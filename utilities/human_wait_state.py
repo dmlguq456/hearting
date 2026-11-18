@@ -1263,17 +1263,85 @@ def _valid_resources(value):
 
 
 # The compute hosts' sample the producer shows the panels' RESOURCES from. It is Fleet's own host collector (`compute_hosts.collect`,
-# the sample Fleet's RESOURCES view draws), asked at most once in RESOURCE_SAMPLE_S by a pass that is already running, in one short-lived
-# thread the pass never waits for: the pass uses the last sample it has, so a panel's refresh is never held behind a slow host.
-RESOURCE_SAMPLE_S = 30.0
+# the sample Fleet's RESOURCES view draws). Reading a host costs the servers an SSH probe, so it is taken only for a display that draws it:
+#  * only while a side panel that draws RESOURCES has asked (`note_resources_wanted`; a status line alone, a bottom panel or no panel
+#    asks nothing, and then no host is read);
+#  * at most once in RESOURCE_SAMPLE_S, whatever the number of windows (one producer), by a pass that is already running, in one
+#    short-lived thread the pass never waits for: the pass uses the last sample it has, so a panel's refresh is never held behind a slow host;
+#  * not at all while Fleet is open: Fleet reads the hosts every ten seconds and leaves each sample for the producer
+#    (`share_resource_sample`), which uses a sample younger than RESOURCE_SAMPLE_S, whoever took it, before it reads a host itself.
+RESOURCE_SAMPLE_S = 60.0
+RESOURCE_WANT_S, _RESOURCE_WANT_TOUCH_S = 90.0, 20.0
+_RESOURCE_SHARED_MAX = 1 << 20
 # `on` is set by the resident producer's own loop alone: a refresh anywhere else (a test, a one-shot) reads no host.
 _resources = {"started": 0.0, "at": 0.0, "snapshot": None, "thread": None, "on": False}
 
 
+def note_resources_wanted(now=None):
+    """A side panel that draws RESOURCES asks for the host sample: the marker's time, touched at most every ``_RESOURCE_WANT_TOUCH_S``."""
+    now = time.time() if now is None else now
+    try:
+        root = state_root()
+        marker = root / ".resources-wanted"
+        try:
+            if 0 <= now - marker.lstat().st_mtime < _RESOURCE_WANT_TOUCH_S:
+                return
+        except OSError:
+            pass
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(marker, os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            os.utime(fd, (now, now))
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _resources_wanted(now):
+    """Whether a side panel asked for the host sample within ``RESOURCE_WANT_S``."""
+    try:
+        info = (state_root() / ".resources-wanted").lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and 0 <= now - info.st_mtime < RESOURCE_WANT_S
+
+
+def share_resource_sample(snapshot):
+    """Leave a host sample Fleet took for the producer (it reads a sample younger than ``RESOURCE_SAMPLE_S`` instead of its own probe)."""
+    if not isinstance(snapshot, dict) or snapshot.get("error") or not isinstance(snapshot.get("hosts"), list):
+        return
+    try:
+        _write(state_root() / "resource-sample.json", {"at": time.time(), "snapshot": snapshot})
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _shared_resource_sample():
+    """``(snapshot, at)`` of the sample Fleet left, or None."""
+    try:
+        path = state_root() / "resource-sample.json"
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > _RESOURCE_SHARED_MAX:
+            return None
+        value = json.loads(path.read_text(encoding="utf-8"))
+        at, snapshot = value["at"], value["snapshot"]
+        if isinstance(at, bool) or not isinstance(at, (int, float)) or not isinstance(snapshot, dict):
+            return None
+        return snapshot, float(at)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def _resource_sample(now):
-    """``(snapshot, sampled_at)`` of the last compute-host sample, and a new sample started in a thread when it is old enough."""
+    """``(snapshot, sampled_at)`` of the last compute-host sample, and a new one started in a thread when none is younger than
+    ``RESOURCE_SAMPLE_S`` (the sample Fleet left counts)."""
+    shared = _shared_resource_sample()
+    if shared is not None and _resources["at"] < shared[1] <= now + 5:
+        _resources.update(snapshot=shared[0], at=shared[1])
     thread = _resources["thread"]
-    if (thread is None or not thread.is_alive()) and now - _resources["started"] >= RESOURCE_SAMPLE_S:
+    if (thread is None or not thread.is_alive()) and now - max(_resources["started"], _resources["at"]) >= RESOURCE_SAMPLE_S:
         _resources["started"] = now
 
         def run():
@@ -1287,6 +1355,12 @@ def _resource_sample(now):
     return _resources["snapshot"], _resources["at"]
 
 
+def _clipped(value, limit):
+    """``value`` as text within ``limit`` characters, a longer one ending in ``…`` (never cut without the mark)."""
+    value = str(value)
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
 def resources_view(snapshot, sampled_at, index):
     """The sample as the panels draw it, from the pass's own session records (``index``: the numbers of the sessions that hold a GPU)."""
     if not isinstance(snapshot, dict) or snapshot.get("error") or not isinstance(snapshot.get("hosts"), list):
@@ -1295,11 +1369,11 @@ def resources_view(snapshot, sampled_at, index):
     _labels, compute = _host_records({"compute_hosts": snapshot}, index)
     hosts = []
     for name, base, cpu, mem, _swap, gpus in compute[:_RESOURCE_HOSTS]:
-        hosts.append({"name": str(name)[:32], "self": bool(base),
+        hosts.append({"name": _clipped(name, 32), "self": bool(base),
                       "cpu": round(cpu[0] * 100 / cpu[1]) if cpu and cpu[1] else None,
                       "mem": round(mem[0] * 100 / mem[1]) if mem and mem[1] else None,
                       "gpus": [{"i": int(g[0]), "busy": g[1] == "working", "util": g[4], "used": g[5], "total": g[6],
-                                "users": [str(t)[:32] for t in g[7][:4]]}
+                                "users": [_clipped(t, 32) for t in g[7][:4]]}
                                for g in gpus[:_RESOURCE_GPUS] if g[0] is not None]})
     return _valid_resources({"observed_at": sampled_at, "hosts": hosts})
 
@@ -4941,8 +5015,9 @@ def _refresh_cache() -> bool:
                     # (The session records the pass worked out for the route rows are used again, not worked out twice.)
                     from tools.fleet.explorer.live import session_peers
                     result["session_peers"] = _bounded(session_peers(snapshot, records=records[0] if records else None))
-                    # The compute hosts' last sample (the resident producer's loop only; a one-shot refresh has none): CPU, memory and each GPU's use.
-                    if _resources["on"] and records:
+                    # The compute hosts' last sample (the resident producer's loop only, and only while a side panel that draws RESOURCES
+                    # asks for it; a one-shot refresh has none): CPU, memory and each GPU's use.
+                    if _resources["on"] and records and _resources_wanted(time.time()):
                         sample, sampled_at = _resource_sample(time.time())
                         result["resources"] = resources_view(sample, sampled_at, records[0][1])
             except Exception:

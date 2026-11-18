@@ -31,7 +31,7 @@ const doer=(h,m,e,pct,bar)=>({harness:P(h),model_text:P(m),effort:P(e),ctx:P(pct
 const worker=(h,m,e,pct,bar,o={})=>({kind:'working',role:'worker',stage:'execute',elapsed:'12m',...o,paint:{glyph:P('⠸'),...doer(h,m,e,pct,bar),now:'route 기록에 갈래 칸을 더하는 중'}});
 const direct={id:'d1',zone:'direct',title:'README 넷째 줄 고침',kind:'working',state:'working',elapsed:'2m',shape:'직접',intensity:'direct',kind_word:'code',stages:[],paint:{glyph:P('⠸')}};
 const directQuick={...direct,id:'d2',intensity:'quick'};
-const dispatch={id:'a',zone:'dispatch',title:'갈래를 route에 기록',kind:'working',state:'working',elapsed:'1h52m',shape:'staged',stages:six(2),kind_word:'code',intensity:'standard',role:'owner',
+const dispatch={id:'a',zone:'dispatch',title:'갈래를 route에 기록',kind:'working',state:'working',elapsed:'1h 52m',shape:'staged',stages:six(2),kind_word:'code',intensity:'standard',role:'owner',
   paint:{glyph:P('⠸'),...doer('claude','Opus 5.5','xhigh','41%','━━━━'),now:'검토 지적 둘을 고치고 시험을 다시 돌리는 중'},workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',target:'backend'})]};
 const bare={...dispatch,id:'b',zone:undefined,title:'zone-less route'};
 const requests=[{id:'q1',kind:'request-out',way:'→',who:'[c2]',title:'보낸 요청의 제목',status:'open'},{id:'q2',kind:'request-in',way:'◂',who:'[6c]',title:'받은 요청의 제목',status:'partial'}];
@@ -69,7 +69,7 @@ assert.deepEqual(rows,[
  '● code                            2m',
  '  README 넷째 줄 고침',
  zr('dispatch'),
- '● code(standard)               1h52m',
+ '● code(standard) · staged 3/6 1h 52m',
  '  갈래를 route에 기록',
  '  ● owner  claude Opus 5.5 xhigh',
  '    CTX ━━━━──── 41%',
@@ -92,7 +92,7 @@ assert.deepEqual(rows,[
 // The session rows are the same under `worker_box: none` apart from the box: the stage row and the `↳` indent come back.
 const none=box(draw([direct,dispatch],requests,44,60,{configuration:{worker_box:'none'}}));
 assert.deepEqual(none.slice(none.indexOf(zr('dispatch'))+1,none.indexOf(zr('request'))),[
- '● code(standard)               1h52m',
+ '● code(standard)              1h 52m',
  '  갈래를 route에 기록',
  '  ● owner  claude Opus 5.5 xhigh',
  '    CTX ━━━━──── 41%',
@@ -135,7 +135,7 @@ assert.deepEqual(rules(box(draw([bare],[],44,60))).map(s=>s.split(' ')[1]),['dis
 const rows=box(draw([direct,directQuick,dispatch],[],44,60));
 assert(rows.includes('● code                            2m'),rows.join('\n'));
 assert(rows.includes('● code(quick)                     2m'),rows.join('\n'));
-assert(rows.includes('● code(standard)               1h52m'));
+assert(rows.includes('● code(standard) · staged 3/6 1h 52m'));
 assert(!rows.some(s=>/\(direct\)|\(직접\)|직접/.test(s)));
 // With no intensity recorded the shape's word stood in the brackets; in the direct zone it is gone too.
 const noIntensity=box(draw([{...direct,intensity:undefined}],[],44,60));

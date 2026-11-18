@@ -316,7 +316,7 @@ DEMO_USAGE = {"claude": {"rl_5h": 18, "rl_7d": 40, "rl_ms": []},
               "opencode": {"rl_5h": 9, "rl_7d": 33, "rl_ms": []}}
 
 
-def projection(world, harness, sid, *, columns=40, rows=46, state="working", popup_columns=None):
+def projection(world, harness, sid, *, columns=40, rows=46, state="working", popup_columns=None, side=False):
     """``panel_projection``'s payload for one demo session, its live readers replaced."""
     import human_wait_state
     import session_shell
@@ -364,7 +364,7 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working", pop
         os.environ.pop("NO_COLOR", None)
         payload = session_shell.panel_projection(harness, sid, native_pid=81000 + len(sid),
                                                  native_start=1, columns=columns, rows=rows,
-                                                 state=state, expanded=True, popup_columns=popup_columns)
+                                                 state=state, expanded=True, popup_columns=popup_columns, side=side)
     # The host puts the status button's value in the model (``host.cjs`` ``statusDoc``).
     status = world.status(sid)
     if isinstance(status, dict) and isinstance(status.get("word"), str):

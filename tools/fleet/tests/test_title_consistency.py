@@ -474,7 +474,13 @@ class TitleConsistencyTest(_ConfigHomeMixin, unittest.TestCase):
                                 ("Chinese", "会话标题一致性"), ("French", "Résumé des sessions")):
             with self.subTest(language=language):
                 self.assertEqual(rt.validate_title(title, language), title)
-        self.assertEqual(len(rt.validate_title("가" * 30, "Korean")), 20)
+        # 11-18: a Korean title may be as long as the panel's two name rows hold (30 characters); a longer one is cut
+        # at a word boundary and marked, never in the middle of a word without a mark.
+        self.assertEqual(rt.validate_title("가" * 30, "Korean"), "가" * 30)
+        self.assertEqual(rt.validate_title("가" * 40, "Korean"), "가" * 29 + "…")
+        self.assertEqual(rt.validate_title("로그인시도횟수제한기능을 API키별로나누고 거절응답헤더를 정리하는 작업", "Korean"),
+                         "로그인시도횟수제한기능을 API키별로나누고…")
+        self.assertEqual(rt.TITLE_MAXLEN_CJK, 30)
         for bad in ("진행 중 제목 갱신", "제목 없음", "알 수 없습니다", "Awaiting worker result"):
             self.assertIsNone(rt.validate_title(bad, "Korean"))
 

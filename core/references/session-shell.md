@@ -586,7 +586,7 @@ popup; a request row the MESSAGES popup).
   display line in `peer-received/<key>.json` beside the prompt frontier (11-17), and runtime notices keep their own
   eight places, so a run of completion notices never pushes it out.
 - MEM: the newest saved memory records of this repository and the global ones
-  together (11-15), newest first, five at most (`MEM_MAX`; 11-16, the person: "메모리도
+  together (11-15), newest first, three at most (`MEM_MAX`, five until 11-18, the person: "MEM는 최대 최근 3개만 띄워도 되겠다"; 11-16, the person: "메모리도
   메시지랑 같은 맥락이야"), from the journal Fleet reads (the newest `add`/`supersede`
   rows of its project, and the global ones of the same read), two rows each as
   v4.36.4 drew them (spec rule 46 (b), restored 11-16): a dim head row saying what the
@@ -618,10 +618,14 @@ popup; a request row the MESSAGES popup).
   sessions that hold it, empty where the producer does not know them) and one for the count of the GPUs nothing runs on
   (`  idle GPU 6`, `빈 GPU 6` in Korean); a host that could not be reached keeps its name alone. Short of cells a GPU row gives up its
   gauge's width, then the memory, and keeps the session number; a host row gives up `MEM`, then `CPU`. The values are Fleet's own
-  compute-host sample (`compute_hosts.collect`, the sample its RESOURCES view draws): the resident producer asks for it at most once
-  in 30 seconds, in one short-lived thread its pass never waits for, and keeps the last result in the cache (`resources`, bounded:
-  eight hosts, sixteen GPUs each); the panel reads that cache only, never a host, so what it shows is at most about a minute old (the
-  sample's period, the pass that follows it, the probe's own time) and is not drawn once it is older than two minutes. A window with
+  compute-host sample (`compute_hosts.collect`, the sample its RESOURCES view draws): a probe costs the servers an SSH read each, so the
+  resident producer takes it only while a side panel that draws the section is open (the host's projection request carries `side`;
+  `panel_projection` then touches `.resources-wanted`, at most every 20 seconds, and the producer reads no host once it is 90 seconds old),
+  at most once in 60 seconds however many windows are open, in one short-lived thread its pass never waits for, and not at all while Fleet
+  is open (Fleet's own ten-second pump leaves each sample in `resource-sample.json` beside the cache, and a sample younger than the period,
+  whoever took it, stands in for a probe). It keeps the last result in the cache (`resources`, bounded:
+  eight hosts, sixteen GPUs each); the panel reads that cache only, never a host, so what it shows is at most about two minutes old (the
+  sample's period, the pass that follows it, the probe's own time) and is not drawn once it is older than two and a half minutes. A window with
   no producer, no configured host and no local sample has no section. The existing `MEM` section is the saved memory records, not
   the machine's memory, so nothing is merged with it. Short of rows it gives way before any other part of the panel (its GPU rows,
   then its host rows, the name row with the last of them), so the sections above and USAGE stand as they do without it.

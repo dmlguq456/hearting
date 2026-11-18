@@ -120,8 +120,11 @@ assert.equal(find(render([mk('code','code','standard')],44,40),/^code$/).foregro
     def test_the_time_stands_at_the_right_end_of_the_first_line_at_every_width_and_the_middle_text_goes_first(self):
         self.node(r"""
 const rows=w=>box(plain(render([route()],w,60)));
-assert.equal(rows(44)[0],tm('● code(standard)','1h 52m'));
+// (11-18, review C3: the stage text is on the first line, `· staged 3/6` beside the workers' box, the name too where no box holds it; short of cells
+// the name goes first, then the stage text, before the chain, the intensity, the kind word or the time.)
+assert.equal(rows(44)[0],tm('● code(standard) · staged 3/6','1h 52m'));
 assert.equal(rows(32)[0],tm('● code(standard)','1h 52m',32));   // (the panel is never narrower than 32 cells: `sideWidth`)
+assert.equal(rows(60)[0],tm('● code(standard) · staged 3/6: execute','1h 52m',60));   // (this route has no worker: no box holds the stage name)
 // The kind word and the time stay down to the narrowest: the chain's earlier legs and the intensity go before them.
 for(let w=24;w<=60;w++){
  const first=rows(w)[0];assert(/1h 52m$/.test(first)&&/^● code/.test(first),w+' '+first);
@@ -135,7 +138,7 @@ assert(/^◑ frame → \?\? · .*…\s+4m$/.test(cut),cut);
 for(let w=22;w<=60;w++){const f=box(plain(render([wait],w,60)))[0];assert(/ 4m$/.test(f)&&/frame/.test(f)&&cells(f)<=w-8,w+' '+f);}
 // No time: the end stays empty (no empty row, no stray digits).
 const none=box(plain(render([route({elapsed:''})],44,60)));
-assert.equal(none[0],'● code(standard)');assert(!none.some(s=>/^\s+$/.test(s)));
+assert.equal(none[0],'● code(standard) · staged 3/6');assert(!none.some(s=>/^\s+$/.test(s)));
 // An owner shows no time of its own, at any width: its CTX row is `CTX 41%` and the route's time stays only at the end of the first line.
 const wide=box(plain(render([route()],72,60)));
 assert(wide.some(s=>/^ +CTX 41%$/.test(s)),wide.join('\n'));

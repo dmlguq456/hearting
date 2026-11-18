@@ -612,7 +612,7 @@ assert(roomy.some(x=>/│ │   ⠋ claude Opus 5\.5 +│/.test(x))&&roomy.some(
 const kinded=view.render({width:40,height:30,side:true,model:{routes:[{...one,kind_word:'code'}],route_count:1,messages:[]},sid:'s',
  configuration:{},expandedKeys:[],questions:()=>[]}).rows.map(x=>x.map(p=>p.text).join(''));
 const ki=kinded.findIndex(x=>/│ │   ⠋ claude Opus 5\.5 +│/.test(x));
-assert(ki>2&&/^│ │ ● code +47m │ │$/.test(kinded[ki-2])&&kinded[ki-1].includes('│   one step')&&/│ │     CTX 24% +│ │/.test(kinded[ki+1])&&kinded[ki+2].includes('│     running the tests'),kinded.join('\n'));
+assert(ki>2&&/^│ │ ● code(?: · staged \d+\/\d+)? +47m │ │$/.test(kinded[ki-2])&&kinded[ki-1].includes('│   one step')&&/│ │     CTX 24% +│ │/.test(kinded[ki+1])&&kinded[ki+2].includes('│     running the tests'),kinded.join('\n'));
 // Narrower the CTX row stays on its own row (the word `CTX` and the percent), and the NOW keeps its row; no tool, no time.
 assert(narrow.some(x=>/│ │   ⠋ claude Opus 5\.5 +│/.test(x))&&narrow.some(x=>/│ │     CTX 24% +│ │/.test(x))&&narrow.some(x=>/│ │     running the tests +│/.test(x)),narrow.join('\n'));
 '''
@@ -657,19 +657,19 @@ assert(r32.some(s=>s.startsWith('│ │   ⠋ worker Sonnet 5.5'))&&r32.some(s=
 // the NOW is a row of its own, only where the session has one (none: no row, never an empty one).
 assert(!box(r50).some(s=>/[━]/.test(s)&&/│ │   [⠋●] /.test(s)),r50.join('\n'));
 const waitAt=box(r50).findIndex(s=>s.includes('● owner'));
-assert(!/CTX/.test(box(r50)[waitAt])&&!/CTX/.test(box(r50)[waitAt+1])&&box(r50)[waitAt+1].includes('staged 4/7'),'an unknown context draws no CTX\n'+r50.join('\n'));
+assert(!/CTX/.test(box(r50)[waitAt])&&!/CTX/.test(box(r50)[waitAt+1])&&box(r50)[waitAt-2].includes('staged 4/7: host-run'),'an unknown context draws no CTX\n'+r50.join('\n'));
 assert(!box(draw([one,{...frame,elapsed:''}],48,50)).some(s=>/^│ │ +│ │$/.test(s)),'no empty row');
 const noNow=box(draw([{...frame,paint:{...frame.paint,now:''}}],48,50));
 assert(box(draw([frame],48,50)).some(s=>/^│ │     framing +│ │$/.test(s))&&!noNow.some(s=>/^│ │     \S/.test(s)&&!s.includes('staged'))&&!noNow.some(s=>/^│ │ +│ │$/.test(s)),'a session with no NOW has no NOW row\n'+noNow.join('\n'));
 // The order: the kind word, what, who, its CTX row, its NOW, then the stage line.
 const at=box(r50).findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
-assert(/^│ │ ● code +41m │ │$/.test(box(r50)[at-2])&&box(r50)[at-1].includes('│ │   셸 상태·표시 고치기')&&/^│ │     CTX ━━─── 38% +│ │$/.test(box(r50)[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(box(r50)[at+2]),r50.join('\n'));
-assert(box(r50).some((s,i)=>s.includes('worker claude Sonnet 5.5 high')&&/^│ │     CTX ━──── 12% +│ │$/.test(box(r50)[i+1])&&/^│ │     editing peer-message\.py +│ │$/.test(box(r50)[i+2])&&box(r50)[i+3].includes('│ │     staged 3/7: execute')),r50.join('\n'));
-// (b) Fleet's kind word leads the first line (bold, in the body color), the stage line carries no kind word; the mode and
-// intensity stay in the opened KIND. A route with no stage line (one-shot) has none: its NOW ends it.
-for(const want of ['│ │ ● code ','│ │ ● frame ','│ │     staged 3/7: execute','│ │     staged 4/7: host-run','│ │     staged 1/3: frame'])
+assert(/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(box(r50)[at-2])&&box(r50)[at-1].includes('│ │   셸 상태·표시 고치기')&&/^│ │     CTX ━━─── 38% +│ │$/.test(box(r50)[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(box(r50)[at+2]),r50.join('\n'));
+assert(box(r50).some((s,i)=>s.includes('worker claude Sonnet 5.5 high')&&/^│ │     CTX ━──── 12% +│ │$/.test(box(r50)[i+1])&&/^│ │     editing peer-message\.py +│ │$/.test(box(r50)[i+2])&&!/^│ │     staged/.test(box(r50)[i+3])&&box(r50).some(t=>t.includes('● code · staged 3/7: execute'))),r50.join('\n'));   // (the stage is on the first line)
+// (b) Fleet's kind word leads the first line (bold, in the body color) and, with it, the stage (`code · staged 3/7: execute`: where the
+// width allows, no stage row stands apart); the mode and intensity stay in the opened KIND. A route with no stage line (one-shot) has none: its NOW ends it.
+for(const want of ['│ │ ● code ','│ │ ● frame ','│ │ ● code · staged 3/7: execute','│ │ ● code · staged 4/7: host-run','│ │ ● frame · staged 1/3: frame'])
  assert(r50.some(s=>s.includes(want)),want+'\n'+r50.join('\n'));
-assert(!r50.join('').includes('(dev')&&!r50.some(s=>/one-shot|code ·/.test(s)),r50.join('\n'));
+assert(!r50.join('').includes('(dev')&&!r50.some(s=>/one-shot/.test(s)),r50.join('\n'));
 const r80=draw(four,80,50).join('\n');
 assert(r80.includes('⠋ owner claude Opus 5.5 xhigh')&&r80.includes('CTX ━━─── 38%')&&!r80.includes('CTX ━━─── 38% · 41m')&&r80.includes('editing host.cjs')&&!r80.includes('· Edit')&&r80.includes('staged 3/7: execute · owner Opus 5.5'),r80);
 // The bottom layout's kind column: the kind leads it (`code · staged 3/7: execute`) and goes first, before the tool.
@@ -688,9 +688,9 @@ assert(flat.length>0&&flat.every(s=>!/owner|worker|code/.test(s))&&!r30.some(s=>
 // (the percent at the right edge, and no time: a session with no time of its own has none; the routes' times stand on their first lines),
 // then the stage line, then the one-row form.
 const r44=box(draw(nine,40,50));
-assert(!r44.some(s=>s.includes('━'))&&r44.filter(s=>/│ │   [⠋●] (owner|worker) .* \d+% │ │$/.test(s)).length===6&&!r44.some(s=>/│ │   [⠋●] .* \d+m │ │$/.test(s))&&r44.filter(s=>/^│ │ ● code +(\d+h )?\d+m │ │$/.test(s)).length===9&&!r44.some(s=>s.includes('staged')),r44.join('\n'));
+assert(!r44.some(s=>s.includes('━'))&&r44.filter(s=>/│ │   [⠋●] (owner|worker) .* \d+% │ │$/.test(s)).length===6&&!r44.some(s=>/│ │   [⠋●] .* \d+m │ │$/.test(s))&&r44.filter(s=>/^│ │ ● code(?: · staged \d+\/\d+)? +(\d+h )?\d+m │ │$/.test(s)).length===9&&!r44.some(s=>/^│ │ +staged/.test(s)),r44.join('\n'));   // (11-18: the stage text is on the first line, never a row apart)
 for(let h=16;h<=80;h++){
- const rows=box(draw(nine,40,h)),nows=rows.filter(s=>/│ │     editing /.test(s)).length,stages=rows.filter(s=>/│ │     staged /.test(s)).length;
+ const rows=box(draw(nine,40,h)),nows=rows.filter(s=>/│ │     editing /.test(s)).length,stages=rows.filter(s=>/│ │ .*staged \d/.test(s)).length;
  const second=rows.some(s=>/^│ │   \d +│ │$/.test(s));
  if(nows)assert(stages===6,h+' the NOW rows go before the stage line\n'+rows.join('\n'));
  if(second)assert(nows===6,h+' a title keeps its second row only while the NOW rows stand\n'+rows.join('\n'));
@@ -723,17 +723,17 @@ const box=rows=>{const a=rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s));return ro
 const col=(row,word)=>[...row.slice(0,row.indexOf(word))].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 // No worker: the kind / title / owner (who only) / its CTX row / its NOW; no stage box, no `↳`, no time on the owner.
 let b=box(draw([solo],40,60)),at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
-assert(at>0&&/^│ │ ● code +41m │ │$/.test(b[at-2])&&/^│ │   셸 상태·표시 고치기 +│ │$/.test(b[at-1])&&/^│ │     CTX ━━━─+ 38% +│ │$/.test(b[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(b[at+2])&&b.length===at+4,b.join('\n'));
+assert(at>0&&/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(b[at-2])&&/^│ │   셸 상태·표시 고치기 +│ │$/.test(b[at-1])&&/^│ │     CTX ━━━─+ 38% +│ │$/.test(b[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(b[at+2])&&b.length===at+4,b.join('\n'));
 assert.equal(col(b[at+1],'CTX'),col(b[at],'owner'));assert.equal(col(b[at+2],'editing'),col(b[at],'owner'));
 assert(!/[└├]─|╭─ [⠋●]|↳|Edit /.test(b.join('\n'))&&!b.some(s=>/^│ │ +│/.test(s))&&!b[at-1].includes('41m')&&!/CTX|━|41m/.test(b[at]),b.join('\n'));
 // Where the row has room nothing joins the owner's rows: its CTX row has no time (the route's stands on the first line).
 b=box(draw([solo],64,60));at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
-assert(at>0&&/^│ │     CTX ━━━─+ 38% +│ │$/.test(b[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(b[at+2])&&!/41m/.test(b[at]+b[at+1])&&/^│ │ ● code +41m │ │$/.test(b[at-2]),b.join('\n'));
+assert(at>0&&/^│ │     CTX ━━━─+ 38% +│ │$/.test(b[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(b[at+2])&&!/41m/.test(b[at]+b[at+1])&&/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(b[at-2]),b.join('\n'));
 // One worker: the kind, the title and the owner's rows (no guide), its CTX row and NOW, then the stage box two cells in: the stage text on its top
 // line, the worker's who, its CTX row with its own time and its NOW (here on two rows, wrapped between words) inside the box's side. The
 // owner stands as a dim `●`.
 b=box(draw([one],40,60));at=b.findIndex(s=>s.includes('● owner  claude Opus 5.5 xhigh'));
-for(const [i,want] of [[-2,/^│ │ ● code +(\d+h )?\d+m │ │$/],[-1,/^│ │   속도 3단계 +│ │$/],[1,/^│ │     CTX ━━━━─+ 52% +│ │$/],[2,/^│ │     waiting for the worker +│ │$/],
+for(const [i,want] of [[-2,/^│ │ ● code(?: · staged \d+\/\d+)? +(\d+h )?\d+m │ │$/],[-1,/^│ │   속도 3단계 +│ │$/],[1,/^│ │     CTX ━━━━─+ 52% +│ │$/],[2,/^│ │     waiting for the worker +│ │$/],
  [3,/^│ │   ┌ staged 3\/7: execute ─+┐ │ │$/],[4,/^│ │   │ ⠋ worker claude Sonnet 5\.5 +│ │ │$/],[5,/^│ │   │   CTX ━━─+ 22% · 12m +│ │ │$/],[6,/^│ │   │   editing +│ │ │$/],[7,/^│ │   │   utilities\/panel\.py +│ │ │$/],
  [8,/^│ │   └─+┘ │ │$/],[9,/^│ ╰─+╯ │$/]])
  assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
@@ -772,16 +772,16 @@ assert.equal(nowOf(/running the codex review/,'running').dim,false);assert.equal
 b=box(draw([{...solo,role:undefined}],40,60));
 assert(b.some(s=>s.includes('│ │   ⠋ claude Opus 5.5 xhigh'))&&b.some(s=>/^│ │     CTX ━━━─+ 38% +│ │$/.test(s))&&b.some(s=>/^│ │     editing host\.cjs +│ │$/.test(s)),b.join('\n'));
 // An unknown context: no CTX label (owner or worker). The owner, with no context and no time of its own, has no CTX row at all; a worker's
-// own time stands alone on its row (no word) where it has one (56 cells).
+// own time ends its first row (no CTX row of only a time) where it has one (56 cells).
 const noCtx=[{...one,owner_paint:{harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh')},workers_live:[{...worker('claude','Sonnet 5.5','high','22%','━━'),paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Sonnet 5.5')}}]}];
 b=box(draw(noCtx,56,60));at=b.findIndex(s=>s.includes('● owner'));
-assert(!b.join('').includes('CTX')&&/^│ │   ● owner  claude Opus 5\.5 xhigh +│ │$/.test(b[at])&&/^│ │   ┌ staged 3\/7: execute ─+┐ │ │$/.test(b[at+1])&&b.some(s=>/^│ │   │ ⠋ worker claude Sonnet 5\.5 +│ │ │$/.test(s))&&b.some(s=>/^│ │   │   12m +│ │ │$/.test(s))&&!b.some(s=>/owner.*2h/.test(s)&&!/code/.test(s)),b.join('\n'));
+assert(!b.join('').includes('CTX')&&/^│ │   ● owner  claude Opus 5\.5 xhigh +│ │$/.test(b[at])&&/^│ │   ┌ staged 3\/7: execute ─+┐ │ │$/.test(b[at+1])&&b.some(s=>/^│ │   │ ⠋ worker claude Sonnet 5\.5 +12m +│ │ │$/.test(s))&&!b.some(s=>/^│ │   │   12m +│ │ │$/.test(s))&&!b.some(s=>/owner.*2h/.test(s)&&!/code/.test(s)),b.join('\n'));
 // A session with no NOW has no NOW row (none empty): the owner's CTX row, then the stage box straight under it.
 b=box(draw([{...one,owner_paint:{...one.owner_paint,now:''}}],40,60));at=b.findIndex(s=>s.includes('● owner'));
 assert(/^│ │     CTX /.test(b[at+1])&&/^│ │   ┌ staged 3\/7: execute /.test(b[at+2])&&!b.some(s=>/^│ │ +│ │$/.test(s)),b.join('\n'));
 // A title on two rows: both rows the title's; the time on the first line, never on the owner's rows, its CTX row and NOW under it.
 b=box(draw([{...solo,title:'아주 긴 route 이름이 두 줄로 넘어가는 경우의 시간 자리 확인'}],40,60));at=b.findIndex(s=>s.includes('아주 긴'));
-assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&/^│ │ ● code +41m │ │$/.test(b[at-1])&&b[at+2].includes('⠋ owner')&&b[at+3].includes('CTX ━')&&b[at+4].includes('editing host.cjs'),b.join('\n'));
+assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(b[at-1])&&b[at+2].includes('⠋ owner')&&b[at+3].includes('CTX ━')&&b[at+4].includes('editing host.cjs'),b.join('\n'));
 b=box(draw([{...solo,title:'아주 긴 route 이름이 두 줄로 넘어가는 경우의 시간 자리 확인'}],64,60));at=b.findIndex(s=>s.includes('아주 긴'));
 assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&b[at+2].includes('⠋ owner')&&!b[at+2].includes('CTX')&&b[at+3].includes('CTX ━━━')&&!b[at+3].includes('41m'),b.join('\n'));
 // Hangul in the owner's title and the worker's NOW: every line keeps its cells, in each form of the box.
@@ -817,7 +817,8 @@ b=box(draw([older],60,60));
 assert(!/↳|└─|┌/.test(b.join(''))&&b.some(s=>/⠋ worker claude Sonnet 5\.5 high +│ │$/.test(s))&&b.some(s=>/^│ │     CTX ━━─+ 22% +│ │$/.test(s))&&b.some(s=>/^│ │     writing the worker side +│ │$/.test(s))
  &&b.some(s=>s.includes('owner Opus 5.5')),b.join('\n'));
 // The bottom layout keeps its rows whatever the route carries.
-assert.deepEqual(draw([solo,one,two],120,20,{side:false}),draw([{...solo,workers_live:undefined},older,{...two,workers_live:undefined}],120,20,{side:false}));
+// (11-18: under the native area a route's row reads its owner, as the NOW under it does, so what a worker holds changes nothing there.)
+assert.deepEqual(draw([solo,one,two],120,20,{side:false}),draw([{...solo,workers_live:undefined},{...older,owner_paint:one.owner_paint},{...two,workers_live:undefined}],120,20,{side:false}));
 """
         self.node(script, "panel-view.cjs")
 
@@ -876,7 +877,7 @@ for(const none of [false,true])for(let width=32;width<=48;width++){
 // At 40 cells, the picture of rule 57 (the stage box closed): the owner's who, its CTX row two cells further in with no time, its NOW,
 // then the stage box with the worker's who, CTX row (with its own time) and NOW; every right `│` of the box in one column.
 const b=draw([one],40,60),at=b.findIndex(s=>s.includes('● owner'));
-for(const [i,want] of [[-3,/^│ │ ● code +2h 10m │ │$/],[-2,/^│ │   한글 제목 — 속도 3단계의 남은 +│ │$/],[-1,/^│ │   재계산 +│ │$/],[0,/^│ │   ● owner  claude Opus 5\.5 xhigh +│ │$/],[1,/^│ │     CTX ━━━━──── 52% +│ │$/],[2,/^│ │     owner step +│ │$/],
+for(const [i,want] of [[-3,/^│ │ ● code · staged 3\/7 +2h 10m │ │$/],[-2,/^│ │   한글 제목 — 속도 3단계의 남은 +│ │$/],[-1,/^│ │   재계산 +│ │$/],[0,/^│ │   ● owner  claude Opus 5\.5 xhigh +│ │$/],[1,/^│ │     CTX ━━━━──── 52% +│ │$/],[2,/^│ │     owner step +│ │$/],
  [3,/^│ │   ┌ staged 3\/7: execute ─+┐ │ │$/],[4,/^│ │   │ ⠋ worker claude Sonnet 5\.5 +│ │ │$/],[5,/^│ │   │   CTX ━━─+ 22% · 12m +│ │ │$/],[6,/^│ │   │   worker step +│ │ │$/],[7,/^│ │   └─+┘ │ │$/],[8,/^│ ╰─+╯ │$/]])
  assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
 // The `none` form is the older one: the stage row four cells in, the worker hanging by a `↳` four cells in, its CTX row and NOW eight in.
@@ -1022,9 +1023,23 @@ for(const width of [38,40,44,52,60]){
 for(const width of [32,34,36]){const rows=plain(width,{}),box=part(rows);
  assert(/^│ │   ┌ /.test(box[0])&&!box.some(s=>/[┐┘└]/.test(s))&&box.slice(1).every(s=>/^│ │   │ /.test(s)),width+'\n'+rows.join('\n'));
  for(const s of rows)assert.equal(cells(s),width,s);}
-// A route with no workers draws no box: its stage row stays as it was.
-{const rows=view.render({width:40,height:80,side:true,fill:true,model:{...head,routes:[{...route,workers_live:[]}],route_count:1},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
- assert(rows.some(s=>/^│ │ {5}staged 3\/7: execute +│ │$/.test(s))&&!rows.some(s=>/^│ │ +[┌│└]/.test(s)),rows.join('\n'));}
+// A route with no workers draws no box and no stage row apart (11-18, review C3): its stage text is on the first line, `staged 3/7: execute` where the
+// width has room for it (the name goes first short of cells, then the whole text).
+for(const [width,want] of [[40,/^│ │ ● code · staged 3\/7 +2h 10m │ │$/],[52,/^│ │ ● code · staged 3\/7: execute +2h 10m │ │$/],[32,/^│ │ ● code +2h 10m │ │$/]]){
+ const rows=view.render({width,height:80,side:true,fill:true,model:{...head,routes:[{...route,workers_live:[]}],route_count:1},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+ assert(rows.some(s=>want.test(s))&&!rows.some(s=>/^│ │ +[┌│└]/.test(s)||/^│ │ +(staged )?\d+\/\d+: /.test(s)),width+'\n'+rows.join('\n'));}
+// Several stages at once (review C2): the workers stand in the box of their own stage, each box titled with that stage's position and name.
+{const parallel={...route,stages:[...seven(2).slice(0,2),{name:'eval-asr',mark:'●',current:true},{name:'eval-sep',mark:'●',current:true},...seven(2).slice(4)],
+  workers_live:[worker('claude','Sonnet 5.5','22%','ASR step',{stage:'eval-asr'}),worker('opencode','glm-5.2','9%','SEP step',{stage:'eval-sep'}),worker('codex','gpt-5.5','34%','ASR two',{stage:'eval-asr'})]};
+ for(const configuration of [{},{worker_box:'open'},{worker_box:'none'}]){
+  const rows=view.render({width:44,height:80,side:true,fill:true,model:{...head,routes:[parallel],route_count:1},state:'working',configuration,questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join('')),where=JSON.stringify(configuration)+'\n'+rows.join('\n');
+  const asr=rows.findIndex(s=>s.includes('staged 3/7: eval-asr')),sep=rows.findIndex(s=>s.includes('staged 4/7: eval-sep'));
+  assert(asr>0&&sep>asr,where);
+  const between=(a,b)=>rows.slice(a,b).filter(s=>/worker/.test(s)).map(s=>s.replace(/[^\w. -]/g,' ').replace(/\s+/g,' ').trim());
+  assert(between(asr,sep).length===2&&between(asr,sep)[0].includes('claude Sonnet 5.5')&&between(asr,sep)[1].includes('codex gpt-5.5'),where);
+  assert.equal(rows.slice(sep).filter(s=>/worker opencode glm-5\.2/.test(s)).length,1,where);
+  assert.equal(rows.filter(s=>/worker/.test(s)).length,3,where);
+ }}
 """
         self.node(script, "panel-view.cjs")
 
@@ -1044,7 +1059,7 @@ for(const configuration of [{},{worker_box:'none'}])for(const width of [34,40,52
  const rows=plain([route([timed,untimed])],width,configuration),where=width+' '+JSON.stringify(configuration)+'\n'+rows.join('\n');
  const at=rows.findIndex(s=>/● owner/.test(s)),first=rows.findIndex(s=>/● code/.test(s));
  // The route's time ends its first line and stands nowhere else but the workers' own.
- assert(/^│ │ ● code +2h 10m │ │$/.test(rows[first])&&rows.filter(s=>s.includes('2h 10m')).length===1,where);
+ assert(/^│ │ ● code(?: · staged \d+\/\d+)? +2h 10m │ │$/.test(rows[first])&&rows.filter(s=>s.includes('2h 10m')).length===1,where);
  // The owner: its who row and its CTX row, no time.
  assert(/^│ │   ● owner /.test(rows[at])&&/^│ │ {5}CTX /.test(rows[at+1])&&!/\d+[hm]\b/.test(rows[at]+rows[at+1].replace(/^│ │ +CTX [━─ ]*\d+% /,'')),where);
  // The worker with its own time: `CTX ━━ 34% · 12m` (the gauge may go before the time in a narrow box); the one with none: the percent alone.
@@ -1521,7 +1536,7 @@ for(const want of ['│ │   ⠋ claude Opus 5.5 xhigh ','│ │     CTX ━�
 assert(!/· Edit|>_/.test(all),'no tool on a side row\n'+all);
 // An owner shows no time wherever the row has room: the route's own stands at the right end of its first line (a route with a kind word).
 const roomy=draw([{...oneShot,kind_word:'code'},staged,failed],52,76);
-assert(roomy.some(s=>/^│ │ ● code +41m │ │$/.test(s))&&roomy.some(s=>s.includes('│ │   ⠋ claude Opus 5.5 xhigh '))&&roomy.some(s=>/^│ │     CTX ━━─── 38% +│ │$/.test(s))&&!roomy.some(s=>/· \d+m/.test(s)),'the owner takes no time where the row has room\n'+roomy.join('\n'));
+assert(roomy.some(s=>/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(s))&&roomy.some(s=>s.includes('│ │   ⠋ claude Opus 5.5 xhigh '))&&roomy.some(s=>/^│ │     CTX ━━─── 38% +│ │$/.test(s))&&!roomy.some(s=>/· \d+m/.test(s)),'the owner takes no time where the row has room\n'+roomy.join('\n'));
 // No model name, version or path is cut apart, and nothing opens in place under a route.
 for(const s of rows)assert(!/\((Opus|Sonnet) *│|│ +5\.5|utilities\/sessio( |$)|sessio *│/.test(s),s+'\n'+all);
 for(const gone of ['OWNER','DOER','KIND','┆','impl-review','lines ›'])assert(!all.includes(gone),gone+'\n'+all);

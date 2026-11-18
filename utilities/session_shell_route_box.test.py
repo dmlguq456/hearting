@@ -55,7 +55,10 @@ const runs=row=>{const all=[];for(const p of row)for(const c of [...p.text])all.
 const strip=m=>{const {lab,sessions,memory_items,messages,wait,answerable,...rest}=m;return {...rest,messages:[]};};
 let n=0,same=0,folded=0,soloSame=0,soloFolded=0,noTool=0;
 for(const c of golden.cases){
- const model=c.alone?strip(golden.scenes[c.scene]):golden.scenes[c.scene];
+ const scene=c.alone?strip(golden.scenes[c.scene]):golden.scenes[c.scene];
+ // 11-18 (review C4): under the native area a route's row reads its owner (as the NOW under it does); the golden's row is the leading
+ // worker's, so the comparison there is made without the owner's values (`owner_paint`), which the panel's own tests draw.
+ const model=c.side?scene:{...scene,routes:(scene.routes||[]).map(({owner_paint,...route})=>route)};
  // 11-18: the golden draws a worker `↳` under its owner with a stage row of its own, which is the `none` form of the panel setting
  // `worker_box` (the default now boxes the workers under the owner with the stage text on the box's top line); the comparison is made in that form.
  const v=pv.render({frame:0,width:c.width,height:c.height,side:c.side,fill:c.side,model,state:'working',configuration:{...c.cfg,worker_box:'none'},background:c.background});
@@ -78,13 +81,20 @@ for(const c of golden.cases){
   for(const [t2,st] of r)for(const ch of t2){if(n>=want)return out;n++;const last=out.at(-1);if(last&&last[1]===st)last[0]+=ch;else out.push([ch,st]);}
   return out;};
  const stageLine=r=>/^│ +(?:staged )?\d+\/\d+: /.test(textOf(r));
- const sessionExtra=r=>!stageLine(r)&&!whoHead(r)&&/^│ {5,}\S/.test(textOf(r));   // indented four or more under the box's own edge: a gauge, a tool, a NOW
+ const sessionExtra=r=>stageLine(r)||!whoHead(r)&&/^│ {5,}\S/.test(textOf(r));   // indented four or more under the box's own edge: a gauge, a tool, a NOW (and the stage row, now on the first line)
  const sessions=(rows,hs)=>{const keep=rows.map(r=>!sessionExtra(r)),at=keep.map((k,i)=>k?i:-1).filter(i=>i>=0);
   return {rows:at.map(i=>whoHead(rows[i])||rows[i]),hits:hs.filter(h=>keep[h[0]]).map(h=>[at.indexOf(h[0]),...h.slice(1)])};};
  // 11-18: a route's time stands at the right end of its first line (the kind line), no row of its own: the golden's time-only row
  // leaves with the other session rows (above), and the time on a drawn kind line is blanked to the padding the golden has there.
  const kindLine=/^│ \S (?:[a-z-]+(?: ✓)? → )*[a-z-]+(?:\([^)]*\))?(?: · \S.*?)? +(?:\d+h )?\d+m │$/;
- const blankTime=rows=>rows.map(r=>kindLine.test(textOf(r))?r.map(([t,st],i)=>[i>0&&/^ +(?:\d+h )?\d+m$/.test(t)?' '.repeat(t.length):t,st]):r);
+ // 11-18 (review C3): the stage text (` · staged 3/6: execute`) stands on that first line too, and no stage row apart; the golden has it on
+ // a row of its own, which leaves with the session rows above, so on the drawn first line the stage text is blanked to padding as well.
+ const stageMid=/^(│ \S (?:[a-z-]+(?: ✓)? → )*[a-z-]+(?:\([^)]*\))?)( · (?:[a-z-]+ )?\d+\/\d+(?:: \S.*?)?)( +(?:\d+h )?\d+m │)$/;
+ const blankStage=r=>{const m=stageMid.exec(textOf(r));if(!m)return r;
+  const from=[...m[1]].length,to=from+[...m[2]].length,pad=r.find(([t])=>/^ +$/.test(t))?.[1]??r.at(-1)[1],out=[];let n=0;
+  for(const [t,st] of r)for(const ch of t){const blank=n>=from&&n<to;n++;const style=blank?pad:st,c=blank?' ':ch,last=out.at(-1);if(last&&last[1]===style)last[0]+=c;else out.push([c,style]);}
+  return out;};
+ const blankTime=rows=>rows.map(blankStage).map(r=>kindLine.test(textOf(r))?r.map(([t,st],i)=>[i>0&&/^ +(?:\d+h )?\d+m$/.test(t)?' '.repeat(t.length):t,st]):r);
  const unzone=(rows,hs)=>{const keep=rows.map(r=>!zoneRule(r)),at=keep.map((k,i)=>k?i:-1).filter(i=>i>=0);
   return {rows:at.map(i=>rows[i]),hits:hs.filter(h=>keep[h[0]]).map(h=>[at.indexOf(h[0]),...h.slice(1)])};};
  const mine=(rows,hs)=>{const own=new Set(hs.filter(h=>h[3]==='popup:MESSAGES').map(h=>h[0]));

@@ -36,7 +36,7 @@ const A=host('host-a',34,61,[gpu(0,92,'21/24G','[3b]'),gpu(3,58,'14/24G','[c7]')
 const B=host('host-b',12,40,[gpu(1,71,'18/24G','[d4]')],0);
 const usage=[{harness:'claude',parts:[P('5h 12%')]},{harness:'codex',parts:[P('5h 3%')]},{harness:'opencode',parts:[]}];
 const six=at=>['plan','plan-check','execute','impl-review','test','report'].map((name,i)=>i<at?{name,mark:'✓'}:i===at?{name,mark:'●',current:true}:{name,mark:''});
-const route={id:'a',zone:'dispatch',title:'갈래를 route에 기록',kind:'working',state:'working',elapsed:'1h52m',shape:'staged',stages:six(2),kind_word:'code',intensity:'standard',role:'owner',
+const route={id:'a',zone:'dispatch',title:'갈래를 route에 기록',kind:'working',state:'working',elapsed:'1h 52m',shape:'staged',stages:six(2),kind_word:'code',intensity:'standard',role:'owner',
   paint:{glyph:P('⠸'),harness:P('claude'),model_text:P('Opus 5.5'),ctx:P('41%'),now:'검토 지적 둘을 고치는 중'},workers_live:[]};
 const render=(width,height,model={},{side=true,configuration={}}={})=>view.render({width,height,side,fill:side,harness:'claude',frame:0,
  model:{repo:[P('hearting/')],repo_side:[P('hearting')],git_side:[P('main ✓')],tag:'[c7]',messages:[],styles:STYLES,routes:[route],route_count:1,route_total:1,usage,...model},
@@ -111,7 +111,7 @@ assert.deepEqual(view.options.worker_box,['closed','open','none']);
 assert.equal(view.defaults.worker_box,'closed');
 let value={...view.defaults};const seen=[];
 for(let i=0;i<4;i++){seen.push(value.worker_box);value=view.change(value,'worker_box',1);}
-assert.deepEqual(seen,['closed','none','open','closed'].slice(0,0).concat(seen));
+assert.deepEqual(seen,['closed','open','none','closed']);   // (one step each way round, back where it began)
 assert.deepEqual(new Set(seen),new Set(['closed','open','none']));
 """)
 
@@ -169,14 +169,19 @@ class ResourcesBackendTest(unittest.TestCase):
             def is_alive(self):
                 return False
         fake = mock.Mock(return_value={"configured": True, "hosts": [], "observed_at": 5.0})
+        clock = [100.0]
         with mock.patch.object(state, "_resources", {"started": 0.0, "at": 0.0, "snapshot": None, "thread": None, "on": False}), \
                 mock.patch.object(state.threading, "Thread", Quick), \
+                mock.patch.object(state, "_shared_resource_sample", return_value=None), \
+                mock.patch("time.time", lambda: clock[0]), \
                 mock.patch("tools.fleet.collectors.compute_hosts.collect", fake):
             first = state._resource_sample(100.0)
             self.assertEqual(first[0], {"configured": True, "hosts": [], "observed_at": 5.0})  # (here the thread ran at once)
-            state._resource_sample(100.0 + state.RESOURCE_SAMPLE_S - 1)
+            clock[0] = 100.0 + state.RESOURCE_SAMPLE_S - 1
+            state._resource_sample(clock[0])
             self.assertEqual(len(started), 1)                                                  # not again within the period
-            state._resource_sample(100.0 + state.RESOURCE_SAMPLE_S + 1)
+            clock[0] = 100.0 + state.RESOURCE_SAMPLE_S + 1
+            state._resource_sample(clock[0])
             self.assertEqual(len(started), 2)
 
     def test_only_the_resident_producers_loop_samples_the_hosts(self):

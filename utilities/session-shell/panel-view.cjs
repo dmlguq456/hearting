@@ -29,8 +29,8 @@ const WAIT_BLINK=10;
 // messages at most, each its head row and its first line (spec rule 31).
 const MESSAGES_MAX=5;
 // 11-16 (the person: "메모리도 메시지랑 같은 맥락이야"): MEM shows the newest MEM_MAX records at most, each its
-// dim head row and its headline on up to two rows (spec rule 46 (b)).
-const MEM_MAX=5;
+// dim head row and its headline on up to two rows (spec rule 46 (b)). 11-18 (the person: "MEM는 최대 최근 3개만 띄워도 되겠다"): three at most.
+const MEM_MAX=3;
 const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom',auxiliary:'summary',bottom_rows:14,
   position:'right',theme:'terminal',shade:'none',route_line:'time',worker_box:'closed',rule_motion:'rule'};
 // Panel color schemes (spec rule 22: the reviewed set A, the question rose one
@@ -963,7 +963,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const requestList=Array.isArray(model.requests)?model.requests.filter(q=>q&&typeof q.id==='string'):[];
     const elapsedWidth=Math.max(0,...listed.map(r=>measure(r.elapsed||'')));
     const columnWidth=(pick)=>Math.max(0,...listed.map(r=>size(pick(r))));
-    const owner=r=>{const p=r.paint||{};return [p.harness,p.model_text&&text(' '),p.model_text,p.effort&&text(' '),p.effort].filter(Boolean);};
+    const owner=r=>{const p=leadPaint(r);return [p.harness,p.model_text&&text(' '),p.model_text,p.effort&&text(' '),p.effort].filter(Boolean);};
     // A route whose record names its kind: its stage stands in the kind column, never as
     // the older `execute ✕ 2/3` step text (that stays for a record that names no kind).
     const shaped=r=>{const shape=String(r.shape||'');return shape==='one-shot-owner'||!!shape&&shape!=='unknown'&&(!/^staged/.test(shape)||Array.isArray(r.stages)&&r.stages.length>0);};
@@ -1050,9 +1050,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return {level:''};
     };
     function folded(r){
-      const p=r.paint||{},lead=[routeGlyph(r),text(' ')];
+      // 11-18: beside the native area the one-row form is the leader's; under it the row reads the owner, whose NOW stands under it.
+      const p=side?r.paint||{}:leadPaint(r),lead=[routeGlyph(r),text(' ')];
       if(!side){
-        const ow=columnWidth(owner),gw=columnWidth(x=>x.paint?.gauge5||[]);
+        const ow=columnWidth(owner),gw=columnWidth(x=>leadPaint(x).gauge5||[]);
         const plan=bottomPlan||(bottomPlan=planBottom(ow,gw));
         if(plan.level){
           const kind=plan.kinds[listed.indexOf(r)],cell=kind?kind[plan.level]:[],name=cut(titleOf(r),plan.title);
@@ -1189,7 +1190,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const ctxRowOf=(p,gap,time,lead=null)=>{
       const C=p.ctx?[p.ctx]:[],at=time?[text(clean(time),'dim')]:[],head=lead||[text(' '.repeat(gap))];
       if(!C.length&&!at.length)return null;
-      if(!C.length)return [...head,...at];
+      if(!C.length)return lead?[...head,...at]:null;   // (a time alone is no row: a worker's ends its first row)
       const gauges=[p.gauge_row,p.gauge,p.gauge5].filter((g,i,all)=>Array.isArray(g)&&g.length&&all.indexOf(g)===i).sort((x,y)=>size(y)-size(x));
       // The gauge gives up its width first (down to the number alone), then the time, then the word `CTX`.
       const tries=[];
@@ -1257,20 +1258,41 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // A model name longer than the line itself is cut with `…` rather than left out.
       let who=whoOf(lead,p,role)||cut(lead,inner);
       if(size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner);
+      // No CTX value, so no CTX row to carry its time: the time ends its first row, at the right edge (the effort, then the harness, give
+      // way to it; where even the model does not leave it room the row keeps its values and has no time).
+      const stamp=!p.ctx&&w.elapsed?clean(w.elapsed):'';
+      if(stamp){
+        const room=inner-1-measure(stamp),tight=whoOf(lead,p,role,room);
+        if(tight&&size(tight)<=room&&size(tight)>size(lead))who=[...tight,pad(inner-size(tight)-measure(stamp)),text(stamp,'dim')];
+      }
       return sessionOf({who,one:foldRow(lead,p,role,E)||cut(lead,inner),p,kind:w.kind,gap,time:w.elapsed});
     }
     // Spec rule 24 (11-12), 36 (b), 11-17: the stage line under the owner: `staged 3/6: execute`, the current stage's name
     // the one thing that blinks (a failed one keeps `✕`, a done one `✓`); with no stage running, the next stage and what it
     // waits for. A route with no stage list (one-shot, direct, frame) has none: its first line says what it is. Short of
     // cells the values go from the back, whole: `owner <model>`, then the word `staged` (`3/6: execute`).
-    function placeRow(r,workers=0,limit=inner-4){
-      const shape=String(r.shape||''),stages=Array.isArray(r.stages)?r.stages:[];
-      if(!stageLined(r))return null;
-      const current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
-      const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length;
-      const stage=stageCell(stages[at],stageInk(stages[at].key)),pieces=[];
+    // 11-18 (review C2): the stage a worker runs is its own (`w.stage`, a stage's name); the route's current stage is the one for a
+    // worker that names none the route knows. Parallel stages each have their workers' box, in the stages' order.
+    const stagesOf=r=>Array.isArray(r.stages)?r.stages:[];
+    const currentAt=r=>{const stages=stagesOf(r),current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
+      return current>=0?current:next>=0?next:stages.length-1;};
+    const stageGroups=(r,list)=>{
+      const stages=stagesOf(r),groups=new Map();
+      list.forEach((w,i)=>{const named=stages.findIndex(stage=>stage&&w.stage&&stage.name===w.stage),at=named>=0?named:currentAt(r);
+        if(!groups.has(at))groups.set(at,[]);groups.get(at).push(i);});
+      return [...groups.entries()].sort((a,b)=>a[0]-b[0]).map(([at,items])=>({at,items}));
+    };
+    function piecesOf(r){
+      const current=stagesOf(r).findIndex(stage=>stage.current||stage.mark==='✕'),pieces=[];
       if(current>=0){if(r.doer_worker&&r.owner_model&&!treeOf(r))pieces.push([text('owner '+r.owner_model,'dim')]);}
       else if(r.visibility?.next)pieces.push([text(r.visibility.next,'dim')]);
+      return pieces;
+    }
+    function placeRow(r,workers=0,limit=inner-4,given=null){
+      const shape=String(r.shape||''),stages=stagesOf(r);
+      if(!stageLined(r))return null;
+      const at=given!==null&&stages[given]?given:currentAt(r),position=(at+1)+'/'+stages.length;
+      const stage=stageCell(stages[at],stageInk(stages[at].key)),pieces=piecesOf(r);
       // Spec rule 43 (g): the workers gone for rows, the stage line ends with their count (it stays while the values before it go).
       for(const end of workers?[[text(' · ','dim'),text('worker '+workers,'dim')],[]]:[[]])for(const word of [...new Set([(stageWord(shape)?stageWord(shape)+' ':'')+position,position])])for(let n=pieces.length;n>=0;n--){
         const row=[text(word,'dim'),text(': ','dim'),...stage,...pieces.slice(0,n).flatMap(piece=>[text(' · ','dim'),...piece]),...end];
@@ -1299,15 +1321,30 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-18 (the person, on the first line: "route 첫 줄 오른쪽 끝에 둔다"): the route's elapsed time stands at the right end of this
     // line, whatever the width, and the kind word with it. Short of cells the middle text (`· waiting for direction`) goes first
     // (cut with `…`, then whole), then the earlier legs of the chain, then the intensity. A route with no time leaves the end empty.
+    // 11-18 (review C3; the person's picture `● code(standard) · staged 3/6          1h52m`): a route with a stage line carries its stage
+    // there, whether its workers stand in a box or none run. Where no box holds the stage text the first line takes the stage's name
+    // too (`· staged 3/6: execute`; `name` below). Short of cells this middle text goes first (what the stage waits for, then the name,
+    // then the whole), as the waiting-for-direction text does.
+    function stageForms(r,name){
+      if(!stageLined(r))return [];
+      const stages=stagesOf(r),at=currentAt(r),word=(stageWord(String(r.shape||''))?stageWord(String(r.shape||''))+' ':'')+(at+1)+'/'+stages.length;
+      const forms=[];
+      if(name){const stage=stageCell(stages[at],stageInk(stages[at].key)),pieces=piecesOf(r);
+        for(let n=pieces.length;n>=0;n--)forms.push({named:true,parts:[text(word,'dim'),text(': ','dim'),...stage,...pieces.slice(0,n).flatMap(piece=>[text(' · ','dim'),...piece])]});}
+      forms.push({named:false,parts:[text(word,'dim')]});
+      return forms.map(form=>({named:form.named,parts:[text(' · ','dim'),...form.parts]}));
+    }
     function headRow(r){
       const chains=[{},{past:false},{past:false,inten:false}].map(o=>chainParts(r,o));
       if(!chains[0].length)return null;
       const wait=directionWait(r)?[text(' · ','dim'),text(t('direction_wait','waiting for direction'),'dim')]:[];
       const width=inner,room=width-2;     // the box's inner width, read now (the row is drawn after the box's width is given back)
       const time=clean(r.elapsed||'').trim(),end=time?measure(time)+1:0;
-      return blink=>{
-        const mark=wait.length?{...text('◑','g_blocked'),role:'state:blocked'}:live(r)?zonePaint(r,blink?pulse('●'):{...text('●','g_work'),role:'state:working'}):routeGlyph(r);
-        const finish=body=>{
+      // `blink`: the first line's dot pulses; `stage.blinks`: the stage's name blinks where it stands on this line, and the dot then stands still.
+      return (blink,stage=null)=>{
+        const finish=(body,named=false)=>{
+          const dot=blink&&!(named&&stage&&stage.blinks);
+          const mark=wait.length?{...text('◑','g_blocked'),role:'state:blocked'}:live(r)?zonePaint(r,dot?pulse('●'):{...text('●','g_work'),role:'state:working'}):routeGlyph(r);
           const row=[mark,text(' '),...body];
           return time?[...row,pad(Math.max(1,width-size(row)-measure(time))),text(time,'dim')]:row;
         };
@@ -1316,6 +1353,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
           if(left<0)continue;
           if(wait.length&&size(wait)<=left)return finish([...chain,...wait]);
           if(wait.length&&left>=5)return finish([...chain,...cut(wait,left)]);
+          const form=stage?stageForms(r,stage.name).find(f=>size(f.parts)<=left):null;
+          if(form)return finish([...chain,...form.parts],form.named);
           return finish(chain);
         }
         return finish(cut(chains.at(-1),Math.max(1,room-end)));
@@ -1334,21 +1373,20 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const narrower=(by,fn)=>{inner-=by;try{return fn();}finally{inner+=by;}};
     function boxedWorkers(r,count){
       if(!side||!count||boxSetting==='none'||!treeOf(r))return null;
-      const line=value=>({...text(value,'dim'),role:'messages'}),W=inner;
+      const line=value=>({...text(value,'dim'),role:'messages'}),W=inner,list=workersOf(r),groups=stageGroups(r,list);
       const make=closed=>{
-        const by=closed?6:4,blocks=narrower(by,()=>workersOf(r).map(w=>workerBlock(w,0,true)));
-        const title=placeRow(r,0,Math.max(1,W-6));
-        if(!title)return null;
-        const top=[text('  '),line('┌ '),...title,text(' '),line('─'.repeat(Math.max(0,W-4-size(title)-1-(closed?1:0)))+(closed?'┐':''))];
-        return {blocks,lines:()=>{
-          const rows=[top];
+        // One box for each stage that has workers, its top line that stage's own position and name (`staged 2/4: eval-asr`).
+        const by=closed?6:4,boxes=groups.map(g=>({blocks:narrower(by,()=>g.items.map(i=>workerBlock(list[i],0,true))),title:placeRow(r,0,Math.max(1,W-6),g.at)}));
+        if(!boxes.length||boxes.some(box=>!box.title))return null;
+        return {lines:()=>boxes.flatMap(({blocks,title})=>{
+          const rows=[[text('  '),line('┌ '),...title,text(' '),line('─'.repeat(Math.max(0,W-4-size(title)-1-(closed?1:0)))+(closed?'┐':''))]];
           for(const parts of blocks.flatMap(b=>sessionRowsOf(b).filter(Boolean))){
             const fit=clip(parts,W-by);
             rows.push(closed?[text('  '),line('│ '),...fit.parts,pad(W-by-fit.used),line(' │')]:[text('  '),line('│ '),...fit.parts]);
           }
           if(closed)rows.push([text('  '),line('└'+'─'.repeat(Math.max(0,W-4))+'┘')]);
           return rows;
-        }};
+        })};
       };
       const wide=boxSetting==='closed'&&W-6>=BOX_TEXT_MIN?make(true):null,open=make(false);
       return open?{closed:wide,open}:null;
@@ -1361,7 +1399,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         let names=side?wrapAll(title,inner-2):[];
         if(names.length>2)names=[names[0],ellipsis(names[1],inner-2)];
         setRoles(r);
-        const tree=treeOf(r),open=framed(r)&&tree,base=open?2:4,workers=tree?workersOf(r).map(w=>workerBlock(w,base)):[];
+        const tree=treeOf(r),open=framed(r)&&tree,base=open?2:4,workerList=tree?workersOf(r):[],workers=workerList.map(w=>workerBlock(w,base));
+        // The `none` form: each stage's own stage row, its workers under it.
+        const groups=side&&!open&&placeRow(r)?stageGroups(r,workerList).map(g=>({items:g.items,place:placeRow(r,0,inner-4,g.at)})):[];
         const supervising=workers.length>0;
         const place=side?placeRow(r):null,stages=Array.isArray(r.stages)?r.stages:[];
         const boxed=!open&&place?boxedWorkers(r,workers.length):null;
@@ -1374,7 +1414,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
           names,name:[cut(title,inner-2)],glyph,place,action:key,kind:r.kind,
           // The stage name blinks while the stage line stands and a stage runs; else the first line's dot does.
           stageBlinks:!!place&&live(r)&&running&&running.mark==='●',
-          ...(tree?{tree,workers,boxed,counted:workers.length?placeRow(r,workers.length):null}:{})});
+          ...(tree?{tree,workers,groups,boxed,counted:workers.length?placeRow(r,workers.length):null}:{})});
       }
       for(const q of requestList){
         // A request row opens the MESSAGES popup, where the requests read whole (as their MESSAGES rows did).
@@ -1428,15 +1468,26 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const place=!keepWorkers&&x.counted?x.counted:x.place,showPlace=keepPlace&&place;
       // 11-18: the stage text stands on the top of the workers' box, so the stage row is not drawn apart.
       const boxed=keepWorkers&&keepPlace&&x.boxed&&x.workers.length?(keepBoxEnd&&x.boxed.closed?x.boxed.closed:x.boxed.open):null;
-      if(x.first){out.push(x.first(!(showPlace&&x.stageBlinks)));out.push(...names.map(row=>[indent,...row]));}
+      // 11-18 (review C3): the stage text stands on the first line unless a stage row stands apart (the `none` form, or the workers'
+      // count form); beside a box it is the position alone (the box's top line has the name), with no workers the name too.
+      // (A route with no first line, no kind word, has no place for it: its stage row stands as it did.)
+      const some=!!(x.tree&&x.workers.length),apart=showPlace&&!boxed&&(some||!x.first),headStage=x.first&&x.place&&!apart?{name:!some}:null;
+      const nameElsewhere=!!boxed||apart;
+      if(x.first){out.push(x.first(!(nameElsewhere&&x.stageBlinks),headStage&&{...headStage,blinks:x.stageBlinks}));out.push(...names.map(row=>[indent,...row]));}
       else out.push([...x.glyph,...names[0]],...names.slice(1).map(row=>[indent,...row]));
       // A route whose owner is not known keeps its time and `CTX` row under the title all the same.
       const owner=x.session?sessionRowsOf(x.session).filter(Boolean):[];
       out.push(...owner);
       if(keepNow&&x.time)out.push(x.time);
-      if(showPlace&&!boxed)out.push([text(owner.length?'    ':'  '),...place]);
+      const standing=[text(owner.length?'    ':'  ')];
       if(boxed)out.push(...boxed.lines());
-      else for(const w of workers)out.push(...sessionRowsOf(w).filter(Boolean));
+      else if(apart&&some&&keepWorkers&&x.groups.length>1)for(const g of x.groups){
+        out.push([...standing,...g.place]);
+        for(const i of g.items)out.push(...sessionRowsOf(workers[i]).filter(Boolean));
+      }else{
+        if(apart)out.push([...standing,...place]);
+        for(const w of workers)out.push(...sessionRowsOf(w).filter(Boolean));
+      }
       return out;
     }
     const routeSize=x=>routeForm(x).length;
@@ -1676,7 +1727,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // MESSAGES the same; QUESTIONS keeps its head and first row to the last; 5h/7d last of all. A step that
     // freed more than it had to gives its rows back, the most important first.
     const gave=[];
-    const give=(can,apply,undo)=>{while(need()>budget&&can()){apply();gave.push(undo);}};
+    // `family`: steps given in a priority order and given back in it (review follow-up 1): once one of them cannot be given back the
+    // ones less important than it stay given, so a taller panel never shows less of the more important one.
+    const give=(can,apply,undo,family=null)=>{while(need()>budget&&can()){apply();gave.push({undo,family});}};
     const lowest=['MEM','MESSAGES'];
     // RESOURCES gives way first (it is the newest and the least needed of the bottom's sections): the GPU rows, then the host rows.
     resGpus=resourceGpuTotal();
@@ -1698,14 +1751,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>kept.QUESTIONS&&keepQuestionBox,()=>{keepQuestionBox=false;},()=>{keepQuestionBox=true;});
     give(()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
     // The box comes back with its context rows only while the workers stand.
-    give(()=>keepBoxEnd,()=>{keepBoxEnd=false;},()=>{keepBoxEnd=true;});
-    give(()=>nowTwo,()=>{nowTwo=false;},()=>{nowTwo=true;});
-    give(()=>keepCtxLine,()=>{keepCtxLine=false;},()=>{keepCtxLine=true;});
+    give(()=>keepBoxEnd,()=>{keepBoxEnd=false;},()=>{keepBoxEnd=true;},'route');
+    give(()=>nowTwo,()=>{nowTwo=false;},()=>{nowTwo=true;},'route');
+    give(()=>keepCtxLine,()=>{keepCtxLine=false;},()=>{keepCtxLine=true;},'route');
     // The box comes back with its NOW rows only while the workers stand.
-    give(()=>keepNow,()=>{keepNow=false;},()=>{if(keepWorkers||!anyWorkers)keepNow=true;});
-    give(()=>anyWorkers&&keepWorkers&&!keepNow,()=>{keepWorkers=false;},()=>{keepWorkers=true;});
-    give(()=>keepPlace,()=>{keepPlace=false;},()=>{keepPlace=true;});
-    give(()=>twoRows,()=>{twoRows=false;},()=>{twoRows=true;});
+    give(()=>keepNow,()=>{keepNow=false;},()=>{if(keepWorkers||!anyWorkers)keepNow=true;},'route');
+    give(()=>anyWorkers&&keepWorkers&&!keepNow,()=>{keepWorkers=false;},()=>{keepWorkers=true;},'route');
+    give(()=>keepPlace,()=>{keepPlace=false;},()=>{keepPlace=true;},'route');
+    give(()=>twoRows,()=>{twoRows=false;},()=>{twoRows=true;},'route');
     give(()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
     give(()=>routeLimit>1,()=>{routeLimit--;},()=>{routeLimit++;});
     give(()=>kept.ROUTE&&routeRule(),()=>{keepRouteRule=false;},()=>{keepRouteRule=true;});
@@ -1726,9 +1779,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>keepQuota&&(!usageOn||footRule()>0),()=>{keepQuota=false;},()=>{keepQuota=true;});
     const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
       keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus]);
-    for(const undo of gave.reverse()){
+    const stuck=new Set();
+    for(const {undo,family} of gave.reverse()){
+      if(family&&stuck.has(family))continue;
       const was=choices();undo();
-      if(need()>budget){const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
+      if(need()>budget){if(family)stuck.add(family);const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
         Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);keepRouteRule=v[24];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus]=v.slice(25,30);}
     }
     const order=[];

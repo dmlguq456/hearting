@@ -528,8 +528,9 @@ const other=stages.map(s=>s.name==='execute'?{...s,mark:'✕',key:'lvl_r'}:s);
 const failed=draw({...opt,height:60,routes:[{...route,stages:other}]});
 const f=stageRow(failed,'execute').find(p=>p.text==='execute');assert.equal(f.foreground,217);assert.equal(f.bold,true);
 const allDone=stages.map(s=>({...s,mark:'✓',current:false}));   // nothing running: the line stands on the last stage, finished
-const done=draw({...opt,height:60,routes:[{...route,stages:allDone}]});
-const d=stageRow(done,'report').find(p=>p.text==='report');assert.equal(d.foreground,147);assert.equal(d.dim,true);
+// (11-18, review C2: a worker's box is titled by the stage the worker runs; with no worker running the stage text is on the route's first line.)
+const done=draw({...opt,height:60,routes:[{...route,stages:allDone,workers_live:[]}]});
+const d=done.rows.find(r=>/^│ │ ● code · staged 6\/6: report/.test(str(r))).find(p=>p.text==='report');assert.equal(d.foreground,147);assert.equal(d.dim,true);
 // No key sent (an older backend): the body color as before.
 const old=draw({...opt,height:60,routes:[{...route,stages:stages.map(s=>({...s,key:undefined}))}]});
 assert.equal(stageRow(old,'execute').find(p=>p.text==='execute').foreground,253);

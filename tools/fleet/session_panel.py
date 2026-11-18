@@ -675,8 +675,8 @@ def memory_kind(kind):
 # 11-15 (panel polish 5): the memory system's own tier and scope names, as its records carry them.
 MEMORY_TIERS = ("durable", "working")
 MEMORY_SCOPES = ("project", "global")
-# 11-16 (panel polish 1116): the MEM section's records, five at most (the panel's `MEM_MAX`).
-MEMORY_ITEMS = 5
+# 11-16 (panel polish 1116): the MEM section's records (the panel's `MEM_MAX`); 11-18 (the person: "MEM는 최대 최근 3개만 띄워도 되겠다"): the newest three.
+MEMORY_ITEMS = 3
 
 
 def session_memory_items(values, now=None):
@@ -748,8 +748,8 @@ def usage_rows(harness, values):
 
 
 # 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): a host sample older than this is
-# not drawn (the producer takes a new one about every half minute: `human_wait_state.RESOURCE_SAMPLE_S`).
-RESOURCES_MAX_AGE = 120.0
+# not drawn (the producer takes a new one at most once a minute, and only while a side panel draws it: `human_wait_state.RESOURCE_SAMPLE_S`).
+RESOURCES_MAX_AGE = 150.0
 
 
 def resource_rows(value, now):

@@ -337,6 +337,22 @@ class ValidateTitleTest(unittest.TestCase):
     def test_validate_len_cap(self):
         out = rt.validate_title("alpha bravo " + "x" * 120)
         self.assertEqual(len(out), rt.TITLE_MAXLEN)
+        self.assertTrue(out.endswith("…"))      # (cut with the mark, never silently)
+
+    def test_a_long_title_ends_at_a_word_boundary_with_the_mark(self):
+        self.assertEqual(rt.clip_title("short title", 40), "short title")
+        self.assertEqual(rt.clip_title("alpha bravo charlie delta echo foxtrot golf hotel", 40), "alpha bravo charlie delta echo foxtrot…")
+        self.assertEqual(rt.clip_title("alpha bravo charlie delta echo foxtrot", 38), "alpha bravo charlie delta echo foxtrot")
+        self.assertEqual(rt.clip_title("alpha bravo, charlie delta", 15), "alpha bravo…")   # (no stray punctuation before the mark)
+        self.assertEqual(rt.clip_title("x" * 50, 10), "x" * 9 + "…")                        # (one long word: cut by characters, marked)
+        for text in ("alpha bravo charlie delta echo foxtrot golf hotel india", "가나다 라마바 사아자 차카타 파하 거너더 러머버 서어저"):
+            for limit in (12, 20, 30, 40):
+                out = rt.clip_title(text, limit)
+                self.assertLessEqual(len(out), limit)
+                if len(out) < len(text):
+                    self.assertTrue(out.endswith("…"))
+                    self.assertTrue(text.startswith(out[:-1]))
+                    self.assertFalse(text[len(out) - 1:len(out)].strip(" ,;:·-"))    # (what follows the cut is a space: the cut is between words)
 
     def test_validate_newline_strip_takes_first_line(self):
         out = rt.validate_title("\n\n  Fix login flow  \nsecond line")

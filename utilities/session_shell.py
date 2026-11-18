@@ -1152,8 +1152,9 @@ PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked"
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
                      native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False,
-                     upgrade_note="", native_model=None, popup_columns=None, table_columns=None) -> dict:
-    """No collection pass: read the same exact native display and question APIs."""
+                     upgrade_note="", native_model=None, popup_columns=None, table_columns=None, side=False) -> dict:
+    """No collection pass: read the same exact native display and question APIs. ``side``: the panel stands beside the native area
+    and open, so it draws RESOURCES (the shared producer takes the host sample only for such a panel)."""
     import time
     registry_root()
     import human_wait_state
@@ -1172,6 +1173,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.session_line import peer_message_rows
     counts, route = human_wait_state.cached_statusline(harness, sid)
     view = human_wait_state.cached_view(request=False) or {}
+    if side and expanded:
+        human_wait_state.note_resources_wanted()
     seat = session_tidy.resolve_seat(harness, env={}, sid=sid)
     display = session_tidy.prompt_display(seat, harness, sid)
     received = display.get("received") or []
@@ -1986,7 +1989,7 @@ def _backend_operation(request: dict) -> dict:
             retained_questions=request.get("retained_questions", ()), pane_binding=binding,
             answer_busy=request.get("answer_busy") is True,
             upgrade_note=request.get("upgrade_note") if request.get("upgrade_note") in ("pending", "scrollback") else "",
-            native_model=request.get("native_model"))}
+            native_model=request.get("native_model"), side=request.get("side") is True)}
     if op == "answer":
         return _block_answer(binding, request)
     if op == "popup":
