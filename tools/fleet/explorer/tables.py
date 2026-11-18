@@ -5,6 +5,7 @@ from .live import current_route_counts, route_marker_state, unknown_kind, unknow
 from .grid import CellGrid, cell_width
 from .style import recede_key
 from ..config import ui_text
+from ..palette import kind_intensity_key, kind_word_key, route_field
 
 X = 34
 GAP = 3
@@ -1220,7 +1221,12 @@ def _kind_cell(route):
         intensity = ""               # the `direct` zone's own name says it (11-17, route zones)
     if not kind:
         return []
-    return [(kind, "grp")] + ([("(" + intensity + ")", "dim")] if intensity else [])
+    # 11-18: the kind word wears its field's hue and the bracket the same hue stepped by its intensity's weight; a route
+    # with no field hue keeps the bold body word and the dim bracket.
+    field = route_field(route.get("field"), kind)
+    word_key = kind_word_key(field) or "grp"
+    bracket_key = kind_intensity_key(field, intensity) or "dim"
+    return [(kind, word_key)] + ([("(" + intensity + ")", bracket_key)] if intensity else [])
 
 
 def _blinking_stage(stages, at, lit):
@@ -1721,13 +1727,15 @@ def draw_routes(grid, vm, state, x=34, y=3):
             y += 1
             if not is_open:
                 continue
-            kind_parts = [(str(route.get("capability") or "·"), "soft")]
+            field = route_field(route.get("field"), route.get("capability"))
+            kind_parts = [(str(route.get("capability") or "·"), kind_intensity_key(field, "standard") or "soft")]
             short = {"standard": "std", "light": "lt", "quick": "q", "thorough": "thr",
                      "adversarial": "adv"}
             suffix = "·".join(short.get(value, value) for value in
                               (route.get("mode"), route.get("intensity")) if value)
             if suffix:
-                kind_parts.append(("(" + suffix + ")", "dim"))
+                # The whole bracket (a mode word may stand in it: `(dev·q)`) takes the field's hue at its intensity's weight.
+                kind_parts.append(("(" + suffix + ")", kind_intensity_key(field, suffix) or "dim"))
             def next_row(row):
                 """Close this unfolded row and open the next one under it."""
                 _tint_row(grid, row, x - 1, right, 236)

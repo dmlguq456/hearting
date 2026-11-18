@@ -1,11 +1,11 @@
-"""11-16 (panel polish 1116, 9): MEM draws v4.36.4's two rows per record again (spec rule 46 (b)), five at most.
+"""11-16 (panel polish 1116, 9): MEM draws v4.36.4's two rows per record again (spec rule 46 (b)); 11-18 (the person: "MEM는 최대 최근 3개만 띄워도 되겠다"): the newest three at most.
 
 The person (right after MESSAGES' correction): "메모리도 메시지랑 같은 맥락이야." A record is a dim head row that keeps
 what the person asked for on 11-15 (`◆` durable, `◇` working, `·` naming no tier, the scope, the kind, the age:
 `◆ project · decision · 10m`) and, two cells in, its headline in the body color on up to two rows (the second
-ending in `…`). This repository's and the global records together, newest first, `MEM_MAX` (5) at most; the
+ending in `…`). This repository's and the global records together, newest first, `MEM_MAX` (3) at most; the
 head `MEM ────` without `›`, no popup. Short of rows, inside the section: the headlines take one row, then fewer
-records show; between the sections MEM still gives way first. The backend sends five (it sent two).
+records show; between the sections MEM still gives way first. The backend sends three (it sent two, then five).
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -62,20 +62,20 @@ class MemRowsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
-    def test_a_record_takes_its_head_row_and_its_headline_five_at_most(self):
+    def test_a_record_takes_its_head_row_and_its_headline_three_at_most(self):
         self.node(r"""
 const v=draw(),m=mem(v);
 assert(m,lines(v).join('\n'));
 assert.match(m.head,/^│ MEM ─+ │$/,'no `›`, no count');
 const heads=m.rows.filter(s=>/^│ [◆◇·] /.test(s)).map(s=>s.slice(2,-2).trimEnd());
-assert.deepEqual(heads,['◆ project · decision · 10m','◇ global · lesson · 2h','◆ project · correction · 3h 10m','◆ global · fact · 1d 2h','· project · done · 2d 0h'],m.rows.join('\n'));
+assert.deepEqual(heads,['◆ project · decision · 10m','◇ global · lesson · 2h','◆ project · correction · 3h 10m'],m.rows.join('\n'));
 // Each headline two cells in under its head, two rows at most, the second ending in `…` where it goes on.
 const blocks=[];for(const r of m.rows){if(/^│ [◆◇·] /.test(r))blocks.push([]);else blocks.at(-1).push(r);}
-assert.deepEqual(blocks.map(b=>b.length),[2,1,2,1,1],m.rows.join('\n'));
+assert.deepEqual(blocks.map(b=>b.length),[2,1,2],m.rows.join('\n'));
 assert(blocks.flat().every(r=>/^│   \S/.test(r)),m.rows.join('\n'));
 assert.match(blocks[2][1].slice(0,-1).trimEnd(),/…$/,'the third record goes on past two rows');
 assert(!blocks[0][1].includes('…'),'the first fits two rows whole');
-assert(!lines(v).join('\n').includes('여섯째'),'the sixth record does not stand');
+assert(!lines(v).join('\n').includes('패널 설정은')&&!lines(v).join('\n').includes('현황 단추')&&!lines(v).join('\n').includes('여섯째'),'the fourth and later records do not stand');
 // The head row dim (mark, scope, kind, age), the headline in the body color; MEM opens nothing.
 const y=lines(v).findIndex(s=>s.startsWith('│ ◇ global'));
 assert(v.rows[y].filter(p=>/[◇a-z0-9]/.test(p.text)).every(p=>p.dim===true),JSON.stringify(v.rows[y]));
@@ -99,7 +99,7 @@ for(let w=60;w>=14;w--){
   else assert(/^│ ◆ 10m +│$/.test(h),label);
 }
 // Mono and NO_COLOR keep the marks apart by shape.
-for(const o of [{cfg:{theme:'mono'}},{model:{no_color:true}}]){const m=mem(draw(o));assert(m.rows[0].startsWith('│ ◆ ')&&m.rows.some(r=>r.startsWith('│ ◇ '))&&m.rows.some(r=>r.startsWith('│ · ')),JSON.stringify(o));}
+for(const o of [{cfg:{theme:'mono'}},{model:{no_color:true}}]){const m=mem(draw({...o,mem:[MEM[0],MEM[1],MEM[4]]}));assert(m.rows[0].startsWith('│ ◆ ')&&m.rows.some(r=>r.startsWith('│ ◇ '))&&m.rows.some(r=>r.startsWith('│ · ')),JSON.stringify(o));}
 """)
 
     def test_short_of_rows_headlines_take_one_row_then_fewer_records_and_mem_goes_first(self):
@@ -110,11 +110,11 @@ for(let h=70;h>=14;h--){
   const records=m?m.rows.filter(s=>/^│ [◆◇·] /.test(s)).length:0,longest=m?Math.max(0,...m.rows.map((r,i,a)=>/^│ [◆◇·] /.test(r)?(()=>{let n=0;for(let k=i+1;k<a.length&&/^│   /.test(a[k]);k++)n++;return n;})():0)):0;
   seen.push({h,records,longest,head:!!m,msg:g.count,two:g.two});
 }
-// Inside MEM: while five records stand some headline may take two rows; fewer records show only once every
+// Inside MEM: while three records stand some headline may take two rows; fewer records show only once every
 // headline took one row at a higher height first (a step that frees more rows gives them back).
-const firstOne=seen.find(s=>s.records===5&&s.longest===1),firstFewer=seen.find(s=>s.head&&s.records<5);
+const firstOne=seen.find(s=>s.records===3&&s.longest===1),firstFewer=seen.find(s=>s.head&&s.records<3);
 assert(firstOne&&firstFewer&&firstOne.h>firstFewer.h,JSON.stringify(seen));
-assert(seen[0].records===5&&seen[0].longest===2,JSON.stringify(seen[0]));
+assert(seen[0].records===3&&seen[0].longest===2,JSON.stringify(seen[0]));
 // Between the sections MEM gives way first: the messages keep their five records in two rows while MEM steps down,
 // and MESSAGES gives up its rows only after MEM's last record went.
 for(const s of seen){if(s.msg<5||!s.two)assert(s.records<=1,JSON.stringify(s));}
@@ -124,18 +124,18 @@ console.log(JSON.stringify(seen.map(s=>[s.h,s.records,s.longest,s.msg,s.two?2:1]
 """)
         self.assertTrue(out.strip())
 
-    def test_the_backend_sends_five_records(self):
+    def test_the_backend_sends_three_records(self):
         from fleet import session_panel, session_work
         import session_shell as shell
         import human_wait_state
         import session_tidy
-        self.assertEqual(session_panel.MEMORY_ITEMS, 5)
+        self.assertEqual(session_panel.MEMORY_ITEMS, 3)
         now = datetime.datetime(2026, 11, 16, 10, 0, 0)
         rows = [{"ts": "2026-11-16T09:%02d:00" % (50 - n), "type": "decision", "headline": "기록 %d" % n,
                  "tier": "durable", "scope": "project"} for n in range(7)]
         items = session_panel.session_memory_items({"memory_recent": rows}, now)
-        self.assertEqual([item["text"] for item in items], ["기록 %d" % n for n in range(5)])
-        # The projection asks the journal for five.
+        self.assertEqual([item["text"] for item in items], ["기록 %d" % n for n in range(3)])
+        # The projection asks the journal for three.
         asked = []
 
         def recent(cwd, limit=2):
@@ -147,7 +147,7 @@ console.log(JSON.stringify(seen.map(s=>[s.h,s.records,s.longest,s.msg,s.two?2:1]
                 mock.patch.object(human_wait_state, "cached_statusline", return_value=((0, 0), "")), \
                 mock.patch.object(session_tidy, "waiting_notice_display", return_value=("", [], "")):
             shell.panel_projection("claude", "00000000-0000-4000-8000-000000001169", columns=50, rows=46)
-        self.assertEqual(asked, [5])
+        self.assertEqual(asked, [3])
 
 
 if __name__ == "__main__":

@@ -36,7 +36,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 현황 단추가 달린 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, 2/4 execute의 Rate limiting route와 그 owner와 execute 작업자(각자의 문맥과 지금 하는 일이 함께, dispatch 선 아래), request 선 아래에 [b2]에 맡긴 요청 Test run(일부 답)이 든 route 상자, [b2]의 답과 [9c]에 보낸 메모가 든 MESSAGES, 프로젝트 결정과 전역 교훈과 정정이 든 MEM, Claude·Codex·OpenCode의 USAGE. 창의 맨 아래 줄에는 작업 폴더와 hearting v4.46.0." width="100%">
+  <img src="docs/fleet/seat.png" alt="web-api 프로젝트의 Claude Code 세션 [4f]. 왼쪽은 예시 대화로, 요청 제한을 맡기는 말, 의도 카드, Proceed, route 줄, 세션 [b2]의 일부 보고가 보인다. 오른쪽은 하팅 패널로, 현황 단추가 달린 프로젝트와 Git 상태, 모델 Opus 5.5 xhigh와 문맥 46%, 제목 Rate limiting과 지금 하는 일, 2/4 execute의 Rate limiting route(파란 code(standard), 걸린 시간은 첫 줄 오른쪽 끝)와 그 owner(문맥 게이지 줄과 지금 하는 일이 함께)와 단계 글 아래 상자에 든 execute 작업자(자기 문맥 줄과 지금 하는 일이 함께, dispatch 선 아래), request 선 아래에 [b2]에 맡긴 요청 Test run(일부 답)이 든 route 상자, [b2]의 답과 [9c]에 보낸 메모가 든 MESSAGES, 프로젝트 결정과 전역 교훈과 정정이 든 MEM, 호스트 둘의 CPU·메모리와 쓰이는 GPU마다 그것을 잡은 세션이 든 RESOURCES, Claude·Codex·OpenCode의 USAGE. 창의 맨 아래 줄에는 작업 폴더와 hearting v4.46.0." width="100%">
 </p>
 <p align="center"><sub>패널을 곁에 두고 일하는 세션 <code>[4f]</code>. route는 이 세션이 띄운 단계별 일입니다. 데모 데이터이며 대화는 예시입니다.</sub></p>
 
@@ -49,11 +49,11 @@
 ### 세션 옆 패널
 
 새 설치에서는 새로 여는 Claude Code, Codex, OpenCode 터미널마다 오른쪽에 40칸
-패널이 열립니다. 프로젝트와 Git 상태(세션이 감독하거나 감독받으면 `PEERS` 줄: `[c7] ⚑ ─ [d4]`), 모델과 문맥, 세션 제목과 지금 하는 일 아래로
+패널이 열립니다. 프로젝트와 Git 상태(세션이 감독하거나 감독받으면 `PEERS` 줄: `[c7] ⚑  ─ [d4]`), 모델과 문맥, 세션 제목과 지금 하는 일 아래로
 구획마다 몇 줄씩 보입니다: 사용자의 답을 기다리는 질문, 이 세션의 route와 요청을 세 영역(`direct`, `dispatch`, `request`)으로
-나눈 한 상자에, 메시지, 저장된 기억(`MEM`), 세 에이전트의 사용량 창(`USAGE`). 질문,
+나눈 한 상자에(route 첫 줄은 유형 낱말을 갈래 색으로 읽습니다: `code` 파랑, `lab` 호박색, `design` 장미색, `docs` 모래색, `research` 하늘색이고, 뒤따르는 강도는 같은 색에 `quick`은 흐리게 `strong` 이상은 굵게 쓰며, 걸린 시간은 줄 오른쪽 끝에 놓입니다. 그 안의 세션(owner와 작업자 모두)은 하네스·모델 줄, 문맥 게이지 줄, 지금 하는 일(두 줄까지) 순서로 읽히고, 한 단계의 작업자들은 단계 글 아래 상자에 서며 상자 모양은 `worker box` 설정(`closed`·`open`·없음)을 따릅니다), 메시지, 저장된 기억(`MEM`), 기계의 GPU가 하는 일과 그것을 잡은 세션(`RESOURCES`), 세 에이전트의 사용량 창(`USAGE`). 질문,
 route 상자, `MESSAGES`를 누르면 그 표 전부가 창 가운데 팝업으로 뜨고, 뒤는 회색으로 가라앉습니다.
-`MEM`과 `USAGE`는 누르면 열리는 것이 없습니다.
+`MEM`, `RESOURCES`, `USAGE`는 누르면 열리는 것이 없습니다.
 여기서 답할 질문은 장미색 테두리 상자에 섭니다. **Ctrl+]** 키는 늘 팝업을 열고 그
 질문을 먼저 띄웁니다. **Tab**, **1–9**, **Enter**로 답하면 팝업이 닫히고
 `✓ answer sent`가 남습니다. 머리의 REPO 줄 끝 **현황 ›** 단추는 프로젝트 현황 문서
@@ -82,7 +82,7 @@ Fleet를 열고, **p**는 패널을 에이전트 화면 아래 띠로 접으며,
 |---|---|---|---|---|
 | **QUESTIONS** | 사용자의 답이나 승인을 기다리는 질문 | 사용자가 필요한 에이전트 | 사용자가 답할 때(패널이나 Fleet에서), 또는 일이 끝날 때. 다른 자리에서 답할 질문은 그 자리를 알려 줍니다 | 패널: 장미색 테두리 상자 · Fleet: QUESTIONS |
 | **ROUTE** | 이 세션이 띄운 일: 단계, 단계마다 맡은 쪽, 검증(세션이 직접 하는 일은 상자의 `direct` 영역, 띄운 일은 `dispatch` 영역) | 요청이 route를 필요로 할 때 이 세션(route가 owner를 띄움) | route가 끝날 때. 결과는 다음 입력이나 10분까지 한 줄로 남습니다 | 패널: route 상자 · Fleet: ROUTES |
-| **PEER REQUEST** | 다른 세션에 맡긴 일. 번호, 판, 보고가 붙습니다 | 맡기는 세션 | 상대 세션의 최종 보고나 거절, 또는 맡긴 쪽의 취소로. 일부 보고는 열어 둡니다 | 패널: route 상자의 `request` 영역(이름 붙은 선 아래. 상대 세션의 번호·하네스·모델·effort가 붙고, `→` 맡긴 일, `◂` 받은 일, `✓` 끝난 일, `✕` 거절·취소), MESSAGES 팝업에 전문 · Fleet: 세션 페이지의 `request` 줄과 PEERS의 연결 |
+| **PEER REQUEST** | 다른 세션에 맡긴 일. 번호, 판, 보고가 붙습니다 | 맡기는 세션 | 상대 세션의 최종 보고나 거절, 또는 맡긴 쪽의 취소로. 일부 보고는 열어 둡니다 | 패널: route 상자의 `request` 영역(이름 붙은 선 아래. 상대 세션의 번호, 다른 저장소의 세션이면 그 저장소 이름, 하네스·모델·effort가 붙고, `→` 맡긴 일, `◂` 받은 일, `✓` 끝난 일, `✕` 거절·취소), MESSAGES 팝업에 전문 · Fleet: 세션 페이지의 `request` 줄과 PEERS의 연결 |
 | **MESSAGES** | 읽고 끝나는 짧은 글 | 어느 세션이든 | 닫을 것이 없습니다 | 패널: MESSAGES · Fleet: 세션 페이지와 PEERS |
 | **PEERS** | 메시지, 요청, 감독, 이어받음으로 이어진 세션들 | 그 이어짐 자체 | — | Fleet: PEERS |
 

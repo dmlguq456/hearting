@@ -157,11 +157,13 @@ console.log(JSON.stringify(out));'''
             # known here, so no `CTX`; 11-17, the person: the context beside the model, no gauge).
             rows = [(lines[i - 1], line, lines[i + 1]) for i, line in enumerate(lines)
                     if 0 < i < len(lines) - 2 and "│ │ " in line and "Fixture solo route" in line]
-            self.assertTrue(any("● code(quick)" in kind and "owner" in who and "codex" in who and "5m" in who
+            # 11-18: the route's time (`5m`) is at the end of its first line and nowhere on the owner's row.
+            self.assertTrue(any("● code(quick)" in kind and "5m" in kind and "owner" in who and "codex" in who and "5m" not in who
                                 and "5m" not in title and "CTX" not in who for kind, title, who in rows), side)
-            # The staged route: its owner first, its live worker hung under it by `↳`.
+            # The staged route: its owner first, its live worker in the box under its stage text (11-18).
             self.assertIn("owner  claude Opus 5.5 high", side)
-            self.assertIn("↳ ⠋ worker codex", side)
+            self.assertIn("┌ staged 2/2: code-execute", side)
+            self.assertIn("⠋ worker codex", side)
             self.assertIn("codex Opus 5.5 high", bottom)
             rows_seen.append([row for row in side.splitlines() if "Fixture" in row])
             self.assertNotIn("hb_", side + bottom)

@@ -124,6 +124,10 @@ _HDR_BAR_PAIR = 19
 _HDR_WARN_PAIR = 20
 _HDR_BLK_PAIR = 21
 _TINT_PAIR_START = 22
+# The tint pairs take 22 + 6 levels × the hue count (19 hues: 22..135); the pairs below stay clear of them (`_init_colors` turns the tints
+# off rather than let them reach these, and a test holds the two ranges apart).
+_KIND_PAIR_START = 160       # the five field hues
+_ZONE_PAIR_START = 165       # the three zone names (direct, dispatch, request)
 
 
 def _live_key(state):

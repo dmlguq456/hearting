@@ -1252,6 +1252,8 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "mode": mode,
             "intensity": intensity,
             "profile": _text(_get(owner, "model_profile", "profile")) if owner is not None else None,
+            # 11-18: the field the route records (``code``, ``lab``, ``docs`` …); the kind word's hue follows it.
+            "field": _text(view.get("field")) or _text(record.get("field")),
             "capability": short, "shape": shape, "past_from": None,
             "worker_stage": worker_stage or "·", "worker_unit": worker_unit,
             "worker_stage_key": None, "worker_step_key": None,
@@ -1359,6 +1361,7 @@ def _direct_routes(routes, session_rows, session_index, now=None):
             "mode": _text(record.get("capability_mode")) or _text(node.get("capability_mode")),
             "intensity": _text(record.get("effective_intensity")) or _text(node.get("intensity")),
             "profile": None, "capability": _short_capability(capability), "shape": "direct",
+            "field": _text(record.get("field")),
             "past_from": None, "worker_stage": "·", "worker_unit": None,
             "worker_stage_key": None, "worker_step_key": None,
             "owner_context": None, "owner_gauge": [None, None], "worker_contexts": [], "subworker": None,
@@ -2089,6 +2092,27 @@ def _steward_targets(session_rows, session_index, tag_by_sid):
     return steward_targets
 
 
+def _registered_tag(harness, sid):
+    """The Fleet number the tag registry holds for a session this pass has no row for, or None."""
+    from ..session_tags import assigned_tag
+    tag = assigned_tag(harness, sid)
+    return str(tag) if tag else None
+
+
+def session_repos(records):
+    """``{"<harness>\\0<session id>": repo name}``: the repository name Fleet puts on each session of a pass (its session
+    row's ``repo``), for each id the session answers to. No read of its own: ``records`` is the pass's ``(rows, index)``."""
+    rows, index = records
+    repo_of = {row["tag"]: row.get("repo") for row in rows}
+    found = {}
+    for tag, info in index.items():
+        repo, harness = repo_of.get(tag), _text(_get(info["session"], "harness", "adapter", "h"))
+        if isinstance(repo, str) and repo and harness:
+            for known in info["ids"]:
+                found[harness + "\0" + str(known)] = repo
+    return found
+
+
 def session_peers(snapshot, now=None, records=None):
     """``{"<harness>\\0<session id>": {"tag", "supervisors": [[tag, harness]], "targets": [[tag, harness]]}}`` for each
     session in a supervision relation, from the steward records the snapshot already holds (no read of its own).
@@ -2105,13 +2129,26 @@ def session_peers(snapshot, now=None, records=None):
     for steward, watched in targets.items():
         for tag in watched:
             supervisors.setdefault(tag, []).append(steward)
-    found = {}
+    found, registered = {}, {}
     for tag, info in index.items():
-        above, below = supervisors.get(tag, []), targets.get(tag, [])
+        above = [[t, harness_of.get(t) or ""] for t in supervisors.get(tag, [])]
+        below = [[t, harness_of.get(t) or ""] for t in targets.get(tag, [])]
+        # 11-18: a registered relation is a fact whether or not the other end drew a panel in the last ten minutes. An end
+        # this pass has no row for stands by the number the tag registry already holds for it (a local read, no collection).
+        session = info["session"]
+        for entries, side in ((_get(session, "steward_targets"), below), (_get(session, "steward_parents"), above)):
+            for item in entries or ():
+                sid, other_harness = _text(_get(item, "session_id")), (_text(_get(item, "harness")) or "").lower()
+                if not sid or tag_by_sid.get(sid) in harness_of or sid in info["ids"] or other_harness not in HARNESSES:
+                    continue
+                if (other_harness, sid) not in registered:           # one registry read per end, not one per window
+                    registered[(other_harness, sid)] = _registered_tag(other_harness, sid)
+                other = registered[(other_harness, sid)]
+                if other and other != tag and other not in harness_of and all(other != seen[0] for seen in side):
+                    side.append([other, other_harness])
         if not (above or below):
             continue
-        entry = {"tag": tag, "supervisors": [[t, harness_of.get(t) or ""] for t in above[:8]],
-                 "targets": [[t, harness_of.get(t) or ""] for t in below[:16]]}
+        entry = {"tag": tag, "supervisors": above[:8], "targets": below[:16]}
         for sid in info["ids"]:
             found[str(_get(info["session"], "harness")) + "\0" + sid] = entry
     return found
@@ -3859,7 +3896,7 @@ def session_route_status(snapshot, now=None, *, include_details=False, records_o
         # Spec rule 23: every current route (the panel shows them all, scrolling in place).
         for route in selected:
             row = {key: str(route.get(key) or "")[:320] for key in
-                   ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability")}
+                   ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability", "field")}
             # Each stage's box in Fleet's route detail (verdict, time, unit, output, rounds note).
             boxes = {}
             for group in (route_nodes or {}).get(route.get("id")) or ():
