@@ -175,7 +175,7 @@ class DispatchLogRetentionTest(unittest.TestCase):
         self.assertEqual(result["removed"], 0)
         self.assertTrue(all(path.exists() for path in (live, review, delivery, unbound, outside)))
         self.assertGreater(result["protected_bytes"], 0)
-        self.assertGreater(result["unknown_bytes"], 0)
+        self.assertGreater(result["unreferenced_bytes"], 0)  # unbound.jsonl: no row names it
         self.assertGreater(result["over_limit_bytes"], 0)
         self.assertEqual(result["kept_reasons"].get("delivery-pending"), 1)
         self.assertEqual(result["kept_reasons"].get("review-consumer-open"), 1)
@@ -613,6 +613,88 @@ class DispatchLogRetentionTest(unittest.TestCase):
             result = R.sweep(self.jobs, now_ns=self.now, force=True)
         self.assertEqual((result["removed"], result["more"]), (0, 1))
         self.assertEqual(result["kept_reasons"].get("delivery-refresh-budget"), 3)
+
+    def _continue(self, start, *, cap=20):
+        # Calls the sweep the way its callers do: no force, and a `more` result
+        # is followed after the short interval. `cap` only stops a runaway test.
+        gap = R.BACKLOG_DUE_SECONDS * 1_000_000_000
+        results, at = [], start
+        while len(results) < cap:
+            result = R.sweep(self.jobs, now_ns=at)
+            results.append(result)
+            if not result.get("more"):
+                break
+            self.assertEqual(R.sweep(self.jobs, now_ns=at + gap - 1_000_000_000),
+                             {"skipped": "not-due"})
+            at += gap
+        return {"passes": len(results), "removed": [r.get("removed") for r in results],
+                "more": [r.get("more") for r in results]}
+
+    def _blocked(self, count, prefix="a-blocked"):
+        paths = []
+        for index in range(count):
+            path = self.log(f"{prefix}-{index:02d}.jsonl")
+            self.add_row(f"att-{prefix}-{index:02d}", path, status="open", ended=self.now - 30 * DAY)
+            paths.append(path)
+        return paths
+
+    def test_blocked_names_do_not_hide_removable_logs_within_one_round(self):
+        blocked = self._blocked(32)
+        expired = []
+        for index in range(5):
+            path = self.log(f"z-expired-{index:02d}.jsonl")
+            self.add_row(f"att-z-expired-{index:02d}", path, ended=self.now - 30 * DAY)
+            expired.append(path)
+        with mock.patch.object(R, "EXAMINE_LIMIT", 32):
+            summary = self._continue(self.now)
+        self.assertEqual(summary, {"passes": 2, "removed": [0, 5], "more": [1, 0]})
+        self.assertTrue(all(path.exists() for path in blocked))
+        self.assertFalse(any(path.exists() for path in expired))
+
+    def test_all_blocked_names_stop_the_continuation_after_one_round(self):
+        paths = self._blocked(80)
+        with mock.patch.object(R, "EXAMINE_LIMIT", 32):
+            summary = self._continue(self.now)
+            self.assertEqual(summary, {"passes": 3, "removed": [0, 0, 0], "more": [1, 1, 0]})
+            later = R.sweep(self.jobs, now_ns=self.now + 10 * R.DUE_SECONDS * 1_000_000_000)
+        self.assertEqual((later["more"], later["removed"], later["round_left"]), (0, 0, 0))
+        self.assertTrue(all(path.exists() for path in paths))
+
+    def test_a_removal_after_a_spent_round_arms_the_next_round(self):
+        self._blocked(80)
+        with mock.patch.object(R, "EXAMINE_LIMIT", 32):
+            self.assertEqual(self._continue(self.now)["more"], [1, 1, 0])
+            late = self.log("z-late-expired.jsonl")
+            self.add_row("att-z-late-expired", late, ended=self.now - 30 * DAY)
+            at = self.now
+            for _ in range(6):   # normal interval until the cursor reaches the new name
+                at += 10 * R.DUE_SECONDS * 1_000_000_000
+                result = R.sweep(self.jobs, now_ns=at)
+                if result.get("removed"):
+                    break
+                self.assertEqual((result["more"], result["round_left"]), (0, 0))
+            self.assertFalse(late.exists())
+            self.assertEqual((result["removed"], result["more"], result["round_left"]), (1, 0, 81))
+            at += 10 * R.DUE_SECONDS * 1_000_000_000
+            following = R.sweep(self.jobs, now_ns=at)
+        self.assertEqual((following["removed"], following["more"]), (0, 1))
+        self.assertLess(following["round_left"], 81)
+
+    def test_unknown_bytes_is_split_into_three_disjoint_counts(self):
+        self.add_row("att-a-unknown", self.log("a-unknown.jsonl", b"u" * 11), harness="other",
+                     ended=self.now - 30 * DAY)
+        for name, size in (("b-blocked", 13), ("c-blocked", 15)):
+            self.add_row(f"att-{name}", self.log(f"{name}.jsonl", b"b" * size), status="open",
+                         ended=self.now - 30 * DAY)
+        for name, size in (("d-x", 17), ("e-y", 19)):
+            self.add_row(f"att-{name}", self.log(f"{name}.jsonl", b"x" * size), ended=self.now - DAY)
+        self.log("orphan.jsonl", b"o" * 23)
+        with mock.patch.object(R, "EXAMINE_LIMIT", 2):
+            result = self.sweep()
+        self.assertNotIn("unknown_bytes", result)
+        self.assertEqual((result["examined"], result["protected_bytes"]), (2, 28))
+        self.assertEqual((result["unknown_verdict_bytes"], result["unexamined_bytes"],
+                          result["unreferenced_bytes"]), (11, 36, 23))
 
     def test_one_registry_read_serves_every_removal_while_jobs_log_is_unchanged(self):
         import worker_home_retention as WHR
