@@ -635,9 +635,11 @@ HOME retention, rechecks identity and settlement immediately before removal, and
 holds all bound attempt/child/successor reference admissions through quarantine
 and unlink. It resumes on the next normal cadence after
 interruption; examining and removing have separate time budgets (it examines
-only the logs and prompt sidecars still present), and the next
-pass may start after one minute while removable files remain, and once a round over
-all logs ends, a new round opens at most once a day. It runs beside the existing post-exit reaper and selector-free
+only the logs and prompt sidecars still present). While a round over all
+logs is open every pass may start after one minute, whatever it removed, and so may the pass
+after one that leaves removable files beyond its limits; once a round ends, a new round opens
+at most once a day, and a round an older release ended without an end time is closed by the
+next pass of this release. It runs beside the existing post-exit reaper and selector-free
 `reconcile --apply`; exact-attempt transactions remain scoped to their attempt.
 The same pass retires two state-root leftovers untouched for seven days: a
 route's completion markers when neither the registry nor its archive names that route and
