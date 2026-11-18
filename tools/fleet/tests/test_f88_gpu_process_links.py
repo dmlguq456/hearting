@@ -659,11 +659,11 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
                 mock.patch.object(render.curses, "COLORS", 256, create=True):
             render._init_colors()
 
-        self.assertEqual(render._COLOR["gpu_ada"], render._COLOR["h_claude"])
-        self.assertEqual(render._COLOR["gpu_hopper"], render._COLOR["h_codex"])
-        self.assertEqual(render._COLOR["gpu_ampere"], render._COLOR["h_opencode"])
-        self.assertEqual(render._COLOR["gpu_rtx6000"], render._COLOR["h_opencode"])
-        self.assertEqual(render._COLOR["gpu_rtx4090"], render._COLOR["h_claude"])
+        self.assertEqual(render._COLOR["gpu_ada"], render._COLOR["famd_opus"])      # the GPU teal is not the Claude orange
+        self.assertEqual(render._COLOR["gpu_hopper"], render._COLOR["fam_fable"] | render.curses.A_DIM)
+        self.assertEqual(render._COLOR["gpu_ampere"], render._COLOR["fam_sonnet"] | render.curses.A_DIM)
+        self.assertEqual(render._COLOR["gpu_rtx6000"], render._COLOR["fam_sonnet"] | render.curses.A_DIM)
+        self.assertEqual(render._COLOR["gpu_rtx4090"], render._COLOR["famd_opus"])
         self.assertNotEqual(render._COLOR["gpu_rtx6000"], render._COLOR["gpu_rtx4090"])
         for family in ("gpu_rtx6000", "gpu_rtx4090", "gpu_rtx5090",
                        "gpu_blackwell", "gpu_hopper", "gpu_ada", "gpu_ampere", "gpu_turing"):

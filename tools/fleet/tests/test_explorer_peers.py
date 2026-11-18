@@ -123,6 +123,28 @@ def _history_recede_delta(expected_cells):
     return normalized
 
 
+def _stage_cyan_delta(actual_cells, expected_cells):
+    """The approved 2026-11-18 delta (the harness colors are their own now): the stage strip's hues (blue, cyan, magenta)
+    were drawn with the harness keys in the reference (`h_claude`, `h_codex`); they stay the hues they were, now on the model
+    families' keys. Only the moves this fixture shows may differ, and each by exactly its listed pair (the glyph, the frozen
+    key, the key now drawn): the strip's `✓` and `·` cells. Any other cell, a real harness cell (`hb_*`) included, is compared
+    as captured, so a harness cell that turned into a family key fails here."""
+    moves = {("✓", "h_claude"): "famd_opus", ("·", "h_claude"): "famd_opus", ("·", "h_codex"): "famd_fable"}
+    normalized = [list(row) for row in expected_cells]
+    for y, row in enumerate(normalized):
+        if y >= len(actual_cells):
+            break
+        for x, cell in enumerate(row):
+            if (x < len(actual_cells[y]) and (cell[0], cell[1]) in moves
+                    and actual_cells[y][x][:2] == [cell[0], moves[(cell[0], cell[1])]]):
+                row[x] = [cell[0], moves[(cell[0], cell[1])], *cell[2:]]
+            # The approved 2026-11-18 spinner delta: a working spinner on a session card is drawn in its harness's color.
+            elif (x < len(actual_cells[y]) and cell[1] in ("g_spin", "spin") and cell[0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+                  and actual_cells[y][x][:2] in ([cell[0], "spin_claude"], [cell[0], "spin_codex"], [cell[0], "spin_opencode"])):
+                row[x] = [cell[0], actual_cells[y][x][1], *cell[2:]]
+    return normalized
+
+
 def _links_words_delta(frame, expected_cells):
     """The approved 2026-11-16 words delta (Fleet takes the shell panel's words and forms): the
     LINKS head leads with its count (``9 LINKS messages·requests · supervision · handover``), a
@@ -189,6 +211,7 @@ class PeerPaneReference(unittest.TestCase):
                     expected_cells = _arrow_glyph_delta(expected_cells)
                     expected_cells = _history_recede_delta(expected_cells)
                     expected_cells = _links_words_delta(frame, expected_cells)
+                    expected_cells = _stage_cyan_delta(actual_cells, expected_cells)
                     expected_hits = [[hit[0] - 5, hit[1] - SEPARATOR, hit[2] - SEPARATOR, hit[3]]
                                      for hit in expected_full_hits
                                      if hit[0] >= 5 and hit[1] >= SEPARATOR]

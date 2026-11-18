@@ -251,8 +251,10 @@ being typed in for the person, `●` idle, `◑` waiting on a dialog or question
 the session number (`[e9]`), the harness name in its Fleet hue and, for a
 steward, Fleet's `⚑` followed by two cells before the line (a steward's number takes Fleet's steward color, fixed,
 as on Fleet's session row); the state has no word, its glyph and number share the
-state's color, and the three glyph shapes still differ in `mono` and under
-`NO_COLOR`. Short of cells the steward mark goes first, then the harness, then
+state's color (11-18: but a spinning glyph is in the session's harness color, `hb_*`: Claude 173, Codex 147, OpenCode 153; the same for every
+working spinner on a line that names its harness: a route's owner and worker rows and a frame leg here, Fleet's SESSIONS rows, route rows and
+PEERS cards; a route's first-line `●`, a stopped, waiting or finished mark and a line with no known harness keep the state's color), and the three
+glyph shapes still differ in `mono` and under `NO_COLOR`. Short of cells the steward mark goes first, then the harness, then
 the number; the glyph stays. Right of that head the border is the line alone:
 the gear `⚙` stands on the panel's last row inside, three cells left of the fold button `▾`
 at its right end, beside 5h/7d and the model windows (`5h … │ 7d … │
@@ -332,7 +334,10 @@ a person tunes stand at its top (the blink's `WAIT_BLINK` 10 frames; the rule's 
 frames, `RULE_REST` 10 frames, the lit frame `BORDER_LIT` 1; the wave `WAVE_COUNT` 3, `WAVE_LAP` 56
 frames, `WAVE_STEPS` 10, `WAVE_FLOOR` 0.3, `WAVE_MIN` 24; the arc `BORDER_ARC` 1/4, `BORDER_LAP` 60
 frames), the breath and its shade count with the other `BORDER_*`, the colors in `FACES.*.orbit`,
-`scan`, `waveRGB`, `breath`, `breathRGB`, the blink's two reds in `FACES.*.waitBlink`. A route's state stays in
+`scan`, `waveRGB`, `breath`, `breathRGB`, the blink's two reds in `FACES.*.waitBlink`. 11-18: while a session works (every `rule motion`
+kind) those three tone ramps are its harness's own, `FACES.*.ramp.<harness>` (Claude 173, Codex 147, OpenCode 153 and their lit
+tints on the dark face, their deep pairs 166, 25, 31 on the light one): the same number of steps, the same motion and speed; a waiting
+session's reds, a window with no known harness (the vanilla ramp), mono and `NO_COLOR` are unchanged. A route's state stays in
 the route box: a failed current route turns that box's line to the failure
 color and a running one pulses `N ROUTE` (`route N`); the question's count and `◑` keep their rose. An experiment's failure never colors the frame.
 `HEARTING` names the settings screen alone. What runs shares Fleet's one beat
@@ -366,7 +371,10 @@ glyph. Directly under `GIT` stands `PEERS` (11-17, the person's PEERS sketch; th
 `REPO`/`GIT`): `PEERS  [c7] ⚑  ─ [d4] [3b]`, the supervising session, its flag, two cells, a dash, then the sessions it
 supervises, in that order from every window; a supervised window shows only its own group
 (`[c7] ⚑  ─ [d4]`), a window that is both shows two groups joined by ` · `. Each number wears its session's
-harness color (this window's own bold), the flag is Fleet's steward pink, the dash and the dot dim; it shows no
+harness color: this window's own the lit color, bold; every other session's the same hue one step back and plain (11-18, "this window's
+number should show at a glance": on the dark and unknown faces the USAGE names' own values, `FACES.*.harnessName`; on the light face
+`FACES.light.peerOther`, the lighter step, Claude 173, Codex 68, OpenCode 66, so it is never this window's deep hue; each drawn as that
+face's fixed color, never the terminal's dim; with no color, weight alone, as before); the flag is Fleet's steward pink, the dash and the dot dim; it shows no
 session state. Short of cells the last numbers go from the back and the count of the ones a group lost stands
 inside that group (`[3b] ⚑  ─ +2`), never after another group's; a group keeps its head (`[x] ⚑  ─`) while that fits, else the
 group goes whole and no count is put on the groups left; a window with no relation has no row. The relation
@@ -475,7 +483,8 @@ popup; a request row the MESSAGES popup).
   itself (its route line has no `(direct)` bracket: `● code  title`), `dispatch` the routes this
   session started (lines as before: owner, stage line, workers), `request` the peer requests it sent
   or received (lines and presses as before). A zone's name and its mark (dot or arrow) have their own
-  color: direct orange, dispatch violet, request aqua, none a harness color, a status color of the box (working green,
+  color: direct orange (208), dispatch violet, request aqua, none a harness color (the harnesses' own are Claude's softer clay orange 173, 13 apart
+  by CIEDE2000, its light-face pair 166; Codex's lavender 147, light-face pair 25, the Sonnet family's own step on purpose; OpenCode's pale sky 153, light-face pair 31), a status color of the box (working green,
   idle yellow, failure coral, the spinner's vanilla) or the steward pink (an 8-color terminal has none left over: the zones read in
   the default color and the white there). A
   zone with no rows has no rule, no rows at all is the empty box; a route a request opened stands in
@@ -601,8 +610,8 @@ popup; a request row the MESSAGES popup).
 - USAGE (spec rule 59, 11-16, the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을
   USAGE로 해서 넣자"): the section at the panel's bottom, its name row `USAGE ────` (as MESSAGES' and MEM's, no `›`: it
   opens nothing; the thin rule that parted MEM from the last row became it), then one row per harness in Fleet's header
-  order (Claude, Codex, OpenCode): the harness's name in its Fleet hue one step down (11-16, "하네스 이름도 어둡게 원래 테마 컬러를": claude 66, codex 133, opencode
-  104 on a dark or unknown face, 30, 96, 68 on a light one, `FACES.*.harnessName`; none in mono, eight colors or `NO_COLOR`), then the windows that harness reports as the last row showed
+  order (Claude, Codex, OpenCode): the harness's name in its Fleet hue one step down (11-16, "하네스 이름도 어둡게 원래 테마 컬러를": claude 130, codex 104, opencode
+  110 on a dark or unknown face, 166, 68, 31 on a light one, `FACES.*.harnessName`; none in mono, eight colors or `NO_COLOR`), then the windows that harness reports as the last row showed
   them (`5h 12%(↻ 2h) │ 7d 66%`, Fleet's level colors; a window not reported is left out; a harness with none reported reads a
   dim `?`). The values are the usage records Fleet already keeps (`~/.local/state/agent-fleet/usage/<harness>.json`, read
   by `usage_cache`; this window's own harness keeps the values its panel observed, a Claude callback included); nothing is
@@ -613,11 +622,13 @@ popup; a request row the MESSAGES popup).
   whole. Under the native area it stands as beside it, as rows are left. The folded strip is unchanged.
 - RESOURCES (11-18, the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): beside the
   native area, the section right above USAGE, its name row `RESOURCES ────` (no `›`: it opens nothing), then for each host (this
-  machine first, then the configured hosts, eight at most) one row, its name and `CPU 34%  MEM 61%`, and under it one row for each
-  GPU a process runs on (`  GPU0  ━━━━━━━━─ 92%  21/24G  [3b]`: the use as a gauge, the memory, and the Fleet numbers of the
-  sessions that hold it, empty where the producer does not know them) and one for the count of the GPUs nothing runs on
-  (`  idle GPU 6`, `빈 GPU 6` in Korean); a host that could not be reached keeps its name alone. Short of cells a GPU row gives up its
-  gauge's width, then the memory, and keeps the session number; a host row gives up `MEM`, then `CPU`. The values are Fleet's own
+  machine first, then the configured hosts, eight at most) one row, its name, `CPU 34%  MEM 61%` and, at the row's end, the count of the GPUs
+  nothing runs on (`idle GPU 6`, `빈 GPU 6` in Korean), and under it the GPUs a process runs on side by side (`  GPU0 92% 21/24G [3b]  GPU3 58%
+  14/24G [c7]`: no gauge since 11-18 ("게이지는 없애자 ... 가로로 나열"); the use is its number, in Fleet's level color (green, yellow from 50, red
+  from 80); the memory; and the Fleet numbers of the sessions that hold it, empty where the producer does not know them), two cells in and two cells
+  apart, onto the next row where they do not fit and never splitting one GPU's group; a host that could not be reached keeps its name alone, a host with no
+  GPU in use is its one row. Short of cells a GPU's group gives up its memory, then its use, and keeps the session number (every group takes the
+  form that lets the widest stand alone); a host row gives up the idle count, then `MEM`, then `CPU`, and a long name is cut with `…`. The values are Fleet's own
   compute-host sample (`compute_hosts.collect`, the sample its RESOURCES view draws): a probe costs the servers an SSH read each, so the
   resident producer takes it only while a side panel that draws the section is open (the host's projection request carries `side`;
   `panel_projection` then touches `.resources-wanted`, at most every 20 seconds, and the producer reads no host once it is 90 seconds old),
@@ -648,7 +659,7 @@ popup; a request row the MESSAGES popup).
 
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run short they give way in this order:
-RESOURCES (11-18: its GPU rows, then its host rows and name); empty rows and a value's further rows (title, NOW, a route's title); every other
+RESOURCES (11-18: its GPU rows, then its host rows and name; the idle count goes with its host row); empty rows and a value's further rows (title, NOW, a route's title); every other
 section down to two rows, then to one, the lowest first (MEM: its headlines one row each, then
 down to two records and to one; the question's action row,
 then its summary keeps one row and the guidance line goes); the
@@ -1057,8 +1068,9 @@ writes such a cell plain first, so a wide character it cuts in half leaves its o
 terminal's own look), and closing it leaves no ground behind. One frame
 serves every popup: a thin rounded line one empty cell from what it covers,
 the title and `✕` on its top line, the sections on its bottom line (the current
-one bright) and the keys on the row above; text 76 cells wide, a table the window
-less 4 (116 at most; the routes popup 148 at most), both the window less 4 under 80 columns and the whole
+one bright) and the keys on the row above; the question popup the window less 4 (132 at most; 11-18, "가독성이 안좋다": it was 76),
+a table the window
+less 4 (116 at most; the routes popup 196 at most: 11-18, the read for it takes at most 200 columns), all the window less 4 under 80 columns and the whole
 window under 28; its content's height, at most the rows above the strip less 2,
 paging inside. A low window gives up the empty rows round the frame first (under
 8 rows), then its bottom line (3 rows or fewer), so a 20×6 window still shows the

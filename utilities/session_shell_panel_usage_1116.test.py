@@ -475,12 +475,12 @@ for(const o of [{theme:'mono'},{model:{colors:8}}]){
     # 2 (corrected 11-16 12:57) ---------------------------------------------------------------------------------
     def test_the_usage_rows_name_each_harness_in_its_hue_one_step_down(self):
         self.node(r"""
-const F=view.FACES,hb={claude:116,codex:176,opencode:147};
+const F=view.FACES,hb={claude:173,codex:147,opencode:153};   // 11-18: the harness hues: Claude orange 173, Codex lavender 147, OpenCode sky 153
 const L=(n)=>{const c=[0,95,135,175,215,255],m=n-16,rgb=[c[Math.floor(m/36)],c[Math.floor(m/6)%6],c[m%6]].map(x=>x/255).map(x=>x<=0.04045?x/12.92:((x+0.055)/1.055)**2.4);
   const y=0.2126*rgb[0]+0.7152*rgb[1]+0.0722*rgb[2];return 116*Math.cbrt(y)-16;};
 const none=[{harness:'claude',parts:USAGE[0].parts},{harness:'codex',parts:[]},{harness:'opencode',parts:[]}];
 const nameOf=(v,name)=>v.rows.flat().find(p=>p.role==='harness-name'&&p.text===name);
-for(const [opt,table,face] of [[{},{claude:66,codex:133,opencode:104},'dark'],[{light:true,theme:'light'},{claude:30,codex:96,opencode:68},'light']]){
+for(const [opt,table,face] of [[{},{claude:130,codex:104,opencode:110},'dark'],[{light:true,theme:'light'},{claude:166,codex:68,opencode:31},'light']]){
   assert.deepEqual(F[face].harnessName,table);
   for(const usage of [USAGE,none]){
     const v=draw({...opt,background:face,usage});
@@ -489,9 +489,9 @@ for(const [opt,table,face] of [[{},{claude:66,codex:133,opencode:104},'dark'],[{
 }
 // One step down from the Fleet hue the head's own name uses (hb_*): a lower L* on the dark face, and a quieter value than the numbers.
 for(const n of ['claude','codex','opencode'])assert(L(F.dark.harnessName[n])<L(hb[n])-8,n);
-// The same hue family: claude cyan, codex magenta, opencode blue (the head's names).
-const hueOf=n=>{const c=[0,95,135,175,215,255],m=n-16,[r,g,b]=[c[Math.floor(m/36)],c[Math.floor(m/6)%6],c[m%6]];return r>g&&b>g&&Math.abs(r-b)<=40?'m':g>=r&&b>=r&&Math.abs(g-b)<=40?'c':b>r&&b>g?'l':'?';};
-assert.deepEqual(['claude','codex','opencode'].map(n=>hueOf(F.dark.harnessName[n])),['c','m','l']);
+// The same hue family: claude orange, codex lavender (blue) and opencode sky (cyan-blue; a 13-step CIEDE2000 gap apart, 104 and 110).
+const hueOf=n=>{const c=[0,95,135,175,215,255],m=n-16,[r,g,b]=[c[Math.floor(m/36)],c[Math.floor(m/6)%6],c[m%6]];return r>g&&g>=b&&r-b>=95?'k':r>g&&b>g&&Math.abs(r-b)<=40?'m':g>=r&&b>=r&&Math.abs(g-b)<=40?'c':b>r&&b>g?'l':'?';};
+assert.deepEqual(['claude','codex','opencode'].map(n=>hueOf(F.dark.harnessName[n])),['k','l','c']);
 // Mono, eight colors: no color; NO_COLOR: the style the rows were given (no hue).
 for(const o of [{theme:'mono'},{model:{colors:8}},{model:{no_color:true}}]){
   const p=nameOf(draw(o),'codex');assert(p&&!Number.isInteger(p.foreground),JSON.stringify([o,p]));
