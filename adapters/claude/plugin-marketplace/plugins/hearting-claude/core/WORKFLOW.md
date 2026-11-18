@@ -342,6 +342,13 @@ light check of a direct change may use the harness's own native subagent
 | One reversible local completion unit already made in place | `compose --shape direct --field <field>` | records the in-place change as an inline node |
 | Other new work | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
 
+A single read-only unit can also be opened as a route of its own, with no owner:
+`compose --start --unit <family/name> --prompt-file <brief>` (for example
+`qa/code-review`; `stages --capability unit` lists the units). Its one worker starts
+with the brief, and its end closes the route and returns the sealed summary to the
+session that opened it (`core/OPERATIONS.md` §5.10c). This adds a way to start; it
+does not change the choices above.
+
 Examples of the same boundary:
 
 - **Direct:** one small local feature with its tests and README.

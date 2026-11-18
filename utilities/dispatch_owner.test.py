@@ -1428,7 +1428,7 @@ class RouteEvidenceOwnerHarnessTest(unittest.TestCase):
         both and every quick owner died at launch.
         """
         source = Path(OWNER.__file__).read_text(encoding="utf-8")
-        body = source.split('if values["--worker-type"] == "frame" or route_data.get("effective_intensity") == "quick":', 1)[1]
+        body = source.split('if leg_launch or route_data.get("effective_intensity") == "quick":', 1)[1]
         quick, standard = body.split("else:", 1)
         self.assertIn('"--route-file", binding.route_file', quick)
         code = "\n".join(
@@ -1761,7 +1761,8 @@ class FrameModelRoleHandoffTest(unittest.TestCase):
 
     def test_route_node_alone_supplies_frame_identity_without_copied_environment(self):
         path = self._route(nodes=[{"id": "frame", "role": "deep maker", "model_profile": "light",
-                                 "unit": "plan/frame", "dispatch_depth": 1}])
+                                 "unit": "plan/frame", "dispatch_depth": 1, "worker_type": "frame",
+                                 "launch_authority": "depth-0"}])
         with mock.patch.dict(os.environ, {}, clear=True):
             _, values, forwarded, _, _ = OWNER._parse([
                 "--start", "--route-evidence", path, "--route-node", "frame", "--prompt-text", "probe"])
@@ -2535,8 +2536,9 @@ class FrameAssignmentIncidentTest(unittest.TestCase):
         doc = {k: data[k] for k in ("route_id", "capability", "capability_mode", "effective_intensity",
                                     "owner_model_profile", "selection", "dispatch_allocation",
                                     "owner_harness_policy", "dispatch_evidence")}
+        # The recorded legs predate no seal worth keeping: a depth-0 leg carries its launch authority.
         doc.update(route_hash="sha256:" + incident, slug="probe", cwd=str(ROOT),
-                   nodes=data["frame_nodes"])
+                   nodes=[{**node, "launch_authority": "depth-0"} for node in data["frame_nodes"]])
         if pins == "sealed":
             pins = data.get("selection_pins")
         if pins:
