@@ -3750,6 +3750,10 @@ class OwnerProofReuseTest(unittest.TestCase):
                         self._pass()
                         self.assertEqual(len(self.calls), expected, "proved again each pass")
                     self.assertEqual(self.context._unsettled, {})
+                    metrics = self.context.metrics()
+                    self.assertEqual((metrics["owner_passes"], metrics["owner_proofs"],
+                                      metrics["owner_unquiet_uncached"]), (3, 3, 3),
+                                     "each pass proved it and could not hold it")
                     self.process = "quiescent"  # the process ends; no row or file changed
                     self._pass()
                     self.assertEqual(len(self.calls), 4)
@@ -3757,6 +3761,27 @@ class OwnerProofReuseTest(unittest.TestCase):
                                     "the pass that sees it stopped completes it")
                     self._pass()
                     self.assertEqual(len(self.calls), 4, "completed: settled cache from here")
+
+    def test_owner_proof_counters_ride_on_the_settled_proof_file(self):
+        # The runner's per-pass diagnostics: owner passes, proofs, and pending/unknown
+        # verdicts not reused because a process they read was not stopped. They are
+        # written with the settled proofs (no file of their own) and ignored on load.
+        self._fresh_context()
+        self.state[0], self.process, self.lease[0] = PENDING, "live", True
+        self._pass()
+        self._pass()
+        self.process = "quiescent"
+        self._pass()
+        self.assertTrue(self.context.has_settled_owner(self.jobs, "att-owner"))
+        proofs = self.jobs.parent / "settled-owners.json"
+        self.assertTrue(self.context.save_settled_proofs(proofs))
+        saved = json.loads(proofs.read_text())["metrics"]
+        self.assertEqual((saved["owner_passes"], saved["owner_proofs"],
+                          saved["owner_unquiet_uncached"]), (3, 3, 2))
+        self.assertLessEqual(saved["since_ns"], saved["saved_ns"])
+        restarted = obligations.OwnerSettlementReadContext()
+        self.assertEqual(restarted.load_settled_proofs(proofs), 1)
+        self.assertEqual(restarted.metrics()["owner_proofs"], 0, "counters are per runner")
 
     def _redrive(self, materialized):
         record = registry_cache.registry_view(self.jobs).settlement_owner_candidates()[0]

@@ -1113,9 +1113,15 @@ class OwnerSettlementReadContext:
         self._saved_version = None
         self._metrics = {"historical_checks": 0, "settled_cache_hits": 0,
                          "dependency_checks": 0, "dependency_invalidations": 0,
-                         "deferred_owner_checks": 0, "unsettled_retries": 0}
+                         "deferred_owner_checks": 0, "unsettled_retries": 0,
+                         # Diagnostics persisted with the settled proofs: owner proofs
+                         # run, of them the pending/unknown ones not reused because a
+                         # process they read was not stopped, and owner passes.
+                         "owner_proofs": 0, "owner_unquiet_uncached": 0, "owner_passes": 0}
+        self._metrics_since_ns = time.time_ns()
 
     def begin_owner_pass(self):
+        self._metrics["owner_passes"] += 1
         self._pass_keys = {}
 
     def end_owner_pass(self):
@@ -1580,7 +1586,12 @@ class OwnerSettlementReadContext:
                    "generations": [[name, list(generation)] for name, generation in entry[3]],
                    "aliases": list(entry[4])}
                   for key, entry in self._settled.items()]
-        payload = json.dumps({"schema": self._PROOF_SCHEMA, "owners": owners},
+        metrics = {key: self._metrics[key] for key in (
+            "owner_passes", "owner_proofs", "owner_unquiet_uncached",
+            "historical_checks", "unsettled_retries", "settled_cache_hits")}
+        metrics.update(since_ns=self._metrics_since_ns, saved_ns=time.time_ns())
+        payload = json.dumps({"schema": self._PROOF_SCHEMA, "owners": owners,
+                              "metrics": metrics},
                              separators=(",", ":")).encode("utf-8")
         target = os.fspath(path)
         temporary = f"{target}.{os.getpid()}.tmp"
@@ -1878,6 +1889,11 @@ class OwnerSettlementReadContext:
     def record_historical_check(self):
         self._metrics["historical_checks"] += 1
 
+    def record_owner_proof(self, *, unquiet_uncached: bool = False):
+        self._metrics["owner_proofs"] += 1
+        if unquiet_uncached:
+            self._metrics["owner_unquiet_uncached"] += 1
+
     def registered_owner_redrive(self, jobs: Path, status: str, raw: str,
                                  metadata: dict, related_rows, *, lease_held: bool,
                                  materialize, refresh=None):
@@ -1923,8 +1939,10 @@ class OwnerSettlementReadContext:
                 state = "unknown"
             # The same reuse rule as the classify path: a verdict that read a live or
             # unverifiable process, or has no input signature, is proved again next pass.
-            if (state in {"pending", "unknown"}
-                    and _unsettled_verdict_is_reusable(state, paths, unquiet)):
+            reusable = _unsettled_verdict_is_reusable(state, paths, unquiet)
+            self.record_owner_proof(
+                unquiet_uncached=state in {"pending", "unknown"} and unquiet and not reusable)
+            if state in {"pending", "unknown"} and reusable:
                 self.commit_unsettled_owner(
                     jobs, attempt_id, state=state, lease_held=False)
             else:
@@ -2325,6 +2343,8 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_
                     # verdict may only be held while none of them was "not stopped".
                     with quiescence_record_scope() as quiescence:
                         state = owner_completion_state(jobs, fields[1], meta).state
+                    if context is not None and state not in {"pending", "unknown"}:
+                        context.record_owner_proof()
                     if state == "not-applicable":
                         if context is not None:
                             context.note_unsettled_owner(
@@ -2357,8 +2377,11 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_
                         if state in {"pending", "unknown"}:
                             unsettled_paths = _owner_unsettled_dependency_paths(
                                 jobs, fields[1], meta, settlement_paths=dependencies)
-                            if _unsettled_verdict_is_reusable(
-                                    state, unsettled_paths, quiescence.unquiet):
+                            reusable = _unsettled_verdict_is_reusable(
+                                state, unsettled_paths, quiescence.unquiet)
+                            context.record_owner_proof(
+                                unquiet_uncached=quiescence.unquiet and not reusable)
+                            if reusable:
                                 context.note_unsettled_owner(
                                     jobs, state, fields[1], raw, meta, related_rows,
                                     unsettled_paths)
