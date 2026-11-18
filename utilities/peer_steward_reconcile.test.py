@@ -798,6 +798,134 @@ class ReconcileDutyTest(IsolatedCase):
         self.assertNotIn("retention", result)
         self.assertEqual(self._retention_starts(popen), [])
 
+    # -- log retirement follow-up: the runner starts the retention child again when the
+    #    last log pass left `more`, instead of waiting out the six-hour window.
+    def _log_state(self, ago_s, *, raw=None, **last_result):
+        state = {"cursor": "", "last_pass_ns": time.time_ns() - int(ago_s * 1_000_000_000),
+                 "last_result": last_result, "round_left": 10}
+        (self.root / "dispatch-log-retention.json").write_bytes(
+            raw if raw is not None else json.dumps(state).encode())
+
+    def _runner_state(self, ago_s, **extra):
+        peer_obligations.write_runner_duty_state(
+            self.root, "retention",
+            {"last_pass_ns": time.time_ns() - int(ago_s * 1_000_000_000), **extra})
+
+    def _maintenance(self, *, observation=None, popen_error=None, canonical=True):
+        import dispatch_contract
+        group = mock.Mock(return_value=SimpleNamespace(state=observation or "empty"))
+        with mock.patch.object(peer_steward.subprocess, "Popen", side_effect=popen_error) as popen, \
+                patch_split(dispatch_contract, "stable_state_root",
+                            return_value=self.root if canonical else self.root / "elsewhere"), \
+                patch_split(dispatch_contract, "process_group_observation", group):
+            popen.return_value.pid = 4242
+            result = peer_steward._runner_maintenance_pass(self.store)
+        return result, len(self._retention_starts(popen)), group
+
+    def test_a_log_pass_that_left_more_restarts_the_retention_child_after_a_minute(self):
+        self._runner_state(3600)
+        self._log_state(61, more=1, round_left=10)
+        result, starts, _group = self._maintenance()
+        self.assertEqual((starts, result["retention"]), (1, {"started": 4242, "follow_up": 1}))
+        state = peer_obligations.read_runner_duty_state(self.root, "retention")
+        self.assertEqual(state["child_pgid"], 4242)
+        self.assertGreater(state["last_pass_ns"], time.time_ns() - 60 * 1_000_000_000)
+        self._runner_state(3600)
+        self._log_state(59, more=1, round_left=10)
+        self.assertEqual(self._maintenance()[1], 0)
+
+    def test_a_follow_up_waits_for_a_log_pass_after_the_previous_start(self):
+        self._runner_state(30)
+        self._log_state(61, more=1, round_left=10)     # the log pass is older than the start
+        self.assertEqual(self._maintenance()[1], 0)
+        # a start that cannot be recorded or run is not chased every minute
+        self._runner_state(3600)
+        self._log_state(61, more=1, round_left=10)
+        self.assertEqual(self._maintenance(popen_error=OSError("no fork"))[1], 1)
+        self.assertEqual(self._maintenance()[1], 0)
+
+    def test_a_follow_up_waits_while_the_previous_process_group_is_not_known_empty(self):
+        for why, observation, starts in (("populated", "populated", 0), ("unverifiable", "unverifiable", 0),
+                                         ("empty", "empty", 1)):
+            with self.subTest(why=why):
+                self._runner_state(3600, child_pgid=4300)
+                self._log_state(61, more=1, round_left=10)
+                result, count, group = self._maintenance(observation=observation)
+                self.assertEqual(count, starts)
+                group.assert_called_once_with(4300)
+        for why, pgid in (("text", "4300"), ("zero", 0), ("negative", -1), ("bool", True)):
+            with self.subTest(why=why):
+                self._runner_state(3600, child_pgid=pgid)
+                self._log_state(61, more=1, round_left=10)
+                self.assertEqual(self._maintenance()[1], 0)
+        with self.subTest(why="no recorded group"):
+            self._runner_state(3600)
+            self._log_state(61, more=1, round_left=10)
+            result, count, group = self._maintenance()
+            self.assertEqual(count, 1)
+            group.assert_not_called()
+
+    def test_a_populated_previous_group_is_looked_at_again_at_most_once_a_minute(self):
+        peer_steward._RETENTION_GROUP_SEEN.clear()
+        self.addCleanup(peer_steward._RETENTION_GROUP_SEEN.clear)
+        self._runner_state(3600, child_pgid=4300)
+        self._log_state(61, more=1, round_left=10)
+        clock = [1000.0]
+        with mock.patch.object(peer_steward.time, "monotonic", side_effect=lambda: clock[0]):
+            first = self._maintenance(observation="populated")
+            within = self._maintenance(observation="empty")
+            clock[0] += 61
+            after = self._maintenance(observation="populated")
+            self._log_state(61, more=1, round_left=9)      # a newer log pass: look at once
+            newer = self._maintenance(observation="empty")
+        self.assertEqual((first[1], first[2].call_count), (0, 1))
+        self.assertEqual((within[1], within[2].call_count), (0, 0))   # no /proc walk this tick
+        self.assertEqual((after[1], after[2].call_count), (0, 1))
+        self.assertEqual((newer[1], newer[2].call_count), (1, 1))
+
+    def test_an_unknown_log_state_leaves_the_six_hour_window_alone(self):
+        states = {
+            "no file": None,
+            "garbage": {"raw": b"\xff{"},
+            "a list": {"raw": b"[1]"},
+            "pass time as text": {"raw": json.dumps({"last_pass_ns": "1", "cursor": "",
+                                                       "last_result": {"more": 1}}).encode()},
+            "no more": {"round_left": 3},
+            "more zero": {"more": 0},
+            "more as text": {"more": "1"},
+        }
+        for why, kwargs in states.items():
+            with self.subTest(why=why):
+                self._runner_state(3600)
+                (self.root / "dispatch-log-retention.json").unlink(missing_ok=True)
+                if kwargs is not None:
+                    self._log_state(61, **kwargs)
+                self.assertEqual(self._maintenance()[1], 0)
+
+    def test_a_follow_up_from_an_older_release_pass_follows_its_more_and_never_writes_the_log_state(self):
+        self._runner_state(3600)
+        self._log_state(61, more=1)                      # no round_left: an older release wrote it
+        path = self.root / "dispatch-log-retention.json"
+        before = path.read_bytes()
+        self.assertEqual(self._maintenance()[1], 1)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(sorted(p.name for p in self.root.glob("*retention*")),
+                         ["dispatch-log-retention.json"])
+
+    def test_the_six_hour_window_is_unchanged_and_does_not_look_at_the_previous_group(self):
+        self._runner_state(6 * 3600 + 60, child_pgid=4300)
+        result, starts, group = self._maintenance(observation="populated")
+        self.assertEqual((starts, result["retention"]), (1, {"started": 4242}))
+        group.assert_not_called()
+        self.assertEqual(peer_obligations.read_runner_duty_state(self.root, "retention")["child_pgid"], 4242)
+
+    def test_a_fixture_root_never_follows_up(self):
+        self._runner_state(3600)
+        self._log_state(61, more=1, round_left=10)
+        result, starts, _group = self._maintenance(canonical=False)
+        self.assertEqual(starts, 0)
+        self.assertNotIn("retention", result)
+
     def test_incomplete_registry_never_judges_records_and_still_prunes(self):
         records = self._open_records(3)
         result = join.reconcile_pending_delivery(self.jobs, time_budget_s=0)
