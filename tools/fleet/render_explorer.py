@@ -412,7 +412,8 @@ def _explorer_reveal(state, rows):
                    nav_fold=tuple(x for x in state.nav_fold if x not in opened))
 
 
-_EXPLORER_SPIN_KEYS = frozenset(("spin", "g_spin", "g_spin_dim"))
+_EXPLORER_SPIN_KEYS = frozenset(("spin", "g_spin", "g_spin_dim", *(prefix + harness for prefix in ("spin_", "spind_")
+                                                                  for harness in ("claude", "codex", "opencode"))))
 
 
 _ESC = 27

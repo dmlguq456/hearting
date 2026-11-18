@@ -281,7 +281,7 @@ const styles={dim:{dim:true},loc_repo:{foreground:253},lvl_g:{foreground:150},g_
 // Fleet's table cells as the backend sends them: plain, dim, a gray, a hue, a dim hue, a bold dim.
 const table=[[{text:'STATE',dim:true},{text:'  ROUTE  ',foreground:-1},{text:'AGE',foreground:244}],
  [{text:'✕',foreground:217,bold:true},{text:' 휠 입력 시험 '},{text:'54m',foreground:242},{text:' code ',dim:true,bold:true}],
- [{text:'⠋',foreground:230},{text:' 팝업 바탕 ',foreground:253},{text:'claude',foreground:116},{text:' 대기',foreground:150,dim:true}]];
+ [{text:'⠋',foreground:230},{text:' 팝업 바탕 ',foreground:253},{text:'claude',foreground:116},{text:'cc',foreground:173},{text:' 대기',foreground:150,dim:true}]];
 const question=[[{text:'◑ ',role:'accent'},{text:'route 상자를 이대로 둘까요?'}],[{text:'  '},{text:'▸',foreground:116,bold:true},{text:' 1 네',foreground:253,bold:true}],[{text:'    2 아니오',dim:true}],[{text:'↑↓ · Enter 보내기 · Esc 닫기',dim:true}]];
 const messages=pv.messagesBody({model:{styles,requests:[{id:'rq-a',glyph:'◂',who:'[e7]',title:'검토 요청',status:'열림',details:[['전달','전달됨','dim']],body:['본문']}],
  messages:[{way:'←',who:'[e1]',harness:'claude',when:'08:10',text:'CI 통과'}]},columns:60});
@@ -307,7 +307,9 @@ for(const [name,body,kind] of [['question',question,'text'],['table',table,'tabl
   assert.equal(top.find(p=>p.text.includes('QUESTIONS')).foreground,f.popupTitle,label);
   assert.equal(top.find(p=>p.text==='3 ').foreground,face==='light'?88:217,label);
   if(name==='table'){const all=frame.flat();assert.equal(all.find(p=>p.text.includes('휠 입력')).foreground,f.bright);
-   assert.equal(all.find(p=>p.text==='claude').foreground,face==='light'?23:116);const d=all.find(p=>p.text===' 대기');assert(d.dim===false&&d.foreground===(face==='light'?22:150),label);}
+   assert.equal(all.find(p=>p.text==='claude').foreground,face==='light'?23:116);
+   // 11-18: Claude's harness orange 173 has its own deep pair (166) on the light face; the teal keeps its own.
+   assert.equal(all.find(p=>p.text==='cc').foreground,face==='light'?166:173);const d=all.find(p=>p.text===' 대기');assert(d.dim===false&&d.foreground===(face==='light'?22:150),label);}
   if(name==='question'){const all=frame.flat();assert.equal(all.find(p=>p.text.startsWith('route 상자')).foreground,f.bright);assert.equal(all.find(p=>p.text==='◑ ').foreground,f.accent);}
   // The empty cells round the frame keep the terminal's own (no ground).
   for(const row of [r.rows[0],r.rows.at(-1)])if(r.top<r.frame.top)assert(row.every(p=>p.background===undefined),label);

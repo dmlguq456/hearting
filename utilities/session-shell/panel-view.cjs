@@ -76,27 +76,51 @@ const FACES={
     // an L* gap of 15 apart; these are 34 apart (L* 79 and 44.5), the darker still readable.
     waitBlink:[217,95],
     // 11-16 (the person: "usage에서 하네스 이름도 어둡게 원래 테마 컬러를 넣어주고"): the harness names of the USAGE rows, each in
-    // its Fleet hue (`hb_*`: claude cyan, codex magenta, opencode blue) one step down (L* 53.5, 52.3, 59.3; the lit hues
-    // 116, 176, 147 are L* 81, 67, 74), so a name reads as a label and never louder than its numbers.
-    harnessName:{claude:66,codex:133,opencode:104}},
+    // its Fleet hue (`hb_*`: claude orange 173, codex lavender 147, opencode sky 153) one step down (L* 48.6, 59.3, 70.0; the lit hues
+    // are L* 63.8, 74.2, 84.4), so a name reads as a label and never louder than its numbers.
+    // 11-18 (the harness colors follow the products' own themes): Claude's name was 66, now 130; Codex's was 133, now 104
+    // (the step under 147); OpenCode's was 104, now 110 (the step under 153). Each pair is 13 or more apart (CIEDE2000).
+    harnessName:{claude:130,codex:104,opencode:110},
+    // 11-18 (the person: "패널 스캐너 동작도"): while a session works, the moving frame and the head rule's light take the
+    // session's harness color instead of the vanilla ramp: the same steps (the arc's four, the head rule's five, the wave's two
+    // ends), each a step of that harness's hue (`orbit` brightest first: a lit tint of the harness color, the color, two steps
+    // toward the still frame's gray; `scan` the head rule's, dimmest first, from the still frame's gray to the lit tint, each step 8 or more L* above the one before and the last as bright as the body text; `waveRGB` the same two
+    // ends in 24-bit color: the still frame's gray and the lit tint's own RGB). A waiting frame's reds, the unknown harness's
+    // vanilla and mono are as before.
+    ramp:{claude:{orbit:[216,173,137,102],scan:[243,137,209,216,223],waveRGB:[[128,128,128],[255,175,135]]},
+      codex:{orbit:[189,147,104,245],scan:[243,104,177,183,189],waveRGB:[[128,128,128],[215,215,255]]},
+      opencode:{orbit:[195,153,110,246],scan:[243,103,74,117,195],waveRGB:[[128,128,128],[215,255,255]]}}},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
     working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
     orbit:[22,65,108,151],waveRGB:[[118,118,118],[0,95,0]],scan:[244,242,240,238,236],
     breath:[88,124,131],breathRGB:[[135,0,0],[175,95,95]],
     veil:250,bright:232,popup:254,popupLine:137,popupTitle:232,popupFloor:241,chosen:223,waitBlink:[88,167],
     rgb:{popup:'#f1e7dc',popupLine:'#9c8571',popupTitle:'#342a23',chosen:'#fecca4'},
-    // (The light face: the deep hues 23, 60, 25 (L* 36, 42, 40) one step lighter: L* 50.8, 45.7, 56.7.)
-    harnessName:{claude:30,codex:96,opencode:68}},
+    // (The light face: the deep hues 166, 25, 31 (L* 54.7, 40, 52.3). Codex's name is the step lighter, 68 (L* 56.7); Claude's deep orange
+    // and OpenCode's deep sky are already the lightest that read on white (166, 3.3; 31, 4.1), so their names are the head's own hue.)
+    harnessName:{claude:166,codex:68,opencode:31},
+    // 11-18 (PEERS: this window's number is its deep hue bold, every other window's one step back, "나머지는 컬러도 조금 어둡게"):
+    // on white the step back is the lighter one. Claude 173 (2.8 on white, 12.4 from 166 by CIEDE2000), Codex 68 (its name's own,
+    // 16.8 from 25), OpenCode 66 (4.0 on white, 14.3 from 31, 23.5 from Codex's 68). Only PEERS reads it; the USAGE names keep `harnessName`.
+    peerOther:{claude:173,codex:68,opencode:66},
+    // (The light face's ramps, the deep pairs 166, 25, 31 first, toward the light ground: the harness's own steps; `scan` dimmest first,
+    // from the still frame's gray up to the deep color.)
+    ramp:{claude:{orbit:[166,173,216,223],scan:[243,102,137,173,166],waveRGB:[[118,118,118],[215,95,0]]},
+      codex:{orbit:[25,68,146,189],scan:[243,60,61,26,25],waveRGB:[[118,118,118],[0,95,175]]},
+      opencode:{orbit:[31,74,110,152],scan:[243,102,67,32,31],waveRGB:[[118,118,118],[0,135,175]]}}},
 };
 // Fleet's 256-color hues on each face. The light face takes the reviewed deep
 // counterparts (running 22, attention 58, failure 88, project 23, model 60)
 // instead of the earlier strong substitutes; the dark face changes only the
 // failure red, and only on a shade.
+// 11-18 (OpenCode's sky 153 -> 31, #0087af, 4.1 on white; Codex's 147 shares Sonnet's, so its deep pair is 25: the person chose the same color.)
+// 11-18 (Claude's harness orange 173 -> 166, #d75f00, 3.3 on white: the deep orange nearest its hue (56°; 130 is 64° and is the
+// direct zone's and lab's own deep hue here), 9.4 from that 130 by CIEDE2000: see PR text).
 // 11-18: the three zone hues (orange, violet, aqua) and the five field hues (code blue, lab amber, design rose, docs sand,
 // research sky) take their dark counterparts on the light face: the same hue at a contrast of 4.5 or more on white
 // (130 4.7, 55 10, 29 4.5; 26 5.8, 130 4.7, 162 5.0, 94 5.7, 24 7.0), set apart from each other and the state hues
 // (Lab distance 20 or more; lab 130 and docs 94 are the closest pair, as amber and sand are in the dark set).
-const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,176:60,147:25,230:22,219:132,137:94,
+const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,173:166,176:60,147:25,153:31,230:22,219:132,137:94,
   208:130,99:55,43:29,69:26,214:130,205:162,180:94,38:24}};
 const LINES=new Set(['frame','route','messages']);
 function face(theme,background){return theme==='light'?'light':background==='light'||background==='dark'?background:'';}
@@ -105,11 +129,13 @@ function face(theme,background){return theme==='light'?'light':background==='lig
 // the head rule's light step (1 the dimmest .. 5); a waiting step from its face's 256-color reds, or in
 // 24-bit color (when the terminal says it takes it) a point on the cosine between its face's two ends.
 const mix=(a,b,f)=>'#'+a.map((c,i)=>Math.round(c+(b[i]-c)*f).toString(16).padStart(2,'0')).join('');
-function orbitTone(part,F,colors){
-  if(part.tone==='arc')return F.orbit[Math.max(0,Math.min(F.orbit.length-1,part.level))];
-  if(part.tone==='scan')return F.scan[Math.max(0,Math.min(F.scan.length-1,part.level-1))];
-  if(part.tone==='wave'){const [lo,hi]=F.waveRGB,q=Math.max(0,Math.min(1,part.level));
-    return colors>256?mix(lo,hi,WAVE_FLOOR+(1-WAVE_FLOOR)*q):F.orbit[Math.round((1-q)*(F.orbit.length-1))];}
+function orbitTone(part,F,colors,harness=''){
+  // A working session's tones are its harness's (`F.ramp`); a waiting one's reds (`breath`) and an unknown harness's are the face's own.
+  const R=part.tone!=='breath'&&F.ramp&&F.ramp[harness]||F;
+  if(part.tone==='arc')return R.orbit[Math.max(0,Math.min(R.orbit.length-1,part.level))];
+  if(part.tone==='scan')return R.scan[Math.max(0,Math.min(R.scan.length-1,part.level-1))];
+  if(part.tone==='wave'){const [lo,hi]=R.waveRGB,q=Math.max(0,Math.min(1,part.level));
+    return colors>256?mix(lo,hi,WAVE_FLOOR+(1-WAVE_FLOOR)*q):R.orbit[Math.round((1-q)*(R.orbit.length-1))];}
   const steps=part.steps,k=part.step;
   if(colors>256&&steps>1){
     const f=(Math.cos(Math.PI*k/(steps-1))+1)/2,[hi,lo]=F.breathRGB;
@@ -117,7 +143,7 @@ function orbitTone(part,F,colors){
   }
   return F.breath[Math.max(0,Math.min(F.breath.length-1,k))];
 }
-function appearance(rows,configuration={},{colors=256,noColor=false,background=''}={}){
+function appearance(rows,configuration={},{colors=256,noColor=false,background='',harness=''}={}){
   const cfg={...defaults,...configuration},theme=['terminal','light','mono'].includes(cfg.theme)?cfg.theme:'terminal';
   if(noColor)return rows;
   const known=face(theme,background),full=colors>=256;
@@ -164,8 +190,8 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     else if(role==='steward'&&theme==='mono')dim=false;
     // Spec rule 47: the moving frame's cells take their step's tone on their face (an unknown face
     // the dark face's), at full strength; mono never moves (no tone).
-    else if(role==='harness-name'&&theme!=='mono'){foreground=F.harnessName[part.harness]??foreground;dim=false;}
-    else if(role==='orbit'&&theme!=='mono'&&part.tone){foreground=orbitTone(part,FACES[known||'dark'],colors);dim=false;}
+    else if(role==='harness-name'&&theme!=='mono'){foreground=((part.peer&&F.peerOther)||F.harnessName)[part.harness]??foreground;dim=false;}
+    else if(role==='orbit'&&theme!=='mono'&&part.tone){foreground=orbitTone(part,FACES[known||'dark'],colors,harness);dim=false;}
     // Spec rule 22: on a known face each line takes its role's color with or
     // without a shade (frame 244/243, route 245/243, messages 242/245); an
     // unknown face keeps the terminal's own, mono keeps no hue.
@@ -406,7 +432,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const joinAll=groups=>groups.filter(g=>g.length).flatMap((g,i)=>i?[...bar,...g]:g);
     // The session.
     const tag=/^\[[^\]?]{1,16}\]$/.test(String(model.tag||''))?clean(String(model.tag).slice(1,-1)):'';
-    const glyph=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
+    const glyph=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[0]==='spin'&&['claude','codex','opencode'].includes(harness)?'hb_'+harness:own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
     const number=tag?[text('[','dim'),model.steward===true?{...text(tag,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})}:{...text(tag,own?own[1]:'dim'),role:'session'},text(']','dim')]:[];
     const lead=[...glyph,...(glyph.length&&number.length?[text(' ')]:[]),...number];
     const project=Array.isArray(model.repo_side)?P(model.repo_side):P(model.repo).filter(p=>!/^\[[^\]]*\] ?$/.test(String(p.text)));
@@ -502,14 +528,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(const sp of spans)if(sp.left<limit())hits.push({row:0,left:sp.left,right:Math.min(sp.right,limit()-1),action:sp.action});
     hits.push({row:0,left:0,right:width-1,action:'unfold'});
     const shown=new Set(body);
-    const painted=appearance(out,{...cfg,shade:'none'},{colors:model.colors??256,noColor:model.no_color===true,background});
+    const painted=appearance(out,{...cfg,shade:'none'},{colors:model.colors??256,noColor:model.no_color===true,background,harness});
     const spins=out.map((r,i)=>r.some(part=>part.spin)?i:-1).filter(i=>i>=0);
     const groupsPainted=['head',...(groups.some(g=>g.parts.some(p=>p.text==='CTX '))?['context']:[]),...(body.some(part=>quotaParts.has(part))?['quota']:[]),
       ...(wait.length&&body.some(p=>wait.includes(p))?['wait']:[]),...(groups.some(g=>g.route)?['route']:[])];
     const color=own&&own[1]!=='g_work_off'?own[1]:'dim';
     // The wait's cells, swapped by the host between the two reds on Fleet's beat (only those cells).
     const cells=blinkCells(out,measure,clean,0,1);
-    const look={...cfg,shade:'none'},paint={colors:model.colors??256,noColor:model.no_color===true,background};
+    const look={...cfg,shade:'none'},paint={colors:model.colors??256,noColor:model.no_color===true,background,harness};
     const motion=cells.length?{cells,at:tick=>appearance([cells.map(c=>({...c.blink,text:c.ch,blinkTone:blinkTone(tick)}))],look,paint)[0],
       next:tick=>blinkNext(tick)}:null;
     return {rows:painted,hits,color,groups:[...new Set(groupsPainted)],animated:spins.length>0||!!motion,spins,motion,folded:true};
@@ -581,11 +607,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   // 11-17 (route zones, the person: "그래도 컬러는 전부 달라야하지 않을까"): the `●` and the spinner of a route of the `direct` zone
   // wear that zone's color (a lit beat in it, a dark beat dimmed); a `dispatch` route's are the working green they were, a
   // request's arrow the request color (`requestForms`). A failure's, a result's and a wait's mark keep the state's own.
+  // 11-18 (the harness spinner, below): a spinner on a line that names its harness (`routeGlyph` with `h`) turns in that harness's
+  // color before this, so a `direct` zone's working owner line spins in its harness's color; the zone's color stays on the `●`, on a
+  // spinner whose line names no harness, and on the zone's other marks.
   const zonePaint=(r,part)=>{
     const look=r&&r.zone==='direct'?styles.zone_direct:null;
     return look&&(part.spin||part.text==='●'||/^[\u2800-\u28ff]$/.test(String(part.text)))?{...part,...look,dim:part.dim===true||look.dim===true}:part;
   };
-  const routeGlyph=r=>{const g=r.paint?.glyph||text('·');if(live(r))return zonePaint(r,{...g,...spinGlyph,role:'state:working'});return zonePaint(r,{...g,role:'state:'+(r.kind==='done'&&r.outcome_key==='g_dead'?'dead':r.kind||'idle')});};
+  // 11-18 (the person: "스피너 컬러도 하네스에 맞추고"): the spinner of a line that names its harness (`h`, that line's own harness part)
+  // turns in that harness's color, on every face (a deep pair on the light face, as the harness name's own); a mark that is not the
+  // spinner (`●`, `✕`, `✓`), a route's first line and a line with no known harness keep the state's own color.
+  const harnessSpin=(g,h)=>h&&Number.isInteger(h.foreground)?{...g,foreground:h.foreground,bold:false,dim:false}:g;
+  const routeGlyph=(r,h)=>{const g=r.paint?.glyph||text('·');if(live(r))return h&&Number.isInteger(h.foreground)?harnessSpin({...g,...spinGlyph},h):zonePaint(r,{...g,...spinGlyph,role:'state:working'});return zonePaint(r,{...g,role:'state:'+(r.kind==='done'&&r.outcome_key==='g_dead'?'dead':r.kind||'idle')});};
   // A finished route's row leads its title with the result word (`FAIL · title`), so a cut title keeps it.
   const titleOf=(r,fallback='·')=>[...(r.kind==='done'&&r.outcome?[text(r.outcome,r.outcome_key||'lvl_g'),text(' · ','dim')]:[]),...line(r.title||fallback,'loc_repo')];
   const join=(groups,sep=' · ')=>groups.filter(g=>g&&g.length).flatMap((g,i)=>i?[text(sep),...g]:g);
@@ -701,7 +734,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const peers=model.peers&&typeof model.peers==='object'&&Array.isArray(model.peers.groups)?model.peers:null;
       const groups=(peers?peers.groups:[]).filter(g=>g&&g.steward&&Array.isArray(g.members)&&g.members.length);
       if(!groups.length)return [];
-      const number=e=>({...text('['+clean(e.tag)+']',e.key||'dim'),...(e.me===true?{bold:true}:{}),role:'peer'});
+      // 11-18 (the person: "PEERS에서 볼드 여부만 해놓으니까 나의 세션이 뭔지 확 안오네, 나머지는 컬러도 조금 어둡게"): this window's number is its harness
+      // color, bold (the brightest); every other session's is its harness's one step back (the USAGE names' own `FACES.*.harnessName`;
+      // on the light face `FACES.light.peerOther`, the lighter step, so it never equals this window's deep hue), drawn as that
+      // face's fixed color, never the terminal's dim, plain. No color: weight alone tells them apart, as before.
+      const number=e=>{const h=/^hb_(claude|codex|opencode)$/.exec(e.key||'');
+        return {...text('['+clean(e.tag)+']',e.key||'dim'),...(e.me===true?{bold:true,role:'peer'}:h?{role:'harness-name',harness:h[1],peer:true}:{role:'peer'})};};
       const flag={...text('⚑','tag_steward'),role:'steward',...(model.no_color===true||cfg.theme==='mono'?{bold:true,dim:false}:{})};
       const build=keep=>{
         const out=[];let rest=keep;
@@ -1051,7 +1089,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     function folded(r){
       // 11-18: beside the native area the one-row form is the leader's; under it the row reads the owner, whose NOW stands under it.
-      const p=side?r.paint||{}:leadPaint(r),lead=[routeGlyph(r),text(' ')];
+      const p=side?r.paint||{}:leadPaint(r),lead=[routeGlyph(r,p.harness),text(' ')];
       if(!side){
         const ow=columnWidth(owner),gw=columnWidth(x=>leadPaint(x).gauge5||[]);
         const plan=bottomPlan||(bottomPlan=planBottom(ow,gw));
@@ -1163,7 +1201,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const spaced=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
     // The owner's own mark: it spins while it does the work itself, stands as a dim `●` while its workers run, and keeps the
     // route's state mark when nothing runs.
-    const ownerGlyph=(r,supervising)=>live(r)?(supervising?text('●','dim'):{...routeGlyph(r)}):routeGlyph(r);
+    const ownerGlyph=(r,supervising)=>live(r)?(supervising?text('●','dim'):{...routeGlyph(r,leadPaint(r).harness)}):routeGlyph(r);
     const ownerLead=(r,supervising)=>[text('  '),ownerGlyph(r,supervising),text(' '),...rolePart(r)];
     // 11-17 (the person: "라우트 내부의 CTX는 하네스, 모델 옆에 붙이고 게이지는 없애자 ... 대신 NOW를 아래줄에"): a session's
     // first line is its mark, role, harness, model, effort and, beside them, `CTX 40% · 42m` with no gauge. Short of cells the
@@ -1252,7 +1290,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // cells the who loses its effort, then its harness; short of rows (rule 48 (c)) the worker takes the owner's one-row form.
     // In a box (`boxed`, below) the mark leads the row and the CTX and NOW rows stand two cells in.
     function workerBlock(w,base,boxed=false){
-      const p=w.paint||{},role=workerRole(w),glyph=routeGlyph({paint:p,kind:w.kind}),E=w.elapsed?[text(w.elapsed)]:[];
+      const p=w.paint||{},role=workerRole(w),glyph=routeGlyph({paint:p,kind:w.kind},p.harness),E=w.elapsed?[text(w.elapsed)]:[];
       const gap=boxed?2:base+4;
       const lead=boxed?[glyph,text(' '),...roleCell(role)]:[text(' '.repeat(base)),text('↳ ','dim'),glyph,text(' '),...roleCell(role)];
       // A model name longer than the line itself is cut with `…` rather than left out.
@@ -1672,43 +1710,62 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return {row:cut([{...mark,role:'harness-name',harness:u.harness}],room),values:false};
     };
     const usageLines=()=>keepQuota&&usageOn?usageData.filter((_u,i)=>keepLine[i]):[];
-    // 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): RESOURCES stands
-    // right above USAGE: one row for each host (its name, `CPU 34%  MEM 61%`), under it one row for each GPU a process runs on
-    // (`GPU0 ━━━━━━━━─ 92%  21/24G  [3b]`: the gauge, the use, the memory, and the number of the session that holds it, left out where
-    // the backend does not know it) and one for the count of those nothing runs on (`idle GPU 6`). The values are the sample the shared
-    // producer already took. Short of rows it gives way before everything else: the GPU rows (from the last), the host rows (from the
-    // last; the name row goes with the last of them), so USAGE and the sections above it stand as they did without it.
+    // 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"; then, on v4.54.0,
+    // "RESOURCE는 세로로 차지하는 공간이 너무 많은데, 이걸 게이지는 없애자 그리고 가로로 나열이 가능하면 가로로 나열을 좀 하자"): RESOURCES stands
+    // right above USAGE. One row for each host: its name, `CPU 34%  MEM 61%` and, at the row's end, the count of the GPUs nothing runs
+    // on (`idle GPU 6`). Under it the GPUs a process runs on, side by side (`GPU0 93% 21/24G [3b]  GPU1 40% 10/48G`), onto the next
+    // row where they do not fit; one GPU's group is never split between rows. No gauge: the use is its number, in the level's color.
+    // The values are the sample the shared producer already took. Short of cells on a host row the values go in this order: MEM,
+    // then CPU, then the name is cut with `…` (12 cells at least), the idle count last (11-18 review: the idle count was first to go); short of cells for one GPU's group the memory goes first, then the use,
+    // and the session's number stays (who holds the GPU is what the section is for). Short of rows it gives way before everything else:
+    // the GPU rows (from the last), the host rows (from the last; the name row goes with the last of them), so USAGE and the sections
+    // above it stand as they did without it.
     const resourceData=Array.isArray(model.resources)?model.resources.filter(h=>h&&typeof h==='object'&&Array.isArray(h.host)).slice(0,8):[];
     let resHosts=resourceData.length,resGpus=Infinity;
     const resourceHostRow=h=>{
-      const stats=painted(h.stats).filter(x=>Array.isArray(x)&&x.length);
+      const idle=h.idle>0?[[text(t('resource_idle_gpus','idle GPU')+' '+h.idle,'dim')]]:[];
+      const stats=painted(h.stats).filter(x=>Array.isArray(x)&&x.length).map(painted);
+      const name=painted(h.host),least=Math.min(size(name),12);
+      const tailOf=vals=>vals.flatMap(x=>[text('  '),...x]);
+      // Giving way: MEM, then CPU (the last stat first), then the name is cut (12 cells at least), the idle count last.
       for(let n=stats.length;n>=0;n--){
-        const row=[...painted(h.host),...stats.slice(0,n).flatMap(x=>[text('  '),...painted(x)])];
-        if(size(row)<=inner)return row;
+        const tail=tailOf([...stats.slice(0,n),...idle]);
+        if(size(name)<=inner-size(tail))return [...name,...tail];
       }
-      return cut(painted(h.host),inner);
+      if(idle.length){const tail=tailOf(idle),room=inner-size(tail);if(room>=least)return [...cut(name,room),...tail];}
+      return cut(name,inner);
     };
-    const resourceGpuRow=g=>{
-      const tries=[[g.gauge9,g.mem,g.users],[g.gauge5,g.mem,g.users],[g.gauge5,g.users],[g.pct,g.users],[g.pct]];
-      if(!g.gauge9&&!g.pct)tries.splice(0,tries.length,[g.mem,g.users],[g.users],[]);
-      for(const gap of ['  ',' '])for(const parts of tries){
-        const row=[text('  '),...painted(g.label),...parts.filter(x=>Array.isArray(x)&&x.length).flatMap(x=>[text(gap===' '?' ':gap),...painted(x)])];
-        if(size(row)<=inner)return row;
+    // One GPU's group at a form (0 whole; 1 without the memory; 2 without the use too; 3 the label alone).
+    const resourceGpuGroup=(g,form)=>{
+      const sets=[[g.pct,g.mem,g.users],[g.pct,g.users],[g.users],[]];
+      return [...painted(g.label),...sets[form].filter(x=>Array.isArray(x)&&x.length).flatMap(x=>[text(' '),...painted(x)])];
+    };
+    // The host's GPU rows: groups side by side, two cells in, two cells between; every group in the first form that lets the widest stand alone.
+    const resourceGpuRows=h=>{
+      const gpus=painted(h.gpus);
+      if(!gpus.length)return [];
+      let form=0;
+      while(form<3&&gpus.some(g=>2+size(resourceGpuGroup(g,form))>inner))form++;
+      const rows=[];let row=[];
+      for(const g of gpus){
+        const group=resourceGpuGroup(g,form);
+        if(row.length&&size(row)+2+size(group)>inner){rows.push(row);row=[];}
+        row=row.length?[...row,text('  '),...group]:[text('  '),...group];
       }
-      return cut([text('  '),...painted(g.label)],inner);
+      rows.push(row);
+      return rows.map(r=>cut(r,inner));
     };
     const resourceLines=()=>{
       const out=[];let room=resGpus;
       resourceData.slice(0,resHosts).forEach(h=>{
         out.push(resourceHostRow(h));
-        const lines=[...painted(h.gpus).map(resourceGpuRow),...(h.idle>0?[[text('  '),text(t('resource_idle_gpus','idle GPU')+' '+h.idle,'dim')]]:[])];
-        for(const line of lines){if(room<=0)break;out.push(cut(line,inner));room--;}
+        for(const line of resourceGpuRows(h)){if(room<=0)break;out.push(line);room--;}
       });
       return out;
     };
     const resourceHead=()=>sectionHead([],'RESOURCES',[],[[]],false);
     const resourceCount=()=>side&&resHosts>0?1+resourceLines().length:0;
-    const resourceGpuTotal=()=>resourceData.reduce((n,h)=>n+painted(h.gpus).length+(h.idle>0?1:0),0);
+    const resourceGpuTotal=()=>resourceData.reduce((n,h)=>n+resourceGpuRows(h).length,0);
     // The last row beside the buttons: that harness's row when its values fit there.
     const usageShared=u=>u&&usageFit(u,quotaRoom).values;
     const footBase=()=>{
@@ -1886,7 +1943,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const stewardTag=v=>({...text(v,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})});
   const tag=/^\[[^\]?]{1,16}\]$/.test(String(model.tag||''))?String(model.tag).slice(1,-1):'';
   const harnessName=['claude','codex','opencode'].includes(harness)?harness:'';
-  const glyphPart=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
+  const glyphPart=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[0]==='spin'&&harnessName?'hb_'+harnessName:own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
   const tagPart=tag?[text('[','dim'),steward?stewardTag(tag):{...text(tag,own?own[1]:'dim'),role:'session'},text(']','dim')]:[];
   const harnessPart=harnessName?[text(harnessName,'hb_'+harnessName)]:[];
   const flagPart=steward?[stewardPart('⚑')]:[];
@@ -1931,7 +1988,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   for(let i=0;i<count-2;i++)rows.push(frameRow(content[i]||[],i+1));
   rows.push(moving?joined([border(H-1,0,'└'),border(H-1,1,'─'),...foot.parts,...borderRun(H-1,2+foot.used,W-2),border(H-1,W-1,'┘')]):
     [frameText('└─'),...foot.parts,frameText('─'.repeat(Math.max(0,width-3-foot.used))+'┘')]);
-  const painted=appearance(rows,cfg,{colors:borderColors,noColor:model.no_color===true,background});
+  const painted=appearance(rows,cfg,{colors:borderColors,noColor:model.no_color===true,background,harness});
   // The rows whose spinner cells turn between paints (the host swaps only those cells).
   const spins=rows.map((row,i)=>row.some(part=>part.spin)?i:-1).filter(i=>i>=0&&i<count);
   // Only a blinking part needs the one-second repaint (a spinner and the frame turn on their own).
@@ -1956,7 +2013,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   if(waitBlinks)cells.push(...blinkCells(rows,measure,clean,1,count-1));
   const blinked=cells.length>framed;
   const motion=cells.length?{cells,
-    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(tick)}:c.rule!==undefined?ruleLook(c.rule,tick):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background})[0],
+    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(tick)}:c.rule!==undefined?ruleLook(c.rule,tick):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background,harness})[0],
     next:tick=>Math.min(blinked?blinkNext(tick):Infinity,framed?frameNext(tick):Infinity)}:null;
   function frameNext(tick){const local=borderTick(tick),shift=Math.trunc(tick)-local;
       if(ruleMoving){const r=ruleTick(tick);return Math.trunc(tick)+scanNext(r,inner)-r;}
@@ -2000,11 +2057,13 @@ function keyRows(pieces,inner,{rows=Infinity,cellWidth}={}){
 // native that paints its own background, or a wide character on the edge, ends there). The top
 // line carries the title and `✕`, the bottom line the sections (the current one bright), and the
 // row above it the keys (the content's last row). Width: text wraps at 76 cells; narrower than 80
-// cells the window less 4; narrower than 28 the whole window. A table popup stands up to 116 cells, the routes popup up to 148. Height: the content's, at most the
+// cells the window less 4; narrower than 28 the whole window. A table popup stands up to 116 cells, the routes popup up to 196, the question popup up to 132. Height: the content's, at most the
 // rows above the strip less 2 (the content then pages inside). Display only: the keys go to the
 // popup's owner (the host) while it stands; nothing here reads input.
-// 11-18: the routes popup alone stands up to 148 cells (`route`), the other table popups at most 116.
-const POPUP_TEXT=76,POPUP_TABLE=116,POPUP_ROUTE=148;
+// 11-18: the routes popup alone stands up to 196 cells (`route`: 148, then "더 늘려"; the read for it takes `columns` up to 200), the question
+// popup up to 132 (`question`: "가로 길이를 좀 늘려줘라. 가독성이 안좋다"; 104 was too little for the person), the other table popups at most 116.
+// `text` (76) is no popup's now; a popup asked for with no kind keeps it.
+const POPUP_TEXT=76,POPUP_TABLE=116,POPUP_ROUTE=196,POPUP_QUESTION=132;
 // A foreground's gray level (0 black .. 255 white), or null for a hue or the terminal's own color.
 function grayLevel(fg){
   if(Number.isInteger(fg)){
@@ -2039,7 +2098,7 @@ function popupLook(part,F,light,colors=256){
 function popupWidth(cols,kind='text'){
   if(cols<28)return Math.max(4,cols);
   if(cols<80)return cols-4;
-  return kind==='route'?Math.min(POPUP_ROUTE,cols-4):kind==='table'?Math.min(POPUP_TABLE,cols-4):POPUP_TEXT;
+  return kind==='route'?Math.min(POPUP_ROUTE,cols-4):kind==='question'?Math.min(POPUP_QUESTION,cols-4):kind==='table'?Math.min(POPUP_TABLE,cols-4):POPUP_TEXT;
 }
 // The rows the content may take inside the frame. A low window gives up the empty rows round the
 // frame first (under 8 rows), then its bottom line (3 rows or fewer), so the content keeps rows.

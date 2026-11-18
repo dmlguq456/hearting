@@ -7,6 +7,7 @@ from ..config import ui_text
 from .output import cell_width
 from .tables import _clip, repo_rule_label
 from .style import steward_flag_key
+from ..palette import harness_spin
 
 STAGE_HUES = ("l", "c", "g", "y", "m")          # blue · cyan · green · yellow · magenta
 LANE_HEAD_LEFT, LANE_HEAD_RIGHT = "<", ">"
@@ -72,7 +73,7 @@ def _draw_card(grid, session, tag, bx, by, box_w, right, border, extra, owners):
     glyph, glyph_key = STATE_MARKS.get(str(session.get("state") or ""), ("·", "dim"))
     steward = bool(session.get("steward"))
     xx = put(bx + 2, by, " ", "branch_s")
-    xx = put(xx, by, glyph, glyph_key)
+    xx = put(xx, by, glyph, harness_spin(glyph_key, harness))      # 11-18: a working spinner in its harness's color
     xx = put(xx, by, " ", "branch_s")
     xx = put(xx, by, "[", "tag_b")
     xx = put(xx, by, tag, "steward" if steward else "text")
