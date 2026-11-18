@@ -1111,6 +1111,35 @@ for(let width=56;width<=140;width+=2)for(const s of draw(four,width,20,{side:fal
         self.node(script, "panel-view.cjs")
 
 
+    def test_a_unit_route_leads_with_its_unit_and_its_worker_line_names_no_role(self):
+        # 11-18 (the person: "첫 줄에 unit·code-review(quick), 작업자 줄에서 worker를 뺌"): a unit route (one worker called with no
+        # owner) reads `unit·code-review(quick)`; short of cells the intensity goes, then the unit's name. The worker line has no
+        # role word; a route with an owner keeps `owner`. The bottom layout's kind cell carries the unit too.
+        script = self.FIXTURE + r'''
+const unit={...oneShot,id:'u',title:'PR 독립 검토',kind_word:'unit',unit_word:'code-review',intensity:'quick',role:'worker',elapsed:'17m',
+ stages:[],paint:{...oneShot.paint,model_text:P('Opus 5.5'),ctx:P('14%'),gauge_row:[P('━───── 14%')]}};
+const own={...oneShot,kind_word:'code',intensity:'quick',role:'owner',owner_paint:oneShot.paint};
+const first=(rows,re)=>rows.find(s=>s.startsWith('│ │ ')&&re.test(s));
+const w44=draw([unit,own],44,60);
+assert(first(w44,/● unit·code-review\(quick\) +17m │ │$/),w44.join('\n'));
+const w32=draw([unit],32,60);
+assert(first(w32,/● unit·code-review +17m │ │$/),w32.join('\n'));       // the intensity went first
+const w26=draw([unit],26,60);
+assert(first(w26,/● unit +17m │ │$/),w26.join('\n'));                    // then the unit's name
+// The worker line: harness, model, effort, with no `worker` word; the owner route's own line keeps `owner`.
+const doerRow=draw([unit],44,60).find(s=>/⠋ claude Opus 5\.5/.test(s));
+assert(doerRow&&!/worker/.test(doerRow),w44.join('\n'));
+assert(w44.some(s=>/⠋ owner claude/.test(s)),w44.join('\n'));
+// An ended route's first line names the unit too; its `success · title` line is the one it had.
+const ended=draw([{...unit,kind:'done',state:'done',outcome:'success'}],44,60);
+assert(first(ended,/unit·code-review\(quick\)/)&&ended.some(s=>/success · PR 독립 검토/.test(s)),ended.join('\n'));
+// The bottom layout's kind cell.
+const bottom=draw([unit],140,20,{side:false});
+assert(bottom.some(s=>s.includes('│ unit·code-review(quick)')),bottom.join('\n'));
+'''
+        self.node(script, "panel-view.cjs")
+
+
     def test_owners_and_their_workers_fold_together_and_every_route_takes_the_same_step(self):
         # Spec E9 rule 48 (c) (it replaces the #1579 review follow-up (가)), 11-18: short of rows the steps of the route box are, in
         # order: the worker box's closing border, every session's second NOW row, then in one step every session's CTX row folds into

@@ -992,6 +992,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     const kindText=(word,field='')=>field?{...text(clean(word),'kind_'+field),bold:true,dim:false}:{text:clean(word),foreground:null,bold:true,dim:false};
     const bracket=(word,field='')=>field?{...text('('+word+')','kind'+(WEIGHT[String(word).trim().toLowerCase()]||'s')+'_'+field),role:'kind'}:text('('+word+')','dim');
+    const kindTail=(str,field,word)=>field?{...text(str,'kind'+(WEIGHT[String(word).trim().toLowerCase()]||'s')+'_'+field),role:'kind'}:text(str,'dim');
     const framed=r=>String(r.shape||'')==='framed';
     // A direct route's word stands for its intensity when the record names none (the backend sends it in the screen language).
     const intensityRaw=r=>{
@@ -1007,8 +1008,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return r.zone==='direct'&&(/^direct$/i.test(word)||word===clean(r.shape||'').trim())?'':word;
     };
     const kindHead=r=>{const word=clean(r.kind_word||'').trim(),inten=intensityOf(r);
-      const field=kindField(r,word);
-      return word?[kindText(word,field),...(inten?[bracket(inten,field)]:[])]:[];};
+      const field=kindField(r,word),unit=word==='unit'?clean(r.unit_word||'').trim():'';
+      return word?[kindText(word,field),...(unit?[kindTail('·'+unit,field,inten)]:[]),...(inten?[bracket(inten,field)]:[])]:[];};
     // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(standard) · staged 3/7: execute`, a route with
     // no stage line reads `lab(quick)`; short of cells `3/7: execute`.
     function kindCell(r){
@@ -1146,7 +1147,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const treeOf=r=>side&&Array.isArray(r.workers_live);
     const leadPaint=r=>r.owner_paint&&typeof r.owner_paint==='object'?r.owner_paint:(r.paint||{});
     // A frame route has no owner yet: its two legs hang straight under the route (11-17, route row 5).
-    const leadRole=r=>framed(r)&&treeOf(r)?'':r.owner_paint&&typeof r.owner_paint==='object'?'owner':r.role;
+    // A unit route (one worker called with no owner) names no role: `worker` means nothing without an owner.
+    const unitRoute=r=>clean(r.kind_word||'').trim()==='unit';
+    const leadRole=r=>unitRoute(r)?'':framed(r)&&treeOf(r)?'':r.owner_paint&&typeof r.owner_paint==='object'?'owner':r.role;
     const workersOf=r=>treeOf(r)?r.workers_live.filter(w=>w&&typeof w==='object').slice(0,8):[];
     // The one-row form's percent and time columns, shared by owners and their workers (rule 48 (c)).
     const allWorkers=listed.flatMap(r=>workersOf(r));
@@ -1157,7 +1160,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const workerRole=w=>w.role==='frame'?(/alt/.test(String(w.stage||''))?'frame-alt':'frame'):'worker';
     // The role column's width is the route's own (11-17: a frame route's `frame-alt` does not widen another route's rows).
     let roleWidth=0;
-    const setRoles=r=>{roleWidth=side?Math.max(0,ROLE.has(leadRole(r))?measure(leadRole(r)):0,...workersOf(r).map(w=>measure(workerRole(w)))):0;};
+    const setRoles=r=>{roleWidth=side?Math.max(0,ROLE.has(leadRole(r))?measure(leadRole(r)):0,...workersOf(r).map(w=>unitRoute(r)?0:measure(workerRole(w)))):0;};
     const roleCell=role=>roleWidth?[text((ROLE.has(role)?role:'').padEnd(roleWidth),'dim'),text(' ')]:[];
     const rolePart=r=>roleCell(leadRole(r));
     const spaced=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
@@ -1302,9 +1305,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     // The first line: a state mark, then the chain of kinds the route continues (`frame ✓ → code(standard)`: what is behind
     // dim with `✓`, this one bold, what is left dim; a frame route reads `frame → ??` until its direction is chosen).
-    function chainParts(r,{past=true,inten=true}={}){
+    function chainParts(r,{past=true,inten=true,unit=true}={}){
       const kind=clean(r.kind_word||'').trim(),word=inten?intensityOf(r):'';
-      const own=name=>{const field=kindField(r,name);return [kindText(name,field),...(word?[bracket(word,field)]:[])];};
+      // A unit route reads `unit·code-review(quick)`: the unit's short name follows the kind word in the bracket's own hue.
+      const tail=name=>{const u=unit&&name==='unit'?clean(r.unit_word||'').trim():'';
+        return u?[kindTail('·'+u,kindField(r,name),word)]:[];};
+      const own=name=>{const field=kindField(r,name);return [kindText(name,field),...tail(name),...(word?[bracket(word,field)]:[])];};
       const legs=(Array.isArray(r.chain)?r.chain:[]).filter(l=>l&&l.name);
       if(!legs.length)return kind?own(kind):[];
       const out=[];
@@ -1335,7 +1341,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return forms.map(form=>({named:form.named,parts:[text(' · ','dim'),...form.parts]}));
     }
     function headRow(r){
-      const chains=[{},{past:false},{past:false,inten:false}].map(o=>chainParts(r,o));
+      const chains=[{},{past:false},{past:false,inten:false},{past:false,inten:false,unit:false}].map(o=>chainParts(r,o));
       if(!chains[0].length)return null;
       const wait=directionWait(r)?[text(' · ','dim'),text(t('direction_wait','waiting for direction'),'dim')]:[];
       const width=inner,room=width-2;     // the box's inner width, read now (the row is drawn after the box's width is given back)

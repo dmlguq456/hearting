@@ -120,7 +120,9 @@ def _staged_after_frame_vm():
              "effort": "xhigh", "route_id": STAGED_ID, "attempt_id": "att-owner",
              "elapsed_min": 11}]
     chain = [{"route_id": "rt-prev", "capability": "route-frame", "state": "done"},
-             {"route_id": STAGED_ID, "capability": "autopilot-code", "state": "active"}]
+             # The staged route is a leg of the plan its frame opened: that recorded relation is what chains them.
+             {"route_id": STAGED_ID, "capability": "autopilot-code", "state": "active",
+              "route_plan": {"decision": "frame/route-decision.json", "digest": "sha256:" + "0" * 64, "index": 0}}]
     session = {"harness": "claude", "session_id": "sid-owner", "session_tag": "z9",
                "cwd": REPO, "liveness": "idle", "is_child": False, "title": "owner",
                "route_chain": {"nodes": chain}}
@@ -384,8 +386,9 @@ class FrameOwnerLevelTests(unittest.TestCase):
                 self.assertIn("frame ✕", row)
 
     def test_framed_progress_marks_the_routes_own_frame_leg_after_a_predecessor(self):
+        # The second frame route records the first as the route it continues; a frame route with no such record stands alone.
         chain = [{"route_id": "rt-prev", "capability": "route-frame", "state": "done"},
-                 {"route_id": ROUTE_ID, "capability": "route-frame", "state": "active"}]
+                 {"route_id": ROUTE_ID, "capability": "route-frame", "state": "active", "source_route_id": "rt-prev"}]
         for kwargs, expected in (({"running": True}, "frame → ??"),
                                  ({"node_state": "failed"}, "frame ✕")):
             with self.subTest(expected=expected):

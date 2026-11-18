@@ -477,6 +477,12 @@ def outcome_state(outcome):
     return "unknown", None
 
 
+def _sealed_plan(record):
+    """The ``{decision, digest, index}`` a route sealed from an approved plan, or None."""
+    plan = record.get("route_plan") if isinstance(record, dict) else None
+    return {key: plan.get(key) for key in ("decision", "digest", "index")} if isinstance(plan, dict) else None
+
+
 def assemble(lines, *, load_record, load_outcome, jobs=(), node_evidence=None):
     """PURE (loaders injected) — one displayed chain from a session's ledger lines."""
     from . import route as _route
@@ -539,6 +545,9 @@ def assemble(lines, *, load_record, load_outcome, jobs=(), node_evidence=None):
             "ambiguity": ambiguity, "source_route_id": line.get("source_route_id"),
             "ts": line.get("ts"), "_record": record,
             "result": result,
+            # What the route itself recorded about its relation to the others (``route_plan``: the approved
+            # plan it is a leg of); the display chains only routes such records tie together.
+            "route_plan": _sealed_plan(record),
         })
 
     # Step 4 — continuation folding (rule 3-i): verified hops collapse onto the earliest slot.
@@ -591,6 +600,7 @@ def assemble(lines, *, load_record, load_outcome, jobs=(), node_evidence=None):
                 break
         if pos is not None:
             pi = pos + 1
+        node["planned"] = pos is not None      # it consumed a step of the declared ``--plan``
         result_nodes.append(node)
     for label in plan[pi:]:
         result_nodes.append({

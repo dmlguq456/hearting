@@ -768,13 +768,51 @@ def _chain_leg_name(node):
     return "frame" if capability == "route-frame" else _short_capability(capability) or "·"
 
 
+def _is_unit_node(node):
+    return _chain_leg_name(node) == "unit"
+
+
+def _chain_links(node, earlier, frames):
+    """Whether ``earlier`` is tied to ``node`` by what the routes themselves recorded: the route it
+    continues (``source_route_id``), a leg of the same approved plan (``route_plan``) or the frame that
+    opened that plan, or the next step of a declared ``--plan``. A route that only sits in the same
+    session or campaign is not tied. A unit route is nobody's leg and has no legs of its own."""
+    if _is_unit_node(node) or _is_unit_node(earlier):
+        return False
+    plan, before = node.get("route_plan"), earlier.get("route_plan")
+    if node.get("source_route_id") and node["source_route_id"] == earlier.get("route_id"):
+        return True
+    if node.get("planned") and earlier.get("planned"):
+        return True
+    if isinstance(plan, Mapping):
+        if isinstance(before, Mapping):
+            return (plan.get("decision") == before.get("decision") and plan.get("digest") == before.get("digest")
+                    and (_num(before.get("index")) or 0) < (_num(plan.get("index")) or 0))
+        return earlier.get("capability") == "route-frame" and earlier.get("route_id") == frames.get(node.get("route_id"))
+    return False
+
+
 def _chain_legs(nodes, rid, own, status, progress):
     """``[[leg, status, progress], ...]``: the frame that opened the route, the latest finished leg
-    of every other capability since it, and the route's own leg."""
+    of every other capability since it, and the route's own leg. Only routes tied to this one by a
+    recorded relation (``_chain_links``) are legs; the others are not part of its work."""
     index = _chain_position(nodes, rid)
     if index is None:
         return [[own, status, progress]] if own else []
-    before = nodes[:index]
+    # The frame that opened a plan leg is the nearest frame route before it.
+    frames = {}
+    for i, node in enumerate(nodes[:index + 1]):
+        if isinstance(node.get("route_plan"), Mapping):
+            frames[node.get("route_id")] = next((nodes[j].get("route_id") for j in range(i - 1, -1, -1)
+                                                 if nodes[j].get("capability") == "route-frame"), None)
+    tied, pending = {index}, [index]
+    while pending:
+        later = pending.pop()
+        for i in range(later):
+            if i not in tied and _chain_links(nodes[later], nodes[i], frames):
+                tied.add(i)
+                pending.append(i)
+    before = [nodes[i] for i in sorted(tied) if i != index]
     frame = next((i for i in range(len(before) - 1, -1, -1)
                   if before[i].get("capability") == "route-frame"), None)
     legs = []
@@ -1385,6 +1423,8 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
         return []
     detail = _parallel_stage_details(view_nodes, now)
     short, mode = route.get("capability"), route.get("mode")
+    unit_route = short == "unit"         # no owner and no mode: its leg band names neither
+    mode = None if unit_route else mode
     name = f"leg {len(legs) or 1} · {short or '·'}{' ' + mode if mode else ''}"
     frame_nodes = [node for node in view_nodes if _is_frame_leg(node)]
     if frame_nodes and (short == "frame" or route.get("shape") == FRAME_ROUTE_SHAPE):
@@ -1419,8 +1459,9 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
         owner_line.append([" · " + route["age"], "dim"])
     return [{
         "kind": "leg", "n": name, "st": leg_status, "verdict": f"{done}/{len(view_nodes)}",
-        "lines": [owner_line], "detail": detail,
-        "title": [[name, "head"]] + _route_title_line(rid, route, route.get("resume")), "loops": [],
+        "lines": [] if unit_route else [owner_line], "detail": detail,
+        "title": [[name, "head"]] + _route_title_line(rid, route, route.get("resume"), "worker" if unit_route else "owner"),
+        "loops": [],
     }]
 
 

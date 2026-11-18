@@ -1213,10 +1213,19 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
 _PLAIN_WEIGHT = {"g_work": "grp_live", "stg3_on": "g_idle", "eff_xhigh": "hb_codex"}
 
 
-def _kind_cell(route):
-    """``code(standard)``: the kind word (bold) and its intensity in dim brackets; nothing else goes in the brackets."""
+def _unit_word(route):
+    """A unit route's unit, short: ``qa/code-review`` reads ``code-review`` (its bundle is left off)."""
+    if str(route.get("capability") or "").strip() != "unit":
+        return ""
+    return str(route.get("worker_unit") or "").strip().rsplit("/", 1)[-1]
+
+
+def _kind_cell(route, name=True, bracket=True):
+    """``code(standard)``: the kind word (bold) and its intensity in dim brackets; nothing else goes in the brackets.
+    A unit route reads ``unit·code-review(quick)``: the unit's short name follows the kind word in the bracket's hue.
+    ``name`` and ``bracket`` leave those parts out where the row is short of cells."""
     kind = str(route.get("capability") or "").strip()
-    intensity = str(route.get("intensity") or "").strip()
+    intensity = str(route.get("intensity") or "").strip() if bracket else ""
     if route.get("shape") == "direct" and intensity.casefold() in ("", "direct"):
         intensity = ""               # the `direct` zone's own name says it (11-17, route zones)
     if not kind:
@@ -1226,7 +1235,9 @@ def _kind_cell(route):
     field = route_field(route.get("field"), kind)
     word_key = kind_word_key(field) or "grp"
     bracket_key = kind_intensity_key(field, intensity) or "dim"
-    return [(kind, word_key)] + ([("(" + intensity + ")", bracket_key)] if intensity else [])
+    unit = _unit_word(route) if name else ""
+    return ([(kind, word_key)] + ([("·" + unit, bracket_key if intensity else "dim")] if unit else [])
+            + ([("(" + intensity + ")", bracket_key)] if intensity else []))
 
 
 def _blinking_stage(stages, at, lit):
@@ -1335,7 +1346,11 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
         earlier = _fold_items(items[:-1], max(8, (end - x) // 3), sep=" → ") if items[:-1] else []
         cells = (earlier + [(" → ", "dim")] if earlier else []) + _kind_cell(route)
         if sum(_seg_width(text) for text, _key in cells) > end - x:
-            cells = _kind_cell(route)
+            # Short of cells: the earlier legs go, then (a unit route) the intensity, then the unit's name.
+            for options in ({}, {"bracket": False}, {"bracket": False, "name": False}):
+                cells = _kind_cell(route, **options)
+                if sum(_seg_width(text) for text, _key in cells) <= end - x:
+                    break
         cursor = _put_segments(grid, x, y, cells, end)
         cursor = _put_segments(grid, cursor, y, after, end)
         if card:
@@ -1733,6 +1748,10 @@ def draw_routes(grid, vm, state, x=34, y=3):
                      "adversarial": "adv"}
             suffix = "·".join(short.get(value, value) for value in
                               (route.get("mode"), route.get("intensity")) if value)
+            unit_route = str(route.get("capability") or "") == "unit"
+            if unit_route:
+                # A unit route has no owner and no mode: its kind line is the first row's `unit·code-review(quick)`.
+                kind_parts, suffix = _kind_cell(route) or kind_parts, ""
             if suffix:
                 # The whole bracket (a mode word may stand in it: `(dev·q)`) takes the field's hue at its intensity's weight.
                 kind_parts.append(("(" + suffix + ")", kind_intensity_key(field, suffix) or "dim"))
@@ -1747,7 +1766,8 @@ def draw_routes(grid, vm, state, x=34, y=3):
             grid.add_hit(y, x, right, action)
             cursor = grid.put(x + cols["title"], y, "└ kind ", "dim", limit=right)
             # The unfolded owner is whole (harness, model, effort, profile), wrapped if need be.
-            cursor, y = _put_wrapped(grid, cursor, y, kind_parts + [("  owner ", "dim")] + _owner_parts(route),
+            owner_words = [] if unit_route else [("  owner ", "dim")] + _owner_parts(route)
+            cursor, y = _put_wrapped(grid, cursor, y, kind_parts + owner_words,
                                      right, x + cols["title"] + 2, next_row)
             # The folded row shows the live doer's context; the owner's own stays here (on a
             # line of its own when the kind line has no room left for it).
@@ -1816,6 +1836,8 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 not slim or context_x - (x + cols["prog"]) >= 10)
             worker_progress_end = context_x - gap if inline_context and slim else progress_end
             label = str(worker[0]) if worker else "worker"
+            if unit_route and label == "worker":
+                label = "unit"             # a unit route has no owner: its worker is the unit (`unit · qa/code-review`)
             unit = route.get("worker_unit")
             route_end = x + cols["kind"] - gap
             route_start = x + cols["title"]

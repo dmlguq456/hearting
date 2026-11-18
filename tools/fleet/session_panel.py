@@ -346,6 +346,10 @@ def route_row(row, now=None, *, cells=None):
         field = route_field(sanitize_title(str(row.get("field") or ""))[:16], kind_word)
         if field:
             shown["kind_field"] = field
+        # A unit route (one worker, no owner) leads with its unit's short name: ``qa/code-review`` reads ``code-review``.
+        unit = sanitize_title(str(row.get("worker_unit") or "")).rsplit("/", 1)[-1][:48]
+        if kind_word == "unit" and unit:
+            shown["unit_word"] = unit
     shown.update(doer_paint(row, cells))
     minutes = None
     if _number(row.get("since")) is not None:
