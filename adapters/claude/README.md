@@ -255,3 +255,16 @@ New installations enable the shared session shell for new Claude, Codex and Open
 terminals. Updates preserve existing choices and older absent policies. Use
 `hearting session shell disable` to restore native launch behavior, or
 `hearting session shell enable` to enable it again. Existing sessions keep running.
+
+## Left arrow stays in the conversation
+
+Claude Code's `←` on an empty prompt sends the conversation to a background
+session under a new session id, which the Hearting shell, panel and message
+delivery do not follow. An install therefore adds `leftArrowOpensAgents: false`
+to Claude's global config file (`~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`;
+Claude ignores this key in `settings.json`) only when the key is absent, so a
+value you set yourself, `true` or `false`, is never overwritten. `/bg`,
+`/background` and `claude agents` still work. To undo it, set it to `true` in
+`/config` ("← opens agents") or in that file; later installs keep your value.
+Uninstall removes the key only while it is still the `false` the install wrote.
+New Claude sessions pick it up; a session already open needs a restart.

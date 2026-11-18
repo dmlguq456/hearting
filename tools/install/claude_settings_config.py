@@ -3,8 +3,9 @@
 The managed install merges only hooks, statusLine, env, autoMemoryEnabled and idleCompaction
 into the user's file and never writes `permissions`, so Hearting does not read
 or judge permission settings (`harness config status` has no row for them).
-This module only removes retired harness hook registrations, preserving the
-user's own settings.
+This module removes retired harness hook registrations, preserving the user's
+own settings, and carries the one default Claude reads from its global config
+file instead of settings.json (the empty-prompt left arrow).
 """
 
 from __future__ import annotations
@@ -12,6 +13,13 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+
+# Claude reads this key only from its global config file (`~/.claude.json`, or
+# `$CLAUDE_CONFIG_DIR/.claude.json`); it ignores it in settings.json. `false`
+# turns off the empty-prompt left arrow that backgrounds a foreground session
+# (a fork under a new session id). `/bg`, `/background`, `claude agents` and
+# the other ways to open the list stay available.
+LEFT_ARROW_KEY = "leftArrowOpensAgents"
 
 
 # Exact retired harness entrypoints. Keep this migration list after source removal
@@ -108,3 +116,58 @@ def remove_retired_hooks(data: dict) -> bool:
         elif groups:
             del events[event]
     return changed
+
+
+def apply_left_arrow_default(path: Path, *, owned: bool) -> tuple[bool, str | None]:
+    """Write the left-arrow default only when the global config lacks the key.
+
+    Returns ``(owned_now, notice)``. A key the user already set (either value)
+    is never touched; ownership then carries only while the value is still the
+    ``false`` Hearting wrote. A file Hearting cannot read or replace safely is
+    left alone and reported, never an install failure.
+    """
+    import safe_fs
+
+    try:
+        if path.is_symlink():
+            return owned, f"left-arrow default skipped: {path} is a symlink"
+        before = safe_fs.capture_state(path)
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        if not isinstance(data, dict):
+            return owned, f"left-arrow default skipped: {path} is not a JSON object"
+        if LEFT_ARROW_KEY in data:
+            return owned and data[LEFT_ARROW_KEY] is False, None
+        data[LEFT_ARROW_KEY] = False
+        auth = safe_fs.authority(path, owner="hearting-claude-left-arrow-default",
+                                 allowed_paths=(path,), allow_leaf_symlink=False, expected=before)
+        mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+        safe_fs.atomic_write_bytes(
+            auth, (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode(), mode)
+        return True, ("claude: left arrow on an empty prompt no longer sends the conversation to the "
+                      f"background ({LEFT_ARROW_KEY}=false in {path}; set it to true in /config to undo)")
+    except (OSError, ValueError, safe_fs.SafetyError) as exc:
+        return owned, f"left-arrow default skipped: {str(exc).splitlines()[0][:160]}"
+
+
+def release_left_arrow_default(path: Path, *, dry_run: bool = False) -> bool:
+    """Remove the key at uninstall only while it is still the value Hearting wrote."""
+    import safe_fs
+
+    try:
+        if path.is_symlink() or not path.exists():
+            return False
+        before = safe_fs.capture_state(path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get(LEFT_ARROW_KEY, None) is not False:
+            return False
+        if dry_run:
+            return True
+        del data[LEFT_ARROW_KEY]
+        auth = safe_fs.authority(path, owner="hearting-claude-left-arrow-default",
+                                 allowed_paths=(path,), allow_leaf_symlink=False, expected=before)
+        safe_fs.atomic_write_bytes(
+            auth, (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode(),
+            path.stat().st_mode & 0o777)
+        return True
+    except (OSError, ValueError, safe_fs.SafetyError):
+        return False
