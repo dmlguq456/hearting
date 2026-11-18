@@ -213,25 +213,77 @@ def attachment(target):
 
 
 class View:
+    """The attachment's screen, read only once its latest repaint has finished.
+
+    A terminal that brackets repaints (`?2026h`/`?2026l`) says so itself: the last frame
+    must be closed. Claude 2.1.x brackets nothing on `attach` (measured on 2.1.327: no
+    `?2026` at all, a full clear and a repaint that ends within about 150 ms); there a
+    repaint counts as finished when the output stays quiet for ``QUIET`` seconds. An
+    animation (a working session's spinner) never goes quiet, so it is never read.
+    ``why`` names what the last ``read`` was still waiting for.
+    """
+    QUIET = 0.75
+
     def __init__(self, fd):
         self.fd, self.raw = fd, b""
+        self.last_data = None
+        self.why = "no-output"
+
+    def _settled(self):
+        opened, closed = self.raw.rfind(b"\x1b[?2026h"), self.raw.rfind(b"\x1b[?2026l")
+        if opened >= 0 or closed >= 0:
+            return (True, "") if closed > opened else (False, "frame-open")
+        if self.last_data is None:
+            return False, "no-output"
+        quiet = time.monotonic() - self.last_data >= self.QUIET
+        return (True, "") if quiet else (False, "not-quiet")
 
     def read(self, timeout=10):
         deadline = time.monotonic() + timeout
+        self.why = "no-output" if not self.raw else "not-quiet"
         while time.monotonic() < deadline and len(self.raw) < 1024 * 1024:
             ready, _, _ = select.select([self.fd], [], [], min(0.25, max(0, deadline - time.monotonic())))
             if ready:
                 try: part = os.read(self.fd, 65536)
-                except OSError: return None
-                if not part: return None
+                except OSError: part = b""
+                if not part:
+                    self.why = "attach-closed"
+                    return None
                 self.raw += part
-            elif (self.raw.rfind(b"\x1b[?2026l") > self.raw.rfind(b"\x1b[?2026h")):
-                snap = Snapshot(); snap.feed(self.raw.decode("utf-8", "replace"))
-                lines = snap.lines()
-                # The first repaint is an "Attaching…" splash, not an empty box.
-                if lines and any("".join(c for c, _ in row).lstrip().startswith("❯") for row in lines):
-                    return lines
+                self.last_data = time.monotonic()
+                self.why = "not-quiet"
+                continue
+            settled, self.why = self._settled()
+            if not settled:
+                continue
+            snap = Snapshot(); snap.feed(self.raw.decode("utf-8", "replace"))
+            lines = snap.lines()
+            # The first repaint is an "Attaching…" splash, not an empty box.
+            if lines and any("".join(c for c, _ in row).lstrip().startswith("❯") for row in lines):
+                self.why = ""
+                return lines
+            self.why = ("undecodable-control" if not snap.valid
+                        else "no-full-repaint" if not snap.painted else "no-input-line")
         return None
+
+
+def keep_open_after_send(fd, limit=5.0):
+    """Hold the attacher open until the session answers the line just typed.
+
+    Closing the PTY right after the write ends the attacher before it forwards the keys
+    (measured on 2.1.327: the typed /compact never reached the session). The first output
+    after the write is the session reacting; the wait ends once that has gone quiet, or at
+    ``limit``. Nothing is read for meaning here and nothing is sent again."""
+    deadline = time.monotonic() + limit
+    answered = None
+    with contextlib.suppress(OSError, ValueError):
+        while time.monotonic() < deadline:
+            if select.select([fd], [], [], 0.1)[0]:
+                if not os.read(fd, 65536):
+                    return
+                answered = time.monotonic()
+            elif answered is not None and time.monotonic() - answered >= View.QUIET:
+                return
 
 
 def read_snapshot(fd, timeout=10):
@@ -250,8 +302,10 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
     sid = req.get("new_session") if continuing else req.get("sid")
     word = "continued" if continuing else "cleared"
     claim = None
+    detail = ""
     def result(outcome, reason="", new_session=""):
         fields = {word: outcome, "reason": reason, "new_session": new_session}
+        if reason == "screen-unknown": fields["detail"] = detail
         if continuing and claim is not None:
             fields["claim_id"] = (claim.get("continued") or {}).get("claim_id", "")
         return fields
@@ -285,7 +339,7 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
                 time.sleep(0.1)
             if why: return result("skipped", why)
             lines = view.read()
-            why = "screen-unknown" if lines is None else screen_ready("claude", lines)
+            why, detail = ("screen-unknown", view.why) if lines is None else (screen_ready("claude", lines), "")
             if why: return result("skipped", why)
             current, why = validator(request_path, nonce)
             if current is None: return result("skipped", why)
@@ -306,8 +360,8 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
                 if current is None:
                     if continuing: clear.release_unsent_continue(claim)
                     return result("skipped", why)
-                lines = view.read(timeout=1)
-                why = "screen-unknown" if lines is None else screen_ready("claude", lines)
+                lines = view.read(timeout=View.QUIET + 1)
+                why, detail = ("screen-unknown", view.why) if lines is None else (screen_ready("claude", lines), "")
                 why = why or idle_reason(target, sid)
                 if why or proc.poll() is not None:
                     if continuing: clear.release_unsent_continue(claim)
@@ -338,6 +392,7 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
             if written != len(data): return result("unverified", "partial-send")
             if not continuing:
                 # The session id stays; the helper waits (bounded) for the compaction evidence.
+                keep_open_after_send(fd)
                 return result("unverified", "compact-pending")
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
@@ -359,8 +414,11 @@ def idle_card_request(req, request_path, nonce, *, screen_ready):
     """Use the exact attachment for background idle cards or legacy compact prompts."""
     import session_tidy_clear as clear
 
+    detail = ""
     def result(outcome, reason=""):
-        return {"accepted": outcome, "reason": reason}
+        fields = {"accepted": outcome, "reason": reason}
+        if reason == "screen-unknown": fields["detail"] = detail
+        return fields
 
     target = (req.get("seat") or {}).get("native")
     if req.get("harness") != "claude" or not target:
@@ -375,7 +433,7 @@ def idle_card_request(req, request_path, nonce, *, screen_ready):
             if reason:
                 return result("queued" if reason == "not-idle-native" else "skipped", reason)
             lines = view.read()
-            reason = "screen-unknown" if lines is None else screen_ready("claude", lines)
+            reason, detail = ("screen-unknown", view.why) if lines is None else (screen_ready("claude", lines), "")
             if reason:
                 queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown"}
                 return result("queued" if queued else "skipped", reason)
@@ -385,8 +443,8 @@ def idle_card_request(req, request_path, nonce, *, screen_ready):
             claim, why = clear.claim_idle_card_request(request_path, nonce)
             if claim is None:
                 return result("skipped", why)
-            lines = view.read(timeout=1)
-            reason = "screen-unknown" if lines is None else screen_ready("claude", lines)
+            lines = view.read(timeout=View.QUIET + 1)
+            reason, detail = ("screen-unknown", view.why) if lines is None else (screen_ready("claude", lines), "")
             reason = reason or idle_reason(target, claim.get("sid"))
             current, why = clear.validate_idle_request(
                 request_path, nonce, _sending_claim=claim.get("idle_request"))

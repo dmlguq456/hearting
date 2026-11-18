@@ -4735,6 +4735,16 @@ class ClearHelperTest(TidyCase):
                 last = self.notices(seat)[-1]
                 self.assertIn(word, last)
 
+    def test_a_screen_that_was_not_read_records_what_the_read_was_waiting_for(self):
+        seat, req = self.booked()
+        verdict = {"cleared": "skipped", "reason": "screen-unknown", "detail": "not-quiet"}
+        self.assertEqual(self.run_helper(seat, req, verdict=verdict), "skipped")
+        held = st.read_json(self.state / "clear" / f"{seat.key}.json")
+        self.assertEqual((held["reason"], held["detail"]), ("screen-unknown", "not-quiet"))
+        seat, req = self.booked()
+        self.assertEqual(self.run_helper(seat, req, verdict={"cleared": "skipped", "reason": "draft"}), "skipped")
+        self.assertNotIn("detail", st.read_json(self.state / "clear" / f"{seat.key}.json"))
+
     def test_an_unverified_compact_is_not_resent_and_becomes_cleared_when_the_compaction_shows_up(self):
         seat, req = self.booked()
 
