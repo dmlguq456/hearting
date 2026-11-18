@@ -173,8 +173,10 @@ def _gen_strip(grid, x, y, marks, room, harness):
             gen_harness = str(details[0]) if details else harness
             kind = str(details[1]) if len(details) > 1 else "new"
         glyph = {"new": "●", "cont": "○", "existing": "◆"}.get(kind, "●")
-        hue = {"claude": "c", "codex": "m", "opencode": "l"}.get(gen_harness, "d")
-        x = grid.put(x, y, glyph, (hue, int(index == len(shown) - 1), 0))
+        newest = index == len(shown) - 1
+        key = (("hbb_" if newest else "hb_") + gen_harness if gen_harness in ("claude", "codex", "opencode")
+               else ("d", int(newest), 0))
+        x = grid.put(x, y, glyph, key)
     return x
 
 
@@ -222,8 +224,8 @@ def draw_seat_expand(grid, vm, state, tag, x, use, y, bottom, seat, harness):
                      "no card" if at != "now" else "current generation · no card yet")
         grid.put(x0, y, "now" if at == "now" else f"{index + 1:3d}", "soft")
         grid.put(x0 + 6, y, _hard_cut(at if at != "now" else "", right - x0 - 6), "dim", limit=right)
-        hue = {"claude": "c", "codex": "m", "opencode": "l"}.get(h, "d")
-        grid.put(x0 + 20, y, {"new": "●", "cont": "○", "existing": "◆"}.get(kind, "●"), (hue, 1, 0))
+        glyph_key = ("hbb_" + h) if h in ("claude", "codex", "opencode") else ("d", 1, 0)
+        grid.put(x0 + 20, y, {"new": "●", "cont": "○", "existing": "◆"}.get(kind, "●"), glyph_key)
         cursor = grid.put(x0 + 22, y, h, "hb_" + h)
         grid.put(cursor + 1, y, _hard_cut(sid, right - cursor - 1), "dim", limit=right)
         grid.put(x0 + 42, y, _clip(connection, 30), "blocked" if kind == "existing" else "dim", limit=right)
