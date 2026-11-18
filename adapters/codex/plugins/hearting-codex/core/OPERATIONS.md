@@ -2137,7 +2137,9 @@ that is claimed but not yet registered, or a read that failed, timed out, found
 no tool or no row, or could not tell, leaves it pending. The runner and a long-lived observer share that one
 judgment, the parent session is told through the ordinary session notice before
 the record changes, and the record itself is kept (nothing is deleted,
-cancelled or retried).
+cancelled or retried). An observer whose join fails every round still runs
+that judgment on each failed round, and leaves the failure's type and text in
+the record's `observer_error`, written once per distinct failure.
 
 **Visibility is a requirement, not a nicety.** Independently of capability,
 Fleet and the status surfaces expose the workflow, its current stage, its child

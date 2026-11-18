@@ -8526,7 +8526,8 @@ def _native_tidy_command(args, req, *, continuing):
     target = f"native:{req['seat']['native']['job']}"
     receipt = (f"action={action} {word}={outcome} harness={harness} old_session={old} "
                f"new_session={new or '-'} verify=native ms={int((time.monotonic() - started) * 1000)}"
-               + (f" reason={verdict['reason']}" if verdict.get("reason") else ""))
+               + (f" reason={verdict['reason']}" if verdict.get("reason") else "")
+               + (f" detail={verdict['detail']}" if verdict.get("detail") else ""))
     try:
         _record(to_harness=harness, to_name=target, kind="notice",
                 summary_text=f"[notice] action={action} {outcome}",
@@ -8653,12 +8654,12 @@ def cmd_idle_card_request(args):
     path = Path(args.request)
     req, why = clear.validate_idle_request(path, args.nonce)
 
-    def finish(outcome, reason=""):
+    def finish(outcome, reason="", detail=""):
         harness = str((req or {}).get("harness") or "unknown")
         sid = str((req or {}).get("sid") or "")
         pane = (req or {}).get("seat", {}).get("pane")
         receipt = (f"action=idle-card-request accepted={outcome} harness={harness} session={sid}"
-                   + (f" reason={reason}" if reason else ""))
+                   + (f" reason={reason}" if reason else "") + (f" detail={detail}" if detail else ""))
         try:
             if req and req.get("origin") != "idle":
                 _record(to_harness=harness, to_name=args.target, kind="notice",
@@ -8669,7 +8670,7 @@ def cmd_idle_card_request(args):
         except Exception:
             pass
         print(f"accepted={outcome} target={args.target} harness={harness} session={sid}"
-              + (f" reason={reason}" if reason else ""))
+              + (f" reason={reason}" if reason else "") + (f" detail={detail}" if detail else ""))
         return 0 if outcome == "true" else (3 if outcome in ("queued", "skipped") else 5)
 
     if req is None:
@@ -8678,7 +8679,7 @@ def cmd_idle_card_request(args):
     if seat.get("kind") == "native":
         from session_tidy_native import idle_card_request
         verdict = idle_card_request(req, str(path), args.nonce, screen_ready=_screen_ready)
-        return finish(verdict.get("accepted", "failed"), verdict.get("reason", ""))
+        return finish(verdict.get("accepted", "failed"), verdict.get("reason", ""), verdict.get("detail", ""))
     if _surface_missing(args.target):
         return finish("failed", "tmux-not-found" if terminal_surface.is_tmux_pane(args.target)
                       else "herdr-not-found")
