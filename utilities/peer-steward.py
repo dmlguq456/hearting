@@ -5761,8 +5761,9 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
             from dispatch_completion_join import materialize_after_terminal_close
             materialize = lambda: materialize_after_terminal_close(jobs, row.attempt_id)
             owner_meta = row.metadata
+            from dispatch_contract import finishes_route
             if (settlement_context is not None and row.status == "done"
-                    and owner_meta.get("worker_type") == "owner"
+                    and finishes_route(owner_meta)
                     and owner_meta.get("workflow_completion") == "runtime-v1"):
                 from dispatch_contract import supervisor_lease_is_held
                 lease_held = supervisor_lease_is_held(jobs, owner_meta)

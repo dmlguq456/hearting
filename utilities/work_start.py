@@ -583,6 +583,14 @@ def capture_request_context(value, route):
     return validate_request(request)
 
 
+def unit_leg(route, node_id=None):
+    """The one depth-0 leg of a unit route (the named node, when `node_id` is given), or None."""
+    if route.get("capability") != "unit":
+        return None
+    legs = [n for n in route.get("nodes") or [] if isinstance(n, dict) and RP.is_depth0_leg(n)]
+    return next((n for n in legs if node_id is None or n.get("id") == node_id), None)
+
+
 def attempt_id(route, node):
     digest = hashlib.sha256((route["route_id"] + ":" + node).encode()).hexdigest()[:32]
     return "att-" + digest
@@ -633,7 +641,7 @@ def _slot(route, node, rows, jobs=None):
                if ((node == "owner" and meta.get("worker_type") == "owner"
                     and route["route_id"] in {meta.get("owner_route_id"), meta.get("route_id")})
                    or (node != "owner" and meta.get("route_id") == route["route_id"]
-                       and meta.get("route_node") == node and meta.get("worker_type") == "frame"))]
+                       and meta.get("route_node") == node and meta.get("worker_type") != "owner"))]
     adopted = {}
     owner = route.get("owner_attempt_id")
     if node == "owner" and not matches and jobs is not None and owner in rows:
@@ -785,8 +793,9 @@ def _start_bound(route, path, jobs, node, harness, run, on_registered, repositor
                "--route-evidence", str(path), "--jobs", str(jobs),
                "--slug", route["slug"] + "-" + node,
                "--attempt-id", attempt_id(route, node)]
-    if node == "owner" or not route.get("artifact_root"):
+    if node == "owner" or not route.get("artifact_root") or unit_leg(route, node):
         # A route with no artifact root has no runtime home for a prompt file; every sealed route has one.
+        # A unit leg gets the brief itself: nothing is added to it here.
         task = (route["work_request"] if "work_request" in route
                 else continuation_work_request(route, jobs))["text"]
         if RESOURCE_RESUME.route_selected(route):
@@ -2479,6 +2488,9 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 "task": task, "cwd": cwd,
                 "next_step": f"Do this inline work in {cwd}. Then run finish for this route with the result evidence and summary.",
                 "artifact_env": prepare_route_artifact_env(path, start=True, jobs=jobs, require_cycle=False)}
+    leg = unit_leg(route)
+    if leg is not None:
+        return _advance_unit(route, path, jobs, result, leg, wait=wait, run=run, sleep=sleep, clock=clock)
     rows = _rows(jobs)
     existing_owner = _slot(route, "owner", rows, jobs)
     frames = ([] if existing_owner in rows and not (interview or answers) else
@@ -2847,6 +2859,54 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 "bounded-wait means run parent_next_command once."}
 
 
+def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock):
+    """Start the one leg of a unit route, or report where it is; repeating this launches nothing twice.
+
+    There is no owner and no gate: the depth-0 session launches the worker with the brief, the shared
+    join watches the attempt, and the completion controller closes the route when the worker ends."""
+    resume = result["resume_command"]
+    rows = _rows(jobs)
+    node = leg["id"]
+    aid = _slot(route, node, rows, jobs)
+    if aid not in rows:
+        rows, refusal = _launch_admitted(route, path, jobs, node, None, run, result,
+                                         wait=wait, sleep=sleep, clock=clock)
+        if aid not in rows:
+            if refusal:
+                return _capacity_wait(result, aid, node, refusal, resume, clock)
+            launch = result["launches"][-1] if result["launches"] else {}
+            reason = _launch_failure_reason(launch) if launch else "-"
+            return {**result, "state": "needs-attention", "reason": "unit-launch-not-admitted",
+                    "launch_reason": reason, "unit_attempt_id": aid, "required_action": "resume-later",
+                    "next_step": f"The unit worker did not start ({reason}); nothing ran. Run resume_command "
+                        "again once the reason is cleared; it starts the same worker again."}
+    attempts = {aid}
+    result.update(unit_attempt_id=aid, owner_started=False, **_wait_fields(attempts, rows, resume))
+    joined = _timed_join(result, clock, jobs=jobs, expected_attempts=attempts,
+                         timeout=_wait_budget(result) if wait else 0, recover=True, observe_only=not wait)
+    result["observation"] = joined
+    if joined["state"] == "ready":
+        outcome = _outcome(jobs, aid)
+        if outcome["classification"] == "success":
+            return {**result, "state": "completed", "result": outcome}
+        # The one leg ended without a pass: the same work goes out again as a new unit route.
+        command = _compose_again(route)
+        return {**result, "state": "needs-attention", "reason": "unit-outcome-needs-inspection",
+                "result": outcome, "required_action": "compose-again", "parent_next": "compose",
+                "parent_next_command": command,
+                "next_step": "The unit worker ended without a pass. Read its result and report; to run the "
+                    "same unit again, run parent_next_command (a new route; this one stays as it ended)."}
+    if wait:
+        return _wait_expired(result)
+    status, metadata = _rows(jobs).get(aid, rows[aid])
+    directive, reason, _ = parent_next(metadata.get("parent_completion_delivery", ""), aid, agent_home=ROOT)
+    return {**result, "state": "running", "parent_next": directive, "parent_next_reason": reason,
+            "parent_next_command": resume + " --wait" if directive == "bounded-wait" else "",
+            "next_step": "The unit worker runs as a separate attempt and its result comes back to this session "
+                "when it ends. Follow parent_next: end-turn means yield; bounded-wait means run "
+                "parent_next_command once."}
+
+
 def _with_next_leg(route, result):
     """Attach the route plan's next leg to a `completed` receipt; `start_work` then starts it
     (`_advance_plan`). It is never written into `parent_next` or `required_action`."""
@@ -2958,6 +3018,8 @@ def _compose_again(route) -> str:
     # A framed compose names no capability: the shape is the route.
     named = [] if shape == "framed" else ["--capability", route["capability"],
                                           "--capability-mode", str(route.get("capability_mode") or "default")]
+    if unit_leg(route):   # a unit route is named by its unit, not by a capability
+        named = ["--unit", unit_leg(route)["unit"]]
     if named and route.get("field_source") == "explicit" and isinstance(route.get("field"), str):
         named += ["--field", route["field"]]  # a field the person named stays with the work
     argv = [sys.executable, entrypoint(ROOT, "utilities/capability-route.py"), "compose",

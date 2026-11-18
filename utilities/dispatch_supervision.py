@@ -2328,7 +2328,8 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
                    on_timeout: Callable[[set[str]], None] | None = None,
                    deadline: float | None = None,
                    stop_check: Callable[[], str] | None = None,
-                   replacement_checkpoint: Callable | None = None) -> dict:
+                   replacement_checkpoint: Callable | None = None,
+                   on_observer_error: Callable[[BaseException], None] | None = None) -> dict:
     """One shared wait loop. Join deadlines are checkpoints, never death votes.
 
     Execution boundaries retain their finite budgets. The parent receives one
@@ -2345,6 +2346,13 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
     REASONS token it returns halts the same way, under that reason). Neither
     ever fires mid-join -- only at the same checkpoint an ordinary
     `join-deadline` notice already used.
+
+    A round whose join or replacement checkpoint raised skips both `stop_check`
+    and the deadline.
+    `on_observer_error`, also optional and `None` for every other caller, is
+    the one call such a round still makes: it receives the exception, may end
+    the wait by raising `StopWaiting`, and anything else it raises leaves the
+    round an ordinary observer-error round.
     """
     ordinal = 0
     lineage_edges = []
@@ -2352,7 +2360,7 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
     roots = set(attempts)
     attention = []
     while True:
-        observer_error, deferred = "", None
+        observer_error, deferred, failure = "", None, None
         try:
             receipt = join(set(attempts))
             if replacement_checkpoint is not None:
@@ -2376,8 +2384,15 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
                 deferred = exc
             else:
                 # Observation failure retains the exact batch and diagnostic.
-                observer_error = str(exc)
+                observer_error, failure = str(exc), exc
         ordinal += 1
+        if failure is not None and on_observer_error is not None:
+            try:
+                on_observer_error(failure)
+            except StopWaiting:
+                raise
+            except Exception:  # noqa: BLE001 -- the round stays an ordinary error round
+                pass
         halt_reason = ""
         if not observer_error:
             if stop_check is not None:

@@ -518,6 +518,9 @@ def dispatch_prompt(
 ) -> tuple[str, str]:
     task, source = task_input or task_prompt(args)
     bootstrap = DISPATCH_MAIN.bind_worker_contract(_ADAPTER, args, profile_type=profile_worker_type(ROOT, args.profile))
+    unit_prompt = DISPATCH_MAIN.unit_leg_prompt(_ADAPTER, args, task, commit_clause=commit_policy.prompt_clause(args))
+    if unit_prompt is not None:
+        return unit_prompt, source
     route_state = (
         "consume the assigned route only (wrapper-validated immutable record)"
         if args.route_file

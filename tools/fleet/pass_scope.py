@@ -31,15 +31,20 @@ def active():
     return getattr(_LOCAL, "memo", None) is not None
 
 
-def cached(key, producer):
-    """``producer()`` once per pass for ``key``; outside a pass, every call is fresh."""
+def cached(key, producer, *, keep=None):
+    """``producer()`` once per pass for ``key``; outside a pass, every call is fresh.
+
+    ``keep(value)`` false leaves the answer unremembered, so a later reader in the same pass asks again.
+    """
     memo = getattr(_LOCAL, "memo", None)
     if memo is None:
         return producer()
     try:
         return memo[key]
     except KeyError:
-        value = memo[key] = producer()
+        value = producer()
+        if keep is None or keep(value):
+            memo[key] = value
         return value
 
 

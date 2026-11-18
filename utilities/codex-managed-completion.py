@@ -94,6 +94,31 @@ def _observer_expired(args) -> bool:
     return batch_obligations.expire_if_due(args.jobs, duty_id, fd, observer=owner)
 
 
+_OBSERVER_ERROR_TEXT_LIMIT = 300
+
+
+def _observer_error_round(args, exc):
+    """A round whose join or checkpoint raised: keep the cause and the expiry judgment.
+
+    Such a round skips the stop checks, so an observer whose join fails every round
+    would never reach the expiry judgment. This runs that one judgment (an unproven
+    judgment leaves the batch pending, as before) and leaves the cause in the batch
+    record, written only when it changes, so a repeating failure is written once.
+    """
+    duty_id = getattr(args, "_obligation_id", None)
+    if duty_id:
+        cause = {"type": type(exc).__name__, "text": str(exc)[:_OBSERVER_ERROR_TEXT_LIMIT]}
+        if getattr(args, "_observer_error_cause", None) != cause:
+            try:
+                _update_duty(args, duty_id, observer_error={**cause, "at": time.time()})
+            except Exception:  # noqa: BLE001 -- the cause is a diagnostic, never a stop
+                pass
+            else:
+                args._observer_error_cause = cause
+    if _observer_expired(args):
+        raise ObserverExpired("completion-observer-expired")
+
+
 def _update_duty(args, duty_id, **changes):
     fd = getattr(args, "obligation_lock_fd", None)
     if fd is None:
@@ -2009,6 +2034,7 @@ def _execute_once(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 deadline=deadline,
                 stop_check=supervision_stop_check,
                 replacement_checkpoint=replacement_checkpoint,
+                on_observer_error=lambda exc: _observer_error_round(args, exc),
             )
             from dispatch_replacement import adopt_receipt
             attempts, _replaced_attempts = adopt_receipt(args.jobs, attempts, receipt)
@@ -2065,7 +2091,8 @@ def _execute_once(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
         normalized = wait_for_batch(join=project, attempts=attempts, jobs=args.jobs,
             parent_attempt_id=delivery_parent, deadline=deadline,
-            stop_check=projection_stop_check)
+            stop_check=projection_stop_check,
+            on_observer_error=lambda exc: _observer_error_round(args, exc))
         if normalization_error:
             raise normalization_error[0]
         if normalized.get("state") == "watch-expired":

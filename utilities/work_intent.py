@@ -602,8 +602,10 @@ _NUMBER = re.compile(r"^(?P<num>\d+(?:\.\d+)?)[.)]?\s")
 # hold only for a code report (`code-report` writes `## 1. Change Overview` … `## 6. Follow-Ups`);
 # other documents number their own sections, so their headings are read by words only.
 _SECTION_FIELDS = (
+    # A review's blocking findings (`## 병합을 막는 것`, `## Blocking findings`) are what its reader must still deal with.
     ("remaining", ("5",), ("미검증", "실패", "건너뛴", "건너뜀", "남은", "해결하지", "필수", "unverified", "failed",
-                           "skipped", "remaining", "unresolved")),
+                           "skipped", "remaining", "unresolved", "막는 지적", "막는 것", "막는 문제", "병합을 막는", "blocking",
+                           "blockers")),
     # Limits, residual risks and follow-ups are shown with the rest, but only a failed/skipped,
     # unverified or remaining-work heading (and the checks) can say that something failed.
     ("limits", (), ("한계", "limitation", "limits", "open risk")),
@@ -615,6 +617,54 @@ _SECTION_FIELDS = (
     ("changed", ("1",), ("변경 개요", "변경 사항", "변경 내용", "수정 사항", "수정 내용", "변경 파일", "바뀐 것", "고친 것", "고친 행동", "사용자용",
                          "change overview", "changes", "what changed")),
 )
+# A review's blocking-findings headings. Only these get the two readings below: a heading that
+# itself says there is nothing opens no section, and a line in one that says "none" is none (the
+# section's own words, so no other heading's lines change). When in doubt a finding stays open:
+# calling an existing blocker absent is worse than listing one that is not.
+_BLOCKING_WORDS = ("막는 지적", "막는 것", "막는 문제", "병합을 막는", "blocking", "blockers")
+_NO_BLOCKING_HEADING = re.compile(r"(?:없음|없다|없습니다)\s*[.。]?\s*$|^(?:no|zero)\b"
+                                  r"|[:：]\s*(?:none|없음)\s*[.。]?\s*$", re.I)
+_NONE_MARKER = re.compile(r"(?:없음|해당 없음|없습니다|none|n/a|not applicable)", re.I)
+_CONTRAST = re.compile(r"\b(?:but|however|yet|although|except)\b|다만|그러나|하지만|그렇지만|그런데", re.I)
+# A heading that says "none" but turns ("## No blocking issues, but …") opens its section: what follows is a finding.
+_HEAD_CONTRAST = re.compile(r"\b(?:but|however)\b|다만|그러나|하지만", re.I)
+_PAREN_NOTE = re.compile(r"[(（][^.,，。;；()（）]*[)）]")
+
+
+def _says_none(text: str) -> bool:
+    """A blocking-section line that only says there is nothing: the none marker alone, or followed by a
+    plain parenthetical note, or (Korean marker) by one closing sentence. A word, hyphen, colon, comma or
+    dash right after the marker ("None of the callers…", "None-check is missing…", "N/A values crash…") is
+    a finding, and so is anything that turns with "but"/"however"/"다만" after the marker."""
+    text = text.strip()
+    marker = _NONE_MARKER.match(text)
+    if not marker:
+        return False
+    rest = text[marker.end():].strip()
+    if _CONTRAST.search(rest):
+        return False
+    if not rest or _PAREN_NOTE.fullmatch(rest):
+        return True
+    if rest[0] in ".。":
+        after = rest[1:].strip()
+        korean = marker.group(0)[0] in "없해"
+        return not after or (korean and not re.search(r"[.。]\s*\S", after))
+    return False
+
+
+def _blocking_heading(title: str) -> str | None:
+    """The heading's words when it names the review's blocking findings (`막는 지적`, `Blocking findings`)."""
+    number = _NUMBER.match(title)
+    lowered = (title[number.end():] if number else title).lower()
+    leading = re.sub(r"^(?:(?:주요|직접|실행한|수행한|관련|최종|추가|알려진|known|executed|performed|focused|relevant)\s+)+", "", lowered)
+    if any(leading.startswith(word) and _has_word(leading, word) for word in _BLOCKING_WORDS):
+        return lowered
+    if (re.match(r"(?:no|zero)\b", lowered) and _HEAD_CONTRAST.search(lowered)
+            and any(_has_word(lowered, word) for word in _BLOCKING_WORDS)):
+        return lowered   # "No blocking issues, but …": a heading that says none and turns is a blocking section
+    return None
+
+
 _FAILURE_HEADINGS = ("미검증", "실패", "건너뛴", "건너뜀", "해결하지", "unverified", "failed", "skipped",
                      "unresolved")
 # The report's own first line when it states the verdict (`최종 판정: …`, `Final verdict: …`).
@@ -677,8 +727,11 @@ def _section_field(title: str, *, numbered: bool) -> str | None:
     if re.match(r"(?:실행한|돌린|수행한)\s*것(?:$|[\s(·:—-])", lowered):
         return "verified"
     leading = re.sub(r"^(?:(?:주요|직접|실행한|수행한|관련|최종|추가|알려진|known|executed|performed|focused|relevant)\s+)+", "", lowered)
-    if not any(leading.startswith(word) and _has_word(leading, word)
-               for _field, _numbers, words in _SECTION_FIELDS for word in words):
+    blocking = _blocking_heading(title)
+    if not blocking and not any(leading.startswith(word) and _has_word(leading, word)
+                                for _field, _numbers, words in _SECTION_FIELDS for word in words):
+        return None
+    if blocking and _NO_BLOCKING_HEADING.search(blocking) and not _HEAD_CONTRAST.search(blocking):
         return None
     matches = [field for field, _numbers, words in _SECTION_FIELDS
                if any(_has_word(lowered, word) for word in words)]
@@ -699,6 +752,7 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
     Mixed/unknown headings and code fences cannot populate a guessed field."""
     sections: dict[str, list[str]] = {}
     current = None
+    blocking = False   # the open section is the review's blocking findings
     fence = None
     for raw in (text or "").splitlines():
         if raw.lstrip().startswith(('```', '~~~')):
@@ -710,13 +764,15 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
         match = _SECTION.match(raw)
         if match:
             current = _section_field(match["title"].strip(), numbered=numbered)
+            blocking = current == "remaining" and bool(_blocking_heading(match["title"].strip()))
             continue
         bold = _BOLD_FIELD.match(raw)
         if bold:
             label = bold["title"].strip().rstrip(":：")
             current = _section_field(label, numbered=numbered)
+            blocking = current == "remaining" and bool(_blocking_heading(label))
             value = bold["value"].strip()
-            if current and value:
+            if current and value and not (blocking and _says_none(value)):
                 sections.setdefault(current, []).append(value)
             continue
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
@@ -731,12 +787,13 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
             field = _section_field(label, numbered=numbered) if label else None
             if field:
                 value = " · ".join(cell for cell in cells[1:] if cell and not re.fullmatch(r"[-: ]+", cell))
-                if value:
+                if value and not (field == "remaining" and _blocking_heading(label) and _says_none(value)):
                     sections.setdefault(field, []).append(value)
                 current = None
                 continue
         if (current and line and not re.fullmatch(r"[|:\-\s]+", line)
-                and not any(marker in line for marker in _CARRIER_MARKERS)):
+                and not any(marker in line for marker in _CARRIER_MARKERS)
+                and not (blocking and _says_none(line.strip("|").strip()))):
             # A verification section can explicitly say a check was not run.
             # Preserve that declaration as unverified; never call it a pass.
             field = "remaining" if current == "verified" and _UNRUN_CHECK.search(line) else current
@@ -962,6 +1019,7 @@ def _review_degraded(route_file) -> list[str]:
 
 
 _NONE_ITEMS = {"없음", "해당 없음", "없습니다", "none", "n/a", "not applicable"}
+_NONE_WORD_LEAD = re.compile(r"(?:none|n/a|not applicable)[ -]\S", re.I)
 _NONE_LEAD = re.compile(r"^(?:없음|해당 없음|없습니다|none|n/a|not applicable)(?=$|[\s.:：,;()（）—–-])", re.I)
 # What a failed/skipped, unverified or remaining-work line says went wrong or was not done.
 _FAILURE_TEXT = re.compile(
@@ -1020,8 +1078,8 @@ def _failure_kind(line, *, verified=False) -> str | None:
     if not _FAILURE_TEXT.search(rest):
         if rest != text and not re.search(r"[\w가-힣]", rest):
             return None  # "실패한 단계 없음 (errors: 0)": only a statement that nothing failed
-        if _NONE_LEAD.match(text):
-            return None  # "없음 — 모든 단계 수행"
+        if _NONE_LEAD.match(text) and not _NONE_WORD_LEAD.match(text) and not _CONTRAST.search(text):
+            return None  # "없음 — 모든 단계 수행"; "None of the callers…" is a statement, not a none marker
         return "check"
     if _UNSURE_FAILURE.search(rest) and not _STILL_FAILING.search(rest):
         return "check"
