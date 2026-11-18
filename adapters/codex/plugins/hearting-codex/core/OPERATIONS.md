@@ -2106,10 +2106,11 @@ same named files) is held the same way: when the route lineage, those files or
 the installed runtime changes, a later join or finish invocation judges it
 again.
 A pending batch duty older than the 14-day obligation retention is closed as
-`expired` only when every attempt it watches is proven ended and
-process-quiescent by the same registry-plus-process judgment the completion
-join uses; a read that failed, timed out, found no tool or no row, or could not
-tell leaves it pending. The runner and a long-lived observer share that one
+`expired` only when every attempt it watches, and every replacement or retry
+row that continues one of them, is proven ended and process-quiescent by the
+same registry-plus-process judgment the completion join uses; a replacement
+that is claimed but not yet registered, or a read that failed, timed out, found
+no tool or no row, or could not tell, leaves it pending. The runner and a long-lived observer share that one
 judgment, the parent session is told through the ordinary session notice before
 the record changes, and the record itself is kept (nothing is deleted,
 cancelled or retried).
