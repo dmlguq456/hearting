@@ -1596,9 +1596,24 @@ def _placement_result(*argv):
     return result
 
 
+def _project_start_hint():
+    """The window value in this process's environment as a lookup hint, else ``""``.
+
+    A session Claude's background daemon started carries the window value the daemon inherited
+    from whichever window first started it, not one a window gave this session: no hint."""
+    hint = os.environ.get("HERDR_PANE_ID", "")
+    if not hint:
+        return ""
+    try:
+        import peer_address
+        return "" if peer_address._service_hosted(os.getpid()) else hint
+    except Exception:
+        return ""
+
+
 def _project_start_workspace():
     """A directory match locates a workspace; it never proves caller ownership."""
-    hint = os.environ.get("HERDR_PANE_ID")
+    hint = _project_start_hint()
     if not hint:
         return None
     try:
@@ -1724,7 +1739,7 @@ def _start_request(args):
             args.project_workspace = _project_start_workspace()
     args.start_request.update(beside=args.beside,
                               project_workspace=getattr(args, "project_workspace", None),
-                              project_hint=os.environ.get("HERDR_PANE_ID", ""))
+                              project_hint=_project_start_hint())
     if terminal_surface.is_tmux_pane(args.beside or args.pane or ""):
         return _start_tmux_request(args)
     workspace = (args.beside.split(":")[0] if args.beside else
@@ -5247,7 +5262,8 @@ def _watch_publish_ready_receipt(target, native_state, arm, expected, server,
 def _schedule_message_obligation(row, target, pane=None, *, delay_notice_for=None, handoff_acceptance=False):
     """Persist exact transport ownership without copying the sealed message body."""
     sender = row.get("from") or {}
-    recipient = peer_message.pending_delivery_recipient(row) or row.get("to") or {}
+    binding = peer_message.pending_delivery_binding(row)
+    recipient = (binding or {}).get("recipient") or row.get("to") or {}
     sid = recipient.get("session_id")
     harness = recipient.get("harness")
     identity = {"server": _HERDR_SESSION or "default", "pane": pane or "",
@@ -5259,7 +5275,10 @@ def _schedule_message_obligation(row, target, pane=None, *, delay_notice_for=Non
             identity["namespace"] = (_PEER_NAMESPACE or peer_address.caller_endpoint(
                 server=_HERDR_SESSION)["socket"])
     intent = {"ref": row.get("ref"), "body_digest": row.get("body_sha256"),
-              "target": target, "from": sender, "to": recipient,
+              "target": target, "from": sender,
+              # A row that went on to a background session still names the old id: the duty
+              # keeps the row's own target, and its receipt names who took it.
+              "to": row.get("to") if (binding or {}).get("parked_from") else recipient,
               "refs": list(row.get("refs") or []),
               "delay_notice_for": delay_notice_for or ""}
     if row.get("producer_binding") is not None:
@@ -7299,6 +7318,51 @@ def _retire_finished_lineage_bundles(store, *, now=None, deadline_ns=None):
     return result
 
 
+# The last (pgid, log pass) whose group was seen still populated, and when: the
+# group is looked at again at most once a minute, not on every runner tick.
+_RETENTION_GROUP_SEEN: dict = {}
+
+
+def _log_retention_follow_up_due(jobs, state):
+    """Whether the log retirement left more to do and the previous start has settled.
+
+    Read-only on the log retirement state. Anything unknown means no: the six-hour
+    duty stays the fallback, so an unreadable state never turns into a tight loop.
+    """
+    try:
+        import dispatch_log_retention
+        from dispatch_contract import process_group_observation as observe_group
+
+        pass_ns = dispatch_log_retention.follow_up_pass_ns(jobs)
+        last = state.get("last_pass_ns") if isinstance(state, dict) else None
+        if not pass_ns or type(last) is not int or last <= 0:
+            return False
+        # A log pass must have run since the previous start; otherwise a state that
+        # cannot be written, or a pass that keeps finding the lock busy, would restart
+        # the child every minute.
+        if pass_ns <= last:
+            return False
+        if "child_pgid" not in state:
+            # A start recorded before this rule (or a runner that died between its two
+            # writes) names no group; one overlapping start is harmless because each
+            # retention pass takes its own lock and an overlapping one returns busy.
+            return True
+        pgid = state["child_pgid"]
+        if type(pgid) is not int or pgid <= 0:
+            return False
+        seen = _RETENTION_GROUP_SEEN.get("key") == (pgid, pass_ns) and (
+            time.monotonic() - _RETENTION_GROUP_SEEN.get("at", 0.0)
+            < dispatch_log_retention.BACKLOG_DUE_SECONDS)
+        if seen:
+            return False
+        if observe_group(pgid).state == "empty":
+            return True
+        _RETENTION_GROUP_SEEN.update(key=(pgid, pass_ns), at=time.monotonic())
+        return False
+    except Exception:  # noqa: BLE001 -- unknown means the six-hour duty
+        return False
+
+
 def _runner_maintenance_pass(store):
     """Publish derived observations and run the bounded global cleanup duties."""
     import dispatch_recipient_inbox as inbox
@@ -7451,11 +7515,15 @@ def _runner_maintenance_pass(store):
         jobs = root / "jobs.log"
         from dispatch_contract import stable_state_root
         canonical = root == stable_state_root(os.environ).resolve()   # never a fixture's own root
-        if (canonical and jobs.is_file()
-                and peer_obligations.runner_duty_due(state, MAINTENANCE_DUE_SECONDS)):
+        due = canonical and jobs.is_file() and peer_obligations.runner_duty_due(
+            state, MAINTENANCE_DUE_SECONDS)
+        follow = (canonical and jobs.is_file() and not due
+                  and _log_retention_follow_up_due(jobs, state))
+        if due or follow:
             # Recorded first: a start that fails is not retried before the next due window.
+            launched = time.time_ns()
             peer_obligations.write_runner_duty_state(
-                root, "retention", {"last_pass_ns": time.time_ns()},
+                root, "retention", {"last_pass_ns": launched},
                 expected_root_identity=identity)
             child = subprocess.Popen(
                 [sys.executable, str(Path(__file__).resolve().parent / "dispatch_registry_archive.py"),
@@ -7465,7 +7533,15 @@ def _runner_maintenance_pass(store):
             # It forks the passes off and exits at once, so this wait is short and leaves no zombie.
             with contextlib.suppress(subprocess.TimeoutExpired):
                 child.wait(timeout=10)
+            # The child leads its own process group and the forked passes stay in it, so
+            # its pid names the group the next follow-up checks for emptiness.
+            with contextlib.suppress(OSError, ValueError, RuntimeError):
+                peer_obligations.write_runner_duty_state(
+                    root, "retention", {"last_pass_ns": launched, "child_pgid": child.pid},
+                    expected_root_identity=identity)
             result["retention"] = {"started": child.pid}
+            if follow:
+                result["retention"]["follow_up"] = 1
     except (OSError, ValueError, RuntimeError):
         pass
     return result
