@@ -41,6 +41,17 @@ class PeerReadContext:
         self._transfer_roots = None
         self._peer_notice_records = None
         self._end_observation = _UNOBSERVED
+        self._native_sessions = _UNOBSERVED
+
+    def native_sessions(self, loader):
+        """Reuse one native-session census (a ``/proc`` walk) for this read pass.
+
+        Like ``end_observation`` it is an observation of live processes, never
+        delivery state, a claim or an acknowledgement. Only a successful reading is
+        kept; a caller that acts on absence proves the death on its own."""
+        if self._native_sessions is _UNOBSERVED:
+            self._native_sessions = loader()
+        return self._native_sessions
 
     def end_observation(self, loader):
         """Reuse one lazy session-holder reading for every lifetime question of this pass.

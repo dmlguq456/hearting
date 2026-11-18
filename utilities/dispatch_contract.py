@@ -172,6 +172,7 @@ from dispatch_contract_process import (  # noqa: F401
     process_launch_identity, process_namespace_identity, process_namespace_pids,
     process_observation, process_start_ticks, process_state, process_table_scan_scope,
     process_unified_cgroup, ProcessTableScan, prove_attempt_quiescence,
+    quiescence_record_scope,
     recorded_pid_namespace_state, remove_supervisor_lease, residue_live_pids,
     resolve_parent_extinction, runtime_ancestry_binding, scan_process_table,
     signal_exact_process_group, supervisor_lease_is_held, supervisor_lease_path,
