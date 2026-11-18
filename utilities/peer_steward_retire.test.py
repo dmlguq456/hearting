@@ -2920,7 +2920,7 @@ class _ShellHost:
         self.native(binding["harness"], binding["sid"], row["text"])
         return dict(self.result)
 
-    def presence(self, harness, sid):
+    def presence(self, harness, sid, **_kwargs):
         return "present" if (harness, sid) in self.seats else "absent"
 
     @contextlib.contextmanager
@@ -5480,6 +5480,8 @@ class NativeReceivingTurnRecoveryTest(_TmpRootMixin, unittest.TestCase):
              mock.patch("dispatch_terminal_commit.owner_completion_state",
                         return_value=CompletionState("pending")), \
              mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+             mock.patch.object(obligations, "_owner_unsettled_dependency_paths",
+                               return_value=(self.jobs_path,)), \
              mock.patch.object(peer_steward.peer_obligations,
                                "_registered_terminal_state", return_value=None), \
              mock.patch("dispatch_seat_handover._effective", return_value=(sid, "codex")):
@@ -7744,6 +7746,40 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
             "route_hash": route_hash, "closed_at": closed_at,
             "recipient_sid": row.metadata["parent_sid"],
         })
+        retained = join.pending_delivery.read(
+            self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
+        self.assertEqual(retained["state"], "pending")
+
+    def test_closed_route_rechecks_a_parent_the_pass_table_missed_before_dropping(self):
+        # RV-PR1714 follow-up 3: the pass's session table can be a pass old. The
+        # not-required drop trusts only a fresh census, so a parent that is present
+        # now (absent from the table) keeps its notice.
+        import artifact_lifecycle
+        import dispatch_completion_join as join
+        import peer_address
+
+        store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-closed-stale")
+        outcome_path = artifact_lifecycle.canonical_outcome_path(root, route_id)
+        outcome_path.parent.mkdir(parents=True, exist_ok=True)
+        outcome_path.write_text(json.dumps({
+            "schema_version": 4, "route_id": route_id, "route_hash": route_hash,
+            "closed_at": "2026-10-23T00:00:00Z",
+        }), encoding="utf-8")
+        calls = []
+
+        def presence(harness, sid, sessions=None):
+            calls.append(sessions is None)
+            return "present" if sessions is None else "absent"
+
+        stale_table = object()
+        with mock.patch.object(peer_steward, "_pass_native_sessions", return_value=stale_table), \
+             mock.patch.object(peer_address, "presence", side_effect=presence):
+            self._resume_with_agents(duty, store)
+        self.assertEqual(calls, [False, True])
+        kept = store.get(duty["id"])
+        self.assertEqual(kept["state"], "pending")
+        self.assertNotEqual(kept.get("delivery"), "not-required")
         retained = join.pending_delivery.read(
             self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
         self.assertEqual(retained["state"], "pending")
