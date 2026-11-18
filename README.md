@@ -50,7 +50,7 @@ records, so what one session's panel says is what Fleet says about it.
 ### The panel beside each session
 
 New installations open a 40-column panel on the right of every new Claude Code,
-Codex, and OpenCode terminal. Under the project and Git state (and, when the session supervises or is supervised, a `PEERS` row: `[c7] ⚑ ─ [d4]`), the model and
+Codex, and OpenCode terminal. Under the project and Git state (and, when the session supervises or is supervised, a `PEERS` row: `[c7] ⚑  ─ [d4]`), the model and
 context, and the session's title and what it is doing now, each section keeps a
 few rows: questions waiting for you, this session's routes and requests in one
 box of three zones (`direct`, `dispatch`, `request`; a route's first line reads its kind in the color of its field, `code` blue, `lab` amber, `design` rose, `docs` sand, `research` sky, with the intensity after it in the same color, dim for `quick` up to bold for `strong` and beyond, and its time at the right end; each session in it, the owner and every worker, reads as its harness and model, its `CTX` gauge row, and what it is doing now on up to two rows; a stage's workers stand in a box under the stage text, `closed`, `open` or none as the `worker box` setting says), messages, saved memory (`MEM`), what the machine's GPUs are doing and which session holds each (`RESOURCES`), and the usage windows of the three agents

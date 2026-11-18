@@ -691,7 +691,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const worktrees=painted(model.worktrees),sideGit=Array.isArray(model.git_side)?painted(model.git_side):git;
     const sideRepo=Array.isArray(model.repo_side)?painted(model.repo_side):repo;
     const labelled=(label,parts)=>labelWidth?[text(label.padEnd(labelWidth),'dim'),...parts]:parts;
-    // 11-17 (the person's PEERS sketch): `PEERS  [c7] ⚑ ─ [d4] [3b]`: the supervising session, its flag, a dash, then the
+    // 11-17 (the person's PEERS sketch): `PEERS  [c7] ⚑  ─ [d4] [3b]`: the supervising session, its flag, two cells, a dash, then the
     // ones it supervises; the same order from every window. Each number is its harness's color (this window's own bold),
     // the flag alone Fleet's steward pink, the dash and the `·` between two groups dim. No state of any session. Short of
     // cells the last numbers go from the back and the count of the ones a group lost stands inside that group (`[3b] ⚑ ─
@@ -707,7 +707,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const out=[];let rest=keep;
         for(const g of groups){
           const take=Math.min(rest,g.members.length),lost=g.members.length-take;rest-=take;
-          const piece=[number(g.steward),text(' '),flag,text(' '),text('─','dim'),...g.members.slice(0,take).flatMap(e=>[text(' '),number(e)]),
+          const piece=[number(g.steward),text(' '),flag,text('  '),text('─','dim'),...g.members.slice(0,take).flatMap(e=>[text(' '),number(e)]),
             ...(lost?[text(' +'+lost,'dim')]:[])];
           const next=[...out,...(out.length?[text(' · ','dim')]:[]),...piece];
           // A group with no number left stands only where its head and its count fit; else it, and those after it, go.
@@ -1892,7 +1892,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const flagPart=steward?[stewardPart('⚑')]:[];
   // Short of cells the steward mark goes first, then the harness, then the number;
   // the glyph stays to the end.
-  const headParts=pieces=>{const shown=pieces.filter(x=>x.length);return shown.length?[frameText(' '),...shown.flatMap((x,i)=>i?[text(' '),...x]:x),frameText(' ')]:[];};
+  // 11-18: a flag at the end of the head is followed by two cells before the line: `⚑` (U+2691) is drawn two cells wide in some
+  // terminals and would touch the line; the width still counts it as one cell and the second cell is counted as a cell.
+  const headParts=pieces=>{const shown=pieces.filter(x=>x.length);return shown.length?[frameText(' '),...shown.flatMap((x,i)=>i?[text(' '),...x]:x),frameText(shown.at(-1)===flagPart?'  ':' ')]:[];};
   // Spec rule 49 (a): right of the head the top border is the line alone; the gear stands
   // inside, at the right end of the last row.
   const room=Math.max(0,width-3);
@@ -1998,10 +2000,11 @@ function keyRows(pieces,inner,{rows=Infinity,cellWidth}={}){
 // native that paints its own background, or a wide character on the edge, ends there). The top
 // line carries the title and `✕`, the bottom line the sections (the current one bright), and the
 // row above it the keys (the content's last row). Width: text wraps at 76 cells; narrower than 80
-// cells the window less 4; narrower than 28 the whole window. Height: the content's, at most the
+// cells the window less 4; narrower than 28 the whole window. A table popup stands up to 116 cells, the routes popup up to 148. Height: the content's, at most the
 // rows above the strip less 2 (the content then pages inside). Display only: the keys go to the
 // popup's owner (the host) while it stands; nothing here reads input.
-const POPUP_TEXT=76,POPUP_TABLE=116;
+// 11-18: the routes popup alone stands up to 148 cells (`route`), the other table popups at most 116.
+const POPUP_TEXT=76,POPUP_TABLE=116,POPUP_ROUTE=148;
 // A foreground's gray level (0 black .. 255 white), or null for a hue or the terminal's own color.
 function grayLevel(fg){
   if(Number.isInteger(fg)){
@@ -2036,7 +2039,7 @@ function popupLook(part,F,light,colors=256){
 function popupWidth(cols,kind='text'){
   if(cols<28)return Math.max(4,cols);
   if(cols<80)return cols-4;
-  return kind==='table'?Math.min(POPUP_TABLE,cols-4):POPUP_TEXT;
+  return kind==='route'?Math.min(POPUP_ROUTE,cols-4):kind==='table'?Math.min(POPUP_TABLE,cols-4):POPUP_TEXT;
 }
 // The rows the content may take inside the frame. A low window gives up the empty rows round the
 // frame first (under 8 rows), then its bottom line (3 rows or fewer), so the content keeps rows.

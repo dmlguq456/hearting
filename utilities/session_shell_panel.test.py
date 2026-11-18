@@ -427,8 +427,8 @@ for(const [frame,key] of [[0,'tag_steward'],[10,'tag_steward_dim']]){
  assert(!number.beat&&number.foreground===219&&number.bold&&!number.dim,frame+' '+JSON.stringify(number));
  assert(v.animated,'an idle steward still keeps the beat');
 }
-// Narrow: the steward mark goes first, then the harness, then the number; the glyph stays.
-for(const [width,want] of [[20,'┌ ● [e9] claude ⚑ ─'],[19,'┌ ● [e9] claude ─'],[17,'┌ ● [e9] ─']]){
+// Narrow: (11-18: two cells stand after the flag) the steward mark goes first, then the harness, then the number; the glyph stays.
+for(const [width,want] of [[21,'┌ ● [e9] claude ⚑  ─'],[20,'┌ ● [e9] claude ─'],[17,'┌ ● [e9] ─']]){
  const row=text(view.render({width,height:12,side:true,sid:'s',harness:'claude',configuration:{},model:{tag:'[e9]',steward:true},state:'idle',questions:()=>[]}))[0];
  assert(row.startsWith(want),width+' '+row);
 }

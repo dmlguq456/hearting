@@ -113,6 +113,9 @@ const P=t=>({text:t}),text=r=>r.rows.map(row=>row.map(p=>p.text).join(''));
 const body=n=>[...Array(n)].map((_,i)=>[P('row '+i)]).concat([[P('↑↓ · Enter 보내기 · Tab 다음 · Esc/Ctrl+] 돌아가기')]]);
 const pop=(cols,rows,band,n=3,title=[P('› ◑ 3 QUESTIONS · 1/3 · 답 필요')])=>v.popup({cols,rows,band,title,body:body(n),sections:['QUESTIONS','ROUTE'],current:0});
 assert.deepEqual([160,120,90,80,79,60,28,27,20].map(c=>v.popupWidth(c)),[76,76,76,76,75,56,24,27,20]);
+// 11-18: a table popup stands up to 116 cells, the routes popup alone up to 148; under 80 columns both are the window less 4.
+assert.deepEqual([200,160,152,120,100,80,79,60,28,27].map(c=>v.popupWidth(c,'table')),[116,116,116,116,96,76,75,56,24,27]);
+assert.deepEqual([200,160,152,148,120,100,80,79,60,28,27].map(c=>v.popupWidth(c,'route')),[148,148,148,144,116,96,76,75,56,24,27]);
 let r=pop(160,40,0);assert.deepEqual(r.frame,{left:42,top:17,width:76,height:6});
 assert.deepEqual([r.left,r.top,r.width,r.height],[41,16,78,8]);
 const rows=text(r);

@@ -249,7 +249,7 @@ neither the rows left over are below the last section). The top border carries F
 session on the left: the state glyph (a spinner while it works or an answer is
 being typed in for the person, `●` idle, `◑` waiting on a dialog or question),
 the session number (`[e9]`), the harness name in its Fleet hue and, for a
-steward, Fleet's `⚑` (a steward's number takes Fleet's steward color, fixed,
+steward, Fleet's `⚑` followed by two cells before the line (a steward's number takes Fleet's steward color, fixed,
 as on Fleet's session row); the state has no word, its glyph and number share the
 state's color, and the three glyph shapes still differ in `mono` and under
 `NO_COLOR`. Short of cells the steward mark goes first, then the harness, then
@@ -363,12 +363,12 @@ inside), then `✓` when ahead and behind are both known to be 0, else `↑N`/`�
 (nothing when unknown: no upstream to compare with), then the existing merge
 warnings and `💀merged`; no Git row when nothing is left; no folder or branch
 glyph. Directly under `GIT` stands `PEERS` (11-17, the person's PEERS sketch; the label column of
-`REPO`/`GIT`): `PEERS  [c7] ⚑ ─ [d4] [3b]`, the supervising session, its flag, a dash, then the sessions it
+`REPO`/`GIT`): `PEERS  [c7] ⚑  ─ [d4] [3b]`, the supervising session, its flag, two cells, a dash, then the sessions it
 supervises, in that order from every window; a supervised window shows only its own group
-(`[c7] ⚑ ─ [d4]`), a window that is both shows two groups joined by ` · `. Each number wears its session's
+(`[c7] ⚑  ─ [d4]`), a window that is both shows two groups joined by ` · `. Each number wears its session's
 harness color (this window's own bold), the flag is Fleet's steward pink, the dash and the dot dim; it shows no
 session state. Short of cells the last numbers go from the back and the count of the ones a group lost stands
-inside that group (`[3b] ⚑ ─ +2`), never after another group's; a group keeps its head (`[x] ⚑ ─`) while that fits, else the
+inside that group (`[3b] ⚑  ─ +2`), never after another group's; a group keeps its head (`[x] ⚑  ─`) while that fits, else the
 group goes whole and no count is put on the groups left; a window with no relation has no row. The relation
 is the one Fleet already uses (registered steward relations between live sessions of the same repository), handed
 over by the shared cache producer as `session_peers` (at most as many keys as the cache keeps, cut at the producer):
@@ -1058,7 +1058,7 @@ terminal's own look), and closing it leaves no ground behind. One frame
 serves every popup: a thin rounded line one empty cell from what it covers,
 the title and `✕` on its top line, the sections on its bottom line (the current
 one bright) and the keys on the row above; text 76 cells wide, a table the window
-less 4 (116 at most), both the window less 4 under 80 columns and the whole
+less 4 (116 at most; the routes popup 148 at most), both the window less 4 under 80 columns and the whole
 window under 28; its content's height, at most the rows above the strip less 2,
 paging inside. A low window gives up the empty rows round the frame first (under
 8 rows), then its bottom line (3 rows or fewer), so a 20×6 window still shows the

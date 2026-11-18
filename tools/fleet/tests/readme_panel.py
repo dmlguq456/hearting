@@ -307,7 +307,8 @@ def popup_width(cols, kind="text"):
         return max(4, cols)
     if cols < 80:
         return cols - 4
-    return min(116, cols - 4) if kind == "table" else 76
+    # 11-18: the routes popup alone stands up to 148 cells, the other table popups up to 116.
+    return min(148, cols - 4) if kind == "route" else min(116, cols - 4) if kind == "table" else 76
 
 
 # The other harnesses' usage windows (demo values; the session's own harness takes ``World.values``).
@@ -490,7 +491,7 @@ function tableTitle(m,kind,table){
     let popup=null;
     const table=job.table||null;
     if(job.window&&(block.focused||table)){
-      const {cols,rows}=job.window,kind=table?'table':'text',width=view.popupWidth(cols,kind),inner=Math.max(0,width-4),room=view.popupRoom(rows,0);
+      const {cols,rows}=job.window,kind=table?(table.kind==='ROUTE'?'route':'table'):'text',width=view.popupWidth(cols,kind),inner=Math.max(0,width-4),room=view.popupRoom(rows,0);
       const names=sections(base,block,table),current=Math.max(0,names.indexOf(table?table.kind:'QUESTIONS'));
       let title,body;
       if(table){

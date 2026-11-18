@@ -168,7 +168,8 @@ def panel_paint(world, sid, height, *, width=PANEL_COLS, side=True, keys=(), exp
     columns = readme_panel.popup_width(window["cols"]) if window else None
     payload = readme_panel.projection(world, session.harness, sid, columns=width, rows=height, state=state,
                                       popup_columns=columns)
-    table_cols = max(20, min(200, readme_panel.popup_width(window["cols"] if window else 160, "table") - 4))
+    table_cols = max(20, min(200, readme_panel.popup_width(window["cols"] if window else 160,
+                                                           "route" if table == "ROUTE" else "table") - 4))
     job_table = None
     if table:
         job_table = {"kind": table}

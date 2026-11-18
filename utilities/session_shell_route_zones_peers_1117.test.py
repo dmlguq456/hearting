@@ -5,7 +5,7 @@ has a PEERS line.
     each zone's name and mark have their own color (none a harness color or the steward pink); a zone with no rows has no
     rule; no row at all is the empty box it was. The requests are the third zone (no `PEER REQUEST` tab in the title); in
     the `direct` zone the line has no `(direct)`.
-  * The head's `PEERS` line, under GIT: `[c7] ⚑ ─ [d4] [3b]`, the same order from every window; numbers in their harness's
+  * The head's `PEERS` line, under GIT: `[c7] ⚑  ─ [d4] [3b]`, the same order from every window; numbers in their harness's
     color (this window's own bold), the flag the steward pink, the dash and the `·` dim; `+N` short of cells; no line where
     the window has no relation.
   * The data: the same steward relations Fleet reads (same repository, registered), handed to the panel by the cache.
@@ -237,9 +237,9 @@ const supervised={me:'d4',groups:[{steward:end('c7','hb_claude'),members:[end('d
 const both={me:'3b',groups:[{steward:end('c7','hb_claude'),members:[end('3b','hb_codex',true)]},{steward:end('3b','hb_codex',true),members:[end('a1','hb_claude'),end('a2','hb_opencode')]}]};
 const rowsOf=(peers,w=60)=>draw([],[],w,30,{peers});
 const line=(peers,w=60)=>rowsOf(peers,w).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trimEnd()).find(s=>/^PEERS/.test(s));
-assert.equal(line(supervising),'PEERS  [c7] ⚑ ─ [d4] [3b]');
-assert.equal(line(supervised),'PEERS  [c7] ⚑ ─ [d4]');
-assert.equal(line(both),'PEERS  [c7] ⚑ ─ [3b] · [3b] ⚑ ─ [a1] [a2]');
+assert.equal(line(supervising),'PEERS  [c7] ⚑  ─ [d4] [3b]');
+assert.equal(line(supervised),'PEERS  [c7] ⚑  ─ [d4]');
+assert.equal(line(both),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ [a1] [a2]');
 // The row stands right under GIT, with the labels' column; none for a window with no relation (and no empty row).
 const all=rowsOf(supervising).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trimEnd());
 const at=all.findIndex(s=>/^PEERS/.test(s));
@@ -276,21 +276,21 @@ const end=(tag,key,me)=>({tag,key,...(me?{me:true}:{})});
 const many=['a1','a2','a3','a4','a5'].map(t=>end(t,'hb_claude'));
 const peers={me:'3b',groups:[{steward:end('c7','hb_claude'),members:[end('3b','hb_codex',true)]},{steward:end('3b','hb_codex',true),members:many}]};
 const line=(w,p=peers)=>draw([],[],w,30,{peers:p}).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trimEnd()).find(s=>/^PEERS/.test(s));
-assert.equal(line(80),'PEERS  [c7] ⚑ ─ [3b] · [3b] ⚑ ─ [a1] [a2] [a3] [a4] [a5]');
-assert.equal(line(54),'PEERS  [c7] ⚑ ─ [3b] · [3b] ⚑ ─ [a1] [a2] [a3] +2');
+assert.equal(line(80),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ [a1] [a2] [a3] [a4] [a5]');
+assert.equal(line(56),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ [a1] [a2] [a3] +2');
 // The count stands inside the group whose numbers went (never after [3b] of the first group, which would read as that group's).
-assert.equal(line(46),'PEERS  [c7] ⚑ ─ [3b] · [3b] ⚑ ─ [a1] +4');
-assert.equal(line(40),'PEERS  [c7] ⚑ ─ [3b] · [3b] ⚑ ─ +5');       // the person's third sketch at the default panel width
+assert.equal(line(48),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ [a1] +4');
+assert.equal(line(42),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ +5');       // the person's third sketch, two cells wider for the second cell after each flag
 // Where the second group's head and count do not fit, the group goes whole and no count is put on the group left.
-assert.equal(line(36),'PEERS  [c7] ⚑ ─ [3b]');
-assert.equal(line(34),'PEERS  [c7] ⚑ ─ [3b]');
-// Two supervisors of one window: the second one's head with its count, else it goes whole (never `[c7] ⚑ ─ [3b] +1`).
+assert.equal(line(36),'PEERS  [c7] ⚑  ─ [3b]');
+assert.equal(line(34),'PEERS  [c7] ⚑  ─ [3b]');
+// Two supervisors of one window: the second one's head with its count, else it goes whole (never `[c7] ⚑  ─ [3b] +1`).
 const two={me:'3b',groups:[{steward:end('c7','hb_claude'),members:[end('3b','hb_codex',true)]},{steward:end('e1','hb_claude'),members:[end('3b','hb_codex',true)]}]};
-assert.equal(line(60,two),'PEERS  [c7] ⚑ ─ [3b] · [e1] ⚑ ─ [3b]');
-assert.equal(line(36,two),'PEERS  [c7] ⚑ ─ [3b]');
+assert.equal(line(60,two),'PEERS  [c7] ⚑  ─ [3b] · [e1] ⚑  ─ [3b]');
+assert.equal(line(36,two),'PEERS  [c7] ⚑  ─ [3b]');
 // One group: its own count after its own numbers.
 const one={me:'c7',groups:[{steward:end('c7','hb_claude',true),members:['d4','3b','a1','a2'].map(t=>end(t,'hb_claude'))}]};
-assert.equal(line(36,one),'PEERS  [c7] ⚑ ─ [d4] [3b] +2');
+assert.equal(line(36,one),'PEERS  [c7] ⚑  ─ [d4] [3b] +2');
 // No width draws a `+N` that follows the numbers of another group, or a row wider than the room.
 const cells=l=>[...l].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 for(const p of [peers,two,one])for(let w=34;w<=90;w++){
@@ -309,7 +309,7 @@ assert(bareRow&&!/PEERS/.test(bareRow),bareRow);
 const end=(tag,key,me)=>({tag,key,...(me?{me:true}:{})});
 const peers={me:'c7',groups:[{steward:end('c7','hb_claude',true),members:[end('d4','hb_claude'),end('3b','hb_codex')]}]};
 const rows=draw([direct],[],110,16,{side:false,peers});
-assert(rows.some(s=>/PEERS \[c7\] ⚑ ─ \[d4\] \[3b\]/.test(s)),rows.join('\n'));
+assert(rows.some(s=>/PEERS \[c7\] ⚑  ─ \[d4\] \[3b\]/.test(s)),rows.join('\n'));
 const none=draw([direct],[],110,16,{side:false});
 assert(!none.some(s=>/PEERS/.test(s)));
 """)
