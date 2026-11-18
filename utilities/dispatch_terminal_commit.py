@@ -575,6 +575,15 @@ def _seal_completion_summary(request, route, primary, slot, *, publication=None)
                 row = exact_attempt_row(Path(request.jobs), request.owner_attempt_id).metadata
             if row.get("reconcile_reason") == "completed-audit-with-findings":
                 assessment = "FAIL"
+            elif row.get("worker_type") != "owner":
+                # A unit route's leg: its FAIL handoff with a readable report reads as PASS plus this
+                # assessment (the same reading as an audit's), left in the exact log and the row.
+                from codex_dispatch_terminal import inspect_terminal_attempt
+                view = inspect_terminal_attempt(row.get("log_file"), worktree=route["cwd"],
+                    artifact_root_metadata=route.get("artifact_root"), worker_type=row.get("worker_type"),
+                    artifact_binding=row)
+                if view.get("assessment_verdict") == "FAIL":
+                    assessment = "FAIL"
         except Exception:  # noqa: BLE001 -- an unreadable row only leaves the assessment unnamed
             assessment = None
         text = work_intent.completion_summary(route, primary, route_file=request.route_file,
@@ -787,7 +796,7 @@ def verify_request_identity(request, route, *, registry_rows=None):
     binding = validate_owner_route(jobs=request.jobs, route_file=request.route_file,
                                    owner_attempt_id=request.owner_attempt_id,
                                    registry_rows=registry_rows)
-    owners = [(fields, meta) for fields, meta in rows if meta.get("worker_type") == "owner"
+    owners = [(fields, meta) for fields, meta in rows if dispatch_contract.finishes_route(meta)
               and (meta.get("owner_route_id") == route["route_id"]
                    or meta.get("route_id") == route["route_id"]
                    or meta.get("attempt_id") == request.owner_attempt_id)]
@@ -931,7 +940,7 @@ def _exact_owner_handoff(jobs: Path, attempt: str, route: Mapping[str, Any], *,
             if len(matches) != 1:
                 return None
             fields, meta = matches[0]
-        if meta.get("worker_type") != "owner":
+        if not dispatch_contract.finishes_route(meta):
             return None
         log_file = meta.get("log_file")
         if not isinstance(log_file, str) or not log_file:
@@ -939,7 +948,7 @@ def _exact_owner_handoff(jobs: Path, attempt: str, route: Mapping[str, Any], *,
         from codex_dispatch_terminal import inspect_terminal_attempt
         inspected = inspect_terminal_attempt(
             log_file, worktree=fields[3], artifact_root_metadata=route.get("artifact_root"),
-            worker_type="owner", artifact_binding=meta)
+            worker_type=meta.get("worker_type"), artifact_binding=meta)
         if (inspected.get("state") != "valid" or inspected.get("verdict") != "PASS"
                 or inspected.get("artifact_state") != "readable"):
             return None
@@ -2241,7 +2250,7 @@ def _historical_request(jobs, status, metadata, *, selected_registry_rows=None, 
                 or meta.get("route_id") != route["route_id"] or meta.get("route_hash") != digest))
             or fields[1] not in {"open", "running", "done"} or meta.get("attempt_id") != metadata["attempt_id"]
             or meta.get("registered_worker") != "1" or meta.get("dispatch_depth") != "1"
-            or meta.get("worker_type") != "owner" or meta.get("harness") not in dispatch_contract.WRAPPER_PARENT_HARNESSES
+            or not dispatch_contract.finishes_route(meta) or meta.get("harness") not in dispatch_contract.WRAPPER_PARENT_HARNESSES
             or (fields[1] == "done" and not verdict_pass(meta))):
         raise TerminalCommitError("route-identity-unverified", "historical-owner-identity")
     root = Path(route["artifact_root"]).resolve()

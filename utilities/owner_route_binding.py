@@ -1230,6 +1230,17 @@ _QUICK_NODE_AXES = {
 }
 
 
+def _unit_leg_axes(node):
+    """The (worker type, unit, depth) a unit route's leg must carry, rebuilt from the recipe and the unit head."""
+    try:
+        registry = ROUTE.TOPO.load_registry()
+        recipe = next(r for r in registry["recipes"] if r["capability"] == ROUTE.TOPO.UNIT_CAPABILITY)
+        leg = ROUTE.unit_leg_node(recipe, node.get("unit"), registry)
+    except (StopIteration, TypeError, ValueError, KeyError, OSError):
+        return None
+    return (leg["worker_type"], leg["unit"], leg["dispatch_depth"])
+
+
 def derive_quick_owner_binding(route_file: str | Path, **kwargs) -> QuickOwnerRouteBinding:
     """Compatibility entry for quick node bindings."""
     return _derive_depth1_node_binding(route_file, **kwargs)
@@ -1275,10 +1286,12 @@ def _derive_depth1_node_binding(route_file: str | Path, *, worktree: str | Path,
         validate_owner_route_binding(path, worktree=worktree, capability=capability,
                                      capability_mode=capability_mode, intensity=intensity,
                                      harness=harness)
+    node = next((n for n in route.get("nodes", []) if n.get("id") == route_node), None)
     expected = _QUICK_NODE_AXES.get(str(route_node))
+    if expected is None and route.get("capability") == ROUTE.TOPO.UNIT_CAPABILITY and isinstance(node, dict):
+        expected = _unit_leg_axes(node)   # a unit route's one leg: the recipe's template and the unit head
     if expected is None:
         raise OwnerRouteBindingError("quick-node-tuple-invalid")
-    node = next((n for n in route.get("nodes", []) if n.get("id") == route_node), None)
     if not isinstance(node, dict):
         raise OwnerRouteBindingError("quick-owner-node-missing")
     if (node.get("worker_type"), node.get("unit"), node.get("dispatch_depth")) != expected:

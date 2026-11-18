@@ -292,10 +292,13 @@ def _dispatch_route_references(metadata: dict) -> list[dict]:
             and metadata.get("worker_type") == "owner"
             and metadata.get("unit") == "_kernel/owner"
         )
+        # The one leg of a unit route is the same kind of row: a depth-1 worker that is not the owner,
+        # named by the leg's own unit. The sealed node it names must be a depth-0 leg of that worker type.
         frame_leg = (
             str(metadata.get("dispatch_depth")) == "1"
-            and metadata.get("worker_type") == "frame"
-            and metadata.get("unit") == "plan/frame"
+            and ((metadata.get("worker_type") == "frame" and metadata.get("unit") == "plan/frame")
+                 or (metadata.get("worker_type") in {"review", "stage", "support"}
+                     and bool(metadata.get("unit")) and metadata.get("unit") != "_kernel/owner"))
         )
         if str(metadata.get("dispatch_depth")) != "2" and not (quick_owner or frame_leg):
             raise ValueError("stage-route-binding-axis-invalid")

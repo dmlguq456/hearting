@@ -1479,6 +1479,17 @@ class ObligationStoreTest(unittest.TestCase):
                 self.assertTrue(obligations.ensure_runner(self.root))
                 spawn.assert_called_once()
 
+    def test_the_shared_runner_does_not_inherit_the_starting_workers_attempt_tag(self):
+        self.store.create("message-reconnect", "message", {"session_id": "parent"},
+                          {"ref": "a" * 32})
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": "att-starting-worker", "HEARTING_FIXTURE_KEPT": "1"}), \
+             mock.patch.object(obligations.subprocess, "Popen") as spawn, \
+             mock.patch.object(obligations, "_RUNNERS", []):
+            self.assertTrue(obligations.ensure_runner(self.root))
+        env = spawn.call_args.kwargs["env"]
+        self.assertNotIn("AGENT_DISPATCH_ATTEMPT_ID", env)   # else the worker's own process count holds its row open
+        self.assertEqual(env.get("HEARTING_FIXTURE_KEPT"), "1")
+
     def test_retire_lock_waits_for_legacy_and_releases_after_processing_error(self):
         self.store.root.mkdir(parents=True)
         with (self.store.root / "runner.lock").open("w") as legacy:
