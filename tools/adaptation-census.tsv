@@ -89,6 +89,7 @@ shared-utility-deferred	human_wait_state.py
 shared-utility-deferred	interactive-main-recovery.py
 shared-utility-deferred	memory-store.sh
 shared-utility-deferred	merge-line.py
+shared-utility-deferred	memory_work_labels.py
 shared-utility-deferred	opencode_context_window.py
 shared-utility-deferred	opencode_session_runtime.py
 shared-utility-deferred	owner_write_advisory.py
@@ -461,6 +462,8 @@ tool-deferred	measure_e2e_latency.py
 tool-deferred	measure_e2e_latency.test.py
 tool-deferred	measure_hook_before_after.py
 tool-deferred	measure_state_file_before_after.py
+tool-deferred	measure-unit-pilot.py
+tool-deferred	measure_unit_pilot.test.py
 tool-deferred	migration-manifest.py
 tool-deferred	migration_manifest.test.py
 tool-deferred	native-skill-discovery.test.py

@@ -2344,7 +2344,12 @@ def main():
                               "next_step":"Retain the correction. Inspect the exact owner; do not restart it or treat a file edit as delivery."}))
             return 69
         try:
-            result=(submit(jobs,attempt,a.message_file.read_text(),a.request_id)
+            import memory_work_labels
+            stage_unit=memory_work_labels.stage_unit_label(jobs,given,_find_attempt_row_metadata)
+        except Exception:
+            stage_unit=None  # a label that cannot be read is no label
+        try:
+            result=(submit(jobs,attempt,a.message_file.read_text(),a.request_id,unit=stage_unit)
                     if a.message_file else inspect(jobs,attempt))
         except InputError as exc:
             refusal={"state":"not-admitted","reason":str(exc),
@@ -2357,6 +2362,14 @@ def main():
             return 69
         if attempt!=a.attempt_id:
             result["redirected_from"]=a.attempt_id
+        if a.message_file:
+            # A value for the main session: the labels it can leave on a "my way" record. Nothing is written.
+            try:
+                labels=memory_work_labels.correction_labels(frame_path,stage_unit)
+            except Exception:
+                labels=[]
+            if labels:
+                result["memory_labels"]=labels
         from dispatch_owner_input import blocked_owner_answers
         if (a.message_file and not result.get("consumer_recovery")
                 and (result.get("retained") or blocked_owner_answers(jobs,attempt))):

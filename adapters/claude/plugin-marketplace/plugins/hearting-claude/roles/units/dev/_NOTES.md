@@ -23,3 +23,13 @@ Merged sources per unit: `roles/modes/dev/<mode>.md` (EN), `adapters/claude/agen
 10. **new-lib dependency-approval divergence resolved to stricter EN.** KO `:15` "외부 패키지 추가 시 사용자에 한 줄 확인" (one-line heads-up) vs EN `roles/modes/dev/new-lib.md:27` "explicit approval or a parent plan that already authorizes them" — unit takes the stricter EN contract.
 
 11. **Team Agent Memory paragraph merged into memory-flow refs.** `dev-team.md:67-69` ("do not record transient invocation frequency or task state") is semantically covered by `_shared/memory-flow.md` ("do not store one-off task detail"); the specific anti-target "invocation frequency" is recorded here in case the fragment wording is judged not to cover it.
+
+## Two-layer pilot (2026-11-18) — placement log: dev/backend
+
+The body is split into `## 지킬 것` and `## 참고`. **No line was removed**; old `##`
+headings became `###`. 지킬 것: ownership boundary (UI / infrastructure / library API belong
+elsewhere), spec-backed check, the whole Procedure, the whole Guardrails (migration / auth /
+deployment need explicit scope; signature changes; preserve inputs and outputs), Output.
+참고: the role sentence (it calls this unit the backend of a user-facing application although
+it executes every code route — kept as a default, not a must), Focus list, cross-project
+profile preload (`tools/memory/mem.py`), memory.
