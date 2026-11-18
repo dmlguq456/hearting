@@ -128,12 +128,13 @@ def route_kind(row):
         shown["legs"] = row["legs"]
     # 11-17 (route row 5): the kind's own intensity word and the chain of kinds the route continues (name and state).
     intensity = sanitize_title(str(row.get("intensity") or ""))[:32]
-    if intensity:
+    unit_route = str(row.get("capability") or "") == "unit"
+    if intensity and not unit_route:          # (a unit route's `quick` is not a choice: the first line has no bracket)
         shown["intensity"] = intensity
     chain = [{"name": sanitize_title(str(leg[0]))[:24], "state": sanitize_title(str(leg[1]))[:12]}
              for leg in (row.get("chain") or ())[:6]
              if isinstance(leg, (list, tuple)) and len(leg) >= 2 and sanitize_title(str(leg[0]))]
-    if chain:
+    if chain and not unit_route:
         shown["chain"] = chain
     return shown
 
@@ -342,10 +343,26 @@ def route_row(row, now=None, *, cells=None):
     if kind_word:
         shown["kind_word"] = kind_word
         # 11-18: the field whose hue the kind word and its bracket wear (one of five); none = the body color.
-        from .palette import route_field
+        from .palette import route_field, ROUTE_FIELDS
         field = route_field(sanitize_title(str(row.get("field") or ""))[:16], kind_word)
         if field:
             shown["kind_field"] = field
+        # A unit route (one worker, no owner): its first word is the route's field (what the work is: `code`, `docs`; an
+        # older route that records none keeps `unit`) and the unit's short name (`qa/code-review` reads `code-review`) stands
+        # on the worker's line. It is nobody's leg and has no bracket: its intensity is not a choice.
+        if kind_word == "unit":
+            shown["unit_route"] = True
+            unit = sanitize_title(str(row.get("worker_unit") or "")).rsplit("/", 1)[-1][:48]
+            if unit:
+                shown["unit_word"] = unit
+            word = sanitize_title(str(row.get("field") or ""))[:16]
+            if word in ROUTE_FIELDS:
+                shown["kind_word"] = word
+                field = route_field(word, word)
+                if field:
+                    shown["kind_field"] = field
+                else:
+                    shown.pop("kind_field", None)
     shown.update(doer_paint(row, cells))
     minutes = None
     if _number(row.get("since")) is not None:
