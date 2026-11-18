@@ -33,7 +33,7 @@ function fixture(delivery){
   fleetView:undefined,paste:false,relay:false,dragging:false,heldBytes:0,sessionDetails:false,keyTail:'',actionLines:[],
   table:null,popupWatch:[],activated:true,ended:false,succeeding:false,expanded:true,
   panelHits:[{row:0,left:30,right:38,action:'settings'}],geometry:()=>({side:true,panelColumn:93}),panelRow:()=>0,height:()=>30,panelColumns:()=>40,
-  terminal:{modes:{mouseTrackingMode:'none'}},nowStop(){},queueLayout(){},queueDisplay(){},rebuildDisplay(){},observeInput(){},openFleet(){},
+  terminal:{modes:{mouseTrackingMode:'none'}},heldStop(){},queueLayout(){},queueDisplay(){},rebuildDisplay(){},observeInput(){},openFleet(){},
   // The press targets stand for the placement on screen (#1586 review follow-up 5); a hand fold choice.
   layoutQueued:false,panelHitsPlacement:'shown',placement:()=>'shown',foldByHand(){},
   source:(op,value)=>{saved.push({op,value});return Promise.resolve({ok:true,settings:value.settings});},

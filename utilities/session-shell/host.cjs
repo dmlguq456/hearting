@@ -339,26 +339,32 @@ function readAction(extra,operation='action',own=false) {
     worker.stdin.end(JSON.stringify({op:operation,binding:binding(),...extra})+'\n');
   });
 }
-// The NOW popup's reader. A key in its folded list asks for the list again with the row stood on open, and a
-// backend started for each key costs 0.2 s (its modules load again), so one backend is held while that popup
-// stands and asked a line at a time (the backend already answers a line at a time). It ends with the popup
+// The popup's own reader (NOW's list, and the routes popup's route and page). A key in NOW's folded list asks for
+// the list again with the row stood on open, and a backend started for each key costs 0.2 s (its modules load
+// again); a routes popup's key would otherwise collect Fleet again (4-9 s). So one backend is held while that
+// popup stands and asked a line at a time (the backend already answers a line at a time). It ends with the popup
 // (closed, another section, the window ended) and when it fails; a read it cannot answer in time, or at all,
 // is made the one-shot way as before, and the popup then reads that way for as long as it stands.
-let nowWorker=null,nowNext=0;
-function nowStop(){
-  const worker=nowWorker;nowWorker=null;if(!worker)return;
-  if(worker.pending){clearTimeout(worker.pending.timer);worker.pending.resolve(null);worker.pending=null;}
+let heldWorker=null,heldNext=0;
+// keep: the kind of popup being opened; a backend held for that kind stays.
+function heldStop(keep){
+  if(keep&&heldWorker&&heldWorker.kind===keep)return;
+  const worker=heldWorker;heldWorker=null;if(!worker)return;
+  // A routes read cut at its time says so: the one-shot read would collect the same again and wait as long once more.
+  // NOW's (a list in milliseconds) goes the one-shot way.
+  if(worker.pending){clearTimeout(worker.pending.timer);worker.pending.resolve(worker.cut&&worker.kind!=='NOW'?{ok:false,reason:'timeout'}:null);worker.pending=null;}
   try{worker.stdin.end();}catch{}
   try{worker.kill('SIGKILL');}catch{}
 }
-function nowRead(extra){
+function heldRead(kind,extra,wait){
   return new Promise(resolve=>{
-    let worker=nowWorker;
+    if(heldWorker&&heldWorker.kind!==kind)heldStop();
+    let worker=heldWorker;
     if(!worker){
       try{worker=cp.spawn(process.env.HEARTING_SHELL_PYTHON,[path.join(__dirname,'..','session_shell.py'),'backend'],{stdio:['pipe','pipe','ignore']});}
       catch{resolve(null);return;}
-      worker.pending=null;worker.raw='';worker.warm=false;nowWorker=worker;
-      const fail=()=>{if(nowWorker===worker)nowStop();else if(worker.pending){clearTimeout(worker.pending.timer);worker.pending.resolve(null);worker.pending=null;}};
+      worker.pending=null;worker.raw='';worker.warm=false;worker.kind=kind;heldWorker=worker;
+      const fail=()=>{if(heldWorker===worker)heldStop();else if(worker.pending){clearTimeout(worker.pending.timer);worker.pending.resolve(null);worker.pending=null;}};
       worker.on('error',fail);worker.stdin.on('error',fail);worker.on('close',fail);
       worker.stdout.setEncoding('utf8');
       worker.stdout.on('data',bytes=>{
@@ -373,14 +379,14 @@ function nowRead(extra){
         if(Buffer.byteLength(worker.raw)>65536)fail();
       });
     }
-    const id=++nowNext;
+    const id=++heldNext;
     // The first answer waits for the backend to start; the ones after it come in milliseconds.
-    const timer=setTimeout(()=>{if(nowWorker===worker)nowStop();},worker.warm?4000:12000);
+    const timer=setTimeout(()=>{if(heldWorker===worker){worker.cut=true;heldStop();}},!worker.warm?12000:(wait||4000));
     worker.pending={id,timer,resolve};
-    try{worker.stdin.write(JSON.stringify({id,op:'popup',binding:binding(),...extra})+'\n');}catch{if(nowWorker===worker)nowStop();}
+    try{worker.stdin.write(JSON.stringify({id,op:'popup',binding:binding(),...extra})+'\n');}catch{if(heldWorker===worker)heldStop();}
   });
 }
-process.on('exit',nowStop);
+process.on('exit',heldStop);
 function emit(value) { process.stdout.write(value); }
 function geometry(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration});}
 // Spec rule 49: the panel opened or folded through the same layout path a window resize takes
@@ -725,8 +731,10 @@ function staleWords(stale){
   const failed=stale.failed===true,words=label(failed?'popup_shown_failed':'popup_shown_at',failed?'as read at {time} · could not read again':'as read at {time} · reading again');
   const at=Number(stale.at);
   if(!(at>0)){const cut=words.indexOf(' · ');return cut>=0?words.slice(cut+3):words.replace('{time}','').trim();}
-  const d=new Date(at*1000);
-  return words.replace('{time}',String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'));
+  const d=new Date(at*1000),two=n=>String(n).padStart(2,'0'),today=new Date();
+  // A reading of another day says the day (`11-17 18:30`); today's is the time alone.
+  const day=d.toDateString()===today.toDateString()?'':two(d.getMonth()+1)+'-'+two(d.getDate())+' ';
+  return words.replace('{time}',day+two(d.getHours())+':'+two(d.getMinutes()));
 }
 function tableRows(inner){
   const t=table;
@@ -818,6 +826,9 @@ function tableParts(result){
 // stands at once; Fleet's lines are read one at a time and fill the popup standing when they arrive
 // (its width and generation as asked), and are not kept when either changed.
 let fleetAsking=false,fleetAgain=false,fleetWidth=0,fleetGeneration=0;
+// A collection the held backend made is drawn again by a key for as long as it is fresher than this many seconds; an older
+// one is drawn at once with the words that it is not this reading's, and read again behind them.
+const HELD_READ_AGE=60;
 function askTable(){
   const t=table;if(!t||!POPUP_KIND[t.kind])return;
   if(tableAsking){tableAgain=true;return;}
@@ -827,13 +838,19 @@ function askTable(){
   // The NOW list folds to the lines the popup has: its rows less the key line and the place (3).
   const room=now?Math.max(3,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-3)):Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
   const status=t.kind==='STATUS';
+  const routeTable=t.kind==='ROUTE',pageAsked=!!t.page;
+  // The routes popup's held backend draws a route unfolded or its page from the collection it already made while the
+  // panel's route rows are the ones that collection was read for (`reuse`); else it collects (a first read, a changed key).
+  const collect=!!t.collect;t.collect=false;
+  const reuse=routeTable&&!collect&&t.readKey!==undefined&&t.readKey===(popupKeys.ROUTE??null);
+  const aged=reuse&&Date.now()/1000-(t.readAt||0)>=HELD_READ_AGE;
   const ask=extra=>{
     const asked={kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,
-      ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),...extra}:{})};
-    if(!now||t.noWorker)return readAction(asked,'popup',true);
-    // The NOW popup's own backend answers. A read it did not answer is made the one-shot way (and the popup reads
+      ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),...extra}:{}),...(reuse?{reuse:true}:{})};
+    if(!(now||routeTable)||t.noWorker)return readAction(asked,'popup',true);
+    // The popup's own backend answers. A read it did not answer is made the one-shot way (and the popup reads
     // that way from then on); a popup that is gone by then starts nothing.
-    return nowRead(asked).then(result=>{
+    return heldRead(t.kind,asked,now?undefined:(reuse?4000:12000)).then(result=>{
       if(result)return result;
       t.noWorker=true;
       return table===t?readAction(asked,'popup',true):{ok:false,reason:'action-unavailable'};
@@ -862,11 +879,17 @@ function askTable(){
       t.error=!t.loaded;
       // A first screen that stands because the reading did not come (or was cut at 12 s) says so; its rows stay.
       if(t.kind==='ROUTE'&&t.stale)t.stale={...t.stale,failed:true};
+      // A table read before that could not be read again says so, as a first screen does (#1730 review).
+      else if(t.kind==='ROUTE'&&t.loaded&&t.readAt)t.stale={at:t.readAt,failed:true};
       queueDisplay();return;
     }
     const anchor=route?routeAnchor(t):null;
     t.hits=Array.isArray(result.hits)?result.hits:[];t.loaded=true;t.error=false;loaded=true;
-    if(t.kind==='ROUTE')t.stale=null;
+    if(t.kind==='ROUTE'){
+      t.stale=null;t.readKey=keyAsked??null;t.readAt=Number(result.read_at)||atAsked;
+      // A collection older than a minute is drawn with the words (its time is when it was collected) and collected again behind them.
+      if(aged){t.stale={at:t.readAt,failed:false};t.collect=true;tableAgain=true;}
+    }
     if(status){
       // The document first (it waits on nothing of Fleet's); Fleet's lines come after and stand above it.
       t.title=typeof result.title==='string'?result.title:'';t.doc=tableParts(result);t.rows=[...(t.head||[]),...t.doc];
@@ -880,8 +903,10 @@ function askTable(){
       }else followOpen(t);
     }
     if(Array.isArray(result.routes))t.routes=result.routes;
-    if(t.kind==='ROUTE'&&t.page&&result.page!==true)t.page=false;
-    if(route)routePopup={sid,width,open:openAsked,key:keyAsked,rows:t.rows,hits:t.hits,routes:t.routes,at:atAsked};
+    if(t.kind==='ROUTE'&&t.page&&pageAsked&&result.page!==true)t.page=false;
+    // A page asked for while the table was being read opens at its top, not where the table's own scroll followed the row to.
+    if(t.kind==='ROUTE'&&result.page===true&&t.pageTop){t.scroll=0;t.pageTop=false;}
+    if(route)routePopup={sid,width,open:openAsked,key:keyAsked,rows:t.rows,hits:t.hits,routes:t.routes,at:t.readAt};
     queueDisplay();
   }).finally(()=>{
     tableAsking=false;
@@ -974,7 +999,7 @@ function followOpen(t){
 // Opening a popup (a press on its section, Ctrl+], ←→ inside one). The keys are its own from now on.
 function openPopup(name,open=''){
   epoch++;empty=false;actionLines=[];resetTableInput();
-  if(name!=='NOW')nowStop();
+  heldStop(name);
   if(name==='QUESTIONS'){table=null;block.enter();queueDisplay();return;}
   const was=table;
   // The routes popup opens with the pressed route unfolded, else the most pressing one.
@@ -1010,7 +1035,7 @@ function rankedRoutes(){
 }
 function closePopup(){
   resetTableInput();
-  table=null;nowStop();
+  table=null;heldStop();
   if(block.focused)block.leave();
   actionLines=[];queueDisplay();
 }
@@ -1033,7 +1058,7 @@ function moveRow(delta){
 function enterRow(){
   const t=table;if(!t)return;
   if(t.kind==='NOW'){enterNow(t);return;}
-  if(t.kind==='ROUTE'&&t.open){t.page=!t.page;t.scroll=0;askTable();}
+  if(t.kind==='ROUTE'&&t.open){t.page=!t.page;t.scroll=0;t.pageTop=t.page;askTable();}
 }
 // Enter in the NOW popup: a prompt or NOW row reads its part of the conversation here (Enter again is back at
 // the list, on that row); a route, question or message row opens that section's popup. No key goes to the window.
@@ -1305,7 +1330,7 @@ function openFleet() {
     const session=pty.spawn(process.env.HEARTING_SHELL_PYTHON,[exe,'--explorer'],
       {cols,rows,cwd:process.cwd(),env:{...process.env}});
     const view={terminal:vt,child:session,closing:false,inputTail:'',paste:false};
-    fleetView=view;table=null;nowStop();block.leave();last=[];emit('\x1b[2J');
+    fleetView=view;table=null;heldStop();block.leave();last=[];emit('\x1b[2J');
     vt.onData(data=>session.write(data));vt.onWriteParsed(schedule);
     session.onData(data=>{try{vt.write(data);}catch{session.write('q');rawRelay();}});
     session.onExit(()=>{
@@ -1411,10 +1436,12 @@ let popupKeys={};
 function refreshPopups(panel){
   const keys={NOW:JSON.stringify(panel.now||''),ROUTE:JSON.stringify([(Array.isArray(panel.routes)?panel.routes:[]).map(r=>[r.id,r.title,r.state,r.kind,r.stage,r.outcome,r.elapsed]),panel.route_label])};
   const changed=name=>popupKeys[name]!==undefined&&popupKeys[name]!==keys[name];
-  if(table&&table.kind==='ROUTE'&&changed(table.kind))askTable();
+  const route=table&&table.kind==='ROUTE'&&changed('ROUTE');
   // A standing NOW list reads again when this session's NOW changed (the read it holds is still the one shown).
-  if(table&&table.kind==='NOW'&&!table.page&&table.list&&changed('NOW'))askTable();
+  const now=table&&table.kind==='NOW'&&!table.page&&table.list&&changed('NOW');
+  // The key is in place before the reading it starts, so what it reads is kept under the key it stands for.
   popupKeys=keys;
+  if(route||now)askTable();
 }
 async function projection() {
   if(!sid||ended||relay||succeeding)return;if(projecting){projectionPending=true;return;}
@@ -1494,6 +1521,7 @@ function rawRelay() {
   // before that one is told to read; a `retire` already sent still arrives and ends this host.
   if(succeeding){succeeding=false;try{successionChannel?.end();}catch{}try{child.resume();process.stdin.resume();}catch{}}
   if(fleetView){try{fleetView.child.write('q');}catch{}fleetView=undefined;}
+  heldStop();
   clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);frameTimer=projectionTimer=beatTimer=undefined;
   mouseInput?.flush();
   try{terminal.dispose();}catch{}
@@ -1902,9 +1930,10 @@ async function lifecycle(req) {
       ...(cleared?{selected:panelModel.selected,model_value:panelModel.model_value,effort_value:panelModel.effort_value}:{})};panelSections=undefined;panelLines=[];
     projectionKey='';footer='';footerSegments=[];
     // A popup reads one session's values: another selection closes it; the same session selected again
-    // with no key between (an OpenCode plugin reload) keeps it, read again for the session as it is now.
+    // with no key between (an OpenCode plugin reload) keeps it, read again for the session as it is now. The popup's held
+    // backend ends with it either way (its collection is not this session's).
     const again=unselected&&unselected.sid===req.sid&&unselected.nativeEpoch===nativeEpoch;
-    table=again?unselected.table:null;routeScroll=again?unselected.routeScroll:0;unselected=null;if(table)setImmediate(askTable);
+    heldStop();table=again?unselected.table:null;routeScroll=again?unselected.routeScroll:0;unselected=null;if(table)setImmediate(askTable);
     if(routePopup&&routePopup.sid!==req.sid)routePopup=null;
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();
@@ -1922,7 +1951,7 @@ async function lifecycle(req) {
   sequence=req.seq;const was=state;
   if(req.event==='deselect'){
     unselected={sid:req.sid,nativeEpoch,table,routeScroll};
-    selection++;sid='';state=harness==='opencode'?'idle':'unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;table=null;nowStop();block.update([]);
+    selection++;sid='';state=harness==='opencode'?'idle':'unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;table=null;heldStop();block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     source('register');rebuildDisplay();return {ok:true};
   }
@@ -2055,7 +2084,7 @@ function wireDisplay() {
   child.onExit(async event=>{
     // A successor that has not taken over owns nothing outside itself.
     if(!switched)process.exit(0);
-    ended=true;nowStop();clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);
+    ended=true;heldStop();clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     for(const watch of releaseWatchers)try{watch.close();}catch{}
     server.close();await source('unregister');backend?.stdin.end();
