@@ -687,7 +687,6 @@ def _pass(jobs, root, layout, state, now_ns, started):
 
     protected_names = set()
     eligible = []
-    unknown_bytes = 0
     reasons = {}
     examined_names = []
     removable = 0
@@ -776,13 +775,21 @@ def _pass(jobs, root, layout, state, now_ns, started):
 
     if examined_names:
         state["cursor"] = examined_names[-1]
-    selected_set = set(examined_names)
+    # Three disjoint counts of bytes this pass did not judge: names it ran out
+    # of room to look at, names whose verdict or registry evidence is unknown,
+    # and files no registry row names at all.
     known_names = set(candidate_rows)
-    unknown_names.update(set(stamps) - known_names)
-    unknown_names.update(known_names - selected_set)
-    unknown_bytes = sum(max(0, stamps[name][4]) for name in unknown_names if name in stamps)
-    unknown_bytes += recovery["pending_bytes"]
-    protected_bytes = sum(max(0, stamps[name][4]) for name in protected_names - unknown_names if name in stamps)
+    unexamined = known_names - set(examined_names)
+    verdict_unknown = unknown_names - unexamined
+    unreferenced = set(stamps) - known_names - verdict_unknown
+
+    def _size(names):
+        return sum(max(0, stamps[name][4]) for name in names if name in stamps)
+
+    unexamined_bytes = _size(unexamined)
+    unknown_verdict_bytes = _size(verdict_unknown)
+    unreferenced_bytes = _size(unreferenced)
+    protected_bytes = _size(protected_names - verdict_unknown)
     eligible_bytes = sum(max(0, item[2][4]) for item in eligible)
     expired = [item for item in eligible if now_ns - item[1] >= RETENTION_NS]
     expired.sort(key=lambda item: (item[1], item[0]))
@@ -830,11 +837,23 @@ def _pass(jobs, root, layout, state, now_ns, started):
                 unknown_names.add(name)
                 deferred += 1
     over_limit_bytes = max(0, total_bytes - removed_bytes - MAX_LOG_BYTES)
+    # A round is every name the rows point at, looked at once. A pass that found
+    # nothing to remove keeps the short interval until the round is spent; a
+    # removal after that opens the next round.
+    left = state.get("round_left")
+    if type(left) is not int or left < 0:
+        left = len(ordered)
+    left = max(0, left - len(examined_names))
+    if removed and not left:
+        left = len(ordered)
+    round_more = bool(examined_names) and not selected and left > 0
+    state["round_left"] = left
     result = {
         "examined": len(examined_names), "eligible": len(eligible), "eligible_bytes": eligible_bytes,
         "removed": removed, "removed_bytes": removed_bytes, "deferred": deferred + discovery_deferred,
         "total_bytes": total_bytes, "protected_bytes": protected_bytes,
-        "unknown_bytes": unknown_bytes,
+        "unexamined_bytes": unexamined_bytes, "unknown_verdict_bytes": unknown_verdict_bytes,
+        "unreferenced_bytes": unreferenced_bytes, "round_left": left,
         "quarantine_pending_files": recovery["pending_files"],
         "quarantine_pending_bytes": recovery["pending_bytes"],
         "over_limit_bytes": over_limit_bytes,
@@ -843,7 +862,7 @@ def _pass(jobs, root, layout, state, now_ns, started):
         # reachable, so come back at the short interval. A pass that removed
         # nothing (bytes held by protected logs) waits the normal interval.
         "more": int(removed >= REMOVE_LIMIT or budget_deferred > 0
-                    or (removed > 0 and over_limit_bytes > 0)),
+                    or (removed > 0 and over_limit_bytes > 0) or round_more),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }
     try:
