@@ -2030,11 +2030,13 @@ function keyRows(pieces,inner,{rows=Infinity,cellWidth}={}){
 // native that paints its own background, or a wide character on the edge, ends there). The top
 // line carries the title and `✕`, the bottom line the sections (the current one bright), and the
 // row above it the keys (the content's last row). Width: text wraps at 76 cells; narrower than 80
-// cells the window less 4; narrower than 28 the whole window. A table popup stands up to 116 cells, the routes popup up to 148. Height: the content's, at most the
+// cells the window less 4; narrower than 28 the whole window. A table popup stands up to 116 cells, the routes popup up to 196, the question popup up to 132. Height: the content's, at most the
 // rows above the strip less 2 (the content then pages inside). Display only: the keys go to the
 // popup's owner (the host) while it stands; nothing here reads input.
-// 11-18: the routes popup alone stands up to 148 cells (`route`), the other table popups at most 116.
-const POPUP_TEXT=76,POPUP_TABLE=116,POPUP_ROUTE=148;
+// 11-18: the routes popup alone stands up to 196 cells (`route`: 148, then "더 늘려"; the read for it takes `columns` up to 200), the question
+// popup up to 132 (`question`: "가로 길이를 좀 늘려줘라. 가독성이 안좋다"; 104 was too little for the person), the other table popups at most 116.
+// `text` (76) is no popup's now; a popup asked for with no kind keeps it.
+const POPUP_TEXT=76,POPUP_TABLE=116,POPUP_ROUTE=196,POPUP_QUESTION=132;
 // A foreground's gray level (0 black .. 255 white), or null for a hue or the terminal's own color.
 function grayLevel(fg){
   if(Number.isInteger(fg)){
@@ -2069,7 +2071,7 @@ function popupLook(part,F,light,colors=256){
 function popupWidth(cols,kind='text'){
   if(cols<28)return Math.max(4,cols);
   if(cols<80)return cols-4;
-  return kind==='route'?Math.min(POPUP_ROUTE,cols-4):kind==='table'?Math.min(POPUP_TABLE,cols-4):POPUP_TEXT;
+  return kind==='route'?Math.min(POPUP_ROUTE,cols-4):kind==='question'?Math.min(POPUP_QUESTION,cols-4):kind==='table'?Math.min(POPUP_TABLE,cols-4):POPUP_TEXT;
 }
 // The rows the content may take inside the frame. A low window gives up the empty rows round the
 // frame first (under 8 rows), then its bottom line (3 rows or fewer), so the content keeps rows.

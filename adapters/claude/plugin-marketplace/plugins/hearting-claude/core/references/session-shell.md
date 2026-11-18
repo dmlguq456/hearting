@@ -1066,8 +1066,9 @@ writes such a cell plain first, so a wide character it cuts in half leaves its o
 terminal's own look), and closing it leaves no ground behind. One frame
 serves every popup: a thin rounded line one empty cell from what it covers,
 the title and `✕` on its top line, the sections on its bottom line (the current
-one bright) and the keys on the row above; text 76 cells wide, a table the window
-less 4 (116 at most; the routes popup 148 at most), both the window less 4 under 80 columns and the whole
+one bright) and the keys on the row above; the question popup the window less 4 (132 at most; 11-18, "가독성이 안좋다": it was 76),
+a table the window
+less 4 (116 at most; the routes popup 196 at most: 11-18, the read for it takes at most 200 columns), all the window less 4 under 80 columns and the whole
 window under 28; its content's height, at most the rows above the strip less 2,
 paging inside. A low window gives up the empty rows round the frame first (under
 8 rows), then its bottom line (3 rows or fewer), so a 20×6 window still shows the
