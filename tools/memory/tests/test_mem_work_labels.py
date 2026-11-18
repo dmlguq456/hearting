@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""A main session's work-style record gets its field and unit labels by itself (D-82, 12b).
+
+Every case runs the real ``mem add`` against a throwaway store, session ledger and
+registry; nothing reads or writes a live store.
+"""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
+
+import json
+from pathlib import Path
+import sqlite3
+import subprocess
+import tempfile
+import time
+import unittest
+
+ROOT = Path(__file__).resolve().parents[3]
+MEM = ROOT / "tools" / "memory" / "mem.py"
+sys.path.insert(0, str(ROOT / "utilities"))
+from harness_capabilities import session_env  # noqa: E402
+from dispatch_contract import supervisor_lease_path  # noqa: E402
+
+HARNESSES = ("claude", "codex", "opencode")
+SESSION = "sess-labels-1"
+BODY = "Put blocking findings first in every review."
+
+
+class WorkLabelsTest(unittest.TestCase):
+    harness = "claude"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="mem-labels-", dir="/tmp")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        for name in ("home", "project", "routes", "dispatch"):
+            (self.root / name).mkdir()
+        self.jobs = self.root / "dispatch" / "jobs.log"
+        self.n = 0
+
+    def env(self, **extra):
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("MEM_", "AGENT_", "CODEX_", "OPENCODE_", "CLAUDE", "FLEET_"))}
+        env.pop("PYTHONPYCACHEPREFIX", None)
+        env.update({"HOME": str(self.root / "home"), "XDG_STATE_HOME": str(self.root / "state"),
+                    "MEM_STORE": str(self.root / "store"), "MEM_EXCHANGE_AUTO": "0", "TMPDIR": "/tmp",
+                    "MEM_RECALL_EVENTS": str(self.root / "events.jsonl"),
+                    "FLEET_ROUTE_CHAIN_DIR": str(self.root / "chains"),
+                    "AGENT_DISPATCH_JOBS": str(self.jobs),
+                    "AGENT_DISPATCH_CALLER_HARNESS": self.harness,
+                    session_env()[self.harness][0]: SESSION})
+        env.update(extra)
+        return env
+
+    def mem(self, *args, **env):
+        done = subprocess.run([sys.executable, str(MEM), *args], cwd=self.root / "project", env=self.env(**env),
+                              text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done
+
+    def route(self, field="code", capability="autopilot-code", ts=None, ended=None, source=None, session=SESSION):
+        """One route file plus its ledger line; `ended` is the outcome file's age in seconds."""
+        self.n += 1
+        route_id = f"rt-{self.n:016x}"
+        path = self.root / "routes" / f"{route_id}.json"
+        value = {"route_id": route_id, "capability": capability}
+        if field:
+            value["field"] = field
+        path.write_text(json.dumps(value))
+        if ended is not None:
+            outcome = path.with_name(path.stem + ".outcome.json")
+            outcome.write_text("{}")
+            os.utime(outcome, (time.time() - ended,) * 2)
+        directory = self.root / "chains" / self.harness
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / (session + ".jsonl")).open("a") as ledger:
+            ledger.write(json.dumps({
+                "v": 1, "ts": time.time() if ts is None else ts, "event": "start", "harness": self.harness,
+                "session_id": session, "route_id": route_id, "route_file": str(path),
+                "capability": capability, "source_route_id": source}) + "\n")
+        return route_id
+
+    def correction(self, route_id, unit=None, session=SESSION, attempt="att-owner1", at=None):
+        path = supervisor_lease_path(self.jobs, attempt).with_suffix(".input.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        item = {"id": "r1", "route_id": route_id, "source_session": session, "state": "queued",
+                "events": [{"state": "queued", "time": time.time() if at is None else at}]}
+        if unit:
+            item["unit"] = unit
+        known = json.loads(path.read_text())["requests"] if path.exists() else []
+        path.write_text(json.dumps({"schema_version": 1, "attempt_id": attempt, "requests": known + [item]}))
+
+    def add(self, *extra, rtype="preference", tier="durable", **env):
+        self.n += 1  # a distinct body each time, so no write is merged into an earlier record
+        self.mem("add", tier, rtype, f"{BODY} Case {self.n}.", "--scope", "global", *extra, **env)
+        with sqlite3.connect(self.root / "store" / "memory.db") as con:
+            row = con.execute("SELECT id FROM records ORDER BY rowid DESC LIMIT 1").fetchone()
+            topics = sorted(t for (t,) in con.execute("SELECT topic FROM record_topics WHERE record_id=?", row))
+        return row[0], topics
+
+    def found(self, *labels):
+        args = ["bootstrap-context", "--cwd", str(self.root / "project")]
+        for label in labels:
+            args += ["--topic", label]
+        return BODY in self.mem(*args).stdout
+
+    def test_one_open_route_names_its_field(self):
+        self.route("lab")
+        self.assertEqual(self.add()[1], ["field:lab"])
+
+    def test_the_labelled_record_is_found_by_exact_label_only(self):
+        self.route("docs")
+        self.add()
+        self.assertTrue(self.found("field:docs"))
+        self.assertFalse(self.found("field:code"))
+        self.assertFalse(self.found("unit:qa/code-review"))
+
+    def test_several_routes_or_none_name_nothing(self):
+        self.assertEqual(self.add()[1], [])
+        self.route("code")
+        self.route("docs")
+        rid, topics = self.add()
+        self.assertEqual(topics, [])
+        self.assertTrue(rid, "the record itself is still written")
+
+    def test_a_correction_sent_to_a_stage_adds_its_unit(self):
+        rid = self.route("code")
+        self.correction(rid, unit="unit:qa/code-review")
+        topics = self.add()[1]
+        self.assertEqual(topics, ["field:code", "unit:qa/code-review"])
+        self.assertTrue(self.found("unit:qa/code-review"))
+        self.assertTrue(self.found("field:code"))
+
+    def test_only_this_sessions_newest_correction_on_this_route_counts(self):
+        rid = self.route("code")
+        other = self.route("docs", session="sess-other")
+        self.correction(rid, unit="unit:qa/test", at=100)
+        self.correction(rid, unit="unit:qa/code-review", at=200, attempt="att-owner2")
+        self.correction(rid, unit="unit:qa/ml-debug", session="sess-other", at=300, attempt="att-owner3")
+        self.correction(other, unit="unit:editorial/write", at=400, attempt="att-owner4")
+        self.assertEqual(self.add()[1], ["field:code", "unit:qa/code-review"])
+        self.correction(rid, at=500, attempt="att-owner5")  # a later correction to the owner
+        self.assertEqual(self.add()[1], ["field:code"])
+
+    def test_old_ended_route_and_frame_route_do_not_count(self):
+        self.route("code", ended=13 * 3600)
+        self.assertEqual(self.add()[1], [])
+        self.route("code", ended=60)  # just ended: still the session's route
+        self.route(None, capability="route-frame")
+        self.assertEqual(self.add()[1], ["field:code"])
+
+    def test_a_continued_route_leaves_only_its_continuation(self):
+        first = self.route("code", ended=60)
+        self.route("code", source=first)
+        self.assertEqual(self.add()[1], ["field:code"])
+
+    def test_legacy_route_without_field_and_unknown_field_name_nothing(self):
+        self.route(None)
+        self.assertEqual(self.add()[1], [])
+        self.route("dev", ended=60)
+        self.assertEqual(self.add()[1], [])
+
+    def test_only_a_durable_preference_is_labelled_and_given_labels_stay(self):
+        self.route("code")
+        self.assertEqual(self.add(rtype="lesson")[1], [])
+        self.assertEqual(self.add(tier="working")[1], [])
+        self.assertEqual(self.add("--topic", "field:docs")[1], ["field:docs"])
+        self.assertEqual(self.add("--topic", "other-topic")[1], ["field:code", "other-topic"])
+
+    def test_a_worker_session_gets_nothing(self):
+        self.route("code")
+        self.assertEqual(self.add(AGENT_DISPATCH_DEPTH="1")[1], [])
+        self.assertEqual(self.add(AGENT_DISPATCH_DEPTH="2")[1], [])
+
+
+class CorrectionLabelsTest(unittest.TestCase):
+    """What the correction device hands back: values only, from the stage it was sent to."""
+
+    def test_a_stage_attempt_names_its_unit_and_an_owner_names_none(self):
+        import memory_work_labels as labels
+        rows = {"att-stage": {"worker_type": "stage", "dispatch_depth": "2", "unit": "qa/code-review"},
+                "att-owner": {"worker_type": "owner", "dispatch_depth": "1", "unit": "_kernel/owner"},
+                "att-kernel": {"worker_type": "stage", "dispatch_depth": "2", "unit": "_kernel/owner"}}
+        find = lambda _jobs, attempt: rows.get(attempt)  # noqa: E731
+        self.assertEqual(labels.stage_unit_label("jobs", "att-stage", find), "unit:qa/code-review")
+        self.assertIsNone(labels.stage_unit_label("jobs", "att-owner", find))
+        self.assertIsNone(labels.stage_unit_label("jobs", "att-kernel", find))
+        self.assertIsNone(labels.stage_unit_label("jobs", "rt-0123456789abcdef", find))
+
+    def test_labels_are_the_sealed_field_plus_the_unit(self):
+        import memory_work_labels as labels
+        with tempfile.TemporaryDirectory(prefix="mem-labels-", dir="/tmp") as tmp:
+            route = Path(tmp) / "route.json"
+            route.write_text(json.dumps({"field": "research"}))
+            self.assertEqual(labels.correction_labels(route, "unit:qa/test"), ["field:research", "unit:qa/test"])
+            self.assertEqual(labels.correction_labels(route), ["field:research"])
+            route.write_text(json.dumps({"field": "dev"}))
+            self.assertEqual(labels.correction_labels(route), [])
+            self.assertEqual(labels.correction_labels(Path(tmp) / "missing.json"), [])
+
+
+def _per_harness(name):
+    return type(f"WorkLabels{name.title()}Test", (WorkLabelsTest,), {"harness": name})
+
+
+for _name in HARNESSES[1:]:
+    globals()[f"WorkLabels{_name.title()}Test"] = _per_harness(_name)
+
+
+if __name__ == "__main__":
+    unittest.main()

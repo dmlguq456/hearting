@@ -262,6 +262,32 @@ def _session_id_from_env():
             return ""
     return ""
 
+def _with_work_labels(tier, rtype, topics):
+    """``topics`` plus the field/unit labels of the session's one current route (D-82).
+
+    Only a durable ``preference`` record (the work-style shape) gets them, and only when the
+    caller named no label of that kind. No route, several routes, a worker session, or any
+    failure adds nothing: the write itself never depends on this.
+    """
+    if tier != "durable" or rtype != "preference":
+        return topics
+    for base in (MEM_MODULE_DIR.parents[1] / "utilities", AGENT_HOME / "utilities"):
+        if not (base / "memory_work_labels.py").is_file():
+            continue
+        if str(base) not in sys.path:
+            sys.path.append(str(base))
+        try:
+            from memory_work_labels import labels_for_session
+            given = list(topics or [])
+            have = {item.partition(":")[0] for item in given if isinstance(item, str)}
+            extra = [label for label in labels_for_session()
+                     if label.partition(":")[0] not in have and label not in given]
+            return given + extra if extra else topics
+        except Exception:
+            return topics
+    return topics
+
+
 # Module-level FTS and CJK-shadow availability caches, initialized by get_con().
 _FTS_OK = None     # FTS5 unicode61 availability.
 _CJK_OK = None     # CJK bigram shadow index availability (audit W4).
@@ -8847,7 +8873,8 @@ def _cli_main():
             requires_consume=args.requires_consume,
             journal_action="add",
             headline=args.headline, aliases=args.alias, entities=args.entity,
-            topics=args.topic, artifact_refs=args.artifact_ref,
+            topics=_with_work_labels(args.tier, args.type, args.topic),
+            artifact_refs=args.artifact_ref,
         )
     elif args.cmd == "note":
         write_record("working", "project", args.type, args.body,

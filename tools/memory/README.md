@@ -281,7 +281,17 @@ casefolded label). `bootstrap-context --topic` matches labels exactly, keeps the
 existing fences (active, global or current project, not flagged, type fence) and
 limits (four records, 1.6 KB each, 6 KB total, a three-second lookup), and
 prints nothing when no label matches or the lookup fails. Without `--topic` its
-output is unchanged. Nothing calls it with labels yet.
+output is unchanged.
+
+Nobody types the labels. `mem add durable preference …` from a main session adds
+them when none of that kind was given (`utilities/memory_work_labels.py`): the
+field is the sealed `field` of the session's one open or just-ended route (read
+from its route-chain ledger; a route ended more than 12 hours ago, several routes,
+none, a legacy route without a field, or a worker session add nothing), and the
+unit is the stage the session's newest correction on that route was sent to
+(`capability-route correct` keeps it on the owner-input request and returns the
+same labels as `memory_labels`, a value only). Other types and tiers are never
+labelled. The record is written either way; workers and owners never write it.
 
 ## Curator safety invariant (D-18/D-35/D-40)
 
