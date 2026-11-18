@@ -71,11 +71,16 @@ assert.deepEqual(rows,[
  zr('dispatch'),
  '● code(standard)               1h52m',
  '  갈래를 route에 기록',
- '  ● owner  claude Opus 5.5 xhigh 41%',
- '    검토 지적 둘을 고치고 시험을 다…',
- '    staged 3/6: execute',
- '    ↳ ⠋ worker claude Sonnet 5.5 22%',
- '        route 기록에 갈래 칸을 더하…',
+ '  ● owner  claude Opus 5.5 xhigh',
+ '    CTX ━━━━──── 41%',
+ '    검토 지적 둘을 고치고 시험을',
+ '    다시 돌리는 중',
+ '  ┌ staged 3/6: execute ───────────┐',
+ '  │ ⠋ worker claude Sonnet 5.5     │',
+ '  │   CTX ━━────── 22% · 12m       │',
+ '  │   route 기록에 갈래 칸을       │',
+ '  │   더하는 중                    │',
+ '  └────────────────────────────────┘',
  zr('request'),
  '→ [c2]',
  '  보낸 요청의 제목',
@@ -84,6 +89,21 @@ assert.deepEqual(rows,[
  '  받은 요청의 제목',
  '  partial',
 ]);
+// The session rows are the same under `worker_box: none` apart from the box: the stage row and the `↳` indent come back.
+const none=box(draw([direct,dispatch],requests,44,60,{configuration:{worker_box:'none'}}));
+assert.deepEqual(none.slice(none.indexOf(zr('dispatch'))+1,none.indexOf(zr('request'))),[
+ '● code(standard)               1h52m',
+ '  갈래를 route에 기록',
+ '  ● owner  claude Opus 5.5 xhigh',
+ '    CTX ━━━━──── 41%',
+ '    검토 지적 둘을 고치고 시험을',
+ '    다시 돌리는 중',
+ '    staged 3/6: execute',
+ '    ↳ ⠋ worker claude Sonnet 5.5',
+ '        CTX ━━────── 22% · 12m',
+ '        route 기록에 갈래 칸을',
+ '        더하는 중',
+],none.join('\n'));
 // The title counts the routes alone: the requests are a zone, not a tab.
 const top=draw([direct,dispatch],requests,44,60).find(s=>/ROUTE/.test(s));
 assert(/╭─ 2 ROUTE ─+╮/.test(top)&&!/REQUEST/.test(top),top);

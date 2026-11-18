@@ -150,6 +150,34 @@ class KindCell(unittest.TestCase):
                     for weight in "qsb":
                         self.assertEqual(render._COLOR["kind%s_%s" % (weight, field)], 1 << 21)
 
+    def test_zone_names_wear_their_hues_where_no_row_tint_stands_and_the_pair_ranges_never_meet(self):
+        """Review of #1715, follow-ups 4 and 6: Fleet's zone names (the `─ direct ─` rules, the request line's `→`) are drawn without a
+        tint, so they need a colour pair of their own; the tint pairs, the kind pairs and the zone pairs stand apart, and none of them
+        is a colour number `_init_colors` changes with `init_color`."""
+        tint = range(render._TINT_PAIR_START, render._TINT_PAIR_START + len(render._TINT_LVL) * len(palette._HUE_PALETTE))
+        kind = range(render._KIND_PAIR_START, render._KIND_PAIR_START + len(FIELDS))
+        zone = range(render._ZONE_PAIR_START, render._ZONE_PAIR_START + len(palette._ZONE_256))
+        for one, other in ((tint, kind), (tint, zone), (kind, zone)):
+            self.assertFalse(set(one) & set(other), (one, other))
+        self.assertLess(max(tint), render._KIND_PAIR_START)
+        self.assertLess(max(zone), 256)
+        previous, old_tint = dict(render._COLOR), render._TINT_OK
+        self.addCleanup(lambda: (render._COLOR.clear(), render._COLOR.update(previous)))
+        self.addCleanup(setattr, render, "_TINT_OK", old_tint)
+        for colors in (256, 8):
+            final = {}
+            with mock.patch.multiple(render.curses, create=True, COLORS=colors, start_color=mock.Mock(), use_default_colors=mock.Mock(),
+                                     can_change_color=mock.Mock(return_value=False), A_BOLD=1 << 20, A_DIM=1 << 21,
+                                     init_pair=mock.Mock(side_effect=lambda n, fg, bg: final.__setitem__(n, (fg, bg))),
+                                     color_pair=mock.Mock(side_effect=lambda n: n << 8)):
+                render._init_colors()
+            for number, (name, hue) in enumerate(palette._ZONE_256.items()):
+                if colors == 256:
+                    self.assertEqual(final[render._ZONE_PAIR_START + number], (hue, -1), name)
+                    self.assertEqual(render._key_attr(name), (render._ZONE_PAIR_START + number) << 8, name)   # no tint: the key's own pair
+                else:
+                    self.assertEqual(render._COLOR.get(name, 0), 0, name)                                       # as before: no hue
+
 
 def session(tag, harness="claude", **values):
     row = {"harness": harness, "session_id": "sid-" + tag, "session_tag": tag, "cwd": "/synthetic/hearting",

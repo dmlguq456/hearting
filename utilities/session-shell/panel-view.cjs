@@ -32,7 +32,7 @@ const MESSAGES_MAX=5;
 // dim head row and its headline on up to two rows (spec rule 46 (b)).
 const MEM_MAX=5;
 const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom',auxiliary:'summary',bottom_rows:14,
-  position:'right',theme:'terminal',shade:'none',route_line:'time',rule_motion:'rule'};
+  position:'right',theme:'terminal',shade:'none',route_line:'time',worker_box:'closed',rule_motion:'rule'};
 // Panel color schemes (spec rule 22: the reviewed set A, the question rose one
 // step deeper). `terminal` is the terminal's own background with the shared
 // palette; `light` declares a light terminal; `mono` drops hue and keeps weight,
@@ -174,6 +174,8 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
       // On a shade nothing is dimmed on top: secondary text and lines take their own color.
       if(LINES.has(role)){foreground=F[role];dim=false;}
       else if(role==='title'){foreground=F.title;dim=false;}
+      // A kind word's bracket keeps its field's hue and its weight step (quick dim) on a shade too.
+      else if(role==='kind'&&foreground!==null){/* kept as it is */}
       else if(foreground===null||dim||role==='secondary'){foreground=foreground===null&&!dim&&role!=='secondary'?F.body:F.secondary;dim=false;}
       return {...part,foreground,dim,bold,background:F[shade]};
     }
@@ -189,10 +191,10 @@ const graphemes=s=>SEGMENTER&&JOINS.test(s)?Array.from(SEGMENTER.segment(s),x=>x
 // Spec rule 49 (d): the narrow-width judgment is one constant (native-display's NATIVE_MIN), so
 // the editor has no `threshold`; `side_min_columns` stays in `defaults` only so a saved policy
 // keeps its keys.
-const fields=['layout','position','side_width','narrow','auxiliary','bottom_rows','theme','shade','route_line','rule_motion'];
-const names=['layout','position','width','narrow','auxiliary','height','theme','shade','route_line','rule_motion'];
+const fields=['layout','position','side_width','narrow','auxiliary','bottom_rows','theme','shade','route_line','worker_box','rule_motion'];
+const names=['layout','position','width','narrow','auxiliary','height','theme','shade','route_line','worker_box','rule_motion'];
 const OPTIONS={layout:['side','bottom'],position:['right','left'],narrow:['bottom','compact'],auxiliary:['summary','detail'],
-  theme:['terminal','light','mono'],shade:['none','light','medium'],route_line:['time','model'],rule_motion:['rule','border','scanners','off']};
+  theme:['terminal','light','mono'],shade:['none','light','medium'],route_line:['time','model'],worker_box:['closed','open','none'],rule_motion:['rule','border','scanners','off']};
 const APPEARANCE_KEYS=['position','theme','shade'];
 // The session's own state, as Fleet's session row judges and draws it
 // (render_cells `_LIVE_GLYPH`/`_state_key`): a working session spins.
@@ -989,7 +991,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return hued&&FIELDS.includes(field)&&styles['kind_'+field]?field:'';
     };
     const kindText=(word,field='')=>field?{...text(clean(word),'kind_'+field),bold:true,dim:false}:{text:clean(word),foreground:null,bold:true,dim:false};
-    const bracket=(word,field='')=>field?text('('+word+')','kind'+(WEIGHT[String(word).trim().toLowerCase()]||'s')+'_'+field):text('('+word+')','dim');
+    const bracket=(word,field='')=>field?{...text('('+word+')','kind'+(WEIGHT[String(word).trim().toLowerCase()]||'s')+'_'+field),role:'kind'}:text('('+word+')','dim');
     const framed=r=>String(r.shape||'')==='framed';
     // A direct route's word stands for its intensity when the record names none (the backend sends it in the screen language).
     const intensityRaw=r=>{
@@ -1148,7 +1150,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // The one-row form's percent and time columns, shared by owners and their workers (rule 48 (c)).
     const allWorkers=listed.flatMap(r=>workersOf(r));
     const ctxWidth=Math.max(0,...listed.map(r=>leadPaint(r).ctx?size([leadPaint(r).ctx]):0),...allWorkers.map(w=>w.paint?.ctx?size([w.paint.ctx]):0));
-    const timeWidth=Math.max(elapsedWidth,...allWorkers.map(w=>measure(w.elapsed||'')));
+    const timeWidth=Math.max(0,...allWorkers.map(w=>measure(w.elapsed||'')));   // (an owner has no time of its own: the route's stands on its first line)
     const ROLE=new Set(['owner','frame','frame-alt','worker']);
     // A frame leg is `frame`, its alternative `frame-alt`; any other stage worker is `worker`.
     const workerRole=w=>w.role==='frame'?(/alt/.test(String(w.stage||''))?'frame-alt':'frame'):'worker';
@@ -1165,35 +1167,59 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-17 (the person: "라우트 내부의 CTX는 하네스, 모델 옆에 붙이고 게이지는 없애자 ... 대신 NOW를 아래줄에"): a session's
     // first line is its mark, role, harness, model, effort and, beside them, `CTX 40% · 42m` with no gauge. Short of cells the
     // time goes first, then the word `CTX` (the number stays), then the effort, then the harness; the role and the model stay.
-    const whoRow=(r,supervising)=>whoOf(ownerLead(r,supervising),leadPaint(r),leadRole(r),r.elapsed?[text(r.elapsed)]:[]);
-    function whoOf(lead,p,role,E=[],room=inner){
+    // 11-18 (the person: "CTX는 게이지를 포함해서 아래줄로 내리자 ... NOW를 두줄까지는 허용치를 늘려주고 (owner, worker 둘다)"): a session
+    // is three blocks. Its first row is its mark, role, harness, model and effort; under it, two cells in, `CTX ━━━━━───── 41%` (the
+    // gauge and its number, then ` · 12m` only when the time is that session's own: a worker's, never the owner's, which is the
+    // route's time and stands at the end of the route's first line); under that its NOW on at most two rows (the second ending in
+    // `…` where it goes on). A session with no NOW has no NOW rows. Short of cells the first row loses its effort, then its
+    // harness; the CTX row loses its gauge's width first (down to the number alone), then its time, then the word `CTX`.
+    const whoRow=(r,supervising)=>whoOf(ownerLead(r,supervising),leadPaint(r),leadRole(r));
+    function whoOf(lead,p,role,room=inner){
       const value=x=>x?[x]:[];
       const H=value(p.harness),M=value(p.model_text),F=value(p.effort),C=value(p.ctx),keep=M.length?M:H;
-      if(!ROLE.has(role)&&!H.length&&!M.length&&!F.length&&!C.length)return null;
-      const dim=t=>text(t,'dim');
-      // `CTX 40% · 42m`; with no context known the time stands alone.
-      const tail=(time,word)=>{
-        const ctx=C.length?[...(word?[dim('CTX ')]:[]),...C]:[],at=time&&E.length?E:[];
-        return ctx.length&&at.length?[...ctx,dim(' · '),...at]:ctx.length?ctx:at;
-      };
-      const withTail=(left,time,word)=>{const t=tail(time,word);return t.length?[...left,...(left.length?[text(word?'  ':' ')]:[]),...t]:left;};
-      // The time and the word go before the effort does; each form shows whole or not at all.
-      const tries=[[[H,M,F],1,1],[[H,M,F],0,1],[[H,M,F],0,0],[[H,M],0,0],[[[],keep,[]],0,0],[[[],keep,[]],-1,0]];
-      for(const [parts,time,word] of tries){
-        const row=time<0?[...lead,...spaced(parts)]:[...lead,...withTail(spaced(parts),time,word)];
+      if(!ROLE.has(role)&&!H.length&&!M.length&&!F.length)return null;   // (a session whose values are not known: its CTX row leads with its mark instead)
+      for(const parts of [[H,M,F],[H,M],[[],keep,[]]]){
+        const row=[...lead,...spaced(parts)];
         if(size(row)<=room)return row;
       }
       return cut(lead,room);
     }
-    // The one-row form used short of rows is the older fold (who, then percent and time at the right edge in shared columns).
-    const leadRow=(r,supervising)=>foldRow(ownerLead(r,supervising),leadPaint(r),leadRole(r),r.elapsed?[text(r.elapsed)]:[]);
-    // The session's NOW, one row (never wrapped; `…` where it runs over), none when the session has none (no empty row).
-    // Bright while the session works or waits, as Fleet's NOW cell.
-    const nowRow=(p,kind,gap)=>{
-      const value=clean(p?.now||'').replace(/\s+/g,' ').trim();
-      if(!value)return null;
-      return [text(' '.repeat(gap)),...cut([text(value,kind==='working'||kind==='blocked'?'loc_repo':'dim')],Math.max(0,inner-gap))];
+    // The CTX row at `gap` cells in: the gauge (the backend's `gauge_row`, at the panel's width), else the five-cell one, else the
+    // number alone; the session's own time after it when it has one.
+    const ctxRowOf=(p,gap,time,lead=null)=>{
+      const C=p.ctx?[p.ctx]:[],at=time?[text(clean(time),'dim')]:[],head=lead||[text(' '.repeat(gap))];
+      if(!C.length&&!at.length)return null;
+      if(!C.length)return [...head,...at];
+      const gauges=[p.gauge_row,p.gauge,p.gauge5].filter((g,i,all)=>Array.isArray(g)&&g.length&&all.indexOf(g)===i).sort((x,y)=>size(y)-size(x));
+      // The gauge gives up its width first (down to the number alone), then the time, then the word `CTX`.
+      const tries=[];
+      for(const withTime of at.length?[true,false]:[false])for(const g of [...gauges,C])tries.push([g,true,withTime]);
+      tries.push([C,false,false]);
+      for(const [g,word,withTime] of tries){
+        const row=[...head,...(word?[text('CTX ','dim')]:[]),...g,...(withTime?[text(' · ','dim'),...at]:[])];
+        if(size(row)<=inner)return row;
+      }
+      return cut([...head,...C],inner);
     };
+    // The one-row form used short of rows is the older fold (who, then percent and time at the right edge in shared columns).
+    const leadRow=(r,supervising)=>foldRow(ownerLead(r,supervising),leadPaint(r),leadRole(r),[]);
+    // The session's NOW at `gap` cells in, on at most `most` rows (the last ending in `…` where the value goes on; a word wider than a
+    // row goes on by cells, so no row is wider than the box), none when the session has none (no empty row). Bright while the session
+    // works or waits, as Fleet's NOW cell.
+    const nowRows=(p,kind,gap,most=2)=>{
+      const value=clean(p?.now||'').replace(/\s+/g,' ').trim();
+      if(!value)return [];
+      const room=Math.max(1,inner-gap),rows=wrapAll([text(value,kind==='working'||kind==='blocked'?'loc_repo':'dim')],room);
+      const shown=rows.slice(0,most);
+      if(rows.length>most)shown[most-1]=ellipsis(shown[most-1],room);
+      return shown.map(row=>[text(' '.repeat(gap)),...row]);
+    };
+    const nowRow=(p,kind,gap)=>nowRows(p,kind,gap,1)[0]||null;
+    // One session's blocks, as the route box draws them: `who` (or, with its CTX row folded in, `one`), `ctx`, and `now` in its two
+    // forms (`now2`, `now1`). The steps below (short of rows) drop the second NOW row, then the CTX row (its number goes into `one`),
+    // then the first NOW row.
+    const sessionOf=({who,one,p,kind,gap,time,lead})=>({who,one,ctx:ctxRowOf(p,gap,time,who?null:lead),now2:nowRows(p,kind,gap,2),now1:nowRows(p,kind,gap,1)});
+    const sessionRowsOf=u=>[...(keepCtxLine?(u.who?[u.who,...(u.ctx?[u.ctx]:[])]:[u.ctx||u.one]):[u.one||u.who]),...(keepNow?(nowTwo?u.now2:u.now1):[])];
     // The one-row form (an owner's, and since spec rule 48 (c) its workers' too, two cells in):
     // who, then the percent and the time at the right in columns shared by every route and worker.
     function foldRow(lead,p,role,E){
@@ -1210,6 +1236,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const drops=routeLine==='model'?[[H,M,F,1,1],[H,M,[],1,1],[[],K,[],1,1],[[],K,[],1,0],[[],K,[],0,0]]:
         [[H,M,F,1,1],[H,M,[],1,1],[[],K,[],1,1],[[],K,[],0,1],[[],K,[],0,0]];
       for(const pick of drops){
+        if(!E.length&&pick[4]&&!pick[3])continue;   // (no time of its own: a row that gave its percent up for a time column would show neither)
         const got=build(...pick);
         if(got.empty)return null;
         if(got.width>inner)continue;
@@ -1217,27 +1244,26 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       return null;
     }
-    // 11-17 (route row 5; the person: "CTX는 하네스, 모델 옆에 ... NOW를 아래줄에"): a worker hangs under its owner by a `↳`, with
-    // no box: two rows, its who (its own mark, role, harness, model, effort, then `CTX 22% · 12m`, no gauge) and under it its
-    // NOW (none: no row). Its stage name and open tool are not drawn (the owner's stage line has the stage). A frame leg (the
-    // route has no owner yet) hangs straight under the route the same way. Short of cells the who loses its time, the word
-    // `CTX`, its effort, then its harness; short of rows (rule 48 (c)) the worker takes the owner's one-row form.
-    function workerBlock(w,base){
+    // 11-17 (route row 5; 11-18: CTX and NOW under the first row): a worker hangs under its owner by a `↳`, with no box: its who (its
+    // own mark, role, harness, model, effort), under it its CTX row (the gauge and number, then ` · 12m` when the worker has a time
+    // of its own) and under that its NOW on up to two rows (none: no row). Its stage name and open tool are not drawn (the owner's
+    // stage line has the stage). A frame leg (the route has no owner yet) hangs straight under the route the same way. Short of
+    // cells the who loses its effort, then its harness; short of rows (rule 48 (c)) the worker takes the owner's one-row form.
+    // In a box (`boxed`, below) the mark leads the row and the CTX and NOW rows stand two cells in.
+    function workerBlock(w,base,boxed=false){
       const p=w.paint||{},role=workerRole(w),glyph=routeGlyph({paint:p,kind:w.kind}),E=w.elapsed?[text(w.elapsed)]:[];
-      const gap=base+4;
-      const lead=[text(' '.repeat(base)),text('↳ ','dim'),glyph,text(' '),...roleCell(role)];
+      const gap=boxed?2:base+4;
+      const lead=boxed?[glyph,text(' '),...roleCell(role)]:[text(' '.repeat(base)),text('↳ ','dim'),glyph,text(' '),...roleCell(role)];
       // A model name longer than the line itself is cut with `…` rather than left out.
-      let who=whoOf(lead,p,role,E)||cut(lead,inner);
+      let who=whoOf(lead,p,role)||cut(lead,inner);
       if(size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner);
-      const rows=[who],now=nowRow(p,w.kind,gap);
-      if(now)rows.push(now);
-      return {rows,one:foldRow(lead,p,role,E)||cut(lead,inner)};
+      return sessionOf({who,one:foldRow(lead,p,role,E)||cut(lead,inner),p,kind:w.kind,gap,time:w.elapsed});
     }
     // Spec rule 24 (11-12), 36 (b), 11-17: the stage line under the owner: `staged 3/6: execute`, the current stage's name
     // the one thing that blinks (a failed one keeps `✕`, a done one `✓`); with no stage running, the next stage and what it
     // waits for. A route with no stage list (one-shot, direct, frame) has none: its first line says what it is. Short of
     // cells the values go from the back, whole: `owner <model>`, then the word `staged` (`3/6: execute`).
-    function placeRow(r,workers=0){
+    function placeRow(r,workers=0,limit=inner-4){
       const shape=String(r.shape||''),stages=Array.isArray(r.stages)?r.stages:[];
       if(!stageLined(r))return null;
       const current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
@@ -1245,7 +1271,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const stage=stageCell(stages[at],stageInk(stages[at].key)),pieces=[];
       if(current>=0){if(r.doer_worker&&r.owner_model&&!treeOf(r))pieces.push([text('owner '+r.owner_model,'dim')]);}
       else if(r.visibility?.next)pieces.push([text(r.visibility.next,'dim')]);
-      const limit=inner-4;
       // Spec rule 43 (g): the workers gone for rows, the stage line ends with their count (it stays while the values before it go).
       for(const end of workers?[[text(' · ','dim'),text('worker '+workers,'dim')],[]]:[[]])for(const word of [...new Set([(stageWord(shape)?stageWord(shape)+' ':'')+position,position])])for(let n=pieces.length;n>=0;n--){
         const row=[text(word,'dim'),text(': ','dim'),...stage,...pieces.slice(0,n).flatMap(piece=>[text(' · ','dim'),...piece]),...end];
@@ -1296,6 +1321,38 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         return finish(cut(chains.at(-1),Math.max(1,room-end)));
       };
     }
+    // 11-18 (the person: "worker 부를떄 stage ~ 부분을 블록의 상단에 그려서 그냥 worker는 박스에 넣어도 되겠는데?" / "박스 여부는 내가 골라가면서 볼 수
+    // 있게 그냥 옵션에 좀 넣어줘"): the setting `worker box` (`closed`, the default; `open`; `none`). A route that has workers and a stage
+    // line puts its workers of that stage in one box under its owner, the stage text (`staged 3/6: execute`) on the box's top line, and
+    // the stage row apart is not drawn. `closed` has all four borders, `open` only the top line and the left side, `none` the stage row
+    // and the `↳` indent as before. The lines are dim; the right side of a closed box stands in one column whatever the widths of the
+    // text (the row is padded in cells). Where the box's text would be under BOX_TEXT_MIN cells wide the closed box gives way to the open
+    // one, and short of rows (below) the closed box's bottom line goes first. A route with no workers draws no box (its stage text stays
+    // on its stage row); a frame route's legs hang under it as before.
+    const BOX_TEXT_MIN=24;
+    const boxSetting=OPTIONS.worker_box.includes(cfg.worker_box)?cfg.worker_box:'closed';
+    const narrower=(by,fn)=>{inner-=by;try{return fn();}finally{inner+=by;}};
+    function boxedWorkers(r,count){
+      if(!side||!count||boxSetting==='none'||!treeOf(r))return null;
+      const line=value=>({...text(value,'dim'),role:'messages'}),W=inner;
+      const make=closed=>{
+        const by=closed?6:4,blocks=narrower(by,()=>workersOf(r).map(w=>workerBlock(w,0,true)));
+        const title=placeRow(r,0,Math.max(1,W-6));
+        if(!title)return null;
+        const top=[text('  '),line('┌ '),...title,text(' '),line('─'.repeat(Math.max(0,W-4-size(title)-1-(closed?1:0)))+(closed?'┐':''))];
+        return {blocks,lines:()=>{
+          const rows=[top];
+          for(const parts of blocks.flatMap(b=>sessionRowsOf(b).filter(Boolean))){
+            const fit=clip(parts,W-by);
+            rows.push(closed?[text('  '),line('│ '),...fit.parts,pad(W-by-fit.used),line(' │')]:[text('  '),line('│ '),...fit.parts]);
+          }
+          if(closed)rows.push([text('  '),line('└'+'─'.repeat(Math.max(0,W-4))+'┘')]);
+          return rows;
+        }};
+      };
+      const wide=boxSetting==='closed'&&W-6>=BOX_TEXT_MIN?make(true):null,open=make(false);
+      return open?{closed:wide,open}:null;
+    }
     const routeRows=[];
     within(()=>{
       for(const r of listed){
@@ -1307,16 +1364,17 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const tree=treeOf(r),open=framed(r)&&tree,base=open?2:4,workers=tree?workersOf(r).map(w=>workerBlock(w,base)):[];
         const supervising=workers.length>0;
         const place=side?placeRow(r):null,stages=Array.isArray(r.stages)?r.stages:[];
+        const boxed=!open&&place?boxedWorkers(r,workers.length):null;
         const running=stages.find(stage=>stage.current||stage.mark==='✕');
         routeRows.push({zone:r.zone==='direct'?'direct':'dispatch',parts:folded(r),two:side,bnow:side?null:nowRow(leadPaint(r),r.kind,2),first:side?headRow(r):null,
-          who:side&&!open?whoRow(r,supervising):null,lead:side&&!open?leadRow(r,supervising):null,
-          // A route with no session values (a direct one) keeps its time alone on the row it always had, at the right edge.
-          now:side&&!open?nowRow(leadPaint(r),r.kind,4):null,
+          // The owner's blocks (11-18); its time is the route's own, which stands on the first line, so it has none here.
+          session:side&&!open?sessionOf({who:whoRow(r,supervising),one:leadRow(r,supervising),p:leadPaint(r),kind:r.kind,gap:4,time:'',lead:ownerLead(r,supervising)}):null,
+          // A route with no session values and no kind word (no first line to end in its time) keeps its time alone on a row, at the right edge.
           time:side&&!open&&r.elapsed&&!whoRow(r,supervising)&&!headRow(r)?[pad(inner-measure(r.elapsed)),text(r.elapsed)]:null,
           names,name:[cut(title,inner-2)],glyph,place,action:key,kind:r.kind,
           // The stage name blinks while the stage line stands and a stage runs; else the first line's dot does.
           stageBlinks:!!place&&live(r)&&running&&running.mark==='●',
-          ...(tree?{tree,workers,counted:workers.length?placeRow(r,workers.length):null}:{})});
+          ...(tree?{tree,workers,boxed,counted:workers.length?placeRow(r,workers.length):null}:{})});
       }
       for(const q of requestList){
         // A request row opens the MESSAGES popup, where the requests read whole (as their MESSAGES rows did).
@@ -1344,7 +1402,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // The route box's own steps short of rows (below): its title's second rows (`keepMulti`), the
     // context rows (and the workers' box) fold into the first rows, the workers go, the kind rows go,
     // every route takes one row, then the box shows fewer routes and scrolls in place.
-    let routeLimit=routeRows.length,keepCtx=true,keepPlace=true;
+    let routeLimit=routeRows.length,keepPlace=true;
+    // Short of rows (below), in this order: the box's closing border, the NOW's second row, the CTX row (its number goes into the first row), the NOW's first row.
+    let keepBoxEnd=true,nowTwo=true,keepCtxLine=true,keepNow=true;
     // Spec rule 48 (c): the workers stay (in their box while the owners keep their context row,
     // else one row each, as their owners) or go (the kind row counts them).
     let keepWorkers=true;
@@ -1354,7 +1414,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // Spec rule 38: who / context and time / what (two rows, then one) / which kind.
     const routeForm=x=>{
       // Under the native area (11-18) the route's NOW stands on the row under its one row (the first to go short of rows).
-      if(!(twoRows&&x.two))return [x.parts,...(keepCtx&&x.bnow?[x.bnow]:[])];
+      if(!(twoRows&&x.two))return [x.parts,...(keepNow&&x.bnow?[x.bnow]:[])];
       // A request: who and age / title / status; the kind rows gone, the title and the status share a row.
       if(x.request)return [x.head,...(keepPlace&&x.statusRow?[x.titleRow,x.statusRow]:[x.titled])];
       return routeRowsOf(x);
@@ -1365,15 +1425,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // the workers go, then the route takes one row.
     function routeRowsOf(x){
       const workers=x.tree&&keepWorkers?x.workers:[],names=keepMulti?x.names:x.name,out=[],indent=text('  ');
-      const owner=keepCtx?x.who:x.lead,place=!keepWorkers&&x.counted?x.counted:x.place,showPlace=keepPlace&&place;
+      const place=!keepWorkers&&x.counted?x.counted:x.place,showPlace=keepPlace&&place;
+      // 11-18: the stage text stands on the top of the workers' box, so the stage row is not drawn apart.
+      const boxed=keepWorkers&&keepPlace&&x.boxed&&x.workers.length?(keepBoxEnd&&x.boxed.closed?x.boxed.closed:x.boxed.open):null;
       if(x.first){out.push(x.first(!(showPlace&&x.stageBlinks)));out.push(...names.map(row=>[indent,...row]));}
       else out.push([...x.glyph,...names[0]],...names.slice(1).map(row=>[indent,...row]));
       // A route whose owner is not known keeps its time and `CTX` row under the title all the same.
-      if(owner)out.push(owner);
-      if(keepCtx&&x.now)out.push(x.now);
-      if(keepCtx&&x.time)out.push(x.time);
-      if(showPlace)out.push([text(owner?'    ':'  '),...place]);
-      for(const w of workers)out.push(...(keepCtx?w.rows:[w.one]));
+      const owner=x.session?sessionRowsOf(x.session).filter(Boolean):[];
+      out.push(...owner);
+      if(keepNow&&x.time)out.push(x.time);
+      if(showPlace&&!boxed)out.push([text(owner.length?'    ':'  '),...place]);
+      if(boxed)out.push(...boxed.lines());
+      else for(const w of workers)out.push(...sessionRowsOf(w).filter(Boolean));
       return out;
     }
     const routeSize=x=>routeForm(x).length;
@@ -1550,12 +1613,50 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return {row:cut([{...mark,role:'harness-name',harness:u.harness}],room),values:false};
     };
     const usageLines=()=>keepQuota&&usageOn?usageData.filter((_u,i)=>keepLine[i]):[];
+    // 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): RESOURCES stands
+    // right above USAGE: one row for each host (its name, `CPU 34%  MEM 61%`), under it one row for each GPU a process runs on
+    // (`GPU0 ━━━━━━━━─ 92%  21/24G  [3b]`: the gauge, the use, the memory, and the number of the session that holds it, left out where
+    // the backend does not know it) and one for the count of those nothing runs on (`idle GPU 6`). The values are the sample the shared
+    // producer already took. Short of rows it gives way before everything else: the GPU rows (from the last), the host rows (from the
+    // last; the name row goes with the last of them), so USAGE and the sections above it stand as they did without it.
+    const resourceData=Array.isArray(model.resources)?model.resources.filter(h=>h&&typeof h==='object'&&Array.isArray(h.host)).slice(0,8):[];
+    let resHosts=resourceData.length,resGpus=Infinity;
+    const resourceHostRow=h=>{
+      const stats=painted(h.stats).filter(x=>Array.isArray(x)&&x.length);
+      for(let n=stats.length;n>=0;n--){
+        const row=[...painted(h.host),...stats.slice(0,n).flatMap(x=>[text('  '),...painted(x)])];
+        if(size(row)<=inner)return row;
+      }
+      return cut(painted(h.host),inner);
+    };
+    const resourceGpuRow=g=>{
+      const tries=[[g.gauge9,g.mem,g.users],[g.gauge5,g.mem,g.users],[g.gauge5,g.users],[g.pct,g.users],[g.pct]];
+      if(!g.gauge9&&!g.pct)tries.splice(0,tries.length,[g.mem,g.users],[g.users],[]);
+      for(const gap of ['  ',' '])for(const parts of tries){
+        const row=[text('  '),...painted(g.label),...parts.filter(x=>Array.isArray(x)&&x.length).flatMap(x=>[text(gap===' '?' ':gap),...painted(x)])];
+        if(size(row)<=inner)return row;
+      }
+      return cut([text('  '),...painted(g.label)],inner);
+    };
+    const resourceLines=()=>{
+      const out=[];let room=resGpus;
+      resourceData.slice(0,resHosts).forEach(h=>{
+        out.push(resourceHostRow(h));
+        const lines=[...painted(h.gpus).map(resourceGpuRow),...(h.idle>0?[[text('  '),text(t('resource_idle_gpus','idle GPU')+' '+h.idle,'dim')]]:[])];
+        for(const line of lines){if(room<=0)break;out.push(cut(line,inner));room--;}
+      });
+      return out;
+    };
+    const resourceHead=()=>sectionHead([],'RESOURCES',[],[[]],false);
+    const resourceCount=()=>side&&resHosts>0?1+resourceLines().length:0;
+    const resourceGpuTotal=()=>resourceData.reduce((n,h)=>n+painted(h.gpus).length+(h.idle>0?1:0),0);
     // The last row beside the buttons: that harness's row when its values fit there.
     const usageShared=u=>u&&usageFit(u,quotaRoom).values;
-    const footRule=()=>{
+    const footBase=()=>{
       if(usageOn){const list=usageLines();return list.length?(keepUsageHead?1:0)+list.length-1+(usageShared(list.at(-1))?0:1):0;}
       return side&&keepFootRule&&(kept.MESSAGES||kept.MEM)?1:0;
     };
+    const footRule=()=>footBase()+resourceCount();
     // 11-16 (the person: "MEM과 가장 하단을 구분하는 줄이 필요"): beside the native area a thin rule (a section
     // head's rule, its color) parts the bottom sections (MESSAGES, MEM) from the last row (5h/7d, the gear and
     // the fold button); short of rows it goes before any content row.
@@ -1577,8 +1678,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const gave=[];
     const give=(can,apply,undo)=>{while(need()>budget&&can()){apply();gave.push(undo);}};
     const lowest=['MEM','MESSAGES'];
+    // RESOURCES gives way first (it is the newest and the least needed of the bottom's sections): the GPU rows, then the host rows.
+    resGpus=resourceGpuTotal();
+    give(()=>side&&resHosts>0&&resGpus>0,()=>{resGpus--;},()=>{resGpus++;});
+    give(()=>side&&resHosts>0,()=>{resHosts--;},()=>{resHosts++;});
     give(()=>keepSpacers,()=>{keepSpacers=false;},()=>{keepSpacers=true;});
-    if(!usageOn)give(()=>!!footRule(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
+    if(!usageOn)give(()=>!!footBase(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
     give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
     for(const down of [2,1])for(const name of ['MEM','QUESTIONS']){
       // (MEM, 11-16: its headlines take one row before fewer records show.)
@@ -1593,8 +1698,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>kept.QUESTIONS&&keepQuestionBox,()=>{keepQuestionBox=false;},()=>{keepQuestionBox=true;});
     give(()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
     // The box comes back with its context rows only while the workers stand.
-    give(()=>keepCtx,()=>{keepCtx=false;},()=>{if(keepWorkers||!anyWorkers)keepCtx=true;});
-    give(()=>anyWorkers&&keepWorkers&&!keepCtx,()=>{keepWorkers=false;},()=>{keepWorkers=true;});
+    give(()=>keepBoxEnd,()=>{keepBoxEnd=false;},()=>{keepBoxEnd=true;});
+    give(()=>nowTwo,()=>{nowTwo=false;},()=>{nowTwo=true;});
+    give(()=>keepCtxLine,()=>{keepCtxLine=false;},()=>{keepCtxLine=true;});
+    // The box comes back with its NOW rows only while the workers stand.
+    give(()=>keepNow,()=>{keepNow=false;},()=>{if(keepWorkers||!anyWorkers)keepNow=true;});
+    give(()=>anyWorkers&&keepWorkers&&!keepNow,()=>{keepWorkers=false;},()=>{keepWorkers=true;});
     give(()=>keepPlace,()=>{keepPlace=false;},()=>{keepPlace=true;});
     give(()=>twoRows,()=>{twoRows=false;},()=>{twoRows=true;});
     give(()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
@@ -1616,11 +1725,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // (11-16: this window's own usage row beside the buttons costs no row, so it stays while no other usage row is left to give.)
     give(()=>keepQuota&&(!usageOn||footRule()>0),()=>{keepQuota=false;},()=>{keepQuota=true;});
     const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
-      keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule]);
+      keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus]);
     for(const undo of gave.reverse()){
       const was=choices();undo();
       if(need()>budget){const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);keepRouteRule=v[24];}
+        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);keepRouteRule=v[24];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus]=v.slice(25,30);}
     }
     const order=[];
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
@@ -1654,6 +1763,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       sectionRows(s).forEach(row=>into(row,s.action));
     }
     // 11-16: the USAGE rows stand last in the lower block (the last harness's row, where it fits, on the last row below).
+    if(resourceCount()){lower.push({parts:resourceHead()});for(const line of resourceLines())lower.push({parts:line});}
     let lastUsage=[];
     if(usageOn&&usageLines().length){
       const list=usageLines(),own=u=>u.harness===harness?['quota']:[];
@@ -1662,7 +1772,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const end=list.at(-1);
       if(usageShared(end))lastUsage=usageFit(end,quotaRoom).row;else lower.push({parts:usageFit(end,inner).row,groups:own(end)});
     }
-    const ruled=!usageOn&&lower.length&&footRule()?1:0;
+    const ruled=!usageOn&&lower.length&&footBase()?1:0;
     if(fill&&lower.length)while(content.length+lower.length+ruled<height-2-1)add([]);
     for(const row of lower)add(row.parts,row.action,row.groups);
     if(ruled)add([{...text('─'.repeat(inner),'dim'),role:'messages'}]);
@@ -1959,7 +2069,11 @@ function requestForms(q,{text,measure,width,arrow='loc_repo'}){
   const paint=q.paint&&typeof q.paint==='object'?q.paint:{};
   const piece=p=>p&&typeof p==='object'&&clean(p.text).trim()?[{...p,text:clean(p.text)}]:[];
   const mark=text(String(q.glyph||q.way||'→'),q.glyph==='✕'?'lvl_r':q.glyph==='✓'?'lvl_g':arrow);
-  const who=q.who?[text(String(q.who),'dim')]:[];
+  // 11-18 (the person: "세션 id 외에도 repo 위치까지 request는 표시를 해주는게 좋겠네"): the other session's repository name, dim, after its number
+  // (`[c2] other-repo`); the backend sends none for a session of this window's own repository or one whose it does not know. It is part
+  // of who the request is with, so it stays after the harness, model, effort and age have gone, and the title goes before it does.
+  const repo=clean(q.repo||'').trim()?[text(clean(q.repo).trim(),'dim')]:[];
+  const who=q.who?[text(String(q.who),'dim'),...(repo.length?[text(' '),...repo]:[])]:[];
   const H=piece(paint.harness),M=piece(paint.model_text),F=piece(paint.effort);
   const title=[text(String(q.title||q.id),'loc_repo')];
   const status=q.status?[text(String(q.status),q.kind==='request-rejected'?'lvl_r':'dim')]:[];
@@ -1980,14 +2094,17 @@ function requestForms(q,{text,measure,width,arrow='loc_repo'}){
   const statusRow=status.length?[...indent,...cut(status,width-2)]:null;
   const room=width-2-size(joint)-size(status);
   const titled=!status.length?titleRow:room>=3?[...indent,...cut(title,room),...joint,...status]:[...indent,...cut(status,width-2)];
-  const body=(w,t)=>[...lead(w),...(t.length?[text(' '),...t]:[]),...(status.length?[...joint,...status]:[])];
+  // (`→ [c2] other-repo · title`: with no harness or model between them, the repository and the title read as the sketch does.)
+  const body=(w,t,bare=false)=>[...lead(w),...(t.length?[bare&&repo.length?joint[0]:text(' '),...t]:[]),...(status.length?[...joint,...status]:[])];
   const one=(()=>{
     for(const [h,m,f,e] of drops){
-      const left=body(spaced([who,h,m,f]),title),row=e.length?ended(left,e):size(left)<=width?left:null;
+      const left=body(spaced([who,h,m,f]),title,!h.length&&!m.length&&!f.length),row=e.length?ended(left,e):size(left)<=width?left:null;
       if(row)return row;
     }
-    for(const h of [H,[]]){const w=spaced([who,h]),left=width-size(body(w,[]))-1;if(left>=3)return body(w,cut(title,left));}
+    for(const h of [H,[]]){const w=spaced([who,h]),left=width-size(body(w,[]))-(!h.length&&repo.length?size(joint):1);if(left>=3)return body(w,cut(title,left),!h.length);}
     if(size(body(who,[]))<=width)return body(who,[]);
+    // Too narrow for the repository name beside the number and the status: it goes last of all, and the title with the number stays.
+    if(repo.length&&q.who){const tag=[text(String(q.who),'dim')],left=width-size(body(tag,[]))-1;if(left>=0)return left>=3?body(tag,cut(title,left)):body(tag,[]);}
     // 11-17: a status that does not fit even with no title (`awaiting delivery · why`) keeps its first word whole and ends in `…`.
     if(status.length&&typeof q.status_head==='string'&&q.status_head){
       const room=width-size(lead(who))-size(joint);

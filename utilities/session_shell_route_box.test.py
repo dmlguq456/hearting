@@ -56,7 +56,9 @@ const strip=m=>{const {lab,sessions,memory_items,messages,wait,answerable,...res
 let n=0,same=0,folded=0,soloSame=0,soloFolded=0,noTool=0;
 for(const c of golden.cases){
  const model=c.alone?strip(golden.scenes[c.scene]):golden.scenes[c.scene];
- const v=pv.render({frame:0,width:c.width,height:c.height,side:c.side,fill:c.side,model,state:'working',configuration:c.cfg,background:c.background});
+ // 11-18: the golden draws a worker `↳` under its owner with a stage row of its own, which is the `none` form of the panel setting
+ // `worker_box` (the default now boxes the workers under the owner with the stage text on the box's top line); the comparison is made in that form.
+ const v=pv.render({frame:0,width:c.width,height:c.height,side:c.side,fill:c.side,model,state:'working',configuration:{...c.cfg,worker_box:'none'},background:c.background});
  const label=JSON.stringify({scene:c.scene,side:c.side,width:c.width,height:c.height,cfg:c.cfg,background:c.background,alone:!!c.alone});
  const b=boxOf(v);assert(b,'no route box '+label+'\n'+v.rows.map(txt).join('\n'));
  const want=c.rows.map(row=>row.map(([t,s])=>[t,JSON.stringify(golden.styles[s])]));

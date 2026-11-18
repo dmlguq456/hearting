@@ -436,7 +436,7 @@ def _request_delivery(row, gone=False):
     return word
 
 
-def request_rows(views, now, tag_of, doer_of=None):
+def request_rows(views, now, tag_of, doer_of=None, own_repo=None):
     """The panel's lines for requests this session sent (``out``) and received (``in``).
 
     ``views`` are plain dicts made by the host (a ``peer-request-v1`` record, which side this
@@ -495,6 +495,11 @@ def request_rows(views, now, tag_of, doer_of=None):
                     known = None
             known = known if isinstance(known, dict) else {}
             doer = doer_paint({"harness": other["harness"], "model": known.get("model"), "effort": known.get("effort")})
+            # 11-18 (the person: "세션 id 외에도 repo 위치까지 request는 표시를 해주는게 좋겠네"): the other session's repository name as
+            # Fleet writes it (a value the shared pass already read); not drawn for a session of this window's own repository.
+            repo = known.get("repo")
+            if isinstance(repo, str) and repo and repo != own_repo:
+                doer["repo"] = repo
         delivery = _request_delivery(deliveries.get(current.get("transfer_ref")),
                                      gone=bool(view.get("gone")))
         word = lambda key: ui_text("fleet.session_panel." + key)  # noqa: E731
@@ -742,6 +747,48 @@ def usage_rows(harness, values):
     return rows
 
 
+# 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): a host sample older than this is
+# not drawn (the producer takes a new one about every half minute: `human_wait_state.RESOURCE_SAMPLE_S`).
+RESOURCES_MAX_AGE = 120.0
+
+
+def resource_rows(value, now):
+    """The RESOURCES section's hosts, one dict each, its values painted as ``(text, key)`` parts: the host, its CPU and memory
+    use, one entry per GPU a process runs on (a gauge at nine and at five cells, the percent, ``21/24G``, and the numbers of the
+    sessions that hold it: none where it does not know them) and the count of the GPUs nothing runs on. Fleet's host sample
+    as the shared producer kept it; nothing is read here. A sample older than ``RESOURCES_MAX_AGE`` gives no rows."""
+    if not isinstance(value, dict) or not isinstance(value.get("observed_at"), (int, float)) or now - value["observed_at"] > RESOURCES_MAX_AGE:
+        return []
+    percent = lambda x: "%d%%" % round(x)  # noqa: E731
+    rows = []
+    for host in value.get("hosts") or ():
+        gpus = []
+        for gpu in host["gpus"]:
+            if not gpu["busy"]:
+                continue
+            util, used, total = gpu["util"], gpu["used"], gpu["total"]
+            row = {"label": [("GPU%d" % gpu["i"], "dim")]}
+            if util is not None:
+                for cells in (9, 5):
+                    filled = max(0, min(cells, int(util * cells / 100 + 0.5)))
+                    row["gauge%d" % cells] = [("━" * filled, "lvl_g"), ("─" * (cells - filled), "dim"), (" ", "dim"), (percent(util), "lvl_g")]
+                row["pct"] = [(percent(util), "lvl_g")]
+            if used is not None and total:
+                row["mem"] = [("%d/%dG" % (round(used), round(total)), "dim")]
+            users = [("[" + str(tag).strip("[]") + "]", "loc_repo") for tag in gpu["users"]]
+            if users:
+                row["users"] = [part for i, one in enumerate(users) for part in ((one,) if not i else ((" ", "dim"), one))]
+            gpus.append(row)
+        row = {"host": [(host["name"], "loc_repo")], "gpus": gpus, "idle": sum(1 for gpu in host["gpus"] if not gpu["busy"])}
+        stats = []
+        for word, number in (("CPU", host.get("cpu")), ("MEM", host.get("mem"))):
+            if number is not None:
+                stats.append([(word + " ", "dim"), (percent(number), "loc_repo")])
+        row["stats"] = stats
+        rows.append(row)
+    return rows
+
+
 # A finished route's result row (the producer keeps the two most recent after the current
 # routes) is news: it stays until the person's next input, ten minutes at most (the bound the
 # notice line's news used), and a result that did not pass takes Fleet's failure mark.
@@ -825,9 +872,11 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         # 11-15 (panel polish 1): the action under a question to answer here.
         "answer_action",
         # 11-17 (route row 5): a frame route whose two legs are done waits for the person's direction.
-        "direction_wait")}
+        "direction_wait",
+        # 11-18: the RESOURCES section's count of the GPUs nothing runs on (`idle GPU 6`).
+        "resource_idle_gpus")}
     # Fixed words are English in every language (spec rule 3).
-    labels.update(settings="Settings", routes="route", context="context", route_line="route line",
+    labels.update(settings="Settings", routes="route", context="context", route_line="route line", worker_box="worker box",
                   rule_motion="rule motion")
     from .session_line import effort_label, gauge_parts, answer_wait_word
     selected = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model, harness=harness))]

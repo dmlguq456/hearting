@@ -2099,6 +2099,20 @@ def _registered_tag(harness, sid):
     return str(tag) if tag else None
 
 
+def session_repos(records):
+    """``{"<harness>\\0<session id>": repo name}``: the repository name Fleet puts on each session of a pass (its session
+    row's ``repo``), for each id the session answers to. No read of its own: ``records`` is the pass's ``(rows, index)``."""
+    rows, index = records
+    repo_of = {row["tag"]: row.get("repo") for row in rows}
+    found = {}
+    for tag, info in index.items():
+        repo, harness = repo_of.get(tag), _text(_get(info["session"], "harness", "adapter", "h"))
+        if isinstance(repo, str) and repo and harness:
+            for known in info["ids"]:
+                found[harness + "\0" + str(known)] = repo
+    return found
+
+
 def session_peers(snapshot, now=None, records=None):
     """``{"<harness>\\0<session id>": {"tag", "supervisors": [[tag, harness]], "targets": [[tag, harness]]}}`` for each
     session in a supervision relation, from the steward records the snapshot already holds (no read of its own).

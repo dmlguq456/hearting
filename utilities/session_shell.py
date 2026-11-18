@@ -47,7 +47,7 @@ def _private_json(path: Path, limit: int):
 DISPLAY_DEFAULTS = {"layout": "side", "side_width": 40, "side_min_columns": 100,
                     "narrow": "bottom", "auxiliary": "summary", "bottom_rows": 14,
                     "position": "right", "theme": "terminal", "shade": "none", "route_line": "time",
-                    "rule_motion": "rule"}
+                    "worker_box": "closed", "rule_motion": "rule"}
 # Appearance choices. An unknown value falls back to its default on its own and
 # never disables the shell, so a hand-edited or newer value cannot cost the panel.
 APPEARANCE = {"position": ("right", "left"), "theme": ("terminal", "light", "mono"),
@@ -57,7 +57,10 @@ APPEARANCE = {"position": ("right", "left"), "theme": ("terminal", "light", "mon
 # 11-15): a light over the head rule under a lit frame (`rule`, the default), one arc round the
 # frame (`border`), a wave round it (`scanners`), or nothing (`off`). Same per-key fallback: the
 # `on` saved before 11-15 reads as `rule`, and the file is not rewritten for it.
-CHOICES = {**APPEARANCE, "route_line": ("time", "model"), "rule_motion": ("rule", "border", "scanners", "off")}
+# 11-18 (the person: "박스 여부는 내가 골라가면서 볼 수 있게 그냥 옵션에 좀 넣어줘"): `worker_box`, how the ROUTE box draws a stage's workers:
+# in a `closed` box (the default), an `open` one (its top line and left side), or `none` (the stage row and the `↳` indent).
+CHOICES = {**APPEARANCE, "route_line": ("time", "model"), "worker_box": ("closed", "open", "none"),
+           "rule_motion": ("rule", "border", "scanners", "off")}
 
 
 def _appearance(value):
@@ -1165,7 +1168,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.config import ui_text
     from fleet.session_view import observe
     from fleet.session_work import observe as observe_work, open_count, recent_memory
-    from fleet.session_panel import MEMORY_ITEMS, presentation, request_rows, usage_rows
+    from fleet.session_panel import MEMORY_ITEMS, presentation, request_rows, resource_rows, usage_rows
     from fleet.session_line import peer_message_rows
     counts, route = human_wait_state.cached_statusline(harness, sid)
     view = human_wait_state.cached_view(request=False) or {}
@@ -1367,10 +1370,16 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     def doer_of(other_harness, other_sid):
         found = doers.get(str(other_harness) + "\0" + str(other_sid))
         return found if isinstance(found, dict) else None
-    panel["requests"] = request_rows(request_views, time.time(), assigned_tag, doer_of) if request_views else []
+    own_known = doer_of(harness, sid) or {}
+    panel["requests"] = request_rows(request_views, time.time(), assigned_tag, doer_of, own_repo=own_known.get("repo")) if request_views else []
     # The PEERS line: who supervises whom (the steward records the shared producer already read, `session_peers` in the
     # cache read above; no read of its own), this window's own group first when it is supervised, then the one it leads.
     panel["peers"] = peer_groups((view.get("session_peers") or {}).get(harness + "\0" + sid), tag, harness)
+    # 11-18: the RESOURCES section (the compute hosts' CPU, memory and GPU use and the numbers of the sessions that hold a GPU): the
+    # sample the shared producer already took, in the cache read above (no read of its own).
+    panel["resources"] = [{"host": styled(row["host"]), "stats": [styled(item) for item in row["stats"]], "idle": row["idle"],
+                           "gpus": [{name: styled(parts) for name, parts in gpu.items()} for gpu in row["gpus"]]}
+                          for row in resource_rows(view.get("resources"), time.time())]
     for request in panel["requests"]:
         # Painted as a route's doer is: the same harness, model and effort keys.
         request["paint"] = route_paint(request)

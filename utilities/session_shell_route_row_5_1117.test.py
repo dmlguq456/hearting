@@ -1,11 +1,16 @@
 """11-17 (the person: route row sketch 5): the shell panel's route lines read as the sketch draws them.
 
 Three scenes of one grammar, everything synthetic:
-  * a route that continues a frame: `frame ✓ → code(standard)` / title / owner (`CTX 40% · 42m` beside its model) / its NOW /
-    `staged 3/6: execute` / the workers hung under the owner by `↳` (no box), each with its own NOW under it;
-  * a frame route: `frame → ??`, its two legs hung straight under the route (`↳ frame`, `↳ frame-alt`); when the legs are
+  * a route that continues a frame: `frame ✓ → code(standard)` / title / owner (its mark, role, harness and model, with its `CTX 40%`
+    row under it) / its NOW / the workers and the stage line under the owner, each worker with its `CTX 22% · 12m` row and its own
+    NOW under it. The default panel setting `worker_box` (`closed`) draws the workers in a box whose top line is the stage line
+    (`┌ staged 3/6: execute ──┐`); `none` is the old form (`staged 3/6: execute` as a row, the workers hung by `↳`), which most of
+    the scenes below read in;
+  * a frame route: `frame → ??`, its two legs hung straight under the route (`↳ frame`, `↳ frame-alt`, no box); when the legs are
     done it waits for the direction (`◑ frame → ?? · waiting for direction`, not blinking);
-  * a route its owner does alone: `code(quick)` / title / owner (`CTX` beside its model) / its NOW, no stage line.
+  * a route its owner does alone: `code(quick)` / title / owner / its `CTX` row / its NOW, no stage line.
+A session shows a time only where it has its own (a worker's, on its CTX row); an owner never does: the route's time is the one at
+the right end of its first line.
 The kind word is the one bold word, the intensity stands in dim brackets (nothing else goes in them), and exactly one thing
 blinks per route: the stage name when a stage line stands, else the first line's dot. Failed, finished and narrow forms keep
 the same grammar. The bottom layout and the three harnesses draw the same words.
@@ -55,6 +60,8 @@ const draw=(routes,width,height,o)=>plain(render(routes,width,height,o));
 const box=rows=>{const a=rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s)),z=rows.findIndex((s,i)=>i>a&&s.startsWith('│ ╰'));
   return rows.slice(a+1,z).map(s=>s.replace(/^│ │ ?/,'').replace(/ ?│ │$/,'').replace(/\s+$/,'')).filter(s=>!/^─ (direct|dispatch|request) ─+$/.test(s));};
 const only=(route,width=44,o={})=>box(draw([route],width,60,o));
+// (11-18: `worker_box: none` draws the workers hung under the owner by `↳` with the stage line as a row of its own, the form these scenes were written in.)
+const NB={configuration:{worker_box:'none'}};
 const rowParts=(v,re)=>v.rows.find(r=>re.test(text(r)));
 // (The box's title `1 ROUTE` pulses while a route runs; it is not a route's line.)
 const beats=(route,o={})=>render([route],44,60,o).rows.flat().filter(p=>p.beat===true&&!/ROUTE$/.test(p.text));
@@ -69,62 +76,90 @@ class RouteRow5Test(unittest.TestCase):
 
     def test_the_route_that_continues_a_frame_reads_kind_title_owner_stage_and_hung_workers(self):
         self.node(r"""
-// (11-17, two-row session lines: each session is its who row, `CTX 40%` beside its model with no gauge, and under it its NOW, one row;
-// a worker's stage and open tool are not drawn: the owner's stage line has the stage.)
+// (11-18: each session is its who row, its `CTX 40%` row under it (a worker's `CTX 22% · 12m` with its own time; an owner's never has one) and its NOW,
+// up to two rows; a worker's stage and open tool are not drawn: the stage line has the stage.)
+// The default `worker_box` (closed): the workers sit in a box under the owner, the stage line on its top line, no stage row of its own.
 assert.deepEqual(only(R.staged),[
  tm('● frame ✓ → code(standard)','42m'),
  '  패널 route 줄 다시 짜기',
- '  ● owner  claude Opus 5.5 xhigh 40%',
+ '  ● owner  claude Opus 5.5 xhigh',
+ '    CTX 40%',
+ '    Waiting on two workers',
+ '  ┌ staged 3/6: execute ───────────┐',
+ '  │ ⠋ worker claude Sonnet 5.5     │',
+ '  │   CTX 22% · 12m                │',
+ '  │   Edit panel-view.cjs          │',
+ '  │ ⠋ worker opencode GLM-5.2 max  │',
+ '  │   CTX 9% · 12m                 │',
+ '  │   Bash run-tests.py            │',
+ '  └────────────────────────────────┘',
+]);
+const boxed=only(R.staged),colOf=(s,w)=>[...s.slice(0,s.indexOf(w))].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
+assert.equal(colOf(boxed[5],'┌'),2);assert.equal(colOf(boxed[6],'│'),2);assert.equal(colOf(boxed[6],'⠋'),4);assert.equal(colOf(boxed[7],'CTX'),6);assert.equal(colOf(boxed[8],'Edit'),6);
+assert(!boxed.some(s=>/↳/.test(s))&&!boxed.some(s=>/^ {4}staged/.test(s)),boxed.join('\n'));
+// `worker_box: none` is the old form: the stage row, the workers hung by `↳`, each one's rows at 8 cells.
+assert.deepEqual(only(R.staged,44,NB),[
+ tm('● frame ✓ → code(standard)','42m'),
+ '  패널 route 줄 다시 짜기',
+ '  ● owner  claude Opus 5.5 xhigh',
+ '    CTX 40%',
  '    Waiting on two workers',
  '    staged 3/6: execute',
- '    ↳ ⠋ worker claude Sonnet 5.5 22%',
+ '    ↳ ⠋ worker claude Sonnet 5.5',
+ '        CTX 22% · 12m',
  '        Edit panel-view.cjs',
- '    ↳ ⠋ worker opencode GLM-5.2 9%',
+ '    ↳ ⠋ worker opencode GLM-5.2 max',
+ '        CTX 9% · 12m',
  '        Bash run-tests.py',
 ]);
 // No box: no frame characters inside the route's rows, and a worker's rows hang at 4 / 8 cells.
-const rows=only(R.staged);
-assert(!rows.some(s=>/[╭╮╰╯├┤│]/.test(s)),rows.join('\n'));
+const rows=only(R.staged,44,NB);
+assert(!rows.some(s=>/[╭╮╰╯├┤│┌└]/.test(s)),rows.join('\n'));
 const col=(s,w)=>[...s.slice(0,s.indexOf(w))].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
-assert.equal(col(rows[5],'↳'),4);assert.equal(col(rows[6],'Edit'),8);assert.equal(col(rows[8],'Bash'),8);
-assert.equal(col(rows[2],'owner'),4);assert.equal(col(rows[3],'Waiting'),4);
+assert.equal(col(rows[6],'↳'),4);assert.equal(col(rows[7],'CTX'),8);assert.equal(col(rows[8],'Edit'),8);assert.equal(col(rows[11],'Bash'),8);
+assert.equal(col(rows[2],'owner'),4);assert.equal(col(rows[3],'CTX'),4);assert.equal(col(rows[4],'Waiting'),4);
 // The NOW is bright while the session works, dim otherwise; the gauge and the worker's stage / tool rows are gone.
-const nowOf=(route,re,o)=>rowParts(render([route],44,60,o),re).find(p=>re.test(p.text));
+const nowOf=(route,re,o)=>rowParts(render([route],44,60,o),re).find(p=>p.text==='Waiting');   // (a NOW is drawn word by word: its first word wears the NOW's color)
 assert.equal(nowOf(R.staged,/Waiting on/).foreground,253);assert.notEqual(nowOf(R.staged,/Waiting on/).dim,true);
 assert.equal(nowOf({...R.staged,kind:'idle',state:'idle'},/Waiting on/).dim,true);
 assert(!rows.some(s=>/━|─|execute ·|· Edit|· Bash/.test(s)),rows.join('\n'));
-// The same route at a wider panel reads whole: `CTX` and the time beside the model.
-const wide=only(R.staged,60);
-assert.equal(wide[2],'  ● owner  claude Opus 5.5 xhigh  CTX 40% · 42m');
-assert.equal(wide[5],'    ↳ ⠋ worker claude Sonnet 5.5 high  CTX 22% · 12m');
-assert.equal(wide[6],'        Edit panel-view.cjs');
-// Short of cells the time goes first, then the word `CTX` (the number stays), then the effort, then the harness; the NOW is cut with `…`.
-assert.equal(only(R.staged,52)[2],'  ● owner  claude Opus 5.5 xhigh  CTX 40%');
-assert.equal(only(R.staged,40)[2],'  ● owner  claude Opus 5.5 40%');
-assert(only({...R.staged,paint:{...R.staged.paint,now:'a very long NOW that cannot fit in the row at all, ever'}},36)[3].endsWith('…'));
+// An owner shows no time of its own at any width; a worker's time stands on its CTX row.
+for(const w of [44,60])assert(!only(R.staged,w,NB).slice(2,5).some(s=>/42m/.test(s)),w);
+// The same route at a wider panel keeps the same rows: the effort now fits on the worker's row too.
+const wide=only(R.staged,60,NB);
+assert.equal(wide[2],'  ● owner  claude Opus 5.5 xhigh');
+assert.equal(wide[3],'    CTX 40%');
+assert.equal(wide[6],'    ↳ ⠋ worker claude Sonnet 5.5 high');
+assert.equal(wide[7],'        CTX 22% · 12m');
+assert.equal(wide[8],'        Edit panel-view.cjs');
+// Short of cells the effort goes first, then the harness, then the model; the NOW is cut with `…` on its second row.
+const ownerRow=(w,o)=>only(R.staged,w,o).find(s=>/● owner/.test(s));   // (the title wraps to a second row at the narrow widths)
+assert.equal(ownerRow(36,NB),'  ● owner  claude Opus 5.5');
+assert.equal(ownerRow(30,NB),'  ● owner  Opus 5.5');
+assert.equal(ownerRow(26,NB),'  ● owner');
+const long=only({...R.staged,paint:{...R.staged.paint,now:'a very long NOW that cannot fit in the row at all, ever'}},36,NB);
+assert.deepEqual(long.slice(4,6),['    a very long NOW that','    cannot fit in the row a…'],long.join('\n'));
 """)
 
     def test_a_frame_route_hangs_its_two_legs_under_it_and_waits_for_the_direction(self):
         self.node(r"""
-assert.deepEqual(only(R.frame,50),[
- tm('● frame → ??','4m',50),
- '  보류된 메시지 조사',
- '  ↳ ⠋ frame     claude Opus 5.5 xhigh 18%',
+// (11-18: the legs hang under the route as they did, no box, whatever `worker_box` says; each is its who row, its `CTX 18% · 4m` row with its own time, its NOW.)
+const legs=[
+ '  ↳ ⠋ frame     claude Opus 5.5 xhigh',
+ '      CTX 18% · 4m',
  '      Reading the held messages',
- '  ↳ ⠋ frame-alt codex GPT-5.5 xhigh 11%',      // (a leg with no NOW has no empty row under it)
-]);
-assert.deepEqual(only(R.frame,60).slice(2),[
- '  ↳ ⠋ frame     claude Opus 5.5 xhigh  CTX 18% · 4m',
- '      Reading the held messages',
- '  ↳ ⠋ frame-alt codex GPT-5.5 xhigh  CTX 11% · 4m',
-]);
+ '  ↳ ⠋ frame-alt codex GPT-5.5 xhigh',      // (a leg with no NOW has no empty row under it)
+ '      CTX 11% · 4m',
+];
+for(const o of [{},NB])assert.deepEqual(only(R.frame,50,o),[tm('● frame → ??','4m',50),'  보류된 메시지 조사',...legs],JSON.stringify(o));
+assert.deepEqual(only(R.frame,60).slice(2),legs);
 // Done, the two legs gone and the answer asked for: the mark `◑`, no legs, the word; it does not blink.
 assert.deepEqual(only(R.wait,50),[tm('◑ frame → ?? · waiting for direction','4m',50),'  보류된 메시지 조사']);
 assert.equal(beats(R.wait).length,0);
 // In the person's language the word is the word list's (the backend's labels).
 const ko=only(R.wait,50,{model:{labels:{direction_wait:'방향 확인 대기'}}});
 assert.equal(ko[0],tm('◑ frame → ?? · 방향 확인 대기','4m',50));
-// Short of rows the NOW rows go and the legs fold into one row each (percent and time at the right edge); the first line and the title stay.
+// Short of rows the CTX rows fold into their who rows (the percent at the right edge) and the NOW rows go, so each leg is one row; the first line and the title stay.
 let folded=false;
 for(let h=40;h>=12;h--){
  const rows=box(draw([R.frame],50,h));
@@ -140,11 +175,13 @@ assert(folded,'the legs fold into one row each at some height');
 assert.deepEqual(only(R.solo),[
  tm('● code(quick)','18m'),
  '  보류된 메시지 조사',
- '  ⠋ owner codex GPT-5.5 high 63%',
+ '  ⠋ owner codex GPT-5.5 high',
+ '    CTX 63%',
  '    Bash run-tests.py',
 ]);
-// `CTX` and the time stand beside the model where the row has room; the owner's open tool is not on its row any more (its NOW says it).
-assert.equal(only({...R.solo,target:'utilities/session-shell/host.cjs',tool:'Edit'},60)[2],'  ⠋ owner codex GPT-5.5 high  CTX 63% · 18m');
+// The `CTX` row is the same at any width and has no time (the owner never shows one: the route's time is on its first line); the owner's open tool
+// is not on its row (its NOW says it).
+assert.deepEqual(only({...R.solo,target:'utilities/session-shell/host.cjs',tool:'Edit'},60).slice(2),['  ⠋ owner codex GPT-5.5 high','    CTX 63%','    Bash run-tests.py']);
 // No kind line text of the old forms anywhere.
 for(const old of ['code ·','one-shot','staged 3/6 ·','· execute','· Bash','━'])assert(!only(R.solo,60).join('\n').includes(old),old);
 """)
@@ -201,7 +238,8 @@ assert.deepEqual(lit.filter(p=>p.text!=='execute'),dark.filter(p=>p.text!=='exec
 assert.deepEqual(only(R.failed),[
  tm('✕ frame ✓ → code(standard)','42m'),
  '  패널 route 줄 다시 짜기',
- '  ✕ owner claude Opus 5.5 xhigh 40%',
+ '  ✕ owner claude Opus 5.5 xhigh',
+ '    CTX 40%',
  '    staged 2/3: execute ✕',
 ]);
 const done=only(R.done);
@@ -223,9 +261,10 @@ for(const width of [22,24,26,30,36,44,60]){
   assert(inner.length>=2,width+' '+route.id);
  }
 }
-// The stage line shortens `staged` first and keeps the stage; a worker's percent is never cut in the middle.
-assert(only(R.staged,30).includes('    3/6: execute'),only(R.staged,30).join('\n'));
-for(const s of only(R.staged,24))assert(!/CTX\s+\d$/.test(s),s);
+// The stage line shortens `staged` first and keeps the stage (in the box's top line, cut with `…` only after that); a worker's percent is never cut in the middle.
+assert(only(R.staged,30,NB).includes('    3/6: execute'),only(R.staged,30,NB).join('\n'));
+assert(only(R.staged,30).some(s=>/^  ┌ 3\/6: execute/.test(s)),only(R.staged,30).join('\n'));
+for(const o of [{},NB])for(const s of only(R.staged,24,o))assert(!/CTX\s+\d$/.test(s),s);
 """)
 
     def test_the_bottom_layout_reads_kind_intensity_and_stage_in_one_cell(self):
@@ -248,7 +287,7 @@ for(const s of [...wide,...mid])assert([140,80].includes(cells(s)),s);
 const three=['search','analyze','report'].map((n,i)=>i<1?{name:n,mark:'✓'}:i===1?{name:n,mark:'●',current:true,key:'stg2_on'}:{name:n,mark:''});
 const mk=(shape,o={})=>({...R.staged,id:'m',shape,stages:three,kind_word:'research',chain:[{name:'research',state:'active'}],workers_live:[],paint:{...R.staged.paint,now:'Reading the sources'},...o});
 const want=(shape,line,o)=>{const rows=only(mk(shape,o),50);
- assert.deepEqual(rows,[tm('● research(standard)','42m',50),'  패널 route 줄 다시 짜기','  ⠋ owner claude Opus 5.5 xhigh  CTX 40%','    Reading the sources',line],rows.join('\n'));};
+ assert.deepEqual(rows,[tm('● research(standard)','42m',50),'  패널 route 줄 다시 짜기','  ⠋ owner claude Opus 5.5 xhigh','    CTX 40%','    Reading the sources',line],rows.join('\n'));};
 want('map-reduce','    map-reduce 2/3: analyze');
 want('transactional-owner','    transactional-owner 2/3: analyze');
 want('resource+verification','    resource+verification 2/3: analyze',{chain:[{name:'research',state:'active'}]});
@@ -274,8 +313,9 @@ assert(wide.some(s=>/research\(standard\) · map-reduce 2\/3: analyze/.test(s))&
         self.node(r"""
 const none=(o={})=>({id:'n',title:'소유자를 모르는 route',kind:'working',state:'working',elapsed:'23m',shape:'one-shot-owner',stages:[{name:'one-shot',current:true,mark:'●'}],
  kind_word:'code',intensity:'quick',paint:{glyph:P('⠋'),ctx:P('40%')},...o});
-// The time and the context are drawn though no owner is named (`CTX 40% · 23m` after the mark; with no context the time is only on the first line, 11-18).
-const a=only(none(),50);assert(a.some(s=>/^ {2}⠋ CTX 40% · 23m$/.test(s)),a.join('\n'));
+// The context is drawn though no owner is named (its mark leads its `CTX 40%` row, there being no who row; no session shows a time of its own here, the route's time is on its
+// first line, 11-18).
+const a=only(none(),50);assert.deepEqual(a.slice(1),['  소유자를 모르는 route','  ⠋ CTX 40%'],a.join('\n'));assert.equal(a[0],tm('● code(quick)','23m',50));
 const b=only(none({paint:{glyph:P('⠋')}}),50);assert.equal(b[0],tm('● code(quick)','23m',50),b.join('\n'));assert(!b.some(s=>/^\s+23m$/.test(s)),b.join('\n'));
 const c=only(none({shape:'map-reduce',stages:[{name:'search',mark:'✓'},{name:'analyze',mark:'●',current:true}],paint:{glyph:P('⠋')}}),50);
 assert(c[0]===tm('● code(quick)','23m',50)&&c.some(s=>/map-reduce 2\/2: analyze/.test(s)),c.join('\n'));
@@ -285,10 +325,9 @@ assert.equal(d[2],'    Bash run-tests.py',d.join('\n'));assert(!d.some(s=>/^\s+2
 assert(!b.some(s=>s.trim()===''),b.join('\n'));
 // An owner at rest draws no tool at all (no `after Bash`, no open tool): its row is its who row, its NOW under it where it has one.
 const rest={...R.solo,kind:'idle',state:'idle',tool:undefined,after_tool:'Bash',paint:{glyph:P('●'),...doer('codex','GPT-5.5','high','63%')}};
-assert.equal(only(rest,50)[2],'  ● owner codex GPT-5.5 high  CTX 63%');
-assert.equal(only(rest,50).length,3);
+assert.deepEqual(only(rest,50).slice(2),['  ● owner codex GPT-5.5 high','    CTX 63%']);
 assert(!only({...rest,paint:{...rest.paint,now:'idle'}},50).join('\n').includes('after Bash'));
-assert.equal(only(R.solo,50)[2],'  ⠋ owner codex GPT-5.5 high  CTX 63%');
+assert.deepEqual(only(R.solo,50).slice(2,4),['  ⠋ owner codex GPT-5.5 high','    CTX 63%']);
 """)
 
     def test_the_three_harness_panels_draw_the_same_rows(self):

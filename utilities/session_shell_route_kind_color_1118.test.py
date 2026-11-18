@@ -34,7 +34,7 @@ const P=t=>({text:t}),cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2
 const names=['plan','plan-check','execute','impl-review','test','report'];
 const six=at=>names.map((name,i)=>i<at?{name,mark:'✓'}:i===at?{name,mark:'●',current:true}:{name,mark:''});
 const doer=(h,m,e,pct,now)=>({harness:P(h),model_text:P(m),effort:P(e),ctx:P(pct),...(now?{now}:{})});
-const route=(o={})=>({id:'a',zone:'dispatch',title:'갈래를 route에 기록',kind:'working',state:'working',elapsed:'1h52m',shape:'staged',stages:six(2),
+const route=(o={})=>({id:'a',zone:'dispatch',title:'갈래를 route에 기록',kind:'working',state:'working',elapsed:'1h 52m',shape:'staged',stages:six(2),
   kind_word:'code',kind_field:'code',intensity:'standard',role:'owner',paint:{glyph:P('⠸'),...doer('claude','Opus 5.5','xhigh','41%','검토 지적 둘을 고치는 중')},workers_live:[],...o});
 const mk=(word,field,intensity,o={})=>route({id:word,kind_word:word,kind_field:field,intensity,...o});
 const render=(routes,width,height,{side=true,model={},configuration={},background='',styles=STYLES}={})=>view.render({width,height,side,fill:side,harness:'claude',frame:0,background,
@@ -120,11 +120,11 @@ assert.equal(find(render([mk('code','code','standard')],44,40),/^code$/).foregro
     def test_the_time_stands_at_the_right_end_of_the_first_line_at_every_width_and_the_middle_text_goes_first(self):
         self.node(r"""
 const rows=w=>box(plain(render([route()],w,60)));
-assert.equal(rows(44)[0],tm('● code(standard)','1h52m'));
-assert.equal(rows(30)[0],tm('● code(standard)','1h52m',30));
+assert.equal(rows(44)[0],tm('● code(standard)','1h 52m'));
+assert.equal(rows(32)[0],tm('● code(standard)','1h 52m',32));   // (the panel is never narrower than 32 cells: `sideWidth`)
 // The kind word and the time stay down to the narrowest: the chain's earlier legs and the intensity go before them.
 for(let w=24;w<=60;w++){
- const first=rows(w)[0];assert(/1h52m$/.test(first)&&/^● code/.test(first),w+' '+first);
+ const first=rows(w)[0];assert(/1h 52m$/.test(first)&&/^● code/.test(first),w+' '+first);
  assert.equal(cells(first)<=w-8,true,w+' '+first);
 }
 // A frame route that waits for the person's direction: the middle text is cut with `…` before the kind word or the time go.
@@ -136,9 +136,10 @@ for(let w=22;w<=60;w++){const f=box(plain(render([wait],w,60)))[0];assert(/ 4m$/
 // No time: the end stays empty (no empty row, no stray digits).
 const none=box(plain(render([route({elapsed:''})],44,60)));
 assert.equal(none[0],'● code(standard)');assert(!none.some(s=>/^\s+$/.test(s)));
-// The session line's own time is as it was (`CTX 41% · 1h52m` where it fits).
+// An owner shows no time of its own, at any width: its CTX row is `CTX 41%` and the route's time stays only at the end of the first line.
 const wide=box(plain(render([route()],72,60)));
-assert(wide.some(s=>/CTX 41% · 1h52m/.test(s)),wide.join('\n'));
+assert(wide.some(s=>/^ +CTX 41%$/.test(s)),wide.join('\n'));
+assert(!wide.slice(1).some(s=>/1h 52m/.test(s)),wide.join('\n'));
 """)
 
     def test_a_direct_route_keeps_its_time_on_its_first_line_with_no_row_of_its_own(self):
@@ -151,7 +152,7 @@ assert.deepEqual(rows,[tm('● code','2m'),'  갈래를 route에 기록'],rows.j
     def test_under_the_native_area_the_command_column_is_gone_and_the_now_stands_under_the_row(self):
         self.node(r"""
 const r=route({tool:'Edit',target:'x.cjs',stages:six(2)});
-for(const w of [80,100,140]){
+for(const w of [90,100,140]){   // (the time reads `1h 52m`, as the producer words it)
  const rows=plain(render([r],w,22,{side:false}));
  assert(!rows.some(s=>s.includes('>_')),w+'\n'+rows.join('\n'));
  for(const s of rows)assert.equal(cells(s),w,s);

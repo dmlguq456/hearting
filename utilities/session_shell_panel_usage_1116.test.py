@@ -52,7 +52,7 @@ const brief=()=>({count:1,answerable:true,choices:2,label:'QUESTIONS',
   one:[[t('◑ ','g_blocked'),t('MESSAGES 몇 건까지 보일까요?','loc_repo')]],line:'MESSAGES 몇 건까지 보일까요?'});
 const draw=(o={})=>view.render({width:o.width??50,height:o.height??46,side:o.side??true,model:model(o),state:o.state||'working',harness:o.harness||'claude',
   frame:o.frame??1000,since:o.since??990,brief:o.question===false?undefined:(o.brief||brief),sent:()=>o.sent||[],cellWidth:cells,
-  configuration:{side_width:o.width??50,rule_motion:o.motion||'rule',theme:o.theme||'terminal'},background:o.background||''});
+  configuration:{side_width:o.width??50,rule_motion:o.motion||'rule',theme:o.theme||'terminal',...(o.configuration||{})},background:o.background||''});
 const lines=v=>v.rows.map(str);
 const inside=v=>lines(v).map(l=>l.slice(2,-2));
 const at=(v,head)=>inside(v).findIndex(l=>l.startsWith(head));
@@ -514,10 +514,14 @@ const v=draw({...opt,height:60});
 const L=lines(v);
 // 11-17 (route row 5, the two-row session lines): a worker's `execute · Edit` stage row is gone, so the stage's name stands
 // only on the owner's stage line `staged 3/6: execute`: in the color Fleet gives the stage `execute` (its 3rd, running:
-// index 2, lit), four cells in, no kind word.
-const stageRow=(vv,name)=>vv.rows.find(r=>new RegExp('^│ │ {5}\\S* ?\\d/\\d+: '+name).test(str(r)));
+// index 2, lit), no kind word. 11-18: with workers the default `worker_box` draws that line as the top line of the box the
+// workers sit in (`┌ staged 3/6: execute ──┐`, two cells in); `worker_box: none` draws it as its own row, four cells in.
+const stageRow=(vv,name)=>vv.rows.find(r=>new RegExp('^│ │ {3}┌ \\S* ?\\d/\\d+: '+name).test(str(r)));
 assert(!v.rows.some(r=>/│ +execute · Edit/.test(str(r))),'the worker no longer has a stage row\n'+L.join('\n'));
-const kind=v.rows.find(r=>/^│ │ {5}staged 3\/6: execute/.test(str(r)));assert(kind,L.join('\n'));
+const kind=v.rows.find(r=>/^│ │ {3}┌ staged 3\/6: execute/.test(str(r)));assert(kind,L.join('\n'));
+const flat=draw({...opt,height:60,configuration:{worker_box:'none'}}),flatKind=flat.rows.find(r=>/^│ │ {5}staged 3\/6: execute/.test(str(r)));
+assert(flatKind&&!lines(flat).some(l=>/[┌└]/.test(l.slice(4))),lines(flat).join('\n'));
+assert.equal(flatKind.find(p=>p.text==='execute').foreground,150);
 const stageName=kind.find(p=>p.text==='execute');assert.equal(stageName.foreground,150);assert.equal(stageName.bold,true,'lit like Fleet\'s running stage');
 // Other states by Fleet's rule: a finished stage dim of its hue, a failed one the failure red, a waiting one dim.
 const other=stages.map(s=>s.name==='execute'?{...s,mark:'✕',key:'lvl_r'}:s);
