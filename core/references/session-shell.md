@@ -628,7 +628,7 @@ popup; a request row the MESSAGES popup).
   from 80); the memory; and the Fleet numbers of the sessions that hold it, empty where the producer does not know them), two cells in and two cells
   apart, onto the next row where they do not fit and never splitting one GPU's group; a host that could not be reached keeps its name alone, a host with no
   GPU in use is its one row. Short of cells a GPU's group gives up its memory, then its use, and keeps the session number (every group takes the
-  form that lets the widest stand alone); a host row gives up the idle count, then `MEM`, then `CPU`, and a long name is cut with `…`. The values are Fleet's own
+  form that lets the widest stand alone); a host row gives up `MEM`, then `CPU`; if that is still short the name is cut with `…` (to 12 cells at least), and the idle count stays to the last. The values are Fleet's own
   compute-host sample (`compute_hosts.collect`, the sample its RESOURCES view draws): a probe costs the servers an SSH read each, so the
   resident producer takes it only while a side panel that draws the section is open (the host's projection request carries `side`;
   `panel_projection` then touches `.resources-wanted`, at most every 20 seconds, and the producer reads no host once it is 90 seconds old),
