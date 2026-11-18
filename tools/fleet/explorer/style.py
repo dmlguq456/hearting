@@ -17,7 +17,7 @@ KEY_ALIASES = {
     "lvl_r_flat": "g_blocked", "chip_on": "hearting_name", "eff_medium": "branch_s",
     # `fam_*` model keys pass through unchanged: one key per family keeps every viewer
     # on the same hue. A local alias here is how Sol/Astra/Luna once shared one yellow.
-    "bold": "section_head", "code": "hb_opencode", "tool": "g_work",
+    "bold": "section_head", "code": "fam_sonnet", "tool": "g_work",
 }
 
 REFERENCE_STYLES = {
@@ -25,9 +25,11 @@ REFERENCE_STYLES = {
     ("w", 0, 0): "loc_repo", ("w", 0, 1): "name_dim", ("w", 1, 0): "section_head",
     ("r", 0, 0): "g_blocked", ("r", 0, 1): "lvl_r_dim", ("r", 1, 0): "g_dead",
     ("g", 0, 0): "grp_live", ("g", 0, 1): "g_work_off", ("g", 1, 0): "g_work",
-    ("c", 0, 0): "hb_claude", ("c", 0, 1): "h_claude", ("c", 1, 0): "hb_claude",
-    ("m", 0, 0): "hb_codex", ("m", 0, 1): "h_codex", ("m", 1, 0): "eff_xhigh",
-    ("l", 0, 0): "hb_opencode", ("l", 0, 1): "version_release", ("l", 1, 0): "hb_opencode",
+    # "c" here is the stage palette's cyan (`_stage_hue`), not the Claude harness hue (orange, 11-18).
+    ("c", 0, 0): "fam_opus", ("c", 0, 1): "famd_opus", ("c", 1, 0): "fam_opus",
+    # "m" and "l" are the stage palette's magenta and blue (the Fable and Sonnet families' hues), not the Codex and OpenCode harness colors (11-18).
+    ("m", 0, 0): "fam_fable", ("m", 0, 1): "famd_fable", ("m", 1, 0): "eff_xhigh",
+    ("l", 0, 0): "fam_sonnet", ("l", 0, 1): "version_release", ("l", 1, 0): "fam_sonnet",
     ("v", 0, 0): "g_spin", ("v", 0, 1): "g_spin_dim", ("v", 1, 0): "hearting_name",
     ("y", 0, 0): "g_idle", ("y", 0, 1): "lvl_y_dim", ("y", 1, 0): "stg3_on",
     ("p", 1, 0): "tag_steward",
@@ -51,7 +53,7 @@ RECEDE_KEYS = {
     "g_blocked": "lvl_r_dim", "g_blocked_chip": "lvl_r_dim",
 }
 
-_HARNESS_DIM = {"claude": "h_claude", "codex": "h_codex", "opencode": "version_release"}
+_HARNESS_DIM = {"claude": "h_claude", "codex": "h_codex", "opencode": "h_opencode"}
 
 
 def normalize_style(key=None, tint=None):
@@ -86,6 +88,8 @@ def recede_key(key):
         return mapped
     if canonical.startswith("hb_"):
         return _HARNESS_DIM.get(canonical[3:], "dim")
+    if canonical.startswith("spin_"):
+        return "spind_" + canonical[5:]
     if canonical.startswith("fam_"):
         return "famd_" + canonical[4:]
     if canonical.startswith("eff_"):

@@ -234,10 +234,11 @@ class PeersLine(unittest.TestCase):
             for _ in range(nth + 1):
                 at = line.index(token, at + 1)
             return grid.cells[row][at][1]
-        self.assertEqual(key("[c7]"), "hb_claude")
+        # 11-18: this window's number is its harness color bold; the other sessions' are the receded harness color, plain.
+        self.assertEqual(key("[c7]"), "h_claude")
         self.assertEqual(key("[3b]"), "hbb_codex")
         self.assertEqual(key("[3b]", 1), "hbb_codex")
-        self.assertEqual(key("[a1]"), "hb_claude")
+        self.assertEqual(key("[a1]"), "h_claude")
         self.assertEqual(key("⚑"), "tag_steward")
         self.assertEqual(key("─"), "dim")
         self.assertNotRegex(line.split("PEERS", 1)[1], r"working|idle|blocked|●|⠏")

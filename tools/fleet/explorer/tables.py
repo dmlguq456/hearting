@@ -5,7 +5,7 @@ from .live import current_route_counts, route_marker_state, unknown_kind, unknow
 from .grid import CellGrid, cell_width
 from .style import recede_key
 from ..config import ui_text
-from ..palette import ROUTE_FIELDS, kind_intensity_key, kind_word_key, route_field
+from ..palette import ROUTE_FIELDS, harness_spin, kind_intensity_key, kind_word_key, route_field
 
 X = 34
 GAP = 3
@@ -384,8 +384,8 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                     not branch_tail or tail.startswith(branch_tail) and branch_tail == " (%s)" % branch))
                 title_text = _clip(title, room)
                 bold_key = ("dim" if session.get("title_wait") and not session.get("title") else
-                            {"claude": ("c", 1, 0), "codex": ("m", 1, 0),
-                             "opencode": ("l", 1, 0)}.get(harness, "unknown"))
+                            {"claude": "hb_claude", "codex": "hbb_codex",
+                             "opencode": "hb_opencode"}.get(harness, "unknown"))
                 title_end = grid.put(x + c["title"], y, title_text, bold_key,
                                      limit=x + c["title"] + room)
                 if tail:
@@ -1043,6 +1043,10 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
     age = _clip(str(route.get("age") or ""), AGE_W + 1)
     age_x = right - _seg_width(age)
     marker, marker_key = _ROUTE_MARK[route_marker_state(route)]
+    # 11-18: the working spinner turns in the color of the harness this row names (its doer's, the one its model cell leads with).
+    parts, (pct, window, tokens), tool, agents = route_doer_cells(route)
+    first_key = parts[0][1] if parts and isinstance(parts[0][1], str) else ""
+    marker_key = harness_spin(marker_key, first_key[3:] if first_key.startswith("hb_") else None)
     grid.put(x + IND + 1, y, marker, marker_key)
     tag = str(route.get("session_tag") or route.get("past_from") or "")
     tag_x = x + IND + 3
@@ -1054,7 +1058,6 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
         grid.put(tag_x + 1 + _seg_width(shown), y, "]", "dim")
     if steward and x + IND + 9 <= x + c["h"]:
         grid.put(x + IND + 8, y, "⚑", "steward")
-    parts, (pct, window, tokens), tool, agents = route_doer_cells(route)
     harn_end = _overview_harness_end(use, c)
     # What this row leaves out or cuts, for the unfolded route to give in full (a cut title is
     # whole on the route detail's top band).
@@ -1175,6 +1178,7 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
     marker, marker_key = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"),
                           "blocked": ("●", "g_blocked"), "done": ("✓", "grp_live"),
                           "stale": ("◌", "dim"), "wait": ("·", "dim")}.get(state, ("●", "g_work_off"))
+    marker_key = harness_spin(marker_key, route.get("harness"))        # 11-18: the owner's harness names this line
     grid.put(x0, y, marker, marker_key)
     x = x0 + 2
     if repo_w:
@@ -1210,7 +1214,7 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
 
 
 # 11-17 (route row 5): the kind word is the one bold word of a route's cell; a lit stage name keeps its hue at plain weight.
-_PLAIN_WEIGHT = {"g_work": "grp_live", "stg3_on": "g_idle", "eff_xhigh": "hb_codex"}
+_PLAIN_WEIGHT = {"g_work": "grp_live", "stg3_on": "g_idle", "eff_xhigh": "fam_fable"}
 
 
 def _is_unit_route(route):
@@ -1431,13 +1435,14 @@ def _stage_hue(route, step):
 
 
 def _stage_items(stages, lit=True):
-    bright_hues = ("hb_opencode", "hb_claude", "grp_live", "g_idle", "hb_codex")
-    dim_hues = ("version_release", "h_claude", "g_work_off", "lvl_y_dim", "h_codex")
+    # The stage palette is blue, cyan, green, yellow, magenta (the family hues): none of them is a harness color.
+    bright_hues = ("fam_sonnet", "fam_opus", "grp_live", "g_idle", "fam_fable")
+    dim_hues = ("version_release", "famd_opus", "g_work_off", "lvl_y_dim", "famd_fable")
     result = []
     for index, stage in enumerate(stages):
         status = stage.get("st")
         if status == "active" and lit:
-            name_key = {0: "hb_opencode", 1: "hb_claude", 2: "g_work", 3: "stg3_on", 4: "eff_xhigh"}[index % len(bright_hues)]
+            name_key = {0: "fam_sonnet", 1: "fam_opus", 2: "g_work", 3: "stg3_on", 4: "eff_xhigh"}[index % len(bright_hues)]
         elif status == "failed":
             name_key = bright_hues[index % len(bright_hues)]
         else:
@@ -1632,6 +1637,7 @@ def session_marker(session):
     marker, marker_key = {"working": ("⠏", "spin"), "blocked": ("●", "blocked"),
                           "dead": ("✕", "dead"), "done": ("✓", "done")}.get(
                               session.get("state"), ("●", "idle"))
+    marker_key = harness_spin(marker_key, session.get("harness"))      # 11-18: a working spinner in its harness's color
     if session.get("answer_wait_marker") == "●":
         marker, marker_key = "●", "blocked"
     elif session.get("answer_wait_marker") == "◑":
@@ -1870,7 +1876,7 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 # the weight every family-coloured model name has here.
                 if index == 0 and isinstance(style, str) and style.startswith("hb_"):
                     style = {"hb_claude": "h_claude", "hb_codex": "h_codex",
-                             "hb_opencode": "version_release"}.get(style, style)
+                             "hb_opencode": "h_opencode"}.get(style, style)
                 elif style == "eff_medium":
                     style = "branch_s"
                 if link and worker_owner_limit < owner_limit:

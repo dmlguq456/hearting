@@ -115,7 +115,14 @@ const pop=(cols,rows,band,n=3,title=[P('› ◑ 3 QUESTIONS · 1/3 · 답 필요
 assert.deepEqual([160,120,90,80,79,60,28,27,20].map(c=>v.popupWidth(c)),[76,76,76,76,75,56,24,27,20]);
 // 11-18: a table popup stands up to 116 cells, the routes popup alone up to 148; under 80 columns both are the window less 4.
 assert.deepEqual([200,160,152,120,100,80,79,60,28,27].map(c=>v.popupWidth(c,'table')),[116,116,116,116,96,76,75,56,24,27]);
-assert.deepEqual([200,160,152,148,120,100,80,79,60,28,27].map(c=>v.popupWidth(c,'route')),[148,148,148,144,116,96,76,75,56,24,27]);
+assert.deepEqual([240,200,160,120,100,80,79,60,28,27].map(c=>v.popupWidth(c,'route')),[196,196,156,116,96,76,75,56,24,27]);
+// 11-18 ("그 질문 팝업도 가로 길이를 좀 늘려줘라"): the question popup stands up to 132 cells (`question`), the window less 4 where that is less, as before under 80 columns.
+assert.deepEqual([240,200,160,136,132,120,100,80,79,60,28,27].map(c=>v.popupWidth(c,'question')),[132,132,132,132,128,116,96,76,75,56,24,27]);
+// A popup asked for with no kind keeps the text width (the table and routes popups' and the question popup's are their own).
+assert.deepEqual([240,160,80].map(c=>v.popupWidth(c,'text')),[76,76,76]);
+// The question popup laid out by `popup({kind:'question'})`: 132 cells in a 160-wide window, the frame centred.
+{const q=v.popup({cols:160,rows:40,band:0,kind:'question',title:[P('› ◑ 1 QUESTIONS')],body:body(3),sections:['QUESTIONS','ROUTE'],current:0});
+ assert.deepEqual([q.frame.left,q.frame.width],[14,132]);}
 let r=pop(160,40,0);assert.deepEqual(r.frame,{left:42,top:17,width:76,height:6});
 assert.deepEqual([r.left,r.top,r.width,r.height],[41,16,78,8]);
 const rows=text(r);

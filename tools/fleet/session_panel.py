@@ -771,7 +771,7 @@ RESOURCES_MAX_AGE = 150.0
 
 def resource_rows(value, now):
     """The RESOURCES section's hosts, one dict each, its values painted as ``(text, key)`` parts: the host, its CPU and memory
-    use, one entry per GPU a process runs on (a gauge at nine and at five cells, the percent, ``21/24G``, and the numbers of the
+    use, one entry per GPU a process runs on (the percent in its level's color, ``21/24G``, and the numbers of the
     sessions that hold it: none where it does not know them) and the count of the GPUs nothing runs on. Fleet's host sample
     as the shared producer kept it; nothing is read here. A sample older than ``RESOURCES_MAX_AGE`` gives no rows."""
     if not isinstance(value, dict) or not isinstance(value.get("observed_at"), (int, float)) or now - value["observed_at"] > RESOURCES_MAX_AGE:
@@ -786,10 +786,8 @@ def resource_rows(value, now):
             util, used, total = gpu["util"], gpu["used"], gpu["total"]
             row = {"label": [("GPU%d" % gpu["i"], "dim")]}
             if util is not None:
-                for cells in (9, 5):
-                    filled = max(0, min(cells, int(util * cells / 100 + 0.5)))
-                    row["gauge%d" % cells] = [("━" * filled, "lvl_g"), ("─" * (cells - filled), "dim"), (" ", "dim"), (percent(util), "lvl_g")]
-                row["pct"] = [(percent(util), "lvl_g")]
+                # 11-18: no gauge (the section is laid out side by side); the use is its number, in its level's color.
+                row["pct"] = [(percent(util), _level(util))]
             if used is not None and total:
                 row["mem"] = [("%d/%dG" % (round(used), round(total)), "dim")]
             users = [("[" + str(tag).strip("[]") + "]", "loc_repo") for tag in gpu["users"]]

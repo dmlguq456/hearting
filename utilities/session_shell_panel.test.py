@@ -451,9 +451,10 @@ for(const [state,want] of [['working',230],['submitting',230],['blocked',217],['
  // (11-15: the arc is the `border` value's; under the default `rule` a running frame stands lit, one step below.)
  const moving=paint({state,frame:0,since:0,cfg:{rule_motion:'border'}}).rows.flatMap(r=>[r[0],r.at(-1)]),lines=paint({state,frame:0,since:0,cfg:{rule_motion:'border'}}).rows.flat().filter(x=>['frame','frame-state','orbit'].includes(x.role)&&/^[─┌┐└┘│]+$/.test(x.text));
  const lit=paint({state,frame:0,since:0}).rows.flat().filter(x=>!x.rule&&['frame','frame-state','orbit'].includes(x.role)&&/^[─┌┐└┘│]+$/.test(x.text));
- if(want===230)assert(lit.every(x=>x.role==='orbit'&&x.foreground===view.FACES.dark.orbit[1]&&x.dim!==true),state+' lit');
+ const R=view.FACES.dark.ramp.claude.orbit;   // (11-18: this window is Claude's: a running session's moving cells are its harness's ramp)
+ if(want===230)assert(lit.every(x=>x.role==='orbit'&&x.foreground===R[1]&&x.dim!==true),state+' lit');
  if(want===217)assert(lines.every(x=>x.foreground===217&&x.dim!==true),state+' '+JSON.stringify(moving[0]));
- else if(want)assert(lines.every(x=>x.role==='frame'&&x.dim===true||x.role==='orbit'&&view.FACES.dark.orbit.includes(x.foreground))&&lines.some(x=>x.foreground===want),state);
+ else if(want)assert(lines.every(x=>x.role==='frame'&&x.dim===true||x.role==='orbit'&&R.includes(x.foreground))&&lines.some(x=>x.foreground===(want===230?R[0]:want)),state);
  else assert.deepEqual(moving,frame,state);
 }
 // A failed route turns only its own box line to the failure color; the frame stays the session's.
@@ -2444,7 +2445,9 @@ for(let h=40;h>=10;h--){const rows=sections(h,{q});
         script = self.FIXTURE + r"""
 const styles={dim:{dim:true},g_spin:{foreground:230},g_blocked:{foreground:217},g_work_off:{foreground:150,dim:true},
  tag_steward:{foreground:219,bold:true},tag_steward_dim:{foreground:219,dim:true}};
-const run=(o={})=>view.render({width:o.width||40,height:o.height||40,side:o.side!==false,fill:o.side!==false,harness:o.harness||'claude',
+// (11-18: these scenes read the moving frame's vanilla ramp, which a window with no known harness keeps; a working session of a known harness takes
+// its harness's ramp, `session_shell_harness_spinner_1118.test.py`'s.)
+const run=(o={})=>view.render({width:o.width||40,height:o.height||40,side:o.side!==false,fill:o.side!==false,harness:o.harness||'',
  model:{...head,tag:'[e9]',routes:[],route_count:0,messages:[],styles,...(o.model||{})},state:o.state,frame:o.frame||0,since:o.since,
  configuration:{rule_motion:'border',...(o.cfg||{})},background:o.background||'',questions:()=>[],...(o.extra||{})});
 const text=r=>r.map(p=>p.text).join('');
@@ -2458,7 +2461,8 @@ const around=(W,H)=>{const out=[];for(let x=0;x<W;x++)out.push([0,x]);for(let y=
  for(let x=W-1;x>=0;x--)out.push([H-1,x]);for(let y=H-2;y>0;y--)out.push([y,0]);return out;};
 // Each frame cell's look: 'text' (the head's words), 'base' (the neutral frame), or its arc shade 0..3.
 const ramp=view.FACES.dark.orbit;
-const looks=v=>{const g=grid(v),W=g[0].length,H=g.length;return around(W,H).map(([y,x])=>{const c=g[y][x];
+// (11-18: a working session's arc is its harness's ramp, `FACES.dark.ramp.<harness>`; a window with no known harness keeps `FACES.dark.orbit`.)
+const looks=(v,h='')=>{const g=grid(v),W=g[0].length,H=g.length,ramp=view.FACES.dark.ramp[h]?.orbit||view.FACES.dark.orbit;return around(W,H).map(([y,x])=>{const c=g[y][x];
  if(!'┌┐└┘─│'.includes(c.ch))return 'text';
  if(c.p.role==='frame')return 'base';
  assert(c.p.role==='orbit'&&ramp.includes(c.p.foreground)&&c.p.dim!==true,JSON.stringify(c.p));return ramp.indexOf(c.p.foreground);});};
@@ -2573,11 +2577,13 @@ for(const [o,face] of [[{background:'dark'},'dark'],[{cfg:{theme:'light'}},'ligh
 // (i) Claude, Codex and OpenCode draw the same frame on the same frame (one renderer, one beat):
 // the same content and breath; the same arc, each starting right after its own head's words.
 const startOf=v=>text(v.rows[0]).indexOf(' ─')+1;
-for(const [state,f] of [['working',5],['blocked',10]]){const all=['claude','codex','opencode'].map(harness=>run({harness,state,frame:f}));
- for(const v of all.slice(1)){
-  assert.deepEqual(v.rows.slice(1,-1).map(r=>r.slice(1,-1)),all[0].rows.slice(1,-1).map(r=>r.slice(1,-1)),state);
+for(const [state,f] of [['working',5],['blocked',10]]){const all=['claude','codex','opencode'].map(harness=>run({harness,state,frame:f})),hs=['claude','codex','opencode'];
+ // (11-18: the same content and tones' steps; a working session's tone colors are its own harness's, so only those are set aside.)
+ const alike=v=>v.rows.slice(1,-1).map(r=>r.slice(1,-1).map(p=>p.role==='orbit'&&state==='working'?{...p,foreground:null}:p));
+ for(const [i,v] of all.slice(1).entries()){
+  assert.deepEqual(alike(v),alike(all[0]),state);
   if(state==='blocked'){assert.deepEqual(v.rows.slice(1),all[0].rows.slice(1),state);continue;}
-  const d=startOf(v)-startOf(all[0]),a=looks(v),b=looks(all[0]),P=a.length;assert(d!==0);
+  const d=startOf(v)-startOf(all[0]),a=looks(v,hs[i+1]),b=looks(all[0],hs[0]),P=a.length;assert(d!==0);
   a.forEach((x,i)=>{const y=b[((i-d)%P+P)%P];if(x!=='text'&&y!=='text')assert.equal(x,y,state+' '+i);});}}
 // (j) Short of rows (the rule goes, spec rule 34 (c)) the frame keeps moving; the bottom layout moves alike.
 for(let h=30;h>=8;h-=4){const v=run({state:'working',frame:7,height:h});assert(v.motion&&v.motion.cells.length===2*40+2*(h-2)-text(v.rows[0]).indexOf(' ─'),String(h));}
@@ -2601,7 +2607,9 @@ for(let h=30;h>=8;h-=4){const v=run({state:'working',frame:7,height:h});assert(v
         script = self.FIXTURE + r"""
 const fs=require('node:fs');
 const styles={dim:{dim:true},g_spin:{foreground:230},g_blocked:{foreground:217},g_work_off:{foreground:150,dim:true},g_dead:{foreground:210}};
-const run=(o={})=>view.render({width:o.width||40,height:o.height||40,side:o.side!==false,fill:o.side!==false,harness:o.harness||'claude',
+// (11-18: these scenes read the moving frame's vanilla ramp, which a window with no known harness keeps; a working session of a known harness takes
+// its harness's ramp, `session_shell_harness_spinner_1118.test.py`'s.)
+const run=(o={})=>view.render({width:o.width||40,height:o.height||40,side:o.side!==false,fill:o.side!==false,harness:o.harness||'',
  model:{...head,tag:'[e9]',routes:[],route_count:0,messages:[],styles,...(o.model||{})},state:o.state,frame:o.frame||0,since:o.since,
  configuration:{...(o.motion?{rule_motion:o.motion}:{}),...(o.cfg||{})},background:o.background||'',questions:()=>[],...(o.extra||{})});
 const text=r=>r.map(p=>p.text).join('');
@@ -2710,7 +2718,9 @@ for(const motion of ['rule','border','scanners','off'])for(const [cfg,model] of 
   assert.deepEqual(ruleCells(b).map(c=>c.p.foreground??null),ruleCells(a).map(c=>c.p.foreground??null),motion+' '+state);}}
 // (f) Claude, Codex and OpenCode draw the same frame and rule on the same frame.
 for(const motion of ['rule','scanners'])for(const [state,f] of [['working',5],['blocked',10]]){const all=['claude','codex','opencode'].map(harness=>run({harness,state,frame:f,motion}));
- for(const v of all.slice(1))assert.deepEqual(v.rows.slice(1,-1).map(r=>r.slice(1,-1)),all[0].rows.slice(1,-1).map(r=>r.slice(1,-1)),motion+' '+state);}
+ // (11-18: the moving tones' colors are the working session's own harness's; their steps and positions are the same.)
+ const alike=v=>v.rows.slice(1,-1).map(r=>r.slice(1,-1).map(p=>p.role==='orbit'&&state==='working'?{...p,foreground:null}:p));
+ for(const v of all.slice(1))assert.deepEqual(alike(v),alike(all[0]),motion+' '+state);}
 // (g) A light face: the lit frame and the light take the face's ramps.
 {const v=run({state:'working',frame:8,cfg:{theme:'light'}});assert(ring(v).every(c=>c.p.foreground===view.FACES.light.orbit[1]));
  assert(ruleCells(v).filter(c=>c.p.tone==='scan').every(c=>view.FACES.light.scan.includes(c.p.foreground)));}

@@ -259,9 +259,31 @@ const both={me:'3b',groups:[{steward:end('c7','hb_claude'),members:[end('3b','hb
 const v=render([],[],70,30,{peers:both});
 const row=v.rows.find(r=>/^│ PEERS/.test(text(r)));
 const num=t=>row.filter(p=>p.text==='['+t+']');
-assert.equal(num('c7')[0].foreground,116);assert.equal(num('a1')[0].foreground,116);assert.equal(num('a2')[0].foreground,147);
-assert.equal(num('3b').length,2);assert(num('3b').every(p=>p.foreground===176&&p.bold===true));       // this window's own number: bold
+// 11-18 (the person: "나머지는 컬러도 조금 어둡게"): this window's own number is its harness color, bold; every other session's is its
+// harness's one step back (`harnessName`, the USAGE names'; the light face's `peerOther`), plain; both resolved by the face as fixed colors.
+const dark=(...p)=>view.appearance([p],{theme:'terminal'},{colors:256,background:'dark'})[0][0];
+assert.equal(num('c7')[0].role,'harness-name');assert.equal(num('c7')[0].harness,'claude');assert.equal(num('a1')[0].harness,'claude');assert.equal(num('a2')[0].harness,'opencode');
+assert.equal(dark(num('c7')[0]).foreground,view.FACES.dark.harnessName.claude);assert.equal(dark(num('a2')[0]).foreground,view.FACES.dark.harnessName.opencode);
+assert.equal(num('3b').length,2);assert(num('3b').every(p=>p.foreground===176&&p.bold===true&&p.role==='peer'));       // this window's own number: bold, lit
+assert.equal(dark(num('3b')[0]).foreground,176);
 assert(num('c7')[0].bold!==true&&num('a1')[0].bold!==true);
+// The light face: each harness's `peerOther` (the lighter step); mono keeps no color and tells them apart by weight alone.
+const lit=(theme,...p)=>view.appearance([p],{theme},{colors:256,background:theme==='light'?'light':''})[0][0];
+assert.equal(lit('light',num('a2')[0]).foreground,view.FACES.light.peerOther.opencode);
+assert.equal(lit('light',num('a1')[0]).foreground,view.FACES.light.peerOther.claude);
+// 11-18 review: on every face (dark, light, unknown, and each with a shade) this window's number is never the color of another
+// window's of the same harness: the light face's other-window value is its own lighter step, not the deep hue (was the same 166 / 31).
+for(const h of ['claude','codex','opencode']){
+  const grp={me:'3b',groups:[{steward:end('3b','hb_'+h,true),members:[end('a1','hb_'+h)]}]};
+  const r=render([],[],70,30,{peers:grp}).rows.find(x=>/^│ PEERS/.test(text(x)));
+  const mine=r.find(x=>x.text==='[3b]'),other=r.find(x=>x.text==='[a1]');
+  for(const [cfg,bg] of [[{theme:'terminal'},'dark'],[{theme:'light'},'light'],[{theme:'terminal'},''],[{theme:'terminal',shade:'medium'},'dark'],[{theme:'light',shade:'light'},'light']]){
+    const f=x=>view.appearance([[x]],cfg,{colors:256,background:bg})[0][0];
+    assert.notEqual(f(mine).foreground,f(other).foreground,h+' '+JSON.stringify(cfg)+' '+bg);
+    assert.equal(f(mine).bold,true);assert.notEqual(f(other).bold,true);
+  }
+}
+assert.equal(lit('mono',num('c7')[0]).foreground,null);assert.equal(lit('mono',num('3b')[0]).bold,true);assert.notEqual(lit('mono',num('c7')[0]).bold,true);
 const flags=row.filter(p=>p.text==='⚑');assert.equal(flags.length,2);assert(flags.every(p=>p.foreground===219));
 assert(row.filter(p=>p.text==='─'||p.text===' · ').every(p=>p.dim===true));
 // Nothing says what a session is doing: no state word, glyph or mark on the row.

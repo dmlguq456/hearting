@@ -642,7 +642,7 @@ let routePopup=null;
 // 11-15 (design 2): the status popup first, as its button stands at the panel's head (the REPO row).
 const SECTIONS=['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES'];
 const POPUP_KIND={ROUTE:'routes',STATUS:'status',NOW:'now'};
-// 11-18: the width kind of a table popup: the routes popup stands wider (`panelView.popupWidth`), the others as a table.
+// 11-18: the width kind of a table popup: the routes popup stands wider (`panelView.popupWidth`), the others as a table; the question popup is `question`.
 const tableKind=name=>name==='ROUTE'?'route':'table';
 // 11-15 (design 2): the panel's status button value (Fleet's `session_status.read`: the status document of
 // this session's campaign, else the one Fleet's project line picks; null where the project has no
@@ -751,7 +751,7 @@ function nowRows(t){
 }
 function popupNow(){
   if(!popupShown())return null;
-  const band=expanded?0:height(),kind=table?tableKind(table.kind):'text',width=panelView.popupWidth(cols,kind),inner=Math.max(0,width-4),room=panelView.popupRoom(rows,band);
+  const band=expanded?0:height(),kind=table?tableKind(table.kind):'question',width=panelView.popupWidth(cols,kind),inner=Math.max(0,width-4),room=panelView.popupRoom(rows,band);
   const names=sections(),current=Math.max(0,names.indexOf(table?table.kind:'QUESTIONS'));
   let title,body,view;
   if(table){
@@ -788,7 +788,7 @@ function popupNow(){
     if(actionLines.length)body=actionLines.slice(0,room);
     else if(block.question){const all=block.detail({budget:room+1,columns:inner});title=all[0]||label;body=all.slice(1);}
     else body=block.detail({budget:room,columns:inner});
-    view=panelView.popup({cols,rows,band,title,body,sections:names,labels:names.map(sectionLabel),current,model:panelModel,
+    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,labels:names.map(sectionLabel),current,model:panelModel,
       configuration:displayConfiguration,cellWidth,background:terminalBackground});
   }
   // OpenCode paints its own background: every popup row starts from the terminal's own look. The cell
@@ -1421,7 +1421,7 @@ async function projection() {
   projecting=true;projectionPending=false;const selected=selection;
   try{
     const asked=++clock;
-    const data=await source('projection',{side:geometry().side,columns:openColumns(),popup_columns:panelView.popupWidth(cols),table_columns:panelView.popupWidth(cols,'table')-4,rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery,upgrade_note:upgradeNoteNow(),
+    const data=await source('projection',{side:geometry().side,columns:openColumns(),popup_columns:panelView.popupWidth(cols,'question'),table_columns:panelView.popupWidth(cols,'table')-4,rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery,upgrade_note:upgradeNoteNow(),
       ...(typeof displayValues.model==='string'&&displayValues.model?{native_model:displayValues.model}:{})});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     turnRecord=harness==='claude'&&typeof data.turn_record==='string'&&path.isAbsolute(data.turn_record)?data.turn_record:'';
