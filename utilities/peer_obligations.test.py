@@ -242,6 +242,66 @@ class ObligationStoreTest(unittest.TestCase):
             self.assertEqual(len(sent[0]["dispatch_notices"]), 2)
             self.assertTrue(all(record["delivery_id"] in sent[0]["text"] for record in records))
 
+    def test_registered_resume_reads_the_native_census_once_per_pass_and_a_stale_table_loses_nothing(self):
+        """One table per read pass feeds ``presence``; a stale table acts like today's race.
+
+        A stale ``present`` (the session ended after the table was read) goes through the
+        existing claim, submission fence and ack check, so nothing is acked or completed
+        here. A stale ``absent`` withholds delivery for this pass only and keeps every
+        record pending; the next pass reads a fresh table and delivers."""
+        import dispatch_pending_delivery as pending
+        from peer_read_context import PeerReadContext
+        import peer_address
+        sid, records, duties, _metas = self.registered_transfer("codex", prepare=False)
+        sent, reads = [], []
+
+        def courier(args, *, expected_recipient, on_prepared, producer_binding):
+            peer = peer_steward.peer_message
+            _text, ref = peer.prepare_peer_message(Path(args.body_file).read_text(),
+                {"harness": "runtime", "session_id": None, "name": "Hearting runtime"},
+                {"harness": expected_recipient[0], "session_id": expected_recipient[1]},
+                defer=True, refs=args.ref, producer_binding=producer_binding)
+            on_prepared(ref)
+            sent.append(ref)
+            return 3
+
+        def run(context, inventory):
+            with mock.patch.object(peer_steward.subprocess, "run", return_value=type("Result", (), {
+                    "stdout": json.dumps(inventory), "returncode": 0})()), \
+                    mock.patch.object(peer_steward, "_resolve_target", return_value=("codex", sid)), \
+                    mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier), \
+                    mock.patch("dispatch_notice_state.keep_claim", return_value=True):
+                peer_steward._resume_registered_obligation(
+                    self.store.get(duties[0]["id"]), self.store, read_context=context)
+
+        live = {"result": {"agents": [{"agent": "codex", "pane_id": "w1:pCensus",
+                                       "agent_session": {"value": sid}}]}}
+        gone = {"result": {"agents": []}}
+        stale_absent = PeerReadContext(registry_append_only=True)
+        stale_absent.native_sessions(lambda: reads.append("absent") or [])
+        run(stale_absent, live)  # the session appeared after this pass read its table
+        self.assertEqual(reads, ["absent"], "the pass's one table is not read again")
+        self.assertEqual(sent, [])
+        self.assertNotEqual(self.store.get(duties[0]["id"])["state"], "complete")
+        for record in records:
+            self.assertEqual(pending.read(self.root, sid, record["delivery_id"])["state"], "pending")
+        stale_present = PeerReadContext(registry_append_only=True)
+        stale_present.native_sessions(lambda: reads.append("present") or [
+            {"harness": "codex", "sid": sid, "pid": 0, "env": {}, "binding": None}])
+        run(stale_present, gone)  # the session ended after this pass read its table
+        self.assertEqual(reads, ["absent", "present"])
+        self.assertEqual(len(sent), 1, "the stale table's present reached the courier, as a race would")
+        self.assertNotEqual(self.store.get(duties[0]["id"])["state"], "complete")
+        for record in records:
+            self.assertNotEqual(pending.read(self.root, sid, record["delivery_id"])["state"], "acked")
+        # A new pass reads the table itself and corrects the stale view.
+        before = len(sent)
+        with mock.patch.object(peer_address, "native_sessions", wraps=peer_address.native_sessions) as census:
+            run(PeerReadContext(registry_append_only=True), gone)
+        self.assertEqual(census.call_count, 1)
+        self.assertEqual(len(sent), before, "the session is gone: nothing more is sent")
+        self.assertNotEqual(self.store.get(duties[0]["id"])["state"], "complete")
+
     def test_registered_resume_producer_binds_every_real_route_member(self):
         self.resume_registered_case(False)
 
@@ -2283,6 +2343,90 @@ class ObligationStoreTest(unittest.TestCase):
                     self.assertEqual(duty["observation"]["recipient_sid"], "sid-notice")
                     stored = pending.read(self.jobs.parent, "sid-notice", record["delivery_id"])
                     self.assertEqual(stored["state"], "pending")
+
+    def _census_notice_setup(self):
+        import dispatch_pending_delivery as pending
+        record = _legacy_notice("claude", "sid-notice", key="run:census",
+            subject="compute run", text="finished", jobs=self.jobs)
+        store = obligations.ObligationStore(self.jobs.parent)
+        sessions = self.root / "xdg-state" / "hearting" / "session-tidy" / "sessions"
+        sessions.mkdir(parents=True, exist_ok=True)
+        (sessions / "known-seat.jsonl").write_text(
+            json.dumps({"event": "start", "harness": "claude", "sid": "sid-notice"}) + "\n")
+        self.jobs.write_text(
+            "2026-10-24T00:00:00Z\topen\t/w\t/w\tslug\t"
+            "attempt_id=att-known,parent_sid=sid-notice,parent_completion_delivery=claude-parent-runtime,"
+            "dispatch_depth=1,worker_type=owner,route_id=rt-known,route_hash=sha256:known\n")
+        peer_steward._discover_session_notice_duties(store)
+        duties = store.list(kinds={"session-notice"})
+        return record, store, duties, pending
+
+    def test_one_native_census_per_read_pass_never_settles_or_expires_a_notice(self):
+        """The presence census is read once per pass: a stale table never loses a notice.
+
+        A stale ``present`` (the session ended after the table was read) acts like
+        today's race between ``presence`` and the send: the courier's own claim and
+        ack rules decide, and nothing is completed or acknowledged here. A stale
+        ``absent`` (a session that appeared after the read) only withholds delivery
+        for this pass; the next pass reads a fresh table and delivers."""
+        import peer_address
+        import session_shell
+        from peer_read_context import PeerReadContext
+        env = {"HOME": str(self.root / "home"),
+               "XDG_STATE_HOME": str(self.root / "xdg-state"),
+               "AGENT_DISPATCH_JOBS": str(self.jobs)}
+        alive = {"harness": "claude", "sid": "sid-notice", "pid": 1, "env": {}, "binding": None}
+        table = []
+        reads = []
+
+        def census():
+            reads.append(list(table))
+            return list(table)
+
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(obligations, "ensure_normal_runner", return_value=False):
+            record, store, duties, pending = self._census_notice_setup()
+            with mock.patch.object(session_shell, "exact_binding",
+                                   return_value=(None, "attachment-not-found")), \
+                 mock.patch.object(peer_address, "native_sessions", side_effect=census), \
+                 mock.patch.object(peer_steward, "cmd_prompt", return_value=1) as send:
+                # Stale absent: the session shows up right after this pass read the table.
+                context = PeerReadContext(registry_append_only=True)
+                peer_steward._resume_session_notice_obligations(duties, store, read_context=context)
+                table.append(alive)
+                peer_steward._resume_session_notice_obligations(
+                    [store.get(duties[0]["id"])], store, read_context=context)
+                self.assertEqual(len(reads), 1, "one census for the whole pass and its sweeps")
+                send.assert_not_called()
+                duty = store.get(duties[0]["id"])
+                self.assertEqual(duty["state"], "pending")
+                self.assertEqual(duty["observation"]["reason"], "recipient-unavailable")
+                self.assertEqual(pending.read(self.jobs.parent, "sid-notice",
+                                              record["delivery_id"])["state"], "pending")
+                # Stale present: the table says live, the native process is already gone.
+                context = PeerReadContext(registry_append_only=True)
+                peer_steward._resume_session_notice_obligations(
+                    [store.get(duties[0]["id"])], store, read_context=context)
+                table.clear()
+                peer_steward._resume_session_notice_obligations(
+                    [store.get(duties[0]["id"])], store, read_context=context)
+                self.assertEqual(len(reads), 2, "a new pass reads the table again")
+                self.assertEqual(reads[1], [alive])
+                duty = store.get(duties[0]["id"])
+                self.assertNotEqual(duty["state"], "complete")
+                self.assertNotEqual(pending.read(self.jobs.parent, "sid-notice",
+                                                 record["delivery_id"])["state"], "acked")
+                # The next pass (new context, the session gone) records the loss and keeps the duty.
+                send.reset_mock()
+                peer_steward._resume_session_notice_obligations(
+                    [store.get(duties[0]["id"])], store)
+                self.assertEqual(len(reads), 3)
+                send.assert_not_called()
+                duty = store.get(duties[0]["id"])
+                self.assertEqual(duty["state"], "pending")
+                self.assertEqual(duty["observation"]["reason"], "recipient-unavailable")
+                self.assertEqual(pending.read(self.jobs.parent, "sid-notice",
+                                              record["delivery_id"])["state"], "pending")
 
     def test_old_duties_yield_to_a_notice_accepted_mid_pass(self):
         """Each old non-notice duty is followed by the runner's new-notice check."""

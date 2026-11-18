@@ -2657,7 +2657,7 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
                                             receive=receive, sends=sends)
         with host, \
                 mock.patch.object(peer_address, "presence",
-                                  side_effect=lambda kind, sid: "present" if (kind, sid) == (harness, target_sid)
+                                  side_effect=lambda kind, sid, **_kw: "present" if (kind, sid) == (harness, target_sid)
                                   else "absent"), \
                 mock.patch.object(peer_steward.subprocess, "run",
                                   side_effect=OSError("no terminal multiplexer")), \
