@@ -2216,7 +2216,7 @@ def _set_successor_prompt_frontier(req: dict, sid: str) -> None:
 
 
 def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observed: str = "",
-            expected_idle_due: Optional[float] = None) -> bool:
+            expected_idle_due: Optional[float] = None, detail: str = "") -> bool:
     """Record how the booking ended -- only while it is still this helper's -- and leave the
     one result line for anything but a clear.  The notice is written after the seat lock is
     released (``write_notice`` takes it itself)."""
@@ -2231,6 +2231,8 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
         if reason == NOTIFICATION_TURN:
             outcome = "cancelled"
         req.update(status=outcome, reason=reason, finished=now)
+        if detail:
+            req["detail"] = detail   # what a look was still waiting for (`screen-unknown` only)
         claim = req.get("clear_claim")
         if isinstance(claim, dict) and claim.get("state") == "sending":
             req["clear_claim"] = {**claim, "state": "sent" if outcome in ("cleared", "unverified") else "finished",
@@ -2431,6 +2433,7 @@ def _wait_idle_card_acceptance(seat_key: str, nonce: str, sleep: Callable[[float
 def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], None]) -> str:
     path = reservation_path(seat_key)
     waited = ""         # why the last look did not send (a form, a draft, a busy screen)
+    waited_detail = ""
     while True:
         req = read_reservation(seat_key)
         if not req or req.get("nonce") != nonce or req.get("status") != "reserved":
@@ -2452,7 +2455,8 @@ def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], No
         due = float(idle.get("due_at", 0) or 0)
         now = st.now_epoch()
         if now > float(req.get("deadline", 0) or 0):
-            if _finish(seat_key, nonce, "skipped", waited or "expired", expected_idle_due=due):
+            if _finish(seat_key, nonce, "skipped", waited or "expired", expected_idle_due=due,
+                       detail=waited_detail if waited == "screen-unknown" else ""):
                 return "skipped"
             continue
         if now < due:
@@ -2485,10 +2489,12 @@ def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], No
                 return "pending"
             if verdict.get("accepted") == "queued" and st.now_epoch() < float(req.get("deadline", 0) or 0):
                 waited = str(verdict.get("reason") or waited)
+                waited_detail = str(verdict.get("detail") or "")
                 sleep(min(5.0, max(0.0, float(req.get("deadline", 0) or 0) - st.now_epoch())))
                 continue
             reason = verdict.get("reason") or "idle-card-not-accepted"
-            if _finish(seat_key, nonce, "skipped", reason, expected_idle_due=due):
+            if _finish(seat_key, nonce, "skipped", reason, expected_idle_due=due,
+                       detail=str(verdict.get("detail") or "")):
                 return "skipped"
             continue
         accepted = _wait_idle_card_acceptance(seat_key, nonce, sleep)
@@ -2617,7 +2623,7 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
         _finish(seat_key, nonce, "cleared", observed=sid)
         return _continue(seat_key, nonce, continuer, sleep=sleep)
     final = "skipped" if outcome == "skipped" else "failed"
-    return final if _finish(seat_key, nonce, final, reason) else "superseded"
+    return final if _finish(seat_key, nonce, final, reason, detail=str(verdict.get("detail") or "")) else "superseded"
 
 
 def main(argv=None) -> int:
