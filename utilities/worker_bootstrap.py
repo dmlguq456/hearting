@@ -2201,7 +2201,7 @@ def unit_safety_prompt(worker_type: str) -> str:
     """The kernel's safety lines for a unit route's worker, whose first instruction is not the whole kernel.
 
     Only what keeps a bounded worker inside its node: its role, its guards and scope, what it leaves to
-    the supervisor, and where its scratch goes. (It may call other workers: a later route lets it.)"""
+    the supervisor, and where its scratch goes. (Starting another worker is `unit_call_prompt`.)"""
     lines = ["You are a bounded worker, not the user-facing main session. Treat the assigned route, node "
              "scope and completion gate as fixed. Preserve permission, safety and git-state guards, and write "
              "only inside the assigned scope.",
@@ -2216,6 +2216,21 @@ def unit_safety_prompt(worker_type: str) -> str:
                      "says otherwise. Record prioritized findings, locations, checks and uncertainty in the review "
                      "artifact. Do not implement fixes or widen the review.")
     return "\n".join(lines) + "\n"
+
+
+def unit_call_prompt(root: Path) -> str:
+    """How a unit route's worker hands a lookup to another worker (the one way a worker starts another).
+
+    One read-only unit worker per question, opened by `compose --start --unit <u> --ephemeral`: nothing
+    lands in the project's artifact folder, and its answer comes back as the `Answer:` text of the wait
+    result. The called worker carries the same limits and its scope is its own read-only report: starting
+    it widens nothing of yours. What a worker leaves running when it ends is stopped with it."""
+    command = f"python3 {root / 'utilities' / 'capability-route.py'} compose --start --unit <family/name> --ephemeral --prompt-file <brief>"
+    return ("Starting another worker: hand a read-only lookup you need (a search, many files to read, text to "
+            f"transcribe) to a unit worker with `{command}`; the brief holds the question. Run the wait command its "
+            "receipt prints and read the `Answer:` text. Wait for it before you end: a worker you started is "
+            "stopped when you end. If the start is refused (the shared worker limit), say so in your result; "
+            "never start the same question again.\n")
 
 
 def worker_terminal_contract(root: Path) -> str:

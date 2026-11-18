@@ -586,11 +586,17 @@ def _seal_completion_summary(request, route, primary, slot, *, publication=None)
                     assessment = "FAIL"
         except Exception:  # noqa: BLE001 -- an unreadable row only leaves the assessment unnamed
             assessment = None
-        text = work_intent.completion_summary(route, primary, route_file=request.route_file,
-                                              cost=_completion_cost(request, route),
-                                              corrections=completion_corrections(request.jobs, request.owner_attempt_id),
-                                              assessment=assessment, publication=publication, owner=owner)
-        _write_exclusive(slot / work_intent.SUMMARY_NAME, text.encode())
+        import unit_ephemeral
+        if unit_ephemeral.is_scratch_root(route.get("artifact_root")):
+            # An ephemeral unit route: the answer itself is what the caller is given.
+            text = unit_ephemeral.answer_summary(route, primary, head=work_intent.ui_translator()("completion.head"))
+        else:
+            text = work_intent.completion_summary(route, primary, route_file=request.route_file,
+                                                  cost=_completion_cost(request, route),
+                                                  corrections=completion_corrections(request.jobs, request.owner_attempt_id),
+                                                  assessment=assessment, publication=publication, owner=owner)
+        if text:
+            _write_exclusive(slot / work_intent.SUMMARY_NAME, text.encode())
     except Exception:  # noqa: BLE001 -- an existing or unrenderable summary keeps the delivery as it was
         return
 

@@ -2052,6 +2052,6 @@ def _commit_sealed(
     artifact_cycle_titles.emit_after_seal_locked(root, sealed, document, directory / "manifest.json")
     try:
         import artifact_workflow_group_review  # lazy: it imports this module
-        artifact_workflow_group_review.launch_after_seal(root, sealed)  # groups and metadata, one job
+        artifact_workflow_group_review.launch_after_seal(root, sealed)  # title and metadata, one job
     except Exception:  # noqa: BLE001 -- the review trigger never changes a seal
         pass
