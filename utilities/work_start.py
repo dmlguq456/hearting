@@ -673,7 +673,9 @@ def _slot(route, node, rows, jobs=None):
         # A live attempt delivers to the session that launched it, so another
         # session cannot adopt it. A finished one only has a result to read:
         # the session a supervisor handed the route to may harvest it.
-        if status != "done":
+        # A unit leg a worker started is followed by that worker (it is no session; its attempt is the caller).
+        if status != "done" and not (meta.get("caller_attempt_id")
+                                      and meta["caller_attempt_id"] == os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")):
             parent = _current_parent_session_id()
             if not route_authority.require_known(_owns(meta, parent, jobs), meta, jobs):
                 raise DispatchContractError("work-parent-recovery-required", aid)
@@ -2433,6 +2435,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 publication = None
         return _with_next_leg(route, {**result, "state": "completed", "required_action": "advance-completed",
                                       "outcome": closed,
+                                      **_closed_unit_summary(route, jobs),
                                       **({"completion_delivery": delivery} if delivery else {}),
                                       **({"shared_publication": publication} if publication is not None else {})})
     from start_receipt import runtime_commands
@@ -2902,7 +2905,7 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock):
     if joined["state"] == "ready":
         outcome = _outcome(jobs, aid)
         if outcome["classification"] == "success":
-            return {**result, "state": "completed", "result": outcome}
+            return {**result, "state": "completed", "result": outcome, **_unit_summary(jobs, aid, sleep=sleep)}
         # The one leg ended without a pass: the same work goes out again as a new unit route.
         command = _compose_again(route)
         return {**result, "state": "needs-attention", "reason": "unit-outcome-needs-inspection",
@@ -2919,6 +2922,29 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock):
             "next_step": "The unit worker runs as a separate attempt and its result comes back to this session "
                 "when it ends. Follow parent_next: end-turn means yield; bounded-wait means run "
                 "parent_next_command once."}
+
+
+def _unit_summary(jobs, aid, *, sleep=time.sleep) -> dict:
+    """`{"summary": <text>}` the runtime sealed for a finished unit leg, `{}` when there is none.
+
+    A session that was woken for the end gets this text with the notice; a worker that waited for its
+    called leg (`start --wait`, the polling delivery) has no notice, so the receipt carries it. The
+    runtime seals it a moment after the route closes: read it for a few seconds at most."""
+    import work_intent
+    meta = _rows(jobs).get(aid, ("", {}))[1]
+    for attempt in range(UNIT_SUMMARY_READS):
+        text = work_intent.sealed_summary(meta, aid) if meta else ""
+        if text:
+            return {"summary": text}
+        if attempt + 1 < UNIT_SUMMARY_READS:
+            sleep(UNIT_SUMMARY_READ_SECONDS)
+    return {}
+
+
+def _closed_unit_summary(route, jobs) -> dict:
+    """The sealed summary of a closed unit route's one leg (`{}` for any other route)."""
+    leg = unit_leg(route)
+    return _unit_summary(jobs, attempt_id(route, leg["id"])) if leg else {}
 
 
 def _with_next_leg(route, result):
@@ -3175,10 +3201,25 @@ def start_work(route, path, jobs, *, wait=False, interview=None, answers=None,
     return save(_arm_capacity_resume(result, path, jobs), jobs)
 
 
+UNIT_SUMMARY_READS = 10          # the seal follows the route close by well under a second
+UNIT_SUMMARY_READ_SECONDS = 0.5
+
+
+def _is_unit_route_file(path) -> bool:
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8")).get("capability") == "unit"
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def _arm_capacity_resume(result, path, jobs):
     """A usage-limit pause with a known reset time, or an owner launch that did not start,
     resumes itself once (audit §4 #17)."""
     import capacity_auto_resume as capacity_resume
+    if os.environ.get("AGENT_DISPATCH_CHILD") == "1" and _is_unit_route_file(path):
+        # A worker that started a unit leg is no session to notice: it reads this refusal itself, and a
+        # resume the runtime made later would start the leg after its caller may be gone.
+        return result
     try:
         armed = capacity_resume.arm(result, path, jobs)
     except (OSError, ValueError):

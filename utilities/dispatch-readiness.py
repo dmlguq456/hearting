@@ -61,8 +61,12 @@ def generate(
     child_harnesses: list[str],
     disabled_harnesses: set[str] | None = None,
     codex_execution_selection: dict[str, Any] | None = None,
+    worker_caller: bool = False,
 ) -> dict[str, Any]:
-    if os.environ.get("AGENT_DISPATCH_DEPTH", "0") != "0":
+    # A worker may call for its own check only when the check is the worker's own question (a unit
+    # route it starts): which registered children can it launch. It never stands in for the pre-owner
+    # readiness of a staged route, so every other caller keeps the refusal.
+    if os.environ.get("AGENT_DISPATCH_DEPTH", "0") != "0" and not worker_caller:
         raise ReadinessError("dispatch-readiness-inside-dispatch")
     worktree = worktree.expanduser().resolve()
     jobs = jobs.expanduser()
@@ -100,7 +104,7 @@ def generate(
                 worktree=str(worktree),
                 jobs=str(jobs),
                 user_disabled=child in disabled,
-                prospective_standard_owner=parent == "codex",
+                prospective_standard_owner=parent == "codex" and not worker_caller,
                 gpu_resource_owner=gpu_owner,
             )
             rows.append(NESTED.evaluate(args))
