@@ -79,3 +79,31 @@ merge divergences. Sources: `roles/modes/qa/*.md` (EN), `adapters/claude/agent-m
 - `branches` for ml-debug/data-curate set to `[direct]` only — legacy sources show no
   pipeline (file-path one-line-return) call site; restore `pipeline` if a recipe
   dispatches them as stages.
+
+## Two-layer pilot (2026-11-18) — placement log: qa/code-review, qa/test
+
+The body of both units is split into `## 지킬 것` and `## 참고` (see `_schema.md`, Body).
+**No line was removed from the worker text**: every old line sits in one of the two layers,
+and the old `##` headings became `###` headings inside them. The line numbers the
+design cites (11-17) drifted by one in `qa/code-review`; placement below goes by content.
+
+`qa/code-review` — 지킬 것: read-only line, scope line, spec-drift paragraph (`**Common:**`),
+the command-evidence paragraph, the "Returning to earlier content" paragraph, the
+multi-run paragraph and the Round 1 / Round >= 2 / Verdict bullets (the four round
+sentences), the whole Output section, `Return per the dual return switch` (was Procedure
+step 5), the estimates-are-not-caps sentence (split off the end of the Scope-and-cost
+criterion), the 5-7 cap bullet and the unchanged-code bullet. 참고: role and tone, the
+procedure lists (steps 1-4), the runtime-bound-subject paragraph, the legacy-PASS paragraph,
+the verdict-less-attempt bullet (the runtime already renders `판정 없음(...)`), the review
+criteria, effort scaling, style lines, memory. One word changed with the move: "the closure
+check below" became "above" in the runtime-bound-subject paragraph, because the closure
+check now sits in the earlier layer.
+
+`qa/test` — 지킬 것: purpose paragraph, target determination (incl. handed-over checks),
+browser scratch/profile paragraph, Level 5b first paragraph, Level 5c with the
+`tools/figure-semantic-verify.py` contract, all Rules, the Report paragraph. 참고: the
+level 1-5 list and the Level 5b observation bullets, memory.
+
+Placement rule that was applied: a line that the 11-17 form review marked as exposed when
+moved below (`RV-UNIT-FORM-1117.md` §1, "아래가 뚫리는 자리") is in 지킬 것; tone, examples,
+level lists and criteria lists are in 참고.
