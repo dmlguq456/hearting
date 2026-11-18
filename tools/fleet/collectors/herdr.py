@@ -51,38 +51,51 @@ _OBSERVATION_FIRST_WAIT_SPENT = set()
 _OBSERVATION_MIN_REFRESH_S = 0.25
 _PANE_INFO_CACHE = OrderedDict()
 _PANE_INFO_CACHE_LIMIT = 512
-# A process's last pane identity that a complete herdr read confirmed, so a read that failed
-# does not turn every row's session id unknown. pid -> (proc_start, claim).
+# What a complete herdr read concluded about one process, so a read that failed does not turn
+# every row's session id unknown. pid -> (proc_start, claim); claim None = "no pane claim" (a row
+# the pane never binds, such as a Claude run inside the session shell's own PTY, whose id comes
+# from the registry or tap, not the pane).
 _PANE_CLAIM_MEMORY = {}
 
 
 def _session_claims(sessions, panes, bindings, *, complete):
-    """``pane_process_claims`` that lets a failed herdr read keep a confirmed identity.
+    """``pane_process_claims`` that lets a failed herdr read keep what a complete read concluded.
 
-    A process whose pane this read could not tell (no claim, or ``unobserved``) gets the claim of
-    its last complete read back while it is the same live process (same pid and process start).
-    There is no age limit: only a different or dead process, or a complete read that reports a
-    different value (or none), ends it. A process no complete read ever confirmed keeps nothing.
+    A process whose pane this read could not tell (no claim, or ``unobserved``) gets the outcome of
+    its last complete read back while it is the same live process (same pid and process start):
+    that read's claim, or "no pane claim" (the ``unobserved`` guess is dropped so the registry and
+    tap decide, as they did in that read). There is no age limit: only a different or dead process,
+    or a complete read that reports a different outcome, ends it. A process no complete read ever
+    confirmed keeps nothing. Only a process that is gone is forgotten, not one this call's scope
+    (a harness filter) did not list.
     """
     from ..process_identity import pane_process_claims
     from . import procscan
     claims = pane_process_claims(sessions, panes, bindings, complete=complete)
     with _OBSERVATION_LOCK:
-        alive = {s.pid for s in sessions}
-        for pid in [pid for pid in _PANE_CLAIM_MEMORY if pid not in alive]:
-            del _PANE_CLAIM_MEMORY[pid]
+        listed = {s.pid for s in sessions}
+        for pid, (start, _kept) in list(_PANE_CLAIM_MEMORY.items()):
+            if pid not in listed and procscan.read_proc_start(pid) != start:
+                del _PANE_CLAIM_MEMORY[pid]
         for s in sessions:
             claim = claims.get(s.pid)
+            confirmed = bool(claim and claim.get("session_id"))
             if complete:
-                if claim and claim.get("session_id"):
-                    _PANE_CLAIM_MEMORY[s.pid] = (s.proc_start, dict(claim))
+                # "No pane claim" is a conclusion only for a row the read could judge at all.
+                judged = (s.proc_start and not s.is_child and not s.app_server
+                          and procscan.read_proc_start(s.pid) == s.proc_start)
+                if confirmed or judged:
+                    _PANE_CLAIM_MEMORY[s.pid] = (s.proc_start, dict(claim) if confirmed else None)
                 else:
                     _PANE_CLAIM_MEMORY.pop(s.pid, None)
-            elif not (claim and claim.get("session_id")):
+            elif not confirmed:
                 kept = _PANE_CLAIM_MEMORY.get(s.pid)
                 if (kept and s.proc_start and kept[0] == s.proc_start
                         and procscan.read_proc_start(s.pid) == s.proc_start):
-                    claims[s.pid] = dict(kept[1])
+                    if kept[1] is not None:
+                        claims[s.pid] = dict(kept[1])
+                    else:
+                        claims.pop(s.pid, None)
     return claims
 
 

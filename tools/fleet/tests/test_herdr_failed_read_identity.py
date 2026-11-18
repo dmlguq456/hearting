@@ -147,6 +147,94 @@ class FailedReadIdentityTest(unittest.TestCase):
         shown = live.retain_unobserved_cells(candidate, published)
         self.assertIsNone(shown.sessions[0]["title"])
 
+    # A session-shell row: Claude runs in the shell's own PTY, so no pane's foreground is the
+    # process, a complete read gives it no pane claim, and its id comes from the registry.
+    def wrapped_pass(self, *, complete, start=None, registry="current", pane_value="current"):
+        start = start or self.start
+        home = Path(os.environ["CLAUDE_CONFIG_DIR"])
+        (home / "sessions" / f"{self.pid}.json").write_text(json.dumps({
+            "pid": self.pid, "sessionId": registry, "status": "idle", "updatedAt": 1000000,
+            "procStart": start}))
+        s = Session(harness="claude", pid=self.pid, proc_start=start, cwd=self.cwd)
+        panes = [{"pane_id": PANE, "agent": "claude", "cwd": self.cwd,
+                  "agent_session": {"agent": "claude", "value": pane_value}}]
+        with mock.patch.object(procscan, "read_proc_start", return_value=start), \
+                mock.patch.object(procscan, "read_environ", return_value={}), \
+                mock.patch.object(herdr, "pane_session_aliases", return_value=[]), \
+                mock.patch.object(herdr, "_clear_gpu_session_aliases", return_value=[]), \
+                mock.patch.object(process_identity, "pane_session_successors", return_value={}):
+            herdr.enrich([s], agents=[], panes=panes, pids=_pids(self.pid + 1, complete=complete),
+                         pane_bindings={}, lineage=lambda _pid: "herdr")
+            claude.enrich(s, tick={self.pid: getattr(s, "_pane_session_claim", None)})
+        return s
+
+    def test_a_session_shell_row_keeps_its_identity_through_a_failed_read(self):
+        from fleet import titles
+        titles.write("current", "work title", harness="claude")
+        (Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".statusline" / "current.json").write_text(json.dumps({
+            "session_id": "current", "model": {"id": "fixture-model", "display_name": "fixture-model"},
+            "context_window": {"used_percentage": 17}}))
+        full = self.wrapped_pass(complete=True)
+        self.assertEqual(full.session_id, "current")
+        self.assertEqual((full.title, full.model), ("work title", "fixture-model"))
+        self.assertIsNone(full._pane_session_claim)
+        for _ in range(3):
+            failed = self.wrapped_pass(complete=False)
+            self.assertEqual(failed.session_id, "current")
+            self.assertIsNone(failed._pane_session_claim)
+            self.assertEqual(failed.session_identity_evidence["verdict"], "resolved")
+            self.assertEqual(failed.ctx_pct, full.ctx_pct)
+            self.assertEqual(failed.model, full.model)
+            self.assertEqual(failed.title, full.title)
+
+    def test_a_session_shell_row_no_complete_read_confirmed_still_reads_unobserved(self):
+        failed = self.wrapped_pass(complete=False)
+        self.assertIsNone(failed.session_id)
+        self.assertEqual(failed.session_identity_evidence["verdict"], "unobserved")
+
+    def test_a_remembered_no_claim_ends_with_the_process_and_follows_the_registry(self):
+        self.wrapped_pass(complete=True)
+        # The same pid reused by another process (other start): nothing is carried over.
+        reused = self.wrapped_pass(complete=False, start="778")
+        self.assertIsNone(reused.session_id)
+        self.assertEqual(reused.session_identity_evidence["verdict"], "unobserved")
+        # Same process whose session changed during the failure: the current registry wins.
+        self.wrapped_pass(complete=True)
+        self.assertEqual(self.wrapped_pass(complete=False, registry="newer").session_id, "newer")
+        # A dead process keeps nothing.
+        self.wrapped_pass(complete=True)
+        s = Session(harness="claude", pid=self.pid, proc_start=self.start, cwd=self.cwd)
+        with mock.patch.object(procscan, "read_proc_start", return_value=None):
+            self.assertNotIn(self.pid, herdr._session_claims([s], [], {}, complete=False))
+
+    def test_a_complete_read_that_now_finds_the_pane_replaces_a_remembered_no_claim(self):
+        self.wrapped_pass(complete=True)
+        s = Session(harness="claude", pid=self.pid, proc_start=self.start, cwd=self.cwd)
+        panes = [{"pane_id": PANE, "agent": "claude", "cwd": self.cwd,
+                  "agent_session": {"agent": "claude", "value": "newer"}}]
+        with mock.patch.object(procscan, "read_proc_start", return_value=self.start):
+            bound = herdr._session_claims([s], panes, {self.pid: {PANE}}, complete=True)
+            self.assertEqual(bound[self.pid]["session_id"], "newer")
+            self.assertEqual(herdr._session_claims([s], [], {}, complete=False)[self.pid]["session_id"],
+                             "newer")
+
+    def test_a_call_that_lists_fewer_processes_forgets_only_the_gone_ones(self):
+        # The panel producer lists one harness per pass; another harness's processes stay remembered.
+        mine = Session(harness="claude", pid=self.pid, proc_start=self.start, cwd=self.cwd)
+        other = Session(harness="codex", pid=self.pid + 7, proc_start="55", cwd=self.cwd)
+        panes = [{"pane_id": PANE, "agent": "codex", "cwd": self.cwd,
+                  "agent_session": {"agent": "codex", "value": "cx"}}]
+        live_starts = {self.pid: self.start, other.pid: "55"}
+        with mock.patch.object(procscan, "read_proc_start", side_effect=live_starts.get):
+            herdr._session_claims([mine, other], panes, {other.pid: {PANE}}, complete=True)
+            herdr._session_claims([mine], panes, {}, complete=True)   # a claude-only pass
+            self.assertEqual(
+                herdr._session_claims([mine, other], panes, {}, complete=False)[other.pid]["session_id"], "cx")
+            del live_starts[other.pid]                                # now the process is gone
+            herdr._session_claims([mine], panes, {}, complete=False)
+        self.assertNotIn(other.pid, herdr._PANE_CLAIM_MEMORY)
+        self.assertIn(self.pid, herdr._PANE_CLAIM_MEMORY)
+
 
 class FirstViewWaitTest(unittest.TestCase):
     def test_only_the_first_waiting_pass_waits_for_a_first_view(self):
