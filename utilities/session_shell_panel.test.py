@@ -1216,6 +1216,32 @@ for(const [label,mixed,rest] of [['owner+unit',[own,unit],[own]],['owner+unit+st
   assert(first>=0&&first+49<=140&&full.slice(first).every(Boolean),label+' whole cell from '+(first+49)+': '+full.map(x=>x?1:0).join(''));
   assert.equal(doerOf(rowsOf(mixed,60)[mixed.indexOf(unit)]),'code-review Opus 5.5','shared column of 21 cells: the effort and the harness go, the name stays');
 }
+// 11-19 (follow-up to the #1736 close check): a box whose titles are all short, with a staged route whose stage cell has two forms (the kind
+// with its stage word, then the stage word alone). The whole unit cell shows from some width on and at every width above it, 200 included,
+// whether the unit cell is the widest of the box (`code-review claude Opus 5.5 xhigh`) or a shorter one (`fact-verify codex gpt-5.5 high`);
+// the two bars stand at the same cells on every route row all the way.
+const shortOwn={...own,title:'Fix cap'},shortStaged={...stagedRoute,title:'단계 1'},shortUnit={...unit,title:'PR 검토'};
+const factUnit={...shortUnit,unit_word:'fact-verify',paint:{...unit.paint,harness:P('codex'),model_text:P('gpt-5.5'),effort:P('high')}};
+for(const [label,u,whole] of [['short titles',shortUnit,'code-review claude Opus 5.5 xhigh'],['short titles, a shorter unit cell',factUnit,'fact-verify codex gpt-5.5 high']]){
+  const box=[shortOwn,u,shortStaged],shown=[];
+  for(let width=60;width<=200;width++){
+    const rows=rowsOf(box,width);
+    assert.equal(rows.length,3,label+' '+width);
+    for(const k of [0,1])assert.equal(new Set(rows.map(row=>barsOf(row)[k])).size,1,label+' bar '+k+' at '+width+'\n'+rows.join('\n'));
+    shown.push(doerOf(rows[1])===whole);
+  }
+  const first=shown.indexOf(true);
+  assert(first>=0&&first+60<=115&&shown.slice(first).every(Boolean),label+' whole cell from '+(first+60)+': '+shown.map(x=>x?1:0).join(''));
+}
+// A unit route that records no harness: the doer column is as wide as the cell drawn (one blank between the name and the model, none left
+// over after the cell), alone in its box and beside another route.
+const noHarness={...unit,paint:{...unit.paint,harness:undefined}};
+for(const [label,box,at] of [['alone',[noHarness],0],['beside an owner',[own,noHarness],1]])
+  for(const width of [120,140,200]){
+    const rows=rowsOf(box,width);
+    assert.equal(rows[at].split('│')[3],' code-review Opus 5.5 xhigh ',label+' '+width+'\n'+rows.join('\n'));
+    assert.equal(new Set(rows.map(row=>barsOf(row)[1])).size,1,label+' bars at '+width+'\n'+rows.join('\n'));
+  }
 '''
         self.node(script, "panel-view.cjs")
 
