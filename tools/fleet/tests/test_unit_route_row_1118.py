@@ -1,4 +1,4 @@
-"""11-18 unit route row: a route is chained only to routes its own records tie to it; a unit route reads `unit·code-review(quick)`.
+"""11-18 unit route row: a route is chained only to routes its own records tie to it; a unit route reads its field alone (`code`).
 
   * `_chain_legs` chains a route to the route it continues (`source_route_id`), the legs of the plan it belongs to (`route_plan`)
     and the frame that opened that plan, or the steps of a declared `--plan`; a route that only sits in the same session
@@ -85,18 +85,36 @@ class UnitRouteWords(unittest.TestCase):
                                                         "legs": (("unit", "active", None),)}, card=False)
         return "".join(c[0] for c in grid.cells[0]).rstrip()
 
-    def test_the_progress_cell_leads_with_the_units_short_name_and_gives_way_in_order(self):
-        self.assertEqual(self.cell(self.unit(), 40), "unit·code-review(quick)")
-        self.assertEqual(self.cell(self.unit(), 22), "unit·code-review")
-        self.assertEqual(self.cell(self.unit(), 10), "unit")
-        self.assertEqual(self.cell(self.unit(worker_unit="research/research-survey"), 40), "unit·research-survey(quick)")
-        self.assertEqual(self.cell(self.unit(state="done"), 40), "unit·code-review(quick)")   # (the `success · title` line is the one left as it was)
+    def test_the_progress_cell_leads_with_the_field_and_has_no_bracket(self):
+        self.assertEqual(self.cell(self.unit(field="code"), 40), "code")
+        self.assertEqual(self.cell(self.unit(field="docs"), 10), "docs")
+        self.assertEqual(self.cell(self.unit(field="research", worker_unit="research/research-survey"), 40), "research")
+        self.assertEqual(self.cell(self.unit(field="code", state="done"), 40), "code")   # (the `success · title` line is the one left as it was)
+        self.assertEqual(self.cell(self.unit(field="plan"), 40), "plan")
+        # An older unit route records no field: `unit`, still with no bracket and no unit name.
+        self.assertEqual(self.cell(self.unit(), 40), "unit")
+        # A route with an owner keeps its bracket.
         self.assertEqual(self.cell({**self.unit(), "capability": "code", "worker_unit": "dev/backend"}, 40), "code(quick)")
+        self.assertEqual(tables._kind_cell(self.unit(field="code")), [("code", "kind_code")])
 
-    def test_the_panel_row_names_the_unit(self):
-        row = {"capability": "unit", "worker_unit": "qa/code-review", "marker": "working"}
-        self.assertEqual(session_panel.route_row(row)["unit_word"], "code-review")
-        self.assertNotIn("unit_word", session_panel.route_row({**row, "capability": "code"}))
+    def test_the_panel_row_names_the_unit_and_the_field(self):
+        row = {"capability": "unit", "worker_unit": "qa/code-review", "marker": "working", "field": "code",
+               "intensity": "quick"}
+        shown = session_panel.route_row(row)
+        self.assertEqual((shown["kind_word"], shown["kind_field"], shown["unit_word"], shown["unit_route"]),
+                         ("code", "code", "code-review", True))
+        kind = session_panel.route_kind({**row, "chain": [["unit", "active"]]})
+        self.assertNotIn("intensity", kind)             # (a unit route's `quick` is no choice: no bracket)
+        self.assertNotIn("chain", kind)                 # (and it is nobody's leg)
+        self.assertEqual(session_panel.route_kind({**row, "capability": "code"})["intensity"], "quick")
+        plan = session_panel.route_row({**row, "field": "plan"})
+        self.assertEqual(plan["kind_word"], "plan")
+        self.assertNotIn("kind_field", plan)
+        old = session_panel.route_row({**row, "field": ""})
+        self.assertEqual((old["kind_word"], old["unit_word"]), ("unit", "code-review"))
+        other = session_panel.route_row({**row, "capability": "code"})
+        self.assertNotIn("unit_word", other)
+        self.assertNotIn("unit_route", other)
 
     def test_the_route_page_words_a_unit_route_by_its_unit(self):
         desc = {"capability": "unit", "intensity": "quick", "shape": "solo", "basis": {"kind": "default"},
@@ -109,7 +127,7 @@ class UnitRouteWords(unittest.TestCase):
         self.assertEqual(labels[0], "unit")
         self.assertNotIn("owner", labels)
         self.assertNotIn("review", labels)
-        self.assertEqual(route_visibility.detail_lines(desc)[0][1], "qa/code-review · quick")
+        self.assertEqual(route_visibility.detail_lines(desc)[0][1], "qa/code-review")
         self.assertEqual(route_visibility.summary_text(desc, current=False), "gate unit-complete")
         # An owner route keeps every word it had.
         code = {**desc, "capability": "autopilot-code", "shape": "solo"}

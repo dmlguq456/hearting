@@ -1111,31 +1111,41 @@ for(let width=56;width<=140;width+=2)for(const s of draw(four,width,20,{side:fal
         self.node(script, "panel-view.cjs")
 
 
-    def test_a_unit_route_leads_with_its_unit_and_its_worker_line_names_no_role(self):
-        # 11-18 (the person: "첫 줄에 unit·code-review(quick), 작업자 줄에서 worker를 뺌"): a unit route (one worker called with no
-        # owner) reads `unit·code-review(quick)`; short of cells the intensity goes, then the unit's name. The worker line has no
-        # role word; a route with an owner keeps `owner`. The bottom layout's kind cell carries the unit too.
+    def test_a_unit_route_leads_with_its_field_and_its_worker_line_names_the_unit(self):
+        # 11-18 (the person: "Unit에서는 무슨 작업인지가 안보이잖아"): a unit route (one worker called with no owner) reads its
+        # field alone on the first line (`code`, no bracket: its intensity is no choice) and the unit's short name stands in the
+        # role word's place on its worker line; a route with an owner keeps `owner` and its bracket. An older route that records
+        # no field keeps `unit`. The name goes whole, never cut, where the row has no room for it.
         script = self.FIXTURE + r'''
-const unit={...oneShot,id:'u',title:'PR 독립 검토',kind_word:'unit',unit_word:'code-review',intensity:'quick',role:'worker',elapsed:'17m',
+const unit={...oneShot,id:'u',title:'PR 독립 검토',kind_word:'code',kind_field:'code',unit_route:true,unit_word:'code-review',role:'worker',elapsed:'17m',
  stages:[],paint:{...oneShot.paint,model_text:P('Opus 5.5'),ctx:P('14%'),gauge_row:[P('━───── 14%')]}};
 const own={...oneShot,kind_word:'code',intensity:'quick',role:'owner',owner_paint:oneShot.paint};
 const first=(rows,re)=>rows.find(s=>s.startsWith('│ │ ')&&re.test(s));
 const w44=draw([unit,own],44,60);
-assert(first(w44,/● unit·code-review\(quick\) +17m │ │$/),w44.join('\n'));
+assert(first(w44,/● code +17m │ │$/),w44.join('\n'));
+assert(first(w44,/● code\(quick\)/),w44.join('\n'));                      // the route with an owner keeps its bracket
+assert(!w44.some(s=>/unit/.test(s)),w44.join('\n'));                      // no `unit` word on a unit route's lines
 const w32=draw([unit],32,60);
-assert(first(w32,/● unit·code-review +17m │ │$/),w32.join('\n'));       // the intensity went first
-const w26=draw([unit],26,60);
-assert(first(w26,/● unit +17m │ │$/),w26.join('\n'));                    // then the unit's name
-// The worker line: harness, model, effort, with no `worker` word; the owner route's own line keeps `owner`.
-const doerRow=draw([unit],44,60).find(s=>/⠋ claude Opus 5\.5/.test(s));
-assert(doerRow&&!/worker/.test(doerRow),w44.join('\n'));
+assert(first(w32,/● code +17m │ │$/),w32.join('\n'));
+// The worker line: the unit's name where a role word stands, then harness, model, effort; the owner route keeps `owner`.
+assert(w44.some(s=>/⠋ code-review claude Opus 5\.5/.test(s)),w44.join('\n'));
 assert(w44.some(s=>/⠋ owner claude/.test(s)),w44.join('\n'));
-// An ended route's first line names the unit too; its `success · title` line is the one it had.
+assert(!w44.some(s=>/worker/.test(s)),w44.join('\n'));
+// A name too long for the row goes whole, not cut: the row is the bare harness and model.
+const longName={...unit,unit_word:'research-survey-with-a-very-long-name'};
+const w26=draw([longName],26,60);
+assert(!w26.some(s=>/research-s/.test(s))&&w26.some(s=>/⠋ .*Opus 5\.5/.test(s)),w26.join('\n'));
+// An older route that records no field keeps `unit`, with no bracket and no name on the first line.
+const old=draw([{...unit,kind_word:'unit',kind_field:undefined}],44,60);
+assert(first(old,/● unit +17m │ │$/)&&old.some(s=>/⠋ code-review claude/.test(s)),old.join('\n'));
+// Another field: `docs` / `research` read as themselves (only five hues, the rest the body color).
+for(const field of ['docs','research','plan'])assert(first(draw([{...unit,kind_word:field,kind_field:field==='plan'?undefined:field}],44,60),new RegExp('● '+field+' +17m')),field);
+// An ended route's first line reads the same; its `success · title` line is the one it had.
 const ended=draw([{...unit,kind:'done',state:'done',outcome:'success'}],44,60);
-assert(first(ended,/unit·code-review\(quick\)/)&&ended.some(s=>/success · PR 독립 검토/.test(s)),ended.join('\n'));
-// The bottom layout's kind cell.
+assert(first(ended,/ code +17m/)&&ended.some(s=>/success · PR 독립 검토/.test(s)),ended.join('\n'));
+// The bottom layout: the kind cell is the field, the unit's name leads the doer column.
 const bottom=draw([unit],140,20,{side:false});
-assert(bottom.some(s=>s.includes('│ unit·code-review(quick)')),bottom.join('\n'));
+assert(bottom.some(s=>/code-review claude Opus 5\.5 xhigh .*│ code/.test(s)&&!/unit/.test(s)),bottom.join('\n'));
 '''
         self.node(script, "panel-view.cjs")
 

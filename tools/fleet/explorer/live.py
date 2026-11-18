@@ -17,6 +17,7 @@ from .view_model import ExplorerViewModel
 from ..config import ui_text
 from ..display import codex_credits
 from ..model import current_attempt_rank
+from ..palette import ROUTE_FIELDS
 from .. import route_visibility
 
 HARNESSES = ("claude", "codex", "opencode")
@@ -1139,6 +1140,12 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             capability, record,
             _text(view.get("execution_topology")) or _text(record.get("execution_topology")))
         short = "frame" if framed_route else _short_capability(capability)
+        if short == "unit":
+            # A unit route's kind word is what its work is (its field), not how it is run; one that records none keeps `unit`.
+            recorded = _text(view.get("field")) or _text(record.get("field"))
+            short_label = recorded if recorded in ROUTE_FIELDS else short
+        else:
+            short_label = short
         cwd = _text(view.get("cwd")) or _text(record.get("cwd")) or _text(_get(owner, "cwd"))
         repo = (session_row or {}).get("repo") or _repo_of(resolver, cwd)
         owner_state = (session_row or {}).get("state")
@@ -1285,7 +1292,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "result_at": _num(_get(result, "at")),
             "worker": worker, "age": age, "legs": legs,
             "stages": stages, "resume": resume, "activity": "running" if running else "ended",
-            "loops": None, "worktree": worktree, "tree_label": short,
+            "loops": None, "worktree": worktree, "tree_label": short_label,
             "harness": owner_harness, "model": owner_model, "effort": owner_effort,
             "mode": mode,
             "intensity": intensity,

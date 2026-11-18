@@ -637,9 +637,10 @@ def detail_lines(desc):
     verification = desc.get("verification") or {}
     unit = _is_unit_route(desc)
     if unit:
-        # A unit route is its one worker's unit: its name and intensity, with no owner and no reviewer of its own.
+        # A unit route is its one worker's unit: its name (its intensity is no choice, so none is told), with no owner
+        # and no reviewer of its own.
         named = next((s["unit"] for s in desc.get("stages") or () if s.get("unit")), None)
-        lines = [("unit", " · ".join(x for x in (named, desc.get("intensity")) if x) or "·", "info")]
+        lines = [("unit", named or "·", "info")]
     else:
         lines = [("route", "%s · %s · %s %s" % (
             desc.get("shape"), _BASIS_WORD.get(basis.get("kind"), "basis unrecorded"),

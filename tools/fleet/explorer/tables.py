@@ -5,7 +5,7 @@ from .live import current_route_counts, route_marker_state, unknown_kind, unknow
 from .grid import CellGrid, cell_width
 from .style import recede_key
 from ..config import ui_text
-from ..palette import kind_intensity_key, kind_word_key, route_field
+from ..palette import ROUTE_FIELDS, kind_intensity_key, kind_word_key, route_field
 
 X = 34
 GAP = 3
@@ -1213,19 +1213,22 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
 _PLAIN_WEIGHT = {"g_work": "grp_live", "stg3_on": "g_idle", "eff_xhigh": "hb_codex"}
 
 
-def _unit_word(route):
-    """A unit route's unit, short: ``qa/code-review`` reads ``code-review`` (its bundle is left off)."""
-    if str(route.get("capability") or "").strip() != "unit":
-        return ""
-    return str(route.get("worker_unit") or "").strip().rsplit("/", 1)[-1]
+def _is_unit_route(route):
+    return str(route.get("capability") or "").strip() == "unit"
 
 
-def _kind_cell(route, name=True, bracket=True):
+def _kind_cell(route):
     """``code(standard)``: the kind word (bold) and its intensity in dim brackets; nothing else goes in the brackets.
-    A unit route reads ``unit·code-review(quick)``: the unit's short name follows the kind word in the bracket's hue.
-    ``name`` and ``bracket`` leave those parts out where the row is short of cells."""
+    A unit route (one worker, no owner) reads its field alone, ``code``: what the work is, not how it is run (the unit's
+    name stands on the worker's row) and no bracket, its intensity being no choice. An older one that records no field
+    keeps ``unit``."""
     kind = str(route.get("capability") or "").strip()
-    intensity = str(route.get("intensity") or "").strip() if bracket else ""
+    intensity = str(route.get("intensity") or "").strip()
+    unit = _is_unit_route(route)
+    if unit:
+        intensity = ""
+        recorded = str(route.get("field") or "").strip()
+        kind = recorded if recorded in ROUTE_FIELDS else kind
     if route.get("shape") == "direct" and intensity.casefold() in ("", "direct"):
         intensity = ""               # the `direct` zone's own name says it (11-17, route zones)
     if not kind:
@@ -1235,9 +1238,7 @@ def _kind_cell(route, name=True, bracket=True):
     field = route_field(route.get("field"), kind)
     word_key = kind_word_key(field) or "grp"
     bracket_key = kind_intensity_key(field, intensity) or "dim"
-    unit = _unit_word(route) if name else ""
-    return ([(kind, word_key)] + ([("·" + unit, bracket_key if intensity else "dim")] if unit else [])
-            + ([("(" + intensity + ")", bracket_key)] if intensity else []))
+    return [(kind, word_key)] + ([("(" + intensity + ")", bracket_key)] if intensity else [])
 
 
 def _blinking_stage(stages, at, lit):
@@ -1346,11 +1347,7 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
         earlier = _fold_items(items[:-1], max(8, (end - x) // 3), sep=" → ") if items[:-1] else []
         cells = (earlier + [(" → ", "dim")] if earlier else []) + _kind_cell(route)
         if sum(_seg_width(text) for text, _key in cells) > end - x:
-            # Short of cells: the earlier legs go, then (a unit route) the intensity, then the unit's name.
-            for options in ({}, {"bracket": False}, {"bracket": False, "name": False}):
-                cells = _kind_cell(route, **options)
-                if sum(_seg_width(text) for text, _key in cells) <= end - x:
-                    break
+            cells = _kind_cell(route)
         cursor = _put_segments(grid, x, y, cells, end)
         cursor = _put_segments(grid, cursor, y, after, end)
         if card:
@@ -1748,9 +1745,9 @@ def draw_routes(grid, vm, state, x=34, y=3):
                      "adversarial": "adv"}
             suffix = "·".join(short.get(value, value) for value in
                               (route.get("mode"), route.get("intensity")) if value)
-            unit_route = str(route.get("capability") or "") == "unit"
+            unit_route = _is_unit_route(route)
             if unit_route:
-                # A unit route has no owner and no mode: its kind line is the first row's `unit·code-review(quick)`.
+                # A unit route has no owner and no mode: its kind line is the first row's word, its field (`code`).
                 kind_parts, suffix = _kind_cell(route) or kind_parts, ""
             if suffix:
                 # The whole bracket (a mode word may stand in it: `(dev·q)`) takes the field's hue at its intensity's weight.
