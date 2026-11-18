@@ -787,6 +787,45 @@ class ActivateAndBeginTest(ProducerTestBase):
             P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct")
         self.assertEqual(ctx.exception.code, "route-already-closed")
 
+    def test_a_unit_route_turn_begins_its_own_cycle_as_a_child_of_the_sealed_one(self):
+        # `fresh_cycle` (a unit route's next turn): the sealed cycle is not bound again; a child cycle begins in
+        # the same work stream and seals as the route's newer cycle (the index accepts a second cycle of a
+        # route only as the child of its first); asking again resumes it; another turn cannot join it.
+        self.activate()
+        route, route_file, first = self.begin()
+        self.write_output(first)
+        self.close(route, route_file)
+        self.assertEqual(P.finalize(self.root, cycle_id=first["cycle_id"])["status"], "sealed")
+        R.retire_stale_closure(route_file)
+        again = P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct")
+        self.assertEqual((again["status"], again["cycle_id"]), ("resumed", first["cycle_id"]))   # default unchanged
+        second = P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct",
+                         fresh_cycle="att-turn-2")
+        self.assertEqual(second["status"], "begun")
+        self.assertNotEqual(second["cycle_id"], first["cycle_id"])
+        self.assertEqual(second["campaign_id"], first["campaign_id"])
+        record = P.read_cycle_record(self.root, second["cycle_id"])
+        self.assertEqual((record["continues_cycle_id"], record["continuation_attempt_id"], record["parent_cycle_id"]),
+                         (first["cycle_id"], "att-turn-2", first["cycle_id"]))
+        self.assertEqual(P.read_cycle_record(self.root, first["cycle_id"])["state"], "sealed")
+        retry = P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct",
+                        fresh_cycle="att-turn-2")
+        self.assertEqual((retry["status"], retry["cycle_id"]), ("resumed", second["cycle_id"]))
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct",
+                    fresh_cycle="att-turn-3")
+        self.assertEqual(ctx.exception.code, "unit-continue-prior-cycle-open")
+        self.write_output(second)
+        self.close(route, route_file)
+        self.assertEqual(P.finalize(self.root, cycle_id=second["cycle_id"])["status"], "sealed")
+        self.assertEqual(P.route_cycle_for(self.root, P.load_route(self.root, route_file))["cycle_id"],
+                         second["cycle_id"])
+        # a rebuilt index names the same newest cycle for the route as the incremental one
+        import artifact_admission
+        rebuilt = artifact_admission.rebuild_index(self.root)
+        self.assertEqual({row["cycle_id"] for bucket in rebuilt.routes.values() for row in bucket.values()},
+                         {second["cycle_id"]})
+
     def test_stage_worker_joins_owner_cycle_by_node(self):
         self.activate()
         route, route_file, owner = self.begin("standard")

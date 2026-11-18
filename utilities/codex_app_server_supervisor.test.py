@@ -2981,6 +2981,52 @@ class OneTurnStageTransportTest(unittest.TestCase):
         self.assertIn({"event": "closed"}, events)
         self.assertNotIn("--parent-attempt-id", result.args)
 
+    def test_a_unit_leg_keeps_its_thread_and_a_later_turn_wakes_it_with_its_own_grants(self):
+        fake = self.root / "unit_fake.py"
+        trace = self.root / "unit_trace.jsonl"
+        fake.write_text(textwrap.dedent("""\
+            import json, os, sys
+            trace = os.environ['STAGE_TRACE']
+            def send(value): print(json.dumps(value), flush=True)
+            def record(value):
+                with open(trace, 'a', encoding='utf-8') as out:
+                    out.write(json.dumps(value) + '\\n')
+            for line in sys.stdin:
+                value = json.loads(line); method = value.get('method')
+                if method == 'initialize':
+                    send({'jsonrpc':'2.0','id':value['id'],'result':{}})
+                elif method in ('thread/start', 'thread/resume'):
+                    record({'event': method, 'params': value['params']})
+                    send({'jsonrpc':'2.0','id':value['id'],'result':{'thread':{'id':value['params'].get('threadId','thread-new')}}})
+                elif method == 'turn/start':
+                    send({'jsonrpc':'2.0','id':value['id'],'result':{'turn':{'id':'t'}}})
+                    send({'jsonrpc':'2.0','method':'item/completed','params':{'turnId':'t','item':{
+                        'type':'agentMessage','id':'m','text':'artifact: -\\nverdict: PASS\\nblocker: none'}}})
+                    send({'jsonrpc':'2.0','method':'turn/completed','params':{'turn':{'id':'t','status':'completed'}}})
+                elif method == 'shutdown':
+                    break
+        """), encoding="utf-8")
+        env = {**os.environ, "STAGE_TRACE": str(trace)}
+        common = [sys.executable, str(SUPERVISOR), "--one-turn", "--worktree", str(self.root),
+                  "--sandbox", "read-only", "--approval", "never", "--model", "m-1",
+                  "--app-server-command", f"{sys.executable} {fake}"]
+        first = subprocess.run([*common, "--keep-session"], input="turn one", text=True, capture_output=True,
+                               env=env, timeout=15)
+        woken = subprocess.run([*common, "--keep-session", "--resume-thread", "thread-new"], input="turn two",
+                               text=True, capture_output=True, env=env, timeout=15)
+        self.assertEqual((first.returncode, woken.returncode), (0, 0), first.stdout + woken.stdout)
+        events = [json.loads(line) for line in trace.read_text().splitlines()]
+        start, resume = events
+        self.assertEqual(start["event"], "thread/start")
+        self.assertIs(start["params"]["ephemeral"], False)
+        self.assertEqual(resume["event"], "thread/resume")
+        self.assertEqual(resume["params"]["threadId"], "thread-new")
+        self.assertNotIn("ephemeral", resume["params"])
+        # the woken thread is given this launch's own cwd, sandbox, approval and model again
+        for key in ("cwd", "sandbox", "approvalPolicy", "model"):
+            self.assertEqual(resume["params"][key], start["params"][key], key)
+        self.assertIn('"thread_id":"thread-new"', woken.stdout.replace(" ", ""))
+
     def test_empty_prompt_and_app_server_eof_fail_without_terminal_success(self):
         marker = self.root / "started"
         fake = self.root / "eof.py"

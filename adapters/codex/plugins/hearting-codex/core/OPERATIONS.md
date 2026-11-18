@@ -1672,6 +1672,17 @@ root (`<runtime>/ephemeral/<key>/.agent_reports`, one per project) so the projec
 count under the project's governor), and the
 notice (or wait result) carries the answer, cut with the place to read the rest. Details: `capabilities/unit.md`.
 
+A unit route that has ended takes another turn with `capability-route.py correct --route <id> --message-file <text>`
+(the route's parent only): once the last turn has ended and the route has closed, the route's closure record is
+set aside (`<route id>.superseded-<time>.outcome.json`) and a new attempt of the same route and node starts in a new
+cycle, waking the previous turn's harness session when its file is still in that turn's worker home (copied alone
+into the new home, with the new turn's own permissions and model), else starting a fresh session that is told the
+brief and the previous result (`session: resumed | fresh:<reason>`). While a turn runs the text is only kept
+(`retained`) and the next plain `start --route` starts it; nothing waits between turns. The last turn's home waits
+by where its parent is: a leg a worker started, while that worker runs; a main-session leg, while that session
+lives, then `route_autoclose.QUIET_SECONDS` (one hour), or `route_autoclose.IDLE_SECONDS` (seven days) when it cannot be told. Details:
+`capabilities/unit.md`.
+
 ### §5.11. Commit and Push Policy for `<agent-home>`
 
 Fleet's two-hex session numbers have one shared resolver,

@@ -1382,6 +1382,7 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
     work_commands = {}
     completed_work = set()
     summaries = []
+    kept_notes = []
     parked_notes = []
     unit_reports, other_work = [], False
     if jobs:
@@ -1401,8 +1402,14 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                         completed_work.add(child["attempt_id"])
                         import work_intent
                         summary = work_intent.sealed_summary(meta, child["attempt_id"])
+                        import unit_continue
+                        head, kept = unit_continue.notice_lines(jobs, meta)
+                        if summary and head:
+                            summary = head + "\n" + summary
                         if summary and summary not in summaries:
                             summaries.append(summary)
+                        if kept:
+                            kept_notes.append(kept)
                     continue  # Already sealed; successful work has no extra command obligation.
                 path = Path(meta.get("owner_route_file") or meta.get("route_file") or "")
                 route = json.loads(path.read_text())
@@ -1436,6 +1443,7 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                  f"{child['next_leg']['compose_command']}" for child in receipt["children"] if child.get("next_leg")]
         return (RUNTIME_V1_FOLLOWUP_PREFIXES[bool(summaries)]
                 + "".join("\n" + summary for summary in summaries)
+                + "".join("\n" + note for note in kept_notes)
                 + ("".join("\n" + note for note in notes)
                    + ("\nIf this next leg is already approved, execute it in this turn or its existing registered continuation. "
                       "Nothing starts it from receipt alone; obtain approval only for work outside the existing scope." if notes else "")))

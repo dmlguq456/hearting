@@ -363,7 +363,10 @@ def route_cycle_for(root: Path, route: Mapping[str, Any]) -> Optional[Dict[str, 
     deleted_open = [rec for rec in matches if rec.get("state") == "open" and rec.get("deleted_at")]
     if len(deleted_open) == 1:
         return deleted_open[0]
-    closed = sorted((rec for rec in matches if rec.get("state") in CLOSED_BINDABLE_STATES),
+    # A unit route's later turns each begin their own cycle: of two sealed cycles of one route the newer is
+    # the route's (the sort is stable, so a route with one cycle behaves as before).
+    closed = sorted(sorted((rec for rec in matches if rec.get("state") in CLOSED_BINDABLE_STATES),
+                           key=lambda rec: rec.get("started_on") or "", reverse=True),
                     key=lambda rec: nearness[rec.get("route_id")])
     if closed and cycle_route_admission(root, closed[0], route).allow:
         return closed[0]
