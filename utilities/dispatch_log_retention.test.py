@@ -660,25 +660,148 @@ class DispatchLogRetentionTest(unittest.TestCase):
         self.assertEqual((later["more"], later["removed"], later["round_left"]), (0, 0, 0))
         self.assertTrue(all(path.exists() for path in paths))
 
-    def test_a_removal_after_a_spent_round_arms_the_next_round(self):
+    def _state(self):
+        return json.loads((self.root / R.STATE_NAME).read_text(encoding="utf-8"))
+
+    def _edit_state(self, **changes):
+        state = self._state()
+        for key, value in changes.items():
+            if value is KeyError:
+                state.pop(key, None)
+            else:
+                state[key] = value
+        (self.root / R.STATE_NAME).write_text(json.dumps(state), encoding="utf-8")
+
+    def _late_removal(self, *, wait_ns=0, edit=None):
+        # A spent round over 80 blocked names, then one log that expires later: the
+        # normal-interval passes walk on until one reaches and removes it.
         self._blocked(80)
         with mock.patch.object(R, "EXAMINE_LIMIT", 32):
             self.assertEqual(self._continue(self.now)["more"], [1, 1, 0])
+            if edit:
+                self._edit_state(**edit)
             late = self.log("z-late-expired.jsonl")
             self.add_row("att-z-late-expired", late, ended=self.now - 30 * DAY)
-            at = self.now
-            for _ in range(6):   # normal interval until the cursor reaches the new name
+            at = self.now + wait_ns
+            for _ in range(6):
                 at += 10 * R.DUE_SECONDS * 1_000_000_000
                 result = R.sweep(self.jobs, now_ns=at)
                 if result.get("removed"):
                     break
                 self.assertEqual((result["more"], result["round_left"]), (0, 0))
             self.assertFalse(late.exists())
-            self.assertEqual((result["removed"], result["more"], result["round_left"]), (1, 0, 81))
             at += 10 * R.DUE_SECONDS * 1_000_000_000
-            following = R.sweep(self.jobs, now_ns=at)
+            return result, R.sweep(self.jobs, now_ns=at)
+
+    def test_a_removal_within_a_day_of_a_spent_round_does_not_open_the_next_round(self):
+        removing, following = self._late_removal()
+        self.assertEqual((removing["removed"], removing["more"], removing["round_left"]), (1, 0, 0))
+        self.assertEqual((following["removed"], following["more"], following["round_left"]), (0, 0, 0))
+        self.assertIsInstance(self._state()["round_closed_ns"], int)
+
+    def test_a_removal_a_day_after_a_spent_round_arms_the_next_round(self):
+        removing, following = self._late_removal(wait_ns=R.ROUND_REOPEN_SECONDS * 1_000_000_000)
+        self.assertEqual((removing["removed"], removing["more"], removing["round_left"]), (1, 0, 81))
         self.assertEqual((following["removed"], following["more"]), (0, 1))
         self.assertLess(following["round_left"], 81)
+
+    def test_the_pass_that_ends_a_round_does_not_open_the_next_one_even_when_it_removes(self):
+        self._blocked(32)
+        expired = self.log("z-expired.jsonl")
+        self.add_row("att-z-expired", expired, ended=self.now - 30 * DAY)
+        with mock.patch.object(R, "EXAMINE_LIMIT", 32):
+            summary = self._continue(self.now)
+        self.assertEqual(summary, {"passes": 2, "removed": [0, 1], "more": [1, 0]})
+        self.assertFalse(expired.exists())
+        state = self._state()
+        self.assertEqual((state["round_left"], state["last_result"]["round_left"]), (0, 0))
+        self.assertEqual(state["round_closed_ns"], state["last_pass_ns"])
+
+    def test_a_spent_round_without_a_recorded_end_opens_once_on_the_next_removal(self):
+        for why, value in (("missing", KeyError), ("future", 2 ** 62), ("string", "yesterday"),
+                           ("bool", True)):
+            with self.subTest(why=why):
+                self.setUp()
+                removing, _following = self._late_removal(edit={"round_closed_ns": value})
+                self.assertEqual((removing["removed"], removing["round_left"]), (1, 81))
+
+    def _write_state(self, value, *, raw=None):
+        path = self.root / R.STATE_NAME
+        if path.is_dir():
+            path.rmdir()
+        path.write_bytes(raw if raw is not None else json.dumps(value).encode())
+
+    def test_follow_up_pass_ns_reports_only_a_settled_more_pass(self):
+        second = 1_000_000_000
+        ago = lambda seconds: self.now - seconds * second  # noqa: E731
+        ok = {"last_pass_ns": ago(61), "cursor": "", "last_result": {"more": 1, "round_left": 5}}
+        self.assertEqual(R.follow_up_pass_ns(self.jobs, now_ns=self.now), 0)   # no state file
+        cases = [
+            ("more with a minute passed", ok, ago(61)),
+            ("exactly a minute", {**ok, "last_pass_ns": ago(60)}, ago(60)),
+            ("59 seconds", {**ok, "last_pass_ns": ago(59)}, 0),
+            ("old tail without round_left", {**ok, "last_result": {"more": 1}}, ago(61)),
+            ("more 0", {**ok, "last_result": {"more": 0}}, 0),
+            ("more missing", {**ok, "last_result": {"round_left": 1}}, 0),
+            ("more as text", {**ok, "last_result": {"more": "1"}}, 0),
+            ("more as bool", {**ok, "last_result": {"more": True}}, 0),
+            ("last_result list", {**ok, "last_result": [1]}, 0),
+            ("last_result missing", {"last_pass_ns": ago(61), "cursor": ""}, 0),
+            ("pass time as text", {**ok, "last_pass_ns": str(ago(61))}, 0),
+            ("pass time in the future", {**ok, "last_pass_ns": self.now + 5 * second}, 0),
+            ("pass time zero", {**ok, "last_pass_ns": 0}, 0),
+            ("cursor not text", {**ok, "cursor": 3}, 0),
+            ("a list", [ok], 0),
+        ]
+        for why, state, expected in cases:
+            with self.subTest(why=why):
+                self._write_state(state)
+                self.assertEqual(R.follow_up_pass_ns(self.jobs, now_ns=self.now), expected)
+        for why, raw in (("garbage", b"\xff\x00{"), ("over 16 KiB", b"{" + b" " * 16400 + b"}")):
+            with self.subTest(why=why):
+                self._write_state(None, raw=raw)
+                self.assertEqual(R.follow_up_pass_ns(self.jobs, now_ns=self.now), 0)
+        with self.subTest(why="state path is a directory"):
+            (self.root / R.STATE_NAME).unlink()
+            (self.root / R.STATE_NAME).mkdir()
+            self.assertEqual(R.follow_up_pass_ns(self.jobs, now_ns=self.now), 0)
+        with self.subTest(why="no state root"):
+            self.assertEqual(R.follow_up_pass_ns(self.root / "nowhere" / "jobs.log", now_ns=self.now), 0)
+
+    def test_a_runner_chasing_more_stays_within_one_round_a_day(self):
+        # The runner's rule, replayed on a simulated minute clock: start a pass when the
+        # last one left `more`, a minute passed and a pass ran since its previous start.
+        # Natural callers add a pass every two hours. Logs keep expiring one by one.
+        minute = 60 * 1_000_000_000
+        protected = 60
+        for index in range(protected):
+            self.add_row(f"att-open-{index:02d}", self.log(f"a-open-{index:02d}.jsonl"),
+                         status="open", ended=self.now - 30 * DAY)
+        expiring = 25
+        for index in range(expiring):   # one more log passes its 14 days every three hours
+            self.add_row(f"att-exp-{index:02d}", self.log(f"b-exp-{index:02d}.jsonl"),
+                         ended=self.now - 14 * DAY + (index + 1) * 3 * 60 * minute)
+        examine = 8
+        names = protected + expiring
+        one_round = -(-names // examine)
+        days, starts_by_day, last_start, closed_day = 4, [0] * 4, 0, None
+        with mock.patch.object(R, "EXAMINE_LIMIT", examine):
+            for step in range(days * 24 * 60):
+                at = self.now + step * minute
+                if step % 120 == 0:
+                    R.sweep(self.jobs, now_ns=at)
+                    continue
+                passed = R.follow_up_pass_ns(self.jobs, now_ns=at)
+                if passed > last_start:
+                    last_start = at - 1   # the runner records its start just before the pass runs
+                    starts_by_day[step // (24 * 60)] += 1
+                    R.sweep(self.jobs, now_ns=at)
+                if closed_day is None and self._state().get("round_closed_ns"):
+                    closed_day = step // (24 * 60)
+        self.assertEqual(closed_day, 0)                      # the first round is chased to its end
+        self.assertGreaterEqual(starts_by_day[0], one_round - 4)
+        self.assertTrue(all(count <= one_round + 3 for count in starts_by_day), starts_by_day)
+        self.assertLessEqual(sum(starts_by_day), days * (one_round + 3))
 
     def test_unknown_bytes_is_split_into_three_disjoint_counts(self):
         self.add_row("att-a-unknown", self.log("a-unknown.jsonl", b"u" * 11), harness="other",

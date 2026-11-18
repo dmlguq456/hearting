@@ -37,6 +37,9 @@ MAX_LOG_BYTES = 2 * 1024 * 1024 * 1024
 DUE_SECONDS = 300
 # While the last pass left removable files behind, the next pass may start sooner.
 BACKLOG_DUE_SECONDS = 60
+# After a round of the log directory ends, the next round opens at most once per
+# this interval. Not a setting.
+ROUND_REOPEN_SECONDS = 24 * 3600
 EXAMINE_LIMIT = 64
 MAX_DIRECTORY_ENTRIES = 50000
 MAX_PASS_SECONDS = 10
@@ -115,9 +118,40 @@ def _advisory_lock(layout):
 
 
 def _read_state(layout):
+    return _read_state_at(layout.root_fd)
+
+
+def follow_up_pass_ns(jobs, *, now_ns=None) -> int:
+    """Start (ns) of the last pass, only if it left ``more`` and the short interval passed.
+
+    Read-only and lock-free. Anything unreadable, malformed, missing or in the
+    future yields 0, so a caller that does not know does not hurry.
+    """
+    try:
+        now_ns = time.time_ns() if now_ns is None else int(now_ns)
+        root_fd = os.open(dispatch_state_root(Path(jobs).resolve(strict=False)), _DIR_FLAGS)
+    except Exception:  # noqa: BLE001
+        return 0
+    try:
+        state = _read_state_at(root_fd)
+        last = state.get("last_result")
+        passed = state.get("last_pass_ns")
+        if (isinstance(last, dict) and type(last.get("more")) is int and last["more"] == 1
+                and type(passed) is int and 0 < passed <= now_ns
+                and now_ns - passed >= BACKLOG_DUE_SECONDS * 1_000_000_000):
+            return passed
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(root_fd)
+    return 0
+
+
+def _read_state_at(root_fd):
     try:
         fd = os.open(STATE_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                     dir_fd=layout.root_fd)
+                     dir_fd=root_fd)
     except FileNotFoundError:
         return {"last_pass_ns": 0, "cursor": ""}
     with os.fdopen(fd, "rb") as handle:
@@ -843,8 +877,15 @@ def _pass(jobs, root, layout, state, now_ns, started):
     left = state.get("round_left")
     if type(left) is not int or left < 0:
         left = len(ordered)
+    spent_now = bool(left)
     left = max(0, left - len(examined_names))
-    if removed and not left:
+    if spent_now and not left:
+        state["round_closed_ns"] = now_ns  # this pass ended the round
+    closed = state.get("round_closed_ns")
+    recent = (type(closed) is int and 0 <= now_ns - closed < ROUND_REOPEN_SECONDS * 1_000_000_000)
+    if removed and not left and not recent:
+        # A new round opens only when the last one ended over a day ago or its
+        # end time is unknown; otherwise each newly expired log would reopen it.
         left = len(ordered)
     round_more = bool(examined_names) and not selected and left > 0
     state["round_left"] = left
