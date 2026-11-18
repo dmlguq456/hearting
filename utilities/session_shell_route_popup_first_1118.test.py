@@ -187,6 +187,21 @@ const measure=async(label,press_=opened)=>{
     await key('\t',500);if(!popupHas('FLEET_R')(await screen()))await key('\x1b[Z',500);
     const r=await until(filled,'the table after the reading that succeeded');checks.recovered_title=title(r.s);frames.hang_recovered=plain(r.s);
   }
+  if(sc==='reopen_route'){
+    // The routes popup opened again from its own first screen (a press on ROUTE in its bottom line): the rows that are
+    // not a reading's own keep saying so, and when the readings do not come the words say that, not nothing.
+    fs.writeFileSync(cfg.vm+'.hang','');
+    await opened();let r=await until(either,'a first content');checks.first_reading=reading(r.s);
+    const b=box(r.s),bottom=b.rows[b.rows.length-1],x=b.left+bottom.indexOf('ROUTE');
+    checks.bottom_has_route=bottom.indexOf('ROUTE')>=0;
+    await press(x+1,b.bottom,0);
+    r=await until(s=>!!box(s),'the popup after ROUTE again');await sleep(400);const s1=await screen();
+    checks.again_kind=kind(s1);checks.again_reading=reading(s1);checks.again_title=title(s1);frames.reopen_again=plain(s1);
+    // The reading under way when it was opened again is dropped, the next one is cut at 12 s too.
+    r=await until(failedRead,'the words that the reading failed',32000);
+    checks.failed_kind=kind(r.s);checks.failed_title=title(r.s);frames.reopen_failed=plain(r.s);
+    fs.unlinkSync(cfg.vm+'.hang');
+  }
   if(sc==='place_a'||sc==='place_b'||sc==='place_c'){
     await resize(120,16);control('vm-delay',cfg.delay);
     const p=await head();await press(p.x+2,p.y,0);
@@ -195,7 +210,10 @@ const measure=async(label,press_=opened)=>{
     if(sc==='place_a'){await key('\x1b[6~',600);r=await screen();checks.moved=plain(r).join('\n')!==frames.place_first.join('\n');frames.place_moved=plain(r);}
     if(sc==='place_b'){for(let i=0;i<8;i++)await key('\t',60);await sleep(300);checks.tabbed=true;}
     // Fleet's table (the last reading of the Tab case, which waits for its own second reading).
-    r=await until(filled,'the table',cfg.delay*3000+8000);await sleep(cfg.delay*1000+800);r=await screen();
+    // The Tab case waits for its own second reading by what it shows, not by a fixed margin (a slow start missed it).
+    if(sc==='place_b')r=await until(s=>filled(s)&&unfolded(s).includes('FLEET_R10'),'the tabbed route unfolded',cfg.delay*3000+8000);
+    else{r=await until(filled,'the table',cfg.delay*3000+8000);await sleep(cfg.delay*1000+800);}
+    r=await screen();
     checks.table_kind=kind(r);checks.table_unfolded=unfolded(r);checks.table_top=plain(r)[1]||'';checks.table_stale=staleWords(r);frames.place_table=plain(r);
   }
   if(sc==='narrow'){
@@ -398,6 +416,17 @@ class RoutePopupFirstTest(unittest.TestCase):
         # A later reading that succeeds: Fleet's table, no words.
         self.assertNotIn('읽은 내용', c['recovered_title'], c)
         self.assertNotIn('읽지 못함', c['recovered_title'], c)
+
+    def test_opening_the_routes_popup_again_from_its_first_screen_keeps_saying_the_rows_are_not_read(self):
+        # Review of #1730: a press on ROUTE in the popup's bottom line while the first screen stands carried its rows
+        # over without their words, and a reading that then failed changed nothing.
+        c = self.run_case('claude', 'reopen_route', 2, delay=0)['checks']
+        self.assertTrue(c['first_reading'], c)
+        self.assertTrue(c['bottom_has_route'], c)
+        self.assertEqual(c['again_kind'], 'panel', c)
+        self.assertTrue(c['again_reading'], c)
+        self.assertIn('다시 읽지 못함', c['failed_title'], c)
+        self.assertEqual(c['failed_kind'], 'panel', c)
 
     def test_the_place_a_person_reads_at_stays_when_the_table_is_replaced(self):
         # (a) scrolled a page on the first screen: the route at the top of the window stays; the table does not pull

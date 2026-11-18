@@ -841,7 +841,9 @@ function askTable(){
   };
   const stale=()=>table!==t||selected!==selection;
   let loaded=false;
-  const openAsked=t.open||'';
+  const openAsked=t.open||'',keyAsked=popupKeys.ROUTE,atAsked=Date.now()/1000;
+  // A first screen that said `could not read again` is being read again now.
+  if(t.kind==='ROUTE'&&t.stale?.failed)t.stale={...t.stale,failed:false};
   ask(status?{part:'doc'}:{}).then(result=>{
     if(stale())return;
     // Read at a width the popup no longer has: its rows are not this popup's; the read made for the new width stands.
@@ -879,7 +881,7 @@ function askTable(){
     }
     if(Array.isArray(result.routes))t.routes=result.routes;
     if(t.kind==='ROUTE'&&t.page&&result.page!==true)t.page=false;
-    if(route)routePopup={sid,width,open:openAsked,key:popupKeys.ROUTE,rows:t.rows,hits:t.hits,routes:t.routes,at:Date.now()/1000};
+    if(route)routePopup={sid,width,open:openAsked,key:keyAsked,rows:t.rows,hits:t.hits,routes:t.routes,at:atAsked};
     queueDisplay();
   }).finally(()=>{
     tableAsking=false;
@@ -977,7 +979,10 @@ function openPopup(name,open=''){
   const was=table;
   // The routes popup opens with the pressed route unfolded, else the most pressing one.
   if(name==='ROUTE'&&!open)open=String((rankedRoutes()[0]||{}).id||'');
-  table={kind:name,rows:was?.kind===name?was.rows:[],hits:[],scroll:0,open,follow:!!open,page:false,routes:[],loaded:was?.kind===name&&was.loaded,width:panelView.popupWidth(cols,tableKind(name)),
+  // A routes first screen (`stale`) is not carried over: the reopened popup picks its first screen again, so the
+  // rows that are not a reading's own keep saying so.
+  const carry=was?.kind===name&&!(name==='ROUTE'&&was.stale);
+  table={kind:name,rows:carry?was.rows:[],hits:[],scroll:0,open,follow:!!open,page:false,routes:[],loaded:carry&&was.loaded,width:panelView.popupWidth(cols,tableKind(name)),
     ...(name==='NOW'?{sel:'',list:null,read:null,reveal:true,listScroll:0,loaded:false}:{})};
   // The status popup's rows as read last, while no watch event came and the width is the same.
   const kept=name==='STATUS'&&statusPopup&&statusPopup.width===table.width&&statusPopup.generation===statusGeneration;
