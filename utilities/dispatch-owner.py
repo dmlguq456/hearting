@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -337,6 +338,18 @@ def _frame_alternative_tiebreak(first_harness, selected, band, ranks, scores, *,
             continue
         return name
     return selected
+
+
+@contextlib.contextmanager
+def _first_node_of_a_new_route():
+    """A leg started from inside a worker opens a route of its own: the starting worker's attempt is not
+    that route's owner, so producer admission must not read it as one (the worker's environment names it)."""
+    held = {key: os.environ.pop(key) for key in ("AGENT_DISPATCH_ATTEMPT_ID", "AGENT_DISPATCH_PARENT_ATTEMPT_ID")
+            if key in os.environ}
+    try:
+        yield
+    finally:
+        os.environ.update(held)
 
 
 def export_owner_route_env(child_env, binding):
@@ -1191,9 +1204,10 @@ def main(argv):
                         # The alternative joins the cycle its live first leg's preparation began and
                         # looked the root over for, in this start or an earlier start of the route:
                         # it is not walked again; later hand changes go to the next begin or listing.
-                        child_env.update(prepare_route_artifact_env(
-                            Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs),
-                            sibling_looked=bool(first) and first.get("_status") in {"open", "running"}))
+                        with _first_node_of_a_new_route():
+                            child_env.update(prepare_route_artifact_env(
+                                Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs),
+                                sibling_looked=bool(first) and first.get("_status") in {"open", "running"}))
                     except ProducerError as exc:
                         raise OwnerError(f"{exc.code}:{exc.detail}") from exc
                 # Deliberately NOT export_owner_route_env() here. The adapters

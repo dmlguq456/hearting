@@ -159,6 +159,11 @@ def resolve_parent_completion_delivery(args, *, probe=probe_managed_codex_parent
             return declared["carrier"]
         args.parent_completion_reason = "parent-identity-unmatched"
         return "poll-fallback"
+    if getattr(args, "capability", None) == "unit" and os.environ.get("AGENT_DISPATCH_CHILD") == "1":
+        # A unit leg a worker started: a supervisor joins only the children it declared, so this leg would never
+        # wake its caller. The caller runs the printed bounded wait and reads the result there.
+        args.parent_completion_reason = "caller-worker-waits"
+        return "poll-fallback"
     if parent_supervisor_is_live(args):
         args.parent_completion_reason = "parent-attempt-owned"
         return "parent-runtime-supervised"
