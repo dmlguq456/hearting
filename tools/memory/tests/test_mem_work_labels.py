@@ -21,6 +21,7 @@ MEM = ROOT / "tools" / "memory" / "mem.py"
 sys.path.insert(0, str(ROOT / "utilities"))
 from harness_capabilities import session_env  # noqa: E402
 from dispatch_contract import supervisor_lease_path  # noqa: E402
+import turn_change_record as T  # noqa: E402
 
 HARNESSES = ("claude", "codex", "opencode")
 SESSION = "sess-labels-1"
@@ -92,6 +93,20 @@ class WorkLabelsTest(unittest.TestCase):
             item["unit"] = unit
         known = json.loads(path.read_text())["requests"] if path.exists() else []
         path.write_text(json.dumps({"schema_version": 1, "attempt_id": attempt, "requests": known + [item]}))
+
+    def direct_turn(self, ago, root="/tmp/proj-a", route_held=False):
+        """A direct-work turn that ended ``ago`` seconds back, written the way the real recorder
+        keeps it in the session's change-record state file (a folder's later turns leave no ledger line)."""
+        path = T.state_path(self.env(), self.harness, SESSION)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        state = T._read(path) or {"v": T.SCHEMA}
+        item = {"ended": time.time() - ago, "source": ["a.py"], "source_count": 1, "section": "changed a.py"}
+        if route_held:  # a turn made while a route held the folder: only the held observation
+            state["held_turn"] = T._last_turn(item)
+        else:
+            state.setdefault("records", {})[root] = {"route_file": "-", "route_id": "rt-direct", "closed": True,
+                                                       "turns": 2, "last_turn": T._last_turn(item)}
+        T._write(path, state)
 
     def add(self, *extra, rtype="preference", tier="durable", body=None, **env):
         self.n += 1  # a distinct body each time (unless `body` is given), so no write merges into an earlier record
@@ -229,6 +244,71 @@ class WorkLabelsTest(unittest.TestCase):
         self.assertEqual(topics, ["field:docs", "unit:editorial/write"])
         again, topics = self.add("--source", "work-style-from:x", body=f"{BODY} Moved v2.")
         self.assertEqual(topics, ["field:docs", "unit:editorial/write"])
+
+    def test_a_partly_given_topic_does_not_let_the_route_replace_what_the_record_had(self):
+        rid = self.route("code")
+        self.correction(rid, unit="unit:qa/code-review")
+        for given, expected in (("unit:editorial/write", ["unit:editorial/write"]),  # one kind given
+                                ("other-topic", ["other-topic"])):  # another topic only
+            text = f"{BODY} Partly {given}."
+            first = self.add("--topic", "field:docs", "--topic", "unit:editorial/write", body=text,
+                             AGENT_DISPATCH_DEPTH="1")  # written with no route labels
+            again, topics = self.add("--topic", given, body=text)
+            self.assertEqual((again, topics), (first[0], expected))
+
+    def test_a_partly_given_topic_on_a_source_upsert_adds_no_kind_the_record_had(self):
+        rid = self.route("code")
+        self.correction(rid, unit="unit:qa/code-review")
+        for n, (given, expected) in enumerate((("unit:editorial/write", ["unit:editorial/write"]),
+                                               ("other-topic", ["other-topic"]))):
+            source = f"work-style-from:y{n}"
+            first = self.add("--topic", "field:docs", "--topic", "unit:editorial/write", "--source", source,
+                             body=f"{BODY} Partly v1 {n}.", AGENT_DISPATCH_DEPTH="1")
+            again, topics = self.add("--topic", given, "--source", source, body=f"{BODY} Partly v2 {n}.")
+            self.assertEqual((again, topics), (first[0], expected))
+
+    def test_a_later_direct_turn_in_the_same_folder_after_the_route_names_nothing(self):
+        self.route("code", automatic=True, ts=time.time() - 3600)  # the folder's first direct turn: a ledger line
+        self.direct_turn(3500)
+        self.route("research", ended=600, ts=time.time() - 1800)
+        self.direct_turn(30)  # its second one, after the route ended: no ledger line, only the state file
+        self.assertEqual(self.add()[1], [])
+
+    def test_a_later_direct_turn_after_an_open_route_started_names_nothing(self):
+        self.route("code", automatic=True, ts=time.time() - 3600)
+        self.route("lab", ts=time.time() - 600)
+        self.assertEqual(self.add()[1], ["field:lab"])
+        self.direct_turn(100, root="/tmp/proj-b")  # another folder's direct turn while the route runs
+        self.assertEqual(self.add()[1], [])
+
+    def test_a_turn_held_by_the_route_is_not_direct_work_and_a_direct_turn_before_it_is_old(self):
+        self.direct_turn(3500)
+        rid = self.route("code", ts=time.time() - 1800)
+        self.direct_turn(60, route_held=True)  # fixed in the route's own folder while it ran
+        self.correction(rid, unit="unit:qa/code-review")
+        self.assertEqual(self.add()[1], ["field:code", "unit:qa/code-review"])
+
+    def test_an_unreadable_change_record_state_leaves_the_ledger_alone(self):
+        self.route("docs", ts=time.time() - 60)
+        path = T.state_path(self.env(), self.harness, SESSION)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json")
+        self.assertEqual(self.add()[1], ["field:docs"])
+
+    def test_an_open_route_left_behind_by_a_newer_route_names_nothing(self):
+        self.route("lab", ts=time.time() - 294 * 3600)  # never closed
+        self.route("code", ended=2 * 3600, ts=time.time() - 3 * 3600)
+        self.assertEqual(self.add()[1], [])
+        self.route("docs", ts=time.time() - 3600)
+        self.route("code", ended=1800, ts=time.time() - 3500)  # a second pair: still nothing
+        self.assertEqual(self.add()[1], [])
+
+    def test_an_open_route_left_behind_is_not_named_after_a_newer_one_ends(self):
+        self.route("lab", ts=time.time() - 13 * 3600)
+        self.route("docs", ended=1800, ts=time.time() - 3600)
+        self.assertEqual(self.add()[1], [])
+        self.route("code", ended=5 * 60, ts=time.time() - 3000)
+        self.assertEqual(self.add()[1], [])
 
     def test_a_continued_route_leaves_only_its_continuation(self):
         first = self.route("code", ended=60)

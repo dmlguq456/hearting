@@ -286,15 +286,15 @@ output is unchanged.
 Nobody types the labels. `mem add durable preference …` from a main session adds
 them (`utilities/memory_work_labels.py`): the field is the sealed `field` of the
 session's one route, read from its route-chain ledger. A route that is still open
-counts however long it has run; one that ended counts for ten minutes. Several
-routes, none, any direct work (a change record with no route) after the route
+counts however long it has run, unless a newer route followed it; one that ended
+counts for ten minutes. Several routes, none, any direct work (a change record with no route) after the route
 started or ended, a legacy route without a field, or a worker session add nothing.
 The unit is the stage the session's newest correction on that route was sent to
 (`capability-route correct` keeps it on the owner-input request and returns the
 same labels as `memory_labels`, a value only). Labels are only ever added: a new
 record gets the kinds the caller did not give; a record that already exists (the
 same body again, or a `--source` update) keeps every label it has and gains only a
-kind it lacks. Other types and tiers are never labelled. The record is written
+kind that neither it nor the caller had. Other types and tiers are never labelled. The record is written
 either way; workers and owners never write it.
 
 ## Curator safety invariant (D-18/D-35/D-40)

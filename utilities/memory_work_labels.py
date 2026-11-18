@@ -12,12 +12,13 @@ the labels that fit, or with none:
 
 "Current route" is read from the session's own route-chain ledger
 (``tools/fleet/route_chain``), the record every compose and start already
-appends to. One route that is still open (however long it has run), or that ended
-within ``RECENT_ENDED_SECONDS`` with no direct work since, names it. Automatic
-change records (turns that changed files with no route) are never routes: they
-only mark that direct work happened, and direct work after a route's start or end
-means the record may be about that work, so nothing is labelled. Several routes,
-none, or anything unreadable name nothing: the record is still written, just
+appends to. One route that is still open, or that ended within ``RECENT_ENDED_SECONDS`` with
+no direct work since, names it. An open route counts however long it has run, but only while no
+newer route followed it. Automatic change records (turns that changed files with no route) are
+never routes: they only mark that direct work happened (the ledger has a line for a folder's first
+such turn; its later turns are read from the session's own change-record state file). Direct work
+after a route's start or end means the record may be about that work, so nothing is labelled.
+Several routes, none, or anything unreadable name nothing: the record is still written, just
 without labels. A wrong label is worse than none. Nothing here writes, locks, or raises.
 """
 from __future__ import annotations
@@ -73,6 +74,22 @@ def _ended_at(route_file):
         return None
 
 
+def _last_direct_turn(env, anchor):
+    """When this session last ended a direct-work turn in any folder, else 0.0.
+
+    The ledger only has a line for a folder's *first* direct turn; later ones are appended to that
+    folder's change record, whose state file keeps each record's last turn. Read only, this
+    session's own file; unreadable means 0.0 (the ledger's lines alone decide).
+    """
+    try:
+        from turn_change_record import state_path
+        state = json.loads(state_path(env, *anchor).read_text(encoding="utf-8"))
+        ended = [(entry.get("last_turn") or {}).get("ended") for entry in (state.get("records") or {}).values()]
+        return max([t for t in ended if isinstance(t, (int, float)) and not isinstance(t, bool)], default=0.0)
+    except Exception:
+        return 0.0
+
+
 def current_route(environ=None, now=None):
     """``(route_id, route_file)`` of the session's one open or just-ended route, else None.
 
@@ -97,6 +114,10 @@ def current_route(environ=None, now=None):
         newest[line["route_id"]] = line
         if line.get("source_route_id"):
             continued.add(line["source_route_id"])
+    direct = max(direct, _last_direct_turn(env, anchor))
+    # A route that opened after this one means the session moved on: an open route left behind
+    # is then doubtful, not "the current route".
+    latest = max(((line.get("ts") or 0) for rid, line in newest.items() if rid not in continued), default=0)
     found, doubt = [], False
     for route_id, line in newest.items():
         if route_id in continued or not Path(line["route_file"]).is_file():
@@ -104,7 +125,8 @@ def current_route(environ=None, now=None):
         ended = _ended_at(line["route_file"])
         if ended is None:  # still open: counts at any age
             since = line.get("ts")
-            doubt = doubt or not isinstance(since, (int, float)) or since < direct
+            doubt = (doubt or not isinstance(since, (int, float))
+                     or since < direct or since < latest)
         elif now - ended > RECENT_ENDED_SECONDS:
             continue  # over: it no longer names the session's work
         else:

@@ -1380,7 +1380,9 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
             for idx, (raw, old) in enumerate(zip(supplied, current[1:])):
                 normalized = _normalize_capsule_list(raw if raw is not None else old)
                 if idx == 2 and auto_topics:  # topics slot: merge in, never replace
-                    normalized = _normalize_capsule_list(_merge_auto_topics(normalized, auto_topics))
+                    had = _normalize_capsule_list(old)  # a kind the record had, or the caller gave, is not filled in
+                    lacking = _merge_auto_topics(had, auto_topics)[len(had):]
+                    normalized = _normalize_capsule_list(_merge_auto_topics(normalized, lacking))
                 if idx == 1:  # entities slot: merge in deterministic extraction
                     normalized = _merge_entities(normalized, _extracted)
                 values.append(json.dumps(normalized, ensure_ascii=False))
