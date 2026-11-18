@@ -1225,6 +1225,21 @@ def _dispatchable_stage(node) -> bool:
             and not dispatch_contract._owner_executed_node(node))
 
 
+def _owner_spec_transaction(node) -> bool:
+    """A node the owner runs itself whose completion is the atomic PRD transaction."""
+    import dispatch_contract
+    return (isinstance(node, dict) and dispatch_contract._owner_executed_node(node)
+            and node.get("completion_gate") == "spec-atomic-transaction")
+
+
+def spec_transaction_command(route, route_file, node_id: str, worktree) -> str:
+    """The exact `spec-transaction.py run` command for a sealed owner node; only `<apply command>` is left."""
+    script = entrypoint(_REPO_ROOT, "utilities/spec-transaction.py")
+    return (shlex.join(["python3", str(script), "run", "--artifact-root", str(route["artifact_root"]),
+                        "--worktree", str(worktree), "--route", str(route_file), "--node", str(node_id)])
+            + " -- <apply command>")
+
+
 def owner_route_steps_prompt(args, environ) -> str:
     """The sealed route's facts an owner otherwise digs out of the contracts: the exact first command,
     each node's output location, the entry-gate state. Text only; the runtime enforces every gate."""
@@ -1238,7 +1253,8 @@ def owner_route_steps_prompt(args, environ) -> str:
         import dispatch_stage_advance
         nodes = [n for n in route.get("nodes") or [] if isinstance(n, dict) and n.get("id")]
         stages = [n for n in nodes if _dispatchable_stage(n)]
-        if not stages:
+        transactions = [n for n in nodes if _owner_spec_transaction(n)]
+        if not stages and not transactions:
             return ""
         ready = [n["id"] for n in dispatch_stage_advance.runnable_successors(route, frozenset(), frozenset())]
     except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError):
@@ -1267,21 +1283,25 @@ def owner_route_steps_prompt(args, environ) -> str:
         placed.update(n["id"] for n in layer)
         pending = [n for n in pending if n not in layer]
     lines = [f"Route steps (sealed route {route.get('route_id')}, runtime-filled; use these exact values):", gate_line,
-             "Route, registry, cycle (AGENT_ARTIFACT_*) and harness come from your environment; do not export or pass them."]
+             "Route, registry, cycle (AGENT_ARTIFACT_*) and harness come from your environment; do not export "
+             "them or add them to the printed commands."]
     first = ready[0] if len(ready) == 1 and ready[0] in {n["id"] for n in stages} else None
-    if first:
-        lines.append(f"Start now: `{route_start_command(route_file, first)}`")
-    elif ready:
-        lines.append("Ready now: " + ", ".join(ready))
-    lines.append("Use each node's printed start command once every depends_on node is finished; "
-                 "a start for a node already started or finished returns a typed existing state, so follow its "
-                 "required_action. Keep stage-specific instructions in named task artifacts.")
-    inline_node = first or stages[0]["id"]
-    evidence = node_first_evidence(route, inline_node, output_dir)
-    lines.append("Run a stage yourself only when the latest receipt authorizes inline execution: write its "
-                 "outputs, then publish its marker with "
-                 f"`{inline_complete_command(inline_node, evidence)}`. "
-                 "Other stages have their own printed completion command below.")
+    inline_node = None
+    if stages:
+        if first:
+            lines.append(f"Start now: `{route_start_command(route_file, first)}`")
+        elif ready:
+            lines.append("Ready now: " + ", ".join(ready))
+        lines.append("Use each node's printed start command once every depends_on node is finished; "
+                     "a start for a node already started or finished returns a typed existing state, so follow its "
+                     "required_action. Keep stage-specific instructions in named task artifacts.")
+        inline_node = first or stages[0]["id"]
+        evidence = node_first_evidence(route, inline_node, output_dir)
+        lines.append("Run a stage yourself only when the latest receipt authorizes inline execution: write its "
+                     "outputs, then publish its marker with "
+                     f"`{inline_complete_command(inline_node, evidence)}`. "
+                     "Other stages have their own printed completion command below.")
+    worktree = getattr(args, "worktree", None) or route.get("cwd")
     lines.append(f"Outputs under {str(output_dir).rstrip('/')}/:" if output_dir else
                  "Outputs (cycle unbound; names are relative to the cycle output directory the runtime binds):")
     for number, node in enumerate(order, 1):
@@ -1291,6 +1311,12 @@ def owner_route_steps_prompt(args, environ) -> str:
         tags += "" if _dispatchable_stage(node) else " [you run it yourself]"
         outs = ", ".join(str(o) for o in node.get("outputs") or ()) or "-"
         lines.append(f"{number}. {node['id']}{tags} → {outs}")
+        if _owner_spec_transaction(node) and route.get("artifact_root") and worktree:
+            lines.append(f"   Run: `{spec_transaction_command(route, route_file, node['id'], worktree)}`"
+                         + (" once every node it runs after is finished" if after else "") + ". "
+                         "Replace only `<apply command>` with the command that writes prd.md, pipeline_state.yaml "
+                         "and pipeline_summary.md under $AGENT_SPEC_ROOT (the transaction sets AGENT_SPEC_ROOT and "
+                         "AGENT_SPEC_NEXT_VERSION for it).")
         if _dispatchable_stage(node):
             if node["id"] != first:
                 lines.append(f"   Start: `{route_start_command(route_file, node['id'])}`")

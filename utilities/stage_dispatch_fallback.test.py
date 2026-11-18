@@ -80,6 +80,22 @@ class FallbackTest(unittest.TestCase):
   identity=F.semantic_continuation_identity(route,node,"att-owner","att-old")
   self.assertNotEqual(identity,F.semantic_continuation_identity(route,node,"att-owner","att-other"))
 
+ def test_a_node_the_owner_runs_itself_is_refused_with_that_reason(self):
+  owner={"id":"prd-transaction","kind":"capability-owner","unit":"_kernel/owner","terminal":True,"dispatch_depth":1,
+         "completion_gate":"spec-atomic-transaction"}
+  stage={"id":"execute","kind":"pipeline-stage","dispatch_depth":2}
+  verified=subprocess.CompletedProcess([],0,"","")
+  with tempfile.TemporaryDirectory() as directory:
+   path=Path(directory)/"route.json"; path.write_text(json.dumps({"route_id":"rt-one","nodes":[owner,stage]}))
+   with mock.patch.object(F.subprocess,"run",return_value=verified), mock.patch.object(F,"route_in_force",side_effect=lambda route: route):
+    with self.assertRaises(ValueError) as refused:
+     F.load_node(path,"prd-transaction","dry-run")
+    self.assertEqual(str(refused.exception),"route node prd-transaction is run by the route owner itself "
+                     "(dispatch depth 1) and has no stage fallback chain; follow your Route steps")
+    with self.assertRaises(ValueError) as refused:
+     F.load_node(path,"execute","dry-run")
+    self.assertEqual(str(refused.exception),"route node lacks checked ordered fallback")
+
  def test_concurrent_semantic_successor_claims_share_one_registry_row(self):
   import dispatch_contract as dc
   from concurrent.futures import ThreadPoolExecutor

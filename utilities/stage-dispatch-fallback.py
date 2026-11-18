@@ -69,6 +69,7 @@ from dispatch_contract import (  # noqa: E402
     route_state_next_action,
     validate_attempt_metadata,
     bounded_candidate_outcomes, candidate_detail, diagnostic_line, diagnostic_token,
+    _owner_executed_node,
 )
 
 _NODE_SPEC = importlib.util.spec_from_file_location(
@@ -535,6 +536,9 @@ def load_node(route_path: Path, node_id: str, launch_phase: str) -> tuple[dict, 
         raise ValueError(f"unknown route node: {node_id}")
     chain = node.get("fallback_hops")
     if not isinstance(chain, list) or [row.get("fallback_hop") for row in chain] != ORDER:
+        if _owner_executed_node(node):
+            raise ValueError(f"route node {node_id} is run by the route owner itself (dispatch depth 1) and has "
+                             "no stage fallback chain; follow your Route steps")
         raise ValueError("route node lacks checked ordered fallback")
     return route, node
 

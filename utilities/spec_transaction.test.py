@@ -713,6 +713,44 @@ class CycleLayoutTest(unittest.TestCase):
   cmd=[sys.executable,str(ROOT/"utilities/spec-transaction.py"),"run","--artifact-root",str(self.artifact),"--worktree",str(self.repo),"--route",str(self.spec_route),"--node","prd-transaction","--events",str(events),*selector,"--",sys.executable,"-c",code]
   return subprocess.run(cmd,text=True,capture_output=True,env=env)
 
+ def test_owner_route_steps_command_runs_the_transaction_on_both_spec_route_shapes(self):
+  # The owner of a spec route runs prd-transaction itself and may run only printed commands, so the
+  # command its Route steps print must succeed as printed from the owner's environment: its own cycle
+  # bound, its route file, and no route node.
+  import shlex, types, worker_bootstrap as W
+  self._shared_v1()
+  candidates=[{"harness":harness,"surface":"registered-headless","transport":"headless","status":"supported",
+               "probe_source":"fixture","probe_time":"2026-07-16T00:00:00Z"} for harness in ("codex","claude")]
+  for shape in ("prd-transaction alone","stages, then prd-transaction"):
+   with self.subTest(shape=shape):
+    if shape=="prd-transaction alone":
+     route=R.compose_route(capability="autopilot-spec",capability_mode="update",shape="staged",graph="prd-transaction",
+      slug="prd-alone",cwd=self.repo,artifact_root=self.artifact,spec_read="fixture",signals=["shared-contract"],
+      dispatch_evidence=dispatch(self.repo),registered_headless_evidence={"candidates":candidates})
+     route_path=self.repo/"route-alone.json"; route_path.write_text(json.dumps(route))
+    else:
+     route_path=self.spec_route; route=json.loads(route_path.read_text())
+    ids=[n["id"] for n in route["nodes"]]
+    self.assertEqual(ids[-1],"prd-transaction")
+    self.assertEqual(len(ids)==1,shape=="prd-transaction alone",ids)
+    begun=self.P.begin(self.artifact,route_file=route_path,capability="autopilot-spec",intensity=route["effective_intensity"])
+    owner=types.SimpleNamespace(worker_type="owner",route_file=None,route_node=None,worktree=str(self.repo),
+                                owner_route_binding=types.SimpleNamespace(route_file=str(route_path)))
+    text=W.owner_route_steps_prompt(owner,{"AGENT_ARTIFACT_OUTPUT_DIR":str(Path(begun["cycle_dir"])/"artifacts")})
+    printed=[line.split("`")[1] for line in text.splitlines() if "spec-transaction.py run" in line]
+    self.assertEqual(len(printed),1,text)
+    self.assertTrue(printed[0].endswith(" -- <apply command>"),printed[0])
+    argv=shlex.split(printed[0].removesuffix("<apply command>"))
+    code="import os; from pathlib import Path; Path(os.environ['AGENT_SPEC_ROOT'],'prd.md').write_text('v2\\n')"
+    env={**HERMETIC_ENV,**begun["env"],"AGENT_ROUTE_FILE":str(route_path),"AGENT_ROUTE_ID":route["route_id"],"AGENT_ROUTE_NODE":""}
+    result=subprocess.run([sys.executable,*argv[1:],sys.executable,"-c",code],text=True,capture_output=True,env=env)
+    self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+    spec=Path(begun["cycle_dir"])/"artifacts"/"spec"
+    self.assertEqual((spec/"prd.md").read_text(),"v2\n")
+    snapshots={p.parent.name:p.read_text() for p in (spec/"_internal"/"versions").glob("v*/prd.md")}
+    self.assertEqual(snapshots.pop("v1"),"v0\n")                    # seeded history
+    self.assertEqual(list(snapshots.values()),["v1\n"],result.stdout)  # the tool's snapshot of the pre-image
+
  def test_cycle_spec_is_seeded_and_snapshot_comes_from_the_tool(self):
   self._shared_v1()
   _r,_f,begun=self._cycle("spec-edit"); cycle_dir=Path(begun["cycle_dir"]); events=Path(self._tmp.name)/"ev.jsonl"
