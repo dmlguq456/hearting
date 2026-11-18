@@ -303,7 +303,7 @@ class FramedRouteCompileTest(FramedBase):
     def test_the_card_shows_the_two_framed_lines_and_no_other_shape_does(self):
         card = R.compose_card(self.compose())
         self.assertIn("  frame이 방향과 경로를 조립해 제안합니다", card)
-        self.assertIn("  비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회", card)
+        self.assertIn("  비용: 최상위 모델 두 갈래 · 방향 확인 질문 최대 1회", card)
         self.assertIn("framed(standard)", card.splitlines()[0])
         self.assertIn("사람 게이트 frame-review", card.splitlines()[0])
         staged = R.compose_route(
@@ -324,7 +324,7 @@ class FramedRouteCompileTest(FramedBase):
         self.assertTrue(card.startswith("[Route] route-frame \u00b7 framed("), card)
         self.assertIn("human gate frame-review", card.splitlines()[0])
         self.assertIn("  frame assembles and proposes the direction and route", card)
-        self.assertIn("  Cost: two top-model legs \u00b7 one direction-check question", card)
+        self.assertIn("  Cost: two top-model legs \u00b7 at most one direction-check question", card)
         self.assertIn("  Size: nodes=", lines)
         self.assertIn("awaiting frame decision", lines)
         with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"}):
@@ -426,7 +426,7 @@ class FramedRouteCompileTest(FramedBase):
                 "--dispatch-evidence", str(evidence), "--prompt-file", str(task), "--slug", "cli-framed"]
         one = subprocess.run(base + ["--unassigned", "--explain"], text=True, capture_output=True, env=env, check=False)
         self.assertEqual(one.returncode, 0, one.stderr)
-        self.assertIn("비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회", one.stderr)
+        self.assertIn("비용: 최상위 모델 두 갈래 · 방향 확인 질문 최대 1회", one.stderr)
         base += ["--intensity", "strong"]
         done = subprocess.run(
             base + ["--campaign-key", "cli-key", "--capability", "autopilot-refine", "--graph", "review",
@@ -438,7 +438,7 @@ class FramedRouteCompileTest(FramedBase):
         self.assertEqual(route["work_request"]["routing_hints"],
                          {"capability": "autopilot-refine", "graph": "review", "profile": "light"})
         self.assertIn("frame이 방향과 경로를 조립해 제안합니다", done.stderr)
-        self.assertIn("비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회", done.stderr)
+        self.assertIn("비용: 최상위 모델 두 갈래 · 방향 확인 질문 최대 1회", done.stderr)
         explained = subprocess.run(base + ["--unassigned", "--explain"], text=True, capture_output=True,
                                    env=env, check=False)
         self.assertEqual(explained.returncode, 0, explained.stderr)

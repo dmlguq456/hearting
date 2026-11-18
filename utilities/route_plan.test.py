@@ -66,6 +66,19 @@ class ExtractionTest(unittest.TestCase):
         self.assertEqual(decide("quick", "score/a.py hardcore/b.py adapters/codex-extra/a.py notprd.md")[0], 1)
         self.assertEqual(decide("quick", "/tmp/work/prd.md")[0], 2)
 
+    def test_frame_signals_are_the_signs_the_frame_width_reads_and_never_decide_anything(self):
+        signals = RP.frame_signals
+        self.assertEqual(signals("utilities/x.py 확인"), [])
+        self.assertEqual(signals("core/WORKFLOW.md 고침"), [("protected-path", "core/WORKFLOW.md")])
+        self.assertEqual(signals("adapters/claude/a.py adapters/codex/b.py"), [("adapters", "claude,codex")])
+        self.assertEqual(signals("adapters/claude/a.py"), [])
+        self.assertEqual(signals("clean", "autopilot-spec"), [("capability", "autopilot-spec")])
+        self.assertEqual(signals("clean", "autopilot-ship"), [("capability", "autopilot-ship")])
+        self.assertEqual(signals("clean", "autopilot-code"), [])
+        self.assertEqual([kind for kind, _ in signals("spec/a.md adapters/claude/a adapters/codex/b", "autopilot-spec")],
+                         ["protected-path", "adapters", "capability"])
+        self.assertEqual(signals(None), [])
+
     def parse(self, text):
         return RP.parse_proposal(text)
 

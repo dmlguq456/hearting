@@ -116,6 +116,24 @@ def valid_frame_legs(route, legs) -> bool:
     return legs == set(FRAME_PAIR) or (legs == {"frame"} and is_framed_route(route))
 
 
+def frame_signals(request_text="", capability=None) -> list:
+    """The signs that a request's direction is worth settling first, as `(kind, detail)` pairs in
+    a fixed order: a protected path (`core/`, `capabilities/`, `roles/`, `spec/`, a PRD), two or
+    more adapters, or a spec/ship kind. Pure reading of the request; nothing here blocks or
+    seals anything -- `frame_leg_decision` and the compose card's advice line both read it."""
+    text = str(request_text or "")
+    signals = []
+    match = _FRAME_PATH.search(text)
+    if match:
+        signals.append(("protected-path", re.sub(r"[`\n\r]+", "", match.group(0))[:72]))
+    adapters = list(dict.fromkeys(_ADAPTER_PATH.findall(text)))
+    if len(adapters) >= 2:
+        signals.append(("adapters", ",".join(adapters)))
+    if capability in {"autopilot-spec", "autopilot-ship"}:
+        signals.append(("capability", capability))
+    return signals
+
+
 def frame_leg_decision(given_intensity, request_text="", routing_hints=None):
     """Return the sealed frame width, its source, and a stable human-readable reason."""
     if given_intensity is None:
@@ -124,17 +142,12 @@ def frame_leg_decision(given_intensity, request_text="", routing_hints=None):
         raise ValueError("invalid intensity")
     if given_intensity not in {"direct", "quick"}:
         return 2, "explicit", f"--intensity {given_intensity} 표시"
-    text = str(request_text or "")
-    match = _FRAME_PATH.search(text)
-    if match:
-        reason = re.sub(r"[`\n\r]+", "", match.group(0))[:72]
-        return 2, "automatic", f"자동 지킴: --intensity {given_intensity}이지만 과제에 {reason}"
-    adapters = list(dict.fromkeys(_ADAPTER_PATH.findall(text)))
-    if len(adapters) >= 2:
-        return 2, "automatic", f"자동 지킴: --intensity {given_intensity}이지만 과제에 어댑터 둘 이상"
-    hints = routing_hints or {}
-    if hints.get("capability") in {"autopilot-spec", "autopilot-ship"}:
-        return 2, "automatic", f"자동 지킴: --intensity {given_intensity}이지만 과제에 {hints['capability']} 작업"
+    signals = frame_signals(request_text, (routing_hints or {}).get("capability"))
+    if signals:
+        kind, detail = signals[0]
+        what = {"protected-path": detail, "adapters": "어댑터 둘 이상",
+                "capability": f"{detail} 작업"}[kind]
+        return 2, "automatic", f"자동 지킴: --intensity {given_intensity}이지만 과제에 {what}"
     return 1, "explicit", f"간단 표시 --intensity {given_intensity}"
 
 
