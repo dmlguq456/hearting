@@ -876,10 +876,19 @@ def _pass(jobs, root, layout, state, now_ns, started):
     # removed says nothing about the names not yet examined. A removal after the
     # round is spent opens the next round, at most once a day.
     left = state.get("round_left")
-    if type(left) is not int or left < 0:
+    seen = state.get("round_left_seen")  # round_left as the last pass of this release left it
+    entry_ok = type(left) is int and left >= 0
+    if not entry_ok:
         left = len(ordered)
     closed = state.get("round_closed_ns")
     recent = (type(closed) is int and 0 <= now_ns - closed < ROUND_REOPEN_SECONDS * 1_000_000_000)
+    if entry_ok and type(seen) is int and seen > 0 and not recent and (left == 0 or left > seen):
+        # Inside a round round_left only shrinks. An older release spent (or spent and
+        # reopened) the round this release left open, and it records no end. Take the
+        # end as now: a reopened round is closed below and the next removal does not
+        # reopen it within a day.
+        state["round_closed_ns"] = closed = now_ns
+        recent = True
     if recent and left > 0:
         # Within a day of the recorded end, an open round can only have been
         # reopened by an older release that does not know the daily rule.
@@ -895,6 +904,7 @@ def _pass(jobs, root, layout, state, now_ns, started):
         left = len(ordered)
     round_more = bool(examined_names) and left > 0
     state["round_left"] = left
+    state["round_left_seen"] = left
     result = {
         "examined": len(examined_names), "eligible": len(eligible), "eligible_bytes": eligible_bytes,
         "removed": removed, "removed_bytes": removed_bytes, "deferred": deferred + discovery_deferred,
