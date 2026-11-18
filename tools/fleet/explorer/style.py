@@ -88,6 +88,8 @@ def recede_key(key):
         return mapped
     if canonical.startswith("hb_"):
         return _HARNESS_DIM.get(canonical[3:], "dim")
+    if canonical.startswith("spin_"):
+        return "spind_" + canonical[5:]
     if canonical.startswith("fam_"):
         return "famd_" + canonical[4:]
     if canonical.startswith("eff_"):

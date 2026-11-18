@@ -412,7 +412,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const joinAll=groups=>groups.filter(g=>g.length).flatMap((g,i)=>i?[...bar,...g]:g);
     // The session.
     const tag=/^\[[^\]?]{1,16}\]$/.test(String(model.tag||''))?clean(String(model.tag).slice(1,-1)):'';
-    const glyph=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
+    const glyph=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[0]==='spin'&&['claude','codex','opencode'].includes(harness)?'hb_'+harness:own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
     const number=tag?[text('[','dim'),model.steward===true?{...text(tag,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})}:{...text(tag,own?own[1]:'dim'),role:'session'},text(']','dim')]:[];
     const lead=[...glyph,...(glyph.length&&number.length?[text(' ')]:[]),...number];
     const project=Array.isArray(model.repo_side)?P(model.repo_side):P(model.repo).filter(p=>!/^\[[^\]]*\] ?$/.test(String(p.text)));
@@ -591,7 +591,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const look=r&&r.zone==='direct'?styles.zone_direct:null;
     return look&&(part.spin||part.text==='●'||/^[\u2800-\u28ff]$/.test(String(part.text)))?{...part,...look,dim:part.dim===true||look.dim===true}:part;
   };
-  const routeGlyph=r=>{const g=r.paint?.glyph||text('·');if(live(r))return zonePaint(r,{...g,...spinGlyph,role:'state:working'});return zonePaint(r,{...g,role:'state:'+(r.kind==='done'&&r.outcome_key==='g_dead'?'dead':r.kind||'idle')});};
+  // 11-18 (the person: "스피너 컬러도 하네스에 맞추고"): the spinner of a line that names its harness (`h`, that line's own harness part)
+  // turns in that harness's color, on every face (a deep pair on the light face, as the harness name's own); a mark that is not the
+  // spinner (`●`, `✕`, `✓`), a route's first line and a line with no known harness keep the state's own color.
+  const harnessSpin=(g,h)=>h&&Number.isInteger(h.foreground)?{...g,foreground:h.foreground,bold:false,dim:false}:g;
+  const routeGlyph=(r,h)=>{const g=r.paint?.glyph||text('·');if(live(r))return h&&Number.isInteger(h.foreground)?harnessSpin({...g,...spinGlyph},h):zonePaint(r,{...g,...spinGlyph,role:'state:working'});return zonePaint(r,{...g,role:'state:'+(r.kind==='done'&&r.outcome_key==='g_dead'?'dead':r.kind||'idle')});};
   // A finished route's row leads its title with the result word (`FAIL · title`), so a cut title keeps it.
   const titleOf=(r,fallback='·')=>[...(r.kind==='done'&&r.outcome?[text(r.outcome,r.outcome_key||'lvl_g'),text(' · ','dim')]:[]),...line(r.title||fallback,'loc_repo')];
   const join=(groups,sep=' · ')=>groups.filter(g=>g&&g.length).flatMap((g,i)=>i?[text(sep),...g]:g);
@@ -1057,7 +1061,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     function folded(r){
       // 11-18: beside the native area the one-row form is the leader's; under it the row reads the owner, whose NOW stands under it.
-      const p=side?r.paint||{}:leadPaint(r),lead=[routeGlyph(r),text(' ')];
+      const p=side?r.paint||{}:leadPaint(r),lead=[routeGlyph(r,p.harness),text(' ')];
       if(!side){
         const ow=columnWidth(owner),gw=columnWidth(x=>leadPaint(x).gauge5||[]);
         const plan=bottomPlan||(bottomPlan=planBottom(ow,gw));
@@ -1169,7 +1173,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const spaced=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
     // The owner's own mark: it spins while it does the work itself, stands as a dim `●` while its workers run, and keeps the
     // route's state mark when nothing runs.
-    const ownerGlyph=(r,supervising)=>live(r)?(supervising?text('●','dim'):{...routeGlyph(r)}):routeGlyph(r);
+    const ownerGlyph=(r,supervising)=>live(r)?(supervising?text('●','dim'):{...routeGlyph(r,leadPaint(r).harness)}):routeGlyph(r);
     const ownerLead=(r,supervising)=>[text('  '),ownerGlyph(r,supervising),text(' '),...rolePart(r)];
     // 11-17 (the person: "라우트 내부의 CTX는 하네스, 모델 옆에 붙이고 게이지는 없애자 ... 대신 NOW를 아래줄에"): a session's
     // first line is its mark, role, harness, model, effort and, beside them, `CTX 40% · 42m` with no gauge. Short of cells the
@@ -1258,7 +1262,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // cells the who loses its effort, then its harness; short of rows (rule 48 (c)) the worker takes the owner's one-row form.
     // In a box (`boxed`, below) the mark leads the row and the CTX and NOW rows stand two cells in.
     function workerBlock(w,base,boxed=false){
-      const p=w.paint||{},role=workerRole(w),glyph=routeGlyph({paint:p,kind:w.kind}),E=w.elapsed?[text(w.elapsed)]:[];
+      const p=w.paint||{},role=workerRole(w),glyph=routeGlyph({paint:p,kind:w.kind},p.harness),E=w.elapsed?[text(w.elapsed)]:[];
       const gap=boxed?2:base+4;
       const lead=boxed?[glyph,text(' '),...roleCell(role)]:[text(' '.repeat(base)),text('↳ ','dim'),glyph,text(' '),...roleCell(role)];
       // A model name longer than the line itself is cut with `…` rather than left out.
@@ -1892,7 +1896,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const stewardTag=v=>({...text(v,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})});
   const tag=/^\[[^\]?]{1,16}\]$/.test(String(model.tag||''))?String(model.tag).slice(1,-1):'';
   const harnessName=['claude','codex','opencode'].includes(harness)?harness:'';
-  const glyphPart=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
+  const glyphPart=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[0]==='spin'&&harnessName?'hb_'+harnessName:own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
   const tagPart=tag?[text('[','dim'),steward?stewardTag(tag):{...text(tag,own?own[1]:'dim'),role:'session'},text(']','dim')]:[];
   const harnessPart=harnessName?[text(harnessName,'hb_'+harnessName)]:[];
   const flagPart=steward?[stewardPart('⚑')]:[];

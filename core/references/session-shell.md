@@ -251,8 +251,10 @@ being typed in for the person, `●` idle, `◑` waiting on a dialog or question
 the session number (`[e9]`), the harness name in its Fleet hue and, for a
 steward, Fleet's `⚑` followed by two cells before the line (a steward's number takes Fleet's steward color, fixed,
 as on Fleet's session row); the state has no word, its glyph and number share the
-state's color, and the three glyph shapes still differ in `mono` and under
-`NO_COLOR`. Short of cells the steward mark goes first, then the harness, then
+state's color (11-18: but a spinning glyph is in the session's harness color, `hb_*`: Claude 173, Codex 147, OpenCode 153; the same for every
+working spinner on a line that names its harness: a route's owner and worker rows and a frame leg here, Fleet's SESSIONS rows, route rows and
+PEERS cards; a route's first-line `●`, a stopped, waiting or finished mark and a line with no known harness keep the state's color), and the three
+glyph shapes still differ in `mono` and under `NO_COLOR`. Short of cells the steward mark goes first, then the harness, then
 the number; the glyph stays. Right of that head the border is the line alone:
 the gear `⚙` stands on the panel's last row inside, three cells left of the fold button `▾`
 at its right end, beside 5h/7d and the model windows (`5h … │ 7d … │

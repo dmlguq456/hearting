@@ -137,6 +137,10 @@ def _stage_cyan_delta(actual_cells, expected_cells):
         for x, cell in enumerate(row):
             if x < len(actual_cells[y]) and cell[1] in twin and actual_cells[y][x][:2] == [cell[0], twin[cell[1]]]:
                 row[x] = [cell[0], twin[cell[1]], *cell[2:]]
+            # The approved 2026-11-18 spinner delta: a working spinner on a session card is drawn in its harness's color.
+            elif (x < len(actual_cells[y]) and cell[1] in ("g_spin", "spin") and cell[0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+                  and actual_cells[y][x][:2] in ([cell[0], "spin_claude"], [cell[0], "spin_codex"], [cell[0], "spin_opencode"])):
+                row[x] = [cell[0], actual_cells[y][x][1], *cell[2:]]
     return normalized
 
 

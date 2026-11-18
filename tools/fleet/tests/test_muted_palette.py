@@ -72,6 +72,25 @@ class MutedPaletteTest(unittest.TestCase):
         self.assertEqual((low["cx"], low["oc"], low["cl"]), (5, 4, 6))              # 8 colors: the native fallbacks, as before
         self.assertEqual(palette.style_components("hb_claude", no_color=True)["foreground"], None)
 
+    def test_working_spinners_turn_in_their_harness_color(self):
+        """11-18: a working spinner on a line that names its harness is drawn in that harness's color (`spin_*`; `spind_*` receded);
+        a harness Fleet does not name and any other glyph keep the vanilla `g_spin`."""
+        from fleet import palette
+        from fleet.explorer.style import recede_key
+        for harness, number in (("claude", 173), ("codex", 147), ("opencode", 153)):
+            self.assertEqual(palette.harness_spin("g_spin", harness), "spin_" + harness)
+            self.assertEqual(palette.harness_spin("spin", harness), "spin_" + harness)
+            self.assertEqual(palette.harness_spin("g_spin_dim", harness), "spind_" + harness)
+            self.assertEqual(recede_key("spin_" + harness), "spind_" + harness)
+            self.assertEqual(palette.style_components("spin_" + harness)["foreground"], number)
+            self.assertFalse(palette.style_components("spin_" + harness)["dim"])
+            self.assertTrue(palette.style_components("spind_" + harness)["dim"])
+            self.assertIn("spin_" + harness, render._EXPLORER_SPIN_KEYS)
+            self.assertIn("spind_" + harness, render._EXPLORER_SPIN_KEYS)
+        for key, harness in (("g_spin", "other"), ("g_spin", None), ("g_work_off", "claude"), ("g_dead", "codex")):
+            self.assertEqual(palette.harness_spin(key, harness), key)
+        self.assertEqual(palette.style_components("g_spin")["foreground"], 230)
+
     def test_low_color_terminal_keeps_native_fallback(self):
         with mock.patch.object(render.curses, "COLORS", 8, create=True):
             self.assertEqual(render._palette_fg("green", 2), 2)

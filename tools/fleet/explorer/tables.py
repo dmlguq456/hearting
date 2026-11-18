@@ -5,7 +5,7 @@ from .live import current_route_counts, route_marker_state, unknown_kind, unknow
 from .grid import CellGrid, cell_width
 from .style import recede_key
 from ..config import ui_text
-from ..palette import kind_intensity_key, kind_word_key, route_field
+from ..palette import harness_spin, kind_intensity_key, kind_word_key, route_field
 
 X = 34
 GAP = 3
@@ -1043,6 +1043,10 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
     age = _clip(str(route.get("age") or ""), AGE_W + 1)
     age_x = right - _seg_width(age)
     marker, marker_key = _ROUTE_MARK[route_marker_state(route)]
+    # 11-18: the working spinner turns in the color of the harness this row names (its doer's, the one its model cell leads with).
+    parts, (pct, window, tokens), tool, agents = route_doer_cells(route)
+    first_key = parts[0][1] if parts and isinstance(parts[0][1], str) else ""
+    marker_key = harness_spin(marker_key, first_key[3:] if first_key.startswith("hb_") else None)
     grid.put(x + IND + 1, y, marker, marker_key)
     tag = str(route.get("session_tag") or route.get("past_from") or "")
     tag_x = x + IND + 3
@@ -1054,7 +1058,6 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
         grid.put(tag_x + 1 + _seg_width(shown), y, "]", "dim")
     if steward and x + IND + 9 <= x + c["h"]:
         grid.put(x + IND + 8, y, "⚑", "steward")
-    parts, (pct, window, tokens), tool, agents = route_doer_cells(route)
     harn_end = _overview_harness_end(use, c)
     # What this row leaves out or cuts, for the unfolded route to give in full (a cut title is
     # whole on the route detail's top band).
@@ -1175,6 +1178,7 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
     marker, marker_key = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"),
                           "blocked": ("●", "g_blocked"), "done": ("✓", "grp_live"),
                           "stale": ("◌", "dim"), "wait": ("·", "dim")}.get(state, ("●", "g_work_off"))
+    marker_key = harness_spin(marker_key, route.get("harness"))        # 11-18: the owner's harness names this line
     grid.put(x0, y, marker, marker_key)
     x = x0 + 2
     if repo_w:
@@ -1621,6 +1625,7 @@ def session_marker(session):
     marker, marker_key = {"working": ("⠏", "spin"), "blocked": ("●", "blocked"),
                           "dead": ("✕", "dead"), "done": ("✓", "done")}.get(
                               session.get("state"), ("●", "idle"))
+    marker_key = harness_spin(marker_key, session.get("harness"))      # 11-18: a working spinner in its harness's color
     if session.get("answer_wait_marker") == "●":
         marker, marker_key = "●", "blocked"
     elif session.get("answer_wait_marker") == "◑":

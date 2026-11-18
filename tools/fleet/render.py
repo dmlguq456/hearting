@@ -67,7 +67,7 @@ from .model import (fmt_min, dash, project_of, exec_child_is_wait,
                     current_attempt_rank)
 from . import gitinfo, titles
 from .config import ui_text
-from .palette import _HUE_OF, _KIND_256, _ZONE_256, hue_colors
+from .palette import _HUE_OF, _KIND_256, _ZONE_256, harness_spin, hue_colors
 from .palette import KIND_FIELDS as _KIND_FIELDS
 from .work_titles import readable as _readable_name, resource_name as _resource_name, resource_title_key, subject_command
 from .collectors import compute_hosts as _compute_hosts
@@ -500,6 +500,9 @@ def _init_colors():
     for h in _NAME_HUE:
         _COLOR["nm_" + h] = _COLOR.get("hb_" + h, 0)
         _COLOR["nmd_" + h] = _COLOR.get("h_" + h, 0)
+        # 11-18: the working spinner of a line that names its harness, bright and receded.
+        _COLOR["spin_" + h] = _COLOR.get("hb_" + h, 0)
+        _COLOR["spind_" + h] = _COLOR.get("h_" + h, 0)
     _COLOR["nm_other"] = _COLOR.get("soft", 0) | curses.A_BOLD
     _COLOR["nmd_other"] = _COLOR.get("soft", 0) | curses.A_DIM
     _COLOR["head"] = curses.A_DIM
@@ -938,6 +941,7 @@ def _session_row(s, narrow, is_parent=False, child_count=0, name_width=None,
     dim_tel = live in ("stale", "dead") or s.app_server or s.detached
     dead_stale = live in ("stale", "dead")   # F-13: telemetry gone, replaced with a single age cell
     gch, gkey = _glyph(live)
+    gkey = harness_spin(gkey, s.harness)      # 11-18: a working spinner in its harness's color
     if s.detached and live not in ("stale", "dead"):
         gch, gkey = _DETACHED_GLYPH, "g_work_off"   # detached: loading axis, dim-green
     # main↔spawned weight = font-color intensity (no bg fill — the reverse badge read as weird):
@@ -1229,6 +1233,7 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
     # slug stays the fallback — same title → name → slug chain as session rows.
     slug_name = _subject_title(j) or j.slug or key
     gch, gkey = _glyph(j.liveness, dim=True)
+    gkey = harness_spin(gkey, getattr(j, "harness", None))
     afterglow_j = bool(getattr(j, "afterglow", False))
     if afterglow_j:
         gch, gkey = _LIVE_GLYPH["done"], "dim"   # F-46: dim ✓, never the live green
@@ -1437,6 +1442,7 @@ def _session_row_2line(s, is_parent=False, child_count=0, _split=False, term_wid
     slug = s.slug or (s.cwd.rsplit("/", 1)[-1] if s.cwd else "?")
     dim_tel = live in ("stale", "dead") or s.app_server or s.detached
     gch, gkey = _glyph(live)
+    gkey = harness_spin(gkey, s.harness)
     if s.detached and live not in ("stale", "dead"):
         gch, gkey = _DETACHED_GLYPH, "g_work_off"
     hn = _BADGE_TEXT.get(s.harness, "?")
@@ -1575,6 +1581,7 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
     # slug stays the fallback — same title → name → slug chain as session rows.
     slug_name = _subject_title(j) or j.slug or key
     gch, gkey = _glyph(j.liveness, dim=True)
+    gkey = harness_spin(gkey, getattr(j, "harness", None))
     afterglow_j = bool(getattr(j, "afterglow", False))
     if afterglow_j:
         gch, gkey = _LIVE_GLYPH["done"], "dim"   # F-46 parity with the wide row

@@ -117,6 +117,10 @@ _HUE_OF = {
 for _h, _hue_ch in _NAME_HUE.items():
     _HUE_OF["nm_" + _h] = (_hue_ch, 0)
     _HUE_OF["nmd_" + _h] = (_hue_ch, _A_D)
+    # 11-18 (the person asked for it): a working spinner on a line that names its harness turns in that harness's
+    # color (`spin_<harness>`; `spind_<harness>` on a receded row). Any other spinner keeps the vanilla `g_spin`.
+    _HUE_OF["spin_" + _h] = (_hue_ch, 0)
+    _HUE_OF["spind_" + _h] = (_hue_ch, _A_D)
 # 11-18 (route kind color): a route's kind word (`kind_<field>`, bold) wears the hue of its field, and the intensity in
 # brackets the same hue stepped by weight: `kindq_<field>` dim (quick), `kinds_<field>` plain (standard), `kindb_<field>`
 # bold (strong, thorough, adversarial). Only the five fields below have a hue; any other route keeps the body color.
@@ -181,6 +185,14 @@ def kind_intensity_key(field, word):
     for piece in str(word or "").strip("() ").split("·"):
         weight = _INTENSITY_WEIGHT.get(piece.strip().casefold(), weight)
     return {"q": "kindq_", "s": "kinds_", "b": "kindb_"}[weight] + field
+
+
+def harness_spin(key, harness):
+    """The key a working spinner is drawn with on a line of ``harness``: its harness color for a vanilla ``g_spin`` (``spin``,
+    ``g_spin_dim`` at the receded weight), else ``key`` itself (a harness Fleet does not name, or a glyph that is not the spinner)."""
+    if harness in _HARNESS_256 and key in ("spin", "g_spin", "g_spin_dim"):
+        return ("spind_" if key == "g_spin_dim" else "spin_") + harness
+    return key
 
 
 def hue_colors(colors=256):
