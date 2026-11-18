@@ -9,6 +9,7 @@ answer itself (its report text), cut at ``ANSWER_CHARS`` with the place to read 
 """
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 SCRATCH_DIR = "ephemeral"
@@ -17,12 +18,28 @@ ANSWER_CHARS = 6000   # what one completion notice carries of an answer; the res
 
 
 PROJECT_KEY = "project_artifact_root: "
+KEY_CHARS = 12
+
+
+def project_key(project_root) -> str:
+    """The folder name of a project's scratch root: the first 12 hex digits of its artifact root path's sha256."""
+    return hashlib.sha256(str(project_root).encode("utf-8")).hexdigest()[:KEY_CHARS]
+
+
+def _shaped_like_a_scratch_root(root: Path) -> bool:
+    """`<...>/ephemeral/<12 hex>/.agent_reports`: the place a project's scratch root is made."""
+    key = root.parent.name
+    return (root.name == ".agent_reports" and root.parent.parent.name == SCRATCH_DIR
+            and len(key) == KEY_CHARS and all(c in "0123456789abcdef" for c in key))
 
 
 def scratch_root(project_root) -> Path:
-    """The scratch artifact root beside the project's runtime directory (created when absent).
+    """The project's scratch artifact root beside its runtime directory (created when absent).
 
-    A scratch root given back is returned as it is, so a worker that starts another keeps the one root.
+    One folder per project, `<runtime>/ephemeral/<key>/.agent_reports`, so projects sharing a runtime directory
+    never share a root or a marker. A scratch root given back is returned as it is, so a worker that starts
+    another keeps the one root. The caller of a project's artifact root is the authority for the marker: it is
+    written when absent or when it does not verify for this folder. A worker never writes it.
     The marker names the project's artifact root: the scratch root's workers count under that project's
     model-worker governor, never under one of their own."""
     import artifact_admission
@@ -31,33 +48,37 @@ def scratch_root(project_root) -> Path:
     if is_scratch_root(given):
         return given
     runtime = worker_bootstrap.runtime_dir_candidate(given) or str(given.parent / ".agent_runtime")
-    root = Path(runtime) / SCRATCH_DIR / ".agent_reports"
+    root = Path(runtime) / SCRATCH_DIR / project_key(given) / ".agent_reports"
     root.mkdir(parents=True, exist_ok=True)
-    marker = root / MARKER
-    if counted_root(root) == root:
-        marker.write_text(f"{PROJECT_KEY}{given}\nscratch artifact root of ephemeral unit routes; nothing here is a record\n",
-                          encoding="utf-8")
+    if counted_root(root) != given:
+        (root / MARKER).write_text(f"{PROJECT_KEY}{given}\nscratch artifact root of ephemeral unit routes; nothing here is a record\n",
+                                   encoding="utf-8")
     artifact_admission.ensure_root_identity(root)
     return root
 
 
 def is_scratch_root(root) -> bool:
     try:
-        return (Path(root) / MARKER).is_file()
+        root = Path(root)
+        return _shaped_like_a_scratch_root(root) and (root / MARKER).is_file()
     except (OSError, TypeError, ValueError):
         return False
 
 
 def counted_root(root) -> Path:
     """The artifact root whose model-worker governor counts work under `root`: the project's own root for a
-    scratch root that names one, else `root` itself."""
+    scratch root whose marker names a project that hashes to the folder's own name, else `root` itself.
+    A marker that is missing, unreadable or names another project makes no correspondence."""
+    root = Path(root)
     try:
-        for line in (Path(root) / MARKER).read_text(encoding="utf-8").splitlines():
-            if line.startswith(PROJECT_KEY) and line[len(PROJECT_KEY):].strip():
-                return Path(line[len(PROJECT_KEY):].strip())
+        if _shaped_like_a_scratch_root(root):
+            for line in (root / MARKER).read_text(encoding="utf-8").splitlines():
+                named = line[len(PROJECT_KEY):].strip() if line.startswith(PROJECT_KEY) else ""
+                if named and project_key(named) == root.parent.name:
+                    return Path(named)
     except (OSError, UnicodeError, TypeError, ValueError):
         pass
-    return Path(root)
+    return root
 
 
 def answer_text(path) -> str:

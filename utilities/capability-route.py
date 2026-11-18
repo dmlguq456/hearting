@@ -1794,11 +1794,12 @@ def _route_autoclose(artifact_root, trigger, route=None):
 
 
 def _close_unstarted_record_free(route, path, started):
-    """A record-free route a worker started and the governor refused has a route file and an open cycle and no
-    row; nothing will start it (no resume is armed for a worker, which is told not to ask again). Close it
-    the way the runtime closes any route nobody works on, so none is left open in the scratch root."""
-    if (started.get("state") != "waiting-capacity" or started.get("registered_attempts") or started.get("auto_resume")
-            or os.environ.get("AGENT_DISPATCH_CHILD") != "1"):
+    """A record-free route a worker started and the start refused (the governor's wait, or a root the governor
+    does not accept) has a route file and an open cycle and no row; nothing will start it (no resume is armed
+    for a worker, which is told not to ask again). Close it the way the runtime closes any route nobody works
+    on, so none is left open in the scratch root."""
+    if (started.get("state") not in ("waiting-capacity", "needs-attention") or started.get("registered_attempts")
+            or started.get("auto_resume") or os.environ.get("AGENT_DISPATCH_CHILD") != "1"):
         return
     try:
         import time

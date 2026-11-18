@@ -322,6 +322,85 @@ class EphemeralRootTest(unittest.TestCase):
         self.assertEqual(unit_ephemeral.answer_summary({"route_id": "rt-1"}, report.with_name("none.md"), head="[x]"), "")
 
 
+    def other_project(self, name="other"):
+        other = Path(self.tmp.name) / name / ".agent_reports"
+        other.mkdir(parents=True)
+        return other
+
+    def test_the_scratch_root_is_one_folder_per_project_named_by_a_key_of_its_path(self):
+        import hashlib
+        root = unit_ephemeral.scratch_root(self.project)
+        key = hashlib.sha256(str(self.project.resolve()).encode()).hexdigest()[:12]
+        self.assertEqual((root.name, root.parent.name, root.parent.parent.name), (".agent_reports", key, "ephemeral"))
+        self.assertEqual((root / ".ephemeral").read_text().splitlines()[0], f"project_artifact_root: {self.project.resolve()}")
+
+    def test_a_place_that_is_not_shaped_like_a_scratch_root_is_not_one_even_with_a_marker(self):
+        for shape in ("ephemeral/.agent_reports", "ephemeral/abc/.agent_reports", "other/0123456789ab/.agent_reports",
+                      "ephemeral/0123456789ab/reports", "ephemeral/0123456789AB/.agent_reports"):
+            root = Path(self.tmp.name) / shape
+            root.mkdir(parents=True)
+            (root / ".ephemeral").write_text(f"project_artifact_root: {self.project}\n")
+            self.assertFalse(unit_ephemeral.is_scratch_root(root), shape)
+            self.assertEqual(unit_ephemeral.counted_root(root), root, shape)
+        # the old place (no key folder) is neither read nor written: a call from the project makes a keyed root
+        old = Path(self.tmp.name) / "project" / ".agent_runtime" / "ephemeral" / ".agent_reports"
+        old.mkdir(parents=True)
+        (old / ".ephemeral").write_text(f"project_artifact_root: {self.tmp.name}/elsewhere\n")
+        before = (old / ".ephemeral").read_text()
+        root = unit_ephemeral.scratch_root(self.project)
+        self.assertNotEqual(root, old)
+        self.assertEqual((old / ".ephemeral").read_text(), before)
+        self.assertEqual(sorted(p.name for p in old.parent.iterdir()), sorted([".agent_reports", root.parent.name]))
+
+    def test_a_marker_naming_another_or_a_missing_project_is_written_again_by_the_project_that_calls(self):
+        root = unit_ephemeral.scratch_root(self.project)
+        for named in (self.other_project(), Path(self.tmp.name) / "gone" / ".agent_reports"):
+            (root / ".ephemeral").write_text(f"project_artifact_root: {named}\nscratch artifact root of ephemeral unit routes\n")
+            self.assertEqual(unit_ephemeral.counted_root(root), root)         # it does not verify for this folder
+            self.assertEqual(unit_ephemeral.scratch_root(self.project), root)
+            self.assertEqual(unit_ephemeral.counted_root(root), self.project.resolve())
+            self.assertEqual(DC.resolve_model_governor_root(root, environ={}),
+                             self.project.resolve() / ".runtime" / "model-worker-governor")
+        (root / ".ephemeral").write_bytes(b"\xff\xfe")                        # unreadable
+        self.assertEqual(unit_ephemeral.counted_root(root), root)
+        self.assertEqual(unit_ephemeral.scratch_root(self.project), root)
+        self.assertEqual(unit_ephemeral.counted_root(root), self.project.resolve())
+
+    def test_two_projects_on_one_inherited_runtime_have_their_own_scratch_root_and_governor(self):
+        shared = Path(self.tmp.name) / "shared-runtime"
+        other = self.other_project()
+        with mock.patch.dict(os.environ, {"AGENT_RUNTIME_DIR": str(shared)}):
+            a, b = unit_ephemeral.scratch_root(self.project), unit_ephemeral.scratch_root(other)
+            self.assertEqual(unit_ephemeral.scratch_root(self.project), a)    # nobody overwrites the other
+            self.assertEqual(unit_ephemeral.scratch_root(other), b)
+        self.assertNotEqual(a, b)
+        self.assertEqual(a.parent.parent, b.parent.parent)                     # the one shared runtime directory
+        self.assertEqual(a.parent.parent.parent, shared)
+        self.assertEqual(DC.resolve_model_governor_root(a, environ={}), self.project.resolve() / ".runtime" / "model-worker-governor")
+        self.assertEqual(DC.resolve_model_governor_root(b, environ={}), other.resolve() / ".runtime" / "model-worker-governor")
+
+    def test_a_worker_on_a_scratch_root_whose_marker_names_another_project_is_refused_and_never_counted_there(self):
+        root = unit_ephemeral.scratch_root(self.project)
+        governor = self.project.resolve() / ".runtime" / "model-worker-governor"
+        other = self.other_project()
+        (root / ".ephemeral").write_text(f"project_artifact_root: {other}\nscratch artifact root of ephemeral unit routes\n")
+        self.assertEqual(unit_ephemeral.scratch_root(root), root)             # a worker given the scratch root writes nothing
+        self.assertEqual((root / ".ephemeral").read_text().splitlines()[0], f"project_artifact_root: {other}")
+        env = {"AGENT_MODEL_GOVERNOR_ROOT": str(governor)}                    # the worker's environment names the project
+        with self.assertRaises(DC.DispatchContractError) as raised:
+            DC.resolve_model_governor_root(root, environ=env)
+        self.assertEqual(raised.exception.reason, "noncanonical-model-governor-root")
+        self.assertNotEqual(DC.resolve_model_governor_root(root, environ={}), other.resolve() / ".runtime" / "model-worker-governor")
+        self.assertFalse((other / ".runtime").exists())
+
+    def test_overlapping_calls_keep_one_scratch_root(self):
+        first = unit_ephemeral.scratch_root(self.project)
+        roots = {unit_ephemeral.scratch_root(self.project), unit_ephemeral.scratch_root(first),
+                 unit_ephemeral.scratch_root(unit_ephemeral.scratch_root(first))}
+        self.assertEqual(roots, {first})
+        self.assertEqual(sorted(p.name for p in first.parent.parent.iterdir()), [first.parent.name])
+
+
 class EmptyAnswerEndTest(U.UnitLegBase):
     """Both directions of the same end: a blocking review with its report is finished work, an empty answer is not."""
     REPORT = U.BlockingReviewEndTest.REPORT
@@ -383,6 +462,31 @@ class ComposeEphemeralTest(U.UnitLegBase):
             done = self.run_compose("--explain", *args)
             self.assertNotEqual(done.returncode, 0)
             self.assertIn("compose-ephemeral-refused", done.stderr + done.stdout)
+
+
+class RefusedRecordFreeStartTest(unittest.TestCase):
+    """A worker's record-free start that no worker follows (the governor's wait, a root it does not accept) is closed."""
+
+    def closes(self, started, child="1"):
+        import route_autoclose
+        route = {"artifact_root": "/scratch/root", "route_id": "rt-x"}
+        env = {k: v for k, v in os.environ.items() if k != "AGENT_DISPATCH_CHILD"}
+        if child is not None:
+            env["AGENT_DISPATCH_CHILD"] = child
+        with mock.patch.object(route_autoclose, "close_one") as close, \
+                mock.patch.dict(os.environ, env, clear=True), mock.patch.dict(sys.modules, {R.__name__: R}):
+            R._close_unstarted_record_free(route, "/scratch/root/route.json", started)
+        return close.called
+
+    def test_a_refused_start_with_no_row_and_no_resume_is_closed(self):
+        self.assertTrue(self.closes({"state": "waiting-capacity", "launches": []}))
+        self.assertTrue(self.closes({"state": "needs-attention", "reason": "noncanonical-model-governor-root", "launches": []}))
+
+    def test_a_start_with_a_row_a_resume_or_a_depth_zero_caller_is_left_alone(self):
+        self.assertFalse(self.closes({"state": "needs-attention", "launches": [], "registered_attempts": ["att-1"]}))
+        self.assertFalse(self.closes({"state": "waiting-capacity", "launches": [], "auto_resume": {"armed": True}}))
+        self.assertFalse(self.closes({"state": "completed", "launches": []}))
+        self.assertFalse(self.closes({"state": "needs-attention", "launches": []}, child=None))
 
 
 if __name__ == "__main__":

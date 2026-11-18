@@ -1667,8 +1667,8 @@ worker governor's cap and start budget, and the start it cannot fit is refused i
 (`waiting-capacity`; a worker arms no later automatic start). The leg's row names the starting worker
 (`caller_attempt_id`) and Fleet hangs it below it. The starting worker follows its leg with the printed bounded
 wait and receives the sealed summary there; if it ends first, `dispatch-reap-watch.py` stops what it still runs
-(`failure_class=cancelled`, `reconcile_reason=caller-ended`). `--ephemeral` keeps the route's files in a scratch
-root under the runtime directory so the project's artifact folder and campaign records get nothing (its workers still
+(`failure_class=cancelled`, `reconcile_reason=caller-ended`). `--ephemeral` keeps the route's files in the project's scratch
+root (`<runtime>/ephemeral/<key>/.agent_reports`, one per project) so the project's artifact folder and campaign records get nothing (its workers still
 count under the project's governor), and the
 notice (or wait result) carries the answer, cut with the place to read the rest. Details: `capabilities/unit.md`.
 
