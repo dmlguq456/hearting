@@ -167,6 +167,7 @@ def _claude_config_lock(path: Path, *, wait: float | None = None):
         yield
     finally:
         try:
+            # destructive-ok: reason=release the mkdir lock this call took; boundary=the empty `<config>.lock` directory created by this call's own os.mkdir
             os.rmdir(lock)
         except OSError:
             pass

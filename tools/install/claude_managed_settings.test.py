@@ -310,6 +310,7 @@ class LeftArrowDefaultTests(unittest.TestCase):
             self.assertNotIn(self.KEY, result["managed_values"])
             self.assertTrue(any("being saved by Claude" in line for line in result["report_lines"]))
             self.assertEqual(result["conflicts"], [])
+            # destructive-ok: reason=free the fixture lock the test created; boundary=the empty .claude.json.lock directory inside this TemporaryDirectory
             lock.rmdir()
             self._install(active_root, claude_home)  # the next install tries again
             self.assertIs(json.loads(target.read_text())[self.KEY], False)
@@ -319,6 +320,7 @@ class LeftArrowDefaultTests(unittest.TestCase):
             active_root, claude_home, target = self._setup(tmp, {"x": 1})
             lock = claude_home / ".claude.json.lock"
             lock.mkdir()
+            # destructive-ok: reason=free the fixture lock the test created; boundary=the empty .claude.json.lock directory inside this TemporaryDirectory
             timer = threading.Timer(0.2, lock.rmdir)
             timer.start()
             self.addCleanup(timer.cancel)
