@@ -117,7 +117,7 @@ rules) and the active runtime adapter bootstrap for stack-specific behavior.
 - Client-facing error handling
 - Logging and observability hooks
 
-### Cross-project profiles (run before work)
+### Context Sources — cross-project profiles (run before work)
 
 - **Cross-project profiles:** per `_shared/profile-preload.md`, load
   `mem profile 07_coding_convention`, `05_domain_expertise`, and

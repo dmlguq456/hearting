@@ -65,13 +65,13 @@ process-owned scratch: create it with `tempfile.TemporaryDirectory()` outside
 the cycle payload, close the browser in `finally`, then clean only that
 directory. Never remove or relocate an existing reviewer's profile.
 
-### Behavioral runtime observation (Level 5b)
+### Level 5b: Behavioral runtime observation
 
 For a user-facing surface, **verification = runtime observation**: launch the real
 application and exercise the changed path. Tests, type checks, and import-and-call do
 not substitute — they only prove "CI can run", not the changed behavior.
 
-### Report-figure semantics (Level 5c) — tool contract: `tools/figure-semantic-verify.py`
+### Level 5c: Report-figure semantics
 
 When a report contains spectrogram figures, run `tools/figure-semantic-verify.py`
 against the report and figure manifest. Treat missing metadata, a non-24 kHz maximum
