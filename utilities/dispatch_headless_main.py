@@ -218,6 +218,7 @@ def unit_leg_prompt(h, args, task: str, *, commit_clause: str = "") -> str | Non
             f"{dispatch_metadata_prompt(h, args)}\n"
             f"{commit_clause}"
             f"{wb.unit_safety_prompt(args.worker_type)}\n"
+            f"{wb.unit_bootstrap_prompt(args, task, os.environ)}"
             f"Assignment:\n{task.rstrip()}\n\n"
             f"{wb.node_scope_prompt(scope)}\n"
             f"{contract}\n\n"

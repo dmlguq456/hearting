@@ -2462,16 +2462,24 @@ def _query_tokens(task: str, worktree: str | None) -> str:
 
 
 def _bootstrap_memory_block(topics, task, worktree, *, root=None, timeout_s: float = 3.0,
-                            environ=None) -> str:
-    """Bounded read-only preference bodies through ``mem bootstrap-context``; failure is ``""``."""
+                            environ=None, labels=()) -> str:
+    """Bounded read-only preference bodies through ``mem bootstrap-context``; failure is ``""``.
+
+    ``labels`` are exact capsule labels (``unit:<family/name>``, ``field:<id>``): records
+    tagged with one come first, declared query groups fill the rest, one record once.
+    """
     q1 = " ".join(BOOTSTRAP_MEMORY_TOPICS[t] for t in topics if t in BOOTSTRAP_MEMORY_TOPICS)
-    if not q1 or not worktree:
+    if not (q1 or labels) or not worktree:
         return ""
     mem = Path(root or _REPO_ROOT) / "tools" / "memory" / "mem.py"
-    cmd = [sys.executable, str(mem), "bootstrap-context", "--cwd", str(worktree), "--query", q1]
-    q2 = _query_tokens(task, worktree)
-    if q2:
-        cmd += ["--query", q2]
+    cmd = [sys.executable, str(mem), "bootstrap-context", "--cwd", str(worktree)]
+    for label in labels:
+        cmd += ["--topic", label]
+    if q1:
+        cmd += ["--query", q1]
+        q2 = _query_tokens(task, worktree)
+        if q2:
+            cmd += ["--query", q2]
     cmd += ["--limit", "4", "--max-bytes", str(_MEMORY_BLOCK_MAX_BYTES)]
     try:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, cwd=str(worktree),
@@ -2484,20 +2492,57 @@ def _bootstrap_memory_block(topics, task, worktree, *, root=None, timeout_s: flo
     return out
 
 
-def unit_bootstrap_prompt(args, task: str, environ, *, root: Path | None = None) -> str:
-    """Material a unit declared in its ``bootstrap:`` frontmatter, or ``""``.
+_FIELD_LABEL_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
-    Runtime-supplied and read-only. A unit without a declaration receives nothing
-    (no subprocess, no scan); any failure drops the material, never the launch.
+
+def _work_style_labels(args) -> tuple[str, ...]:
+    """Exact capsule labels for this node: its ``unit:`` label, then the route's sealed ``field:``.
+
+    A conductor owner (a route whose stages run at dispatch depth 2) gets none: its stages' units do
+    that work. A route's one-shot owner is the whole worker, so it gets the ``field:`` label only.
+    Any failure is no label.
+    """
+    try:
+        worker_type = getattr(args, "worker_type", None)
+        unit = getattr(args, "unit", None) or ("plan/frame" if worker_type == "frame" else None)
+        labels: list[str] = []
+        if unit and unit not in RESERVED_UNITS and UNIT_REF_RE.match(unit) and worker_type in WORKER_TYPES[1:]:
+            labels.append(f"unit:{unit}")
+        route_file = getattr(args, "route_file", None) or getattr(
+            getattr(args, "owner_route_binding", None), "route_file", None)
+        route = json.loads(Path(route_file).read_text(encoding="utf-8")) if route_file else {}
+        nodes = route.get("nodes") or []
+        if worker_type == "owner" and any(n.get("dispatch_depth") == 2 for n in nodes):
+            return ()
+        field = route.get("field")
+        if isinstance(field, str) and _FIELD_LABEL_RE.match(field):
+            labels.append(f"field:{field}")
+        return tuple(labels)
+    except Exception:
+        return ()
+
+
+def unit_bootstrap_prompt(args, task: str, environ, *, root: Path | None = None) -> str:
+    """Read-only material attached while a worker's prompt is assembled, or ``""``.
+
+    Two sources, both runtime-supplied and read-only: records the user tagged with this node's
+    unit label or the route's field label ("work style", every unit, no declaration), and what a
+    unit declared in its ``bootstrap:`` frontmatter. Neither is automatic memory injection and a
+    worker never writes memory. Nothing found, or any failure, drops the material, never the launch.
     """
     try:
         root = Path(root or _REPO_ROOT)
-        decl = unit_bootstrap_declaration(root, getattr(args, "unit", None))
-        if not decl or getattr(args, "worker_type", None) not in BOOTSTRAP_STAGE_TYPES:
+        worker_type = getattr(args, "worker_type", None)
+        decl = {}
+        if worker_type in BOOTSTRAP_STAGE_TYPES:
+            decl = unit_bootstrap_declaration(root, getattr(args, "unit", None))
+            gate = getattr(args, "completion_gate", None)
+            if decl.get("gates") and gate not in decl["gates"]:
+                decl = {}
+        labels = _work_style_labels(args)
+        if not decl and not labels:
             return ""
         gate = getattr(args, "completion_gate", None)
-        if decl.get("gates") and gate not in decl["gates"]:
-            return ""
         lines = []
         if decl.get("exemplar") in BOOTSTRAP_EXEMPLAR_KINDS:
             found = _deliverable_exemplars(gate, getattr(args, "artifact_root", None), environ)
@@ -2509,15 +2554,17 @@ def unit_bootstrap_prompt(args, task: str, environ, *, root: Path | None = None)
                     "Take every fact only from your assigned inputs.\n"
                     "  For HTML, skim the structure; do not load embedded media.\n")
         memory = _bootstrap_memory_block(decl.get("memory", ()), task, getattr(args, "worktree", None),
-                                         root=root, environ=environ)
+                                         root=root, environ=environ, labels=labels)
         if memory:
-            lines.append("- Saved preferences from memory (reference only; apply only what fits your assignment; "
+            head = ("Your user's working style and saved preferences from memory (those tagged for this unit "
+                    "or field come first; " if labels else "Saved preferences from memory (")
+            lines.append(f"- {head}reference only; apply only what fits your assignment; "
                          "do not write, curate, or sync memory):\n" + memory + "\n")
         if not lines:
             return ""
-        return ("Unit bootstrap material (runtime-supplied, read-only reference):\n" + "".join(lines)
-                + "- If format guidance and your inputs disagree: content follows the inputs, "
-                  "format follows these conventions.\n\n")
+        tail = ("- If format guidance and your inputs disagree: content follows the inputs, "
+                "format follows these conventions.\n" if decl else "")
+        return "Unit bootstrap material (runtime-supplied, read-only reference):\n" + "".join(lines) + tail + "\n"
     except Exception:
         return ""
 
