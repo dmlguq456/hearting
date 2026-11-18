@@ -3555,6 +3555,14 @@ class ObligationStore:
                 watch_ids = _message_watch_ids(message.get("refs", []))
                 if watch_ids is None:
                     return False
+                # A row still addressed to a window's old Claude session that its background
+                # session took over: the receipt's binding names the id the row carries.
+                from_id = binding.get("parked_from")
+                parked_follow = (not watch_ids and isinstance(from_id, dict)
+                                 and from_id.get("harness") == "claude" == recipient.get("harness")
+                                 and from_id.get("session_id") == saved_target.get("session_id")
+                                 == original.get("session_id")
+                                 and original.get("pane_id") is None)
                 # A sealed peer request follows the successor Hearting's lineage confirms;
                 # the receipt's own binding (made by the exact receiver check) names it.
                 followed = (isinstance(message.get("request"), dict)
@@ -3564,6 +3572,8 @@ class ObligationStore:
                             and all((binding.get("recipient") or {}).get(key) == recipient.get(key)
                                     for key in ("harness", "session_id")))
                 if not watch_ids and followed:
+                    pass
+                elif not watch_ids and parked_follow:
                     pass
                 elif not watch_ids:
                     if original.get("harness") != recipient.get("harness"):

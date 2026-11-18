@@ -642,6 +642,8 @@ let routePopup=null;
 // 11-15 (design 2): the status popup first, as its button stands at the panel's head (the REPO row).
 const SECTIONS=['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES'];
 const POPUP_KIND={ROUTE:'routes',STATUS:'status',NOW:'now'};
+// 11-18: the width kind of a table popup: the routes popup stands wider (`panelView.popupWidth`), the others as a table.
+const tableKind=name=>name==='ROUTE'?'route':'table';
 // 11-15 (design 2): the panel's status button value (Fleet's `session_status.read`: the status document of
 // this session's campaign, else the one Fleet's project line picks; null where the project has no
 // artifact root, and no button then), read in its own worker so a slow first read holds neither the panel
@@ -749,7 +751,7 @@ function nowRows(t){
 }
 function popupNow(){
   if(!popupShown())return null;
-  const band=expanded?0:height(),kind=table?'table':'text',width=panelView.popupWidth(cols,kind),inner=Math.max(0,width-4),room=panelView.popupRoom(rows,band);
+  const band=expanded?0:height(),kind=table?tableKind(table.kind):'text',width=panelView.popupWidth(cols,kind),inner=Math.max(0,width-4),room=panelView.popupRoom(rows,band);
   const names=sections(),current=Math.max(0,names.indexOf(table?table.kind:'QUESTIONS'));
   let title,body,view;
   if(table){
@@ -975,7 +977,7 @@ function openPopup(name,open=''){
   const was=table;
   // The routes popup opens with the pressed route unfolded, else the most pressing one.
   if(name==='ROUTE'&&!open)open=String((rankedRoutes()[0]||{}).id||'');
-  table={kind:name,rows:was?.kind===name?was.rows:[],hits:[],scroll:0,open,follow:!!open,page:false,routes:[],loaded:was?.kind===name&&was.loaded,width:panelView.popupWidth(cols,'table'),
+  table={kind:name,rows:was?.kind===name?was.rows:[],hits:[],scroll:0,open,follow:!!open,page:false,routes:[],loaded:was?.kind===name&&was.loaded,width:panelView.popupWidth(cols,tableKind(name)),
     ...(name==='NOW'?{sel:'',list:null,read:null,reveal:true,listScroll:0,loaded:false}:{})};
   // The status popup's rows as read last, while no watch event came and the width is the same.
   const kept=name==='STATUS'&&statusPopup&&statusPopup.width===table.width&&statusPopup.generation===statusGeneration;
@@ -1319,7 +1321,7 @@ function applyLayout() {
   // A table popup is Fleet's table at the popup's width: read again at the new one. Rows laid out at the
   // old width (Fleet's lines above the status document) are not drawn at the new one: the document stands
   // alone until the new read.
-  if(table&&POPUP_KIND[table.kind]&&table.width!==panelView.popupWidth(cols,'table')){table.width=panelView.popupWidth(cols,'table');
+  if(table&&POPUP_KIND[table.kind]&&table.width!==panelView.popupWidth(cols,tableKind(table.kind))){table.width=panelView.popupWidth(cols,tableKind(table.kind));
     if(table.kind==='STATUS'&&table.loaded&&Array.isArray(table.doc)){table.head=[];table.rows=[...table.doc];}
     askTable();}
   emit('\x1b[0m\x1b[2J');rebuildDisplay();schedule();queueProjection();
@@ -1414,7 +1416,7 @@ async function projection() {
   projecting=true;projectionPending=false;const selected=selection;
   try{
     const asked=++clock;
-    const data=await source('projection',{columns:openColumns(),popup_columns:panelView.popupWidth(cols),table_columns:panelView.popupWidth(cols,'table')-4,rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery,upgrade_note:upgradeNoteNow(),
+    const data=await source('projection',{side:geometry().side,columns:openColumns(),popup_columns:panelView.popupWidth(cols),table_columns:panelView.popupWidth(cols,'table')-4,rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery,upgrade_note:upgradeNoteNow(),
       ...(typeof displayValues.model==='string'&&displayValues.model?{native_model:displayValues.model}:{})});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     turnRecord=harness==='claude'&&typeof data.turn_record==='string'&&path.isAbsolute(data.turn_record)?data.turn_record:'';

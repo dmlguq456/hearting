@@ -1910,6 +1910,10 @@
    "en": "answer {state}",
    "ko": "답 {state}"
   },
+  "fleet.session_panel.resource_idle_gpus": {
+   "en": "idle GPU",
+   "ko": "빈 GPU"
+  },
   "fleet.session_panel.results": {
    "en": "Results & connected work",
    "ko": "결과 · 연결된 일"

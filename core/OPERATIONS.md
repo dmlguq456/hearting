@@ -636,7 +636,8 @@ holds all bound attempt/child/successor reference admissions through quarantine
 and unlink. It resumes on the next normal cadence after
 interruption; examining and removing have separate time budgets (it examines
 only the logs and prompt sidecars still present), and the next
-pass may start after one minute while removable files remain. It runs beside the existing post-exit reaper and selector-free
+pass may start after one minute while removable files remain, and once a round over
+all logs ends, a new round opens at most once a day. It runs beside the existing post-exit reaper and selector-free
 `reconcile --apply`; exact-attempt transactions remain scoped to their attempt.
 The same pass retires two state-root leftovers untouched for seven days: a
 route's completion markers when neither the registry nor its archive names that route and
@@ -651,7 +652,9 @@ not removed by this policy.
 hours, moves settled history out of the live `jobs.log`. Because a tail runs
 only when a dispatch ends, the peer obligation runner's six-hour maintenance
 pass also starts these post-exit retention passes (homes, logs, reusable
-runtimes, archive) in a short-lived process. A group of rows that
+runtimes, archive) in a short-lived process; it starts them sooner when the last
+log pass left `more` and a minute passed, the previous start's process group is
+empty, and a log pass ran since that start. A group of rows that
 share an attempt or route id moves only as a whole, when every row ended (the
 last write of its attempt log, else its registration) at least 14 days ago,
 belongs to a route closed at least 14 days ago (a row with no route keys has none

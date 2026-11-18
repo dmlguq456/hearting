@@ -210,11 +210,11 @@ def with_status_document(snapshot, now):
 class World:
     """The demo world's panel inputs, keyed by native session id."""
 
-    def __init__(self, snapshot, now):
+    def __init__(self, snapshot, now, hosts=None):
         from tools.fleet.session_line import session_route_status
         # The status document of the project the first picture shows, in the temporary HOME.
         snapshot, self.status_projects = with_status_document(snapshot, now)
-        self.snapshot, self.now = snapshot, now
+        self.snapshot, self.now, self.hosts = snapshot, now, hosts
         self.sessions = {s.session_id: s for s in snapshot.sessions if not s.is_child}
         self.tags = {(s.harness, s.session_id): "[" + s.session_tag + "]"
                      for s in self.sessions.values() if s.session_tag}
@@ -280,9 +280,18 @@ class World:
         # ``session_doers`` is the map Fleet's shared producer publishes (the model and effort of each
         # session it read), here read from the demo snapshot by the same function.
         import human_wait_state
-        return {"route_panels": self.panels, "by_session": waiting,
+        from fleet.explorer import live
+        view = {"route_panels": self.panels, "by_session": waiting,
                 "session_doers": human_wait_state.session_doers(self.snapshot),
                 "items": [item for items in self.questions.values() for item in items]}
+        # The RESOURCES section: the compute hosts' sample as the shared producer turns it into its view (`resources_view`, with the
+        # session records of the same pass for the numbers that hold a GPU), and the repository names of the sessions (`session_repos`).
+        _rows, index = live._session_records(self.snapshot, self.now, live._resolver(self.snapshot))
+        for key, repo in live.session_repos((_rows, index)).items():
+            view["session_doers"][key] = {**view["session_doers"].get(key, {}), "repo": repo}
+        if self.hosts:
+            view["resources"] = human_wait_state.resources_view(self.hosts, self.now, index)
+        return view
 
     def counts(self, harness, sid):
         mine = len(self.questions.get(sid, ()))
@@ -298,7 +307,8 @@ def popup_width(cols, kind="text"):
         return max(4, cols)
     if cols < 80:
         return cols - 4
-    return min(116, cols - 4) if kind == "table" else 76
+    # 11-18: the routes popup alone stands up to 148 cells, the other table popups up to 116.
+    return min(148, cols - 4) if kind == "route" else min(116, cols - 4) if kind == "table" else 76
 
 
 # The other harnesses' usage windows (demo values; the session's own harness takes ``World.values``).
@@ -307,7 +317,7 @@ DEMO_USAGE = {"claude": {"rl_5h": 18, "rl_7d": 40, "rl_ms": []},
               "opencode": {"rl_5h": 9, "rl_7d": 33, "rl_ms": []}}
 
 
-def projection(world, harness, sid, *, columns=40, rows=46, state="working", popup_columns=None):
+def projection(world, harness, sid, *, columns=40, rows=46, state="working", popup_columns=None, side=False):
     """``panel_projection``'s payload for one demo session, its live readers replaced."""
     import human_wait_state
     import session_shell
@@ -355,7 +365,7 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working", pop
         os.environ.pop("NO_COLOR", None)
         payload = session_shell.panel_projection(harness, sid, native_pid=81000 + len(sid),
                                                  native_start=1, columns=columns, rows=rows,
-                                                 state=state, expanded=True, popup_columns=popup_columns)
+                                                 state=state, expanded=True, popup_columns=popup_columns, side=side)
     # The host puts the status button's value in the model (``host.cjs`` ``statusDoc``).
     status = world.status(sid)
     if isinstance(status, dict) and isinstance(status.get("word"), str):
@@ -481,7 +491,7 @@ function tableTitle(m,kind,table){
     let popup=null;
     const table=job.table||null;
     if(job.window&&(block.focused||table)){
-      const {cols,rows}=job.window,kind=table?'table':'text',width=view.popupWidth(cols,kind),inner=Math.max(0,width-4),room=view.popupRoom(rows,0);
+      const {cols,rows}=job.window,kind=table?(table.kind==='ROUTE'?'route':'table'):'text',width=view.popupWidth(cols,kind),inner=Math.max(0,width-4),room=view.popupRoom(rows,0);
       const names=sections(base,block,table),current=Math.max(0,names.indexOf(table?table.kind:'QUESTIONS'));
       let title,body;
       if(table){
