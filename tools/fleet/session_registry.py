@@ -171,6 +171,128 @@ def session_aliases(harness, pid, *, argv=None):
     return [sid for sid in dict.fromkeys(aliases) if sid != current][:_MAX_ALIASES]
 
 
+# --- Claude's "send to background" link (M1) ------------------------------------------
+#
+# `/bg` (or an empty prompt + the left arrow) does not move a conversation: Claude Code
+# clones it under a new session id into a daemon-run process (argv `--session-id NEW
+# --fork-session --resume <OLD>.jsonl`) and leaves the original process as a viewer.
+# Nothing public says which viewer shows which background session, but two internal
+# facts of the running processes agree when it is so:
+#   (a) the live viewer's record ``sessions/<pid>.json`` carries ``parkedJobId`` and a live
+#       ``kind=bg`` record carries the same ``jobId``;
+#   (b) that background process's argv ``--resume`` names the viewer's ``sessionId``.
+# Both are Claude's own files and argv, not a documented contract: this is the ONE place
+# that reads them, and any change of shape falls to "not linked" (``None``). Replace it with
+# an official signal when Claude Code offers one. The link is never stored: every call
+# decides it again from the live processes, so it ends the moment either one does.
+_MAX_RECORDS = 512
+
+
+def _proc_start(pid):
+    """Live ``/proc/<pid>/stat`` field 22 as a string (the PID-reuse guard), else None."""
+    try:
+        with open("/proc/%d/stat" % int(pid), "rb") as handle:
+            tail = handle.read(4096).rsplit(b")", 1)[1].split()
+    except (OSError, ValueError, IndexError):
+        return None
+    if len(tail) < 20 or tail[0] in (b"Z", b"X"):
+        return None
+    return tail[19].decode("ascii", "replace")
+
+
+def _live_claude_records(home):
+    """Every live Claude process record, or raise ``OSError`` when the folder was not read.
+
+    A record whose process is gone or reused (``procStart`` differs) is not live."""
+    directory = _dir_for("claude", home=home)
+    try:
+        names = os.listdir(directory)
+    except FileNotFoundError:
+        return []
+    if len(names) > _MAX_RECORDS:
+        raise OSError("session record folder too large")
+    found = []
+    for name in names:
+        match = re.fullmatch(r"([0-9]{1,10})\.json", name)
+        if not match:
+            continue
+        pid = int(match.group(1))
+        record = read("claude", pid, home=home, raise_unread=True, extra=("jobId",))
+        if (record and str(record.get("procStart") or "") and _proc_start(pid) == str(record["procStart"])
+                and record.get("pid") in (None, pid, str(pid))):
+            record["pid"] = pid
+            found.append(record)
+    return found
+
+
+def _usable_sid(value):
+    return value.lower() if isinstance(value, str) and _SID_RE.fullmatch(value) else None
+
+
+def _parked_from_viewer(records, viewer_sid, viewer_pid, viewer_start):
+    same = [item for item in records if _usable_sid(item.get("sessionId")) == viewer_sid]
+    # One live process answers to this session id, and it is a viewer holding a job.
+    if len(same) != 1:
+        return None
+    viewer = same[0]
+    job = viewer.get("parkedJobId")
+    if (viewer.get("kind") == "bg" or not isinstance(job, str) or not job
+            or viewer_pid is not None and viewer["pid"] != int(viewer_pid)
+            or viewer_start is not None and str(viewer["procStart"]) != str(viewer_start)):
+        return None
+    # No other live process points at the same job, and exactly one background process is it.
+    if any(item is not viewer and item.get("parkedJobId") == job for item in records):
+        return None
+    background = [item for item in records if item.get("kind") == "bg" and item.get("jobId") == job]
+    if len(background) != 1:
+        return None
+    other = background[0]
+    sid = _usable_sid(other.get("sessionId"))
+    if sid is None or sid == viewer_sid or session_aliases("claude", other["pid"]) != [viewer_sid]:
+        return None
+    started = _ms_to_sec(other.get("startedAt"))
+    return {"harness": "claude", "session_id": sid, "pid": other["pid"],
+            "proc_start": str(other["procStart"]), "started_at": started,
+            "viewer_sid": viewer_sid, "viewer_pid": viewer["pid"], "job_id": job}
+
+
+def parked_successor(harness, sid, *, viewer_pid=None, viewer_start=None, home=None):
+    """The background session a live viewer of ``sid`` holds, or ``None``.
+
+    ``{"session_id", "pid", "proc_start", "started_at", "viewer_sid", "viewer_pid", "job_id"}``
+    only when both facts above agree for exactly one live viewer and one live background
+    process. One fact alone (a deliberate ``--fork-session``, a background session started
+    elsewhere), a dead or reused process, an unreadable or broken record, a second process
+    for either side, or a viewer that holds no job anymore all give ``None``. Read-only."""
+    try:
+        sid = _usable_sid(sid)
+        if harness != "claude" or sid is None:
+            return None
+        return _parked_from_viewer(_live_claude_records(home), sid, viewer_pid, viewer_start)
+    except Exception:
+        return None
+
+
+def parked_origin(harness, sid, *, home=None):
+    """The same link read from the background side: the viewer a background session ``sid`` is
+    held by, as :func:`parked_successor` of that viewer (its ``viewer_sid`` is the original id)."""
+    try:
+        sid = _usable_sid(sid)
+        if harness != "claude" or sid is None:
+            return None
+        records = _live_claude_records(home)
+        mine = [item for item in records if item.get("kind") == "bg" and _usable_sid(item.get("sessionId")) == sid]
+        if len(mine) != 1:
+            return None
+        origins = session_aliases("claude", mine[0]["pid"])
+        if len(origins) != 1:
+            return None
+        found = _parked_from_viewer(records, origins[0], None, None)
+        return found if found and found["session_id"] == sid else None
+    except Exception:
+        return None
+
+
 def session_join_keys(sess):
     """Every ``(harness, session_id)`` a rendered row answers to — its own id first, then
     its resume aliases. The one definition: the peer ledger join, the steward marker join,

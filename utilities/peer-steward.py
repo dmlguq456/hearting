@@ -1596,9 +1596,24 @@ def _placement_result(*argv):
     return result
 
 
+def _project_start_hint():
+    """The window value in this process's environment as a lookup hint, else ``""``.
+
+    A session Claude's background daemon started carries the window value the daemon inherited
+    from whichever window first started it, not one a window gave this session: no hint."""
+    hint = os.environ.get("HERDR_PANE_ID", "")
+    if not hint:
+        return ""
+    try:
+        import peer_address
+        return "" if peer_address._service_hosted(os.getpid()) else hint
+    except Exception:
+        return ""
+
+
 def _project_start_workspace():
     """A directory match locates a workspace; it never proves caller ownership."""
-    hint = os.environ.get("HERDR_PANE_ID")
+    hint = _project_start_hint()
     if not hint:
         return None
     try:
@@ -1724,7 +1739,7 @@ def _start_request(args):
             args.project_workspace = _project_start_workspace()
     args.start_request.update(beside=args.beside,
                               project_workspace=getattr(args, "project_workspace", None),
-                              project_hint=os.environ.get("HERDR_PANE_ID", ""))
+                              project_hint=_project_start_hint())
     if terminal_surface.is_tmux_pane(args.beside or args.pane or ""):
         return _start_tmux_request(args)
     workspace = (args.beside.split(":")[0] if args.beside else
