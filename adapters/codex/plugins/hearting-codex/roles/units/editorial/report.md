@@ -19,11 +19,15 @@ bootstrap:
 
 # Unit: editorial/report
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
 Assemble already-verified artifacts into one final user-facing report. This unit is the
 assembly stage at the end of a pipeline (code report, design handoff, lab eval
 report, draft finalize) — it writes for the reader, it does not judge.
 
-## Contract
+### Contract
 
 - **Inputs are authoritative.** Compose only from the named input artifacts (plans,
   checklists, dev/test logs, review memos, eval tables, figures). Invent nothing beyond
@@ -42,9 +46,6 @@ report, draft finalize) — it writes for the reader, it does not judge.
   values from the shared read-only projection. Preserve the report and review bytes;
   never rewrite a pending body, refine it, or request another verification round just
   to make the display agree.
-- **Voice and language** follow `_voice.md` (audience-language first, rhythm rules,
-  return discipline). Structure the report for the reading audience: outcome first,
-  evidence next, remaining risk last.
 - **Remaining risk is part of the report.** Carry forward unresolved warnings, skipped
   checks, and open decision points from the inputs verbatim-faithfully; a clean-looking
   summary that drops a known risk is a contract violation.
@@ -53,3 +54,15 @@ report, draft finalize) — it writes for the reader, it does not judge.
   inputs and format follows the conventions.
 - Write the report to the assigned artifact path (node-owned scope); return per
   `_shared/dual-io.md`.
+
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+### Voice
+
+- **Voice and language** follow `_voice.md` (audience-language first, rhythm rules,
+  return discipline). Structure the report for the reading audience: outcome first,
+  evidence next, remaining risk last.

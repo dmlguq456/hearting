@@ -63,6 +63,19 @@ The declared `confirmation.mode` (default `hybrid`) governs the ordered pair —
 blocking direction gate first, route notice after; `core/WORKFLOW.md` §0.4 owns
 the user-facing card.
 
+## Ending in a Choice
+
+When the design is the first half of a development job that changes the screen
+(`core/WORKFLOW.md` "Screen first"), the route's end product is one to three
+options with a comparison for the person to choose from. The choosing is not a
+stage and not a unit: it is the conversation between the opening session and
+the person. The chosen option's path then goes to the development task as a
+decision. Leave the `handoff` stage out of such a route
+(`--shape staged --graph refs,build,visual-verify,critic-review`, which compose
+accepts); the development handoff is packaged after the choice. A route that is
+meant to hand over straight away keeps `handoff`. Neither form adds a gate or a
+required input.
+
 ## Artifact Ownership
 
 Artifact root: `core/CONVENTIONS.md §5.1`; output placement: `§5`.

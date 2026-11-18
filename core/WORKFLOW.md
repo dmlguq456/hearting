@@ -327,7 +327,8 @@ work or its tests passed. Missing, interrupted and running results stay unknown.
 Explicit `compose --start --shape direct --field <field> --prompt-file <task>`
 still prepares an isolated worktree and an inline route; `compose --shape direct
 --field <field>` records work already made in place. Their receipt and explicit finish contracts are unchanged.
-Otherwise use `compose --start --prompt-file <task>` with no `--shape`; the
+When the direction is clear, open `--shape solo|staged` (below); otherwise use
+`compose --start --prompt-file <task>` with no `--shape`; the
 frame chooses the capability, stages, and solo or staged shape, judging each
 leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first; an
 omitted shape follows it. Direct has no review-worker path of its own: work that
@@ -340,7 +341,8 @@ light check of a direct change may use the harness's own native subagent
 | One reversible local completion unit in the current Git worktree, including a small feature with its tests and README | read → edit → check → reply | automatic record; no start/finish round trip |
 | Explicit direct source change needing preparation | `compose --start --shape direct --field <field> --prompt-file <task>` | isolated worktree, inline node, dispatch depth 0 |
 | One reversible local completion unit already made in place | `compose --shape direct --field <field>` | records the in-place change as an inline node |
-| Other new work | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
+| New work whose direction is clear | `compose --start --shape solo\|staged --capability <kind> --prompt-file <task>` | opened directly; a sign may add the one advice line below |
+| Other new work (more than one reading is plausible) | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
 
 A single read-only unit can also be opened as a route of its own, with no owner:
 `compose --start --unit <family/name> --prompt-file <brief>` (for example
@@ -391,19 +393,51 @@ English words in every language.
 each kind's field on its first line, and the `[경로]` card shows one line
 `field <field> (<field_source>)` under its `cwd · slug` line.
 
-Skip a new frame only when a frame or the person already decided the shape:
-resume a stopped route, follow the runtime-printed `next_leg`, continue within
-an approved frame decision of the same campaign, or follow the person's
-explicit capability and stages. The main session judges whether follow-up
-stays within that approved scope. Its own judgment that work is already
-decided is not an exception. Use the decided shape explicitly; a person-named
-stage list uses `--shape staged --capability <kind> --graph <stage,…>`. A route made from a
+Open a route directly (`--shape solo|staged`) when the direction is clear. The
+opening session judges that: a frame or the person already decided the shape
+(resume a stopped route, follow the runtime-printed `next_leg`, continue within
+an approved frame decision of the same campaign, follow the person's explicit
+capability and stages), or the request itself leaves one admissible direction.
+When more than one reading is plausible, omit the shape and let a frame settle
+it. The main session also judges whether follow-up stays within an approved
+scope. Use the decided shape explicitly; a person-named
+stage list uses `--shape staged --capability <kind> --graph <stage,…>`.
+
+**Direction advice.** Where the request shows a sign that settling the direction
+first is worth it — a protected path (`core/`, `capabilities/`, `roles/`,
+`spec/`, a PRD), two or more adapters, or a spec or ship kind — the `[경로]` card of a `solo` or `staged` route adds
+one line, `방향 잡기 권함: <reason>` (`Direction check advised: <reason>` in
+English), and the receipt's stderr one machine line, `frame_advice=<reason>`.
+It is advice only: nothing blocks, no input is required, and the route is open
+whether or not the session follows it; `--explain` shows the line before the
+route starts. These are the signs the frame width
+already reads (`route_plan.frame_signals`); a unit route, `direct`, a framed
+route and a route made from a proposal get no advice.
+
+**Screen first.** Development that changes what the person sees (layout,
+color, wording, the order of lines) shows a mockup before it opens, and opens
+from the mockup the person chose. The opening session judges whether the screen
+changes; no path signal is added. A small fix handled inline (one line of screen
+wording, read→edit→check→reply) is not covered by this default. A change in one or two places: the opening
+session draws one mockup (one HTML page) itself. A larger change: open a design
+route (`--capability autopilot-design`) whose end product is one to three
+options with their comparison. The choice is one registered question
+(`hearting run questions ask`) whose options are the mockups, not a unit and
+not a series of free questions. Hand the chosen mockup's path to the
+development task as a decision (받는 것: 결정); development does not decide the
+look again. Development that changes no screen opens at once. When the person
+says to go without a mockup, open at once: this is a default, not a gate, and
+no flag or check refuses it. To open the design route ahead of the choice, leave
+the packaging stage for the development job that follows:
+`--shape staged --capability autopilot-design --graph refs,build,visual-verify,critic-review`.
+
+A route made from a
 proposal (`compose --route-plan <record>#<i>`, a command the runtime prints)
 has no frame nodes, and neither has a `solo` or `staged` compose: those shapes
 compile without the recipe's frame pair (a route sealed earlier keeps the
 frame nodes it was sealed with).
 
-A `framed` route runs two `top` legs by default; the simplified one-leg route runs at `deep`. A preset recipe's own frame pair is also `top`: the route seals each leg profile and a concrete model pin is preserved. `frame-alternative` prefers another harness only when one is ungated in the same quality band (`CONVENTIONS.md §1.1`). Shared verification may rotate only `frame-alternative` for the same-harness, same-model case described in `CONVENTIONS.md §1.1`, keeping its route-sealed profile. Without an eligible, usage-available alternative, the leg runs immediately at its sealed profile and records why. A frame-rule `top` that stops at a usage limit is still retried once at `deep` through the SD-157 replacement lineage, and that capacity lowering is recorded separately. The `[경로]` card of `framed` adds the compiler's two lines: "frame이 방향과 경로를 조립해 제안합니다" and the cost line, "비용: frame 한 갈래 · 방향 확인 질문 1회" or, with both legs, "비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회".
+A `framed` route runs two `top` legs by default; the simplified one-leg route runs at `deep`. A preset recipe's own frame pair is also `top`: the route seals each leg profile and a concrete model pin is preserved. `frame-alternative` prefers another harness only when one is ungated in the same quality band (`CONVENTIONS.md §1.1`). Shared verification may rotate only `frame-alternative` for the same-harness, same-model case described in `CONVENTIONS.md §1.1`, keeping its route-sealed profile. Without an eligible, usage-available alternative, the leg runs immediately at its sealed profile and records why. A frame-rule `top` that stops at a usage limit is still retried once at `deep` through the SD-157 replacement lineage, and that capacity lowering is recorded separately. The `[경로]` card of `framed` adds the compiler's two lines: "frame이 방향과 경로를 조립해 제안합니다" and the cost line, "비용: frame 한 갈래 · 방향 확인 질문 최대 1회" or, with both legs, "비용: 최상위 모델 두 갈래 · 방향 확인 질문 최대 1회".
 
 **Staged assembly guidance.** Staged assembly guidance is for frame brief
 authors and routes whose capability and stages the person explicitly named.
@@ -943,7 +977,9 @@ same registered question goes to the person. This meaning is shared
 by Claude, Codex and OpenCode.
 
 When there is nothing to choose — both frame legs return valid, equal
-proposals, no start approval is in scope, and neither brief's section 7 lists a
+proposals (a one-leg frame needs only its one valid proposal), no start
+approval is in scope, no part needs the repository prepared, the proposal stays
+inside the intent's `안 할 것`, and no brief's section 7 lists a
 question only the user can answer — the runtime records that interview itself as
 the depth-0 session's on-behalf answer (`supervisor`, basis
 `automatic-agreement`), releases frame-review through the same commands, and

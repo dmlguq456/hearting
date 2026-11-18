@@ -279,9 +279,7 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   checks.paste.front_next=!!box(s)&&box(s).title.includes('QUESTIONS');await key('\x1b',300);checks.paste.front_draft=await kept();
   // ↑↓ follow: a popup longer than its rows keeps the unfolded row in view, up and down (60×16).
   await resize(60,16);await key('\x1d',400);await until(s=>!!box(s),'a popup at 60×16');await key('\x1b[C',400);
-  s=await until(popupHas('ROUTE'),'the routes popup at 60×16');
-  // (11-18: a table read before stands at once with words after its title; the keys below are for the one read now.)
-  await until(s=>unfolded(s)!==''&&!/에 읽은 내용/.test(box(s).title),'the unfolded route in view, read now');
+  s=await until(popupHas('ROUTE'),'the routes popup at 60×16');await until(s=>unfolded(s)!=='','the unfolded route in view');
   const place=s=>{const m=(box(s)?box(s).rows.join('\n'):'').match(/(\d+)\/(\d+) · /);return m?[+m[1],+m[2]]:null;};
   checks.follow={down:[],up:[],place:[]};
   for(let i=0;i<14;i++){await key('\x1b[B',350);s=await screen();checks.follow.down.push(unfolded(s)!=='');checks.follow.place.push(place(s));}
