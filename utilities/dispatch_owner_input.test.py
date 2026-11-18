@@ -80,6 +80,14 @@ class OwnerInputTest(unittest.TestCase):
             I.submit(self.jobs, self.attempt, 'different', 'same')
         self.assertEqual(self.state()[0]['state'], 'queued')
 
+    def test_a_stage_unit_is_kept_on_the_request_and_nothing_else_changes(self):
+        I.submit(self.jobs, self.attempt, 'shorter findings first', 'to-stage', unit='unit:qa/code-review')
+        I.submit(self.jobs, self.attempt, 'to the owner', 'to-owner')
+        stage, owner = self.state()
+        self.assertEqual(stage['unit'], 'unit:qa/code-review')
+        self.assertNotIn('unit', owner)
+        self.assertEqual(owner['route_id'], stage['route_id'])
+
     def test_held_lease_stores_once_without_starting_a_second_consumer(self):
         with mock.patch.object(I, 'recover_consumer') as recover:
             receipt = I.submit(self.jobs, self.attempt, 'keep for the live consumer', 'lease')
