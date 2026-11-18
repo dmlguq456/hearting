@@ -1650,9 +1650,11 @@ brief and how to end. Its model grade is the one a staged route gives that unit 
 The launch seals `workflow_completion=runtime-v1` on the leg. When the worker ends, the completion
 controller closes the route and seals the cycle, and the completion notice that returns to the launching
 session carries the route's sealed summary (verdict line, blocking findings, report path); no close or
-finalize command is run by hand. A review that ends FAIL with its readable report is a finished audit's
+finalize command is run by hand. A review that ends FAIL with a readable report that itself opens on a closed
+negative verdict (`Final verdict: changes requested — head <sha>`, as an audit's report does) is a finished audit's
 kind of end: the runtime reads it as a pass whose assessment of the subject is negative, so the route closes
-and the notice carries the same summary (its result line says the review completed with findings). The same
+and the notice carries the same summary (its result line says the review completed with findings). A FAIL
+whose report is empty, says no review was done or declares nothing is not finished work and is offered again. The same
 notice path serves all three harnesses. The launching session need not be an owner: this section does not change which work is direct, solo or staged
 (`core/WORKFLOW.md` §0.2.1).
 

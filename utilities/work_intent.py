@@ -626,6 +626,8 @@ _NO_BLOCKING_HEADING = re.compile(r"(?:없음|없다|없습니다)\s*[.。]?\s*$
                                   r"|[:：]\s*(?:none|없음)\s*[.。]?\s*$", re.I)
 _NONE_MARKER = re.compile(r"(?:없음|해당 없음|없습니다|none|n/a|not applicable)", re.I)
 _CONTRAST = re.compile(r"\b(?:but|however|yet|although|except)\b|다만|그러나|하지만|그렇지만|그런데", re.I)
+# A heading that says "none" but turns ("## No blocking issues, but …") opens its section: what follows is a finding.
+_HEAD_CONTRAST = re.compile(r"\b(?:but|however)\b|다만|그러나|하지만", re.I)
 _PAREN_NOTE = re.compile(r"[(（][^.,，。;；()（）]*[)）]")
 
 
@@ -657,6 +659,9 @@ def _blocking_heading(title: str) -> str | None:
     leading = re.sub(r"^(?:(?:주요|직접|실행한|수행한|관련|최종|추가|알려진|known|executed|performed|focused|relevant)\s+)+", "", lowered)
     if any(leading.startswith(word) and _has_word(leading, word) for word in _BLOCKING_WORDS):
         return lowered
+    if (re.match(r"(?:no|zero)\b", lowered) and _HEAD_CONTRAST.search(lowered)
+            and any(_has_word(lowered, word) for word in _BLOCKING_WORDS)):
+        return lowered   # "No blocking issues, but …": a heading that says none and turns is a blocking section
     return None
 
 
@@ -722,11 +727,11 @@ def _section_field(title: str, *, numbered: bool) -> str | None:
     if re.match(r"(?:실행한|돌린|수행한)\s*것(?:$|[\s(·:—-])", lowered):
         return "verified"
     leading = re.sub(r"^(?:(?:주요|직접|실행한|수행한|관련|최종|추가|알려진|known|executed|performed|focused|relevant)\s+)+", "", lowered)
-    if not any(leading.startswith(word) and _has_word(leading, word)
-               for _field, _numbers, words in _SECTION_FIELDS for word in words):
-        return None
     blocking = _blocking_heading(title)
-    if blocking and _NO_BLOCKING_HEADING.search(blocking):
+    if not blocking and not any(leading.startswith(word) and _has_word(leading, word)
+                                for _field, _numbers, words in _SECTION_FIELDS for word in words):
+        return None
+    if blocking and _NO_BLOCKING_HEADING.search(blocking) and not _HEAD_CONTRAST.search(blocking):
         return None
     matches = [field for field, _numbers, words in _SECTION_FIELDS
                if any(_has_word(lowered, word) for word in words)]

@@ -2176,6 +2176,22 @@ def supervised_owner_prompt() -> str:
     )
 
 
+def unit_verdict_prompt(worker_type: str) -> str:
+    """How a unit route's review opens its report so the runtime can read a FAIL end as a finished review.
+
+    The runtime treats a `verdict: FAIL` end as finished work (a review that found blocking issues) only
+    when the report opens on a closed review verdict line (`codex_dispatch_terminal.closed_review_kind`,
+    the one an audit report carries); the units name their own verdict tokens (clean/issues,
+    CLEAN/FINDINGS), which that reading does not know."""
+    if worker_type != "review":
+        return ""
+    return ("Open the report (its first line that is not a heading) with the review's closed verdict, as "
+            "`Final verdict: changes requested — head <sha>` when you found blocking issues, or "
+            "`Final verdict: mergeable — head <sha>` when you found none (`hold` for a held review); "
+            "<sha> is the commit you reviewed (`git rev-parse HEAD`). Then say what you found. "
+            "If you could not do the review, end `BLOCKED` and say what stopped you.\n")
+
+
 _TERMINAL_CONTRACT_START = "<!-- worker-terminal-contract:start -->"
 _TERMINAL_CONTRACT_END = "<!-- worker-terminal-contract:end -->"
 

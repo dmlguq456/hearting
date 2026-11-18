@@ -221,6 +221,7 @@ def unit_leg_prompt(h, args, task: str, *, commit_clause: str = "") -> str | Non
             f"Assignment:\n{task.rstrip()}\n\n"
             f"{wb.node_scope_prompt(scope)}\n"
             f"{contract}\n\n"
+            f"{wb.unit_verdict_prompt(args.worker_type)}"
             f"{wb.worker_ending_prompt()}")
 
 

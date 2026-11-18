@@ -10,7 +10,8 @@
     sealed summary (the verdict line, the blocking findings and the report path).
 
 ``unit-route-blocking``
-    The same, but the worker's review finds a blocking issue and ends ``verdict: FAIL`` (the most
+    The same, but the worker's review finds a blocking issue, opens its report on a closed
+    negative verdict (``Final verdict: changes requested — head <sha>``, what its first instruction asks) and ends ``verdict: FAIL`` (the most
     common end of a PR review). The runtime reads that end as finished work: the row is a success
     whose terminal reading carries the negative assessment, the route closes like a pass's, the
     resting session is woken with the same sealed summary (its result line says the review completed
@@ -47,12 +48,15 @@ BLOCKER = "HB-UNIT-BLOCKER-42"
 NEXT = "HB-UNIT-NEXT"
 REPORT = (
     "# Review of the fixture change\n\n"
-    "Final verdict: issues\n\n"
+    "{head}\n\n"
     "## Blocking findings\n\n"
     f"- {BLOCKER}: the fixture function ignores an empty list\n\n"
     "## Verification\n\n"
     "- Read the fixture diff; no command was run\n"
 )
+# What the unit worker's first instruction asks a review to open its report with: the closed verdict the runtime reads.
+FAIL_HEAD = "Final verdict: changes requested — head 0123abc"
+PASS_HEAD = "Final verdict: issues"
 
 
 def side_request(record) -> bool:
@@ -73,6 +77,7 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
     needs_tui = True
     WAIT = 240
     blocking = False   # the worker ends FAIL with its blocking findings instead of PASS
+    report_head = PASS_HEAD   # the report's verdict line (the blocking scenario's closes a negative judgment)
     QUIET = 45         # seconds the woken session is watched for a further follow-up (blocking scenario)
 
     def side_script(self, run):
@@ -99,7 +104,7 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
                 if record["last_kind"] != "tool" and not wrote:
                     run.evidence["worker_first_request_chars"] = len(text)
                     return Reply(shell=f"mkdir -p \"$(dirname '{target}')\" && cat > '{target}' <<'HB_EOF'\n"
-                                       f"{REPORT}HB_EOF\n")
+                                       f"{REPORT.format(head=self.report_head)}HB_EOF\n")
                 return self.final_reply(target)
             if record["last_kind"] == "tool":
                 return Reply("The unit route runs; I will continue when its result arrives.")
@@ -228,6 +233,7 @@ class UnitRouteScenario(OwnerPublishRegisteredScenario):
                         self.WAIT, 2)
         completed_at = time.time()
         woke = wait_for(lambda: _carrying(resting_session_requests(run), BLOCKER, before), self.WAIT, 1)
+        first = None
         run.wait_idle(8, 60)
         requests = resting_session_requests(run)
         rows = self.unit_rows()
@@ -295,6 +301,7 @@ class UnitRouteBlockingScenario(UnitRouteScenario):
     summary = ("A unit route whose review finds a blocking issue and ends FAIL: the end is finished work like a "
                "pass's: the route closes, the resting session gets the sealed summary and no follow-up after it.")
     blocking = True
+    report_head = FAIL_HEAD
 
 
 SCENARIOS = [UnitRouteScenario, UnitRouteBlockingScenario]

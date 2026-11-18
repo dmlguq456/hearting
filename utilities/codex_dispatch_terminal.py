@@ -1070,9 +1070,11 @@ def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None)
 
     Two registered depth-1 ends qualify, each only with a completed FAIL handoff naming a readable
     report file: an exact audit owner, and the one leg that finishes a unit route (its review ends
-    FAIL when it found blocking issues, the most common end of a PR review). Native success or a
-    readable file alone cannot prove that review work happened. Stage reviews, a frame leg and
-    ordinary code work do not qualify.
+    FAIL when it found blocking issues, the most common end of a PR review), the latter only when
+    its report itself opens on a closed negative judgment (`_declares_negative_judgment`). Native
+    success or a readable file alone cannot prove that review work happened: an empty report, one
+    that says no review was done, or one that declares a pass stays a failed end. Stage reviews, a
+    frame leg and ordinary code work do not qualify.
     """
     if (not isinstance(binding, Mapping) or binding.get("worker_type") != worker_type
             or worker_type not in {"owner", REVIEW_WORKER_TYPE} or binding.get("dispatch_depth") != "1"
@@ -1083,7 +1085,7 @@ def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None)
             or parsed.get("artifact_shape") != "file"):
         return False
     if worker_type == REVIEW_WORKER_TYPE:
-        return _is_unit_route_leg(binding)
+        return _is_unit_route_leg(binding) and _declares_negative_judgment(artifact_path)
     if parsed.get("disposition"):
         # The owner wrote a closed review disposition (e.g. `수정 후 병합`) as its verdict:
         # a finished review of any capability only when its report opens on a closed
@@ -1096,6 +1098,16 @@ def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None)
                 and _completed_negative_audit_report(artifact_path))
     except (OSError, ValueError, TypeError):
         return False
+
+
+def _declares_negative_judgment(path) -> bool:
+    """Whether the report opens on a closed negative review verdict (`closed_review_kind`: `수정 후 병합` or
+    `hold`, the same reading an audit owner's FAIL needs). A report that declares nothing, a pass or an
+    empty file does not. One that also heads itself `verdict: FAIL`/`BLOCKED` does not either: the
+    completion gates read that heading as evidence that is not a pass, so it keeps the failed end."""
+    if path is None or closed_review_kind(path) not in {"fix", "hold"}:
+        return False
+    return artifact_declared_verdict(Path(path)) not in {"FAIL", "BLOCKED"}
 
 
 def _sealed_route(binding):

@@ -216,7 +216,7 @@ class UnitTupleTest(UnitLegBase):
 class BlockingReviewEndTest(UnitLegBase):
     """A review that ended FAIL with its report is finished work (the most common end of a PR review):
     the runtime reads it as a pass whose judgment on the subject is negative, as it does for an audit."""
-    REPORT = ("# Review\n\nFinal verdict: issues\n\n## Blocking findings\n\n- HB-BLOCKER: empty list ignored\n\n"
+    REPORT = ("# Review\n\nFinal verdict: changes requested — head abc1234\n\n## Blocking findings\n\n- HB-BLOCKER: empty list ignored\n\n"
               "## Verification\n\n- Read the diff\n")
 
     def setUp(self):
@@ -227,6 +227,9 @@ class BlockingReviewEndTest(UnitLegBase):
         self.report = Path(self.root) / "report.md"
         self.report.write_text(self.REPORT)
         self.worktree = Path(self.route["cwd"])
+
+    def write(self, text):
+        self.report.write_text(text)
 
     def log(self, verdict="FAIL", blocker="HB-BLOCKER empty list ignored", artifact=None):
         text = f"artifact: {artifact or self.report}\nverdict: {verdict}\nblocker: {blocker}"
@@ -254,6 +257,46 @@ class BlockingReviewEndTest(UnitLegBase):
             self.log(), worktree=self.worktree, artifact_root_metadata=self.route["artifact_root"],
             worker_type="review", artifact_binding=self.binding())
         self.assertEqual((carrier["verdict"], extra["reconcile_reason"]), ("PASS", "completed-audit-with-findings"))
+
+    def test_only_a_report_that_opens_on_a_closed_negative_judgment_is_promoted(self):
+        promoted = {
+            "changes requested": self.REPORT,
+            "changes requested, Korean": "# 검토\n\n최종 판정: 수정 후 병합 — head abc1234\n\n- 빈 목록을 무시한다\n",
+            "a held review": "# R\n\nFinal verdict: hold — head abc1234\n\n- A: bad\n",
+        }
+        for name, text in promoted.items():
+            with self.subTest(name):
+                self.write(text)
+                view = self.terminal()
+                self.assertEqual((view["verdict"], view["assessment_verdict"], view["failure_class"]),
+                                 ("PASS", "FAIL", "pass"))
+        # The same FAIL end whose report does not open on one: a failed end as before, with the
+        # review_blocking note a sealed leg's reader answers with the confirm notice and `compose-again`.
+        stays = {
+            "a report that says no review was done": "# Review\n\nCould not perform the review: the diff was not available.\n",
+            "an empty report": "",
+            "a report that declares a pass": "# Review\n\n## verdict: PASS\n\nNo blocking issues.\n",
+            "a report that declares BLOCKED": "# Review\n\n## verdict: BLOCKED\n\nThe diff was not available.\n",
+            "a report that says mergeable": "# R\n\nFinal verdict: mergeable — head abc1234\n\n- fine\n",
+            "a verdict of its own tokens only": "# Review\n\nFinal verdict: issues\n\n- A: bad\n",
+            "a heading verdict that the completion gates read as no pass":
+                "# R\n\n## verdict: FAIL\n\nFinal verdict: changes requested — head abc1234\n\n- A: bad\n",
+            "no head named": "# R\n\nFinal verdict: changes requested\n\n- A: bad\n",
+        }
+        for name, text in stays.items():
+            with self.subTest(name):
+                self.write(text)
+                view = self.terminal()
+                self.assertNotIn("assessment_verdict", view)
+                self.assertEqual(view["verdict"], "FAIL")
+                self.assertNotEqual(view["failure_class"], "pass")
+                self.assertEqual(view["failure_note"], TERMINAL.REVIEW_BLOCKING_NOTE)
+
+    def test_the_verdict_conflict_check_still_runs_for_an_end_that_is_not_promoted(self):
+        self.write("# Review\n\n## verdict: FAIL\n\n- A: bad\n")
+        view = self.terminal(verdict="PASS", blocker="none")       # a PASS envelope over a FAIL report
+        self.assertEqual(view["review_verdict_conflict"], "artifact-fail-envelope-pass")
+        self.assertNotIn("assessment_verdict", view)
 
     def test_every_other_end_keeps_the_reading_it_had(self):
         cases = {
@@ -291,7 +334,7 @@ class BlockingReviewEndTest(UnitLegBase):
             DTC._seal_completion_summary(request, self.route, str(self.report), slot)
         text = work_intent.sealed_summary(meta, self.attempt)
         self.assertIn(t("completion.result_audit_findings"), text)
-        self.assertIn(t("completion.verdict", verdict="issues"), text)
+        self.assertIn(t("completion.verdict", verdict="changes requested — head abc1234"), text)
         self.assertIn("HB-BLOCKER: empty list ignored", text)
         self.assertIn(str(self.report), text)
         self.jobs.write_text(self.leg_row(self.route, self.path, status="done", log_file=str(self.log())))
@@ -442,6 +485,12 @@ class ReviewSectionTest(unittest.TestCase):
         ("## Blocking findings\n\n- none, however the cache is stale\n", "none, however the cache is stale"),
         ("## 막는 지적\n\n- 없음. 다만 캐시가 오래됐다.\n", "없음. 다만 캐시가 오래됐다."),
         ("## Blocking findings\n\n- None. The parser drops the last token.\n", "None. The parser drops the last token."),
+        # a heading that says none and then turns opens its section
+        ("## No blocking issues, but one regression\n\n- A: render() breaks on empty input\n",
+         "A: render() breaks on empty input"),
+        ("## Zero blockers, however one is open\n\n- A: render() breaks on empty input\n",
+         "A: render() breaks on empty input"),
+        ("## 막는 지적 없음. 다만 하나는 남았다\n\n- A: 빈 목록에서 죽는다\n", "A: 빈 목록에서 죽는다"),
     )
 
     def test_a_blocking_finding_is_never_read_as_none(self):
@@ -508,6 +557,10 @@ class UnitPromptTest(UnitLegBase):
                      "do not publish task branches or PRs", "retire only your own scratch",
                      "authorize cleanup of user worktrees, native HOME", "Do not implement fixes or widen the review"):
             self.assertIn(line, prompt)
+        self.assertIn("`Final verdict: changes requested — head <sha>`", prompt)   # the form the runtime reads
+        self.assertLess(prompt.index("Final verdict: changes requested"), prompt.index("For the terminal final response"))
+        import worker_bootstrap as wb
+        self.assertEqual(wb.unit_verdict_prompt("support"), "")      # only a review's judgment is read
         self.assertNotIn("dispatch another worker", prompt)     # a later route lets a worker call this one
         for owner_only in ("Portable Worker Kernel", "Worker Type", "supervised owner", "owner-execution",
                            "Route steps", "runtime_wait"):
