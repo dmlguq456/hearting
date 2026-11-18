@@ -236,7 +236,7 @@ def _log_protection(ctx, attempt, *, probe_processes):
     # Attempt logs remain route evidence for a live workflow even when the
     # attempt's separate worker HOME has no remaining consumer.
     verdict = _protections(ctx, "", attempt, probe_processes=probe_processes,
-                           protect_open_route=True)
+                           protect_open_route=True, legacy_empty_tombstone=True)
     row = ctx.snapshot.rows.get(attempt)
     if (verdict.kind == "eligible" and row is not None
             and row.meta.get("worker_type") == "review"
