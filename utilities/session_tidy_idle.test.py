@@ -732,6 +732,31 @@ class IdleObserverTests(unittest.TestCase):
         self.assertEqual((held["status"], held["reason"]), ("skipped", "form-open"))
         self.assertEqual(text, "")  # skipped work has no user notice
 
+    def test_a_screen_that_was_never_read_keeps_what_the_look_was_waiting_for(self):
+        # 11-18: every look of a native session answered queued/screen-unknown, and the booking
+        # ended with only that reason; the record now also says what the read was waiting for.
+        clock = [1000.0]
+
+        def look(_path, _nonce, _pane):
+            return {"accepted": "queued", "reason": "screen-unknown", "detail": "not-quiet"}
+
+        def wait(seconds):
+            clock[0] += max(float(seconds), 1.0)
+        with self.iso.patched_environ(self.extra), \
+                mock.patch.object(clear, "herdr_command", return_value=str(self.iso.root / "fake-herdr")), \
+                mock.patch.object(clear, "_start_helper", return_value=12345), \
+                mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]), \
+                mock.patch.object(clear, "_run_idle_card_request", side_effect=look):
+            self.assertEqual(self.observe_claude(now=1000), "booking=scheduled")
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            booking = clear.read_reservation(seat.key)
+            outcome = clear.run_helper(seat.key, booking["nonce"], wait=lambda *_a: "idle",
+                                       steward=mock.Mock(), continuer=mock.Mock(), sleep=wait)
+            held = clear.read_reservation(seat.key)
+        self.assertEqual(outcome, "skipped")
+        self.assertEqual((held["status"], held["reason"], held["detail"]),
+                         ("skipped", "screen-unknown", "not-quiet"))
+
     @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
     def test_an_idle_result_line_tells_sent_from_not_sent(self):
         for state in ("sending", "sent", "unverified", "accepted"):

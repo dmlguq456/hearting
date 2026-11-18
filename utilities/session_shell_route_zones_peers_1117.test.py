@@ -5,7 +5,7 @@ has a PEERS line.
     each zone's name and mark have their own color (none a harness color or the steward pink); a zone with no rows has no
     rule; no row at all is the empty box it was. The requests are the third zone (no `PEER REQUEST` tab in the title); in
     the `direct` zone the line has no `(direct)`.
-  * The head's `PEERS` line, under GIT: `[c7] ⚑ ─ [d4] [3b]`, the same order from every window; numbers in their harness's
+  * The head's `PEERS` line, under GIT: `[c7] ⚑  ─ [d4] [3b]`, the same order from every window; numbers in their harness's
     color (this window's own bold), the flag the steward pink, the dash and the `·` dim; `+N` short of cells; no line where
     the window has no relation.
   * The data: the same steward relations Fleet reads (same repository, registered), handed to the panel by the cache.
@@ -31,7 +31,7 @@ const doer=(h,m,e,pct,bar)=>({harness:P(h),model_text:P(m),effort:P(e),ctx:P(pct
 const worker=(h,m,e,pct,bar,o={})=>({kind:'working',role:'worker',stage:'execute',elapsed:'12m',...o,paint:{glyph:P('⠸'),...doer(h,m,e,pct,bar),now:'route 기록에 갈래 칸을 더하는 중'}});
 const direct={id:'d1',zone:'direct',title:'README 넷째 줄 고침',kind:'working',state:'working',elapsed:'2m',shape:'직접',intensity:'direct',kind_word:'code',stages:[],paint:{glyph:P('⠸')}};
 const directQuick={...direct,id:'d2',intensity:'quick'};
-const dispatch={id:'a',zone:'dispatch',title:'갈래를 route에 기록',kind:'working',state:'working',elapsed:'1h52m',shape:'staged',stages:six(2),kind_word:'code',intensity:'standard',role:'owner',
+const dispatch={id:'a',zone:'dispatch',title:'갈래를 route에 기록',kind:'working',state:'working',elapsed:'1h 52m',shape:'staged',stages:six(2),kind_word:'code',intensity:'standard',role:'owner',
   paint:{glyph:P('⠸'),...doer('claude','Opus 5.5','xhigh','41%','━━━━'),now:'검토 지적 둘을 고치고 시험을 다시 돌리는 중'},workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',target:'backend'})]};
 const bare={...dispatch,id:'b',zone:undefined,title:'zone-less route'};
 const requests=[{id:'q1',kind:'request-out',way:'→',who:'[c2]',title:'보낸 요청의 제목',status:'open'},{id:'q2',kind:'request-in',way:'◂',who:'[6c]',title:'받은 요청의 제목',status:'partial'}];
@@ -66,17 +66,21 @@ const rows=box(draw([direct,dispatch],requests,44,60));
 assert.deepEqual(rules(rows),[zr('direct'),zr('dispatch'),zr('request')]);
 assert.deepEqual(rows,[
  zr('direct'),
- '● code',
+ '● code                            2m',
  '  README 넷째 줄 고침',
- '                                  2m',
  zr('dispatch'),
- '● code(standard)',
+ '● code(standard) · staged 3/6 1h 52m',
  '  갈래를 route에 기록',
- '  ● owner  claude Opus 5.5 xhigh 41%',
- '    검토 지적 둘을 고치고 시험을 다…',
- '    staged 3/6: execute',
- '    ↳ ⠋ worker claude Sonnet 5.5 22%',
- '        route 기록에 갈래 칸을 더하…',
+ '  ● owner  claude Opus 5.5 xhigh',
+ '    CTX ━━━━──── 41%',
+ '    검토 지적 둘을 고치고 시험을',
+ '    다시 돌리는 중',
+ '  ┌ staged 3/6: execute ───────────┐',
+ '  │ ⠋ worker claude Sonnet 5.5     │',
+ '  │   CTX ━━────── 22% · 12m       │',
+ '  │   route 기록에 갈래 칸을       │',
+ '  │   더하는 중                    │',
+ '  └────────────────────────────────┘',
  zr('request'),
  '→ [c2]',
  '  보낸 요청의 제목',
@@ -85,6 +89,21 @@ assert.deepEqual(rows,[
  '  받은 요청의 제목',
  '  partial',
 ]);
+// The session rows are the same under `worker_box: none` apart from the box: the stage row and the `↳` indent come back.
+const none=box(draw([direct,dispatch],requests,44,60,{configuration:{worker_box:'none'}}));
+assert.deepEqual(none.slice(none.indexOf(zr('dispatch'))+1,none.indexOf(zr('request'))),[
+ '● code(standard)              1h 52m',
+ '  갈래를 route에 기록',
+ '  ● owner  claude Opus 5.5 xhigh',
+ '    CTX ━━━━──── 41%',
+ '    검토 지적 둘을 고치고 시험을',
+ '    다시 돌리는 중',
+ '    staged 3/6: execute',
+ '    ↳ ⠋ worker claude Sonnet 5.5',
+ '        CTX ━━────── 22% · 12m',
+ '        route 기록에 갈래 칸을',
+ '        더하는 중',
+],none.join('\n'));
 // The title counts the routes alone: the requests are a zone, not a tab.
 const top=draw([direct,dispatch],requests,44,60).find(s=>/ROUTE/.test(s));
 assert(/╭─ 2 ROUTE ─+╮/.test(top)&&!/REQUEST/.test(top),top);
@@ -98,7 +117,7 @@ assert(mixed.indexOf(zr('direct'))<mixed.findIndex(s=>/code\(standard\)/.test(s)
         self.node(r"""
 const one=box(draw([direct],[],44,60));
 assert.deepEqual(rules(one),[zr('direct')]);
-assert.equal(one.length,4,one.join('\n'));
+assert.equal(one.length,3,one.join('\n'));      // (11-18: the time stands on the first line, no row of its own)
 const disp=box(draw([dispatch],[],44,60));
 assert.deepEqual(rules(disp).map(s=>s.split(' ')[1]),['dispatch']);
 const reqs=draw([],requests,44,60);
@@ -114,13 +133,13 @@ assert.deepEqual(rules(box(draw([bare],[],44,60))).map(s=>s.split(' ')[1]),['dis
     def test_the_direct_zone_drops_the_direct_word_and_keeps_a_real_intensity(self):
         self.node(r"""
 const rows=box(draw([direct,directQuick,dispatch],[],44,60));
-assert(rows.includes('● code'),rows.join('\n'));
-assert(rows.includes('● code(quick)'),rows.join('\n'));
-assert(rows.includes('● code(standard)'));
+assert(rows.includes('● code                            2m'),rows.join('\n'));
+assert(rows.includes('● code(quick)                     2m'),rows.join('\n'));
+assert(rows.includes('● code(standard) · staged 3/6 1h 52m'));
 assert(!rows.some(s=>/\(direct\)|\(직접\)|직접/.test(s)));
 // With no intensity recorded the shape's word stood in the brackets; in the direct zone it is gone too.
 const noIntensity=box(draw([{...direct,intensity:undefined}],[],44,60));
-assert(noIntensity.includes('● code'),noIntensity.join('\n'));
+assert(noIntensity.includes('● code                            2m'),noIntensity.join('\n'));
 // The bottom layout reads `code` for it as well.
 const bottom=draw([direct,dispatch],[],110,16,{side:false}).join('\n');
 assert(!/code\(direct\)|code\(직접\)/.test(bottom)&&/│ code +2m/.test(bottom),bottom);
@@ -171,7 +190,7 @@ assert.equal(name('direct').foreground,208);assert.equal(name('dispatch').foregr
 const used=new Set([208,99,43]);assert.equal(used.size,3);
 for(const other of [116,176,147,219,150,186,217,230,114,253])assert(!used.has(other));
 // The direct route's mark is its zone's color; a dispatch route's is the working green; a request's arrow the request color.
-const mark=v.rows.find(r=>/● code\s+│ │$/.test(text(r)));
+const mark=v.rows.find(r=>/● code\s+2m\s+│ │$/.test(text(r)));
 assert(mark,'no direct first line');
 const dot=mark.find(p=>p.text==='●');
 assert.equal(dot.foreground,208);
@@ -218,9 +237,9 @@ const supervised={me:'d4',groups:[{steward:end('c7','hb_claude'),members:[end('d
 const both={me:'3b',groups:[{steward:end('c7','hb_claude'),members:[end('3b','hb_codex',true)]},{steward:end('3b','hb_codex',true),members:[end('a1','hb_claude'),end('a2','hb_opencode')]}]};
 const rowsOf=(peers,w=60)=>draw([],[],w,30,{peers});
 const line=(peers,w=60)=>rowsOf(peers,w).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trimEnd()).find(s=>/^PEERS/.test(s));
-assert.equal(line(supervising),'PEERS  [c7] ⚑ ─ [d4] [3b]');
-assert.equal(line(supervised),'PEERS  [c7] ⚑ ─ [d4]');
-assert.equal(line(both),'PEERS  [c7] ⚑ ─ [3b] · [3b] ⚑ ─ [a1] [a2]');
+assert.equal(line(supervising),'PEERS  [c7] ⚑  ─ [d4] [3b]');
+assert.equal(line(supervised),'PEERS  [c7] ⚑  ─ [d4]');
+assert.equal(line(both),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ [a1] [a2]');
 // The row stands right under GIT, with the labels' column; none for a window with no relation (and no empty row).
 const all=rowsOf(supervising).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trimEnd());
 const at=all.findIndex(s=>/^PEERS/.test(s));
@@ -257,21 +276,21 @@ const end=(tag,key,me)=>({tag,key,...(me?{me:true}:{})});
 const many=['a1','a2','a3','a4','a5'].map(t=>end(t,'hb_claude'));
 const peers={me:'3b',groups:[{steward:end('c7','hb_claude'),members:[end('3b','hb_codex',true)]},{steward:end('3b','hb_codex',true),members:many}]};
 const line=(w,p=peers)=>draw([],[],w,30,{peers:p}).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trimEnd()).find(s=>/^PEERS/.test(s));
-assert.equal(line(80),'PEERS  [c7] ⚑ ─ [3b] · [3b] ⚑ ─ [a1] [a2] [a3] [a4] [a5]');
-assert.equal(line(54),'PEERS  [c7] ⚑ ─ [3b] · [3b] ⚑ ─ [a1] [a2] [a3] +2');
+assert.equal(line(80),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ [a1] [a2] [a3] [a4] [a5]');
+assert.equal(line(56),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ [a1] [a2] [a3] +2');
 // The count stands inside the group whose numbers went (never after [3b] of the first group, which would read as that group's).
-assert.equal(line(46),'PEERS  [c7] ⚑ ─ [3b] · [3b] ⚑ ─ [a1] +4');
-assert.equal(line(40),'PEERS  [c7] ⚑ ─ [3b] · [3b] ⚑ ─ +5');       // the person's third sketch at the default panel width
+assert.equal(line(48),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ [a1] +4');
+assert.equal(line(42),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ +5');       // the person's third sketch, two cells wider for the second cell after each flag
 // Where the second group's head and count do not fit, the group goes whole and no count is put on the group left.
-assert.equal(line(36),'PEERS  [c7] ⚑ ─ [3b]');
-assert.equal(line(34),'PEERS  [c7] ⚑ ─ [3b]');
-// Two supervisors of one window: the second one's head with its count, else it goes whole (never `[c7] ⚑ ─ [3b] +1`).
+assert.equal(line(36),'PEERS  [c7] ⚑  ─ [3b]');
+assert.equal(line(34),'PEERS  [c7] ⚑  ─ [3b]');
+// Two supervisors of one window: the second one's head with its count, else it goes whole (never `[c7] ⚑  ─ [3b] +1`).
 const two={me:'3b',groups:[{steward:end('c7','hb_claude'),members:[end('3b','hb_codex',true)]},{steward:end('e1','hb_claude'),members:[end('3b','hb_codex',true)]}]};
-assert.equal(line(60,two),'PEERS  [c7] ⚑ ─ [3b] · [e1] ⚑ ─ [3b]');
-assert.equal(line(36,two),'PEERS  [c7] ⚑ ─ [3b]');
+assert.equal(line(60,two),'PEERS  [c7] ⚑  ─ [3b] · [e1] ⚑  ─ [3b]');
+assert.equal(line(36,two),'PEERS  [c7] ⚑  ─ [3b]');
 // One group: its own count after its own numbers.
 const one={me:'c7',groups:[{steward:end('c7','hb_claude',true),members:['d4','3b','a1','a2'].map(t=>end(t,'hb_claude'))}]};
-assert.equal(line(36,one),'PEERS  [c7] ⚑ ─ [d4] [3b] +2');
+assert.equal(line(36,one),'PEERS  [c7] ⚑  ─ [d4] [3b] +2');
 // No width draws a `+N` that follows the numbers of another group, or a row wider than the room.
 const cells=l=>[...l].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 for(const p of [peers,two,one])for(let w=34;w<=90;w++){
@@ -290,7 +309,7 @@ assert(bareRow&&!/PEERS/.test(bareRow),bareRow);
 const end=(tag,key,me)=>({tag,key,...(me?{me:true}:{})});
 const peers={me:'c7',groups:[{steward:end('c7','hb_claude',true),members:[end('d4','hb_claude'),end('3b','hb_codex')]}]};
 const rows=draw([direct],[],110,16,{side:false,peers});
-assert(rows.some(s=>/PEERS \[c7\] ⚑ ─ \[d4\] \[3b\]/.test(s)),rows.join('\n'));
+assert(rows.some(s=>/PEERS \[c7\] ⚑  ─ \[d4\] \[3b\]/.test(s)),rows.join('\n'));
 const none=draw([direct],[],110,16,{side:false});
 assert(!none.some(s=>/PEERS/.test(s)));
 """)

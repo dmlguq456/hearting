@@ -23,6 +23,19 @@ def _message_obligation_id(ref):
     return "message-" + ref
 
 
+def _own_window_value(peer_address, row, pid):
+    """The window value in a session's own environment, unless Claude's background daemon
+    started it: that value is the one the daemon inherited from whichever window first
+    started it, not one a window gave this session, so it is no hint of where it is."""
+    try:
+        if peer_address._service_hosted(pid):
+            return None
+    except Exception:
+        return None
+    env = row.get("env", {})
+    return env.get("HERDR_PANE_ID") or env.get("TMUX_PANE")
+
+
 def native_agent(harness, session_id, *, pane=None, server=None):
     """Return the existing agent-info shape from one exact native session.
 
@@ -49,7 +62,7 @@ def native_agent(harness, session_id, *, pane=None, server=None):
                 return None
             # The same window value the census row below reads: a shell-attached
             # session in a Herdr window has HERDR_PANE_ID, not TMUX_PANE.
-            pane = pane or row.get("env", {}).get("HERDR_PANE_ID") or row.get("env", {}).get("TMUX_PANE")
+            pane = pane or _own_window_value(peer_address, row, pid)
         else:
             matches = [item for item in rows if item.get("harness") == harness
                        and item.get("sid") == session_id]
@@ -62,7 +75,7 @@ def native_agent(harness, session_id, *, pane=None, server=None):
             if not proc:
                 return None
             birth = str(proc[5])
-            pane = pane or row.get("env", {}).get("HERDR_PANE_ID") or row.get("env", {}).get("TMUX_PANE")
+            pane = pane or _own_window_value(peer_address, row, pid)
         import pane_ownership
         live = pane_ownership._process(pid)
         if not live or str(live[5]) != birth:

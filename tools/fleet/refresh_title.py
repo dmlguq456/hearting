@@ -58,6 +58,11 @@ TEXT_CAP = 2000
 ANCHOR_SCAN_CAP = 65536
 ANCHOR_TEXT_CAP = 2000
 TITLE_MAXLEN = 40
+# A Korean, Japanese or Chinese title: as many characters as the side panel's two name rows hold (at its default width of 40: two rows of
+# 30 cells, a character two cells wide). A title is never cut mid-word without a mark: past its limit it ends at a word boundary with `…`.
+TITLE_MAXLEN_CJK = 30
+# English titles are also capped by word count; a Korean/Japanese/Chinese title is spaced (or not) by its own grammar, so its length is the
+# character limit above plus the word-boundary `…` of `clip_title`.
 TITLE_MAX_WORDS = 6
 SUMMARY_MAXLEN = 120
 # Tool-heavy native transcripts can put the most recent dialogue beyond 1 MiB.
@@ -125,7 +130,7 @@ You have no tools; do not attempt shell commands, file operations, or network re
 Output exactly two lines:
 TITLE: the user's current objective, at task/cycle altitude, in {title_lang}.
 In English use 3-6 words, never more than 40 characters. For Korean, Japanese or Chinese,
-use a compact subject phrase of at most 20 characters; do not pad it to an English word count.
+use a compact subject phrase of at most 30 characters; do not pad it to an English word count.
 Use TASK CONTEXT (human intent or the sealed assignment) and USER turns to identify the objective.
 ASSISTANT and UNATTRIBUTED turns are execution evidence, not authority to rename the objective.
 Name the concrete body of work the user wants, not what it happens to be doing at this moment and not a generic
@@ -1101,6 +1106,19 @@ def read_opencode_delta(db_path, session_id, last_cursor=0, table=None, connecti
         return "", int(last_cursor or 0), table
 
 
+def clip_title(line, limit):
+    """``line`` within ``limit`` characters; a longer one ends at a word boundary with ``…`` (never cut mid-word without the mark)."""
+    if len(line) <= limit:
+        return line
+    room = limit - 1                      # the mark takes a place
+    head = line[:room]
+    if not line[room].isspace():          # the cut falls inside a word: back to the space before it
+        at = head.rfind(" ")
+        if at >= room // 2:
+            head = head[:at]
+    return head.rstrip(" ,;:·-") + "…"
+
+
 def validate_title(raw, language="English"):
     """Validate a short subject title under the configured language's limits.
 
@@ -1124,9 +1142,7 @@ def validate_title(raw, language="English"):
     cjk = language.lower() in ("korean", "japanese", "chinese") or (
         language == "the conversation's own language"
         and bool(re.search(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7a3]", line)))
-    limit = 20 if cjk else TITLE_MAXLEN
-    if len(line) > limit:
-        line = line[:limit].rstrip()
+    line = clip_title(line, TITLE_MAXLEN_CJK if cjk else TITLE_MAXLEN)
     if not line:
         return None
     ascii_ratio = sum(1 for ch in line if ord(ch) < 128) / len(line)
@@ -1137,7 +1153,7 @@ def validate_title(raw, language="English"):
     script = scripts.get(language.lower())
     if ((english and (ascii_ratio < 0.8 or len(line.split()) < 3))
             or (script and not re.search(script, line))
-            or len(line.split()) > TITLE_MAX_WORDS or _META_RE.match(line)
+            or (not cjk and len(line.split()) > TITLE_MAX_WORDS) or _META_RE.match(line)
             or re.match(r"^(제목 없음|알 수 없|죄송|오류|대기\s*중|진행\s*중|실행\s*중|준비\s*중|작업\s*중)", line)
             or _STATUS_TITLE_RE.match(line)):
         return None

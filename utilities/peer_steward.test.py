@@ -91,6 +91,12 @@ def _register_completion_fixture(jobs, attempt, metadata):
 
 class _TmpRootMixin:
     def setUp(self):
+        # Whether the calling session descends from a service (Claude's background daemon, a
+        # Codex app-server) is a value the test sets, not what this machine's process tree says:
+        # the same test gives the same result run from a plain shell or under such a service.
+        pin = mock.patch.object(peer_address, "_service_hosted", return_value=False)
+        pin.start()
+        self.addCleanup(pin.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.tmp_root = Path(self._tmp.name)

@@ -226,6 +226,10 @@ def conform(live, samples, path, problems):
                 if live[key] is not None and not isinstance(live[key], str):
                     problems.append(f"{path}.done_result: expected optional outcome string")
                 continue
+            if path == "routes[]" and key == "field":               # 11-18: the field a route records (its kind word's hue)
+                if live[key] is not None and not isinstance(live[key], str):
+                    problems.append(f"{path}.field: expected optional string")
+                continue
             if path == "system.gpu_processes[]" and key == "session_tag":
                 if live[key] is not None and not isinstance(live[key], str):
                     problems.append(f"{path}.session_tag: expected optional string")

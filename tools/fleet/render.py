@@ -67,7 +67,8 @@ from .model import (fmt_min, dash, project_of, exec_child_is_wait,
                     current_attempt_rank)
 from . import gitinfo, titles
 from .config import ui_text
-from .palette import _HUE_OF, hue_colors
+from .palette import _HUE_OF, _KIND_256, _ZONE_256, hue_colors
+from .palette import KIND_FIELDS as _KIND_FIELDS
 from .work_titles import readable as _readable_name, resource_name as _resource_name, resource_title_key, subject_command
 from .collectors import compute_hosts as _compute_hosts
 from .refresh import LiveSnapshot, RefreshPump, background_read, as_snapshot
@@ -102,7 +103,7 @@ from .render_cells import (  # noqa: F401
     _route_current_index, _ROUTE_STAGE_ZONE_MAX, _route_zone_width, _SESSION_CELL_MAX,
     _session_routing_column, _short_model_id, _shorten_model_suffix, _SPIN, _STAGE_RESERVE,
     _STAGE_ROLE, _stage_role_label, _STAGE_ZONE_MAX, _state_key, _STEWARD_PAIR, _TAG_W,
-    _TINT_PAIR_START, _TINT_RGB_1000, _TITLE_MAX, _TWO_LINE_CUTOFF, _USAGE_BADGE_TEXT, _WIDE,
+    _KIND_PAIR_START, _TINT_PAIR_START, _ZONE_PAIR_START, _TINT_RGB_1000, _TITLE_MAX, _TWO_LINE_CUTOFF, _USAGE_BADGE_TEXT, _WIDE,
     _WIDE_STAGE_GAP, _WIDE_TIME_GAP, _wt_count, curses, NAME_KEYS,
 )
 from .render_stages import (  # noqa: F401
@@ -466,6 +467,9 @@ def _init_colors():
         if curses.COLORS >= 256:
             hues = hue_colors(curses.COLORS)
             n_pair = _TINT_PAIR_START
+            # The tint pairs end below the kind and zone pairs; a hue added past that would overwrite them, so tints stand down instead.
+            if n_pair + len(_TINT_LVL) * len(hues) > _KIND_PAIR_START:
+                raise ValueError("tint pairs would reach the kind pairs")
             for tch, lvl in _TINT_LVL.items():
                 for hch, fg in hues.items():
                     curses.init_pair(n_pair, fg, lvl)
@@ -499,6 +503,35 @@ def _init_colors():
     _COLOR["head"] = curses.A_DIM
     _COLOR["section_head"] = _COLOR.get("soft", 0) | curses.A_BOLD
     _COLOR["unknown"] = curses.A_DIM
+    # 11-18 (route kind color): the kind word and its bracket in the field's 256-color hue (the word bold, the bracket dim,
+    # plain or bold by its intensity); under 256 colors they read as before (the word as `grp`, the bracket dim).
+    for number, field in enumerate(_KIND_FIELDS):
+        hue = None
+        try:
+            if curses.COLORS >= 256:
+                curses.init_pair(_KIND_PAIR_START + number, _KIND_256["kind_" + field], bg)
+                hue = curses.color_pair(_KIND_PAIR_START + number)
+        except Exception:
+            hue = None
+        if hue is None:
+            _COLOR["kind_" + field] = _COLOR.get("grp", 0)
+            for weight in "qsb":
+                _COLOR["kind%s_%s" % (weight, field)] = curses.A_DIM
+        else:
+            _COLOR["kind_" + field] = hue | curses.A_BOLD
+            _COLOR["kindq_" + field] = hue | curses.A_DIM
+            _COLOR["kinds_" + field] = hue
+            _COLOR["kindb_" + field] = hue | curses.A_BOLD
+    # 11-18 (review of #1715, follow-up 4): the three zone names (the route box's `─ direct ─`, and the request line's `→`) wear their
+    # hue where no row tint stands too: `_key_attr` reads these only without a tint (a tinted cell composes its own pair).
+    for number, zone in enumerate(_ZONE_256):
+        try:
+            if curses.COLORS < 256:
+                raise ValueError
+            curses.init_pair(_ZONE_PAIR_START + number, _ZONE_256[zone], bg)
+            _COLOR[zone] = curses.color_pair(_ZONE_PAIR_START + number)
+        except Exception:
+            pass   # (under 256 colors the zone name keeps its plain weight, as before)
 
 
 def _attr(key):
