@@ -8923,10 +8923,11 @@ def _cli_main():
     args = ap.parse_args()
 
     # A failed background exchange is reported once, by the next command a
-    # person or agent runs. Hook-driven reads (candidates, inject) stay silent:
+    # person or agent runs. Hook-driven reads (candidates, inject, recall-gate)
+    # and the runtime's worker-start read (bootstrap-context) stay silent:
     # nobody sees their stderr, so they must not use the notice up.
     no_touch_read = args.cmd in ("show", "recall") and getattr(args, "no_touch", False)
-    if not no_touch_read and args.cmd not in ("candidates", "inject", "recall-gate"):
+    if not no_touch_read and args.cmd not in ("candidates", "inject", "recall-gate", "bootstrap-context"):
         _exchange_consume_notice()
     probe_deadline = None
     if args.cmd == "candidates":

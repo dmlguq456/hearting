@@ -68,6 +68,14 @@ boot --query 'capmarker' --limit 99 --max-bytes 999999 > "$TMP/clamp.out"
 [ "$(snapshot)" = "$before" ]
 [ ! -e "$MEM_RECALL_EVENTS" ]
 [ ! -e "$MEM_RECALL_RECEIPTS" ]
+# ...and no exchange bookkeeping: a pending sync-failure notice stays for the next foreground
+# command (the read must not consume it), and no schedule lock appears in the store
+printf '%s' '{"failure_notice": {"reason": "remote-unavailable"}}' > "$MEM_STORE/.exchange-state.json"
+state_before=$(sha256sum < "$MEM_STORE/.exchange-state.json")
+boot --query 'firstgroupmarker' --topic 'unit:qa/code-review' --topic 'field:code' > /dev/null
+[ "$(sha256sum < "$MEM_STORE/.exchange-state.json")" = "$state_before" ]
+[ ! -e "$MEM_STORE/.exchange-schedule.lock" ]
+rm -f "$MEM_STORE/.exchange-state.json"
 
 # 4) no query, no match: silent
 [ -z "$(boot)" ]
