@@ -93,6 +93,58 @@ class MeasureTest(Fixture):
         self.assertEqual(M.measure(rows, self.root, cut, "after", {})["qa/test"]["attempts"], 4)
 
 
+# A line the form review marked as exposed when moved below must stay in the musts section.
+MUSTS = {
+    "qa/code-review": ("Read-only", "spec/pipeline_state.yaml", "Round 1 — front-load", "Round ≥ 2 — closure check",
+                       "Never fail a round on a", "Verdict tokens:", "they are not caps", "Unchanged code is NOT a review target"),
+    "qa/test": ("stop-on-failure", "Handed-over checks", "Never remove or relocate an existing reviewer", "runtime observation",
+                "tools/figure-semantic-verify.py", "failure, not a skip", "hangs beyond ~60 s", "Verdict tokens:"),
+    "dev/backend": ("DB migrations, core auth logic, and deployment infrastructure require explicit", "never silently diverge from spec",
+                    "search every caller", "Preserve inputs and outputs"),
+    "editorial/report": ("Carry the source description and distinguishing comparison condition", "No new QA", "Remaining risk is part of the report",
+                         "Write the report to the assigned artifact path"),
+}
+
+
+class TwoLayerRenderTest(unittest.TestCase):
+    """What the runtime carries to the worker: both headings once, musts first, the musts intact, the end-of-work form unchanged."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import worker_bootstrap
+        cls.wb = worker_bootstrap
+
+    def render(self, unit):
+        return self.wb.render_worker_bootstrap(ROOT, M.WORKER_TYPE[unit], unit=unit)
+
+    def test_both_headings_once_and_the_musts_come_first(self):
+        for unit in M.UNITS:
+            with self.subTest(unit=unit):
+                text = self.render(unit)
+                self.assertEqual((text.count("\n## 지킬 것\n"), text.count("\n## 참고\n")), (1, 1))
+                self.assertLess(text.index("\n## 지킬 것\n"), text.index("\n## 참고\n"))
+
+    def test_the_exposed_lines_sit_in_the_musts_section(self):
+        for unit, anchors in MUSTS.items():
+            with self.subTest(unit=unit):
+                text = self.render(unit)
+                musts = text[text.index("\n## 지킬 것\n"):text.index("\n## 참고\n")]
+                for anchor in anchors:
+                    self.assertIn(anchor, musts, anchor)
+
+    def test_review_units_carry_the_stance_once_and_the_closing_form_is_untouched(self):
+        for unit in M.UNITS:
+            with self.subTest(unit=unit):
+                text = self.render(unit)
+                self.assertEqual(text.count("Refute first"), 1 if unit in M.REVIEW_UNITS else 0)
+                self.assertIn("artifact: <canonical path | ->\nverdict: PASS | FAIL | BLOCKED\nblocker: none | <one line>", text)
+
+    def test_a_unit_that_is_not_in_the_pilot_keeps_its_single_body(self):
+        text = self.wb.render_worker_bootstrap(ROOT, "stage", unit="dev/frontend")
+        self.assertNotIn("\n## 지킬 것\n", text)
+
+
 class RenderAndCliTest(Fixture):
     def test_render_bytes_cover_the_four_units_and_a_ref_renders_the_same(self):
         here = M.render_bytes(ROOT)
