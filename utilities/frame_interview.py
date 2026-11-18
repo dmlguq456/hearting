@@ -396,7 +396,7 @@ def approval_question_id(leg, key) -> str:
 # those parts keep their gate for the person.
 FRAME_REVIEW_SOURCES = ("user", "supervisor")
 PERSON_ONLY_START_APPROVALS = ("deploy", "handback", "preview")
-# A supervisor answer the runtime records for the depth-0 session when both frame legs agree, no
+# A supervisor answer the runtime records for the depth-0 session when the frame legs agree, no
 # start approval is in scope and no question is left (WORKFLOW §0.4): the existing on-behalf
 # authority, labelled so it is never mistaken for a session's own judgement.
 AUTOMATIC_BASIS = "automatic-agreement"

@@ -393,7 +393,7 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         if (response.get("basis") == FI.AUTOMATIC_BASIS) != bool(automatic) or (
                 automatic and actor_kind != "supervisor"):
             raise ValueError("gate-release-authority-refused: only the runtime records an automatic agreement, "
-                             "and only when both frames agree with nothing left to choose")
+                             "and only when nothing is left to choose")
         binding = next((row for row in route.get("human_gate_bindings", [])
                         if row.get("gate") == "frame-review"), {})
         authority = (resolution.get("release_authority") or
@@ -1322,17 +1322,20 @@ AUTOMATIC_DIRECTION_DIR = "shards/frame/automatic"
 def _automatic_direction(route, rows, output):
     """`(interview, answers)` the runtime records itself when there is nothing to choose, else None.
 
-    Only when both frame legs returned valid, equal proposals, no start approval is in scope,
-    neither brief lists a question only the user can answer, and the caller is not a registered
-    worker. The answer is the depth-0 session's existing on-behalf (`supervisor`) authority with
-    basis `automatic-agreement`; every other case asks the person exactly as before (WORKFLOW §0.4)."""
+    Only when both frame legs returned valid, equal proposals -- or the one leg of a one-leg frame
+    returned a valid proposal, which has no second leg to disagree with -- no start approval is in
+    scope, no brief lists a question only the user can answer, no part needs the repository prepared,
+    the proposal stays inside the intent's 안 할 것, and the caller is not a registered worker. The
+    answer is the depth-0 session's existing on-behalf (`supervisor`) authority with basis
+    `automatic-agreement`; every other case asks the person exactly as before (WORKFLOW §0.4)."""
     import frame_interview as FI
     if os.environ.get("AGENT_DISPATCH_REGISTERED_WORKER") == "1":
         return None
-    if len(rows) != 2 or not RP.proposals_equal(rows) or any(_start_approval_keys(row) for row in rows):
+    single = len(rows) == 1 and rows[0]["proposal"] is not None
+    if not (single or RP.proposals_equal(rows)) or any(_start_approval_keys(row) for row in rows):
         return None
-    if any(row.get("repository_preparation") for row in rows):
-        return None
+    if any(row.get("repository_preparation") or row.get("read_notes") for row in rows):
+        return None   # a part the compile cut or left out is a difference only the person can see
     texts = []
     for row in rows:
         try:
@@ -1354,21 +1357,30 @@ def _automatic_direction(route, rows, output):
     summary = " / ".join(item for item in summaries if item) if RP.wording_differs(rows) else summaries[0]
     if len(summary) > FI.MAX_OPTION_MEANS_CHARS:
         summary = summary[:FI.MAX_OPTION_MEANS_CHARS - 1].rstrip() + "…"
+    translate = work_intent.ui_translator()
     question = {"id": FI.ROUTE_QUESTION_ID, "topic": "진행 방향", "kind": "yes-no",
-                "question": "두 갈래 검토가 같은 진행 방향을 냈습니다. 이대로 시작할까요?",
-                "options": [{"label": "진행", "means": summary or work_intent.ui_translator()("direction.default_means"),
+                "question": ("검토가 고를 것을 남기지 않았습니다. 이대로 시작할까요?" if single
+                             else "두 갈래 검토가 같은 진행 방향을 냈습니다. 이대로 시작할까요?"),
+                "options": [{"label": "진행",
+                             "means": summary or translate("direction.default_means_single" if single
+                                                           else "direction.default_means"),
                              FI.PROPOSAL_MARK: rows[0]["node"]},
                             {"label": "보류", "means": "시작하지 않고 방향을 다시 봅니다"}],
-                "recommended": 0, "why": "두 갈래가 같은 결론이고 사람이 고를 질문을 남기지 않았습니다"}
+                "recommended": 0,
+                "why": ("한 갈래 검토이고 사람이 고를 질문을 남기지 않았습니다" if single
+                        else "두 갈래가 같은 결론이고 사람이 고를 질문을 남기지 않았습니다")}
     interview = {"schema": FI.SCHEMA, "route_id": route["route_id"], "round": 1,
                  "understanding": understanding, "brief": brief, "questions": [question]}
+    if single:
+        interview["frame_legs"] = 1   # read only by the notice wording; the two-leg interview is unchanged
     if FI.validate({**interview, "summary": "-"}, intensity=route["effective_intensity"]):
         return None
     answers = {"schema": FI.ANSWERS_SCHEMA, "route_id": route["route_id"], "round": 1,
                "actor_kind": "supervisor", "basis": FI.AUTOMATIC_BASIS,
                "understanding_confirmed": True, "correction": "",
                "answers": {FI.ROUTE_QUESTION_ID: {
-                   "choice": 0, "note": "자동: 두 갈래가 같은 방향을 내고 물을 것을 남기지 않음"}}}
+                   "choice": 0, "note": ("자동: 한 갈래 검토가 물을 것을 남기지 않음" if single
+                                    else "자동: 두 갈래가 같은 방향을 내고 물을 것을 남기지 않음")}}}
     return interview, answers
 
 
@@ -1385,7 +1397,9 @@ def _automatic_direction_notice_text(interview, answers) -> str:
     except (KeyError, IndexError, TypeError, AttributeError):
         option = ""
     import work_intent
-    return work_intent.ui_translator()("direction.notice", option=f": {option}" if option else "")
+    one_leg = isinstance(interview, dict) and interview.get("frame_legs") == 1
+    key = "direction.notice_single" if one_leg else "direction.notice"
+    return work_intent.ui_translator()(key, option=f": {option}" if option else "")
 
 
 def _automatic_direction_notice(output) -> str:
