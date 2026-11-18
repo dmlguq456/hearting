@@ -181,12 +181,13 @@ class Parked(unittest.TestCase):
                 peer_message._PARKED_MEMO.clear()
                 with self.reads() as read:
                     list(peer_message._pending_rows(strict=True))     # a send's duplicate check: every row
-                self.assertEqual(read.call_count, 1)
+                # With no job held by any window the raw records say so and nothing is judged.
+                self.assertEqual(read.call_count, 1 if linked else 0)
                 peer_message._PARKED_MEMO.clear()
                 with self.reads() as read:
                     peer_message.pending_messages({"harness": "claude", "session_id": NEW})
                     peer_message.pending_messages({"harness": "claude", "session_id": OLD})
-                self.assertEqual(read.call_count, 1)                  # the table is shared inside the second
+                self.assertEqual(read.call_count, 1 if linked else 0)  # the table is shared inside the second
 
     def test_no_window_held_means_no_per_row_work(self):
         self.scene(parked=False)

@@ -273,6 +273,28 @@ def parked_successor(harness, sid, *, viewer_pid=None, viewer_start=None, home=N
         return None
 
 
+def _a_record_holds_a_job(home):
+    """False only when the record folder was read and no process record names ``parkedJobId``.
+
+    A cheap look at the raw bytes first: no viewer holds a job in the ordinary case, and then
+    nothing needs a process check. Any doubt answers True and the full read decides."""
+    directory = _dir_for("claude", home=home)
+    try:
+        names = os.listdir(directory)
+        if len(names) > _MAX_RECORDS:
+            return True
+        for name in names:
+            if re.fullmatch(r"[0-9]{1,10}\.json", name):
+                with open(os.path.join(directory, name), "rb") as handle:
+                    if b"parkedJobId" in handle.read(65537):
+                        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return False
+
+
 def parked_links(harness="claude", *, home=None):
     """Every link :func:`parked_successor` and :func:`parked_origin` would find, from ONE read of
     the live process records: ``{"successor": {viewer_sid: link}, "origin": {held_sid: link}}``.
@@ -283,7 +305,7 @@ def parked_links(harness="claude", *, home=None):
     live viewer holds a job. Any doubt or read failure gives an empty table."""
     table = {"successor": {}, "origin": {}}
     try:
-        if harness != "claude":
+        if harness != "claude" or not _a_record_holds_a_job(home):
             return table
         records = _live_claude_records(home)
         for item in records:
