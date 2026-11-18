@@ -51,38 +51,51 @@ _OBSERVATION_FIRST_WAIT_SPENT = set()
 _OBSERVATION_MIN_REFRESH_S = 0.25
 _PANE_INFO_CACHE = OrderedDict()
 _PANE_INFO_CACHE_LIMIT = 512
-# A process's last pane identity that a complete herdr read confirmed, so one failed
-# read does not turn every row's session id unknown. pid -> (proc_start, claim, seen).
+# What a complete herdr read concluded about one process, so a read that failed does not turn
+# every row's session id unknown. pid -> (proc_start, claim); claim None = "no pane claim" (a row
+# the pane never binds, such as a Claude run inside the session shell's own PTY, whose id comes
+# from the registry or tap, not the pane).
 _PANE_CLAIM_MEMORY = {}
-_PANE_CLAIM_CARRY_S = 60.0
 
 
 def _session_claims(sessions, panes, bindings, *, complete):
-    """``pane_process_claims`` that lets one failed herdr read keep a confirmed identity.
+    """``pane_process_claims`` that lets a failed herdr read keep what a complete read concluded.
 
-    Only a process whose pane this read could not observe (verdict ``unobserved``) gets its
-    earlier complete-read claim back, and only for the same pid and process start within
-    ``_PANE_CLAIM_CARRY_S``. A new session id from a read replaces it; a process that is gone,
-    restarted or reports no claim in a complete read keeps nothing.
+    A process whose pane this read could not tell (no claim, or ``unobserved``) gets the outcome of
+    its last complete read back while it is the same live process (same pid and process start):
+    that read's claim, or "no pane claim" (the ``unobserved`` guess is dropped so the registry and
+    tap decide, as they did in that read). There is no age limit: only a different or dead process,
+    or a complete read that reports a different outcome, ends it. A process no complete read ever
+    confirmed keeps nothing. Only a process that is gone is forgotten, not one this call's scope
+    (a harness filter) did not list.
     """
     from ..process_identity import pane_process_claims
+    from . import procscan
     claims = pane_process_claims(sessions, panes, bindings, complete=complete)
-    now = time.monotonic()
     with _OBSERVATION_LOCK:
-        alive = {s.pid for s in sessions}
-        for pid in [pid for pid in _PANE_CLAIM_MEMORY if pid not in alive]:
-            del _PANE_CLAIM_MEMORY[pid]
+        listed = {s.pid for s in sessions}
+        for pid, (start, _kept) in list(_PANE_CLAIM_MEMORY.items()):
+            if pid not in listed and procscan.read_proc_start(pid) != start:
+                del _PANE_CLAIM_MEMORY[pid]
         for s in sessions:
             claim = claims.get(s.pid)
+            confirmed = bool(claim and claim.get("session_id"))
             if complete:
-                if claim and claim.get("session_id"):
-                    _PANE_CLAIM_MEMORY[s.pid] = (s.proc_start, dict(claim), now)
+                # "No pane claim" is a conclusion only for a row the read could judge at all.
+                judged = (s.proc_start and not s.is_child and not s.app_server
+                          and procscan.read_proc_start(s.pid) == s.proc_start)
+                if confirmed or judged:
+                    _PANE_CLAIM_MEMORY[s.pid] = (s.proc_start, dict(claim) if confirmed else None)
                 else:
                     _PANE_CLAIM_MEMORY.pop(s.pid, None)
-            elif claim and claim.get("verdict") == "unobserved":
+            elif not confirmed:
                 kept = _PANE_CLAIM_MEMORY.get(s.pid)
-                if kept and kept[0] == s.proc_start and now - kept[2] <= _PANE_CLAIM_CARRY_S:
-                    claims[s.pid] = dict(kept[1])
+                if (kept and s.proc_start and kept[0] == s.proc_start
+                        and procscan.read_proc_start(s.pid) == s.proc_start):
+                    if kept[1] is not None:
+                        claims[s.pid] = dict(kept[1])
+                    else:
+                        claims.pop(s.pid, None)
     return claims
 
 
@@ -96,7 +109,26 @@ def _observation_module():
 
 
 def observation_view(session=None, *, refresh=False, wait_timeout=0.0):
-    """Reuse the last complete view while one read runs for this endpoint/socket."""
+    """The last complete view of this endpoint/socket; a read runs in the background.
+
+    Inside a collection pass, readers that do not wait share one answer: the first reader reports
+    the last finished read and starts the next one, which the next pass finds finished. Before,
+    the reader that happened to start the read got "refresh pending" (an incomplete view) although
+    the read ends in milliseconds, and which reader started it changed from pass to pass, so
+    every other pass lost its herdr evidence. Outside a pass (a hook, a one-shot call) a read
+    that is still running keeps the view pending.
+    """
+    from ..pass_scope import active, cached
+    if refresh or wait_timeout > 0 or not active():
+        return _observation_view(session, refresh=refresh, wait_timeout=wait_timeout)
+    scope = (session, os.environ.get("HERDR_SOCKET_PATH"), os.environ.get("HERDR_SESSION"),
+             os.environ.get("AGENT_HERDR_SESSION"))
+    return cached(("herdr-observation-view",) + scope,
+                  lambda: _observation_view(session, shared_pass=True),
+                  keep=lambda view: view is not None)
+
+
+def _observation_view(session=None, *, refresh=False, wait_timeout=0.0, shared_pass=False):
     try:
         observation = _observation_module()
         endpoint = observation.endpoint_name(session)
@@ -130,7 +162,7 @@ def observation_view(session=None, *, refresh=False, wait_timeout=0.0):
                 _OBSERVATION_VIEWS.pop(key, None)
                 _OBSERVATION_ERRORS.pop(key, None)
                 completed_now = False
-            elif completed_now:
+            elif completed_now and not shared_pass:
                 # All consumers in this tick share the just-completed result.
                 # Do not immediately start another read from this same call.
                 return _observation_view_for_key(key)
@@ -138,6 +170,15 @@ def observation_view(session=None, *, refresh=False, wait_timeout=0.0):
                 last_started = _OBSERVATION_LAST_STARTED.get(key, 0.0)
                 if time.monotonic() - last_started < _OBSERVATION_MIN_REFRESH_S:
                     return _observation_view_for_key(key)
+
+            if shared_pass and not refresh:
+                # Report the last finished read first: only a read an earlier pass started and that
+                # has not finished (a slow server) leaves it pending. Then start the next read.
+                shown = _observation_view_for_key(key)
+                if _OBSERVATION_FUTURES.get(key) is None:
+                    _OBSERVATION_FUTURES[key] = background_read(transport.observe)
+                    _OBSERVATION_LAST_STARTED[key] = time.monotonic()
+                return shown
 
             if future is None or refresh:
                 future = background_read(transport.observe)
@@ -221,6 +262,21 @@ def _observation_error(session=None):
     except Exception:
         return None
     return None
+
+
+def _observation_cause(session=None):
+    """``_observation_error`` plus how long a still-running read has been running (record only)."""
+    error = _observation_error(session)
+    if error not in ("herdr refresh pending", "herdr first read pending"):
+        return error
+    try:
+        observation = _observation_module()
+        key = (observation.endpoint_name(session),
+               os.path.realpath(observation.socket_path_for_endpoint(session)))
+        started = _OBSERVATION_LAST_STARTED.get(key)
+    except Exception:
+        started = None
+    return error if not started else "%s (read running %.1fs)" % (error, time.monotonic() - started)
 
 
 def _spend_first_observation_wait(session=None):
@@ -943,7 +999,10 @@ def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bind
         claims = _session_claims(sessions, panes, pane_bindings or {}, complete=False)
         for s in sessions:
             s._pane_session_claim = claims.get(s.pid)
-        return {"complete": False, "last_error": _observation_error() or "herdr 조회 불가"}
+        silent = ("no herdr view: no read has finished yet" if _observation_module().socket_path_for_endpoint()
+                  else "herdr agent list failed or herdr is absent")
+        return {"complete": False, "last_error": _observation_error() or "herdr 조회 불가",
+                "cause": _observation_cause() or silent}
     index = attached_index(agents)
     bindings = {} if pane_bindings is None else pane_bindings
     if pids is None:
@@ -1053,11 +1112,21 @@ def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bind
                 s._herdr_alias_pane = pane
     errors = list(getattr(pids, "errors", ()))
     last_error = "; ".join(errors) if errors else None
+    cause = last_error
+    if errors:
+        asked = sum(1 for pane in panes or () if isinstance(pane, dict) and pane.get("agent"))
+        cause = "pane process-info failed for %d/%d panes; first %s" % (len(errors), asked, errors[0])
     if not probe_ok and not last_error:
-        last_error = _observation_error() or "pane 조회 불가"
+        pending = _observation_error()
+        last_error = pending or "pane 조회 불가"
+        cause = _observation_cause() or (
+            "pane list unavailable" if panes is None
+            else "herdr view marked incomplete with no read pending or failed"
+            if observation is not None and getattr(observation, "complete", True) is not True
+            else "pane process evidence incomplete")
     if pane_of:
         try:
             _mark_corners(sessions, pane_rows, pane_of)
         except Exception:
             pass  # The corner hint is optional display; it never changes attachment.
-    return {"complete": probe_ok, "last_error": last_error}
+    return {"complete": probe_ok, "last_error": last_error, "cause": cause}

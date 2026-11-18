@@ -497,7 +497,8 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
         legs = len(RP.frame_legs(route))
         lines = ["  " + t("route.intensity.framed", requested=requested or "default", legs=legs,
                            bootstrap=route["effective_intensity"], source=source)]
-    if source == "shape-default" and shape != "framed":
+    unit_route = route.get("capability") == TOPO.UNIT_CAPABILITY   # one leg, no owner; its intensity is not a choice
+    if source == "shape-default" and shape != "framed" and not unit_route:
         lines.append("  " + t("route.intensity.hint"))
     capability = basis.get("compose-capability", {})
     if capability.get("source") == "compose-default":
@@ -523,8 +524,9 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
                    else node.get("model_profile") or "unknown")
         profiles.setdefault(anchor, []).append(profile)
     lines.append("  tiers: " + (" ".join(f"{node}={'+'.join(values)}" for node, values in profiles.items()) or t("route.none")))
-    workers = sum(n.get("dispatch_depth") == 2 or _frame_node(n) for n in nodes)
-    owners = int(shape != "framed" and route["effective_intensity"] != "direct")
+    workers = sum(n.get("dispatch_depth") == 2 or _frame_node(n) or (unit_route and RP.is_depth0_leg(n))
+                  for n in nodes)
+    owners = int(shape != "framed" and route["effective_intensity"] != "direct" and not unit_route)
     resources = [n["id"] for n in nodes if n.get("kind") == "resource-runner"]
     size = "  " + t("route.size", nodes=len(nodes), workers=workers, owners=owners,
                       resources=",".join(resources) or t("route.none"))

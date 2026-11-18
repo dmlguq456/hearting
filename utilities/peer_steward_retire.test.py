@@ -5492,6 +5492,59 @@ class NativeReceivingTurnRecoveryTest(_TmpRootMixin, unittest.TestCase):
                 self.assertEqual(materialize.call_count, 1,
                                  "R1_THREE_PASSES_ONE_REGISTERED_REDRIVE")
 
+    def test_a_unit_leg_whose_close_stays_refused_backs_off_like_an_owner(self):
+        import dispatch_batch_obligations as obligations
+        import dispatch_completion_join as join
+        import dispatch_pending_delivery as pending
+        import dispatch_registry_cache
+        from dispatch_terminal_commit import CompletionState
+
+        for label, extra in (("owner", "worker_type=owner,workflow_completion=runtime-v1"),
+                             ("unit leg", "worker_type=review,workflow_completion=runtime-v1,dispatch_depth=1")):
+            with self.subTest(label), tempfile.TemporaryDirectory() as temporary:
+                self.tmp_root = Path(temporary)
+                self.jobs_path = self.tmp_root / "jobs.log"
+                self.jobs_path.touch()
+                with mock.patch.dict(os.environ, {
+                        "AGENT_DISPATCH_JOBS": str(self.jobs_path),
+                        "AGENT_PEER_LEDGER_ROOT": str(self.tmp_root)}):
+                    store, duty, aid, sid = self._duty()
+                    pending.record_path(self.tmp_root, sid, "delivery-native-crash").unlink()
+                    self.jobs_path.write_text(self.jobs_path.read_text(encoding="utf-8").replace(
+                        f"attempt_id={aid}", f"attempt_id={aid},{extra}"), encoding="utf-8")
+                    dispatch_registry_cache.clear_cache()
+                    context = obligations.OwnerSettlementReadContext()
+                    now = [1000.0]
+                    context._clock = lambda: now[0]
+                    self.addCleanup(context.close)
+
+                    def resume():
+                        peer_steward._resume_registered_obligation(
+                            store.get(duty["id"]), store, settlement_context=context)
+
+                    with mock.patch.object(join, "materialize_after_terminal_close") as materialize, \
+                         mock.patch("dispatch_terminal_commit.owner_completion_state",
+                                    return_value=CompletionState("unknown")), \
+                         mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+                         mock.patch.object(obligations, "_owner_unsettled_dependency_paths",
+                                           return_value=(self.jobs_path,)), \
+                         mock.patch.object(peer_steward.peer_obligations,
+                                           "_registered_terminal_state", return_value=None), \
+                         mock.patch("dispatch_seat_handover._effective", return_value=(sid, "codex")):
+                        resume()
+                        self.assertEqual(materialize.call_count, 1)
+                        waits = []
+                        for _ in range(4):
+                            before = materialize.call_count
+                            for step in range(1, 700):
+                                now[0] += 1.0
+                                resume()
+                                if materialize.call_count > before:
+                                    waits.append(step)
+                                    break
+                        # The same 60, 120, 240, 480 second backoff for either, not a 6 second loop.
+                        self.assertEqual(waits, [60, 120, 240, 480], label)
+
     def test_shared_owner_retry_observes_new_pending_before_due(self):
         import dispatch_batch_obligations as obligations
         import dispatch_completion_join as join

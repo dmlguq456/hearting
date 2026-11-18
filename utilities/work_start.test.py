@@ -41,7 +41,8 @@ class WorkStartTest(unittest.TestCase):
         self.jobs = Path(self.tmp.name) / "jobs.log"
         self.route = {"route_id": "rt-probe", "route_hash": "sha256:probe", "slug": "task",
             "effective_intensity": "standard", "work_request": {"text": "Run the two commands", "owner_harness": "codex"},
-            "nodes": [{"id": n, "worker_type": "frame", "dispatch_depth": 1} for n in ("frame", "frame-alternative")]
+            "nodes": [{"id": n, "worker_type": "frame", "dispatch_depth": 1, "launch_authority": "depth-0"}
+                      for n in ("frame", "frame-alternative")]
                      + [{"id": "test", "depends_on": ["frame", "frame-alternative"]}],
             "dispatch_evidence": {"tuples": [{"child_harness": h, "status": "supported"} for h in ("codex", "opencode")]}}
         self.path = Path(self.tmp.name) / "route.json"
