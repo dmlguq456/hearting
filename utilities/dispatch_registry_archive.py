@@ -230,7 +230,7 @@ def _delivery_settled(root: Path):
 
     def settled(metadata):
         try:
-            state, _activity = _delivery_state(root, metadata)
+            state, _activity = _delivery_state(root, metadata, legacy_empty_tombstone=True)
         except Exception:  # noqa: BLE001 -- unreadable evidence keeps the row
             return False
         return state in ("none", "resolved")

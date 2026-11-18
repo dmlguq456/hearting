@@ -648,8 +648,14 @@ def _pruned_delivery_binding(value: dict, digest: str, delivery: str,
             and value.get("terminal_state") in TERMINAL_STATES)
 
 
-def _delivery_state(root: Path, meta: dict):
-    """(state, activity_ns): none | resolved | open | pending | unknown."""
+def _delivery_state(root: Path, meta: dict, *, legacy_empty_tombstone: bool = False):
+    """(state, activity_ns): none | resolved | open | pending | unknown.
+
+    ``legacy_empty_tombstone``: the 2026-09 pruner left a zero-byte
+    ``<record>.json.pruned`` only for a terminal (acked/expired) record, written
+    before the record was removed. A caller that opts in reads such a tombstone,
+    with its record gone, as resolved. Off by default: worker-home retention keeps
+    refusing it (its folders can hold credentials and evidence)."""
     if meta.get("delivery_intent") != "1":
         return "none", 0
     digest, delivery = meta.get("delivery_recipient_digest", ""), meta.get("delivery_id", "")
@@ -666,6 +672,10 @@ def _delivery_state(root: Path, meta: dict):
     try:
         found = _read_json(str(record), MAX_DELIVERY_BYTES)
         if found is None:
+            if legacy_empty_tombstone:
+                raw = _read_regular(str(record) + ".pruned", MAX_DELIVERY_BYTES)
+                if raw is not None and raw[0] == b"":
+                    return "resolved", raw[1]
             tomb = _read_json(str(record) + ".pruned", MAX_DELIVERY_BYTES)
             if tomb is None:
                 return "pending", 0
@@ -2582,7 +2592,7 @@ def _declared_index(ctx_snapshot: _Snapshot, root: Path, workers_real: str) -> d
 
 
 def _protections(ctx: _Context, key: str, attempt: str, *, probe_processes: bool,
-                 protect_open_route: bool = False):
+                 protect_open_route: bool = False, legacy_empty_tombstone: bool = False):
     """Use the shared read-only terminal/consumer decision for this home."""
     from dispatch_retention import terminal_protection
     from dispatch_contract import attempt_process_quiescence
@@ -2590,7 +2600,8 @@ def _protections(ctx: _Context, key: str, attempt: str, *, probe_processes: bool
 
     return terminal_protection(
         ctx, attempt, probe_processes=probe_processes,
-        delivery_state=lambda meta: _delivery_state(ctx.root, meta),
+        delivery_state=lambda meta: _delivery_state(
+            ctx.root, meta, legacy_empty_tombstone=legacy_empty_tombstone),
         replacement_state=lambda identity: _replacement_state(ctx.root, ctx.snapshot, identity),
         route_state=lambda meta: _route_evidence(ctx.jobs, meta),
         owner_state=home_consumer_evidence,

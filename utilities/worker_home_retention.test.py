@@ -1444,6 +1444,55 @@ class Deliveries(Fixture):
         self.assertEqual(self.unknown(self.sweep((24) / 7), "delivery-unknown"), 1)
         self.assertTrue(home.is_dir())
 
+    def test_legacy_empty_tombstone_settles_only_for_callers_that_opt_in(self):
+        # Log retention and the registry archive read the 2026-09 pruner's empty
+        # tombstone (record gone) as resolved; worker-home retention keeps refusing it.
+        import dispatch_log_retention as LR
+        import dispatch_registry_archive as A
+        home, record = self.intent("att-legacy")
+        record.parent.mkdir(parents=True)
+        tomb = Path(str(record) + ".pruned")
+        tomb.write_text("")
+        meta = R._Snapshot(self.jobs).rows["att-legacy"].meta
+        self.assertEqual(R._delivery_state(self.root, meta)[0], "unknown")
+        self.assertEqual(R._delivery_state(self.root, meta, legacy_empty_tombstone=True)[0], "resolved")
+        self.assertTrue(A._delivery_settled(self.root)(meta))
+        # The log-retention caller asks the shared decision for the opt-in read.
+        with mock.patch.object(R, "_protections",
+                               return_value=R._Verdict("keep", "stub")) as protections:
+            LR._log_protection(mock.Mock(snapshot=R._Snapshot(self.jobs)), "att-legacy",
+                               probe_processes=False)
+        self.assertTrue(protections.called)
+        self.assertIs(protections.call_args.kwargs.get("legacy_empty_tombstone"), True)
+        # Worker-home retention keeps the 10-15 protection on the same input.
+        self.assertEqual(self.unknown(self.expire(), "delivery-unknown"), 1)
+        self.assertTrue(home.is_dir())
+
+    def test_legacy_empty_tombstone_does_not_override_a_record_or_a_bad_tombstone(self):
+        import dispatch_registry_archive as A
+        _home, record = self.intent("att-legacy2")
+        record.parent.mkdir(parents=True)
+        tomb = Path(str(record) + ".pruned")
+        tomb.write_text("")
+        record.write_text("{not json")  # interrupted prune: the record still decides
+        meta = R._Snapshot(self.jobs).rows["att-legacy2"].meta
+        self.assertEqual(R._delivery_state(self.root, meta, legacy_empty_tombstone=True)[0], "unknown")
+        self.assertFalse(A._delivery_settled(self.root)(meta))
+        record.unlink()
+        tomb.write_text(json.dumps({"schema": P.PRUNE_TOMBSTONE_SCHEMA,
+                                    "delivery_id": record.name[:-5],
+                                    "recipient_digest": record.parent.name,
+                                    "attempt_ids": ["att-other"],
+                                    "parent_attempt_id": "att-parent",
+                                    "terminal_state": "acked"}))
+        self.assertEqual(R._delivery_state(self.root, meta, legacy_empty_tombstone=True)[0], "unknown")
+        fake = self.outside / "empty-fake"
+        fake.write_text("")
+        tomb.unlink()
+        tomb.symlink_to(fake)
+        self.assertEqual(R._delivery_state(self.root, meta, legacy_empty_tombstone=True)[0], "unknown")
+        self.assertFalse(A._delivery_settled(self.root)(meta))
+
     def test_unreadable_own_record_is_unknown(self):
         home, record = self.intent("att-d4")
         record.parent.mkdir(parents=True)
