@@ -75,6 +75,10 @@ def view_model():
 class TablePopupTest(unittest.TestCase):
     binding = {'harness': 'claude', 'sid': OWN_SID, 'native_pid': 2, 'native_start': '1'}
 
+    def setUp(self):
+        shell._HELD_VIEW.clear()
+        self.addCleanup(shell._HELD_VIEW.clear)
+
     def popup(self, **request):
         # The terminal's 256 colors, as the projection reads them (TERM).
         with mock.patch.object(shell, '_popup_view_model', lambda harness, sid, kind: view_model()), \
@@ -120,6 +124,37 @@ class TablePopupTest(unittest.TestCase):
             # (Where the row is narrow the state stands right after its first word, the rest on the rows under it.)
             self.assertIn('BLOCKED:', whole, columns)
             self.assertIn('사설PTY를열지못함—runtime_dir에node-pty빌드가없어휠시험을돌리지못했다', whole, columns)
+
+    def test_a_held_backend_draws_the_open_route_and_its_page_from_one_collection_only_when_asked_to_reuse_it(self):
+        calls = []
+
+        def collect(harness, sid, kind):
+            calls.append(sid)
+            return view_model()
+        opened = 'rt-aaaaaaaaaaaaaaa2'
+        with mock.patch.object(shell, '_popup_view_model', collect), \
+                mock.patch('fleet.session_tags.assigned_tag', lambda harness, sid: TAGS.get((harness, sid))), \
+                mock.patch.dict(os.environ, {'TERM': 'xterm-256color'}):
+            # No `reuse`: every read collects (the one-shot way and every other caller).
+            shell._panel_popup(self.binding, {'kind': 'routes', 'columns': 82})
+            shell._panel_popup(self.binding, {'kind': 'routes', 'columns': 82})
+            self.assertEqual(len(calls), 2)
+            # `reuse` after a collection: the unfolded route and its page come from it, with the time it was read.
+            table = shell._panel_popup(self.binding, {'kind': 'routes', 'columns': 82, 'open': opened, 'reuse': True})
+            page = shell._panel_popup(self.binding, {'kind': 'routes', 'columns': 82, 'open': opened, 'page': True,
+                                                     'rows': 20, 'reuse': True})
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(page['page'])
+            self.assertIsInstance(table['read_at'], int)
+            self.assertEqual(table['read_at'], page['read_at'])
+            self.assertGreater(table['read_at'], 0)
+            # Another session is not this collection.
+            other = {'harness': 'claude', 'sid': 'another-session', 'native_pid': 3, 'native_start': '1'}
+            shell._panel_popup(other, {'kind': 'routes', 'columns': 82, 'reuse': True})
+            self.assertEqual(len(calls), 3)
+            # A read without `reuse` collects again even when the slot is full.
+            shell._panel_popup(other, {'kind': 'routes', 'columns': 82})
+            self.assertEqual(len(calls), 4)
 
     def test_the_route_page_is_fleets_page_at_the_popup_height(self):
         from dataclasses import replace
