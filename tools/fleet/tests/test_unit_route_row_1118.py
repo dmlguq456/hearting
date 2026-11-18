@@ -87,6 +87,8 @@ class ChainedByRecords(unittest.TestCase):
         self.assertEqual(legs([node("f1", "route-frame"), node("f2", "route-frame", "active")], "f2", "frame", "active"),
                          [["frame", "active", None]])
         self.assertEqual(legs([node("f1", "route-frame"), node("u1", "unit", "open")], "u1", "unit"), [["unit", "active", None]])
+        # A route that names no route id is not the one a frame with no route id is "right before": `None` is no frame.
+        self.assertFalse(live._chain_links({"capability": "autopilot-code"}, {"capability": "route-frame"}, {}))
 
     def test_a_route_of_another_campaign_is_not_the_frames(self):
         def line(rid, capability, key, ts):

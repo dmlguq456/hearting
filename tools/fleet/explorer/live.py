@@ -790,7 +790,8 @@ def _chain_links(node, earlier, frames):
     if isinstance(plan, Mapping) and isinstance(before, Mapping):
         return (plan.get("decision") == before.get("decision") and plan.get("digest") == before.get("digest")
                 and (_num(before.get("index")) or 0) < (_num(plan.get("index")) or 0))
-    return earlier.get("capability") == "route-frame" and earlier.get("route_id") == frames.get(node.get("route_id"))
+    frame = frames.get(node.get("route_id"))
+    return earlier.get("capability") == "route-frame" and frame is not None and earlier.get("route_id") == frame
 
 
 def _chain_legs(nodes, rid, own, status, progress):

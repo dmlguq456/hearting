@@ -1154,7 +1154,7 @@ assert(bottom.some(s=>/code-review claude Opus 5\.5 xhigh .*│ code/.test(s)&&!
     def test_a_unit_routes_narrow_worker_line_gives_up_its_values_and_keeps_its_name_last(self):
         # 11-19 (independent review of #1736): the effort goes first, then the harness, then the model, and the unit's name is the last
         # word on the line; a narrower line never shows a word a wider one lacks. Only a name with no room goes (whole), and the line is
-        # then drawn as one with no name is. Under the route, a unit's name does not change the row of another route in the box.
+        # then drawn as one with no name is. Under the route, a unit route among other routes keeps every row's columns at the same cells and costs no other route a word.
         script = self.FIXTURE + r'''
 const unit={...oneShot,id:'u',title:'PR 독립 검토',kind_word:'code',kind_field:'code',unit_route:true,unit_word:'code-review',role:'worker',elapsed:'17m',
  stages:[],paint:{...oneShot.paint,model_text:P('Opus 5.5'),ctx:P('14%'),gauge_row:[P('━───── 14%')]}};
@@ -1176,12 +1176,45 @@ for(const form of ['claude Opus 5.5 xhigh','claude Opus 5.5','Opus 5.5',''])asse
 const longName={...unit,unit_word:'research-survey-with-a-very-long-name'};
 const narrow=draw([longName],26,60);
 assert(!narrow.some(s=>/research-s/.test(s))&&narrow.some(s=>/⠋ .*Opus 5\.5/.test(s)),narrow.join('\n'));
-// Under the route: the owner route's row reads the same with and without a unit route beside it.
+// Under the route (`side:false`), a unit route among other routes: its doer cell never borrows from its own title, so every route row
+// of the box has its columns at the same cells; the cell folds like the narrow worker line (effort, harness, model) with the name
+// last, and stands whole where the box has room to spare; no other route's row loses a word or a letter of its title for it.
 const own={...oneShot,id:'o',title:'Fix the governor cap',kind_word:'code',intensity:'quick',role:'owner',owner_paint:oneShot.paint};
-const ownRow=rows=>rows.find(s=>/^│ │ [⠋●✓] Fix/.test(s));
-for(let width=55;width<=89;width++){
-  const alone=ownRow(draw([own],width,20,{side:false})),beside=ownRow(draw([own,unit],width,20,{side:false}));
-  assert(alone&&alone===beside,'width '+width+': `'+alone+'` vs `'+beside+'`');
+const stagedRoute={...staged,kind_word:'code',intensity:'standard'};
+const rowsOf=(routes,width)=>draw(routes,width,20,{side:false}).filter(s=>/^│ │ [⠋●✓] /.test(s));
+const barsOf=row=>{const out=[];let at=0;for(const c of row){if(c==='│')out.push(at);at+=cells(c);}return out.slice(2);};   // cells, not characters (Korean titles)
+const wordsOf=row=>row.replace(/[│╭╮╰╯─]/g,' ').trim().split(/\s+/);
+const doerOf=row=>row.split('│')[3].trim();
+const noName={...unit,unit_word:''};   // the same route as the main branch draws it: no name in front of its doer cell
+for(const [label,mixed,rest] of [['owner+unit',[own,unit],[own]],['owner+unit+staged',[own,unit,stagedRoute],[own,stagedRoute]]]){
+  let wider=null;
+  for(let width=200;width>=40;width--){
+    const rows=rowsOf(mixed,width),without=rowsOf(rest,width),plain=rowsOf(mixed.map(r=>r===unit?noName:r),width);
+    assert.equal(rows.length,mixed.length,label+' '+width);
+    // 1. one set of columns: the title│doer and the doer│gauge bars stand at the same cells on every route row.
+    // (Widths 48 and 49 of the box with a staged route are left out: the staged row's own doer cell is clipped there by the row's
+    // end, on main as well, before this change; it is not a unit route's doing.)
+    if(!(rest.length>1&&width>=48&&width<=49))for(const k of [0,1])assert.equal(new Set(rows.map(row=>barsOf(row)[k])).size,1,label+' bar '+k+' at '+width+'\n'+rows.join('\n'));
+    // 2. the unit route costs the other routes nothing: their words and their title letters are what they are without it.
+    const others=mixed.map((r,i)=>r===unit?null:rows[i]).filter(Boolean);
+    others.forEach((row,i)=>assert.deepEqual(wordsOf(row),wordsOf(without[i]),label+' '+width+'\n'+rows.join('\n')+'\n--\n'+without.join('\n')));
+    // 3. the unit route's title is whole wherever the title is whole with no name in front of its doer cell (the main branch's row).
+    const at=mixed.indexOf(unit);
+    if(plain[at].includes('PR 독립 검토'))assert(rows[at].includes('PR 독립 검토'),label+' title cut at '+width+'\n'+rows.join('\n'));
+    // 4. the name shows at every width where the column holds it (the column is 21 cells wide in these boxes; below 49 cells the doer
+    // column is no longer drawn), and a narrower row never shows a word a wider one lacks.
+    if(width>=49){
+      const cell=doerOf(rows[at]),got=cell.split(/\s+/);
+      assert(got.includes('code-review'),label+' name missing at '+width+'\n'+rows.join('\n'));
+      if(wider)for(const w of got)assert(wider.includes(w),label+' width '+width+' shows `'+w+'` that '+(width+1)+' lacks: `'+cell+'`');
+      wider=got;
+    }
+  }
+  // 5. the whole cell (`code-review claude Opus 5.5 xhigh`) shows from some width on and at every width above it, 200 included.
+  const full=[];for(let width=49;width<=200;width++)full.push(doerOf(rowsOf(mixed,width)[mixed.indexOf(unit)])==='code-review claude Opus 5.5 xhigh');
+  const first=full.indexOf(true);
+  assert(first>=0&&first+49<=140&&full.slice(first).every(Boolean),label+' whole cell from '+(first+49)+': '+full.map(x=>x?1:0).join(''));
+  assert.equal(doerOf(rowsOf(mixed,60)[mixed.indexOf(unit)]),'code-review Opus 5.5','shared column of 21 cells: the effort and the harness go, the name stays');
 }
 '''
         self.node(script, "panel-view.cjs")

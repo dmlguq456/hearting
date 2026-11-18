@@ -1003,8 +1003,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const columnWidth=(pick)=>Math.max(0,...listed.map(r=>size(pick(r))));
     // Under the route (`side:false`) a unit route's worker is its unit: the unit's short name leads the doer column, dim as a role word.
     // The column is as wide as the routes' harness, model and effort. A unit's name is counted only where every route of the box is a
-    // unit route (so no other route's row changes); beside any other route a unit route's name takes its cells from its own title
-    // instead, and is left out where the title would keep under 4.
+    // unit route (so no other route's row changes); beside any other route the name stands in the column's cells if they hold it
+    // (bottomLayout, doerCell), never in the title's.
     const owner=(r,named=true)=>{const p=leadPaint(r),u=named&&r.unit_route===true?clean(r.unit_word||'').trim():'';
       return [...(u?[text(u,'dim'),text(' ')]:[]),p.harness,p.model_text&&text(' '),p.model_text,p.effort&&text(' '),p.effort].filter(Boolean);};
     // A route whose record names its kind: its stage stands in the kind column, never as
@@ -1082,7 +1082,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // the stage word alone; the title keeps ten cells (or its whole width) through both. Short of that the rows keep the
     // earlier columns (title, owner, context, then the stage). 11-18: the command column (`>_ Bash`) is gone, as it is
     // beside the native area: a route reads its harness, model and context number, and its NOW on the row under it.
-    let bottomPlan;
     const planBottom=(ow,gw)=>{
       const kinds=listed.map(kindCell);
       const widths=Object.fromEntries(['kind','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
@@ -1094,25 +1093,47 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       return {level:''};
     };
+    // The bottom rows' columns are one set for the box. The doer column is as wide as the routes' harness, model and effort (a
+    // unit's name counted only where every route of the box is a unit route). Where a unit route is drawn among other routes its
+    // name stands in front of its doer cell when the column holds it (see doerCell), and the column is widened to the whole named
+    // cell only where that changes nothing else in the box: the same stage form, the same title width (so beside a stage cell with
+    // room to spare); widened or not, every row's columns stand at the same cells and no row lends another its cells.
+    let bottomSet;
+    const bottomLayout=()=>{
+      if(bottomSet)return bottomSet;
+      const gw=columnWidth(x=>leadPaint(x).gauge5||[]),base=columnWidth(x=>owner(x,listed.every(y=>y.unit_route===true))),named=columnWidth(x=>owner(x)),plan=planBottom(base,gw);
+      if(named>base&&plan.level){const wide=planBottom(named,gw);if(wide.level===plan.level&&wide.title===plan.title)return bottomSet={ow:named,gw,plan:wide};}
+      return bottomSet={ow:base,gw,plan};
+    };
+    // A unit route's doer cell in a column `width` wide: its name, then as much of the effort, harness and model as the column holds,
+    // in the order the narrow worker line gives them up (effort, then harness, then model; the name stays last). A column that
+    // holds not even the name gets the cell with no name.
+    const doerCell=(r,width)=>{
+      const unit=r.unit_route===true?clean(r.unit_word||'').trim():'',p=leadPaint(r);
+      if(!unit)return owner(r);
+      const H=p.harness?[p.harness]:[],M=p.model_text?[p.model_text]:[],F=p.effort?[p.effort]:[],keep=M.length?M:H;
+      for(const parts of [[H,M,F],[H,M],[[],keep,[]],[[],[],[]]]){
+        const rest=parts.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x),row=[text(unit,'dim'),...(rest.length?[text(' '),...rest]:[])];
+        if(size(row)<=width)return row;
+      }
+      return owner(r,false);
+    };
     function folded(r){
       // 11-18: beside the native area the one-row form is the leader's; under it the row reads the owner, whose NOW stands under it.
       const p=side?r.paint||{}:leadPaint(r),lead=[routeGlyph(r,p.harness),text(' ')];
       if(!side){
-        const ow=columnWidth(x=>owner(x,listed.every(y=>y.unit_route===true))),gw=columnWidth(x=>leadPaint(x).gauge5||[]);
-        const plan=bottomPlan||(bottomPlan=planBottom(ow,gw));
-        // A unit route's name stands in front of its doer cell and shortens this row's title by what it adds to the column.
-        const doerOf=room=>{const full=owner(r),extra=Math.max(0,size(full)-ow);return !extra?{cell:full,room}:room-extra>=4?{cell:full,room:room-extra}:{cell:owner(r,false),room};};
+        const {ow,gw,plan}=bottomLayout(),doer=doerCell(r,ow);
         if(plan.level){
-          const kind=plan.kinds[listed.indexOf(r)],cell=kind?kind[plan.level]:[],doer=doerOf(plan.title),name=cut(titleOf(r),doer.room);
-          const parts=[...lead,...name,pad(doer.room-size(name)),text(' │ '),...doer.cell,pad(ow-size(doer.cell)),text(' │ '),
+          const kind=plan.kinds[listed.indexOf(r)],cell=kind?kind[plan.level]:[],name=cut(titleOf(r),plan.title);
+          const parts=[...lead,...name,pad(plan.title-size(name)),text(' │ '),...doer,pad(ow-size(doer)),text(' │ '),
             ...(p.gauge5||[]),pad(gw-size(p.gauge5||[])),text(' │ '),...cell];
           const end=r.elapsed?[text(' '),text(r.elapsed)]:[],left=cut(parts,inner-size(end));
           return [...left,pad(inner-size(left)-size(end)),...end];
         }
         // The title gives way first, but keeps half of what the stage column would take.
         const avail=inner-(2+3+ow+3+gw+3+1+elapsedWidth),titleWidth=Math.min(columnWidth(x=>titleOf(x,'')),Math.max(6,avail-columnWidth(third),Math.floor(avail/2)));
-        const doer=doerOf(titleWidth),name=cut(titleOf(r),doer.room);
-        const base=[...lead,...name,pad(doer.room-size(name)),text(' │ '),...doer.cell,pad(ow-size(doer.cell)),text(' │ '),
+        const name=cut(titleOf(r),titleWidth);
+        const base=[...lead,...name,pad(titleWidth-size(name)),text(' │ '),...doer,pad(ow-size(doer)),text(' │ '),
           ...(p.gauge5||[]),pad(gw-size(p.gauge5||[]))];
         // The elapsed time keeps the right edge; the stage gives way first, whole (spec rule 30 (d)).
         const end=r.elapsed?[text(' '),text(r.elapsed)]:[],whole=[...base,text(' │ '),...third(r)];
