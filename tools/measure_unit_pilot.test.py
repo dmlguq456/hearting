@@ -19,6 +19,8 @@ REVIEW = ("## 📋 Code Review Results\n\n### 🔴 Must-fix issues\n\n"
           "- a.py:12 fails when the list is empty; fix by guarding it\n"
           "- the check `pytest x` could not run here, so this is blocked\n\n"
           "### 🟡 Suggested improvements\n\n- naming\n\nhanded-over: `pytest x` (reason: no network)\n")
+HEADING_ITEMS = ("## 🔴 Must-fix issues\n\n### a.py:3 — crash\n- Why it matters: x\n\n### b.py:7 — leak\n- Why: y\n\n"
+                 "## 🟡 Suggested\n\n- naming\n")
 CLOSED = "### Prior\n\n- r1 🔴 1: closed (evidence)\n\n### 🔴 Must-fix issues\n\n- new.py:3 breaks when x is None\n"
 
 
@@ -57,10 +59,51 @@ class ReportReadingTest(unittest.TestCase):
     def test_closed_priors_and_a_new_finding_is_counted_only_from_round_two(self):
         self.assertTrue(M.analyse_report(CLOSED, 1, True)["closed_fail"])
         self.assertFalse(M.analyse_report(CLOSED, 0, True)["closed_fail"])
-        self.assertFalse(M.analyse_report(CLOSED + "\n- r1 🔴 2: open\n", 1, True)["closed_fail"])
+        self.assertFalse(M.analyse_report(CLOSED.replace("### 🔴", "- r1 🔴 2: open\n\n### 🔴"), 1, True)["closed_fail"])
+
+
+    def test_heading_items_are_counted_and_a_shallower_heading_ends_the_section(self):
+        out = M.analyse_report(HEADING_ITEMS, 0, True)
+        self.assertEqual((out["red"], out["place"]), (2, 2))
+        deeper = "### 🔴 Must-fix\n\n#### a.py:3 — crash\n- Why\n\n#### b.py:7 — leak\n- Why\n\n## 📋 Other\n\n- not red\n"
+        self.assertEqual(M.analyse_report(deeper, 0, True)["red"], 2)
+
+    def test_status_words_count_only_next_to_an_earlier_item_id(self):
+        base = "- r1 🔴 1: closed (evidence)\n\n### 🔴 Must-fix issues\n\n- new.py:3 breaks when x is None\n"
+        self.assertTrue(M.analyse_report(base + "\nNo prior item remains open.\n", 1, True)["closed_fail"])
+        unresolved = "- r1 🔴 1: closed\n- r1 🔴 2: 해소되지 않음\n\n### 🔴 Must-fix issues\n\n- new.py:3 breaks when x is None\n"
+        self.assertFalse(M.analyse_report(unresolved, 1, True)["closed_fail"])
+        self.assertTrue(M.analyse_report(unresolved.replace("해소되지 않음", "해소됨"), 1, True)["closed_fail"])
 
 
 class MeasureTest(Fixture):
+    def test_roundtrips_leave_plan_review_out_count_stage_fail_and_split_by_unit(self):
+        lines = [
+            row("2026-11-01T00:00:00Z", "qa/plan-review", "completed-review-blocking", attempt="p1"),
+            row("2026-11-01T01:00:00Z", "qa/code-review", "completed-review-blocking", attempt="c1"),
+            row("2026-11-01T02:00:00Z", "qa/test", "dead-worker-fail", attempt="t1").replace("note=", "failure_class=fail,note="),
+            row("2026-11-01T03:00:00Z", "qa/test", "dead-worker-blocked", attempt="t2").replace("note=", "failure_class=blocked,note="),
+            row("2026-11-01T04:00:00Z", "dev/backend", "completed-marker", attempt="b1"),
+        ]
+        (self.root / "jobs.log").write_text("".join(lines), encoding="utf-8")
+        rows = M.read_rows(self.root / "jobs.log")
+        result = M.measure(rows, self.root, M.parse_ts("2026-11-05T00:00:00Z"), "before", {})
+        self.assertEqual(result["dev/backend"]["roundtrips_median"], 2)
+        self.assertEqual(result["dev/backend"]["roundtrips_by_unit"], {"qa/code-review": 1, "qa/test": 1})
+
+    def test_fail_and_blocked_reports_are_read_and_unmeasurable_items_are_none(self):
+        stage = "verdict: FAIL\n\n- the check could not run\nhanded-over: `pytest x` (reason: no network)\n"
+        lines = [row("2026-11-01T00:00:00Z", "qa/test", "dead-worker-fail", attempt="t1", log=str(self.log("l1", self.report("r1.md", stage)))),
+                 row("2026-11-01T01:00:00Z", "qa/test", "dead-worker-blocked", attempt="t2", log=str(self.log("l2", self.report("r2.md", stage))))]
+        (self.root / "jobs.log").write_text("".join(l.replace("note=", "failure_class=fail,note=") for l in lines), encoding="utf-8")
+        rows = M.read_rows(self.root / "jobs.log")
+        test = M.measure(rows, self.root, M.parse_ts("2026-11-05T00:00:00Z"), "before", {})["qa/test"]
+        self.assertEqual((test["reports_read"], test["handed_over_lines"]), (2, 2))
+        self.assertIsNone(test["red_items"])
+        self.assertIsNone(test["unrun_as_red"])
+        self.assertTrue(test["notes"])
+
+
     def test_windows_roundtrips_invalid_envelope_and_missing_reports(self):
         rep = self.report("r1.md", REVIEW)
         lines = [
@@ -96,7 +139,8 @@ class MeasureTest(Fixture):
 # A line the form review marked as exposed when moved below must stay in the musts section.
 MUSTS = {
     "qa/code-review": ("Read-only", "spec/pipeline_state.yaml", "Round 1 — front-load", "Round ≥ 2 — closure check",
-                       "Never fail a round on a", "Verdict tokens:", "they are not caps", "Unchanged code is NOT a review target"),
+                       "Never fail a round on a", "Verdict tokens:", "they are not caps", "Unchanged code is NOT a review target",
+                       "A PASS remains attached to the content it reviewed", "reusing command evidence never substitutes"),
     "qa/test": ("stop-on-failure", "Handed-over checks", "Never remove or relocate an existing reviewer", "runtime observation",
                 "tools/figure-semantic-verify.py", "failure, not a skip", "hangs beyond ~60 s", "Verdict tokens:"),
     "dev/backend": ("DB migrations, core auth logic, and deployment infrastructure require explicit", "never silently diverge from spec",
@@ -148,7 +192,7 @@ class TwoLayerRenderTest(unittest.TestCase):
 class RenderAndCliTest(Fixture):
     def test_render_bytes_cover_the_four_units_and_a_ref_renders_the_same(self):
         here = M.render_bytes(ROOT)
-        self.assertEqual(set(here), set(M.UNITS))
+        self.assertEqual(set(here), set(M.UNITS) | {"qa/test@stage"})
         self.assertTrue(all(isinstance(v, int) and v > 0 for v in here.values()))
 
     def test_cli_prints_the_table_and_json_for_an_empty_registry(self):

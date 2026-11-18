@@ -4,25 +4,34 @@
 The pilot units (qa/code-review, qa/test, dev/backend, editorial/report) were split into
 `## 지킬 것` / `## 참고`. Whether that helps is read from records that already exist: the dispatch
 registry (`jobs.log`) and the report each reviewer or stage wrote. Nothing here runs on a timer; the
-supervisor runs it by hand once before the pilot (baseline) and once about two weeks after.
+supervisor runs it by hand once before the pilot (baseline) and once about two weeks after. The cut is the
+time the new unit text was INSTALLED (workers render from the installed release), not the merge time.
 
-    python3 tools/measure-unit-pilot.py --before 2026-11-18T00:00:00Z [--json]   # the window before
-    python3 tools/measure-unit-pilot.py --after  2026-11-18T00:00:00Z [--json]   # the window after
+    python3 tools/measure-unit-pilot.py --before <install time ISO> [--json]   # the window before
+    python3 tools/measure-unit-pilot.py --after  <install time ISO> [--json]   # the window after
 
 A window is, per unit, the attempts of that unit inside 14 days of the cut, at most 30, whichever is
 reached first (`--before` takes the latest ones before the cut, `--after` the earliest after it). Output
 carries counts and kinds only: unit ids, numbers, route ids; never a project name, title or report text.
 
 The six items (per unit):
-  1 roundtrips      review verdicts that sent the work back (note `completed-review-blocking`) in each route
-                    the unit appears in: median and 90th percentile over those routes
+  1 roundtrips      execution <-> review send-backs in each route the unit appears in: median and 90th percentile
+                    over those routes. A send-back is a blocking review verdict (`completed-review-blocking`) or a
+                    FAIL of a stage-form gate (`dead-worker-fail`, failure_class `fail`, a `qa/*` unit). Plan review
+                    (`qa/plan-review`, `research/plan-review`) is left out. `roundtrips_by_unit` splits the sum by the
+                    unit that judged, so a reader can see what is mixed in.
   2 closed_fail     round >= 2 blocking verdicts whose report marks earlier red items closed and none open or
-                    regressed (a FAIL for a new finding); the goal is 0
+                    regressed (a FAIL for a new finding); the goal is 0. Status words count only on a line that also
+                    carries an earlier item id.
   3 place / repro   share of red items carrying a `file:line`, and a reproduction-condition cue
   4 unrun_red       red items that are really "could not run a check"; handed_over: `handed-over:` lines
-  5 render_bytes    bytes of the worker text the runtime renders for the unit (`--render-ref REF` for another tree)
+  5 render_bytes    bytes of the worker text the runtime renders for the unit (`--render-ref REF` for another tree);
+                    qa/test also reports `render_bytes_stage` (it runs in both the review and the stage form)
   6 invalid_envelope attempts that ended `dead-invalid-envelope`
 Items 2-4 read report text and are heuristics (`reports_read` / `reports_missing` say how much was readable).
+Reports of attempts that ended FAIL or BLOCKED (`dead-worker-fail`, `dead-worker-blocked`) are read too. A measure the
+unit's reports cannot carry by shape (a unit with no red-item list) is None (shown as a dash) with the reason in `notes`;
+None is "not measurable", never "zero".
 """
 from __future__ import annotations
 
@@ -42,6 +51,9 @@ REVIEW_UNITS = ("qa/code-review", "qa/test")
 MAX_ATTEMPTS, MAX_DAYS = 30, 14
 BLOCKING = "completed-review-blocking"
 INVALID = "dead-invalid-envelope"
+STAGE_FAIL, STAGE_BLOCKED = "dead-worker-fail", "dead-worker-blocked"
+PLAN_UNITS = ("qa/plan-review", "research/plan-review")   # plan review is not an execution <-> review send-back
+READ_NOTES = (INVALID, STAGE_FAIL, STAGE_BLOCKED)
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -85,7 +97,7 @@ def read_rows(jobs: Path):
 
 
 KEEP = {"unit", "route_id", "route_node", "note", "attempt_id", "dispatch_depth", "log_file",
-        "completion_marker", "model_profile"}
+        "completion_marker", "model_profile", "failure_class"}
 
 
 def window(rows, unit, cut, side, cap=MAX_ATTEMPTS):
@@ -157,69 +169,116 @@ def read_text(path: Path | None) -> str | None:
 _FENCE = re.compile(r"```.*?```", re.S)
 _BULLET = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 _RED_HEAD = re.compile(r"^\s*(?:#{1,6}\s*)?(?:\*\*)?🔴")
-_OTHER_HEAD = re.compile(r"^\s*(?:#{1,6}\s*)?(?:\*\*)?(?:🟡|🟢|✅)|^\s*#{1,6}\s")
+_RED_BULLET = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\*\*)?🔴")
+_END_MARK = re.compile(r"^\s*(?:#{1,6}\s*)?(?:\*\*)?(?:🟡|🟢|✅)")
+_HEADING = re.compile(r"^\s*(#{1,6})(?=\s|\*|🔴|🟡|🟢|✅)")
 _PLACE = re.compile(r"[\w./\-]+\.\w{1,8}:\d+")
 _REPRO = re.compile(r"재현|repro|\b(?:when|if|given|whenever|once|after|with)\b|입력|조건|경우", re.I)
 _UNRUN = re.compile(r"(?:could not|cannot|can't|unable to|not able to|did not|didn't)\s+(?:run|execute)|not run\b|"
                     r"미실행|실행하지 못|돌리지 못|실행 불가|확인하지 못", re.I)
 _HANDED = re.compile(r"(?im)^\s*(?:[-*+]\s*)?(?:\*\*)?handed-over(?:\*\*)?:")
-_STATUS_CLOSED = re.compile(r"\bclosed\b|닫힘|해소", re.I)
-_STATUS_BAD = re.compile(r"\b(?:open|regressed)\b|열림|되돌아감", re.I)
+# An earlier item is named by a red marker + number, an r<N> tag, a file:line, or #<N>.
+_ITEM_ID = re.compile(r"🔴\s*#?\d+|\b[Rr]\d+\b|[\w./\-]+\.\w{1,8}:\d+|#\d+")
+_STATUS_BAD = re.compile(r"\b(?:open|reopened|re-opened|regressed|unclosed)\b|\b(?:not|never)\s+(?:yet\s+)?closed\b|"
+                         r"열림|열린|열려|되돌아(?:옴|온|감|간|왔|갔)|해소되지|해소하지|해소 안|미해소|닫히지|닫지 못", re.I)
+_STATUS_CLOSED = re.compile(r"\bclosed\b|닫힘|닫혔|닫음|해소(?!되지|하지|\s*안|\s*못)", re.I)
 
 
-def red_items(text: str) -> list[str]:
-    """The blocking items of a review report: bullets under a red heading, else bullets that start with 🔴."""
+def _level(line: str) -> int:
+    match = _HEADING.match(line)
+    return len(match.group(1)) if match else 0
+
+
+def _parse_red(text: str):
+    """(items, consumed line indexes) of a review report's red section.
+
+    The red section runs from a red heading to a heading of the same or a shallower depth, or to a yellow/green/check
+    head. A deeper heading inside it is one item (with what follows up to the next heading of its own depth or
+    shallower); otherwise an item is a bullet, or a bullet that itself starts with the red marker anywhere."""
     lines = _FENCE.sub("", text).splitlines()
-    items, current, in_red = [], None, False
+    items, used = [], set()
+    current, item_level, in_red, red_level = None, 0, False, 0
 
     def flush():
-        nonlocal current
+        nonlocal current, item_level
         if current:
             items.append(" ".join(current))
-        current = None
+        current, item_level = None, 0
 
-    for line in lines:
-        if _RED_HEAD.match(line) and not _BULLET.match(line):
-            flush()
-            in_red = True
-            continue
-        if _OTHER_HEAD.match(line) and not _RED_HEAD.match(line):
+    for number, line in enumerate(lines):
+        level = _level(line)
+        if _END_MARK.match(line):
             flush()
             in_red = False
             continue
-        starts_red = bool(_BULLET.match(line)) and "🔴" in line[:12]
-        if starts_red or (in_red and _BULLET.match(line)):
+        if level or (_RED_HEAD.match(line) and not _BULLET.match(line)):
+            is_red = bool(_RED_HEAD.match(line))
+            if in_red and level and red_level and level > red_level:
+                used.add(number)
+                if current is not None and item_level and level > item_level:
+                    current.append(line.strip())      # a sub-heading inside a heading item
+                else:
+                    flush()
+                    current, item_level = [line.strip()], level
+                continue
+            flush()
+            in_red, red_level = is_red, level
+            if is_red:
+                used.add(number)
+            continue
+        starts_red = bool(_RED_BULLET.match(line))
+        if in_red or starts_red:
+            used.add(number)
+        if starts_red or (in_red and _BULLET.match(line) and not item_level):
             flush()
             current = [line.strip()]
         elif current is not None and line.strip():
             current.append(line.strip())
-        elif not line.strip():
+        elif not line.strip() and not item_level:
             flush()
     flush()
-    return items
+    return items, used
+
+
+def red_items(text: str) -> list[str]:
+    return _parse_red(text)[0]
+
+
+def _prior_status(text: str, used: set) -> tuple[bool, bool]:
+    """(some earlier item marked closed, some earlier item marked open/regressed): only a line outside the red section
+    that names an item id counts."""
+    closed = bad = False
+    for number, line in enumerate(_FENCE.sub("", text).splitlines()):
+        if number in used or not _ITEM_ID.search(line):
+            continue
+        closed = closed or bool(_STATUS_CLOSED.search(line))
+        bad = bad or bool(_STATUS_BAD.search(line))
+    return closed, bad
 
 
 def analyse_report(text: str, round_index: int, blocking: bool) -> dict:
     # Red items exist only in a blocking verdict; a passing report's red heading lists what was cleared.
-    items = red_items(text) if blocking else []
-    closed_fail = round_index >= 1 and bool(_STATUS_CLOSED.search(text)) and not _STATUS_BAD.search(_FENCE.sub("", text))
+    items, used = _parse_red(text) if blocking else ([], set())
+    closed, bad = _prior_status(text, used) if round_index >= 1 and items else (False, False)
     return {"red": len(items), "place": sum(bool(_PLACE.search(i)) for i in items),
             "repro": sum(bool(_REPRO.search(i)) for i in items),
             "unrun": sum(bool(_UNRUN.search(i)) for i in items),
-            "handed": len(_HANDED.findall(text)), "closed_fail": closed_fail and bool(items)}
+            "handed": len(_HANDED.findall(text)), "closed_fail": closed and not bad and bool(items)}
 
 
 # -- rendering ------------------------------------------------------------------------------------
 
 def render_bytes(root: Path) -> dict:
+    """Rendered worker-text bytes per unit in its usual form; qa/test (it runs in both) also in the stage form."""
     sys.path.insert(0, str(ROOT / "utilities"))
     import worker_bootstrap as wb  # noqa: E402
     out = {}
-    for unit in UNITS:
+    jobs = [(unit, unit, WORKER_TYPE[unit]) for unit in UNITS] + [("qa/test@stage", "qa/test", "stage")]
+    for key, unit, worker_type in jobs:
         try:
-            out[unit] = len(wb.render_worker_bootstrap(root, WORKER_TYPE[unit], unit=unit).encode("utf-8"))
+            out[key] = len(wb.render_worker_bootstrap(root, worker_type, unit=unit).encode("utf-8"))
         except (OSError, ValueError):
-            out[unit] = None
+            out[key] = None
     return out
 
 
@@ -232,24 +291,41 @@ def render_bytes_of_ref(ref: str) -> dict:
 
 # -- the measurement ------------------------------------------------------------------------------
 
+def sent_back(meta: dict) -> bool:
+    """An execution <-> review send-back: a blocking review verdict, or the FAIL of a stage-form `qa/*` gate.
+    Plan review never counts."""
+    if meta.get("unit") in PLAN_UNITS or meta.get("dispatch_depth", "2") == "0":
+        return False
+    if meta.get("note") == BLOCKING:
+        return True
+    return (meta.get("note") == STAGE_FAIL and meta.get("failure_class") == "fail"
+            and meta.get("unit", "").startswith("qa/"))
+
+
 def measure(rows, root: Path, cut, side, rendered, cap=MAX_ATTEMPTS) -> dict:
-    blocking_by_route: dict[str, int] = {}
+    sent_by_route: dict[str, dict[str, int]] = {}
     verdict_order: dict[tuple, list] = {}
     for when, meta in rows:
         route = meta.get("route_id")
-        if route and meta.get("note") == BLOCKING and meta.get("dispatch_depth", "2") != "0":
-            blocking_by_route[route] = blocking_by_route.get(route, 0) + 1
-        if route and meta.get("note", "").startswith("completed-") and meta.get("unit") in REVIEW_UNITS:
+        if route and sent_back(meta):
+            by_unit = sent_by_route.setdefault(route, {})
+            by_unit[meta.get("unit", "?")] = by_unit.get(meta.get("unit", "?"), 0) + 1
+        if route and meta.get("unit") in REVIEW_UNITS and (meta.get("note", "").startswith("completed-") or meta.get("note") == STAGE_FAIL):
             verdict_order.setdefault((route, meta.get("route_node"), meta.get("unit")), []).append((when, meta.get("attempt_id")))
     result = {}
     for unit in UNITS:
         picked = window(rows, unit, cut, side, cap)
         routes = sorted({m["route_id"] for _, m in picked if m.get("route_id")})
-        trips = [blocking_by_route.get(r, 0) for r in routes]
+        trips = [sum(sent_by_route.get(r, {}).values()) for r in routes]
+        split: dict[str, int] = {}
+        for r in routes:
+            for judged, count in sent_by_route.get(r, {}).items():
+                split[judged] = split.get(judged, 0) + count
         totals = {"red": 0, "place": 0, "repro": 0, "unrun": 0, "handed": 0, "closed_fail": 0}
-        read = missing = 0
+        read = missing = failing_read = failing_with_red = 0
         for when, meta in picked:
-            if not (meta.get("note", "").startswith("completed-") or meta.get("note") == INVALID):
+            note = meta.get("note", "")
+            if not (note.startswith("completed-") or note in READ_NOTES):
                 continue
             text = read_text(report_path(meta, root))
             if text is None:
@@ -258,33 +334,49 @@ def measure(rows, root: Path, cut, side, rendered, cap=MAX_ATTEMPTS) -> dict:
             read += 1
             order = sorted(verdict_order.get((meta.get("route_id"), meta.get("route_node"), unit), []))
             index = next((i for i, (_, a) in enumerate(order) if a == meta.get("attempt_id")), 0)
-            for key, value in analyse_report(text, index, meta.get("note") == BLOCKING).items():
+            failing = note in (BLOCKING, STAGE_FAIL)   # a verdict that sent the work back; BLOCKED reached no verdict
+            found = analyse_report(text, index, failing)
+            failing_read += failing
+            failing_with_red += failing and found["red"] > 0
+            for key, value in found.items():
                 totals[key] += int(value)
+        notes = []
+        red_measured = unit in REVIEW_UNITS and not (failing_read and not failing_with_red)
+        if unit not in REVIEW_UNITS:
+            notes.append("items 2-4 (red items): not a review unit, its reports carry no red-item list")
+        elif not red_measured:
+            notes.append(f"items 2-4 (red items): not measurable here, {failing_read} FAIL/blocking reports read and none carries a red-item list (stage-form reports)")
         result[unit] = {
             "attempts": len(picked),
             "window": [picked[0][0].isoformat(), picked[-1][0].isoformat()] if picked else None,
             "routes": len(routes),
             "roundtrips_median": median(trips), "roundtrips_p90": percentile(trips, 90),
-            "closed_fail": totals["closed_fail"] if unit in REVIEW_UNITS else None,
-            "red_items": totals["red"] if unit in REVIEW_UNITS else None,
-            "red_with_place": totals["place"] if unit in REVIEW_UNITS else None,
-            "red_with_repro_cue": totals["repro"] if unit in REVIEW_UNITS else None,
-            "unrun_as_red": totals["unrun"] if unit in REVIEW_UNITS else None,
+            "roundtrips_by_unit": dict(sorted(split.items())),
+            "closed_fail": totals["closed_fail"] if red_measured else None,
+            "red_items": totals["red"] if red_measured else None,
+            "red_with_place": totals["place"] if red_measured else None,
+            "red_with_repro_cue": totals["repro"] if red_measured else None,
+            "unrun_as_red": totals["unrun"] if red_measured else None,
             "handed_over_lines": totals["handed"],
             "render_bytes": rendered.get(unit),
+            "render_bytes_stage": rendered.get("qa/test@stage") if unit == "qa/test" else None,
             "invalid_envelope": sum(m.get("note") == INVALID for _, m in picked),
             "reports_read": read, "reports_missing": missing,
+            "notes": notes,
         }
     return result
 
 
 def format_table(result: dict) -> str:
     fields = ["attempts", "routes", "roundtrips_median", "roundtrips_p90", "closed_fail", "red_items", "red_with_place",
-              "red_with_repro_cue", "unrun_as_red", "handed_over_lines", "render_bytes", "invalid_envelope",
-              "reports_read", "reports_missing"]
+              "red_with_repro_cue", "unrun_as_red", "handed_over_lines", "render_bytes", "render_bytes_stage",
+              "invalid_envelope", "reports_read", "reports_missing"]
     lines = ["field".ljust(20) + "".join(u.ljust(18) for u in UNITS)]
     for field in fields:
-        lines.append(field.ljust(20) + "".join(str(result[u][field]).ljust(18) for u in UNITS))
+        lines.append(field.ljust(20) + "".join(("—" if result[u][field] is None else str(result[u][field])).ljust(18) for u in UNITS))
+    for unit in UNITS:
+        lines.append(f"roundtrips_by_unit {unit}: " + (", ".join(f"{k}={v}" for k, v in result[unit]["roundtrips_by_unit"].items()) or "none"))
+    lines.extend(f"note {unit}: {note}" for unit in UNITS for note in result[unit]["notes"])
     return "\n".join(lines)
 
 

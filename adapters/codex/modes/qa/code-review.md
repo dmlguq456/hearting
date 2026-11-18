@@ -74,7 +74,8 @@ and execution conditions. A new source subject still requires its own independen
 and reusing command evidence never substitutes for that judgment or makes a
 historical PASS current.
 
-Returning to earlier content reuses that subject's existing budget. Reports,
+Returning to earlier content reuses that subject's existing budget (what a
+subject and its budget are: see 참고, "how the runtime helps"). Reports,
 marker sequence, timestamps, staging alone, and identical-content commits do
 not create a new subject. A PASS remains attached to the content it reviewed
 and cannot be reused for changed content.
@@ -202,7 +203,6 @@ efficiency and may include more uncertainty.
 
 - Use analogies to convey "why something is a problem" intuitively. Show before/after
   code for fix suggestions.
-
 - Style-only issues (whitespace, quote types): briefly mention in 🟡 or omit.
 - Do not suggest large-scale rewrites at once. Always praise what deserves praise.
 
