@@ -1,5 +1,7 @@
-"""11-18 (the person: "스피너 컬러도 하네스에 맞추고"): a working spinner on a panel line that names its harness turns in that
-harness's color; every other mark keeps the state's own.
+"""11-18 (the person: "스피너 컬러도 하네스에 맞추고", "그리고 패널 스캐너 동작도"): a working spinner on a panel line that names its
+harness turns in that harness's color; every other mark keeps the state's own. The moving frame and the head rule's light of a working
+session take that harness's ramp (`FACES.*.ramp`), in every `rule motion` kind, with the same steps; a waiting session's reds, an
+unknown harness's vanilla, mono and no-color are as before.
 
 Synthetic scenes only. The route box's owner row, worker rows (boxed and hung), frame legs and the head line's session spinner take
 `hb_<harness>`'s color (Claude 173, Codex 147, OpenCode 153); a worker with no known harness, the route's first-line dot, a waiting,
@@ -114,6 +116,41 @@ const mono=view.appearance(v.rows,{theme:'mono'},{colors:256});
 assert(mono.flat().filter(p=>SPIN.has(p.text)&&p.spin).every(p=>p.foreground===null));
 // No color: the styles carry none, so the spinner keeps the state's own (no) color.
 const plain=render([owner('claude',{workers_live:[worker('codex')]})]);
+""")
+
+    def test_a_working_sessions_scanner_takes_its_harness_ramp_in_every_motion_kind(self):
+        self.node(r"""
+const SCENE=(harness,{rm='rule',state='working',theme,background='dark',frame=7,colors=256}={})=>view.render({width:44,height:30,side:true,fill:true,harness,frame,background,
+  model:{repo:[P('x/')],messages:[],styles:STYLES,colors},state,configuration:{rule_motion:rm,...(theme?{theme}:{})},questions:()=>[]});
+const tones=v=>new Set(v.rows.flatMap(r=>r.filter(p=>p.role==='orbit').map(p=>p.foreground)));
+const F=view.FACES;
+for(const face of ['dark','light']){
+  const bg=face;
+  for(const h of ['claude','codex','opencode']){
+    const R=F[face].ramp[h];
+    assert.equal(R.orbit.length,F[face].orbit.length);assert.equal(R.scan.length,F[face].scan.length);assert.equal(R.waveRGB.length,2);   // the same steps
+    assert.equal(new Set(R.orbit).size,R.orbit.length);assert.equal(new Set(R.scan).size,R.scan.length);
+    for(const rm of ['rule','border','scanners']){
+      const opt={rm,background:bg,theme:face==='light'?'light':undefined};
+      const mine=tones(SCENE(h,opt)),own=new Set([...R.orbit,...R.scan]);
+      assert(mine.size>0,face+h+rm);assert([...mine].every(t=>own.has(t)),face+' '+h+' '+rm+' '+[...mine]);
+      // Not the vanilla ramp (and not another harness's): the unknown harness keeps the face's own.
+      const plain=tones(SCENE('',opt));assert([...plain].every(t=>[...F[face].orbit,...F[face].scan].includes(t)),face+rm+[...plain]);
+      assert([...plain].every(t=>!own.has(t)||[...F[face].orbit,...F[face].scan].includes(t)));
+    }
+    // 24-bit color: the wave's two ends are the harness's.
+    const wave=SCENE(h,{rm:'scanners',background:bg,theme:face==='light'?'light':undefined,colors:16777216});
+    const hex=new Set(wave.rows.flatMap(r=>r.filter(p=>p.role==='orbit'&&p.tone==='wave').map(p=>p.foreground)));
+    assert([...hex].every(c=>/^#[0-9a-f]{6}$/.test(c)),face+h+[...hex]);
+  }
+}
+// Waiting: the frame's reds, whatever the harness; no motion in mono; no change for an idle session.
+for(const h of ['claude','codex','opencode']){
+  const w=SCENE(h,{state:'blocked',rm:'border'}),w0=SCENE('',{state:'blocked',rm:'border'});
+  assert.deepEqual([...tones(w)].sort(),[...tones(w0)].sort(),h);
+  assert([...tones(w)].every(t=>F.dark.breath.includes(t)),h);
+  assert.equal(tones(SCENE(h,{theme:'mono'})).size,0);
+}
 """)
 
 

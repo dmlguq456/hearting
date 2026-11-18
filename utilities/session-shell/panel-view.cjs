@@ -80,7 +80,16 @@ const FACES={
     // are L* 63.8, 74.2, 84.4), so a name reads as a label and never louder than its numbers.
     // 11-18 (the harness colors follow the products' own themes): Claude's name was 66, now 130; Codex's was 133, now 104
     // (the step under 147); OpenCode's was 104, now 110 (the step under 153). Each pair is 13 or more apart (CIEDE2000).
-    harnessName:{claude:130,codex:104,opencode:110}},
+    harnessName:{claude:130,codex:104,opencode:110},
+    // 11-18 (the person: "패널 스캐너 동작도"): while a session works, the moving frame and the head rule's light take the
+    // session's harness color instead of the vanilla ramp: the same steps (the arc's four, the head rule's five, the wave's two
+    // ends), each a step of that harness's hue (`orbit` brightest first: a lit tint of the harness color, the color, two steps
+    // toward the still frame's gray; `scan` the head rule's, dimmest first, from the still frame's gray to the lit tint, each step 8 or more L* above the one before and the last as bright as the body text; `waveRGB` the same two
+    // ends in 24-bit color: the still frame's gray and the lit tint's own RGB). A waiting frame's reds, the unknown harness's
+    // vanilla and mono are as before.
+    ramp:{claude:{orbit:[216,173,137,102],scan:[243,137,209,216,223],waveRGB:[[128,128,128],[255,175,135]]},
+      codex:{orbit:[189,147,104,245],scan:[243,104,177,183,189],waveRGB:[[128,128,128],[215,215,255]]},
+      opencode:{orbit:[195,153,110,246],scan:[243,103,74,117,195],waveRGB:[[128,128,128],[215,255,255]]}}},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
     working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
     orbit:[22,65,108,151],waveRGB:[[118,118,118],[0,95,0]],scan:[244,242,240,238,236],
@@ -89,7 +98,12 @@ const FACES={
     rgb:{popup:'#f1e7dc',popupLine:'#9c8571',popupTitle:'#342a23',chosen:'#fecca4'},
     // (The light face: the deep hues 166, 25, 31 (L* 54.7, 40, 52.3). Codex's name is the step lighter, 68 (L* 56.7); Claude's deep orange
     // and OpenCode's deep sky are already the lightest that read on white (166, 3.3; 31, 4.1), so their names are the head's own hue.)
-    harnessName:{claude:166,codex:68,opencode:31}},
+    harnessName:{claude:166,codex:68,opencode:31},
+    // (The light face's ramps, the deep pairs 166, 25, 31 first, toward the light ground: the harness's own steps; `scan` dimmest first,
+    // from the still frame's gray up to the deep color.)
+    ramp:{claude:{orbit:[166,173,216,223],scan:[243,102,137,173,166],waveRGB:[[118,118,118],[215,95,0]]},
+      codex:{orbit:[25,68,146,189],scan:[243,60,61,26,25],waveRGB:[[118,118,118],[0,95,175]]},
+      opencode:{orbit:[31,74,110,152],scan:[243,102,67,32,31],waveRGB:[[118,118,118],[0,135,175]]}}},
 };
 // Fleet's 256-color hues on each face. The light face takes the reviewed deep
 // counterparts (running 22, attention 58, failure 88, project 23, model 60)
@@ -111,11 +125,13 @@ function face(theme,background){return theme==='light'?'light':background==='lig
 // the head rule's light step (1 the dimmest .. 5); a waiting step from its face's 256-color reds, or in
 // 24-bit color (when the terminal says it takes it) a point on the cosine between its face's two ends.
 const mix=(a,b,f)=>'#'+a.map((c,i)=>Math.round(c+(b[i]-c)*f).toString(16).padStart(2,'0')).join('');
-function orbitTone(part,F,colors){
-  if(part.tone==='arc')return F.orbit[Math.max(0,Math.min(F.orbit.length-1,part.level))];
-  if(part.tone==='scan')return F.scan[Math.max(0,Math.min(F.scan.length-1,part.level-1))];
-  if(part.tone==='wave'){const [lo,hi]=F.waveRGB,q=Math.max(0,Math.min(1,part.level));
-    return colors>256?mix(lo,hi,WAVE_FLOOR+(1-WAVE_FLOOR)*q):F.orbit[Math.round((1-q)*(F.orbit.length-1))];}
+function orbitTone(part,F,colors,harness=''){
+  // A working session's tones are its harness's (`F.ramp`); a waiting one's reds (`breath`) and an unknown harness's are the face's own.
+  const R=part.tone!=='breath'&&F.ramp&&F.ramp[harness]||F;
+  if(part.tone==='arc')return R.orbit[Math.max(0,Math.min(R.orbit.length-1,part.level))];
+  if(part.tone==='scan')return R.scan[Math.max(0,Math.min(R.scan.length-1,part.level-1))];
+  if(part.tone==='wave'){const [lo,hi]=R.waveRGB,q=Math.max(0,Math.min(1,part.level));
+    return colors>256?mix(lo,hi,WAVE_FLOOR+(1-WAVE_FLOOR)*q):R.orbit[Math.round((1-q)*(R.orbit.length-1))];}
   const steps=part.steps,k=part.step;
   if(colors>256&&steps>1){
     const f=(Math.cos(Math.PI*k/(steps-1))+1)/2,[hi,lo]=F.breathRGB;
@@ -123,7 +139,7 @@ function orbitTone(part,F,colors){
   }
   return F.breath[Math.max(0,Math.min(F.breath.length-1,k))];
 }
-function appearance(rows,configuration={},{colors=256,noColor=false,background=''}={}){
+function appearance(rows,configuration={},{colors=256,noColor=false,background='',harness=''}={}){
   const cfg={...defaults,...configuration},theme=['terminal','light','mono'].includes(cfg.theme)?cfg.theme:'terminal';
   if(noColor)return rows;
   const known=face(theme,background),full=colors>=256;
@@ -171,7 +187,7 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     // Spec rule 47: the moving frame's cells take their step's tone on their face (an unknown face
     // the dark face's), at full strength; mono never moves (no tone).
     else if(role==='harness-name'&&theme!=='mono'){foreground=F.harnessName[part.harness]??foreground;dim=false;}
-    else if(role==='orbit'&&theme!=='mono'&&part.tone){foreground=orbitTone(part,FACES[known||'dark'],colors);dim=false;}
+    else if(role==='orbit'&&theme!=='mono'&&part.tone){foreground=orbitTone(part,FACES[known||'dark'],colors,harness);dim=false;}
     // Spec rule 22: on a known face each line takes its role's color with or
     // without a shade (frame 244/243, route 245/243, messages 242/245); an
     // unknown face keeps the terminal's own, mono keeps no hue.
@@ -508,14 +524,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(const sp of spans)if(sp.left<limit())hits.push({row:0,left:sp.left,right:Math.min(sp.right,limit()-1),action:sp.action});
     hits.push({row:0,left:0,right:width-1,action:'unfold'});
     const shown=new Set(body);
-    const painted=appearance(out,{...cfg,shade:'none'},{colors:model.colors??256,noColor:model.no_color===true,background});
+    const painted=appearance(out,{...cfg,shade:'none'},{colors:model.colors??256,noColor:model.no_color===true,background,harness});
     const spins=out.map((r,i)=>r.some(part=>part.spin)?i:-1).filter(i=>i>=0);
     const groupsPainted=['head',...(groups.some(g=>g.parts.some(p=>p.text==='CTX '))?['context']:[]),...(body.some(part=>quotaParts.has(part))?['quota']:[]),
       ...(wait.length&&body.some(p=>wait.includes(p))?['wait']:[]),...(groups.some(g=>g.route)?['route']:[])];
     const color=own&&own[1]!=='g_work_off'?own[1]:'dim';
     // The wait's cells, swapped by the host between the two reds on Fleet's beat (only those cells).
     const cells=blinkCells(out,measure,clean,0,1);
-    const look={...cfg,shade:'none'},paint={colors:model.colors??256,noColor:model.no_color===true,background};
+    const look={...cfg,shade:'none'},paint={colors:model.colors??256,noColor:model.no_color===true,background,harness};
     const motion=cells.length?{cells,at:tick=>appearance([cells.map(c=>({...c.blink,text:c.ch,blinkTone:blinkTone(tick)}))],look,paint)[0],
       next:tick=>blinkNext(tick)}:null;
     return {rows:painted,hits,color,groups:[...new Set(groupsPainted)],animated:spins.length>0||!!motion,spins,motion,folded:true};
@@ -1941,7 +1957,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   for(let i=0;i<count-2;i++)rows.push(frameRow(content[i]||[],i+1));
   rows.push(moving?joined([border(H-1,0,'└'),border(H-1,1,'─'),...foot.parts,...borderRun(H-1,2+foot.used,W-2),border(H-1,W-1,'┘')]):
     [frameText('└─'),...foot.parts,frameText('─'.repeat(Math.max(0,width-3-foot.used))+'┘')]);
-  const painted=appearance(rows,cfg,{colors:borderColors,noColor:model.no_color===true,background});
+  const painted=appearance(rows,cfg,{colors:borderColors,noColor:model.no_color===true,background,harness});
   // The rows whose spinner cells turn between paints (the host swaps only those cells).
   const spins=rows.map((row,i)=>row.some(part=>part.spin)?i:-1).filter(i=>i>=0&&i<count);
   // Only a blinking part needs the one-second repaint (a spinner and the frame turn on their own).
@@ -1966,7 +1982,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   if(waitBlinks)cells.push(...blinkCells(rows,measure,clean,1,count-1));
   const blinked=cells.length>framed;
   const motion=cells.length?{cells,
-    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(tick)}:c.rule!==undefined?ruleLook(c.rule,tick):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background})[0],
+    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(tick)}:c.rule!==undefined?ruleLook(c.rule,tick):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background,harness})[0],
     next:tick=>Math.min(blinked?blinkNext(tick):Infinity,framed?frameNext(tick):Infinity)}:null;
   function frameNext(tick){const local=borderTick(tick),shift=Math.trunc(tick)-local;
       if(ruleMoving){const r=ruleTick(tick);return Math.trunc(tick)+scanNext(r,inner)-r;}
