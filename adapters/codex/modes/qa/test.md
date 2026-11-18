@@ -51,6 +51,10 @@ aliases: {}
 
 # Unit: qa/test
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
 Assess graduated dynamic verification with **stop-on-failure** semantics. **Read-only with
 respect to source** — never fix code in this unit. Run only checks whose relevant evidence
 is missing or invalidated; the absence of a failing signal is
@@ -59,7 +63,9 @@ changed behavior, and when the evidence cannot confirm the surface works, return
 BLOCKED or FAIL rather than PASS. A PASS asserts observed-correct, not merely
 not-observed-wrong.
 
-## Target determination
+Review stance: the shared stance text carried just above this body.
+
+### Target determination
 
 - The **assignment and released task** define the target and limits. Run only
   applicable verification levels within that scope; an omitted plan does not
@@ -86,13 +92,60 @@ and report — an unconfirmed level stays BLOCKED or FAIL, never PASS. The evide
 supports the current assessment but does not transfer a historical test-gate PASS or
 change source-subject binding and verdict-budget rules.
 
-## Levels (assess applicable evidence; execute missing or invalidated checks in order)
+### Browser scratch
 
 Browser verification keeps screenshots, console/network logs and its verdict
 in the assigned output folder. A persistent Chromium user-data directory is
 process-owned scratch: create it with `tempfile.TemporaryDirectory()` outside
 the cycle payload, close the browser in `finally`, then clean only that
 directory. Never remove or relocate an existing reviewer's profile.
+
+### Behavioral runtime observation (Level 5b)
+
+For a user-facing surface, **verification = runtime observation**: launch the real
+application and exercise the changed path. Tests, type checks, and import-and-call do
+not substitute — they only prove "CI can run", not the changed behavior.
+
+### Report-figure semantics (Level 5c) — tool contract: `tools/figure-semantic-verify.py`
+
+When a report contains spectrogram figures, run `tools/figure-semantic-verify.py`
+against the report and figure manifest. Treat missing metadata, a non-24 kHz maximum
+for the 48 kHz full-band profile, an unsupported full-band/high-frequency/broadband
+claim, a declared `stft` window that violates the confirmed per-rate law
+(8 kHz→256, 16 kHz→512, 48 kHz→1024), or missing visual review evidence as a
+**failure, not a skip**.
+
+### Rules
+
+- Do NOT modify any code; read-only verification only.
+- Stop at the first failing newly executed level unless the parent contract explicitly
+  requests independent later checks. Preserve an unresolved known FAIL; after a relevant
+  fix, rerun only the affected check and any dependent check whose evidence is invalidated.
+- Keep test commands short-lived outside the integration level; if a level 1–4 command
+  hangs beyond ~60 s, kill it and report the timeout. The integration level may use a
+  long (e.g. 10-minute) timeout intentionally — do not run full training or evaluation
+  outside it.
+- Per-level verdicts: PASS with captured evidence / FAIL with the observed wrong
+  behavior / SKIP when no behavioral surface exists (docs, type declarations,
+  behavior-free build config — do not fill the gap with tests) / BLOCKED with the exact
+  obstacle and a cold-start note.
+
+### Report
+
+State target and trigger, report applicable levels as executed, supported by reused evidence,
+skipped, or blocked, then summarize which levels are satisfied (N/M), the first failure, and
+recommended action. Cite reused evidence in the existing report body by artifact path,
+command, target/scope, and verdict; do not add a new report field or manifest. Return per the
+dual return switch (`io.return`). Verdict tokens: `✅ All N levels passed`,
+`❌ Failed at Level N: {reason}`.
+
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+### Levels (assess applicable evidence; execute missing or invalidated checks in order)
 
 1. **Syntax:** parse, compile, or type-check each changed surface (e.g. `ast` parse for
    Python files). On failure: report the syntax error and stop.
@@ -109,11 +162,7 @@ directory. Never remove or relocate an existing reviewer's profile.
    Success: runs without crashing for the session or completes normally. If required
    hardware (e.g. GPU) is absent: skip and note.
 
-### Level 5b: Behavioral runtime observation
-
-For a user-facing surface, **verification = runtime observation**: launch the real
-application and exercise the changed path. Tests, type checks, and import-and-call do
-not substitute — they only prove "CI can run", not the changed behavior.
+### Level 5b — how to observe
 
 - **Identify the surface** where the change lands and observe there: CLI/TUI → type the
   command in a terminal and capture output; server/API → capture the socket request and
@@ -132,40 +181,7 @@ not substitute — they only prove "CI can run", not the changed behavior.
   the user's actual input path (mouse wheel, trackpad, touch). A keyboard workaround
   cannot prove mouse-wheel behavior — use the automation tool's real wheel/pointer API.
 
-### Level 5c: Report-figure semantics
-
-When a report contains spectrogram figures, run `tools/figure-semantic-verify.py`
-against the report and figure manifest. Treat missing metadata, a non-24 kHz maximum
-for the 48 kHz full-band profile, an unsupported full-band/high-frequency/broadband
-claim, a declared `stft` window that violates the confirmed per-rate law
-(8 kHz→256, 16 kHz→512, 48 kHz→1024), or missing visual review evidence as a
-**failure, not a skip**.
-
-## Rules
-
-- Do NOT modify any code; read-only verification only.
-- Stop at the first failing newly executed level unless the parent contract explicitly
-  requests independent later checks. Preserve an unresolved known FAIL; after a relevant
-  fix, rerun only the affected check and any dependent check whose evidence is invalidated.
-- Keep test commands short-lived outside the integration level; if a level 1–4 command
-  hangs beyond ~60 s, kill it and report the timeout. The integration level may use a
-  long (e.g. 10-minute) timeout intentionally — do not run full training or evaluation
-  outside it.
-- Per-level verdicts: PASS with captured evidence / FAIL with the observed wrong
-  behavior / SKIP when no behavioral surface exists (docs, type declarations,
-  behavior-free build config — do not fill the gap with tests) / BLOCKED with the exact
-  obstacle and a cold-start note.
-
-## Report
-
-State target and trigger, report applicable levels as executed, supported by reused evidence,
-skipped, or blocked, then summarize which levels are satisfied (N/M), the first failure, and
-recommended action. Cite reused evidence in the existing report body by artifact path,
-command, target/scope, and verdict; do not add a new report field or manifest. Return per the
-dual return switch (`io.return`). Verdict tokens: `✅ All N levels passed`,
-`❌ Failed at Level N: {reason}`.
-
-## Memory
+### Memory
 
 Per `_shared/memory-flow.md`: retain recurring test-failure patterns and per-level
 project traps (e.g. "config discovery is hard at smoke level in this project").

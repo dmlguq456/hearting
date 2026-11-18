@@ -70,6 +70,23 @@ from the retired team agent file. Nothing load-bearing drops silently → `_NOTE
 
 The `stance:` text is carried by the runtime into the worker prompt, just before the body.
 
+**Two-layer form (pilot: `qa/code-review`, `qa/test`, `dev/backend`, `editorial/report`).**
+A unit body may be written as two sections, both always carried with the worker text:
+
+```
+## 지킬 것   (every line is a must: ownership boundaries, domain prohibitions, tool contract,
+              spec/precondition checks, the output shape and verdict tokens, round rules;
+              review units add one line pointing at the carried stance text)
+## 참고      (defaults the worker may override: role and tone, procedure, criteria lists,
+              examples, memory; its head states the precedence: this turn's instruction >
+              project conventions > the person's profile > these defaults)
+```
+
+A line the unit cannot do without belongs in 지킬 것; write-scope does not stop a worker from
+writing inside its worktree, so a prohibition lives there too. Lines moved out of the worker
+text are recorded in `<family>/_NOTES.md`, never deleted. No checker enforces the headings;
+units not yet moved keep the single-body form.
+
 ## Floor guidance (from the investigation gradient)
 
 - `near-zero`: material/*, qa/test, design/verifier, research/fact-check — kernel +
