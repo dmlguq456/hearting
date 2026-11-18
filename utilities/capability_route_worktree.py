@@ -1358,7 +1358,9 @@ def _emit_compiled_route(a,route,artifact_root,output=None):
             os.environ.get("AGENT_DISPATCH_JOBS", ""),
             target_route=route_for_binding,
             environ=os.environ,
-        ) if os.environ.get("AGENT_DISPATCH_ATTEMPT_ID") else None
+        ) if os.environ.get("AGENT_DISPATCH_ATTEMPT_ID") and route.get("capability") != "unit" else None
+        # A unit route is its own route (its leg is the first node): an owner that opens one has not
+        # compiled its own, so nothing attaches to the owner's attempt.
     except OwnerRouteBindingError as exc:
         print(
             f"route_file_written=1 owner_route_binding_written=0 reason={exc}",

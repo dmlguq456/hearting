@@ -32,7 +32,7 @@ from dispatch_contract import (
     REPLICA_RESERVATION_ROW_KEYS, STANDARD_PLUS_INTENSITIES, SUPERVISOR_LEASE_KIND,
     DispatchContractError, diff_attribution_lines,
     dispatch_state_root, dispatch_state_roots, resolve_dispatch_state_root, runtime_ancestry_binding,
-    sealed_launch_home, source_lineage_row_fields, supervisor_lease_path, workflow_completion_receipt,
+    sealed_launch_home, source_lineage_row_fields, supervisor_lease_path, workflow_completion_receipt, caller_attempt_receipt,
     ensure_terminal_claim_absent, _atomic_registry_replace, close_attempt_row,
     parse_registry_metadata,
     diagnostic_line,
@@ -728,7 +728,7 @@ def append_job(jobs: Path, args: argparse.Namespace, *, harness: str, runtime_sa
             f",owner_route_id={args.owner_route_binding.route_id}"
             f",owner_route_hash={args.owner_route_binding.route_hash}"
         )
-    pipe += workflow_completion_receipt(args)
+    pipe += workflow_completion_receipt(args) + caller_attempt_receipt(args)
     settings = args.resolved_model_settings
     for key, value in sorted(getattr(args, "profile_selection_receipt", {}).items()):
         # The resolved selection below owns model_source. A diversity receipt

@@ -260,7 +260,8 @@ def default_root() -> Path:
     if resolved.returncode != 0 or not resolved.stdout.strip():
         detail = resolved.stderr.strip() or f"resolver exit={resolved.returncode}"
         raise RuntimeError(f"artifact-root-resolution-failed: {detail}")
-    return Path(resolved.stdout.strip()) / ".runtime" / "model-worker-governor"
+    import unit_ephemeral  # a record-free unit route's scratch root counts under its project's governor
+    return unit_ephemeral.counted_root(resolved.stdout.strip()) / ".runtime" / "model-worker-governor"
 
 
 def process_observation(pid: int) -> tuple[str, str, str]:

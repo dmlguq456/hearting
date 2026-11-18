@@ -599,7 +599,7 @@ class UnitPromptTest(UnitLegBase):
             self.assertNotIn(owner_only, prompt)
         import worker_bootstrap
         self.assertLess(len(worker_bootstrap.unit_safety_prompt("review").encode()), 2048)
-        self.assertLess(len(prompt), 14_000)
+        self.assertLess(len(prompt), 15_000)   # the unit's own text grew on main; the first instruction stays one short block
 
 
 if __name__ == "__main__":

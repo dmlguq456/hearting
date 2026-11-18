@@ -253,7 +253,7 @@ from dispatch_contract_rows import (  # noqa: F401
     launch_orphan_watch, launch_reap_watch, probe_owner_supervision,
     reconcile_attempt_terminal, reconcile_local_registry, RefusedChainClose,
     resolve_attempt_cleanup, resolve_residue_drain, resolve_terminal_conflict,
-    SupervisionProbe, terminal_attempt_never_started, workflow_completion_receipt,
+    SupervisionProbe, terminal_attempt_never_started, workflow_completion_receipt, caller_attempt_receipt,
 )
 
 # Moved classes report the module they were defined in before the split, so

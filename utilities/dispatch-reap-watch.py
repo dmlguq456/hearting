@@ -196,6 +196,10 @@ def watch(args: argparse.Namespace) -> int:
     while process_start_ticks(args.pid) == args.pid_start:
         time.sleep(args.interval)
 
+    # The worker has ended: a unit worker it started that still runs would report to no one.
+    from route_parent_close import stop_called_workers
+    stop_called_workers(args.jobs, args.attempt_id)
+
     # SD-OPEN-47 (H7-a): the post-exit drain loop used to rescan every
     # `/proc/<pid>/environ` at the launch interval (0.2 s) for as long as any
     # tagged process lived, which for a worker-spawned background shell meant

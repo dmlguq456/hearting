@@ -816,7 +816,7 @@ def _compose_default_jobs():
 
 
 def _compose_readiness(cwd, jobs, parent_harness, children, *, gpu_route=None,
-                       owner_harnesses=None):
+                       owner_harnesses=None, worker_caller=False):
     spec = importlib.util.spec_from_file_location(
         "hearting_dispatch_readiness", ROOT / "utilities" / "dispatch-readiness.py")
     module = importlib.util.module_from_spec(spec)
@@ -828,7 +828,7 @@ def _compose_readiness(cwd, jobs, parent_harness, children, *, gpu_route=None,
         return module.generate(
             worktree=Path(cwd), jobs=Path(jobs),
             owner_harnesses=list(owner_harnesses) if owner_harnesses is not None else [parent_harness],
-            child_harnesses=list(children),
+            child_harnesses=list(children), worker_caller=worker_caller,
             **({"codex_execution_selection": selection}
                if selection and selection["gpu_scope"] else {}),
         )
