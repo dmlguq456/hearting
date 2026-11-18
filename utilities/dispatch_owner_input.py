@@ -275,7 +275,7 @@ def inspect(jobs, attempt):
         return result
 
 
-def submit(jobs, attempt, text, request_id=None):
+def submit(jobs, attempt, text, request_id=None, unit=None):
     if not text.strip() or len(text.encode()) > 65536:
         raise InputError("correction-text-empty-or-oversized")
     row, target = _target(jobs, attempt)
@@ -324,6 +324,11 @@ def submit(jobs, attempt, text, request_id=None):
             retain = choice.state == "retained"
             item = {"id": request_id, "digest": digest, "text": text, "events": [],
                     "source_session": route_authority.correction_source_session()}
+            # Read later by the main session's work-style record (memory_work_labels);
+            # nothing here writes memory.
+            item["route_id"] = row.metadata.get("owner_route_id") or row.metadata.get("route_id") or ""
+            if unit:
+                item["unit"] = unit
             _transition(item, "retained" if retain else "queued")
             value["requests"].append(item)
             _write(path, value)
