@@ -296,6 +296,37 @@ class LogicalRevisionReaderTest(unittest.TestCase):
         damaged = storage.entrance_snapshot(self.root)
         self.assertEqual(damaged['coverage'], 'unknown'); self.assertTrue(damaged['errors'])
 
+    def _stamp(self, revision, created_on):
+        path = self.base / 'revisions' / revision / 'revision.json'
+        record = json.loads(path.read_text())
+        record['created_on'] = created_on
+        path.write_text(json.dumps(record))
+
+    def test_topic_date_is_the_day_of_the_revision_that_stores_its_prd(self):
+        self.indirect()
+        self._stamp(self.old, '2026-11-10T09:00:00Z')
+        self._stamp(self.new, '2026-11-18T09:00:00Z')
+        (row,) = storage.entrance_snapshot(self.root)['rows']
+        self.assertEqual((row['source_revision_id'], row['revision_id']), (self.old, self.new))
+        self.assertEqual(row['date'], '2026-11-10')
+        self.assertEqual(storage.revision_created_on(self.root, self.ref, self.old), '2026-11-10T09:00:00Z')
+
+    def test_topic_date_falls_back_to_the_latest_revision_when_the_storing_header_has_no_date(self):
+        self.indirect()
+        self._stamp(self.new, '2026-11-18T09:00:00Z')
+        (row,) = storage.entrance_snapshot(self.root)['rows']
+        self.assertEqual(row['date'], '2026-11-18')
+        self.assertIsNone(storage.revision_created_on(self.root, self.ref, self.old))
+
+    def test_an_unreadable_header_gives_no_date_and_never_raises(self):
+        self.indirect()
+        (self.base / 'revisions' / self.old / 'revision.json').write_text('{')
+        self.assertIsNone(storage.revision_created_on(self.root, self.ref, self.old))
+        self.assertIsNone(storage.revision_created_on(self.root, self.ref, 'rrev_' + '9' * 32))
+        self.assertIsNone(storage.revision_created_on(self.root, 'ref_' + 'b' * 32, self.old))
+        # The payload lives in the unreadable revision: no row, never a wrong date.
+        self.assertEqual(storage.entrance_snapshot(self.root)['rows'], [])
+
     def test_fleet_and_memory_read_the_same_stored_pipeline_state(self):
         import subprocess
         state = b'phases:\n  dev: in_progress\n'
@@ -365,7 +396,8 @@ class LogicalRevisionReaderTest(unittest.TestCase):
         import artifact_entrance as entrance
         self.indirect()
         row = entrance._source_row(self.root, storage.entrance_snapshot(self.root)['rows'][0])
-        with mock.patch.object(entrance, '_refresh_and_snapshot', return_value=({}, {'recent': [row]})), \
+        with mock.patch.object(entrance, '_refresh_and_snapshot',
+                               return_value=({}, {'recent': [], 'topics': [row], 'campaigns': []})), \
                 mock.patch.object(entrance, '_open_externally') as external, \
                 mock.patch.object(entrance, '_show_viewer', return_value=None) as viewer, \
                 contextlib.redirect_stdout(io.StringIO()):

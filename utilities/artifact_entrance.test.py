@@ -356,7 +356,7 @@ class CyclePathTests(EntranceFixture):
             self.assertNotIn("outside/final_report.md", self.entrance(name))
         with mock.patch.object(E, "_open_externally") as opener, \
                 contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(E._command_open(self.root, ["1"]), 1)
+            self.assertEqual(E._command_open(self.root, ["final_report.md"]), 1)
         opener.assert_not_called()
 
     def test_traversal_locator_never_reads_links_or_opens_outside(self):
@@ -381,11 +381,11 @@ class CyclePathTests(EntranceFixture):
         def swapped(_root):
             document.unlink()
             document.symlink_to(outside)
-            return {}, {"recent": rows}
+            return {}, {"recent": rows, "topics": [], "campaigns": []}
         with mock.patch.object(E, "_refresh_and_snapshot", side_effect=swapped), \
                 mock.patch.object(E, "_open_externally") as opener, \
                 contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(E._command_open(self.root, ["1"]), 1)
+            self.assertEqual(E._command_open(self.root, ["Safe"]), 1)
         opener.assert_not_called()
 
     def _swap_after_check(self, swap):
@@ -460,7 +460,7 @@ class CyclePathTests(EntranceFixture):
             self.assertEqual(before, {name: (self.root / name).read_bytes() for name in E.ENTRANCE_NAMES})
             with mock.patch.object(E, "_open_externally") as opener, \
                     contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(E._command_open(self.root, ["2"]), 0)
+                self.assertEqual(E._command_open(self.root, ["Safe"]), 0)
             opener.assert_called_once_with(self.root / rows[1]["doc_path"])
 
     def test_placed_output_is_revalidated(self):
@@ -604,14 +604,14 @@ class RowSourceTests(EntranceFixture):
         self.assertEqual(E.ROW_SOURCES, (E._daily_journals, E._campaign_documents, E._canonical_topics))
         self._two_cycles()
         self.refresh()
-        names = ("README.md", "index.html", "all-campaigns.md", "all-campaigns.html")
+        names = E.ENTRANCE_NAMES
         before = {name: (self.root / name).read_bytes() for name in names}
         self.assertTrue(all(row["kind"] == "cycle" for row in self.rows()))
         self._plug(lambda root: [])
         self.assertEqual(self.refresh()["status"], "unchanged")
         self.assertEqual({name: (self.root / name).read_bytes() for name in names}, before)
 
-    def test_a_source_row_joins_entrance_reports_and_open_in_date_order(self):
+    def test_a_source_row_joins_the_route_reports_page_and_open_in_date_order(self):
         self._two_cycles()
         rel = self._note()
         self._plug(lambda root: [{"kind": "note", "date": "2026-01-04", "title": "Day note",
@@ -622,21 +622,12 @@ class RowSourceTests(EntranceFixture):
         self.assertEqual(rows[1]["kind"], "note")
         self.assertEqual((rows[1]["cycle_id"], rows[1]["cycle_path"], rows[1]["extra"]), ("", "", 0))
         self.assertEqual(rows[1]["summary"], "one line")
-        readme, page = self.entrance(), self.entrance("index.html")
+        readme, page = self.entrance(E.RECORDS_MD), self.entrance(E.RECORDS_HTML)
         self.assertIn("2. 2026-01-04  [Day note](<extra/note.md>)\n   one line", readme)
         self.assertNotIn("``", readme)
         self.assertIn('<a href="extra/note.md">Day note</a>', page)
         self.assertNotIn("note</span>", page.replace("Day note", ""))
-        import contextlib
-        import io
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(E._command_reports(self.root), 0)
-        self.assertIn("2. 2026-01-04  Day note", out.getvalue())
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(E._command_open(self.root, ["2"]), 0)
-        self.assertEqual(out.getvalue().strip(), str(self.root / rel))
+        self.assertNotIn("Day note", self.entrance())  # the entrance's top no longer lists route reports
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(E._command_open(self.root, ["Day", "note"]), 0)
@@ -695,7 +686,7 @@ class RowSourceTests(EntranceFixture):
         self._plug(boom, lambda root: [{"kind": "note", "date": "2026-01-03", "title": "Kept", "doc_path": rel}], lazy)
         self.assertEqual(self.refresh()["status"], "written")
         self.assertEqual([row["title"] for row in self.rows()], ["Beta", "Kept", "Alpha"])
-        self.assertIn("Kept", self.entrance())
+        self.assertIn("Kept", self.entrance(E.RECORDS_MD))
 
 
 class LimitTests(EntranceFixture):
@@ -733,7 +724,7 @@ class LimitTests(EntranceFixture):
         page = self.entrance("all-campaigns.md")
         self.assertEqual(len(re.findall(r"^[-*] \[.*?\]\(<campaigns/", page, re.MULTILINE)), 12)
         entrance = self.entrance()
-        campaign_items = [line for line in entrance.splitlines() if line.startswith("- [")]
+        campaign_items = re.findall(r"^\d+\. .*\]\(<campaigns/\d{4}", entrance, re.MULTILINE)
         self.assertEqual(len(campaign_items), E.CAMPAIGN_LIMIT)
         self.assertIn("all-campaigns.md", entrance)
 
@@ -756,7 +747,7 @@ class LinkTests(EntranceFixture):
         links = Links()
         snapshot = E.scan(self.root)
         self.assertEqual({self.root / row["doc_path"] for row in snapshot["recent"]}, set(paths))
-        links.feed(E.render_html(snapshot, E._translator()))
+        links.feed(E.render_recent_html(snapshot, E._translator()))
         opened = {self.root / unquote(urlsplit(href).path) for href in links.hrefs
                   if not urlsplit(href).scheme}
         for path in paths:
@@ -785,11 +776,15 @@ class LanguageTests(EntranceFixture):
         self.cycle("2026-01-02_one", "2026-01-02_alpha",
                    [("artifacts/final_report.md", "# Report\n\nBody.\n")])
         E.refresh(self.root)
-        self.assertIn("Recent documents", self.entrance())
+        self.assertIn("## Campaigns", self.entrance())
+        self.assertIn("# Recent route reports", self.entrance(E.RECORDS_MD))
         os.environ["FLEET_NOW_LANG"] = "ko"
         E.refresh(self.root)
-        self.assertIn("최근 문서", self.entrance())
+        self.assertIn("## 캠페인", self.entrance())
+        self.assertIn("## 기록", self.entrance())
+        self.assertIn("# 최근 route 보고", self.entrance(E.RECORDS_MD))
         self.assertIn('lang="ko"', self.entrance("index.html"))
+        self.assertIn('lang="ko"', self.entrance(E.RECORDS_HTML))
 
 
 class CliTests(EntranceFixture):
@@ -814,18 +809,19 @@ class CliTests(EntranceFixture):
         done = self._run("reports")
         self.assertEqual(done.returncode, 0, done.stderr)
         lines = [line for line in done.stdout.splitlines() if re.match(r"^\d+\. ", line)]
-        self.assertEqual(len(lines), 3)
+        # three campaigns, the all-campaigns page, the route reports page, the ID index
+        self.assertEqual(len(lines), 6)
         self.assertIn("1. 2026-01-04", lines[0])
         entrance = self.entrance()
         self.assertIn("1. 2026-01-04", entrance)
         self.assertIn("3. 2026-01-02", entrance)
         self.assertIn(str(self.root / "README.md"), done.stdout)
 
-    def test_open_number_prints_that_bar_rows_absolute_path(self):
+    def test_open_number_prints_that_entrance_line_target(self):
         self._three_documents()
         done = self._run("open", "2")
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(done.stdout.strip(), str(self.root / "campaigns/2026-01-03_two/2026-01-03_beta/artifacts/final_report.md"))
+        self.assertEqual(done.stdout.strip(), str(self.root / "campaigns/2026-01-03_two"))
 
     def test_open_with_no_argument_prints_the_browser_entrance(self):
         self._three_documents()
@@ -843,7 +839,9 @@ class CliTests(EntranceFixture):
         self.assertEqual(none.stdout.strip(), "")
         several = self._run("open", "result")
         self.assertEqual(several.returncode, 1)
-        self.assertEqual(len([line for line in several.stdout.splitlines() if re.match(r"^\d+\. ", line)]), 3)
+        self.assertEqual(len([line for line in several.stdout.splitlines() if re.match(r"^\d{4}-", line)]), 3)
+        self.assertEqual([line for line in several.stdout.splitlines() if re.match(r"^\d+\. ", line)], [])
+        self.assertIn("add more words", several.stderr)
 
     def test_an_out_of_range_number_is_searched_as_words(self):
         self._three_documents()
@@ -932,11 +930,17 @@ class EntranceIntegrationTests(EntranceFixture):
             with mock.patch.object(V, 'viewer_url', side_effect=lambda root, target: real(root, target, server.server_address[1])):
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out), mock.patch.object(E, '_open_externally') as opener:
-                    self.assertEqual(E._command_open(self.root, ['1']), 0)
+                    self.assertEqual(E._command_open(self.root, ['Hello']), 0)
                 lines = out.getvalue().splitlines()
                 self.assertTrue(lines[0].endswith('report.md'))
                 self.assertIn('http://127.0.0.1:', lines[1])
                 self.assertTrue(opener.call_args.args[0].startswith('http://'))
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), mock.patch.object(E, '_open_externally') as opener:
+                    self.assertEqual(E._command_open(self.root, ['1']), 0)  # the campaign folder line
+                lines = out.getvalue().splitlines()
+                self.assertTrue(lines[0].endswith('campaigns/2026-01-02_one'))
+                self.assertRegex(lines[1], r'http://127\.0\.0\.1:\d+/campaigns/2026-01-02_one/$')
                 self.assertIsNone(real(self.base, self.root/'index.html', server.server_address[1]))
             with mock.patch.dict(sys.modules, {'artifact_viewer': None}), contextlib.redirect_stdout(io.StringIO()) as out:
                 self.assertEqual(E._command_open(self.root, []), 0)
@@ -957,6 +961,8 @@ class EntrancePerformanceTests(EntranceFixture):
         baseline_path = self.base/'baseline_entrance.py'; baseline_path.write_text(original)
         spec = importlib.util.spec_from_file_location('baseline_entrance', baseline_path)
         baseline = importlib.util.module_from_spec(spec); spec.loader.exec_module(baseline)
+        baseline._translator = lambda: baseline._fallback_translator  # the old text keys are gone from the shared catalog
+        baseline.ENTRANCE_NAMES = baseline.ENTRANCE_NAMES[:4]  # the old module knows four files only
         observations = []
         for name, module, root in [('baseline', baseline, baseline_root), ('current', E, self.root)]:
             timings = []
@@ -970,6 +976,288 @@ class EntrancePerformanceTests(EntranceFixture):
                 if name == 'current': self.assertEqual(render.call_count-renders_before, 0)
                 observations.append(f'{name} first={first:.4f}s warm median={statistics.median(timings):.4f}s min={min(timings):.4f}s max={max(timings):.4f}s scans={scan.call_count-scans_before} renders={render.call_count-renders_before}')
         print('\n100x10 warm-cache benchmark: ' + '; '.join(observations))
+
+class SectionFixture(EntranceFixture):
+    """A root with spec topics (older revision A, newer revision B), campaigns and route reports."""
+    REF = "ref_" + "a" * 32
+    REV_A, REV_B = "rrev_" + "1" * 32, "rrev_" + "2" * 32
+
+    def spec(self, count=12, *, newest=("c01",), h1=None):
+        import artifact_producer as P
+        base = self.root / "shared" / "spec" / self.REF
+        names = [f"c{number:02d}" for number in range(1, count + 1)]
+        heads = h1 or (lambda name: f"# Component {name} — Spec (PRD)\n\nBody.\n")
+        files = {f"{name}/prd.md": heads(name).encode() for name in names}
+        files["prd.md"] = "# Contents — PRD\n\nIndex.\n".encode()
+        newer = {f"{name}/prd.md" for name in newest} | {"prd.md"}
+        for rid, day, physical in ((self.REV_A, "2026-11-10", set(files) - newer),
+                                   (self.REV_B, "2026-11-18", newer)):
+            directory = base / "revisions" / rid
+            for name in physical:
+                (directory / name).parent.mkdir(parents=True, exist_ok=True)
+                (directory / name).write_bytes(files[name])
+            directory.mkdir(parents=True, exist_ok=True)
+            logical = files if rid == self.REV_B else {name: files[name] for name in physical}
+            rows = P._spec_inventory(logical)
+            record = {"schema_version": 1, "shared_reference_id": self.REF,
+                      "shared_reference_revision_id": rid, "kind": "shared-spec", "files": rows,
+                      "content_digest": P._spec_inventory_digest(rows), "created_on": day + "T09:00:00Z"}
+            if rid == self.REV_B:
+                record["stored_in"] = {name: self.REV_A for name in files if name not in newer}
+            (directory / "revision.json").write_text(json.dumps(record))
+        (base / "reference.json").write_text(json.dumps({
+            "shared_reference_id": self.REF, "latest_revision_id": self.REV_B,
+            "revisions": [self.REV_A, self.REV_B]}))
+        return names
+
+    def reports(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(E._command_reports(self.root), 0)
+        return out.getvalue()
+
+    def open_line(self, number):
+        out = io.StringIO()
+        with mock.patch.object(E, "_show_viewer", return_value=None), \
+                mock.patch.object(E, "_open_externally"), contextlib.redirect_stdout(out):
+            self.assertEqual(E._command_open(self.root, [str(number)]), 0)
+        return out.getvalue().strip()
+
+    def reports_targets(self):
+        lines = self.reports().splitlines()
+        return [lines[at + 1].strip() for at, line in enumerate(lines) if re.match(r"^\d+\. ", line)]
+
+
+class SectionTests(SectionFixture):
+    def _routes(self):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha",
+                   [("artifacts/final_report.md", "# Alpha result\n\nFirst body.\n")])
+        self.cycle("2026-01-03_two", "2026-01-03_beta",
+                   [("artifacts/final_report.md", "# Beta result\n\nSecond body.\n")])
+
+    def test_the_top_has_spec_campaigns_and_records_and_no_route_reports(self):
+        self.spec()
+        self._routes()
+        self.refresh()
+        readme, page = self.entrance(), self.entrance("index.html")
+        for text, marks in ((readme, ("## spec", "## Campaigns", "## Records")),
+                            (page, ("<h2>spec</h2>", "<h2>Campaigns</h2>", "<h2>Records</h2>"))):
+            positions = [text.index(mark) for mark in marks]
+            self.assertEqual(positions, sorted(positions))
+            for hidden in ("Alpha result", "Beta result", "final_report", "2026-01-02_alpha"):
+                self.assertNotIn(hidden, text)
+        self.assertIn("recent-route-reports.md", readme)
+        self.assertIn('href="recent-route-reports.html"', page)
+        for name in (E.RECORDS_MD, E.RECORDS_HTML):
+            for shown in ("Alpha result", "Beta result", "2026-01-02_alpha"):
+                self.assertIn(shown, self.entrance(name))
+
+    def test_the_route_reports_page_keeps_the_rule_and_order_and_holds_no_spec_topic(self):
+        self.spec()
+        self._routes()
+        self.cycle("2026-01-04_three", "2026-01-04_gamma",
+                   [("artifacts/final_report.md", "# Gamma result\n\nThird body.\n")])
+        self.refresh()
+        rows = self.rows()
+        self.assertEqual([row["title"] for row in rows], ["Gamma result", "Beta result", "Alpha result"])
+        self.assertNotIn("canonical-topic", {row["kind"] for row in rows})
+        page = self.entrance(E.RECORDS_MD)
+        titles = re.findall(r"^\d+\. \S+  \[(.*?)\]\(<", page, re.MULTILINE)
+        self.assertEqual(titles, [row["title"] for row in rows])
+        self.assertNotIn("Component", page)
+        self.assertEqual(page, E.render_recent_markdown(E.scan(self.root), E._translator()))
+        self.assertTrue(page.startswith(E.MARKER + "\n# Recent route reports\n"))
+        self.assertIn("[Back to the entrance](<README.md>)", page)
+
+    def test_spec_lines_dates_titles_order_limit_and_the_rest_line(self):
+        self.spec(12, h1=lambda name: ("# 라우팅 — 갈래, 유닛, 엮기 — 제품 요구사항 (PRD)\n" if name == "c02"
+                                         else "# Plain title\n" if name == "c03"
+                                         else "No heading here\n" if name == "c04"
+                                         else f"# Component {name} — Spec (PRD)\n"))
+        snapshot = E.scan(self.root)
+        sections = E.entrance_sections(snapshot, E._translator())
+        spec = sections[0]
+        self.assertEqual(spec["key"], "spec")
+        lines = spec["lines"]
+        self.assertEqual(len(lines), E.SPEC_LIMIT + 1)
+        self.assertEqual([line["date"] for line in lines[:E.SPEC_LIMIT]],
+                         ["2026-11-18"] + ["2026-11-10"] * (E.SPEC_LIMIT - 1))
+        titles = [line["title"] for line in lines[:E.SPEC_LIMIT]]
+        self.assertEqual(titles[0], "Component c01")
+        self.assertEqual(titles[1], "라우팅 — 갈래, 유닛, 엮기")
+        self.assertEqual(titles[2], "Plain title")
+        self.assertEqual(titles[3], "c04")  # no H1: the component name
+        self.assertEqual(titles[4:], [f"Component c{number:02d}" for number in range(5, 11)])
+        rest = lines[-1]
+        self.assertEqual((rest["kind"], rest["title"]), ("spec-rest", "2 more"))
+        index = next(row for row in snapshot["topics"] if not row["component"])
+        self.assertEqual(rest["target"], index["doc_path"])
+        self.assertEqual(rest["number"], E.SPEC_LIMIT + 1)
+        self.refresh()
+        self.assertIn(f"{E.SPEC_LIMIT + 1}. 2 more", self.entrance().replace("[2 more]", "2 more").replace(
+            f"(<{rest['md']}>)", ""))
+        os.environ["FLEET_NOW_LANG"] = "ko"
+        self.assertIn("나머지 2개", E.render_markdown(E.scan(self.root), E._translator()))
+
+    def test_an_index_less_rest_line_is_plain_text_without_a_number(self):
+        self.spec(12)
+        snapshot = E.scan(self.root)
+        snapshot["topics"] = [row for row in snapshot["topics"] if row["component"]]
+        spec = E.entrance_sections(snapshot, E._translator())[0]["lines"]
+        self.assertEqual(spec[-1]["kind"], "spec-rest")
+        self.assertIsNone(spec[-1]["number"])
+        self.assertIsNone(spec[-1]["md"])
+        readme = E.render_markdown(snapshot, E._translator())
+        self.assertIn("\n2 more\n", readme)
+        self.assertNotIn("11. 2 more", readme)
+
+    def test_no_components_means_no_spec_section(self):
+        self._routes()
+        self.refresh()
+        self.assertNotIn("## spec", self.entrance())
+        self.assertNotIn("<h2>spec</h2>", self.entrance("index.html"))
+        self.assertEqual([section["key"] for section in
+                          E.entrance_sections(E.scan(self.root), E._translator())], ["campaigns", "records"])
+
+    def test_campaign_lines_carry_date_title_and_the_meta_summary(self):
+        self._routes()
+        by_id = {"camp_" + _digest("campaign:2026-01-02_one"): {"title": "First campaign", "summary": "  one   line  "},
+                 "camp_" + _digest("campaign:2026-01-03_two"): {"title": "Second campaign"}}
+        for name in ("2026-01-02_one", "2026-01-03_two"):
+            (self.root / "campaigns" / name / "meta.json").write_text("{}")
+        def read(root, campaign_id, members=None):
+            import types
+            return types.SimpleNamespace(status="ok", doc={"campaign": by_id[campaign_id]})
+        with mock.patch.object(E.artifact_meta, "read_campaign_meta", side_effect=read), \
+                mock.patch.object(E.artifact_meta, "_membership", return_value={}):
+            self.refresh()
+            snapshot = E.scan(self.root)
+        self.assertEqual([(row["title"], row["summary"]) for row in snapshot["campaigns"]],
+                         [("Second campaign", ""), ("First campaign", "one line")])
+        for gone in ("docs", "doc_cycles", "records"):
+            self.assertNotIn(gone, snapshot["campaigns"][0])
+        readme = self.entrance()
+        self.assertIn("1. 2026-01-03  [Second campaign](<campaigns/2026-01-03_two>)\n2. 2026-01-02  "
+                      "[First campaign](<campaigns/2026-01-02_one>)\n   one line\n3. [All campaigns]", readme)
+        self.assertIn('<li><span class="meta">2026-01-02</span> <a href="campaigns/2026-01-02_one">First '
+                      'campaign</a><br><span class="meta">one line</span></li>', self.entrance("index.html"))
+        self.assertNotIn("Alpha result", readme + self.entrance("index.html"))
+
+    def test_the_entrance_reports_and_open_number_name_the_same_lines(self):
+        names = self.spec(12)
+        self._routes()
+        self.refresh()
+        html = re.findall(r'<li>(?:<span class="meta">[^<]*</span> )?<a href="([^"]+)">', self.entrance("index.html"))
+        targets = self.reports_targets()
+        self.assertEqual(html, [__import__("urllib.parse").parse.quote(t, safe="/.") for t in targets])
+        md = re.findall(r"^(\d+)\. (?:\S+  )?\[(.*?)\]\(<(.*?)>\)", self.entrance(), re.MULTILINE)
+        self.assertEqual([int(number) for number, _, _ in md], list(range(1, len(targets) + 1)))
+        self.assertEqual(len(md), len(targets))
+        self.assertEqual(targets[-3:], ["all-campaigns.html", "recent-route-reports.html", "campaigns/INDEX.md"])
+        for number, target in enumerate(targets, start=1):
+            expected = self.root / target
+            self.assertEqual(self.open_line(number), str(expected), number)
+        self.assertTrue((self.root / targets[-4]).is_dir() or targets[-4].startswith("campaigns/"))
+        spec_first = self.open_line(1)
+        self.assertTrue(spec_first.endswith("c01/prd.md"))
+        self.assertEqual(self.open_line(E.SPEC_LIMIT + 1).rsplit("/", 1)[-1], "prd.md")
+        campaign_line = E.SPEC_LIMIT + 2
+        self.assertEqual(self.open_line(campaign_line), str(self.root / "campaigns/2026-01-03_two"))
+        self.assertEqual(names[0], "c01")
+
+    def test_open_words_find_route_reports_and_spec_topics(self):
+        self.spec(12)
+        self._routes()
+        self.refresh()
+        out = io.StringIO()
+        with mock.patch.object(E, "_show_viewer", return_value=None), mock.patch.object(E, "_open_externally"), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(E._command_open(self.root, ["Alpha", "result"]), 0)
+            self.assertEqual(E._command_open(self.root, ["c11"]), 0)
+        first, second = out.getvalue().splitlines()
+        self.assertTrue(first.endswith("2026-01-02_alpha/artifacts/final_report.md"))
+        self.assertIn("/shared/spec/", second)
+        self.assertTrue(second.endswith("c11/prd.md"))
+
+    def test_the_route_reports_page_is_deterministic_recreated_and_never_cached(self):
+        self._routes()
+        self.refresh()
+        before = {name: (self.root / name).read_bytes() for name in (E.RECORDS_MD, E.RECORDS_HTML)}
+        self.assertEqual(self.refresh()["status"], "unchanged")
+        (self.root / E.RECORDS_MD).unlink()  # destructive-ok: own temporary fixture
+        result = self.refresh()
+        self.assertEqual((result["status"], result["created"]), ("written", [E.RECORDS_MD]))
+        self.assertEqual((self.root / E.RECORDS_MD).read_bytes(), before[E.RECORDS_MD])
+        self.cycle("2026-01-04_three", "2026-01-04_gamma",
+                   [("artifacts/final_report.md", "# Gamma result\n\nThird body.\n")])
+        self.refresh()
+        self.assertIn("Gamma result", self.entrance(E.RECORDS_MD))
+        self.assertNotEqual((self.root / E.RECORDS_HTML).read_bytes(), before[E.RECORDS_HTML])
+
+    def test_a_route_reports_page_without_the_marker_or_a_link_is_never_overwritten_or_followed(self):
+        self._routes()
+        mine = "# my own page\n"
+        (self.root / E.RECORDS_MD).write_text(mine, encoding="utf-8")
+        outside = self.base / "outside.html"
+        outside.write_text("outside\n", encoding="utf-8")
+        os.symlink(outside, self.root / E.RECORDS_HTML)
+        result = self.refresh()
+        self.assertEqual(sorted(result["foreign"]), sorted([E.RECORDS_MD, E.RECORDS_HTML]))
+        self.assertEqual((self.root / E.RECORDS_MD).read_text(encoding="utf-8"), mine)
+        self.assertTrue((self.root / E.RECORDS_HTML).is_symlink())
+        self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+        for name in ("README.md", "index.html", "all-campaigns.md", "all-campaigns.html"):
+            self.assertTrue(_has_entrance_marker(self.root / name), name)
+        self.assertEqual(self.refresh()["status"], "unchanged")
+
+    def test_no_screen_text_uses_cycle_or_user_facing_in_either_language(self):
+        self.spec(12)
+        self._routes()
+        self.cycle("2026-01-05_three", "2026-01-05_open-one", [])
+        for lang in ("en", "ko"):
+            os.environ["FLEET_NOW_LANG"] = lang
+            self.refresh()
+            shown = [self.entrance(name) for name in E.ENTRANCE_NAMES] + [self.reports()]
+            self.assertEqual(len(shown), 7)
+            for text in shown:
+                lowered = text.lower()
+                for word in ("사이클", "cycle", "user-facing"):
+                    self.assertNotIn(word, lowered, lang)
+        self.assertIn("route", self.entrance())
+
+    def test_the_viewer_serves_the_route_reports_page_like_any_derived_file(self):
+        import http.client
+        import artifact_viewer as V
+        self._routes()
+        self.refresh()
+        server = V.ViewerServer(self.root, 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for name in (E.RECORDS_MD, E.RECORDS_HTML):
+                conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+                conn.request("GET", "/" + name)
+                response = conn.getresponse()
+                body = response.read()
+                conn.close()
+                self.assertEqual(response.status, 200, name)
+                self.assertIn(b"Alpha result", body, name)
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+            conn.request("GET", "/" + E.RECORDS_HTML + "?raw=1")
+            response = conn.getresponse()
+            raw = response.read()
+            conn.close()
+            if response.status == 200 and b"<!DOCTYPE html>" in raw[:20]:
+                self.assertEqual(raw, (self.root / E.RECORDS_HTML).read_bytes())
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+
+def _has_entrance_marker(path):
+    return E.MARKER in path.read_text(encoding="utf-8").splitlines()[:2]
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

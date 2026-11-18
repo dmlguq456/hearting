@@ -232,7 +232,7 @@ class CampaignDocumentsTest(unittest.TestCase):
         for language, label in [('ko', '현황 문서 상충'), ('en', 'conflicting status pages')]:
             with self.subTest(language=language):
                 t = entrance.ui_text.translator(language)
-                self.assertIn(label, entrance.render_html(result, t))
+                self.assertIn(label, entrance.render_recent_html(result, t))
                 self.assertIn(label, '\n'.join(entrance._markdown_recent(result, t)))
 
     def test_alias_creation_detects_root_replacement_without_touching_the_replacement(self):
@@ -279,7 +279,7 @@ class CampaignDocumentsTest(unittest.TestCase):
         self.assertEqual({Path(r['doc_path']).name for r in rows}, set(names))
         t = entrance.ui_text.translator('en')
         markdown = '\n'.join(entrance._markdown_recent(result, t))
-        html = entrance.render_html(result, t)
+        html = entrance.render_recent_html(result, t)
         for row in rows:
             self.assertIn(quote(row['doc_path'], safe='/.'), markdown)
             self.assertIn(quote(row['doc_path'], safe='/.'), html)

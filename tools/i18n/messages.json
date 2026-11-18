@@ -315,12 +315,12 @@
    "ko": "입구로 돌아가기"
   },
   "entrance.cycles": {
-   "en": "cycles {count}",
-   "ko": "사이클 {count}개"
+   "en": "routes {count}",
+   "ko": "route {count}개"
   },
   "entrance.empty": {
-   "en": "No user-facing document yet.",
-   "ko": "아직 사용자용 문서가 없습니다."
+   "en": "No documents yet.",
+   "ko": "아직 문서가 없습니다."
   },
   "entrance.id_index": {
    "en": "ID index",
@@ -346,21 +346,29 @@
    "en": "Some records could not be read completely; this list is partial.",
    "ko": "일부 기록을 완전히 읽지 못했습니다. 부분 목록입니다."
   },
-  "entrance.recent_campaigns": {
-   "en": "Recent campaigns",
-   "ko": "최근 캠페인"
-  },
-  "entrance.recent_documents": {
-   "en": "Recent documents",
-   "ko": "최근 문서"
-  },
-  "entrance.records": {
-   "en": "work records {count}",
-   "ko": "작업 기록 {count}개"
+  "entrance.recent_routes": {
+   "en": "Recent route reports",
+   "ko": "최근 route 보고"
   },
   "entrance.rewrite": {
    "en": "Hearting rewrites this file. Editing it is overwritten; deleting it comes back at the next publish.",
    "ko": "이 파일은 하팅이 다시 씁니다. 직접 고치면 덮어씁니다. 지우면 다음 발행 때 다시 생깁니다."
+  },
+  "entrance.section_campaigns": {
+   "en": "Campaigns",
+   "ko": "캠페인"
+  },
+  "entrance.section_records": {
+   "en": "Records",
+   "ko": "기록"
+  },
+  "entrance.section_spec": {
+   "en": "spec",
+   "ko": "spec"
+  },
+  "entrance.spec_rest": {
+   "en": "{count} more",
+   "ko": "나머지 {count}개"
   },
   "entrance.status_ambiguous": {
    "en": "conflicting status pages",
@@ -379,8 +387,8 @@
    "ko": "산출물"
   },
   "entrance.totals": {
-   "en": "Campaigns: {campaigns} · cycles: {cycles} · running: {open}",
-   "ko": "캠페인 {campaigns}개 · 사이클 {cycles}개 · 진행 중 {open}개"
+   "en": "Campaigns: {campaigns} · routes: {cycles} · running: {open}",
+   "ko": "캠페인 {campaigns}개 · route {cycles}개 · 진행 중 {open}개"
   },
   "experiment.age_hours": {
    "en": "{n} h ago",
@@ -2191,8 +2199,8 @@
    "ko": "결과는 각 프로젝트의 `.agent_reports/`에 쌓입니다. 그 안의 `README.md`를 열거나 `hearting reports`를 실행하세요."
   },
   "open.ambiguous": {
-   "en": "Several artifacts match; open one by number.",
-   "ko": "여러 산출물이 맞습니다. 번호로 고르세요."
+   "en": "Several artifacts match; add more words to narrow it.",
+   "ko": "여러 문서가 맞습니다. 낱말을 더 넣어 좁혀 주세요."
   },
   "open.not_found": {
    "en": "No artifact matches {query}.",
@@ -2279,8 +2287,8 @@
    "ko": "질문 대기 중입니다. Fleet에서 답하거나 이 창에 선택지 번호나 선택지 문구로 답해 주세요."
   },
   "reports.empty": {
-   "en": "No user-facing document yet.",
-   "ko": "아직 사용자용 문서가 없습니다."
+   "en": "No documents yet.",
+   "ko": "아직 문서가 없습니다."
   },
   "reports.entrance": {
    "en": "Entrance: {path}",

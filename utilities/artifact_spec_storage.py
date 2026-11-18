@@ -360,8 +360,29 @@ def resolve_path(root, relative):
             'error': error.code}
 
 
+def revision_created_on(root, reference_id, revision_id):
+    """`created_on` of one revision's own header, or None when it cannot be read.
+
+    Reads only that revision's metadata (no roster, no payload bytes) and closes
+    its descriptor; a failed read never raises."""
+    snapshot = None
+    try:
+        snapshot = _Snapshot(root, reference_id, revision_id)
+        value = snapshot.header(revision_id)[0].get('created_on')
+        return value if isinstance(value, str) else None
+    except (StorageError, OSError, RuntimeError, ValueError, TypeError, KeyError):
+        return None
+    finally:
+        if snapshot is not None:
+            snapshot.close()
+
+
 def entrance_snapshot(root, *, limit=300):
-    """Canonical topics from existing reference/component/revision identities."""
+    """Canonical topics from existing reference/component/revision identities.
+
+    A topic's date is the `created_on` of the revision that physically stores its
+    PRD (`source_revision_id`), so an unchanged component keeps the day it was last
+    changed; when that header cannot be read the latest revision's date is used."""
     root = Path(root).resolve()
     rows, errors = [], []
     root_fd = shared_fd = None
@@ -411,9 +432,16 @@ def entrance_snapshot(root, *, limit=300):
                 if len(rows) + len(paths) > limit:
                     paths = paths[:limit-len(rows)]; coverage = 'partial'
                 files, _ = read_files(root, reference, revision, paths=paths)
+                stored_on = {}
                 for logical, file in files.items():
                     component = logical.split('/')[0] if '/' in logical else None
-                    date = str(inventory.get('created_on') or '')[:10]
+                    source = file.source_revision_id
+                    if source not in stored_on:
+                        stored_on[source] = (inventory.get('created_on') if source == revision
+                                             else revision_created_on(root, reference, source))
+                    date = str(stored_on[source] or inventory.get('created_on') or '')[:10]
+                    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date):
+                        date = str(inventory.get('created_on') or '')[:10]
                     if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date): date = ''
                     rows.append({'kind': 'canonical-topic', 'title': component or record.get('title') or record.get('key') or reference,
                         'date': date, 'summary': '', 'doc_path': file.path.relative_to(root).as_posix(),
