@@ -410,7 +410,22 @@ English), and the receipt's stderr one machine line, `frame_advice=<reason>`.
 It is advice only: nothing blocks, no input is required, and the route is open
 whether or not the session follows it. These are the signs the frame width
 already reads (`route_plan.frame_signals`); a unit route, `direct`, a framed
-route and a route made from a proposal get no advice. A route made from a
+route and a route made from a proposal get no advice. **Screen first.** Development that changes what the person sees (layout,
+color, wording, the order of lines) shows a mockup before it opens, and opens
+from the mockup the person chose. The opening session judges whether the screen
+changes; no path signal is added. A change in one or two places: the opening
+session draws one mockup (one HTML page) itself. A larger change: open a design
+route (`--capability autopilot-design`) whose end product is one to three
+options with their comparison. The choice is a talk between the opening
+session and the person, not a unit. Hand the chosen mockup's path to the
+development task as a decision (받는 것: 결정); development does not decide the
+look again. Development that changes no screen opens at once. When the person
+says to go without a mockup, open at once: this is a default, not a gate, and
+no flag or check refuses it. To open the design route ahead of the choice, leave
+the packaging stage for the development job that follows:
+`--shape staged --capability autopilot-design --graph refs,build,visual-verify,critic-review`.
+
+A route made from a
 proposal (`compose --route-plan <record>#<i>`, a command the runtime prints)
 has no frame nodes, and neither has a `solo` or `staged` compose: those shapes
 compile without the recipe's frame pair (a route sealed earlier keeps the
