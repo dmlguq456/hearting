@@ -340,7 +340,8 @@ light check of a direct change may use the harness's own native subagent
 | One reversible local completion unit in the current Git worktree, including a small feature with its tests and README | read → edit → check → reply | automatic record; no start/finish round trip |
 | Explicit direct source change needing preparation | `compose --start --shape direct --field <field> --prompt-file <task>` | isolated worktree, inline node, dispatch depth 0 |
 | One reversible local completion unit already made in place | `compose --shape direct --field <field>` | records the in-place change as an inline node |
-| Other new work | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
+| New work whose direction is clear | `compose --start --shape solo\|staged --capability <kind> --prompt-file <task>` | opened directly; a sign may add the one advice line below |
+| Other new work (more than one reading is plausible) | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
 
 A single read-only unit can also be opened as a route of its own, with no owner:
 `compose --start --unit <family/name> --prompt-file <brief>` (for example
@@ -391,13 +392,25 @@ English words in every language.
 each kind's field on its first line, and the `[경로]` card shows one line
 `field <field> (<field_source>)` under its `cwd · slug` line.
 
-Skip a new frame only when a frame or the person already decided the shape:
-resume a stopped route, follow the runtime-printed `next_leg`, continue within
-an approved frame decision of the same campaign, or follow the person's
-explicit capability and stages. The main session judges whether follow-up
-stays within that approved scope. Its own judgment that work is already
-decided is not an exception. Use the decided shape explicitly; a person-named
-stage list uses `--shape staged --capability <kind> --graph <stage,…>`. A route made from a
+Open a route directly (`--shape solo|staged`) when the direction is clear. The
+opening session judges that: a frame or the person already decided the shape
+(resume a stopped route, follow the runtime-printed `next_leg`, continue within
+an approved frame decision of the same campaign, follow the person's explicit
+capability and stages), or the request itself leaves one admissible direction.
+When more than one reading is plausible, omit the shape and let a frame settle
+it. The main session also judges whether follow-up stays within an approved
+scope. Use the decided shape explicitly; a person-named
+stage list uses `--shape staged --capability <kind> --graph <stage,…>`.
+
+**Direction advice.** Where the request shows a sign that settling the direction
+first is worth it — a protected path (`core/`, `capabilities/`, `roles/`,
+`spec/`, a PRD), two or more adapters, or a spec or ship kind — the `[경로]` card of a `solo` or `staged` route adds
+one line, `방향 잡기 권함: <reason>` (`Direction check advised: <reason>` in
+English), and the receipt's stderr one machine line, `frame_advice=<reason>`.
+It is advice only: nothing blocks, no input is required, and the route is open
+whether or not the session follows it. These are the signs the frame width
+already reads (`route_plan.frame_signals`); a unit route, `direct`, a framed
+route and a route made from a proposal get no advice. A route made from a
 proposal (`compose --route-plan <record>#<i>`, a command the runtime prints)
 has no frame nodes, and neither has a `solo` or `staged` compose: those shapes
 compile without the recipe's frame pair (a route sealed earlier keeps the
@@ -943,7 +956,9 @@ same registered question goes to the person. This meaning is shared
 by Claude, Codex and OpenCode.
 
 When there is nothing to choose — both frame legs return valid, equal
-proposals, no start approval is in scope, and neither brief's section 7 lists a
+proposals (a one-leg frame needs only its one valid proposal), no start
+approval is in scope, no part needs the repository prepared, the proposal stays
+inside the intent's `안 할 것`, and no brief's section 7 lists a
 question only the user can answer — the runtime records that interview itself as
 the depth-0 session's on-behalf answer (`supervisor`, basis
 `automatic-agreement`), releases frame-review through the same commands, and

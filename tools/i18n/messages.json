@@ -294,9 +294,17 @@
    "en": "Start in the direction both legs agreed on",
    "ko": "두 갈래가 함께 낸 방향대로 시작합니다"
   },
+  "direction.default_means_single": {
+   "en": "Start in the direction the review proposed",
+   "ko": "검토가 낸 방향대로 시작합니다"
+  },
   "direction.notice": {
    "en": "[Direction notice] The two review legs agreed on a direction and left nothing to ask, so work started without asking{option}. If anything needs fixing, let me know in your next message.",
    "ko": "[방향 통지] 두 갈래 검토가 같은 방향을 내고 물을 것을 남기지 않아 묻지 않고 시작했습니다{option}. 고칠 점이 있으면 다음 말로 알려 주세요."
+  },
+  "direction.notice_single": {
+   "en": "[Direction notice] The review left nothing to ask, so work started without asking{option}. If anything needs fixing, let me know in your next message.",
+   "ko": "[방향 통지] 검토가 물을 것을 남기지 않아 묻지 않고 시작했습니다{option}. 고칠 점이 있으면 다음 말로 알려 주세요."
   },
   "entrance.all_campaigns": {
    "en": "All campaigns",
@@ -2474,6 +2482,18 @@
    "en": "yes",
    "ko": "예"
   },
+  "route.advice.adapters": {
+   "en": "the request names more than one adapter ({detail})",
+   "ko": "과제에 어댑터 둘 이상({detail})"
+  },
+  "route.advice.capability": {
+   "en": "a {detail} job",
+   "ko": "{detail} 작업"
+  },
+  "route.advice.protected-path": {
+   "en": "the request names {detail}",
+   "ko": "과제에 {detail}"
+  },
   "route.campaign.blocked": {
    "en": "Campaign {key} (begin will refuse: {reason})",
    "ko": "캠페인 {key} (begin 거부 예정: {reason})"
@@ -2537,6 +2557,10 @@
   "route.card.cost_two": {
    "en": "Cost: two top-model legs · one direction-check question",
    "ko": "비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회"
+  },
+  "route.card.frame_advice": {
+   "en": "Direction check advised: {reason}",
+   "ko": "방향 잡기 권함: {reason}"
   },
   "route.card.frame_proposes": {
    "en": "frame assembles and proposes the direction and route",

@@ -2201,6 +2201,92 @@ class AutomaticDirectionTest(StartBase):
         self.assertTrue(FI.user_questions_left("## 6. Risks\n\nx\n"))
 
 
+class AutomaticDirectionOneLegTest(StartBase):
+    """A one-leg frame has no second leg to disagree with: with nothing to choose it is not asked
+    either. Every condition that keeps a person's say still asks (WORKFLOW §0.4)."""
+    FRAME_INTENSITY = "quick"
+
+    def automatic(self):
+        root, record, output = W._framed_cycle(self.route)
+        return W._automatic_direction(self.route, W._proposal_rows(self.route, self.jobs, root, record, output), output)
+
+    def one_brief(self, text):
+        (self.output / "shards" / "frame" / "direction-brief.md").write_text(text, encoding="utf-8")
+
+    def test_one_valid_proposal_with_nothing_to_choose_is_recorded_not_asked(self):
+        self.assertEqual(RP.frame_legs(self.route), ("frame",))
+        self.one_brief(full_brief([DIRECT]))
+        interview, answers = self.automatic()
+        self.assertEqual(interview["frame_legs"], 1)
+        derived, errors = W._marked_route_proposals(self.route, self.jobs, interview)
+        self.assertEqual(errors, [])
+        self.assertEqual(FI.validate({**derived, "summary": "-"}), [])
+        self.assertEqual(FI.validate_answers(derived, answers), [])
+        self.assertEqual((answers["actor_kind"], answers["basis"]), ("supervisor", FI.AUTOMATIC_BASIS))
+        self.assertEqual(list(derived["route_proposals"]["by_option"]), ["진행"])
+        self.assertEqual(answers["answers"][FI.ROUTE_QUESTION_ID]["note"], "자동: 한 갈래 검토가 물을 것을 남기지 않음")
+        with self.assertRaisesRegex(ValueError, "registered worker cannot claim supervisor"):
+            FI.answer_actor_kind(answers, registered_worker=True)
+
+    def test_a_question_only_the_person_can_answer_keeps_the_person_asked(self):
+        for name, text in {"question": full_brief([DIRECT], questions="1. 이번에 같이 고칠까요?"),
+                           "no-section": brief([DIRECT]).replace("## 7. Questions\n\nnone\n", ""),
+                           "thin-brief": brief([DIRECT])}.items():
+            with self.subTest(name):
+                self.one_brief(text)
+                self.assertIsNone(self.automatic())
+
+    def test_a_part_with_a_start_approval_keeps_the_person_asked(self):
+        self.one_brief(full_brief([LAB_SETUP]))
+        root, record, output = W._framed_cycle(self.route)
+        rows = W._proposal_rows(self.route, self.jobs, root, record, output)
+        self.assertTrue(W._start_approval_keys(rows[0]))      # the fixture really carries one
+        self.assertIsNone(self.automatic())
+
+    def test_a_repository_that_must_be_prepared_keeps_the_person_asked(self):
+        self.one_brief(full_brief([DIRECT]))
+        self.assertIsNotNone(self.automatic())
+        root, record, output = W._framed_cycle(self.route)
+        rows = W._proposal_rows(self.route, self.jobs, root, record, output)
+        rows[0]["repository_preparation"] = [{"state": "create-after-approval", "path": "/x/y"}]
+        with mock.patch.object(W, "_proposal_rows", return_value=rows):
+            self.assertIsNone(self.automatic())
+
+    def test_a_direction_past_the_intents_not_doing_keeps_the_person_asked(self):
+        summary = "frame-review에 새 게이트를 추가한다"
+        self.one_brief(full_brief([DIRECT], summary=summary))
+        self.assertIsNotNone(self.automatic())
+        self.route = {**self.route, "work_request": {**self.route["work_request"],
+                                                     "text": "안 할 것: 새 게이트·필수 입력\n\n" + self.route["work_request"]["text"]}}
+        self.assertIsNone(self.automatic())
+
+    def test_a_leg_without_a_valid_proposal_or_a_worker_caller_keeps_the_person_asked(self):
+        self.one_brief("not a brief at all")
+        self.assertIsNone(self.automatic())
+        self.one_brief(full_brief([DIRECT]))
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_REGISTERED_WORKER": "1"}):
+            self.assertIsNone(self.automatic())
+
+    def test_the_one_leg_notice_says_one_review_and_the_two_leg_notice_is_unchanged(self):
+        self.one_brief(full_brief([DIRECT]))
+        interview, answers = self.automatic()
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"HOME": tmp, "XDG_CONFIG_HOME": tmp + "/xdg", "CLAUDE_CONFIG_DIR": tmp + "/claude"}
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("FLEET_NOW_LANG", None)
+                english = W._automatic_direction_notice_text(interview, answers)
+                os.environ["FLEET_NOW_LANG"] = "ko"
+                korean = W._automatic_direction_notice_text(interview, answers)
+                two_leg = W._automatic_direction_notice_text({k: v for k, v in interview.items() if k != "frame_legs"},
+                                                             answers)
+        self.assertEqual(english, "[Direction notice] The review left nothing to ask, so work started without "
+                                  "asking: Do the work. If anything needs fixing, let me know in your next message.")
+        self.assertEqual(korean, "[방향 통지] 검토가 물을 것을 남기지 않아 묻지 않고 시작했습니다: Do the work. "
+                                 "고칠 점이 있으면 다음 말로 알려 주세요.")
+        self.assertEqual(two_leg, "[방향 통지] 두 갈래 검토가 같은 방향을 내고 물을 것을 남기지 않아 묻지 않고 시작했습니다"
+                                  ": Do the work. 고칠 점이 있으면 다음 말로 알려 주세요.")
+
+
 class AutomaticDirectionStartTest(F.FramedStartTest):
     """The start that reaches the interview releases it itself, once, through the real settle path."""
 
@@ -2237,7 +2323,16 @@ class AutomaticDirectionStartTest(F.FramedStartTest):
         self.assertTrue(str(automatic["interview"]).startswith(str(cycle / W.AUTOMATIC_DIRECTION_DIR)))
         self.assertEqual(settled, [self.route["route_id"]])          # the real settle ran
         self.assertIn("state", result)
-        self.assertEqual(len(self.calls), 2)                          # no question was asked
+        self.assertEqual(len(self.calls), len(RP.frame_legs(self.route)))   # one launch per frame leg, no question asked
+
+
+class AutomaticDirectionOneLegStartTest(AutomaticDirectionStartTest):
+    """The same real start for a one-leg frame: released by the runtime, settled for real, nothing asked."""
+    FRAME_INTENSITY = "quick"
+
+    def test_nothing_to_choose_releases_through_the_runtime_and_settles_for_real(self):
+        self.assertEqual(RP.frame_legs(self.route), ("frame",))
+        super().test_nothing_to_choose_releases_through_the_runtime_and_settles_for_real()
 
 
 class AutomaticDirectionNoticeTest(StartBase):
