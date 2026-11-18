@@ -74,27 +74,47 @@ def _frame_node(node):
             and node.get("worker_type") == "frame")
 
 
-# The model grade of a unit leg, from the `floor` its unit head declares (roles/units/_schema.md).
-# `--profile` and `--explicit-profiles` still override it through the ordinary profile sealing;
-# `top` is not reachable here: it is for the owner and the frame legs only.
-UNIT_FLOOR_PROFILE = {"near-zero": "light", "low": "light", "moderate": "balanced",
-                      "high": "balanced-deep", "highest": "deep"}
+# The model grade a staged route gives one unit's worker is what the shipped recipes declare for it
+# (a stage node's `model_profile`, or the one its parallel-group leg declares); a unit no recipe
+# runs gets the staged default, `light`. A unit route reads that same declaration and keeps no table
+# of its own. `--profile` and `--explicit-profiles` still override it through the ordinary profile
+# sealing; `top` is not reachable here: it is for the owner and the frame legs only.
+_STAGED_DEFAULT_PROFILE = "light"
+_PROFILE_STRENGTH = {"light": 0, "balanced": 1, "balanced-deep": 2, "deep": 3}
 
 
-def unit_leg_node(recipe, unit):
+def staged_unit_profile(registry, unit):
+    """The grade the shipped staged recipes declare for `unit`'s worker (the strongest, if they differ)."""
+
+    declared = set()
+    check_unit = dict(registry.get("auxiliary_check_units") or {})
+    for recipe in registry["recipes"]:
+        plus = recipe.get("standard_plus") or {}
+        for node in plus.get("nodes") or []:
+            choices = node.get("unit_choices")
+            if node.get("model_profile") and (node.get("unit") == unit
+                                              or (isinstance(choices, list) and unit in choices)):
+                declared.add(node["model_profile"])
+        for group in plus.get("parallel_groups") or []:
+            for leg in group["legs"]:
+                if check_unit.get(leg.get("auxiliary_check")) == unit and leg.get("model_profile"):
+                    declared.add(leg["model_profile"])
+    declared &= set(_PROFILE_STRENGTH)
+    return max(declared, key=_PROFILE_STRENGTH.get) if declared else _STAGED_DEFAULT_PROFILE
+
+
+def unit_leg_node(recipe, unit, registry=None):
     """The one depth-0 leg of a `unit` route: the recipe's template filled from the unit head.
 
     ONE function for the compiler and `verify_route`: the unit, role and worker type are the
-    head's, the floor picks the model grade, everything else is the recipe's. A unit that is not
-    in the catalog, or whose head lacks what a leg needs, raises."""
+    head's, the model grade is the one a staged route gives that unit (`staged_unit_profile`),
+    everything else is the recipe's. A unit that is not in the catalog, or whose head lacks what
+    a leg needs, raises."""
 
     head = TOPO._unit_frontmatter(unit)
-    profile = UNIT_FLOOR_PROFILE.get(head.get("floor"))
-    if profile is None:
-        raise ValueError(f"unit-floor-invalid:{unit}")
     node = json.loads(json.dumps(recipe["standard_plus"]["nodes"][0]))
     node.update({"role": head["role"], "unit": unit, "worker_type": head["worker_type"],
-                 "model_profile": profile})
+                 "model_profile": staged_unit_profile(registry or TOPO.load_registry(), unit)})
     return node
 
 

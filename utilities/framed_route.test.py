@@ -669,7 +669,7 @@ class RegistryRegistrationTest(unittest.TestCase):
                 self.assertEqual(CT.capability_registry_digest(registry, capability), digest)
 
     def test_the_producer_admits_the_internal_capability_and_checks_route_equality(self):
-        self.assertEqual(P.INTERNAL_CAPABILITIES, ("route-frame",))
+        self.assertEqual(P.INTERNAL_CAPABILITIES, ("route-frame", "unit"))
         self.assertNotIn("route-frame", P.ENTRY_CAPABILITIES + P.STAGE_CAPABILITIES)
 
 
