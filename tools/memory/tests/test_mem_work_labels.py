@@ -59,7 +59,8 @@ class WorkLabelsTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         return done
 
-    def route(self, field="code", capability="autopilot-code", ts=None, ended=None, source=None, session=SESSION):
+    def route(self, field="code", capability="autopilot-code", ts=None, ended=None, source=None, session=SESSION,
+              automatic=False):
         """One route file plus its ledger line; `ended` is the outcome file's age in seconds."""
         self.n += 1
         route_id = f"rt-{self.n:016x}"
@@ -78,7 +79,8 @@ class WorkLabelsTest(unittest.TestCase):
             ledger.write(json.dumps({
                 "v": 1, "ts": time.time() if ts is None else ts, "event": "start", "harness": self.harness,
                 "session_id": session, "route_id": route_id, "route_file": str(path),
-                "capability": capability, "source_route_id": source}) + "\n")
+                "capability": capability, "source_route_id": source,
+                **({"automatic": True} if automatic else {})}) + "\n")
         return route_id
 
     def correction(self, route_id, unit=None, session=SESSION, attempt="att-owner1", at=None):
@@ -91,13 +93,19 @@ class WorkLabelsTest(unittest.TestCase):
         known = json.loads(path.read_text())["requests"] if path.exists() else []
         path.write_text(json.dumps({"schema_version": 1, "attempt_id": attempt, "requests": known + [item]}))
 
-    def add(self, *extra, rtype="preference", tier="durable", **env):
-        self.n += 1  # a distinct body each time, so no write is merged into an earlier record
-        self.mem("add", tier, rtype, f"{BODY} Case {self.n}.", "--scope", "global", *extra, **env)
+    def add(self, *extra, rtype="preference", tier="durable", body=None, **env):
+        self.n += 1  # a distinct body each time (unless `body` is given), so no write merges into an earlier record
+        self.mem("add", tier, rtype, body or f"{BODY} Case {self.n}.", "--scope", "global", *extra, **env)
         with sqlite3.connect(self.root / "store" / "memory.db") as con:
             row = con.execute("SELECT id FROM records ORDER BY rowid DESC LIMIT 1").fetchone()
+            if body:
+                row = con.execute("SELECT id FROM records WHERE body=?", (body,)).fetchone()
             topics = sorted(t for (t,) in con.execute("SELECT topic FROM record_topics WHERE record_id=?", row))
         return row[0], topics
+
+    def strength(self, rid):
+        with sqlite3.connect(self.root / "store" / "memory.db") as con:
+            return con.execute("SELECT strength FROM records WHERE id=?", (rid,)).fetchone()[0]
 
     def found(self, *labels):
         args = ["bootstrap-context", "--cwd", str(self.root / "project")]
@@ -149,6 +157,78 @@ class WorkLabelsTest(unittest.TestCase):
         self.route("code", ended=60)  # just ended: still the session's route
         self.route(None, capability="route-frame")
         self.assertEqual(self.add()[1], ["field:code"])
+
+    def test_a_route_that_ended_hours_ago_names_nothing(self):
+        self.route("research", ended=3600)
+        self.assertEqual(self.add()[1], [])
+        self.route("research", ended=11 * 60)  # just past the window; one is only ever alone here
+        self.assertEqual(self.add()[1], [])
+
+    def test_direct_work_without_a_route_is_not_a_route(self):
+        self.route("code", automatic=True, ts=time.time() - 120)  # an automatic change record only
+        self.assertEqual(self.add()[1], [])
+
+    def test_direct_work_after_a_route_ended_or_started_names_nothing(self):
+        self.route("research", ended=8 * 3600)
+        self.route("code", automatic=True, ts=time.time() - 120)
+        self.assertEqual(self.add()[1], [])
+        self.route("docs", ended=300, ts=time.time() - 600)
+        self.route("code", automatic=True)  # direct work after the route ended
+        self.assertEqual(self.add()[1], [])
+
+    def test_a_route_started_after_the_direct_work_still_names_its_field(self):
+        self.route("code", automatic=True, ts=time.time() - 600)
+        self.route("docs", ts=time.time() - 60)
+        self.assertEqual(self.add()[1], ["field:docs"])
+        self.route("lab", ended=60, ts=time.time() - 900)  # a second route now: several
+        self.assertEqual(self.add()[1], [])
+
+    def test_an_open_route_counts_however_long_it_has_run(self):
+        self.route("lab", ts=time.time() - 13 * 3600)
+        self.assertEqual(self.add()[1], ["field:lab"])  # alone, it names its field
+        self.route("docs", ts=time.time() - 3600)
+        self.assertEqual(self.add()[1], [])  # with a newer route, nothing
+
+    def test_an_open_route_beyond_the_ledger_tail_still_counts(self):
+        self.route("lab", ts=time.time() - 13 * 3600)
+        for _ in range(500):  # well over 64 KB of ledger after it
+            self.route("code", ended=20 * 3600, ts=time.time() - 20 * 3600)
+        self.route("docs", ts=time.time() - 3600)
+        self.assertEqual(self.add()[1], [])
+
+    def test_the_same_record_again_keeps_the_given_labels(self):
+        text = f"{BODY} Written again."
+        first, topics = self.add("--topic", "field:docs", "--topic", "unit:editorial/write", body=text)
+        self.assertEqual(topics, ["field:docs", "unit:editorial/write"])
+        rid = self.route("code")
+        self.correction(rid, unit="unit:qa/code-review")
+        again, topics = self.add(body=text)
+        self.assertEqual((again, self.strength(first)), (first, 2))  # the same record, reinforced
+        self.assertEqual(topics, ["field:docs", "unit:editorial/write"])
+        self.add(body=text)
+        self.assertEqual(self.add(body=text)[1], ["field:docs", "unit:editorial/write"])
+
+    def test_the_same_record_again_only_adds_a_missing_kind_once(self):
+        text = f"{BODY} Unit only."
+        self.add("--topic", "unit:editorial/write", body=text)
+        rid = self.route("code")
+        self.correction(rid, unit="unit:qa/code-review")
+        self.assertEqual(self.add(body=text)[1], ["field:code", "unit:editorial/write"])
+        self.assertEqual(self.add(body=text)[1], ["field:code", "unit:editorial/write"])
+        self.assertEqual(self.add("--topic", "Field:Docs", body=f"{BODY} Cased.")[1],
+                         ["field:docs", "unit:qa/code-review"])  # the field given in another case stands
+
+    def test_a_source_upsert_keeps_the_labels_the_record_has(self):
+        first, topics = self.add("--topic", "field:docs", "--topic", "unit:editorial/write", "--source", "work-style-from:x",
+                                 body=f"{BODY} Moved v1.")
+        self.assertEqual(topics, ["field:docs", "unit:editorial/write"])
+        rid = self.route("code")
+        self.correction(rid, unit="unit:qa/code-review")
+        again, topics = self.add("--source", "work-style-from:x", body=f"{BODY} Moved v2.")
+        self.assertEqual(again, first)
+        self.assertEqual(topics, ["field:docs", "unit:editorial/write"])
+        again, topics = self.add("--source", "work-style-from:x", body=f"{BODY} Moved v2.")
+        self.assertEqual(topics, ["field:docs", "unit:editorial/write"])
 
     def test_a_continued_route_leaves_only_its_continuation(self):
         first = self.route("code", ended=60)
