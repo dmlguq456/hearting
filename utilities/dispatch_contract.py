@@ -249,7 +249,7 @@ from dispatch_contract_rows import (  # noqa: F401
     _row_identity, _settlement_metadata_pipe, annotate_attempt_row, annotate_attempt_row_if,
     attempt_launch_state, attempt_row_terminal_never_started,
     attempt_row_withdrawn_before_launch, close_attempt_row, close_attempt_row_if,
-    close_refused_chain_rows, existing_attempt_launch_state, is_runtime_owner_launch,
+    close_refused_chain_rows, existing_attempt_launch_state, finishes_route, is_runtime_owner_launch,
     launch_orphan_watch, launch_reap_watch, probe_owner_supervision,
     reconcile_attempt_terminal, reconcile_local_registry, RefusedChainClose,
     resolve_attempt_cleanup, resolve_residue_drain, resolve_terminal_conflict,

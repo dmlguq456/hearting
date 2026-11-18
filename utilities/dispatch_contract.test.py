@@ -6963,7 +6963,7 @@ class FrameLegRegistrationTest(_AttemptPolicyFixture):
  node MISSING the axes still fails loudly rather than slipping through.
  """
  def frame_node(self,**overrides):
-  node={"id":"frame","dispatch_depth":1,"worker_type":"frame","unit":"plan/frame"}
+  node={"id":"frame","dispatch_depth":1,"worker_type":"frame","unit":"plan/frame","launch_authority":"depth-0"}
   node.update(overrides)
   return {key:value for key,value in node.items() if value is not None}
  def route(self,node,harnesses=("codex","claude")):
@@ -7069,9 +7069,9 @@ class FrameLegRegistrationTest(_AttemptPolicyFixture):
   route={"schema_version":2,"route_id":rt["route_id"],"effective_intensity":"standard",
    "dispatch_evidence":rt["dispatch_evidence"],
    "nodes":[{"id":"frame","dispatch_depth":1,"worker_type":"frame","unit":"plan/frame",
-             "perspective":"primary-frame"},
+             "launch_authority":"depth-0","perspective":"primary-frame"},
             {"id":"frame-alternative","dispatch_depth":1,"worker_type":"frame","unit":"plan/frame",
-             "perspective":"alternative-frame"},
+             "launch_authority":"depth-0","perspective":"alternative-frame"},
             {"id":"plan","dispatch_depth":2,"fallback_hops":[
              {"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[]}]}]}
   self.assertEqual({r["status"] for r in rt["dispatch_evidence"]["tuples"] if r["child_harness"]=="opencode"},

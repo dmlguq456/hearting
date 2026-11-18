@@ -61,6 +61,10 @@ class ObserverOwnershipLost(StopWaiting):
     """This observer no longer owns the exact duty lease and durable row."""
 
 
+class ObserverExpired(StopWaiting):
+    """The duty is past retention with no Codex-side execution left and is now closed."""
+
+
 class ObserverReleaseMoved(StopWaiting):
     """A newer installed release exists; the lease-holding observer hands over to it."""
 
@@ -78,6 +82,16 @@ def _observer_ownership_lost(args) -> bool:
     fd = getattr(args, "obligation_lock_fd", None)
     return bool(duty_id and fd is not None
                 and not batch_obligations.observer_owns_current(args.jobs, duty_id, fd))
+
+
+def _observer_expired(args) -> bool:
+    """Run the runner's expiry judgment from this observer, which holds the lease."""
+    duty_id = getattr(args, "_obligation_id", None)
+    fd = getattr(args, "obligation_lock_fd", None)
+    if not duty_id or fd is None:
+        return False
+    owner = {"pid": os.getpid(), "pid_start": batch_obligations._pid_start(os.getpid())}
+    return batch_obligations.expire_if_due(args.jobs, duty_id, fd, observer=owner)
 
 
 def _update_duty(args, duty_id, **changes):
@@ -1975,6 +1989,8 @@ def _execute_once(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 nonlocal previous_parent_lifetime
                 if _observer_ownership_lost(args):
                     raise ObserverOwnershipLost("completion-observer-ownership-lost")
+                if _observer_expired(args):
+                    raise ObserverExpired("completion-observer-expired")
                 reason = parent_session_stop_reason(args, monitored)
                 if reason:
                     return reason
@@ -2040,6 +2056,8 @@ def _execute_once(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         def projection_stop_check():
             if _observer_ownership_lost(args):
                 raise ObserverOwnershipLost("completion-observer-ownership-lost")
+            if _observer_expired(args):
+                raise ObserverExpired("completion-observer-expired")
             reason = parent_session_stop_reason(args, attempts)
             if reason:
                 return reason
@@ -2080,6 +2098,8 @@ def _execute_once(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     def delivery_stop_check():
         if _observer_ownership_lost(args):
             raise ObserverOwnershipLost("completion-observer-ownership-lost")
+        if _observer_expired(args):
+            raise ObserverExpired("completion-observer-expired")
         reason = parent_session_stop_reason(args, attempts)
         if reason:
             _record_parent_session_ended(args, attempts, duty_id, normalized)
@@ -2253,6 +2273,9 @@ def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         ownership_lost = True
         return {"schema_version": 1, "status": "retryable",
                 "reason": "completion-observer-ownership-lost"}, 75
+    except ObserverExpired:
+        return {"schema_version": 1, "status": "expired",
+                "reason": batch_obligations._EXPIRY_REASON}, 0
     except ObserverReleaseMoved as moved:
         args._successor_binding = moved.binding
         _update_duty(args, args._obligation_id,

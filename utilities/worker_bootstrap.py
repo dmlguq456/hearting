@@ -2176,8 +2176,46 @@ def supervised_owner_prompt() -> str:
     )
 
 
+def unit_verdict_prompt(worker_type: str) -> str:
+    """How a unit route's review opens its report so the runtime can read a FAIL end as a finished review.
+
+    The runtime treats a `verdict: FAIL` end as finished work (a review that found blocking issues) only
+    when the report opens on a closed review verdict line (`codex_dispatch_terminal.closed_review_kind`,
+    the one an audit report carries, a unit's also without its head); the units name their own verdict tokens (clean/issues,
+    CLEAN/FINDINGS), which that reading does not know."""
+    if worker_type != "review":
+        return ""
+    return ("Open the report (its first line that is not a heading) with the review's closed verdict, as "
+            "`Final verdict: changes requested — head <sha>` when you found blocking issues, or "
+            "`Final verdict: mergeable — head <sha>` when you found none (`hold` for a held review); "
+            "<sha> is the commit you reviewed (`git rev-parse HEAD`); where there is no git repository, leave out "
+            "` — head <sha>` and keep the verdict wording. Then say what you found. "
+            "If you could not do the review, end `BLOCKED` and say what stopped you.\n")
+
+
 _TERMINAL_CONTRACT_START = "<!-- worker-terminal-contract:start -->"
 _TERMINAL_CONTRACT_END = "<!-- worker-terminal-contract:end -->"
+
+
+def unit_safety_prompt(worker_type: str) -> str:
+    """The kernel's safety lines for a unit route's worker, whose first instruction is not the whole kernel.
+
+    Only what keeps a bounded worker inside its node: its role, its guards and scope, what it leaves to
+    the supervisor, and where its scratch goes. (It may call other workers: a later route lets it.)"""
+    lines = ["You are a bounded worker, not the user-facing main session. Treat the assigned route, node "
+             "scope and completion gate as fixed. Preserve permission, safety and git-state guards, and write "
+             "only inside the assigned scope.",
+             "Do not perform merge, release, installation, cleanup or UI/status publication, and do not publish "
+             "task branches or PRs; integration and cleanup stay with the supervisor.",
+             "Bind fixtures you create to their command lifetime (a private `TMPDIR`, `TemporaryDirectory` or "
+             "shell trap), keep needed output in the artifact, and retire only your own scratch. That does not "
+             "authorize cleanup of user worktrees, native HOME, existing experiments, parent or sibling roots, "
+             "or shared runtime state."]
+    if worker_type == "review":
+        lines.append("Inspect only the assigned question and evidence; source is read-only unless the node's scope "
+                     "says otherwise. Record prioritized findings, locations, checks and uncertainty in the review "
+                     "artifact. Do not implement fixes or widen the review.")
+    return "\n".join(lines) + "\n"
 
 
 def worker_terminal_contract(root: Path) -> str:
