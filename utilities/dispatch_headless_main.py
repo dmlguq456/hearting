@@ -192,6 +192,39 @@ def assignment_prompt_tail(h, args, task: str, *, heartbeat: str, commit_clause:
     )
 
 
+def unit_leg_prompt(h, args, task: str, *, commit_clause: str = "") -> str | None:
+    """The whole first instruction of a unit route's worker, or None when this launch is not one.
+
+    The unit's text (its stance and body), the dispatch facts, a few of the kernel's safety lines, the brief,
+    the node's declared scope and how to end: nothing the owner reads. A unit route has no owner above its
+    worker and no stage after it, so the kernel's owner and stage rules, the capability contract and the
+    route steps stay out."""
+    if (getattr(args, "capability", None) != "unit" or int(getattr(args, "dispatch_depth", 0)) != 1
+            or not getattr(args, "route_file", None)):
+        return None
+    import json
+    import worker_bootstrap as wb
+    route = json.loads(Path(args.route_file).read_text(encoding="utf-8"))
+    scope = wb.resolve_node_scope(route, args.route_node, wb._child_scope_environment(args, route, os.environ),
+                                  parent_attempt_id=getattr(args, "parent_attempt_id", None),
+                                  route_file=args.route_file)
+    persona = wb.unit_persona_body(h.ROOT, args.unit) or ""
+    stance = wb.unit_stance_text(h.ROOT, args.unit)
+    unit_text = "\n\n".join(part for part in (stance if stance and stance not in persona else "", persona) if part)
+    # The kernel's closing contract, without the paragraph that only a supervised owner reads.
+    contract = "\n\n".join(paragraph for paragraph in wb.worker_terminal_contract(h.ROOT).split("\n\n")
+                            if "supervised owner" not in paragraph)
+    return (f"{unit_text}\n\n"
+            f"{dispatch_metadata_prompt(h, args)}\n"
+            f"{commit_clause}"
+            f"{wb.unit_safety_prompt(args.worker_type)}\n"
+            f"Assignment:\n{task.rstrip()}\n\n"
+            f"{wb.node_scope_prompt(scope)}\n"
+            f"{contract}\n\n"
+            f"{wb.unit_verdict_prompt(args.worker_type)}"
+            f"{wb.worker_ending_prompt()}")
+
+
 def registry_gates(h, args, action: str, *, agent_home: Path, jobs: Path) -> int | None:
     """Prepare the review output request, bind the stage session and check the completion gate."""
     try:

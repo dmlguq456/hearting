@@ -1640,6 +1640,27 @@ from closure and replacement. A process reobserved as a zombie after an environm
 denial has exited; a still-live denied environment remains unobservable.
 `start` distinguishes running, exited and unobservable owners.
 
+### §5.10c. Unit Route — One Unit, No Owner
+
+`capability-route.py compose --start --unit <family/name> --prompt-file <brief>` opens one
+read-only unit as a route of its own (kind `unit`, quick, one leg, no owner). The depth-0 session
+launches the leg through the path that launches a frame leg: the route seals the leg
+(`launch_authority: depth-0`), `dispatch-owner.py --start --route-evidence <route> --route-node unit`
+starts one registered depth-1 attempt, and `capability-route.py start --route <id>` follows it again
+without launching a second. The worker's first instruction is the unit's text, the dispatch facts, the
+brief and how to end. Its model grade is the one a staged route gives that unit (`--profile` wins).
+
+The launch seals `workflow_completion=runtime-v1` on the leg. When the worker ends, the completion
+controller closes the route and seals the cycle, and the completion notice that returns to the launching
+session carries the route's sealed summary (verdict line, blocking findings, report path); no close or
+finalize command is run by hand. A review that ends FAIL with a readable report that itself opens on a closed
+negative verdict (`Final verdict: changes requested — head <sha>`, as an audit's report does; a unit leg's also without ` — head <sha>` where there is no repository) is a finished audit's
+kind of end: the runtime reads it as a pass whose assessment of the subject is negative, so the route closes
+and the notice carries the same summary (its result line says the review completed with findings). A FAIL
+whose report is empty, says no review was done or declares nothing is not finished work and is offered again. The same
+notice path serves all three harnesses. The launching session need not be an owner: this section does not change which work is direct, solo or staged
+(`core/WORKFLOW.md` §0.2.1).
+
 ### §5.11. Commit and Push Policy for `<agent-home>`
 
 Fleet's two-hex session numbers have one shared resolver,
@@ -2108,6 +2129,15 @@ finalize refusal (the same recorded route lineage, or for `output-invalid` the
 same named files) is held the same way: when the route lineage, those files or
 the installed runtime changes, a later join or finish invocation judges it
 again.
+A pending batch duty older than the 14-day obligation retention is closed as
+`expired` only when every attempt it watches, and every replacement or retry
+row that continues one of them, is proven ended and process-quiescent by the
+same registry-plus-process judgment the completion join uses; a replacement
+that is claimed but not yet registered, or a read that failed, timed out, found
+no tool or no row, or could not tell, leaves it pending. The runner and a long-lived observer share that one
+judgment, the parent session is told through the ordinary session notice before
+the record changes, and the record itself is kept (nothing is deleted,
+cancelled or retried).
 
 **Visibility is a requirement, not a nicety.** Independently of capability,
 Fleet and the status surfaces expose the workflow, its current stage, its child

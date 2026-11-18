@@ -836,6 +836,9 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
     args.replacement_raw_task = task
     args.assignment_sha256 = "sha256:" + hashlib.sha256(task.encode("utf-8")).hexdigest()
     bootstrap = DISPATCH_MAIN.bind_worker_contract(_ADAPTER, args, profile_type=None)
+    unit_prompt = DISPATCH_MAIN.unit_leg_prompt(_ADAPTER, args, task, commit_clause=commit_policy.prompt_clause(args))
+    if unit_prompt is not None:
+        return unit_prompt, source
     heartbeat = runtime_progress_prompt(args)
     return (
         f"{bootstrap}\n"

@@ -632,11 +632,34 @@ def resolve_terminal_conflict(
     return values
 
 
+def is_unit_leg_launch(args) -> bool:
+    """Whether this launch is the terminal leg of a unit route: a depth-0 leg with no owner above it."""
+    route_file = getattr(args, "route_file", None)
+    if not route_file or getattr(args, "capability", None) != "unit" or int(getattr(args, "dispatch_depth", 0)) != 1:
+        return False
+    try:
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    from route_plan import is_depth0_leg
+    leg = next((n for n in route.get("nodes") or [] if isinstance(n, dict) and n.get("id") == args.route_node), None)
+    return bool(route.get("capability") == "unit" and is_depth0_leg(leg) and leg.get("terminal") is True)
+
+
+def finishes_route(metadata) -> bool:
+    """Whether this registered attempt's end finishes its route: the owner, or a unit route's one leg.
+
+    The launch seals `workflow_completion=runtime-v1` on exactly these, so the completion controller
+    reads that one mark and never a worker type."""
+    return bool(metadata.get("worker_type") == "owner"
+                or (metadata.get("workflow_completion") == "runtime-v1" and metadata.get("dispatch_depth") == "1"))
+
+
 def is_runtime_owner_launch(args) -> bool:
-    """Whether this launch is a registered depth-1 route owner."""
+    """Whether this launch is a registered depth-1 attempt that finishes its route: a route owner or a unit leg."""
     bound = getattr(args, "owner_route_binding", None) or getattr(args, "route_file", None)
-    return bool(getattr(args, "worker_type", None) == "owner" and bound
-                and int(getattr(args, "dispatch_depth", 0)) == 1)
+    return bool((getattr(args, "worker_type", None) == "owner" and bound
+                 and int(getattr(args, "dispatch_depth", 0)) == 1) or is_unit_leg_launch(args))
 
 
 def workflow_completion_receipt(args) -> str:

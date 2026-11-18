@@ -33,6 +33,7 @@ from dispatch_completion_join import (  # noqa: E402
     current_children,
     current_delivery_state,
     completion_harvest_command,
+    unit_leg_report_line,
     delivery_classification,
     delivery_required_action,
 )
@@ -1388,6 +1389,10 @@ def classified_receipt(
                 + completion_harvest_command(launch.attempt_id, required_action,
                     jobs=str(launch.jobs))
             )
+            if required_action == "inspect-done-failure":
+                # A unit route's review that failed and was not read as finished work: name its report.
+                report = unit_leg_report_line(row.metadata if row is not None else {})
+                instruction += ("\n" + report) if report else ""
         elif required_action == "advance-completed":
             instruction = "No harvest command is required; advance or finish the route."
         elif required_action.startswith(HUMAN_GATE_PREFIX):
