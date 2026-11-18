@@ -1658,6 +1658,16 @@ whose report is empty, says no review was done or declares nothing is not finish
 notice path serves all three harnesses. The launching session need not be an owner: this section does not change which work is direct, solo or staged
 (`core/WORKFLOW.md` §0.2.1).
 
+A registered worker (owner, stage worker or unit worker) may open a unit route too. Its leg is a depth-1 leg of
+its own route, so no depth number stands in the way: a chain of workers each starting another is bounded by the
+worker governor's cap and start budget, and the start it cannot fit is refused in the governor's refusal form
+(`waiting-capacity`; a worker arms no later automatic start). The leg's row names the starting worker
+(`caller_attempt_id`) and Fleet hangs it below it. The starting worker follows its leg with the printed bounded
+wait and receives the sealed summary there; if it ends first, `dispatch-reap-watch.py` stops what it still runs
+(`failure_class=cancelled`, `reconcile_reason=caller-ended`). `--ephemeral` keeps the route's files in a scratch
+root under the runtime directory so the project's artifact folder and campaign records get nothing, and the
+notice (or wait result) carries the answer, cut with the place to read the rest. Details: `capabilities/unit.md`.
+
 ### §5.11. Commit and Push Policy for `<agent-home>`
 
 Fleet's two-hex session numbers have one shared resolver,

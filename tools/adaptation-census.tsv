@@ -75,6 +75,7 @@ shared-utility-deferred	harness_behavior_cases_tidy.py
 shared-utility-deferred	harness_behavior_cases_token_budget.py
 shared-utility-deferred	harness_behavior_cases_tidy_compact.py
 shared-utility-deferred	harness_behavior_cases_unit_route.py
+shared-utility-deferred	harness_behavior_cases_unit_nested.py
 shared-utility-deferred	harness_behavior_cases_request.py
 shared-utility-deferred	harness_behavior_scenarios.py
 shared-utility-deferred	hearting_gates.py
@@ -127,6 +128,7 @@ shared-utility-deferred	verification-background-lease.py
 shared-utility-deferred	work_start.py
 shared-utility-deferred	frame_repository.py
 shared-utility-deferred	work_intent.py
+shared-utility-deferred	unit_ephemeral.py
 shared-utility-deferred	status_board.py
 shared-utility-deferred	start_receipt.py
 shared-utility-deferred	recipient_lifetime.py

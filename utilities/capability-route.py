@@ -1260,7 +1260,8 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     if (shape == "solo" or owner_only or resume_graph) and registered_headless_evidence is None:
         readiness = readiness or _compose_readiness(
             cwd, jobs or _compose_default_jobs(), parent_harness,
-            children or _compose_default_children(selection_pins))
+            children or _compose_default_children(selection_pins),
+            worker_caller=unit is not None and os.environ.get("AGENT_DISPATCH_DEPTH", "0") != "0")
         registered_headless_evidence = {"candidates": readiness["candidates"]}
     common = dict(
         signals=signals, transport=None, transport_evidence=transport_evidence,
@@ -1842,6 +1843,7 @@ def main():
                     help="optional scope already selected in the existing start confirmation; it is not approval evidence")
     cp.add_argument("--capability",default=None,help="the kind (preset recipe); a direct, solo or staged shape names it, --field, or both; a hint only with --shape framed"); cp.add_argument("--capability-mode",default=None)
     cp.add_argument("--unit",default=None,metavar="FAMILY/NAME",help="open one read-only unit as a route of its own (the kind unit, quick, no owner); its field is the unit head's `field:`, or name --field; with --start --prompt-file the unit's one worker starts with the brief and its end closes the route")
+    cp.add_argument("--ephemeral",action="store_true",help="with --unit: leave nothing in the project's artifact folder or campaign records; the route's files stay in a scratch root under the runtime directory and the worker's answer comes back with its completion")
     cp.add_argument("--field",default=None,help="the field of the work (plan, design, code, lab, research, docs, admin, other); alone it opens that field's default recipe, and admin or other also need --capability; a hint only with --shape framed")
     cp.add_argument("--intensity",default=None,help="default by shape: direct/quick/standard; framed defaults to two frame legs, while explicit quick/direct may use one for unprotected work; staged accepts strong+")
     cp.add_argument("--cwd",default=None,help="default: current directory"); cp.add_argument("--artifact-root",default=None,help="default: utilities/artifact-root.sh for cwd")
@@ -2020,6 +2022,13 @@ def main():
         cwd=a.cwd or os.getcwd()
         promotion_cwd = cwd
         artifact_root=a.artifact_root or _compose_artifact_root(cwd)
+        if a.ephemeral:
+            if a.unit is None or a.artifact_root:
+                raise ValueError("compose-ephemeral-refused: --ephemeral opens one unit worker (--unit family/name) and "
+                                 "keeps its files in a scratch root of its own; it takes no --artifact-root")
+            import unit_ephemeral
+            artifact_root=a.artifact_root=str(unit_ephemeral.scratch_root(artifact_root))
+            a.unassigned=True
         if a.campaign_key is None and a.parent_cycle is None and not a.unassigned:
             a.campaign_key=_session_campaign_key(artifact_root)
             if a.campaign_key:

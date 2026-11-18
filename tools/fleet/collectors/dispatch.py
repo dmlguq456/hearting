@@ -5061,6 +5061,9 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
     latest = derived["latest_jobs"]
     selected, alive_keys, expired, observed_identities = _job_selection(
         derived, live_attempt_ids, include_stall=include_stall)
+    # A unit worker a worker started (`caller_attempt_id`) hangs below that worker's own row.
+    slug_of_attempt = {value[2].get("attempt_id"): value[1][4] for value in latest.values()
+                       if value[2].get("attempt_id")}
     for key in selected:
         registry_order, fields, parsed_meta = latest[key]
         if (allowed_attempt_ids is not None
@@ -5163,6 +5166,9 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         parent_sid = meta.get("parent_sid") or meta.get("parent_session_id") or None
         parent_cwd = meta.get("parent_cwd") or meta.get("parent_worktree") or None
         parent_managed_dir = _managed_parent_dir(meta.get("managed_sidecar_log"))
+        called_by = slug_of_attempt.get(meta.get("caller_attempt_id")) if meta.get("caller_attempt_id") else None
+        if called_by and not parent_slug:
+            parent_slug = called_by
         harness = _infer_harness(meta, slug)
         worker_type = meta.get("worker_type")
         unit = meta.get("unit") or None
@@ -5199,7 +5205,8 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             pgid=int(pgid_s) if pgid_s.isdigit() else None,
             pid_identity_source=identity_source,
             profile=meta.get("profile"),
-            depth=_parse_depth(meta.get("dispatch_depth", meta.get("depth"))),
+            # The route-relative depth stays 1 in the registry; Fleet nests a called worker one level below its caller.
+            depth=max(_parse_depth(meta.get("dispatch_depth", meta.get("depth"))), 2 if called_by else 1),
             **attempt_contract,
             intensity=meta.get("intensity"),
             worker_type=worker_type,
