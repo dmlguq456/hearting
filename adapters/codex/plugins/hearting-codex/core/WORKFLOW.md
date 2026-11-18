@@ -327,7 +327,8 @@ work or its tests passed. Missing, interrupted and running results stay unknown.
 Explicit `compose --start --shape direct --field <field> --prompt-file <task>`
 still prepares an isolated worktree and an inline route; `compose --shape direct
 --field <field>` records work already made in place. Their receipt and explicit finish contracts are unchanged.
-Otherwise use `compose --start --prompt-file <task>` with no `--shape`; the
+When the direction is clear, open `--shape solo|staged` (below); otherwise use
+`compose --start --prompt-file <task>` with no `--shape`; the
 frame chooses the capability, stages, and solo or staged shape, judging each
 leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first; an
 omitted shape follows it. Direct has no review-worker path of its own: work that
@@ -408,16 +409,21 @@ first is worth it — a protected path (`core/`, `capabilities/`, `roles/`,
 one line, `방향 잡기 권함: <reason>` (`Direction check advised: <reason>` in
 English), and the receipt's stderr one machine line, `frame_advice=<reason>`.
 It is advice only: nothing blocks, no input is required, and the route is open
-whether or not the session follows it. These are the signs the frame width
+whether or not the session follows it; `--explain` shows the line before the
+route starts. These are the signs the frame width
 already reads (`route_plan.frame_signals`); a unit route, `direct`, a framed
-route and a route made from a proposal get no advice. **Screen first.** Development that changes what the person sees (layout,
+route and a route made from a proposal get no advice.
+
+**Screen first.** Development that changes what the person sees (layout,
 color, wording, the order of lines) shows a mockup before it opens, and opens
 from the mockup the person chose. The opening session judges whether the screen
-changes; no path signal is added. A change in one or two places: the opening
+changes; no path signal is added. A small fix handled inline (one line of screen
+wording, read→edit→check→reply) is not covered by this default. A change in one or two places: the opening
 session draws one mockup (one HTML page) itself. A larger change: open a design
 route (`--capability autopilot-design`) whose end product is one to three
-options with their comparison. The choice is a talk between the opening
-session and the person, not a unit. Hand the chosen mockup's path to the
+options with their comparison. The choice is one registered question
+(`hearting run questions ask`) whose options are the mockups, not a unit and
+not a series of free questions. Hand the chosen mockup's path to the
 development task as a decision (받는 것: 결정); development does not decide the
 look again. Development that changes no screen opens at once. When the person
 says to go without a mockup, open at once: this is a default, not a gate, and
@@ -431,7 +437,7 @@ has no frame nodes, and neither has a `solo` or `staged` compose: those shapes
 compile without the recipe's frame pair (a route sealed earlier keeps the
 frame nodes it was sealed with).
 
-A `framed` route runs two `top` legs by default; the simplified one-leg route runs at `deep`. A preset recipe's own frame pair is also `top`: the route seals each leg profile and a concrete model pin is preserved. `frame-alternative` prefers another harness only when one is ungated in the same quality band (`CONVENTIONS.md §1.1`). Shared verification may rotate only `frame-alternative` for the same-harness, same-model case described in `CONVENTIONS.md §1.1`, keeping its route-sealed profile. Without an eligible, usage-available alternative, the leg runs immediately at its sealed profile and records why. A frame-rule `top` that stops at a usage limit is still retried once at `deep` through the SD-157 replacement lineage, and that capacity lowering is recorded separately. The `[경로]` card of `framed` adds the compiler's two lines: "frame이 방향과 경로를 조립해 제안합니다" and the cost line, "비용: frame 한 갈래 · 방향 확인 질문 1회" or, with both legs, "비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회".
+A `framed` route runs two `top` legs by default; the simplified one-leg route runs at `deep`. A preset recipe's own frame pair is also `top`: the route seals each leg profile and a concrete model pin is preserved. `frame-alternative` prefers another harness only when one is ungated in the same quality band (`CONVENTIONS.md §1.1`). Shared verification may rotate only `frame-alternative` for the same-harness, same-model case described in `CONVENTIONS.md §1.1`, keeping its route-sealed profile. Without an eligible, usage-available alternative, the leg runs immediately at its sealed profile and records why. A frame-rule `top` that stops at a usage limit is still retried once at `deep` through the SD-157 replacement lineage, and that capacity lowering is recorded separately. The `[경로]` card of `framed` adds the compiler's two lines: "frame이 방향과 경로를 조립해 제안합니다" and the cost line, "비용: frame 한 갈래 · 방향 확인 질문 최대 1회" or, with both legs, "비용: 최상위 모델 두 갈래 · 방향 확인 질문 최대 1회".
 
 **Staged assembly guidance.** Staged assembly guidance is for frame brief
 authors and routes whose capability and stages the person explicitly named.

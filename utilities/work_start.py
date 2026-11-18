@@ -393,7 +393,7 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         if (response.get("basis") == FI.AUTOMATIC_BASIS) != bool(automatic) or (
                 automatic and actor_kind != "supervisor"):
             raise ValueError("gate-release-authority-refused: only the runtime records an automatic agreement, "
-                             "and only when both frames agree with nothing left to choose")
+                             "and only when nothing is left to choose")
         binding = next((row for row in route.get("human_gate_bindings", [])
                         if row.get("gate") == "frame-review"), {})
         authority = (resolution.get("release_authority") or
@@ -1334,8 +1334,8 @@ def _automatic_direction(route, rows, output):
     single = len(rows) == 1 and rows[0]["proposal"] is not None
     if not (single or RP.proposals_equal(rows)) or any(_start_approval_keys(row) for row in rows):
         return None
-    if any(row.get("repository_preparation") for row in rows):
-        return None
+    if any(row.get("repository_preparation") or row.get("read_notes") for row in rows):
+        return None   # a part the compile cut or left out is a difference only the person can see
     texts = []
     for row in rows:
         try:

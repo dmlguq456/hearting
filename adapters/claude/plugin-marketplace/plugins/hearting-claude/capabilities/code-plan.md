@@ -42,7 +42,8 @@ returns to an old digest.
 When the task carries a mockup the person already chose (a path given as a
 decision, `core/WORKFLOW.md` "Screen first"), the plan follows it as written and
 does not decide the screen's look again. Where the mockup is silent, the plan
-names the gap for the person instead of filling it with a new design. A task
+records the gap as an open item and follows the project's existing style instead
+of filling it with a new design; the report lists those items for the person. A task
 without a mockup plans as before.
 
 ## Slices Block

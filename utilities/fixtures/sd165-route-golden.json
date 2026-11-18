@@ -20,7 +20,7 @@
     "frame": "f956d0db90b04a54d485",
     "frame-alternative": "40b21afb057a4dcae436"
    },
-   "card": "[경로] route-frame · framed(standard) frame→frame-alternative→route-decision · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 2개: sd165-lab, sd165-code\n  frame이 방향과 경로를 조립해 제안합니다\n  비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회",
+   "card": "[경로] route-frame · framed(standard) frame→frame-alternative→route-decision · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 2개: sd165-lab, sd165-code\n  frame이 방향과 경로를 조립해 제안합니다\n  비용: 최상위 모델 두 갈래 · 방향 확인 질문 최대 1회",
    "completion_gates": "31917371286f7b7174f7",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "750d5eab8cf92fa0eaca",

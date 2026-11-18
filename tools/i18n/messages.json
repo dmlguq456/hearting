@@ -2551,12 +2551,12 @@
    "ko": "확인 방식 {method} · 출처 {origin}"
   },
   "route.card.cost_one": {
-   "en": "Cost: one frame leg · one direction-check question",
-   "ko": "비용: frame 한 갈래 · 방향 확인 질문 1회"
+   "en": "Cost: one frame leg · at most one direction-check question",
+   "ko": "비용: frame 한 갈래 · 방향 확인 질문 최대 1회"
   },
   "route.card.cost_two": {
-   "en": "Cost: two top-model legs · one direction-check question",
-   "ko": "비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회"
+   "en": "Cost: two top-model legs · at most one direction-check question",
+   "ko": "비용: 최상위 모델 두 갈래 · 방향 확인 질문 최대 1회"
   },
   "route.card.frame_advice": {
    "en": "Direction check advised: {reason}",

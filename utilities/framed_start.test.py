@@ -2147,6 +2147,15 @@ class AutomaticDirectionTest(StartBase):
         self.set_briefs(text, full_brief([CODE_STAGED]))
         self.assertIsNone(self.automatic())
 
+    def test_a_proposal_the_compile_cut_or_left_out_something_of_keeps_the_person_asked(self):
+        self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT]))
+        self.assertIsNotNone(self.automatic())
+        root, record, output = W._framed_cycle(self.route)
+        rows = W._proposal_rows(self.route, self.jobs, root, record, output)
+        rows[0]["read_notes"] = ["leg-invalid:1"]
+        with mock.patch.object(W, "_proposal_rows", return_value=rows):
+            self.assertIsNone(self.automatic())
+
     def test_equal_proposals_with_nothing_to_choose_get_a_valid_runtime_interview(self):
         self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT], questions="none"))
         interview, answers = self.automatic()
@@ -2249,6 +2258,15 @@ class AutomaticDirectionOneLegTest(StartBase):
         root, record, output = W._framed_cycle(self.route)
         rows = W._proposal_rows(self.route, self.jobs, root, record, output)
         rows[0]["repository_preparation"] = [{"state": "create-after-approval", "path": "/x/y"}]
+        with mock.patch.object(W, "_proposal_rows", return_value=rows):
+            self.assertIsNone(self.automatic())
+
+    def test_a_proposal_the_compile_cut_or_left_out_something_of_keeps_the_person_asked(self):
+        self.one_brief(full_brief([DIRECT]))
+        self.assertIsNotNone(self.automatic())
+        root, record, output = W._framed_cycle(self.route)
+        rows = W._proposal_rows(self.route, self.jobs, root, record, output)
+        rows[0]["read_notes"] = ["entry-approval-mismatch"]
         with mock.patch.object(W, "_proposal_rows", return_value=rows):
             self.assertIsNone(self.automatic())
 
