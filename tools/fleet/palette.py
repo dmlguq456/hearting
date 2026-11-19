@@ -36,7 +36,7 @@ _HUE_OF = {
     # bright pink text: distinct from white/yellow, without a special background.
     "tag_steward": ("p", _A_B),
     # 11-17 (route zones): the ROUTE box's three zone names and their marks, each its own color, none a status color
-    # (green, yellow, red), a harness hue (Claude orange 173, Codex 147, OpenCode 153) or the steward pink: direct orange (208), dispatch violet,
+    # (green, yellow, red), a harness hue (Claude orange 209, Codex 147, OpenCode 153) or the steward pink: direct orange (208), dispatch violet,
     # request aqua. (An 8-color terminal has no color left over: there the zones read in the default color and the white,
     # still apart from every status and harness color; the names say which zone it is.)
     "zone_direct": ("zd", 0), "zone_dispatch": ("zv", 0), "zone_request": ("zq", 0),

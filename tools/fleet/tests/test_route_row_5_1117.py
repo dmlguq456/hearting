@@ -77,15 +77,19 @@ class FleetRouteCell(unittest.TestCase):
         route["legs"] = (("research", "done", None), ("draft", "done", None), ("code", "active", "2/6"))
         self.assertEqual(cell(route, 80)[0], "research ✓ → draft ✓ → code(team·standard) · 3/6: execute")
 
-    def test_short_of_cells_the_chain_goes_then_the_intensity_the_bracket_the_kind_then_the_position(self):
-        # 11-19: the intensity (`·standard`) goes first in the bracket, then the bracket and the chain; `staged` is never written before the position
-        # (11-19: the form `team` is in the bracket)
-        want = [(46, "frame ✓ → code(team·standard) · 3/6: execute"), (40, "code(team·standard) · 3/6: execute"),
-                (34, "code(team·standard) · 3/6: execute"), (33, "code(team) · 3/6: execute"), (28, "code(team) · 3/6: execute"), (24, "code · 3/6: execute"), (16, "3/6: execute")]
+    def test_short_of_cells_the_chain_goes_then_the_stage_name_the_intensity_the_bracket_the_kind_then_the_position(self):
+        # 11-19 ("강도도 표기해 항상"): the chain goes first, then the stage's name (the intensity outlasts it), then the intensity
+        # (`·standard`), the bracket, the kind word; the position is last. `staged` is never written before the position (the form `team` is in the bracket)
+        want = [(46, "frame ✓ → code(team·standard) · 3/6: execute"), (44, "frame ✓ → code(team·standard) · 3/6: execute"),
+                (43, "code(team·standard) · 3/6: execute"), (34, "code(team·standard) · 3/6: execute"),
+                (33, "code(team·standard) · 3/6"), (25, "code(team·standard) · 3/6"), (24, "code(team) · 3/6"), (16, "code(team) · 3/6"),
+                (15, "code · 3/6"), (10, "code · 3/6"), (9, "3/6"), (3, "3/6")]
         for width, expect in want:
             self.assertEqual(cell(staged(), width)[0], expect, width)
-        for width in range(14, 70):                     # the stage stays at every width
-            self.assertIn("execute", cell(staged(), width)[0], width)
+        for width in range(3, 70):                      # the position stays at every width
+            self.assertIn("3/6", cell(staged(), width)[0], width)
+        for width in range(25, 34):                     # the intensity outlasts the stage's name
+            self.assertEqual(cell(staged(), width)[0], "code(team·standard) · 3/6", width)
 
     def test_the_kind_is_the_one_bold_word_and_the_stage_name_the_one_thing_that_blinks(self):
         text, lit = cell(staged(), 70, beat=1)
@@ -123,17 +127,20 @@ class FleetRouteCell(unittest.TestCase):
         three = [{"name": "search", "st": "done"}, {"name": "analyze", "st": "active"}, {"name": "report", "st": "todo"}]
         route = lambda shape, **kw: {"state": "working", "shape": shape, "capability": "research", "intensity": "standard",
                                      "stages": three, "legs": (("research", "active", None),), **kw}
-        self.assertEqual(cell(route("map-reduce"), 70)[0], "research(team·standard) · map-reduce 2/3: analyze")      # (11-19, correction 4: a team form)
+        # 11-19: where the bracket holds a form (`team`: map-reduce, transactional-owner, staged) the shape's word is not written again
+        self.assertEqual(cell(route("map-reduce"), 70)[0], "research(team·standard) · 2/3: analyze")
         self.assertEqual(cell({**route("transactional-owner"), "capability": "refine"}, 70)[0],
-                         "refine(team·standard) · transactional-owner 2/3: analyze")
+                         "refine(team·standard) · 2/3: analyze")
         resumed = route("resource+verification", resume="2m", legs=(("code", "done", None), ("code", "active", None)))
         self.assertEqual(cell(resumed, 90)[0], "code ✓ → research(standard) · resource+verification 2/3: analyze  resume 2m")
         self.assertEqual(cell(route(""), 70)[0], "research(standard) · 2/3: analyze")      # no shape named: the position and the stage
         self.assertEqual(cell(route("unknown"), 70)[0], "research(standard) · 2/3: analyze")
-        for old in ("›", "analyze ●", "search ✓"):
+        for old in ("›", "analyze ●", "search ✓", "map-reduce"):
             self.assertNotIn(old, cell(route("map-reduce"), 70)[0])
-        for width in range(14, 70):                      # the stage stays at every width
-            self.assertIn("analyze", cell(route("map-reduce"), width)[0], width)
+        for width in range(3, 70):                       # the position stays at every width (the stage's name goes first)
+            self.assertIn("2/3", cell(route("map-reduce"), width)[0], width)
+        self.assertEqual(cell(route("map-reduce"), 29)[0], "research(team·standard) · 2/3")
+        self.assertEqual(cell(route("resource+verification"), 46)[0], "research(standard) · resource+verification 2/3")      # no form: the shape's word stays
         _text, lit = cell(route("map-reduce"), 70, beat=1)
         _text, dark = cell(route("map-reduce"), 70, beat=0)
         at = "".join(c[0] for c in lit).index("analyze")

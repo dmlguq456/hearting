@@ -44,12 +44,13 @@ _MUTED_256 = {
     "warning": 131,   # #af5f5f — warning-band background
 }
 
-# 11-18: the three harnesses' own colors, apart from `_MUTED_256`: Claude orange 173 (its teal 116 stays the Opus
+# 11-18: the three harnesses' own colors, apart from `_MUTED_256`: Claude orange 209 (11-19, "claude 컬러가 주황색이 조금만 더 밝았으면 해":
+# was 173, #d7875f, L* 63.8; 209 is #ff875f, the same orange at L* 69.1; its teal 116 stays the Opus
 # family's and the stage palette's, and a test pins it), Codex 147 (#afafff, the Sonnet model color's own step on purpose
 # - the person chose "the Sonnet color, as in its logo"; kept as its own entry so either can move alone), OpenCode 153
 # (#afd7ff, a pale sky). Only the harness keys (`h_<harness>`, `hb_<harness>`, `hbb_<harness>`, `nm_<harness>`,
 # `nmd_<harness>`) read these; the muted magenta 176 and blue 147 keep the model families, effort and stage meanings.
-_HARNESS_256 = {"claude": 173, "codex": 147, "opencode": 153}
+_HARNESS_256 = {"claude": 209, "codex": 147, "opencode": 153}
 
 # On terminals that allow palette redefinition, open the semantic hues by only
 # a few RGB points.  The xterm indices above remain the stable fallback, while
@@ -62,11 +63,6 @@ _RICHER_RGB_1000 = {
     "magenta": (859, 506, 859),  # #db81db
     "blue": (663, 663, 1000),    # #a9a9ff
 }
-
-# Claude's orange opened to the brand's own #d97757 (173 is #d7875f), the same way the hues above are. Codex and OpenCode
-# stay at their 256-color values (#afafff, #afd7ff): nothing to redefine. (Codex's 147 is also `blue`'s step, which the
-# table above opens to #a9a9ff, so on a terminal that allows it both read as that one slot.)
-_HARNESS_RGB_1000 = {"claude": (851, 467, 341)}    # #d97757
 
 # Keep each panel rung dark and restrained while giving the near-black
 # backgrounds a slightly richer shared slate cast.

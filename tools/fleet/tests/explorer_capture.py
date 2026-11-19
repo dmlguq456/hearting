@@ -96,10 +96,8 @@ def palette(render):
     for name, (r, g, b) in render._RICHER_RGB_1000.items():
         named[name] = (round(r * 255 / 1000), round(g * 255 / 1000), round(b * 255 / 1000))
     # The harness colors (hues "cl", "cx", "oc"): each its own 256-color step, opened to the RGB the live board redefines
-    # that step to (Claude's own #d97757; Codex's 147 is also `blue`'s step, so it reads as blue's opened value).
+    # that step to (Codex's 147 is also `blue`'s step, so it reads as blue's opened value; Claude's 209 and OpenCode's 153 open nothing).
     opened = {render._MUTED_256[name]: named[name] for name in render._RICHER_RGB_1000}
-    opened.update({render._HARNESS_256[name]: tuple(round(v * 255 / 1000) for v in rgb1000)
-                   for name, rgb1000 in render._HARNESS_RGB_1000.items()})
     for name, index in render._HARNESS_256.items():
         named[name] = opened.get(index, rgb(index))
     from fleet.palette import KIND_FIELDS, _KIND_256

@@ -185,8 +185,9 @@ class SinglestageStaged(unittest.TestCase):
         one = {"state": "working", "shape": "staged", "capability": "code", "intensity": "standard",
                "stages": [{"name": "execute", "st": "active"}], "legs": (("code", "active", "1/1"),)}
         self.assertEqual(self.cell(one, 60), "code(team·standard) · 1/1: execute")
-        self.assertEqual(self.cell(one, 24), "code · 1/1: execute")
-        self.assertEqual(self.cell(one, 16), "1/1: execute")
+        self.assertEqual(self.cell(one, 24), "code(team) · 1/1")      # 11-19: the stage's name goes first, then the intensity
+        self.assertEqual(self.cell(one, 14), "code · 1/1")
+        self.assertEqual(self.cell(one, 9), "1/1")
         self.assertNotIn("●", self.cell(one, 60))
         self.assertNotIn("(execute", self.cell(one, 60))
         # The route its owner does alone (shape one-shot-owner) stays as it was.

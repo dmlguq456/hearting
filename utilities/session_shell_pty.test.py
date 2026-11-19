@@ -481,7 +481,7 @@ function existing(file){return new Promise((resolve,reject)=>{
      for(let y=0;y<sideTerm.rows;y++){const t=lineAt(y)?.translateToString()||'';if(t.startsWith('┌')&&t.endsWith('┐'))return {top:y,left:0,W:sideTerm.cols,H:sideTerm.rows-y};}return null;};
    // A frame cell's look: an arc shade (`0` the head .. `3`), `b` the neutral frame (the terminal's dim),
    // `p<N>` another color, `t` the head's words.
-   const RAMP=[216,173,137,102];    // (11-18: this window is Claude's, and a running session's arc is its harness's ramp: `FACES.dark.ramp.claude.orbit`)
+   const RAMP=[216,209,173,137];    // (11-18: this window is Claude's, and a running session's arc is its harness's ramp: `FACES.dark.ramp.claude.orbit`)
    const look=c=>{const ch=c.getChars();if(!ch||!'┌┐└┘─│'.includes(ch))return 't';
      if(c.isFgPalette()){const i=RAMP.indexOf(c.getFgColor());return i>=0?String(i):'p'+c.getFgColor();}return c.isFgDefault()&&c.isDim()?'b':'x';};
    const word=()=>{const m=(lineAt(box()?.top??0)?.translateToString()||'').match(/┌ ([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●◑]) /);return m?m[1]==='●'?'idle':m[1]==='◑'?'waiting':'running':'';};
@@ -954,9 +954,9 @@ class SessionShellPTYTest(unittest.TestCase):
         self.assertEqual(first['native'],second['native'])
         self.assertGreaterEqual(result['writes'],15)
         self.assertLess(result['bytes']/result['writes'],400,result)
-        # The frame: lit (173, never dim) and still on every reading.
+        # The frame: lit (209, never dim) and still on every reading.
         frames=result['frames'];self.assertEqual(len(set(frames)),1,frames)
-        column=[c for c in frames[0].split(',')[1:39]];self.assertTrue(column and all(c=='173' for c in column),frames[0])      # (11-18: Claude's lit frame, `FACES.dark.ramp.claude.orbit[1]`; was the vanilla 187)
+        column=[c for c in frames[0].split(',')[1:39]];self.assertTrue(column and all(c=='209' for c in column),frames[0])      # (11-18: Claude's lit frame, `FACES.dark.ramp.claude.orbit[1]`; was the vanilla 187)
         self.assertLess(result['lit_after_ms'],300,result)
         self.assertTrue(result['rest_seen'],result)
         y=result['rest_row'];self.assertIsNotNone(y,result)

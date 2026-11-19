@@ -209,7 +209,7 @@ class RecedeDeltaTest(unittest.TestCase):
 
     def test_live_failure_and_blocked_keep_their_alarm(self):
         """d2 (live half): row1's re-tried `execute ✕` stays bold red; blocked stays red."""
-        for cols in (140, 168):
+        for cols in (180, 196):             # (11-19: where the route cell still has room for the stage's name)
             with self.subTest(cols=cols):
                 base = _render(self.vm, NavState(view="ROUTES", title="ROUTES"), cols, identity=True)
                 real = _render(self.vm, NavState(view="ROUTES", title="ROUTES"), cols)

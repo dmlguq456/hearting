@@ -556,8 +556,6 @@ def _richer():
     from tools.fleet import render_cells
     opened = {index: tuple(round(v * 255 / 1000) for v in render_cells._RICHER_RGB_1000[name])
               for name, index in render_cells._MUTED_256.items() if name in render_cells._RICHER_RGB_1000}
-    opened.update({index: tuple(round(v * 255 / 1000) for v in render_cells._HARNESS_RGB_1000[name])
-                   for name, index in render_cells._HARNESS_256.items() if name in render_cells._HARNESS_RGB_1000})
     return opened
 
 
@@ -673,7 +671,7 @@ CONVERSATION = {
     ),
 }
 _CONVERSATION_STYLE = {"you": {"fg": 253, "bold": True}, "body": {"fg": None}, "dim": {"dim": True},
-                       "claude": {"fg": 173}, "codex": {"fg": 147}, "opencode": {"fg": 153}}
+                       "claude": {"fg": 209}, "codex": {"fg": 147}, "opencode": {"fg": 153}}
 
 
 # The window's last line under the native screen is the shell's one line in every harness (spec rule 60):

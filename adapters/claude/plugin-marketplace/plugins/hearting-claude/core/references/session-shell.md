@@ -252,7 +252,7 @@ being typed in for the person, `●` idle, `◑` waiting on a dialog or question
 the session number (`[e9]`), the harness name in its Fleet hue and, for a
 steward, Fleet's `⚑` followed by two cells before the line (a steward's number takes Fleet's steward color, fixed,
 as on Fleet's session row); the state has no word, its glyph and number share the
-state's color (11-18: but a spinning glyph is in the session's harness color, `hb_*`: Claude 173, Codex 147, OpenCode 153; the same for every
+state's color (11-18: but a spinning glyph is in the session's harness color, `hb_*`: Claude 209, Codex 147, OpenCode 153; the same for every
 working spinner on a line that names its harness: a route's owner and worker rows and a frame leg here, Fleet's SESSIONS rows, route rows and
 PEERS cards; a route's first-line `●`, a stopped, waiting or finished mark and a line with no known harness keep the state's color), and the three
 glyph shapes still differ in `mono` and under `NO_COLOR`. Short of cells the steward mark goes first, then the harness, then
@@ -336,7 +336,7 @@ frames, `RULE_REST` 10 frames, the lit frame `BORDER_LIT` 1; the wave `WAVE_COUN
 frames, `WAVE_STEPS` 10, `WAVE_FLOOR` 0.3, `WAVE_MIN` 24; the arc `BORDER_ARC` 1/4, `BORDER_LAP` 60
 frames), the breath and its shade count with the other `BORDER_*`, the colors in `FACES.*.orbit`,
 `scan`, `waveRGB`, `breath`, `breathRGB`, the blink's two reds in `FACES.*.waitBlink`. 11-18: while a session works (every `rule motion`
-kind) those three tone ramps are its harness's own, `FACES.*.ramp.<harness>` (Claude 173, Codex 147, OpenCode 153 and their lit
+kind) those three tone ramps are its harness's own, `FACES.*.ramp.<harness>` (Claude 209, Codex 147, OpenCode 153 and their lit
 tints on the dark face, their deep pairs 166, 25, 31 on the light one): the same number of steps, the same motion and speed; a waiting
 session's reds, a window with no known harness (the vanilla ramp), mono and `NO_COLOR` are unchanged. A route's state stays in
 the route box: a failed current route turns that box's line to the failure
@@ -485,8 +485,8 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   itself (its route line has no `(direct)` bracket: `● code  title`), `dispatch` the routes this
   session started (lines as before: owner, stage line, workers), `request` the peer requests it sent
   or received (lines and presses as before). A zone's name and its mark (dot or arrow) have their own
-  color: direct orange (208), dispatch violet, request aqua, none a harness color (the harnesses' own are Claude's softer clay orange 173, 13 apart
-  by CIEDE2000, its light-face pair 166; Codex's lavender 147, light-face pair 25, the Sonnet family's own step on purpose; OpenCode's pale sky 153, light-face pair 31), a status color of the box (working green,
+  color: direct orange (208), dispatch violet, request aqua, none a harness color (the harnesses' own are Claude's orange 209, #ff875f, 14 apart
+  from the zone's 208 by CIEDE2000 (11-19, "claude 컬러가 주황색이 조금만 더 밝았으면 해": it was the softer clay 173, 13 apart), its light-face pair 166; Codex's lavender 147, light-face pair 25, the Sonnet family's own step on purpose; OpenCode's pale sky 153, light-face pair 31), a status color of the box (working green,
   idle yellow, failure coral, the spinner's vanilla) or the steward pink (an 8-color terminal has none left over: the zones read in
   the default color and the white there). A
   zone with no rows has no rule, no rows at all is the empty box; a route a request opened stands in
@@ -515,8 +515,10 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   INTENSITY, always written, a unit's too (`● code(unit·quick)`, `● code(solo·quick)`, `● lab(team·strong)`); the color and weight of
   the whole bracket are the intensity's (as above). A record with no intensity reads the form alone, a route with no form (a frame, an older
   record) its intensity alone, an older unit route that records no field its bare `unit`, a `direct` route none, and a unit a worker called no
-  bracket. Short of cells the `·intensity` tail goes first, then the bracket as before. The stage line never leads with `staged`
-  (`code(team·standard) · 3/6: execute`; the stage box's title `3/6: execute`); the route's time stands at the right end of this
+  bracket. Short of cells the chain behind goes first, then the stage's name (`code(team·standard) · 3/6`; 11-19, "강도도 표기해
+  항상": the intensity outlasts it), then the `·intensity` tail (`code(team) · 3/6`), then the bracket, then the kind word, and the position last.
+  The stage line never leads with `staged`, nor with another shape's word where the bracket holds a form
+  (`code(team·standard) · 3/6: execute`, not `map-reduce 3/6`; the stage box's title `3/6: execute`); the route's time stands at the right end of this
   row, the middle text going first short of cells, then the chain behind and the intensity, the kind word and the time
   staying), the chain of kinds it
   continues leading it (`frame ✓ → code(team·standard)`: what is behind dim with `✓`, this one bold;
@@ -530,8 +532,8 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   four cells in (the value Fleet's session rows carry for that session, handed over by the cache producer from the job it already
   read: no read of its own; broken between words, a word wider than a row by cells so no row is wider than the box; the second row
   ends in `…` where it runs over; none, no row, where the session has none; a session whose values are not known leads its `CTX`
-  row with its mark), and, for a route with a stage list, the stage line (`staged 3/7: execute`,
-  `map-reduce 2/3: analyze`: the route's own shape word, none when the record names none, then the
+  row with its mark), and, for a route with a stage list, the stage line (`3/7: execute`,
+  `resource+verification 2/3: analyze`: a shape's own word only where the bracket holds no form (`kind_form`), none when the record names none, then the
   position; a failed stage keeps `✕`, a done one `✓`; with no stage running the next stage and
   what it waits for). A route whose owner is not known keeps its `CTX` row; its time is on the first row.
   The owner's mark spins while it works alone and is a dim `●` while its workers run. A route its owner
@@ -552,7 +554,7 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   beside it. Exactly one thing blinks per route, on Fleet's beat: the current stage's name while a
   stage line stands (so no `●` follows it), else the first row's mark. The role column is the
   route's own width. Short of cells the values go from the back, whole: the chain behind, then the
-  intensity (`● code`), the stage line's word `staged` (`3/7: execute`), effort, the
+  intensity (`● code`), the stage line's word where one stands (`3/7: execute`), effort, the
   harness; the role and the model stay. Short of rows, in this order: the closed box's closing line, each NOW's second row, each
   `CTX` row (its number joins the session's first row at the right edge, the one-row fold), each NOW's first row, then the stage line
   goes (the workers' count, `· worker 2`, ends it), then the workers go, then every route takes one row.
@@ -580,10 +582,10 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   has been seen (at most 7 days), and then only `show` lists it; a request whose message is
   not confirmed yet stays with `not confirmed`. The
   bottom layout keeps one row per route: title, harness·model·effort, context, then the
-  kind (`code(standard) · staged 3/7: execute`, a failed one `code(standard) · staged 2/3:
-  execute ✕`, `research(standard) · map-reduce 2/3: analyze`, a route with no stage list `lab(quick)`), then the open tool, and the elapsed
-  time at the right edge (short of cells the kind word goes, then the tool, then the word
-  `staged`). The box's line is the route line's color (the
+  kind (`code(team·standard) · 3/7: execute`, a failed one `code(team·standard) · 2/3:
+  execute ✕`, `research(team·standard) · 2/3: analyze`, a route with no stage list `lab(solo·quick)`), then the open tool, and the elapsed
+  time at the right edge (short of cells the stage's name goes first (`code(team·standard) · 3/7`), then the intensity (`code(team) · 3/7`),
+  then the kind word (`3/7`); 11-19, the same order as Fleet's route cell). The box's line is the route line's color (the
   failure color while a current route has failed), its count pulses while a route
   runs, and no empty row parts two routes; with no rows yet the producer's own label
   stands over a `Checking` row, and a known empty list draws no box. The `route line`
@@ -622,7 +624,7 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
 - USAGE (spec rule 59, 11-16, the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을
   USAGE로 해서 넣자"): the section at the panel's bottom, its name row `USAGE ────` (as MESSAGES' and MEM's, no `›`: it
   opens nothing; the thin rule that parted MEM from the last row became it), then one row per harness in Fleet's header
-  order (Claude, Codex, OpenCode): the harness's name in its Fleet hue one step down (11-16, "하네스 이름도 어둡게 원래 테마 컬러를": claude 130, codex 104, opencode
+  order (Claude, Codex, OpenCode): the harness's name in its Fleet hue one step down (11-16, "하네스 이름도 어둡게 원래 테마 컬러를": claude 166, codex 104, opencode
   110 on a dark or unknown face, 166, 68, 31 on a light one, `FACES.*.harnessName`; none in mono, eight colors or `NO_COLOR`), then the windows that harness reports as the last row showed
   them (`5h 12%(↻ 2h) │ 7d 66%`, Fleet's level colors; a window not reported is left out; a harness with none reported reads a
   dim `?`). The values are the usage records Fleet already keeps (`~/.local/state/agent-fleet/usage/<harness>.json`, read
