@@ -2539,7 +2539,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                               publication=args.publication, allow_open_route=args.allow_open_route,
                               adopt_root_outputs=args.adopt_root_output,
                               abandon_reason=args.abandon_reason,
-                              force_abandon_ignoring_lease=args.force_abandon_ignoring_lease)
+                              force_abandon_ignoring_lease=args.force_abandon_ignoring_lease,
+                              leave_outside=args.state == "abandoned")  # a person's abandon only
             if result.get("warning"):
                 print(result["warning"], file=sys.stderr)
             record = read_cycle_record(root, args.cycle)

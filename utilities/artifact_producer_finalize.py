@@ -104,6 +104,7 @@ def _finalize(
     jobs: Optional[Path] = None,
     lock_timeout: Optional[float] = None,
     exclude_symlinks: bool = False,
+    leave_outside: bool = False,
     _admission_lock_fd: Optional[int] = None,
     _recovery_scope: str = "root",
     _prescan: Optional[_Prescan] = None,
@@ -114,6 +115,9 @@ def _finalize(
     checkpoint defaults); a background sweep passes 0 so a held lock defers it.
     The first close of an open cycle reads its files before the admission lock; `_scan_budget`
     (a background sweep's time) lets it stop between files and answer `deferred`.
+    `leave_outside` is for a person's own `finalize --state abandoned` only: the abandon then leaves a
+    regular file outside `artifacts/` where it is instead of refusing on it. Every abandon the runtime
+    makes by itself (a sweep, a cancel, a finish) and every completed close leaves it off and refuses as ever.
     Symbolic links are always left out of the manifest and recorded as
     `excluded_symlinks` on the result and the cycle record (`exclude_symlinks`
     is accepted for old callers and changes nothing)."""
@@ -127,6 +131,7 @@ def _finalize(
         _observe_control_changes(root, cycle_id, now=now)
     if state not in {"completed", "abandoned"}:
         raise ProducerError("finalize-state-invalid", state)
+    leave_outside = leave_outside and state == "abandoned"
     if _admission_lock_fd is not None:
         raise ProducerError("finalize-reentry-forbidden", cycle_id)
     # PRD §13.53.4(3) names the producer admission mutex as the lock that must
@@ -146,7 +151,7 @@ def _finalize(
     # (`_prescan` on that second call).
     prescan = _prescan if _last_try else _prescan_cycle(
         root, cycle_id, unless_recorded=expected_binding, include_open=True,
-        exclude_hidden=exclude_hidden, budget=_scan_budget, leave_outside=state == "abandoned")
+        exclude_hidden=exclude_hidden, budget=_scan_budget, leave_outside=leave_outside)
     lock_fd = _admission_lock_fd
     interim_guard = contextlib.ExitStack()
     sweep_unresolved: List[Dict[str, Any]] = []
@@ -404,7 +409,7 @@ def _finalize(
                                               excluded_roots=excluded_roots,
                                               skip_directories=[tree.directory for tree in bundle_trees],
                                               read_markers=marker_read,
-                                              leave_outside=state == "abandoned")
+                                              leave_outside=leave_outside)
             bundle_dirs = [tree.directory for tree in bundle_trees]
             journal = _read_json(journal_path(root, cycle_id)) or {}
             owned = {row.get("locator") for row in journal.get("directory_bundles", [])
@@ -576,11 +581,11 @@ def _finalize(
         exclude_hidden=exclude_hidden, adopt_root_outputs=adopt_root_outputs, abandon_reason=abandon_reason,
         force_abandon_ignoring_lease=force_abandon_ignoring_lease, support_locators=support_locators,
         expected_binding=expected_binding, jobs=jobs, lock_timeout=lock_timeout,
-        exclude_symlinks=exclude_symlinks,
+        exclude_symlinks=exclude_symlinks, leave_outside=leave_outside,
         _recovery_scope=_recovery_scope, _last_try=True, _scan_budget=_scan_budget,
         _prescan=_prescan_cycle(root, cycle_id, unless_recorded=expected_binding,
                                 include_open=True, exclude_hidden=exclude_hidden,
-                                budget=_scan_budget, leave_outside=state == "abandoned"))
+                                budget=_scan_budget, leave_outside=leave_outside))
 
 
 def finalize(root: Path, *, cycle_id: str, **kwargs: Any) -> Dict[str, Any]:

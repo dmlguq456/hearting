@@ -162,7 +162,7 @@ def _output_paths(directory: Path, *, exclude_hidden: bool = False,
                   leave_outside: bool = False) -> Tuple[List[Tuple[str, Path]], List[str]]:
     """`_enumerate_output` without its reads: the kept `(path, file)` list and the violations.
 
-    `leave_outside` (an abandon, which publishes no output lineage of its own) leaves a regular
+    `leave_outside` (a person's own abandon, which publishes no output lineage of its own) leaves a regular
     file outside `artifacts/` where it is, out of the manifest, reported through `excluded`
     instead of refusing the close on it.
 

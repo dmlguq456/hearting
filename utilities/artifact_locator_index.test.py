@@ -993,7 +993,6 @@ _EXPECTED_WRITER_CENSUS = {
     ("artifact_producer.py", "backfill_cycle_bindings"): "full",
     ("artifact_campaign.py", "_commit_event"): "incremental",
     ("artifact_campaign.py", "_materialize"): "incremental",
-    ("artifact_campaign.py", "_take_detached_off_list"): "incremental",  # the close takes detached ids off the list and updates the index
     ("artifact_campaign.py", "supersede_locked"): "incremental",
 }
 
