@@ -39,8 +39,8 @@ from artifact_producer_routes import (
 from artifact_producer_history import (
     _campaign_lines_locked, _command_line, _command_stamp, _flush_campaign_pending_locked,
     _flush_cycle_pending_locked, _HAND_ACTOR, _history_by, _history_deliver_locked,
-    _last_known_path, _locator_suffix, _merge_pending, _observe_root_controls,
-    _preserve_current_manifest, _read_manifest_raw, _UNSET, _with_cycle_lines, _with_pending,
+    _keep_manifest_before_leaving, _last_known_path, _locator_suffix, _merge_pending,
+    _observe_root_controls, _preserve_current_manifest, _read_manifest_raw, _UNSET, _with_cycle_lines, _with_pending,
 )
 
 from artifact_producer_interim import (
@@ -488,6 +488,13 @@ def _adopt_location_locked(root: Path, record: Mapping[str, Any], new_directory:
             operation="update", field="parent", before={"value": record.get("parent_cycle_id")},
             after={"value": parent}, reason=reason, now=now, by=by))
         changed.append(new_campaign_id)
+    # Before anything reads the campaign the cycle left: its close binds this cycle to the manifest the
+    # folder carries, and the folder is no longer inside that campaign.  A run that stopped after the
+    # folder moved, and a folder moved by hand, are finished here from the same bytes.
+    _keep_manifest_before_leaving(
+        root, record, new_directory,
+        found=manifest if manifest is not _UNSET and manifest is not None else None,
+        digest=manifest_digest if manifest is not _UNSET and manifest is not None else None)
     # The binding the folder carries names the campaign it sits under.
     binding = artifact_locator.read_cycle_binding(new_directory / artifact_locator.CYCLE_BINDING)
     if binding is None or binding.get("campaign_id") != new_campaign_id or binding.get("cycle_id") != cycle_id:
@@ -637,7 +644,14 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
             else:
                 locator_name = keep.name
             destination = target_dir / locator_name
-            # The folder moves first; whatever stops after this is what the next look finishes.
+            # The evidence the old campaign's close reads stays behind the folder (and the folders of a
+            # request's members); the folder then moves, and whatever stops after this is what the next
+            # look finishes (`_adopt_location_locked` keeps the same bytes first).
+            _keep_manifest_before_leaving(root, record, source)
+            for member in artifact_request.members(root, source):
+                member_record = read_cycle_record(root, member.name)
+                if member_record is not None:
+                    _keep_manifest_before_leaving(root, member_record, member)
             os.rename(str(source), str(destination))
             _fsync_dir(target_dir)
             _fsync_dir(source.parent)
