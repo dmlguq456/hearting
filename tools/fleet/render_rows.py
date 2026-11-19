@@ -598,19 +598,6 @@ def _dispatch_role_suffix(j, max_width=None):
     # autopilot-code가 왜 표시되는지") — a worker_role that restates the job's own key/
     # capability_owner drops, and a '<capability>-<role>' composite ('autopilot-code-owner')
     # keeps only its role tail instead of rendering as 'autopilot_cod…'.
-    # Writer-vocabulary normalization (user 2026-07-20: "codex랑 claude가 서로 다르게 뜨는데")
-    # — legacy rows may misfile PORTABLE MODEL-ROLE phrases ('deep orchestrator',
-    # 'deep maker') and retired team metadata ('plan-team') into worker_role. Current writers
-    # leave worker_role unset and use the independent fields above. Legacy harness role tokens
-    # are always kebab, so
-    # a space marks the model-role phrase: the orchestrator phrase IS the conductor
-    # ('owner'), every other model-role/persona restates an axis the row already shows
-    # (model cell / name-zone stage label) and drops. Display-only; the registry row keeps
-    # the raw value.
-    if raw_role and " " in raw_role:
-        raw_role = "capability-owner" if raw_role.endswith("orchestrator") else None
-    if raw_role and raw_role.endswith("-team"):
-        raw_role = None
     if raw_role:
         bare = _strip_autopilot(raw_role)
         dups = [d for d in (_strip_autopilot(getattr(j, "capability_owner", None) or "") or None,

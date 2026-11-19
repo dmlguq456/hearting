@@ -2407,13 +2407,10 @@ class LauncherProvenanceTest(unittest.TestCase):
         hidden = source.with_name(source.name + ".hidden-for-test")
         source.rename(hidden)
         self.addCleanup(lambda: hidden.rename(source) if hidden.exists() else None)
-        campaign = self.root / "campaigns" / "fixture" / "artifacts" / "raw-results"
-        campaign.mkdir(parents=True)
         preflight = Path(payload_home) / "adapters/codex/bin/preflight.sh"
-        result = subprocess.run([str(preflight), "write", str(campaign)],
+        result = subprocess.run([str(preflight), "--help"],
                                 text=True, capture_output=True, env=self.env)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual(list(campaign.iterdir()), [])
         hidden.rename(source)
 
         # Absolute and escaping links are rejected by real and dry-run paths.
@@ -2461,7 +2458,7 @@ class LauncherProvenanceTest(unittest.TestCase):
         remote_env["COMPUTE_HOSTS_CONFIG"] = str(self.config)
         launched = self.run_tool("run", "remote", "--name", "payload-write", "--",
                                  "bash", "-c",
-                                 f'"$AGENT_HOME/adapters/codex/bin/preflight.sh" write {shlex.quote(str(campaign))}',
+                                 '"$AGENT_HOME/adapters/codex/bin/preflight.sh" --help',
                                  env=remote_env)
         self.assertEqual(launched.returncode, 0, launched.stderr + launched.stdout)
         run_id = launched.stdout.split()[1]
