@@ -109,6 +109,10 @@ def add_launch_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--capacity-retry", type=int, choices=(0, 1), default=0)
     p.add_argument("--prior-attempt-id")
     p.add_argument("--automatic-retry-of", help="Exact failed predecessor; revalidated atomically at claim")
+    # A unit route's next turn (`correct --route`): the previous turn's attempt, this turn's number and text.
+    p.add_argument("--continues-attempt-id", help=argparse.SUPPRESS)
+    p.add_argument("--turn", type=int, default=0, help=argparse.SUPPRESS)
+    p.add_argument("--continuation-text", default="", help=argparse.SUPPRESS)
     p.add_argument("--cooled-model")
     p.add_argument("--selection-source")
     p.add_argument("--launch-authority", choices=("conductor", "ancestor-broker"), default="conductor")
@@ -208,6 +212,13 @@ def unit_leg_prompt(h, args, task: str, *, commit_clause: str = "") -> str | Non
     scope = wb.resolve_node_scope(route, args.route_node, wb._child_scope_environment(args, route, os.environ),
                                   parent_attempt_id=getattr(args, "parent_attempt_id", None),
                                   route_file=args.route_file)
+    if getattr(args, "continues_attempt_id", None):
+        import unit_continue
+        plan = unit_continue.plan_for_args(args, args.jobs_path, Path(h.__file__).resolve().parents[1].name)
+        if plan is not None and plan.kind == "resumed":
+            # The woken session holds the brief and the kernel's rules already: only this turn's facts and text.
+            return unit_continue.turn_prompt(args, plan, dispatch_metadata_prompt(h, args), task, args.jobs_path)
+        task = unit_continue.turn_prompt(args, plan, "", task, args.jobs_path)
     persona = wb.unit_persona_body(h.ROOT, args.unit) or ""
     stance = wb.unit_stance_text(h.ROOT, args.unit)
     unit_text = "\n\n".join(part for part in (stance if stance and stance not in persona else "", persona) if part)

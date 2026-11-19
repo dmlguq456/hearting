@@ -1362,7 +1362,16 @@ def classified_receipt(
             # the close contract itself is the adapter bootstrap's (§0.5).
             from dispatch_completion_join import RUNTIME_V1_FOLLOWUP_PREFIXES
             summary = _sealed_summary(row, launch.attempt_id)
-            instruction = RUNTIME_V1_FOLLOWUP_PREFIXES[bool(summary)] + ("\n" + summary if summary else "")
+            head = kept = ""
+            if row is not None and row.metadata.get("capability") == "unit":
+                try:   # a continued unit turn names its turn; a request kept for the route names its start
+                    import unit_continue
+                    head, kept = unit_continue.notice_lines(str(launch.jobs), row.metadata, agent_home=home)
+                except Exception:  # noqa: BLE001 -- the extra lines never block a wake
+                    head = kept = ""
+            instruction = (RUNTIME_V1_FOLLOWUP_PREFIXES[bool(summary)]
+                           + ("\n" + (head + "\n" if head else "") + summary if summary else "")
+                           + ("\n" + kept if kept else ""))
         elif parked and parked["status"] == "blocked":
             gate = parked["gate"]
             required_action = HUMAN_GATE_PREFIX + gate

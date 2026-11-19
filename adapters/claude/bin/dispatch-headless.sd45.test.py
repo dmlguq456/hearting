@@ -270,6 +270,26 @@ class ClaudeSD78CompletionDelivery(unittest.TestCase):
             command,
         )
 
+    def test_a_unit_leg_keeps_its_session_and_a_continued_turn_gives_its_permissions_again(self):
+        # Every other one-shot worker keeps `--no-session-persistence` byte for byte; a unit leg keeps its
+        # session in the worker home, and the turn that wakes it is told its own permissions, add-dirs and model.
+        one_shot = WH.shell_command(_shell_command_args(worker_type="review"), Path("/tmp/p.txt"), Path("/tmp/l.log"))
+        self.assertIn("--no-session-persistence", one_shot)
+        self.assertNotIn("--session-id", one_shot)
+        first = WH.shell_command(_shell_command_args(worker_type="review", unit_session_id="sess-1"),
+                                 Path("/tmp/p.txt"), Path("/tmp/l.log"))
+        self.assertIn("--session-id sess-1", first)
+        self.assertNotIn("--no-session-persistence", first)
+        import unit_continue
+        plan = unit_continue.SessionPlan("resumed", "", "sess-1", "/f", "projects/x/sess-1.jsonl")
+        woken = WH.shell_command(_shell_command_args(worker_type="review", unit_session_id="sess-1", session_plan=plan),
+                                 Path("/tmp/p.txt"), Path("/tmp/l.log"))
+        self.assertIn("--resume sess-1", woken)
+        self.assertNotIn("--session-id", woken)
+        for flag in ("--permission-mode", "--add-dir /tmp/fixture-artifacts"):
+            self.assertIn(flag, woken)
+        self.assertEqual(woken.replace("--resume sess-1", "--session-id sess-1"), first)
+
     def test_supervised_state_path_rejects_attempt_path_escape(self):
         args = _shell_command_args(attempt_id="att-../../outside")
         with self.assertRaises(WH.DispatchContractError):

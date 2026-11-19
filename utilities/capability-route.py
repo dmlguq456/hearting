@@ -2309,6 +2309,15 @@ def main():
             given=found
         frame_path = resolve_route_argument(given, jobs)
         frame_raw = json.loads(frame_path.read_text()) if Path(frame_path).is_file() else None
+        if isinstance(frame_raw,dict) and frame_raw.get("capability")=="unit":
+            # A unit route has no owner to answer: the text is the route's next turn (work_start.correct_unit_route).
+            from work_start import correct_unit_route
+            code,result=correct_unit_route(verify_route(frame_raw),frame_path,jobs,
+                                           a.message_file.read_text() if a.message_file else None,a.request_id)
+            print(json.dumps(result,ensure_ascii=False))
+            from start_receipt import print_next_line
+            print_next_line(result)
+            return code
         if ROUTE_PLAN.is_framed_route(frame_raw):
             from work_start import _framed_cycle
             _first = {}

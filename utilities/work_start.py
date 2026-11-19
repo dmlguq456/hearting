@@ -25,6 +25,7 @@ from dispatch_contract import (
     DispatchContractError, completion_marker_gate, owner_frame_launch_gate,
     parse_registry_metadata, verdict_pass,
 )
+from dispatch_attempt_policy import deferred_completion, terminal_conflict_pending
 from dispatch_completion_join import (
     join_selected_attempts, current_delivery_state, delivery_classification,
     delivery_required_action, completion_harvest_command,
@@ -38,6 +39,7 @@ import owner_write_advisory as OWNER_WRITE_ADVISORY
 import route_plan as RP
 import resource_resume as RESOURCE_RESUME
 import frame_repository
+import unit_continue as UC
 try:  # ends a detached child with the test that started it; no-op outside tests
     from detached_lifetime import bind as end_with_test
 except ImportError:  # a partial tree without it (e.g. a fixture release): no record
@@ -636,7 +638,17 @@ def _owns(meta, parent, jobs):
     return route_authority.owns(meta, parent, jobs)
 
 
-def _slot(route, node, rows, jobs=None):
+def require_route_parent(meta, jobs, aid):
+    """Refuse unless this caller owns the attempt `meta` describes: its launching session (or that seat's
+    successor), or the worker whose attempt started it (a unit leg a worker started is followed by that worker)."""
+    if meta.get("caller_attempt_id") and meta["caller_attempt_id"] == os.environ.get("AGENT_DISPATCH_ATTEMPT_ID"):
+        return
+    parent = _current_parent_session_id()
+    if not route_authority.require_known(_owns(meta, parent, jobs), meta, jobs):
+        raise DispatchContractError("work-parent-recovery-required", aid)
+
+
+def _slot(route, node, rows, jobs=None, path=None):
     matches = [aid for aid, (_, meta) in rows.items()
                if ((node == "owner" and meta.get("worker_type") == "owner"
                     and route["route_id"] in {meta.get("owner_route_id"), meta.get("route_id")})
@@ -652,6 +664,12 @@ def _slot(route, node, rows, jobs=None):
                     route["route_id"], route["route_hash"]):
                 matches = [owner]
                 adopted[owner] = binding
+    if matches and path is not None and jobs is not None and node != "owner" and unit_leg(route, node):
+        # A unit route's next turn is a new attempt of this node once the last one ended and the route is closed
+        # (or reopened for it): the slot is then that turn's id, which has no row yet.
+        turn = UC.ready_to_continue(jobs, route, path, node, rows)
+        if turn is not None:
+            return turn.attempt_id
     aid = matches[-1] if matches else attempt_id(route, node)
     if aid in rows:
         if not matches:
@@ -674,11 +692,8 @@ def _slot(route, node, rows, jobs=None):
         # session cannot adopt it. A finished one only has a result to read:
         # the session a supervisor handed the route to may harvest it.
         # A unit leg a worker started is followed by that worker (it is no session; its attempt is the caller).
-        if status != "done" and not (meta.get("caller_attempt_id")
-                                      and meta["caller_attempt_id"] == os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")):
-            parent = _current_parent_session_id()
-            if not route_authority.require_known(_owns(meta, parent, jobs), meta, jobs):
-                raise DispatchContractError("work-parent-recovery-required", aid)
+        if status != "done":
+            require_route_parent(meta, jobs, aid)
         digest = (meta.get("owner_route_hash") or meta.get("route_hash")) if node == "owner" else meta.get("route_hash")
         if aid in adopted:
             digest = adopted[aid].route_hash
@@ -791,10 +806,16 @@ def _start(route, path, jobs, node, harness, run, on_registered=None):
 
 
 def _start_bound(route, path, jobs, node, harness, run, on_registered, repository):
+    # A unit route's next turn is a new attempt of the same node; its text and its predecessor ride along.
+    turn = UC.next_turn(jobs, route, node, _rows(jobs)) if unit_leg(route, node) else None
+    aid = turn.attempt_id if turn else attempt_id(route, node)
     command = [sys.executable, str(ROOT / "utilities/dispatch-owner.py"), "--start",
                "--route-evidence", str(path), "--jobs", str(jobs),
                "--slug", route["slug"] + "-" + node,
-               "--attempt-id", attempt_id(route, node)]
+               "--attempt-id", aid]
+    if turn:
+        command += ["--continues-attempt-id", turn.prev_attempt_id, "--turn", str(turn.turn),
+                    "--continuation-text", turn.text]
     if node == "owner" or not route.get("artifact_root") or unit_leg(route, node):
         # A route with no artifact root has no runtime home for a prompt file; every sealed route has one.
         # A unit leg gets the brief itself: nothing is added to it here.
@@ -825,7 +846,7 @@ def _start_bound(route, path, jobs, node, harness, run, on_registered, repositor
             # prepared. Preserve the existing typed execution-access reason
             # and stop before dispatch-owner can take its default grant path.
             return {
-                "attempt_id": attempt_id(route, node),
+                "attempt_id": aid,
                 "exit_code": 69,
                 "receipt": f"check=failed\nreason={exc.reason}\ndetail={exc.detail}\nchild_spawned=0\n",
                 "diagnostic": "",
@@ -845,10 +866,10 @@ def _start_bound(route, path, jobs, node, harness, run, on_registered, repositor
     if on_registered is None:
         result = run(command, text=True, capture_output=True, check=False)
     elif run is subprocess.run:
-        result = _run_reporting_registration(command, attempt_id(route, node), reported)
+        result = _run_reporting_registration(command, aid, reported)
     else:   # an injected launcher may report the registration itself, or simply return when done
         result = run(command, text=True, capture_output=True, check=False, on_registered=reported)
-    receipt = {"attempt_id": attempt_id(route, node), "exit_code": result.returncode,
+    receipt = {"attempt_id": aid, "exit_code": result.returncode,
                "receipt": result.stdout, "diagnostic": result.stderr,
                "started_at": round(started, 1), "ended_at": round(time.time(), 1),
                **({"registered_at": round(registered[0], 1)} if registered else {})}
@@ -2379,6 +2400,15 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
     if pending and pending.get("state") != "finished":
         return {**result, "state":"needs-attention", "reason":"finish-pending",
                 "required_action":"resume-inline-finish", "finish_state":pending.get("state")}
+    unit = unit_leg(route)
+    if unit is not None:
+        rows = _rows(jobs)
+        if UC.ready_to_continue(jobs, route, path, unit["id"], rows) is not None:
+            # A kept request for a unit route's next turn and nothing in its way: reopen the route (the closure
+            # record is set aside, not deleted) and start the turn below.
+            turns = UC.chain(rows, route["route_id"], unit["id"])
+            require_route_parent(turns[-1][2], jobs, turns[-1][0])
+            UC.reopen(path)
     closed = closed_outcome(path, route)
     if closed and closed.get("autoclose"):
         # The runtime closed this route after it sat unused (route_autoclose.py).
@@ -2884,7 +2914,7 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock):
     resume = result["resume_command"]
     rows = _rows(jobs)
     node = leg["id"]
-    aid = _slot(route, node, rows, jobs)
+    aid = _slot(route, node, rows, jobs, path)
     if aid not in rows:
         rows, refusal = _launch_admitted(route, path, jobs, node, None, run, result,
                                          wait=wait, sleep=sleep, clock=clock)
@@ -2898,14 +2928,16 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock):
                     "next_step": f"The unit worker did not start ({reason}); nothing ran. Run resume_command "
                         "again once the reason is cleared; it starts the same worker again."}
     attempts = {aid}
-    result.update(unit_attempt_id=aid, owner_started=False, **_wait_fields(attempts, rows, resume))
+    result.update(unit_attempt_id=aid, owner_started=False, **_wait_fields(attempts, rows, resume),
+                  **_turn_fields(rows[aid][1], jobs))
     joined = _timed_join(result, clock, jobs=jobs, expected_attempts=attempts,
                          timeout=_wait_budget(result) if wait else 0, recover=True, observe_only=not wait)
     result["observation"] = joined
     if joined["state"] == "ready":
         outcome = _outcome(jobs, aid)
         if outcome["classification"] == "success":
-            return {**result, "state": "completed", "result": outcome, **_unit_summary(jobs, aid, sleep=sleep)}
+            return {**result, "state": "completed", "result": outcome, **_unit_summary(jobs, aid, sleep=sleep),
+                    **_turn_fields(_rows(jobs).get(aid, ("", {}))[1], jobs)}
         # The one leg ended without a pass: the same work goes out again as a new unit route.
         command = _compose_again(route)
         return {**result, "state": "needs-attention", "reason": "unit-outcome-needs-inspection",
@@ -2922,6 +2954,96 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock):
             "next_step": "The unit worker runs as a separate attempt and its result comes back to this session "
                 "when it ends. Follow parent_next: end-turn means yield; bounded-wait means run "
                 "parent_next_command once."}
+
+
+def _turn_fields(meta, jobs) -> dict:
+    """A continued unit turn's receipt fields (`{}` for the first turn): its number, predecessor, session
+    and this turn's own tokens (`turn_tokens_complete` False is a lower bound)."""
+    if not meta.get("continues_attempt_id"):
+        return {}
+    fields = {"turn": UC.turn_of(meta), "continues_attempt_id": meta["continues_attempt_id"],
+              "session": meta.get("session") or "pending"}
+    try:
+        from attempt_view import session_tokens
+        tokens, complete = session_tokens(meta, jobs)
+    except Exception:  # noqa: BLE001 -- tokens are a courtesy, never a reason to stop a receipt
+        tokens, complete = None, False
+    if tokens is not None:
+        fields.update(turn_tokens=tokens, turn_tokens_complete=bool(complete))
+    return fields
+
+
+def correct_unit_route(route, path, jobs, text, request_id=None, **start_kwargs):
+    """`correct --route <unit route>`: keep `text` for the route's next turn and start it when nothing is in the way.
+
+    Returns `(exit_code, receipt)`. Without `text` it only shows the turns so far. A running turn (or one whose
+    route has not closed yet) leaves the text kept (`retained`); the next `start` (or the end notice's
+    resume_command) starts the turn once the route is closed. Asking again with the same text keeps one request."""
+    leg = unit_leg(route)
+    if leg is None:
+        return 2, {"state": "not-admitted", "reason": "correct-unit-route-required"}
+    rows = _rows(jobs)
+    turns = UC.chain(rows, route["route_id"], leg["id"])
+    if text is None:
+        return 0, {"state": "unit-turns", "route_id": route["route_id"],
+                   "turns": [{"turn": UC.turn_of(m), "attempt_id": a, "status": st,
+                              "session": m.get("session") or ("first" if UC.turn_of(m) == 1 else "pending")}
+                             for a, st, m in turns]}
+    if not turns:
+        return 69, {"state": "not-admitted", "reason": "unit-continue-no-turn-yet",
+                    "next_step": "This route has not started its worker; run start for it first."}
+    if route.get("route_plan") is not None:
+        # A leg of an approved route plan has its cycle folder fixed by the request grouping: no second cycle.
+        return 69, {"state": "not-admitted", "reason": "unit-continue-request-bound-route",
+                    "next_step": "This unit route is a leg of an approved plan, so it cannot take another turn; "
+                                 "compose the unit again with the new request."}
+    import unit_ephemeral
+    if unit_ephemeral.is_scratch_root(Path(route.get("artifact_root", ""))):
+        return 69, {"state": "not-admitted", "reason": "correct-unit-ephemeral-unsupported",
+                    "next_step": "A record-free (--ephemeral) unit route cannot take another turn; run the "
+                                 "unit again with a new brief."}
+    try:
+        require_route_parent(turns[-1][2], jobs, turns[-1][0])
+        last_status, last_meta = turns[-1][1], turns[-1][2]
+        if (last_status == "done" and not verdict_pass(last_meta) and deferred_completion(last_meta) != "pending"
+                and not terminal_conflict_pending(last_meta)):
+            # The last turn ended without a verdict, so the route never closes and a kept text would never start.
+            return 69, {"state": "not-admitted", "reason": "unit-continue-last-turn-no-verdict",
+                        "required_action": "compose-again", "parent_next": "compose",
+                        "parent_next_command": _compose_again(route),
+                        "next_step": "The unit worker's last turn ended without a verdict, so this route cannot "
+                                     "take another turn and nothing was kept. To run the same unit again, run "
+                                     "parent_next_command (a new route; this one stays as it ended)."}
+        kept = UC.submit(jobs, route["route_id"], text, request_id)
+    except DispatchContractError as exc:
+        return 69, {"state": "not-admitted", "reason": exc.reason,
+                    "retry_when": "The route's launching session (or the worker that started it) asks.",
+                    "next_step": "Only the session that started this unit route can ask for another turn."}
+    except UC.ContinueError as exc:
+        return 69, {"state": "not-admitted", "reason": str(exc)}
+    entry = kept["entry"]
+    new_id = UC.attempt_id_for(route["route_id"], leg["id"], entry["id"])
+    if kept["duplicate"] and rows.get(new_id, ("",))[0] == "done":
+        # This text already ran as that turn and its result was delivered then. Starting nothing, say so
+        # instead of letting the closed route read back the old result as if it were new.
+        return 0, {"state": "already-asked", "route_id": route["route_id"], "request_id": entry["id"],
+                   "duplicate": True, "retained": False, "unit_attempt_id": new_id,
+                   **_turn_fields(rows[new_id][1], jobs),
+                   "next_step": "This text already ran as that turn and its result was delivered then; nothing "
+                                "new started. To ask for another turn, send a different text or pass a new "
+                                "--request-id."}
+    receipt = start_work(route, path, jobs, **start_kwargs)
+    rows = _rows(jobs)
+    started = new_id in rows
+    receipt.update(request_id=entry["id"], duplicate=kept["duplicate"], retained=not started,
+                   continues_attempt_id=turns[-1][0])
+    if started:
+        receipt.update(unit_attempt_id=new_id, **_turn_fields(rows[new_id][1], jobs))
+    else:
+        receipt["next_step"] = ("The text is kept for this route's next turn. It starts when the running turn "
+                                "has ended and the route has closed: run resume_command then (the end notice "
+                                "carries it). ") + str(receipt.get("next_step") or "")
+    return 0, receipt
 
 
 def _unit_summary(jobs, aid, *, sleep=time.sleep) -> dict:
@@ -2944,7 +3066,11 @@ def _unit_summary(jobs, aid, *, sleep=time.sleep) -> dict:
 def _closed_unit_summary(route, jobs) -> dict:
     """The sealed summary of a closed unit route's one leg (`{}` for any other route)."""
     leg = unit_leg(route)
-    return _unit_summary(jobs, attempt_id(route, leg["id"])) if leg else {}
+    if not leg:
+        return {}
+    turns = UC.chain(_rows(jobs), route["route_id"], leg["id"])
+    last = turns[-1][0] if turns else attempt_id(route, leg["id"])
+    return {**_unit_summary(jobs, last), **_turn_fields(turns[-1][2] if turns else {}, jobs)}
 
 
 def _with_next_leg(route, result):

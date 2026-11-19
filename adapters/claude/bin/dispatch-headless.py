@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -86,6 +87,7 @@ from dispatch_contract import (
 )
 from parent_next_directive import receipt_lines as parent_next_receipt_lines  # noqa: E402
 import launch_receipt  # noqa: E402
+from dispatch_contract_rows import is_unit_leg_launch  # noqa: E402
 import dispatch_wrapper_common as WRAPPER_COMMON  # noqa: E402
 import dispatch_headless_main as DISPATCH_MAIN  # noqa: E402
 import frame_repository
@@ -940,6 +942,15 @@ def _route_declares_terminal_commit_support(route_file: str) -> bool:
     return route.get("runtime_support", {}).get("terminal_commit") is True
 
 
+def _session_arguments(args: argparse.Namespace) -> list[str]:
+    """A unit leg keeps its session in the worker home (its next turn can wake it); any other one-shot worker keeps none."""
+    session_id = getattr(args, "unit_session_id", "")
+    if not session_id:
+        return ["--no-session-persistence"]
+    plan = getattr(args, "session_plan", None)
+    return ["--resume" if plan is not None and plan.kind == "resumed" else "--session-id", session_id]
+
+
 def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -> str:
     prompt_path, log_path = Path(frame_repository.native_path(prompt_path)), Path(frame_repository.native_path(log_path))
     if getattr(args, "resolved_completion_delivery", "one-shot") == "session-resume-supervised":
@@ -995,7 +1006,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
     cmd = [
         "claude", "-p", "--add-dir", args.artifact_root,
         "--output-format", "stream-json", "--verbose",
-        "--no-session-persistence",
+        *_session_arguments(args),
     ]
     if getattr(args, "runtime_dir", ""):
         cmd += ["--add-dir", str(args.runtime_dir)]
@@ -1241,6 +1252,11 @@ def main(argv: list[str]) -> int:
         profile_type=profile_worker_type(ROOT, args.profile),
     )
     args.jobs_path = jobs
+    if is_unit_leg_launch(args):
+        # The turn's session: the previous turn's when it can be woken, else a new one the worker home keeps.
+        import unit_continue
+        plan = unit_continue.plan_for_args(args, jobs, "claude")
+        args.unit_session_id = plan.session_id if plan is not None and plan.kind == "resumed" else str(uuid.uuid4())
     try:
         from review_input import prepare_request as prepare_review_input
         prepare_review_input(args)
@@ -1338,6 +1354,9 @@ def main(argv: list[str]) -> int:
         args.worker_runtime_env = prepare_worker_home(args.agent_home, 'claude', args.worker_type,
                                                        args.attempt_id, env=env, profile=args.profile)
         env.update(args.worker_runtime_env)
+        if getattr(args, "unit_session_id", ""):
+            import unit_continue
+            unit_continue.transplant(getattr(args, "session_plan", None), env["CLAUDE_CONFIG_DIR"])
         # Apply after the masked worker home and all inherited environment
         # updates so every direct/supervised/resumed native child sees this
         # launch's captured operating budget.

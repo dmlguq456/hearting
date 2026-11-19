@@ -93,6 +93,7 @@ from dispatch_contract import (
 )
 from parent_next_directive import receipt_lines as parent_next_receipt_lines  # noqa: E402
 import launch_receipt  # noqa: E402
+from dispatch_contract_rows import is_unit_leg_launch  # noqa: E402
 import dispatch_wrapper_common as WRAPPER_COMMON  # noqa: E402
 import dispatch_headless_main as DISPATCH_MAIN  # noqa: E402
 import frame_repository
@@ -871,6 +872,12 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             ]
         else:
             command += ["--one-turn"]
+            if is_unit_leg_launch(args):
+                # A unit leg keeps its thread in the worker home, so its next turn can wake it.
+                command += ["--keep-session"]
+                plan = getattr(args, "session_plan", None)
+                if plan is not None and plan.kind == "resumed":
+                    command += ["--resume-thread", plan.session_id]
         command += [
             "--sandbox", effective_runtime_sandbox(args),
             "--approval", args.approval,
@@ -2121,6 +2128,13 @@ def main(argv: list[str]) -> int:
             completion_lease_path(args)
     except DispatchContractError as e:
         return fail(e.reason, 69, detail=e.detail, child_spawned="0")
+    if is_unit_leg_launch(args):
+        import unit_continue
+        plan = unit_continue.plan_for_args(args, jobs, "codex")
+        if (plan is not None and plan.kind == "resumed"
+                and getattr(args, "resolved_stage_telemetry_transport", "raw-exec") != "app-server-one-turn"):
+            # Only the App Server one-turn keeps a session; `codex exec --ephemeral` cannot wake one.
+            args.session_plan = plan._replace(kind="fresh", reason="resume-refused", source="")
     log_dir = (
         Path(args.log_dir)
         if args.log_dir
@@ -2273,6 +2287,9 @@ def main(argv: list[str]) -> int:
             args.agent_home, 'codex', args.worker_type, args.attempt_id,
             env=dispatch_env, destination=args.nested_codex_home, profile=args.profile)
         dispatch_env.update(args.worker_runtime_env)
+        if is_unit_leg_launch(args):
+            import unit_continue
+            unit_continue.transplant(getattr(args, "session_plan", None), dispatch_env["CODEX_HOME"])
         command = shell_command(args, prompt_path, log_path)
         launch_spec = DISPATCH_MAIN.LaunchSpec(
             harness="codex",
