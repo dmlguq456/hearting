@@ -11,6 +11,9 @@ popup stands at once from what the host already holds, and its own reading repla
    that fails or is cut at 12 s changes the words (`다시 읽지 못함`) and leaves the rows; the next success removes them.
 4. Where the table is replaced, a person who scrolled keeps the route at the top of the window; one who pressed or
    Tabbed to a route sees it come into view.
+5. (11-19) A press on a route's row opens that route's page, not the table: the first screen is the stage boxes the panel's
+   own values draw (`panelView.routePageFirst`), then Fleet's page; Enter goes to the table and back; a press on the
+   section's head opens the table. A route with no stage line keeps the panel's box as its first screen.
 
 The collection is given a synthetic delay (as a long `collect_all` is); the host runs in a private PTY. Nothing here
 reaches a real account, session, artifact root or terminal.
@@ -140,6 +143,9 @@ const at=async needle=>{await flush();for(let y=0;y<rows;y++){const c=cellsOf(y)
 const until=async(test,what,ms=20000)=>{const began=Date.now();while(Date.now()-began<ms){const s=await screen();if(test(s))return {s,ms:Date.now()-began};await sleep(25);}
   throw Error('never '+what+'\n'+(await screen()).join('\n'));};
 const has=word=>s=>s.some(line=>line.includes(word));
+// A wait for something that is not on the screen (a process, a file): it ends the moment `test()` holds, or throws at the deadline.
+const settle=async(test,what,ms=8000)=>{const began=Date.now();while(Date.now()-began<ms){if(test())return Date.now()-began;await sleep(25);}
+  throw Error('never '+what+'\n'+(await screen()).join('\n'));};
 const press=async(x,y,ms=100)=>{child.write(`\x1b[<0;${x+1};${y+1}M\x1b[<0;${x+1};${y+1}m`);await sleep(ms);};
 const key=async(bytes,ms=250)=>{child.write(bytes);await sleep(ms);};
 // The popup's own cells (its columns, not the panel's beside it): `rows` from its top line to its bottom line.
@@ -192,13 +198,96 @@ const measure=async(label,press_=opened)=>{
     checks.changed=await measure('changed',async()=>{const p=await at('PANEL_R4');await press(p.x+2,p.y,0);});
     await close();
   }
+  if(sc==='row_page'||sc==='row_page_unstaged'){
+    // A press on a route's row opens its page. The first screen is the stage boxes (a staged route) or the panel's box (none),
+    // Fleet's page comes after the delay, Enter goes to the table and back, a press on the head opens the table.
+    const staged=sc==='row_page';
+    const lines=f=>fs.existsSync(cfg.control+'/'+f)?fs.readFileSync(cfg.control+'/'+f,'utf8').split('\n').filter(Boolean):[];
+    const paged=s=>popupHas('║')(s);
+    // (a box's name that does not fit its title is cut with `…`, as Fleet's is: `plan-che…`, `impl-rev…`; the boxes are read by its first letters)
+    const boxTops=s=>plain(s).filter(l=>/┌─ (plan|execute|impl|test|report)/.test(l));
+    const boxNames=s=>plain(s).flatMap(l=>l.match(/┌─ (?:plan|execute|impl|test|report)\S* /g)||[]);
+    // Where a stage's box stands in the popup's rows and what its top line says past the name (the mark and the word, if there is room).
+    const boxGeo=ls=>{const l=ls.find(x=>/┌─ execute/.test(x));if(!l)return null;const left=l.indexOf('┌─ execute'),end=l.indexOf('┐',left);
+      return {left,width:end-left+1,tag:l.slice(left+'┌─ execute'.length,end).replace(/[─ ]/g,'')};};
+    const marks=s=>{const t=boxTops(s).join('');return {done:[...t].filter(c=>c==='✓').length,active:[...t].filter(c=>c==='●').length};};
+    const order=s=>{const t=plain(s).join('\n');return [/┌─ plan /,/┌─ plan-c/,/┌─ execute/].map(r=>t.search(r));};
+    const widths=staged?[196,120,80]:[160];
+    checks.widths={};
+    for(const w of widths){
+      const c={};checks.widths[w]=c;
+      if(w!==160){await resize(w,40);await sleep(300);}
+      control('vm-delay',cfg.delay);
+      const t0=Date.now();
+      let target=await at('PANEL_R2');
+      // Where the window is narrow the panel stands folded (a strip): a press on its `▴` opens it, and the routes are there to press.
+      if(!target){const fold=await at('▴');if(fold){await press(fold.x,fold.y,0);await sleep(500);target=await at('PANEL_R2');}}
+      if(!target)throw Error('no panel row PANEL_R2 at '+w+'\n'+(await screen()).join('\n'));
+      await press(target.x+2,target.y,0);
+      const first=await until(s=>!!box(s)&&(boxTops(s).length>0||either(s)),'a first content at '+w);
+      c.first_ms=Date.now()-t0;c.first_has_fleet=popupHas('FLEET_R')(first.s);c.first_paged=paged(first.s);c.first_title=title(first.s);
+      c.first_boxes=boxNames(first.s).length;c.first_marks=marks(first.s);c.first_order=order(first.s);
+      {const fl=plain(first.s),ft=fl.join('\n'),rule=fl.find(l=>l.includes('╔═'))||'';
+       // the route pressed (PANEL_R2) is the one drawn, not another's
+       c.first_named=rule.includes('PANEL_R2')&&!rule.includes('PANEL_R1')&&!rule.includes('PANEL_R3');
+       // the panel's pass mark `gate: true` is not drawn as a word; an empty `out`/`unit` is `·`
+       c.first_true=/\btrue\b/.test(ft);c.first_dot=/out +· +│/.test(ft)&&/unit +· +│/.test(ft);c.first_box=boxGeo(fl);}
+      c.first_rule=popupHas('╔═')(first.s);c.first_keys=popupHas('Enter 표로 돌아가기')(first.s);
+      frames['row_page_'+w+'_first']=plain(first.s);
+      // (b) Fleet's page.
+      const full=await until(s=>paged(s)&&popupHas('FLEET_R2')(s)&&!staleWords(s),'Fleet\'s page at '+w,cfg.delay*1000+20000);
+      c.full_ms=Date.now()-t0;c.full_title=title(full.s);frames['row_page_'+w+'_page']=plain(full.s);
+      c.full_keys=popupHas('Enter 표로 돌아가기')(full.s);c.page_box=boxGeo(plain(full.s));
+      // the page's stage boxes (Fleet's own drawing: a narrow page cuts a name, `plan-che…`), inside the page's `║` frame
+      const tops=plain(full.s).filter(l=>/║.*┌─ (plan|execute|impl-r|test|report)/.test(l));
+      c.full_boxes=tops.flatMap(l=>[...l.matchAll(/┌─ (\S+)/g)].map(m=>m[1])).filter(n=>!/^(frame|leg)$/.test(n));
+      c.full_marks={done:[...tops.join('')].filter(x=>x==='✓').length,active:[...tops.join('')].filter(x=>x==='●').length};
+      c.full_no_record=popupHas(cfg.noRecord)(full.s);
+      if(!staged)continue;
+      // (c) Enter: the table, the route unfolded; (d) Enter: the page again.
+      await key('\r',0);const tab=await until(s=>!paged(s)&&!!unfolded(s)&&popupHas('FLEET_R')(s),'the table at '+w);
+      // (a narrow table cuts the name: `FLEET_R…`)
+      c.table_unfolded=plain(tab.s).join('\n');c.table_paged=paged(tab.s);frames['row_page_'+w+'_table']=plain(tab.s);
+      if(w===120){
+        // (the limit: a page left for the table and closed opens at its stage boxes again, then Fleet's page after the delay)
+        await close();control('vm-delay',cfg.delay);
+        const tp=await at('PANEL_R2');await press(tp.x+2,tp.y,0);
+        const lim=await until(s=>!!box(s)&&boxTops(s).length>0,'the stage boxes again at '+w);
+        c.limit={boxes:boxNames(lim.s).length,paged:paged(lim.s),fleet:popupHas('FLEET_R')(lim.s)};frames['row_page_'+w+'_limit']=plain(lim.s);
+        await until(s=>paged(s)&&popupHas('FLEET_R2')(s)&&!staleWords(s),'Fleet\'s page again at '+w,cfg.delay*1000+20000);
+        await key('\r',0);await until(s=>!paged(s)&&!!unfolded(s),'the table again at '+w);
+      }
+      await key('\r',0);const again=await until(s=>paged(s)&&popupHas('FLEET_R2')(s),'the page again at '+w);c.again_paged=paged(again.s);
+      // (e) Closed and pressed again: the page read last at once, with the words that it is not this reading's.
+      await close();control('vm-delay',cfg.delay);
+      const t1=Date.now();const target2=await at('PANEL_R2');await press(target2.x+2,target2.y,0);
+      const back=await until(s=>!!box(s)&&(boxTops(s).length>0||either(s)),'the page read last at '+w);
+      c.reopen={ms:Date.now()-t1,paged:paged(back.s),fleet:popupHas('FLEET_R2')(back.s),stale:staleWords(back.s)};
+      // ←→ from the page: the routes popup that ←→ reach is the table (`↑↓ route`), not a page.
+      await key('\x1b[C',300);
+      for(let i=0;i<5&&!popupHas('↑↓ route')(await screen());i++)await key('\x1b[C',400);
+      const arrow=await until(popupHas('↑↓ route'),'the routes popup by →');
+      c.arrow={table_keys:popupHas('↑↓ route')(arrow.s),page_keys:popupHas('Enter 표로 돌아가기')(arrow.s),paged:paged(arrow.s)};
+      // (f) The section's head: the table (the panel's box or Fleet's), never the page.
+      await close();control('vm-delay',cfg.delay);
+      // (an unfolded panel's box is titled `route N`; the folded strip and the side panel say `N ROUTE`: both are the section's head)
+      {const p=(await head())||(await at('route '+cfg.routes));await press(p.x+2,p.y,0);}
+      const top=await until(either,'a table from the head at '+w);
+      c.head={kind:kind(top.s),paged:paged(top.s),keys:popupHas('Enter 표로 돌아가기')(top.s)};
+      await close();
+    }
+    if(!staged){
+      // A route with no stage line: the panel's box first (no stage boxes, no frame), Fleet's page after.
+      checks.collections=lines('collections').length;
+    }
+  }
   if(sc==='hang'){
     // The collection does not come in 12 s: what stood first stays, the words say the reading failed; a later
     // reading (Tab) that succeeds takes them away.
     fs.writeFileSync(cfg.vm+'.hang','');
     const t0=Date.now();await opened();const first=await until(either,'a first content');checks.first_ms=Date.now()-t0;checks.first_kind=kind(first.s);
     checks.first_reading=reading(first.s);frames.hang_first=plain(first.s);
-    await sleep(13500);let s=await screen();
+    await until(failedRead,'the words that the reading failed',20000);let s=await screen();
     checks.after_kind=kind(s);checks.after_failed=failedRead(s);checks.after_unreadable=!!box(s)&&box(s).rows.slice(1).some(l=>l.includes(cfg.unreadable));checks.after_title=title(s);frames.hang_after=plain(s);
     fs.unlinkSync(cfg.vm+'.hang');
     await key('\t',500);if(!popupHas('FLEET_R')(await screen()))await key('\x1b[Z',500);
@@ -229,7 +318,7 @@ const measure=async(label,press_=opened)=>{
     // Fleet's table (the last reading of the Tab case, which waits for its own second reading).
     // The Tab case waits for its own second reading by what it shows, not by a fixed margin (a slow start missed it).
     if(sc==='place_b')r=await until(s=>filled(s)&&unfolded(s).includes('FLEET_R10'),'the tabbed route unfolded',cfg.delay*3000+8000);
-    else{r=await until(filled,'the table',cfg.delay*3000+8000);await sleep(cfg.delay*1000+800);}
+    else{r=await until(filled,'the table',cfg.delay*3000+8000);await sleep(800);}
     r=await screen();
     checks.table_kind=kind(r);checks.table_unfolded=unfolded(r);checks.table_top=plain(r)[1]||'';checks.table_stale=staleWords(r);frames.place_table=plain(r);
   }
@@ -299,7 +388,7 @@ const measure=async(label,press_=opened)=>{
       const ok=await until(s=>filled(s)&&popupHas('FLEET_R')(s),'the words gone after a read that succeeded',20000);checks.recovered={title:title(ok.s)};frames.reread_recovered=plain(ok.s);
     }
   }
-  if(['session_start','now_start','switch_now','aged','page_scroll'].includes(sc)){
+  if(['session_start','now_start','switch_now','aged','aged_gaps','page_scroll'].includes(sc)){
     const lines=f=>fs.existsSync(cfg.control+'/'+f)?fs.readFileSync(cfg.control+'/'+f,'utf8').split('\n').filter(Boolean):[];
     const isAlive=pid=>{try{process.kill(pid,0);return true;}catch{return false;}};
     // Every process that served a popup, and how many of them are still running.
@@ -321,7 +410,7 @@ const measure=async(label,press_=opened)=>{
     }
     if(sc==='now_start'){
       await opened();await until(filled,'the filled table',cfg.delay*1000+20000);
-      await toKind('NOW');await sleep(1000);
+      await toKind('NOW');await settle(()=>alive()===1,'the NOW backend');
       checks.before={alive:alive(),title:title(await screen())};
       await nativeStart();
       checks.after={alive:alive()};
@@ -333,9 +422,11 @@ const measure=async(label,press_=opened)=>{
       // (Its backend has started its collection: the move ends a process that is there.)
       for(let i=0;i<100&&!spawned().length;i++)await sleep(50);
       checks.collecting={spawned:spawned().length};
-      await toKind('NOW');await sleep(1000);
+      await toKind('NOW');await settle(()=>alive()===1&&procs().length>=2,'NOW held, the routes backend ended');
       checks.on_now={alive:alive(),procs:procs().length,title:title(await screen())};
-      await sleep(cfg.delay*1000+1500);
+      // The routes collection's backend is gone (it is the one process that collects), so no late answer can come: one look.
+      await settle(()=>live()===0,'the routes collection backend gone');
+      await sleep(100);
       const late=await screen();checks.late={title:title(late),fleet:popupHas('FLEET_R')(late)};
       control('vm-delay',0);
       await toKind('ROUTE');await until(filled,'the filled table again',cfg.delay*1000+20000);
@@ -361,7 +452,7 @@ const measure=async(label,press_=opened)=>{
         if(Date.now()-t0>20000)throw Error('never the next route\n'+s.join('\n'));
         await sleep(10);
       }
-      checks.first={ms:r.ms,title:title(r.s),collections:collected(),words:staleWords(r.s)};
+      checks.first={ms:r.ms,title:title(r.s),collections:collected(),words:staleWords(r.s),was:first,route:unfoldedNow(r.s)};
       const until_settled=Date.now()+8000;
       for(;;){
         const before=collected();const s=await screen();
@@ -377,13 +468,59 @@ const measure=async(label,press_=opened)=>{
       const t1=Date.now();await key('\x1b[B',0);const n=await until(s=>unfoldedNow(s)&&unfoldedNow(s)!==second,'the route after');
       checks.next={ms:Date.now()-t1,title:title(n.s),collections:collected()};
     }
+    if(sc==='aged_gaps'){
+      // The gaps of the aged key (review of #1735): (b) a re-read that fails says so, and the route stays the one moved to;
+      // (c) keys pressed while the re-read is under way end on the last route's page with one more collection, not two;
+      // (d) a held backend that died is replaced by a fresh read, which is not read a second time behind words.
+      const reopenAged=async(back,delay)=>{await close();control('clock-back',back);control('vm-delay',delay);await opened();await until(filled,'the filled table',20000);};
+      const routeNumber=s=>Number(unfoldedNow(s).slice(7));
+      // (b)
+      control('clock-back',120);await opened();await until(filled,'the filled table',cfg.delay*1000+20000);
+      control('clock-back',0);fs.writeFileSync(cfg.vm+'.hang','');
+      const b0=routeNumber(await screen());
+      await key('\x1b[B',0);
+      const moved=await until(s=>routeNumber(s)===b0+1&&reading(s),'the next route with the words that it is read again');
+      checks.fails={was:b0,route:routeNumber(moved.s),reading:reading(moved.s)};
+      const failed=await until(failedRead,'the words that the re-read failed',40000);
+      checks.fails.failed={title:title(failed.s),route:routeNumber(failed.s)};
+      fs.unlinkSync(cfg.vm+'.hang');
+      await key('\x1b[B',0);
+      const after=await until(s=>routeNumber(s)===b0+2&&!staleWords(s),'the words gone after the hang is lifted',30000);
+      checks.fails.after={route:routeNumber(after.s),title:title(after.s)};
+      // (c) (a window lower than the page, so that its place is told by the foot `1/N`)
+      await close();await resize(120,16);
+      await reopenAged(120,0);
+      const c0=collected(),c1=routeNumber(await screen());
+      control('clock-back',0);control('vm-delay',2);
+      await key('\x1b[B',0);await key('\x1b[B',0);await key('\r',0);
+      const want=Math.min(cfg.routes,c1+2);
+      const end=await until(s=>paged(s)&&popupHas('FLEET_R'+want)(s)&&!staleWords(s),'the last route\'s page, read',30000);
+      await sleep(600);
+      const fin=await screen();
+      checks.keys={want,collections:collected()-c0,paged:paged(fin),words:staleWords(fin),route:popupHas('FLEET_R'+want)(fin),
+        foot:(plain(fin).find(l=>/\d+\/\d+ ·/.test(l))||'').match(/\d+\/\d+/)?.[0]||''};
+      // (d)
+      await close();await resize(160,40);
+      await reopenAged(120,0);
+      const d0=collected();
+      // The held backend of this popup is the one that collected last: only the process this popup started is ended.
+      for(const pid of spawned().slice(-1))try{process.kill(pid,'SIGKILL');}catch{}
+      await sleep(300);
+      control('clock-back',0);
+      const d1=routeNumber(await screen());
+      await key('\x1b[B',0);
+      await until(s=>routeNumber(s)===d1+1,'the next route read by a backend of its own',20000);
+      await sleep(1500);
+      const dead=await screen();
+      checks.dead={collections:collected()-d0,words:staleWords(dead),title:title(dead),route:routeNumber(dead)===d1+1};
+    }
     if(sc==='page_scroll'){
       // Enter pressed on a route while the collection is still under way (the window is lower than the page): the page opens at its top.
       await resize(120,16);
       await opened();await until(either,'a first content');
       for(let i=0;i<8;i++)await key('\x1b[B',60);await key('\r',100);
-      await until(paged,'the page',cfg.delay*1000+20000);await sleep(cfg.delay*1000+1500);
-      const s1=await screen();checks.page_top=plain(s1).slice(0,4);checks.page_foot=(plain(s1).find(l=>/\d+\/\d+ ·/.test(l))||'').match(/\d+\/\d+/)?.[0]||'';frames.page_pressed=plain(s1);checks.page_title=title(s1);
+      const pageRead=s=>paged(s)&&!staleWords(s)&&plain(s).some(l=>/\d+\/\d+ ·/.test(l));
+      const s1=(await until(pageRead,'the page read',cfg.delay*1000+20000)).s;checks.page_top=plain(s1).slice(0,4);checks.page_foot=(plain(s1).find(l=>/\d+\/\d+ ·/.test(l))||'').match(/\d+\/\d+/)?.[0]||'';frames.page_pressed=plain(s1);checks.page_title=title(s1);
       // The same page, asked when nothing is under way (back to the table, then Enter).
       await key('\r',500);await until(s=>!paged(s)&&filled(s),'the table again');
       await key('\r',500);await until(paged,'the page again');await sleep(600);
@@ -401,6 +538,28 @@ async function resize(c,r){cols=c;rows=r;term.resize(c,r);child.resize(c,r);awai
 STAGES = ('plan', 'plan-check', 'execute', 'impl-review', 'test', 'report')
 
 
+def stage_values(i, n):
+    """The values a staged route's stage carries (the producer's `_panel_stage` and Fleet's route read the same record)."""
+    # (a finished stage's `gate: True` is the pass mark the producer's `stage_doer` carries; the word is Fleet's box's: `PASS`, `running`, `pending`)
+    return {'name': n, 'st': 'done' if i < 2 else 'active' if i == 2 else 'pending',
+            'verdict': 'PASS' if i < 2 else 'running' if i == 2 else 'pending', 'gate': i < 2,
+            'when': '%dm' % (30 - 10 * i) if i < 3 else '', 'unit': 'dev/backend' if i == 2 else '', 'out': 'artifacts/%s.md' % n if i < 2 else ''}
+
+
+def route_nodes(rid):
+    """Fleet's own node shape for a staged route (`live._node_groups`): a frame leg done, then the code leg running, its
+    detail the six stages (`live._node_detail`: `todo` is a stage not begun)."""
+    detail = [{'n': n, 'st': {'pending': 'todo'}.get(v['st'], v['st']), 'verdict': v['verdict'] or {'active': 'running', 'pending': 'pending'}[v['st']],
+               'who': None, 'when': v['when'] or '·', 'rounds': [], 'rounds_note': '', 'unit': v['unit'] or '·', 'gate': '',
+               'out': v['out'] or '·', 'says': ''} for n, v in ((n, stage_values(i, n)) for i, n in enumerate(STAGES))]
+    return [{'kind': 'frame', 'n': 'frame', 'st': 'done', 'verdict': '1/1', 'lines': [], 'loops': [],
+             'detail': [{'n': 'frame', 'st': 'done', 'verdict': 'PASS', 'who': None, 'when': 'done 40m ago', 'rounds': [],
+                         'rounds_note': '', 'unit': '·', 'gate': '', 'out': '·', 'says': ''}],
+             'title': [['frame', 'head']]},
+            {'kind': 'leg', 'n': 'leg 2 · code dev', 'st': 'active', 'verdict': '2/6', 'lines': [[['owner  ', 'dim'], ['claude', 'hb_claude']]],
+             'loops': [], 'detail': detail, 'title': [['leg 2 · code dev', 'head']]}]
+
+
 def route_row(rid, title, state='working', staged=False):
     row = {'id': rid, 'title': title, 'state': state, 'worker_stage': 'one-shot', 'shape': 'one-shot-owner',
            'stages': [{'name': 'one-shot', 'st': 'failed' if state == 'dead' else 'active'}], 'harness': 'claude',
@@ -408,7 +567,7 @@ def route_row(rid, title, state='working', staged=False):
     if staged:  # the producer's staged route (what a real route's row carries), for the pictures of the first screen
         row.update(shape='staged', worker_stage='execute', capability='autopilot-code', mode='dev', intensity='standard',
                    chain=[{'name': 'frame', 'state': 'done'}, {'name': 'code', 'state': 'active'}],
-                   stages=[{'name': n, 'st': 'done' if i < 2 else 'active' if i == 2 else 'pending'} for i, n in enumerate(STAGES)])
+                   stages=[stage_values(i, n) for i, n in enumerate(STAGES)])
     return row
 
 
@@ -418,10 +577,8 @@ def fleet_route(rid, title, state='working', staged=False):
            'mode': 'dev', 'intensity': 'quick', 'stages': [{'name': 'one-shot', 'st': 'failed' if state == 'dead' else 'active'}],
            'worker_stage': 'one-shot'}
     if staged:
-        row.update(intensity='standard', worker_stage='execute', stages=[
-            {'name': n, 'st': 'done' if i < 2 else 'active' if i == 2 else 'pending', 'verdict': 'PASS' if i < 2 else '',
-             'when': '%dm' % (30 - 10 * i) if i < 3 else '', 'unit': 'dev/backend' if i == 2 else '', 'out': 'artifacts/%s.md' % n if i < 2 else ''}
-            for i, n in enumerate(STAGES)])
+        row.update(intensity='standard', worker_stage='execute', legs=[['frame', 'done', None], ['code', 'active', None]],
+                   stages=[stage_values(i, n) for i, n in enumerate(STAGES)])
     return row
 
 
@@ -471,6 +628,7 @@ class RoutePopupFirstTest(unittest.TestCase):
         cls.driver = cls.root / 'driver.cjs'; cls.driver.write_text(DRIVER)
         catalog = json.loads((ROOT / 'tools/i18n/messages.json').read_text())['messages']
         cls.unreadable = catalog['fleet.output.unreadable']['ko']
+        cls.no_record = catalog['fleet.route.no_stage_record']['ko']
         cls.count = 0
 
     def run_case(self, harness, scenario, routes, delay=3, dead=None, staged=False, now=False):
@@ -499,6 +657,8 @@ class RoutePopupFirstTest(unittest.TestCase):
         vm = case / 'vm.json'
         vm.write_text(json.dumps({'repos': [{'id': 'project', 'name': 'project'}], 'system': {},
             'routes': [fleet_route(rid(n), 'FLEET_R%d 제목' % n, states[n - 1], staged) for n in range(1, routes + 1)],
+            # a staged route's page is drawn from Fleet's nodes: its leg band and the stage boxes
+            'nodes': {rid(n): route_nodes(rid(n)) for n in range(1, routes + 1)} if staged else {},
             'sessions': [{'tag': 'e9', 'repo_id': 'project', 'harness': harness, 'model': 'Opus 5.5', 'effort': 'high', 'context': 46,
                           'window': 200000, 'state': 'working', 'title': '이 창', 'now': '그리는 중', 'age': '23m'}]}, ensure_ascii=False))
         backend = case / 'backend'
@@ -509,7 +669,7 @@ class RoutePopupFirstTest(unittest.TestCase):
                   'entry': str(ROOT / 'utilities/session-shell/entry.py'), 'launcher': str(self.launcher),
                   'backend': str(backend), 'diagnostic': str(case / 'display-errors'), 'cache': str(target), 'vm': str(vm),
                   'project': str(project), 'result': str(case / 'result.json'), 'control': str(control),
-                  'scenario': scenario, 'routes': routes, 'delay': delay, 'unreadable': self.unreadable}
+                  'scenario': scenario, 'routes': routes, 'delay': delay, 'unreadable': self.unreadable, 'noRecord': self.no_record}
         (case / 'config.json').write_text(json.dumps(config))
         env = dict(self.env, LOOP_CONFIG=str(case / 'config.json'))
         child = subprocess.Popen([self.node, str(self.driver)], env=env, cwd=project, stdout=subprocess.PIPE,
@@ -560,7 +720,7 @@ class RoutePopupFirstTest(unittest.TestCase):
         self.first_screen('opencode', 5)
 
     def test_reopened_for_the_same_route_is_the_table_read_last_and_another_route_or_changed_values_are_not(self):
-        c = self.run_case('claude', 'many', 5)['checks']
+        c = self.run_case('claude', 'many', 5, delay=1)['checks']
         # The same route again: Fleet's table at once (read last), the words saying so; Fleet's again comes after.
         self.assertLess(c['again']['first_ms'], 1000, c)
         self.assertEqual(c['again']['first_kind'], 'fleet', c)
@@ -572,7 +732,7 @@ class RoutePopupFirstTest(unittest.TestCase):
         # The panel's route values changed since the table was read: the panel's box again, even for the same route.
         self.assertLess(c['changed']['first_ms'], 1000, c)
         self.assertEqual(c['changed']['first_kind'], 'panel', c)
-        self.assertGreaterEqual(c['changed']['full_ms'], 2800, c)
+        self.assertGreaterEqual(c['changed']['full_ms'], 800, c)
         print(json.dumps({'event': 'route-popup-first-pty', 'scenario': 'reopen', 'again_first_ms': c['again']['first_ms'],
                           'other_first_ms': c['other']['first_ms'], 'changed_first_ms': c['changed']['first_ms']}), flush=True)
 
@@ -605,9 +765,9 @@ class RoutePopupFirstTest(unittest.TestCase):
         # the window back to the unfolded route. (b) Tab to the next route: that route comes into view. (c) nothing:
         # the unfolded route stands in the window.
         # Twenty routes in a window of sixteen rows: neither the panel's box nor Fleet's table fits it.
-        a = self.run_case('claude', 'place_a', 20, dead=2)
-        b = self.run_case('claude', 'place_b', 20, dead=2)
-        c = self.run_case('claude', 'place_c', 20, dead=9)
+        a = self.run_case('claude', 'place_a', 20, delay=2, dead=2)
+        b = self.run_case('claude', 'place_b', 20, delay=2, dead=2)
+        c = self.run_case('claude', 'place_c', 20, delay=2, dead=9)
         ca, cb, cc = a['checks'], b['checks'], c['checks']
         self.assertEqual(ca['first_kind'], 'panel', ca)
         self.assertEqual(ca['table_kind'], 'fleet', ca)
@@ -627,7 +787,7 @@ class RoutePopupFirstTest(unittest.TestCase):
         """The popup's ↑↓ and its Enter page draw from the collection the table was read from, in the one backend held while
         the popup stands: no process of their own, no second collection, and nothing left behind when it closes."""
         for routes in (1, 5):
-            c = self.run_case('claude', 'keys', routes, staged=True)['checks']
+            c = self.run_case('claude', 'keys', routes, delay=1, staged=True)['checks']
             # The main assertions do not move with the machine's load: one backend, one collection, none left.
             self.assertEqual(c['opened']['spawned'], 1, c)
             self.assertEqual(c['after_keys']['spawned'], 1, c)
@@ -643,7 +803,7 @@ class RoutePopupFirstTest(unittest.TestCase):
             self.assertLess(c['page_ms'], 1000, c)
 
     def test_a_held_backend_that_dies_is_replaced_by_the_next_key_without_the_words(self):
-        c = self.run_case('claude', 'held_dies', 5, staged=True)['checks']
+        c = self.run_case('claude', 'held_dies', 5, delay=1, staged=True)['checks']
         self.assertEqual(c['held'], 1, c)
         self.assertFalse(c['dies']['failed'], c)
         self.assertNotIn('읽지 못함', c['dies']['title'], c)
@@ -706,6 +866,8 @@ class RoutePopupFirstTest(unittest.TestCase):
         self.assertLess(c['first']['ms'], 1000, c)
         self.assertIn('다시 읽는 중', c['first']['title'], c)
         self.assertNotIn('settle_timeout', c)
+        # The route it unfolded is the one the key moved to.
+        self.assertEqual(c['first']['route'], 'FLEET_R%d' % (int(c['first']['was'][7:]) + 1), c)
         self.assertEqual(c['settled']['collections'], 2, c)
         self.assertNotIn('읽은 내용', c['settled']['title'], c)
         # The collection is new now: the next key draws from it, with no more reading.
@@ -714,7 +876,7 @@ class RoutePopupFirstTest(unittest.TestCase):
         self.assertNotIn('읽은 내용', c['next']['title'], c)
 
     def test_a_page_entered_while_the_table_is_collecting_opens_at_its_top(self):
-        r = self.run_case('claude', 'page_scroll', 20, delay=3, dead=2, staged=True)
+        r = self.run_case('claude', 'page_scroll', 20, delay=2, dead=2, staged=True)
         c = r['checks']
         # The page of the route, with its head, from its first line (`1/N`), as when nothing was under way.
         self.assertTrue(c['calm_foot'].startswith('1/'), c)
@@ -725,6 +887,188 @@ class RoutePopupFirstTest(unittest.TestCase):
         c = self.run_case('claude', 'narrow', 5)['checks']
         self.assertEqual(c['kind'], 'panel', c)
         self.assertRegex(c['title'], r'^╭─ 5 ROUTE', c)
+
+    def test_a_press_on_a_routes_row_opens_its_page_with_the_stage_boxes_first_and_a_press_on_the_head_opens_the_table(self):
+        c = self.run_case('claude', 'row_page', 3, delay=1, staged=True)['checks']['widths']
+        for width, w in c.items():
+            print(json.dumps({'event': 'route-popup-page-first-pty', 'width': width, 'first_ms': w['first_ms'], 'full_ms': w['full_ms'],
+                              'reopen_ms': w['reopen']['ms']}), flush=True)
+            # (a) The stage boxes stand under a second, from the panel's own values: the stages in order, two done and one running
+            # (the boxes' own marks), no Fleet row, the words that it is not this reading's, the page's key line.
+            self.assertLess(w['first_ms'], 1000, w)
+            self.assertFalse(w['first_has_fleet'], w)
+            self.assertFalse(w['first_paged'], w)
+            self.assertTrue(w['first_rule'], w)
+            # (a window shows the boxes its rows hold: the first row of them at least, in order)
+            self.assertGreaterEqual(w['first_boxes'], 3, w)
+            self.assertEqual(w['first_marks'], {'done': 2, 'active': 1}, w)
+            self.assertTrue(all(x >= 0 for x in w['first_order']) and w['first_order'] == sorted(w['first_order']), w)
+            # (the route pressed, not another's; no `true` for the panel's pass mark; an empty place is `·`)
+            self.assertTrue(w['first_named'], w)
+            self.assertFalse(w['first_true'], w)
+            self.assertTrue(w['first_dot'], w)
+            # (the first screen's box is the page's: the same width, the same left cell, the same mark and word on its top line)
+            self.assertIsNotNone(w['first_box'], w)
+            self.assertEqual(w['first_box'], w['page_box'], w)
+            self.assertIn('다시 읽는 중', w['first_title'], w)
+            self.assertIn('에 읽은 내용', w['first_title'], w)
+            self.assertTrue(w['first_keys'], w)
+            # (b) Fleet's page after the delay, the words gone.
+            self.assertGreaterEqual(w['full_ms'], 800, w)
+            self.assertNotIn('읽은 내용', w['full_title'], w)
+            self.assertTrue(w['full_keys'], w)
+            # (the page shows Fleet's stage boxes inside its frame, not the words that the route has no stage record)
+            self.assertFalse(w['full_no_record'], w)
+            for name in STAGES:
+                self.assertTrue(any(name.startswith(box.rstrip('…')) and len(box.rstrip('…')) >= 4 for box in w['full_boxes']), (name, w))
+            self.assertIn('execute', w['full_boxes'], w)
+            self.assertEqual(len(w['full_boxes']), 6, w)
+            self.assertEqual(w['full_marks'], {'done': 2, 'active': 1}, w)
+            if width == '120':  # the page's limit: closed from the table, a press on the row opens the stage boxes first
+                self.assertGreaterEqual(w['limit']['boxes'], 3, w)
+                self.assertFalse(w['limit']['paged'] or w['limit']['fleet'], w)
+            # (c) Enter: the table with the route unfolded and no frame; (d) Enter: the page again.
+            self.assertIn('FLEET_R', w['table_unfolded'], w)
+            self.assertIn('▶', w['table_unfolded'], w)
+            self.assertFalse(w['table_paged'], w)
+            self.assertTrue(w['again_paged'], w)
+            # (e) Closed and pressed again: the page read last at once, with its words.
+            self.assertLess(w['reopen']['ms'], 1000, w)
+            self.assertTrue(w['reopen']['paged'] and w['reopen']['fleet'] and w['reopen']['stale'], w)
+            # ←→ reaches the routes popup as the table.
+            self.assertTrue(w['arrow']['table_keys'] and not w['arrow']['page_keys'] and not w['arrow']['paged'], w)
+            # (f) The head: a table (never the page), with the table's key line.
+            self.assertFalse(w['head']['paged'], w)
+            self.assertFalse(w['head']['keys'], w)
+
+    def test_a_route_with_no_stage_line_keeps_the_panels_box_first_and_opens_to_its_page(self):
+        w = self.run_case('claude', 'row_page_unstaged', 3, delay=1)['checks']['widths']['160']
+        self.assertLess(w['first_ms'], 1000, w)
+        self.assertFalse(w['first_rule'], w)
+        self.assertFalse(w['first_paged'], w)
+        self.assertEqual(w['first_boxes'], 0, w)
+        self.assertIn('다시 읽는 중', w['first_title'], w)
+        self.assertTrue(w['full_keys'], w)
+        self.assertNotIn('읽은 내용', w['full_title'], w)
+
+    def test_the_gaps_of_the_aged_key_a_failed_reread_keys_pressed_under_it_and_a_held_backend_that_died(self):
+        # Review of #1735 (yellow 1 and 4).
+        c = self.run_case('claude', 'aged_gaps', 5, delay=1, staged=True)['checks']
+        # (b) The route moved to stays the one unfolded while the re-read fails; the words change; a later key takes them away.
+        self.assertEqual(c['fails']['route'], c['fails']['was'] + 1, c)
+        self.assertTrue(c['fails']['reading'], c)
+        self.assertIn('다시 읽지 못함', c['fails']['failed']['title'], c)
+        self.assertEqual(c['fails']['failed']['route'], c['fails']['was'] + 1, c)
+        self.assertEqual(c['fails']['after']['route'], c['fails']['was'] + 2, c)
+        self.assertNotIn('읽은 내용', c['fails']['after']['title'], c)
+        # (c) Two keys and Enter while the re-read is under way: the last route's page, one more collection, no words, at its top.
+        self.assertTrue(c['keys']['paged'], c)
+        self.assertTrue(c['keys']['route'], c)
+        self.assertFalse(c['keys']['words'], c)
+        self.assertEqual(c['keys']['collections'], 1, c)
+        self.assertTrue(c['keys']['foot'].startswith('1/'), c)
+        # (d) The held backend died: the next key is read by a fresh one, once, and nothing says it is read again.
+        self.assertTrue(c['dead']['route'], c)
+        self.assertEqual(c['dead']['collections'], 1, c)
+        self.assertFalse(c['dead']['words'], c)
+
+    def test_the_stage_boxes_the_panels_values_draw_for_a_routes_first_screen(self):
+        script = r"""
+const assert=require('node:assert/strict'),path=require('node:path');
+const view=require(path.join(process.argv[1],'panel-view.cjs'));
+const names=['plan','plan-check','execute','impl-review','test','report'];
+// The panel's value for a finished stage carries `gate: true` (a pass mark, `tools/fleet/session_panel.py` `stage_doer`); a gate in words is a string.
+const stage=(n,i)=>({name:n,state:i<2?'done':i===2?'active':'pending',mark:i<2?'✓':i===2?'●':'',current:i===2,key:'stg'+(i%5)+'_on',
+  ...(i<2?{verdict:'PASS',when:'30m',out:'artifacts/'+n+'.md',unit:'qa/'+n,gate:true}:{}),...(i===2?{harness:'claude',model:'Opus 5.5',unit:'dev/backend',when:'4m',gate:true}:{}),
+  ...(i===3?{gate:'code-plan'}:{})});
+const route=(id,extra={})=>({id,title:'제목 '+id,kind:'working',state:'working',elapsed:'23m',shape:'staged',stages:names.map(stage),
+  chain:[{name:'frame',state:'done'},{name:'code',state:'active'}],...extra});
+const model={styles:{dim:{dim:true},stg2_on:{foreground:150,bold:true}},routes:[route('r1'),route('r2',{shape:'one-shot-owner',stages:[{name:'one-shot',mark:'●'}]})]};
+const text=r=>r.map(p=>p.text).join('');
+function measure(s){return [...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);}
+// Fleet's own cut (`grid.clip_cells`): a value that fits stays, else it ends in `…` within the room.
+const clip=(v,room)=>{const s=String(v);if(s.length<=room)return s;return s.slice(0,Math.max(0,room-1))+'…';};
+// Fleet's page lays the boxes in `stage_room = columns-10` (the page's frame and its legs' frame around), from the 5th cell (index 4);
+// fewer than three stages stand at most 64 cells a stage.
+const layout=(columns,n)=>{let room=Math.max(1,columns-10);if(n<3)room=Math.min(room,64*n);
+  const per=Math.min(n,Math.max(3,Math.min(6,Math.floor((room+4)/40))));return {room,per,w:Math.floor((room-4*(per-1))/per)};};
+const wordOf=s=>s.verdict||s.state;
+const rightOf=(w,s)=>3+(w<34||!wordOf(s)?0:wordOf(s).length+1);
+for(const columns of [192,116,76]){
+  const b=view.routePageFirst({model,id:'r1',columns});
+  assert(b,'a page at '+columns);
+  const lines=b.rows.map(text);
+  for(const row of b.rows)assert(row.every(p=>!('beat' in p)&&!('spin' in p)));
+  for(const t of lines)assert(measure(t)<=columns,'a line of '+measure(t)+' cells at '+columns+': '+t);
+  const {room,per,w}=layout(columns,6);
+  const vroom=w-4-7;
+  const shown=(n,i)=>clip(n,Math.max(0,w-6-rightOf(w,stage(n,i))));
+  // (i) every stage box once, at most `per` boxes to a row, arrows between boxes and rows.
+  const found=lines.flatMap(l=>[...l.matchAll(/┌─ (\S+) /g)].map(m=>m[1])).filter(n=>n!=='frame'&&n!=='code');
+  assert.deepEqual([...found].sort(),names.map(shown).sort(),'six stages at '+columns);   // (a snake: an odd row reads leftward)
+  for(const l of lines.filter(l=>/┌─ \S+ /.test(l)&&!/┌─ (frame|code) /.test(l)))assert([...l.matchAll(/┌─ \S+ /g)].length<=per,'row of '+l);
+  assert(lines.some(l=>l.includes('▶')),'▶');assert(lines.some(l=>l.includes('▼')),'▼');assert(lines.some(l=>l.includes('◀')),'◀');
+  // (ii) a value is in its own stage's box; a stage with none has an empty place (`·`, as Fleet's `out`/`unit`).
+  const at=(n,i)=>lines.findIndex(l=>l.includes('┌─ '+shown(n,i)+' '));
+  const boxOf=(n,i)=>{const top=at(n,i),left=lines[top].indexOf('┌─ '+shown(n,i)+' '),width=[...lines[top].slice(left)].findIndex(c=>c==='┐')+1,out=[];
+    for(let y=top;y<lines.length&&!/^└/.test(lines[y].slice(left));y++)out.push([...lines[y]].slice(left,left+width).join(''));out.left=left;out.width=width;return out;};
+  const first=boxOf('plan',0);
+  // (iii) the box's width and its left cell are Fleet's (`_stage_grid` in `stage_room`, from cell 4)
+  assert.equal(first.left,4,'the first box starts at cell 4 at '+columns);
+  assert.equal(first.width,w,'the box is '+w+' wide at '+columns);
+  for(const [n,i] of names.map((n,i)=>[n,i]))assert.equal(boxOf(n,i).width,w,n+' at '+columns);
+  // (the status word stands in a box of 34 cells or more, as Fleet's does)
+  const topOf=(n,i)=>lines[at(n,i)];
+  assert.equal(/ PASS /.test(topOf('plan',0)),w>=34,'the word PASS at '+columns+' (box '+w+')');
+  const done=boxOf('plan-check',1).join('\n'),running=boxOf('execute',2).join('\n'),todo=boxOf('test',4).join('\n');
+  // (a value narrower than its place stands whole; a longer one ends in `…`, one cell before the right edge, as Fleet's does)
+  const v1=clip('artifacts/plan-check.md',vroom),v2=clip('qa/plan-check',vroom);
+  assert(done.includes(v1)&&done.includes(v2)&&done.includes('30m'),done);
+  if(vroom<'artifacts/plan-check.md'.length)assert(v1.endsWith('…')&&done.includes(v1+' │'),'a cut value: '+done);
+  assert(running.includes('claude')&&running.includes(clip('dev/backend',vroom))&&running.includes('4m'),running);
+  // (a value fills at most up to one cell before the right edge: no line of a box that has a value touches it)
+  for(const l of [...boxOf('plan',0),...boxOf('plan-check',1),...boxOf('execute',2)].slice(1,-1))assert(!/[^ ]│$/.test(l),'a value on the edge: '+l);
+  const outLine=boxOf('test',4).find(l=>l.includes('out')),unitLine=boxOf('test',4).find(l=>l.includes('unit')),timeLine=boxOf('test',4).find(l=>l.includes('time'));
+  // (an empty `out`/`unit` is `·`, as Fleet fills it)
+  assert(/^│ out +· +│$/.test(outLine)&&/^│ unit +· +│$/.test(unitLine),outLine+unitLine);
+  assert(timeLine.includes('·'),timeLine);
+  assert(!todo.includes('claude'),'a harness a stage does not have');
+  // (iv) the pass mark `gate: true` is not a word: no `true` anywhere, no gate line for it (the box's title mark already says ✓); a gate in words is drawn.
+  for(const l of lines)assert(!/\btrue\b/.test(l),'a true at '+columns+': '+l);
+  assert(!boxOf('plan',0).some(l=>l.includes('gate')),'a gate line for a pass mark');
+  const gated=boxOf('impl-review',3).join('\n');
+  assert(gated.includes('gate')&&gated.includes(clip('code-plan',vroom-3)),'a gate in words: '+gated);
+  assert.deepEqual(b.routes,['r1','r2']);assert.deepEqual(b.hits,[]);
+}
+// (v) a word gate on a finished stage ends in the check mark.
+{const g=view.routePageFirst({model:{...model,routes:[route('g',{stages:names.map((n,i)=>({...stage(n,i),...(i===1?{gate:'code-plan-review-long'}:{})}))})]},id:'g',columns:192});
+ const l=g.rows.map(text).find(l=>l.includes('gate')&&l.includes('code-plan'));assert(l&&/code-plan-review-long ✓ +│/.test(l),String(l));}
+// (vi) few stages stand at most 64 cells each: two stages at 192 columns are two boxes of 62 cells, from cell 4.
+{const two=view.routePageFirst({model:{...model,routes:[route('t',{stages:names.slice(0,2).map(stage)})]},id:'t',columns:192});
+ const ls=two.rows.map(text),top=ls.findIndex(l=>/┌─ plan /.test(l)),{w}=layout(192,2);
+ assert.equal(w,62);assert.equal(ls[top].indexOf('┌─ plan '),4);assert.equal([...ls[top].slice(4)].findIndex(c=>c==='┐')+1,w);
+ assert.equal(ls[top].indexOf('┌─ plan-check '),4+w+4);}
+// (vii) a narrow page does not break: no exception, no line over the width (the box's width falls to a few cells).
+for(const columns of [20,40,56]){
+  const b=view.routePageFirst({model,id:'r1',columns});assert(b,'a page at '+columns);
+  for(const r of b.rows)assert(measure(text(r))<=columns,'a line over '+columns+': '+text(r));
+}
+// (viii) no stage line: the owner alone, a unit's route, no stages, an unknown route.
+assert.equal(view.routePageFirst({model,id:'r2',columns:100}),null);
+assert.equal(view.routePageFirst({model:{routes:[route('u',{unit_route:true})]},id:'u',columns:100}),null);
+assert.equal(view.routePageFirst({model:{routes:[route('z',{stages:[]})]},id:'z',columns:100}),null);
+assert.equal(view.routePageFirst({model,id:'nope',columns:100}),null);
+// (ix) a name with control characters is cleaned.
+const dirty=view.routePageFirst({model:{routes:[route('d',{title:'a\x1b[31mb',stages:names.map((n,i)=>stage(n+'\x07',i))})]},id:'d',columns:100});
+assert(dirty.rows.every(r=>!/[\x00-\x1f\x7f-\x9f]/.test(text(r))));
+// stages beyond the sixteen the panel carries: `+N`, at the boxes' left cell.
+const more=view.routePageFirst({model:{routes:[route('m',{stage_more:3})]},id:'m',columns:100});
+assert(more.rows.map(text).some(l=>l.trim()==='+3'));
+console.log('ok');
+"""
+        result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell')], capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), 'ok')
 
     def test_the_route_box_laid_at_the_popups_width_has_no_sides_and_presses_open_routes(self):
         script = r"""
