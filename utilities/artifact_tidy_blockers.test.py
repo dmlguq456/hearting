@@ -642,6 +642,22 @@ class MemberCycleClose(S.SourceRepoStartBase):
         folded = C.campaign_state(target, target / self.campaign_path.relative_to(self.root))
         self.assertEqual((folded.state, folded.last_sequence), ("satisfied", 1))
 
+    def test_moving_the_frame_out_of_a_closed_campaign_leaves_it_satisfied(self):
+        # The closed campaign holds the legs' rows; moving the request's frame to another campaign afterwards
+        # (the cycle-move that keeps a closed campaign's evidence) must not undo that close.
+        frame, first, second = self.two_closed_legs()
+        self.assertEqual(C.close(self.root, self.campaign_path, reason="tidy")["status"], "satisfied")
+        route = S.T.compile_for("direct", self.root, slug="target", campaign_key="target-campaign")
+        route_path = Path(S.L.admit_runtime_route(self.root, route).route_file)
+        other = self.begin_route(route, route_path)
+        self.write_output(other, "plans/final_report.md", b"target\n")
+        self.close(route, route_path)
+        P.finalize(self.root, cycle_id=other["cycle_id"])
+        moved = P.cycle_move(self.root, frame["cycle_id"], campaign=other["campaign_id"], reason="frame elsewhere")
+        self.assertEqual(moved["status"], "moved")
+        self.assertEqual(C.status(self.root, self.campaign_path)["state"], "satisfied")
+        self.assertEqual(C.close(self.root, self.campaign_path, reason="again")["status"], "satisfied")
+
     def test_reopen_then_close_again_with_member_cycles(self):
         self.two_closed_legs()
         C.close(self.root, self.campaign_path, reason="tidy")
