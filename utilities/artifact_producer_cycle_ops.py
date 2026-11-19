@@ -543,8 +543,8 @@ def _adopt_location_locked(root: Path, record: Mapping[str, Any], new_directory:
     # An explicit request-folder move already moved these bytes. Apply the
     # same existing metadata/history operation to each logical scope too.
     if command == "cycle-move" and (old_campaign_id != new_campaign_id or record.get("locator") != new_locator):
-        # Not reached for a closed campaign today (one holding request members is not closed by the evidence
-        # path); if it ever is, each member's manifest needs keeping before the old campaign is read above.
+        # The members' manifests were kept before this ran (`cycle_move` before the rename; a reconcile
+        # lists each member as a moved cycle of its own), so the old campaign read above found them.
         for member in artifact_request.members(root, new_directory):
             child = read_cycle_record(root, member.name)
             _, touched = _adopt_location_locked(
@@ -576,6 +576,11 @@ def _retarget_index_paths(root: Path, old_prefix: str, new_prefix: str) -> None:
             changed = True
     if changed:
         artifact_admission._write_index(root, replace(index, cycles=cycles))
+
+
+def _campaign_is_closed(root: Path, campaign_id: str) -> bool:
+    campaign = read_campaign(root, campaign_id)
+    return campaign is not None and campaign.get("state") == "satisfied"
 
 
 def _record_place_holds(root: Path, record: Mapping[str, Any]) -> bool:
@@ -681,10 +686,15 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
             read_once = _read_manifest_raw(source) if _closed_record(record) else None
             read_digest = artifact_manifest.manifest_digest(read_once[1]) if read_once is not None else None
             _preserve_current_manifest(root, record, source, found=read_once, digest=read_digest, match_record=True)
-            for member in artifact_request.members(root, source):  # no closed campaign holds members today
+            # The members' bytes are kept before the old campaign is read, as the cycle's own are.  A member
+            # whose recorded document cannot be kept, in a campaign that is closed, would leave that close
+            # without its evidence once the folder has gone: the move stops here, before anything moved.
+            for member in artifact_request.members(root, source):
                 member_record = read_cycle_record(root, member.name)
-                if member_record is not None:
-                    _preserve_current_manifest(root, member_record, member, match_record=True)
+                if (member_record is not None
+                        and not _preserve_current_manifest(root, member_record, member, match_record=True)
+                        and _campaign_is_closed(root, old_campaign_id)):
+                    raise ProducerError("manifest-not-kept", member.name)
             os.rename(str(source), str(destination))
             _fsync_dir(target_dir)
             _fsync_dir(source.parent)
