@@ -509,7 +509,9 @@ def _read_stream(root, path, record, start_sequence, stream_id, reads=None):
 def campaign_state(root, path, record=None, reads=None):
     root, path = Path(root).resolve(), Path(path)
     if not path.is_absolute():
-        path = root / path
+        # Read from the working directory, as `_safe` and `read_json` read it; joining it to the root
+        # a second time made a relative root look like a missing event folder.
+        path = Path(os.path.abspath(path))
     _safe(root, path)
     if record is None:
         record, _ = read_json(root, path, reads=reads)
