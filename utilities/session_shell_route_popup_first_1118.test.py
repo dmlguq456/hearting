@@ -226,7 +226,7 @@ const measure=async(label,press_=opened)=>{
       if(!target)throw Error('no panel row PANEL_R2 at '+w+'\n'+(await screen()).join('\n'));
       await press(target.x+2,target.y,0);
       const first=await until(s=>!!box(s)&&(boxTops(s).length>0||either(s)),'a first content at '+w);
-      c.first_ms=Date.now()-t0;c.first_has_fleet=popupHas('FLEET_R')(first.s);c.first_paged=paged(first.s);c.first_title=title(first.s);
+      c.first_ms=Date.now()-t0;c.first_has_fleet=popupHas('FLEET_R')(first.s);c.first_paged=paged(first.s);c.first_title=title(first.s);c.first_top=box(first.s).top;
       c.first_boxes=boxNames(first.s).length;c.first_marks=marks(first.s);c.first_order=order(first.s);
       {const fl=plain(first.s),ft=fl.join('\n'),rule=fl.find(l=>l.includes('╔═'))||'';
        // the route pressed (PANEL_R2) is the one drawn, not another's
@@ -240,7 +240,7 @@ const measure=async(label,press_=opened)=>{
       // (b) Fleet's page.
       const full=await until(s=>paged(s)&&popupHas('FLEET_R2')(s)&&!staleWords(s),'Fleet\'s page at '+w,cfg.delay*1000+20000);
       c.full_ms=Date.now()-t0;c.full_title=title(full.s);frames['row_page_'+w+'_page']=plain(full.s);
-      c.full_keys=popupHas('Enter 표로 돌아가기')(full.s);c.page_box=boxGeo(plain(full.s));
+      c.full_keys=popupHas('Enter 표로 돌아가기')(full.s);c.page_box=boxGeo(plain(full.s));c.page_top=box(full.s).top;
       // the page's stage boxes (Fleet's own drawing: a narrow page cuts a name, `plan-che…`), inside the page's `║` frame
       const tops=plain(full.s).filter(l=>/║.*┌─ (plan|execute|impl-r|test|report)/.test(l));
       c.full_boxes=tops.flatMap(l=>[...l.matchAll(/┌─ (\S+)/g)].map(m=>m[1])).filter(n=>!/^(frame|leg)$/.test(n));
@@ -918,6 +918,8 @@ class RoutePopupFirstTest(unittest.TestCase):
             # (the first screen's box is the page's: the same width, the same left cell, the same mark and word on its top line)
             self.assertIsNotNone(w['first_box'], w)
             self.assertEqual(w['first_box'], w['page_box'], w)
+            # (11-19: the popup's top edge is where it was when Fleet's page came: only the bottom edge moved)
+            self.assertEqual(w['first_top'], w['page_top'], w)
             self.assertIn('다시 읽는 중', w['first_title'], w)
             self.assertIn('에 읽은 내용', w['first_title'], w)
             self.assertTrue(w['first_keys'], w)
