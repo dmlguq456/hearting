@@ -127,17 +127,20 @@ class UnitRouteWords(unittest.TestCase):
                                                         "legs": (("unit", "active", None),)}, card=False)
         return "".join(c[0] for c in grid.cells[0]).rstrip()
 
-    def test_the_progress_cell_leads_with_the_field_and_has_no_bracket(self):
-        self.assertEqual(self.cell(self.unit(field="code"), 40), "code")
-        self.assertEqual(self.cell(self.unit(field="docs"), 10), "docs")
-        self.assertEqual(self.cell(self.unit(field="research", worker_unit="research/research-survey"), 40), "research")
-        self.assertEqual(self.cell(self.unit(field="code", state="done"), 40), "code")   # (the `success · title` line is the one left as it was)
-        self.assertEqual(self.cell(self.unit(field="plan"), 40), "plan")
-        # An older unit route records no field: `unit`, still with no bracket and no unit name.
+    def test_the_progress_cell_leads_with_the_field_and_the_unit_bracket(self):
+        # 11-19: `code(unit)` (before: `code`, no bracket). The `(unit)` is a plain dim bracket: no field hue, no weight step.
+        self.assertEqual(self.cell(self.unit(field="code"), 40), "code(unit)")
+        self.assertEqual(self.cell(self.unit(field="docs"), 20), "docs(unit)")
+        self.assertEqual(self.cell(self.unit(field="research", worker_unit="research/research-survey"), 40), "research(unit)")
+        self.assertEqual(self.cell(self.unit(field="code", state="done"), 40), "code(unit)")   # (the `success · title` line is the one left as it was)
+        self.assertEqual(self.cell(self.unit(field="plan"), 40), "plan(unit)")
+        # An older unit route records no field: `unit`, still with no bracket (never `unit(unit)`) and no unit name.
         self.assertEqual(self.cell(self.unit(), 40), "unit")
-        # A route with an owner keeps its bracket.
+        # A route with an owner keeps its intensity bracket.
         self.assertEqual(self.cell({**self.unit(), "capability": "code", "worker_unit": "dev/backend"}, 40), "code(quick)")
-        self.assertEqual(tables._kind_cell(self.unit(field="code")), [("code", "kind_code")])
+        self.assertEqual(tables._kind_cell(self.unit(field="code")), [("code", "kind_code"), ("(unit)", "dim")])
+        self.assertEqual(tables._kind_cell(self.unit(field="code"), bracket=False), [("code", "kind_code")])
+        self.assertEqual(tables._kind_cell(self.unit()), [("unit", "grp")])
 
     def test_the_panel_row_names_the_unit_and_the_field(self):
         row = {"capability": "unit", "worker_unit": "qa/code-review", "marker": "working", "field": "code",
@@ -185,7 +188,7 @@ class UnitRouteWords(unittest.TestCase):
         opened = draw(vm, NavState(view="ROUTES", title="ROUTES", folds=(("ropen:ROUTES", rid),)), 180, 60)
         pane = ["".join(cell[0] for cell in row[34:]) for row in opened.cells]
         kind = next(line for line in pane if "└ kind" in line)
-        self.assertIn("└ kind code", kind)
+        self.assertIn("└ kind code(unit)", kind)
         self.assertNotIn("owner", kind)                                                      # no owner on a unit route
         self.assertTrue(any("└ unit · qa/code-review" in line for line in pane), pane[:14])
         self.assertFalse(any("└ worker" in line for line in pane))

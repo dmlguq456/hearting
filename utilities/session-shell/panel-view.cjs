@@ -1005,7 +1005,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const walkCalled=(items,depth)=>(Array.isArray(items)?items:[]).filter(c=>c&&typeof c==='object').slice(0,8).flatMap(c=>[[c,depth],...walkCalled(c.called,depth+1)]);
     const flatCalled=r=>[...walkCalled(r.called,0),...workersAll(r).flatMap(w=>walkCalled(w.called,0))];
     const calledBottom=new Map(listed.map(r=>[r,side?[]:flatCalled(r).filter(([c])=>clean(c.unit_word||'').trim()).map(([c,depth])=>({
-      title:c.title||'',kind:c.kind,paint:c.paint||{},elapsed:c.elapsed,unit_route:true,unit_word:c.unit_word,kind_word:c.kind_word,
+      title:c.title||'',kind:c.kind,paint:c.paint||{},elapsed:c.elapsed,unit_route:true,called:true,unit_word:c.unit_word,kind_word:c.kind_word,
       kind_field:c.kind_field,indent:2+2*depth,shape:''}))]));
     const calledAll=[...calledBottom.values()].flat();
     const indentOf=r=>r.indent||0;
@@ -1058,15 +1058,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     // 11-17 (route zones): in the `direct` zone the zone's own name says it, so `(direct)` (the word the record or its shape
     // gives) is left out of the line; a real intensity (`quick`) stays.
-    // A unit route's intensity is not a choice (it is always `quick`), so its first line has no bracket.
+    // 11-19 (the person: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?" / "code(unit) 이렇게 쓰는건 이상한가?" / "근데 강도랑은 좀 다르잖아.
+    // 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만 수행하는 건지"): a formal route's bracket holds its intensity (how heavily
+    // it walks its kind's whole procedure); a unit route walks no procedure and does one thing, and its intensity is not a choice
+    // (always `quick`), so the same place holds the word `unit` (English in every language, as the zone and intensity words are). A route that
+    // records no field keeps its bare `unit`, and a unit a worker called (`called`) is a row under its caller's with no bracket.
     const intensityOf=r=>{
-      if(r.unit_route===true)return '';
+      if(r.unit_route===true)return r.called!==true&&clean(r.kind_word||'').trim()!=='unit'?'unit':'';
       const word=intensityRaw(r);
       return r.zone==='direct'&&(/^direct$/i.test(word)||word===clean(r.shape||'').trim())?'':word;
     };
+    // The `(unit)` bracket wears no field hue and no weight step (a dim bracket, as a route with no field has).
+    const bracketOf=(r,word,field)=>bracket(word,r.unit_route===true?'':field);
     const kindHead=r=>{const word=clean(r.kind_word||'').trim(),inten=intensityOf(r);
       const field=kindField(r,word);
-      return word?[kindText(word,field),...(inten?[bracket(inten,field)]:[])]:[];};
+      return word?[kindText(word,field),...(inten?[bracketOf(r,inten,field)]:[])]:[];};
     // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(standard) · staged 3/7: execute`, a route with
     // no stage line reads `lab(quick)`; short of cells `3/7: execute`.
     function kindCell(r){
@@ -1117,7 +1123,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // routes' alone (`routeCols`: the box as it stands with no called unit); the called rows are drawn into them (the title cut
     // with `…` and empty where no cells are left, the worker cell folded in the narrow worker line's order). Only where the
     // columns grown by the called rows leave every route row reading the same, letter for letter (as it reads in the routes'
-    // own), the box takes those wider columns, as it takes the widened named column above.
+    // own), the box takes those wider columns, as it takes the widened named column above, and as that one only from the richest stage
+    // form the box can have (`plan.top`; 11-19 review N1: else the columns widen and narrow again as the window is widened).
     let bottomSet;
     const layoutOf=C=>{
       const gw=C.width(x=>leadPaint(x).gauge5||[]),named=C.width(x=>doerCell(x,Infinity)),
@@ -1130,7 +1137,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const own=layoutOf(routeCols);
       if(!calledAll.length)return bottomSet=own;
       const grown=layoutOf(columnsOf([...listed,...calledAll])),letters=parts=>clean(parts.map(p=>p.text).join('')).replace(/\s+/g,' ').trim();
-      return bottomSet=grown.plan.level===own.plan.level&&listed.every(r=>letters(folded(r,own))===letters(folded(r,grown)))
+      return bottomSet=grown.plan.level===own.plan.level&&own.plan.top&&listed.every(r=>letters(folded(r,own))===letters(folded(r,grown)))
         &&calledAll.every(c=>{folded(c,grown);return !clipped;})?grown:own;
     };
     // A unit route's doer cell in a column `width` wide: its name, then as much of the effort, harness and model as the column holds,
@@ -1449,7 +1456,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // dim with `✓`, this one bold, what is left dim; a frame route reads `frame → ??` until its direction is chosen).
     function chainParts(r,{past=true,inten=true}={}){
       const kind=clean(r.kind_word||'').trim(),word=inten?intensityOf(r):'';
-      const own=name=>{const field=kindField(r,name);return [kindText(name,field),...(word?[bracket(word,field)]:[])];};
+      const own=name=>{const field=kindField(r,name);return [kindText(name,field),...(word?[bracketOf(r,word,field)]:[])];};
       const legs=(Array.isArray(r.chain)?r.chain:[]).filter(l=>l&&l.name);
       if(!legs.length)return kind?own(kind):[];
       const out=[];

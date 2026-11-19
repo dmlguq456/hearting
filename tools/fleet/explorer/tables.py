@@ -1294,17 +1294,22 @@ def _is_unit_route(route):
     return str(route.get("capability") or "").strip() == "unit"
 
 
-def _kind_cell(route):
+def _kind_cell(route, bracket=True):
     """``code(standard)``: the kind word (bold) and its intensity in dim brackets; nothing else goes in the brackets.
-    A unit route (one worker, no owner) reads its field alone, ``code``: what the work is, not how it is run (the unit's
-    name stands on the worker's row) and no bracket, its intensity being no choice. An older one that records no field
-    keeps ``unit``."""
+    A unit route (one worker, no owner) reads its field and ``(unit)``, ``code(unit)``: what the work is, and that it does
+    one thing instead of walking the kind's whole procedure (its intensity, always ``quick``, is no choice and is not
+    told; the unit's name stands on the worker's row). 11-19 (the person: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?",
+    "code(unit) 이렇게 쓰는건 이상한가?", "근데 강도랑은 좀 다르잖아. 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만
+    수행하는 건지"). The ``(unit)`` bracket is a plain dim one: it takes no field hue and no weight step. An older one that
+    records no field keeps ``unit`` with no bracket. ``bracket=False``: the bare kind word (the narrow forms)."""
     kind = str(route.get("capability") or "").strip()
-    intensity = str(route.get("intensity") or "").strip()
+    intensity = str(route.get("intensity") or "").strip() if bracket else ""
     unit = _is_unit_route(route)
+    unit_bracket = False
     if unit:
         intensity = ""
         recorded = str(route.get("field") or "").strip()
+        unit_bracket = bracket and recorded in ROUTE_FIELDS
         kind = recorded if recorded in ROUTE_FIELDS else kind
     if route.get("shape") == "direct" and intensity.casefold() in ("", "direct"):
         intensity = ""               # the `direct` zone's own name says it (11-17, route zones)
@@ -1315,7 +1320,8 @@ def _kind_cell(route):
     field = route_field(route.get("field"), kind)
     word_key = kind_word_key(field) or "grp"
     bracket_key = kind_intensity_key(field, intensity) or "dim"
-    return [(kind, word_key)] + ([("(" + intensity + ")", bracket_key)] if intensity else [])
+    return ([(kind, word_key)] + ([("(" + intensity + ")", bracket_key)] if intensity else [])
+            + ([("(unit)", "dim")] if unit_bracket else []))
 
 
 def _blinking_stage(stages, at, lit):
@@ -1336,7 +1342,7 @@ def _stage_word(route):
 def _staged_cells(route, earlier, stages, at, lit):
     """``frame ✓ → code(standard) · staged 3/6: execute``, widest first; short of cells the earlier legs go, then the
     intensity, then the kind, then the shape word, then the position; the stage stays."""
-    kind, bare = _kind_cell(route), _kind_cell({**route, "intensity": ""})
+    kind, bare = _kind_cell(route), _kind_cell(route, bracket=False)
     position = f"{at + 1}/{len(stages)}"
     stage = _blinking_stage(stages, at, lit)
 
@@ -2017,18 +2023,25 @@ def draw_routes(grid, vm, state, x=34, y=3):
             # Each worker's row (and its context row) has the units that worker called right under it; units called by an
             # attempt no row here carries (the owner, or a worker not listed) stand after the last row.
             carried = {str(item["attempt"]) for item in worker_contexts if item.get("attempt")}
-            for index, worker_context in enumerate(worker_contexts):
-                own_calls = called_lines(route, callers={str(worker_context.get("attempt") or "")}) if worker_context.get("attempt") else []
-                if body_context is not None and index == context_index and inline_context:
+            # 11-19 (review of #1742, N2): the body worker's own row stands before the loop, so the units it called stand right under
+            # it (its context row, when the context is not on its row) and are not drawn again in the loop: a body worker that is not
+            # the first of `worker_contexts` (a parallel slice the route's node names) never has them under an earlier worker's rows.
+            if body_context is not None:
+                own_calls = (called_lines(route, callers={str(body_context.get("attempt") or "")})
+                             if body_context.get("attempt") else [])
+                if inline_context:
                     y = put_called(y, own_calls)
-                    continue
-                grid.add_hit(y, x, right, action)
-                if body_context is not None and index == context_index:
+                else:
                     # At the smallest widths keep the metric as a continuation,
                     # without presenting the same worker's identity a second time.
+                    grid.add_hit(y, x, right, action)
                     grid.put(route_start, y, context_text, "dim", limit=x + use)
                     y = put_called(y + 1, own_calls)
+            for index, worker_context in enumerate(worker_contexts):
+                if body_context is not None and index == context_index:
                     continue
+                own_calls = called_lines(route, callers={str(worker_context.get("attempt") or "")}) if worker_context.get("attempt") else []
+                grid.add_hit(y, x, right, action)
                 label = str(worker_context.get("stage") or "worker")
                 grid.put(route_start, y, _clip(f"└ {label} · {index + 1}", route_end - route_start),
                          "title_dim", limit=route_end)

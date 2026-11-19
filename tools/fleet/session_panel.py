@@ -129,7 +129,9 @@ def route_kind(row):
     # 11-17 (route row 5): the kind's own intensity word and the chain of kinds the route continues (name and state).
     intensity = sanitize_title(str(row.get("intensity") or ""))[:32]
     unit_route = str(row.get("capability") or "") == "unit"
-    if intensity and not unit_route:          # (a unit route's `quick` is not a choice: the first line has no bracket)
+    # (a unit route's `quick` is not a choice, so it is not sent: the panel's first line draws the word `unit` in that bracket
+    # itself, 11-19 "code(unit) 이렇게 쓰는건 이상한가?" — the screen's word, never the record's `intensity=quick`)
+    if intensity and not unit_route:
         shown["intensity"] = intensity
     chain = [{"name": sanitize_title(str(leg[0]))[:24], "state": sanitize_title(str(leg[1]))[:12]}
              for leg in (row.get("chain") or ())[:6]

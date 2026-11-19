@@ -504,7 +504,13 @@ popup; a request row the MESSAGES popup).
   a route with no such field hue keeps the body color), never dim, in mono, eight colors and `NO_COLOR`
   as the bold body word; the intensity stands in brackets in the same hue at its weight (`quick` dim, `standard` plain,
   `strong`, `thorough`, `adversarial` bold; as dim brackets where no hue is shown) and nothing else goes in them; a
-  direct route's word stands there when the record names no intensity; the route's time stands at the right end of this
+  direct route's word stands there when the record names no intensity; a unit route (one worker doing one thing, no
+  procedure walked; its intensity, always `quick`, is no choice) has `unit` in that place, `● code(unit)` (11-19, the
+  person: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?", "근데 강도랑은 좀 다르잖아. 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면
+  한가지 일만 수행하는 건지"): the bracket tells a regular route's weight (it walks its kind's whole procedure, `quick` too) or that
+  a route is a unit route, a different axis and not a step of intensity; a plain dim bracket with no field hue or weight step,
+  the word English in every language, folding as the intensity bracket does; an older unit route that records no field keeps its
+  bare `unit`, and a unit a worker called has no bracket; the route's time stands at the right end of this
   row, the middle text going first short of cells, then the chain behind and the intensity, the kind word and the time
   staying), the chain of kinds it
   continues leading it (`frame ✓ → code(standard)`: what is behind dim with `✓`, this one bold;
