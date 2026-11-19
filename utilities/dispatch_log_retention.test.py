@@ -759,6 +759,88 @@ class DispatchLogRetentionTest(unittest.TestCase):
                 removing, _following = self._late_removal(edit={"round_closed_ns": value})
                 self.assertEqual((removing["removed"], removing["round_left"]), (1, 81))
 
+    def _unseen_end(self, *, edit, wait_ns=10 * R.DUE_SECONDS * 1_000_000_000):
+        # This release opens a round over 80 blocked names and leaves it open (48 left).
+        # An older release then changes the state without recording an end time (`edit`),
+        # and one log expires. The next pass of this release is the one that removes it.
+        self._blocked(80)
+        with mock.patch.object(R, "EXAMINE_LIMIT", 32):
+            first = R.sweep(self.jobs, now_ns=self.now)
+            self.assertEqual((first["round_left"], first["more"]), (48, 1))
+            self._edit_state(cursor="", **edit)
+            late = self.log("0-late-expired.jsonl")
+            self.add_row("att-0-late-expired", late, ended=self.now - 30 * DAY)
+            at = self.now + wait_ns
+            result = R.sweep(self.jobs, now_ns=at)
+            self.assertFalse(late.exists())
+        return result, at
+
+    def test_a_round_an_older_release_ended_gets_its_end_from_the_next_current_pass(self):
+        result, at = self._unseen_end(edit={"round_left": 0})
+        self.assertEqual((result["removed"], result["round_left"], result["more"]), (1, 0, 0))
+        state = self._state()
+        self.assertEqual(state["round_closed_ns"], at)
+        self.assertEqual(state["round_left_seen"], 0)   # not above 0 again: nothing more to stamp
+        # the end is stamped once: later passes keep it and do not open the next round
+        late = self.log("0-later-expired.jsonl")
+        self.add_row("att-0-later-expired", late, ended=self.now - 30 * DAY)
+        again = R.sweep(self.jobs, now_ns=at + 10 * R.DUE_SECONDS * 1_000_000_000)
+        self.assertEqual((again["removed"], again["round_left"], again["more"]), (1, 0, 0))
+        self.assertEqual(self._state()["round_closed_ns"], at)
+
+    def test_an_end_time_over_a_day_old_does_not_hide_a_round_an_older_release_ended(self):
+        # This release opened the round a day after the recorded end; the older release
+        # ended it without a stamp, so the recorded end is the one before it.
+        result, at = self._unseen_end(edit={"round_left": 0, "round_closed_ns": self.now - 2 * DAY})
+        self.assertEqual((result["removed"], result["round_left"], result["more"]), (1, 0, 0))
+        self.assertEqual(self._state()["round_closed_ns"], at)
+
+    def test_a_round_an_older_release_reopened_after_an_unseen_end_is_closed_in_one_pass(self):
+        result, at = self._unseen_end(edit={"round_left": 80})   # more than the 48 this release left
+        self.assertEqual((result["round_left"], result["more"]), (0, 0))
+        self.assertEqual(self._state()["round_closed_ns"], at)
+
+    def test_a_round_still_open_is_counted_on_and_never_stamped(self):
+        # round_left only shrinks inside a round: no end is invented for a round in progress.
+        self._blocked(80)
+        with mock.patch.object(R, "EXAMINE_LIMIT", 32):
+            R.sweep(self.jobs, now_ns=self.now)
+            self.assertNotIn("round_closed_ns", self._state())
+            second = R.sweep(self.jobs, now_ns=self.now + R.BACKLOG_DUE_SECONDS * 1_000_000_000)
+        self.assertEqual((second["round_left"], second["more"]), (16, 1))
+        self.assertNotIn("round_closed_ns", self._state())
+
+    def test_an_operating_state_with_an_end_time_is_left_as_it_is(self):
+        self._blocked(80)
+        with mock.patch.object(R, "EXAMINE_LIMIT", 32):
+            self.assertEqual(self._continue(self.now)["more"], [1, 1, 0])
+            self._edit_state(round_left_seen=KeyError)   # a state file written before the key existed
+            before = self._state()
+            self.assertEqual((before["round_left"], type(before["round_closed_ns"])), (0, int))
+            at = before["last_pass_ns"] + 10 * R.DUE_SECONDS * 1_000_000_000
+            R.sweep(self.jobs, now_ns=at)
+        after = self._state()
+        self.assertEqual(set(after) - set(before), {"round_left_seen"})
+        self.assertEqual(after["round_left_seen"], 0)
+        for key in ("round_closed_ns", "round_left"):
+            self.assertEqual(after[key], before[key], key)
+
+    def test_a_removal_a_day_after_the_end_opens_one_round_this_release_then_ends(self):
+        removing, _following = self._late_removal(wait_ns=R.ROUND_REOPEN_SECONDS * 1_000_000_000)
+        self.assertEqual((removing["removed"], removing["round_left"]), (1, 81))
+        stamped = self._state()["round_closed_ns"]
+        with mock.patch.object(R, "EXAMINE_LIMIT", 32):
+            summary = self._continue(self._state()["last_pass_ns"] + 60 * 1_000_000_000)
+        self.assertEqual(summary["more"][-1], 0)
+        state = self._state()
+        self.assertGreater(state["round_closed_ns"], stamped)   # the round it opened ended and says so
+        self.assertEqual((state["round_left"], state["round_left_seen"]), (0, 0))
+
+    def test_a_fresh_install_without_a_round_record_still_opens_once(self):
+        removing, _following = self._late_removal(edit={"round_closed_ns": KeyError,
+                                                        "round_left_seen": KeyError})
+        self.assertEqual((removing["removed"], removing["round_left"]), (1, 81))
+
     def _write_state(self, value, *, raw=None):
         path = self.root / R.STATE_NAME
         if path.is_dir():
@@ -772,6 +854,7 @@ class DispatchLogRetentionTest(unittest.TestCase):
         self.assertEqual(R.follow_up_pass_ns(self.jobs, now_ns=self.now), 0)   # no state file
         cases = [
             ("more with a minute passed", ok, ago(61)),
+            ("more with the round_left_seen key", {**ok, "round_left_seen": 5}, ago(61)),
             ("exactly a minute", {**ok, "last_pass_ns": ago(60)}, ago(60)),
             ("59 seconds", {**ok, "last_pass_ns": ago(59)}, 0),
             ("old tail without round_left", {**ok, "last_result": {"more": 1}}, ago(61)),
@@ -802,7 +885,7 @@ class DispatchLogRetentionTest(unittest.TestCase):
         with self.subTest(why="no state root"):
             self.assertEqual(R.follow_up_pass_ns(self.root / "nowhere" / "jobs.log", now_ns=self.now), 0)
 
-    def _chase_days(self, *, natural_minutes=120, older_natural=False):
+    def _chase_days(self, *, natural_minutes=120, older_natural=False, days=4):
         # The runner's rule, replayed on a simulated minute clock: start a pass when the
         # last one left `more`, a minute passed and a pass ran since its previous start.
         # Natural callers add a pass every `natural_minutes`. Logs keep expiring one by
@@ -820,7 +903,7 @@ class DispatchLogRetentionTest(unittest.TestCase):
         examine = 8
         names = protected + expiring
         one_round = -(-names // examine)
-        days, starts_by_day, last_start, closed_day = 4, [0] * 4, 0, None
+        starts_by_day, last_start, closed_day = [0] * days, 0, None
         reopens_by_day = [0] * days
         with mock.patch.object(R, "EXAMINE_LIMIT", examine):
             for step in range(days * 24 * 60):
@@ -844,16 +927,21 @@ class DispatchLogRetentionTest(unittest.TestCase):
     def _older_pass(self, at):
         # The current pass with the daily rule switched off, its end stamp undone and
         # its `more` written as an older release would: returns 1 when it reopened.
+        # It does not know `round_left_seen` either: the key is hidden while the pass runs
+        # and put back as it was, so the end detection of this release cannot run in it.
         before = self._state() if (self.root / R.STATE_NAME).exists() else {}
+        if "round_left_seen" in before:
+            self._edit_state(round_left_seen=KeyError)
         with mock.patch.object(R, "ROUND_REOPEN_SECONDS", 0):
             result = R.sweep(self.jobs, now_ns=at)
         if not isinstance(result, dict) or "round_left" not in result:
             return 0
         state = self._state()
-        if "round_closed_ns" in before:
-            state["round_closed_ns"] = before["round_closed_ns"]
-        else:
-            state.pop("round_closed_ns", None)
+        for key in ("round_closed_ns", "round_left_seen"):
+            if key in before:
+                state[key] = before[key]
+            else:
+                state.pop(key, None)
         if 0 < result["removed"] < R.REMOVE_LIMIT and not result.get("over_limit_bytes"):
             state["last_result"]["more"] = 0
         (self.root / R.STATE_NAME).write_text(json.dumps(state), encoding="utf-8")
@@ -877,6 +965,18 @@ class DispatchLogRetentionTest(unittest.TestCase):
         for day in range(days["days"]):
             # at most the one round a day allows, plus one start per older reopening
             self.assertLessEqual(starts[day], one_round + reopens[day] + 3, (starts, reopens))
+
+    def test_a_fixed_cadence_of_older_passes_costs_one_round_a_day_plus_one_start_per_reopening(self):
+        # Older releases alone, at a fixed interval, end every round without a stamp. The
+        # next pass of this release that sees it stamps the end, so the daily rule holds.
+        for minutes in (5, 10):
+            with self.subTest(natural_minutes=minutes):
+                self.setUp()
+                days = self._chase_days(natural_minutes=minutes, older_natural=True, days=2)
+                one_round, starts, reopens = days["one_round"], days["starts"], days["reopens"]
+                self.assertEqual(days["closed_day"], 0, days)
+                for day in range(days["days"]):
+                    self.assertLessEqual(starts[day], one_round + reopens[day] + 3, (starts, reopens))
 
     def test_unknown_bytes_is_split_into_three_disjoint_counts(self):
         self.add_row("att-a-unknown", self.log("a-unknown.jsonl", b"u" * 11), harness="other",

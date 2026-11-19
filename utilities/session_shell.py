@@ -1370,6 +1370,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         if isinstance(row.get("now"), str) and row["now"]:
             paint["now"] = row["now"]
         return paint
+    def called_paint(rows):
+        for item in rows or ():
+            item["paint"] = route_paint(item)
+            called_paint(item.get("called"))
     for row in panel["routes"]:
         row["paint"] = route_paint(row)
         # Spec E9 rule 43: the owner apart from a worker that leads the row, and each live worker.
@@ -1377,6 +1381,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             row["owner_paint"] = route_paint(row["owner_paint"])
         for worker in row.get("workers_live") or ():
             worker["paint"] = route_paint(worker)
+            called_paint(worker.get("called"))
+        called_paint(row.get("called"))
     # The repo's open work, as the earlier panel's tail row read it.
     # (`◌` is Fleet's stale route alone: the open work's line has no glyph, popup design F 10.)
     panel["work"] = styled([(str(open_count(work)) + " open · " + _plain(work[0].get("headline")), "loc_repo")]) if work else []
@@ -1679,6 +1685,11 @@ def _popup_view_model(harness, sid, kind):
     return live.build_view_model(snapshot)
 
 
+# A popup's held backend draws a route unfolded or its page from the collection it made, while the host says
+# nothing changed (`reuse`). One slot: (harness, sid) -> (view model, the time it was collected).
+_HELD_VIEW = {}
+
+
 _ROUTE_ID = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 
 
@@ -1866,7 +1877,14 @@ def _panel_popup(binding, request):
     if kind == "now":
         return _now_popup(binding, request, columns, colors, no_color)
     opened = request.get("open") if isinstance(request.get("open"), str) and len(request["open"]) <= 64 else ""
-    vm = _popup_view_model(harness, sid, kind)
+    held = _HELD_VIEW.get((harness, sid)) if request.get("reuse") is True else None
+    if held is None:
+        import time
+        started = time.time()
+        held = (_popup_view_model(harness, sid, kind), started)
+        _HELD_VIEW.clear()
+        _HELD_VIEW[(harness, sid)] = held
+    vm, read_at = held
     grid = CellGrid(columns, POPUP_ROWS + 8)
     from dataclasses import replace
     from fleet.explorer import pages
@@ -1895,8 +1913,10 @@ def _panel_popup(binding, request):
         rows.pop(0)
         hits = [{**hit, "row": hit["row"] - 1} for hit in hits if hit["row"] > 0]
     if page:
-        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "routes": ids[:64], "page": page}
-    return _popup_table(kind, rows, styles, hits, len(ids), colors=colors, no_color=no_color, page=False)
+        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "routes": ids[:64], "page": page,
+                "read_at": int(read_at)}
+    return _popup_table(kind, rows, styles, hits, len(ids), colors=colors, no_color=no_color, page=False,
+                        read_at=int(read_at))
 
 
 def _input_readiness(binding, request):

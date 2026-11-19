@@ -999,8 +999,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // Requests this session sent (→) or received (◂): lines in the route box after the routes
     // (R27); each opens in place by its own key and reads whole on its own page.
     const requestList=Array.isArray(model.requests)?model.requests.filter(q=>q&&typeof q.id==='string'):[];
-    const elapsedWidth=Math.max(0,...listed.map(r=>measure(r.elapsed||'')));
-    const columnWidth=(pick)=>Math.max(0,...listed.map(r=>size(pick(r))));
+    // Under the route (`side:false`) a unit a worker called is a row of its own under its caller's, in the same columns: it is a
+    // route-shaped row (its title two cells in, its kind, its time) that no count of routes holds. Its cells count in the columns' widths.
+    const workersAll=r=>Array.isArray(r.workers_live)?r.workers_live.filter(w=>w&&typeof w==='object').slice(0,8):[];
+    const walkCalled=(items,depth)=>(Array.isArray(items)?items:[]).filter(c=>c&&typeof c==='object').slice(0,8).flatMap(c=>[[c,depth],...walkCalled(c.called,depth+1)]);
+    const flatCalled=r=>[...walkCalled(r.called,0),...workersAll(r).flatMap(w=>walkCalled(w.called,0))];
+    const calledBottom=new Map(listed.map(r=>[r,side?[]:flatCalled(r).filter(([c])=>clean(c.unit_word||'').trim()).map(([c,depth])=>({
+      title:c.title||'',kind:c.kind,paint:c.paint||{},elapsed:c.elapsed,unit_route:true,unit_word:c.unit_word,kind_word:c.kind_word,
+      kind_field:c.kind_field,indent:2+2*depth,shape:''}))]));
+    const calledAll=[...calledBottom.values()].flat();
+    const indentOf=r=>r.indent||0;
+    const titleCols=x=>[...(indentOf(x)?[text(' '.repeat(indentOf(x)))]:[]),...titleOf(x,'')];
+    // The columns of a set of rows: the width of one cell of each, and of the time. The routes' columns are the routes' alone;
+    // the called rows' are counted only in the set bottomLayout tries them in.
+    const columnsOf=set=>({set,elapsed:Math.max(0,...set.map(r=>measure(r.elapsed||''))),width:pick=>Math.max(0,...set.map(r=>size(pick(r))))});
+    const routeCols=columnsOf(listed);
     // Under the route (`side:false`) a unit route's worker is its unit: the unit's short name leads the doer column, dim as a role word.
     // The column is as wide as the routes' harness, model and effort. A unit's name is counted only where every route of the box is a
     // unit route (so no other route's row changes); beside any other route the name stands in the column's cells if they hold it
@@ -1082,14 +1095,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // the stage word alone; the title keeps ten cells (or its whole width) through both. Short of that the rows keep the
     // earlier columns (title, owner, context, then the stage). 11-18: the command column (`>_ Bash`) is gone, as it is
     // beside the native area: a route reads its harness, model and context number, and its NOW on the row under it.
-    const planBottom=(ow,gw)=>{
-      const kinds=listed.map(kindCell);
+    const planBottom=(ow,gw,C)=>{
+      const kinds=C.set.map(kindCell);
       const widths=Object.fromEntries(['kind','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
-      const longest=columnWidth(x=>titleOf(x,'')),avail=inner-(2+3+ow+3+gw+1+elapsedWidth);
-      for(const level of widths.kind>widths.full?['kind','full','short']:['full','short']){
+      const longest=C.width(titleCols),avail=inner-(2+3+ow+3+gw+1+C.elapsed);
+      const order=widths.kind>widths.full?['kind','full','short']:['full','short'];
+      for(const level of order){
         if(!widths[level])break;
         const room=avail-(3+widths[level]);
-        if(room>=Math.min(longest,10))return {level,width:widths[level],title:Math.min(longest,room),kinds};
+        if(room>=Math.min(longest,10))return {level,width:widths[level],title:Math.min(longest,room),kinds,top:level===order[0]};
       }
       return {level:''};
     };
@@ -1097,13 +1111,27 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // unit's name counted only where every route of the box is a unit route). Where a unit route is drawn among other routes its
     // name stands in front of its doer cell when the column holds it (see doerCell), and the column is widened to the whole named
     // cell only where that changes nothing else in the box: the same stage form, the same title width (so beside a stage cell with
-    // room to spare); widened or not, every row's columns stand at the same cells and no row lends another its cells.
+    // room to spare), and only from the richest stage form the box can have (the first of the order), so a width that widens it
+    // widens it at every wider width; widened or not, every row's columns stand at the same cells and no row lends another its cells.
+    // 11-19 (review of #1742): a unit a worker called never takes from its caller's row. The columns and the stage form are the
+    // routes' alone (`routeCols`: the box as it stands with no called unit); the called rows are drawn into them (the title cut
+    // with `…` and empty where no cells are left, the worker cell folded in the narrow worker line's order). Only where the
+    // columns grown by the called rows leave every route row reading the same, letter for letter (as it reads in the routes'
+    // own), the box takes those wider columns, as it takes the widened named column above.
     let bottomSet;
+    const layoutOf=C=>{
+      const gw=C.width(x=>leadPaint(x).gauge5||[]),named=C.width(x=>doerCell(x,Infinity)),
+        base=listed.every(y=>y.unit_route===true)?named:C.width(x=>owner(x,false)),plan=planBottom(base,gw,C);
+      if(named>base&&plan.level&&plan.top){const wide=planBottom(named,gw,C);if(wide.level===plan.level&&wide.title===plan.title)return {ow:named,gw,plan:wide,C};}
+      return {ow:base,gw,plan,C};
+    };
     const bottomLayout=()=>{
       if(bottomSet)return bottomSet;
-      const gw=columnWidth(x=>leadPaint(x).gauge5||[]),base=columnWidth(x=>owner(x,listed.every(y=>y.unit_route===true))),named=columnWidth(x=>owner(x)),plan=planBottom(base,gw);
-      if(named>base&&plan.level){const wide=planBottom(named,gw);if(wide.level===plan.level&&wide.title===plan.title)return bottomSet={ow:named,gw,plan:wide};}
-      return bottomSet={ow:base,gw,plan};
+      const own=layoutOf(routeCols);
+      if(!calledAll.length)return bottomSet=own;
+      const grown=layoutOf(columnsOf([...listed,...calledAll])),letters=parts=>clean(parts.map(p=>p.text).join('')).replace(/\s+/g,' ').trim();
+      return bottomSet=grown.plan.level===own.plan.level&&listed.every(r=>letters(folded(r,own))===letters(folded(r,grown)))
+        &&calledAll.every(c=>{folded(c,grown);return !clipped;})?grown:own;
     };
     // A unit route's doer cell in a column `width` wide: its name, then as much of the effort, harness and model as the column holds,
     // in the order the narrow worker line gives them up (effort, then harness, then model; the name stays last). A column that
@@ -1118,37 +1146,47 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       return owner(r,false);
     };
-    function folded(r){
+    let clipped=false;   // the last bottom row folded had its end cut away by the width
+    function folded(r,laid){
       // 11-18: beside the native area the one-row form is the leader's; under it the row reads the owner, whose NOW stands under it.
-      const p=side?r.paint||{}:leadPaint(r),lead=[routeGlyph(r,p.harness),text(' ')];
+      const p=side?r.paint||{}:leadPaint(r),ind=indentOf(r),lead=[...(ind?[text(' '.repeat(ind))]:[]),routeGlyph(r,p.harness),text(' ')];
       if(!side){
-        const {ow,gw,plan}=bottomLayout(),doer=doerCell(r,ow);
+        const lay=laid||bottomLayout(),{ow,gw,plan}=lay,C=lay.C,calledRow=ind>0;
+        // A called row is drawn into columns it did not make: its title is cut to what is left of the title's; its worker cell is the
+        // unit's name with what the column holds, else the name cut (the name is what the cell is for).
+        const calledCell=(c,width)=>{const cell=doerCell(c,width),unit=clean(c.unit_word||'').trim();
+          return cell.length&&clean(cell[0].text)===unit?cell:fit([text(unit,'dim')],width);};
+        const fit=(parts,room)=>calledRow&&room<1?[]:cut(parts,room),doer=calledRow?calledCell(r,ow):doerCell(r,ow);
+        // The time of a called row is cut to the width the routes' times leave.
+        const stamp=r.elapsed?calledRow&&measure(r.elapsed)>C.elapsed?fit([text(r.elapsed)],C.elapsed):[text(r.elapsed)]:[];
+        // The title column is as wide as the routes' make it; a called row's two cells in are never wider than it (the bars stay).
+        const avail=inner-(2+3+ow+3+gw+3+1+C.elapsed),titleWidth=plan.level?plan.title:Math.min(C.width(titleCols),Math.max(6,avail-C.width(third),Math.floor(avail/2)));
+        const shift=calledRow?Math.min(ind,titleWidth):ind,row=calledRow?[text(' '.repeat(shift)),routeGlyph(r,p.harness),text(' ')]:lead;
         if(plan.level){
-          const kind=plan.kinds[listed.indexOf(r)],cell=kind?kind[plan.level]:[],name=cut(titleOf(r),plan.title);
-          const parts=[...lead,...name,pad(plan.title-size(name)),text(' │ '),...doer,pad(ow-size(doer)),text(' │ '),
+          const at=C.set.indexOf(r),kind=at>=0?plan.kinds[at]:kindCell(r),cell=kind?kind[plan.level]:[],name=fit(titleOf(r),plan.title-shift);
+          const parts=[...row,...name,pad(plan.title-shift-size(name)),text(' │ '),...doer,pad(ow-size(doer)),text(' │ '),
             ...(p.gauge5||[]),pad(gw-size(p.gauge5||[])),text(' │ '),...cell];
-          const end=r.elapsed?[text(' '),text(r.elapsed)]:[],left=cut(parts,inner-size(end));
+          const end=stamp.length?[text(' '),...stamp]:[],left=cut(parts,inner-size(end));clipped=size(parts)>inner-size(end);
           return [...left,pad(inner-size(left)-size(end)),...end];
         }
         // The title gives way first, but keeps half of what the stage column would take.
-        const avail=inner-(2+3+ow+3+gw+3+1+elapsedWidth),titleWidth=Math.min(columnWidth(x=>titleOf(x,'')),Math.max(6,avail-columnWidth(third),Math.floor(avail/2)));
-        const name=cut(titleOf(r),titleWidth);
-        const base=[...lead,...name,pad(titleWidth-size(name)),text(' │ '),...doer,pad(ow-size(doer)),text(' │ '),
+        const name=fit(titleOf(r),titleWidth-shift);
+        const base=[...row,...name,pad(titleWidth-shift-size(name)),text(' │ '),...doer,pad(ow-size(doer)),text(' │ '),
           ...(p.gauge5||[]),pad(gw-size(p.gauge5||[]))];
         // The elapsed time keeps the right edge; the stage gives way first, whole (spec rule 30 (d)).
-        const end=r.elapsed?[text(' '),text(r.elapsed)]:[],whole=[...base,text(' │ '),...third(r)];
-        const left=cut(third(r).length&&size(whole)<=inner-size(end)?whole:base,inner-size(end));
+        const end=stamp.length?[text(' '),...stamp]:[],whole=[...base,text(' │ '),...third(r)];
+        const left=cut(third(r).length&&size(whole)<=inner-size(end)?whole:base,inner-size(end));clipped=size(base)>inner-size(end);
         return [...left,pad(inner-size(left)-size(end)),...end];
       }
       // As in leadRow(): the title gives way first, and each fixed value
       // (harness, model, context, time) shows whole or not at all.
       const H=p.harness?[p.harness]:[],M=p.model_text?[p.model_text]:[],C=p.ctx?[p.ctx]:[];
-      const E=elapsedWidth?[text(' '.repeat(elapsedWidth-measure(r.elapsed||''))+(r.elapsed||''))]:[];
+      const E=routeCols.elapsed?[text(' '.repeat(routeCols.elapsed-measure(r.elapsed||''))+(r.elapsed||''))]:[];
       const drops=routeLine==='model'?[[H,M,C],[H,M],[H],[]]:[[H,C,E],[H,E],[E],[]];
       const join=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
       const right=drops.map(join).find(values=>!values.length||inner-2-size(values)-1>=4)||[];
-      const room=inner-2-size(right)-(right.length?1:0),name=cut(titleOf(r),Math.max(1,room));
-      return cut([...lead,...name,pad(inner-2-size(name)-size(right)),...right],inner);
+      const room=inner-2-ind-size(right)-(right.length?1:0),name=cut(titleOf(r),Math.max(1,room));
+      return cut([...lead,...name,pad(inner-2-ind-size(name)-size(right)),...right],inner);
     }
     // Spec rule 14: the route box is the one thin rounded box (11-15: the questions section has
     // none, its count and `◑` keep the question's rose). Strength of color tells the sections
@@ -1235,6 +1273,25 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const roleCell=role=>roleWidth?[text((roled(role)?role:'').padEnd(roleWidth),'dim'),text(' ')]:[];
     const rolePart=r=>roleCell(leadRole(r));
     const spaced=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
+    // A unit a worker called (`called`: the backend's list, in the order they were called, each with the ones it called in turn) stands
+    // on one row under its caller's row, two cells in (a called unit's own calls two more): its mark, the unit's short name in the
+    // role word's dim, its harness, model and effort, and its time at the right edge. Short of cells the effort goes first, then the
+    // harness, then the model; the name and the time stay. Only what runs now is listed. Short of rows these rows go first (`keepCalled`).
+    let keepCalled=true;
+    const calledOf=x=>x&&Array.isArray(x.called)?x.called.filter(c=>c&&typeof c==='object').slice(0,8):[];
+    function calledRow(c,gap){
+      const p=c.paint||{},name=clean(c.unit_word||'').trim();
+      if(!name)return null;
+      const head=[text(' '.repeat(gap)),routeGlyph({paint:p,kind:c.kind},p.harness),text(' '),text(name,'dim')];
+      const H=p.harness?[p.harness]:[],M=p.model_text?[p.model_text]:[],F=p.effort?[p.effort]:[],keep=M.length?M:H;
+      const E=c.elapsed?[text(clean(c.elapsed),'dim')]:[];
+      for(const parts of [[H,M,F],[H,M],[[],keep,[]],[[],[],[]]]){
+        const values=spaced(parts),body=[...head,...(values.length?[text(' '),...values]:[])];
+        if(E.length?size(body)+1+size(E)<=inner:size(body)<=inner)return E.length?[...body,pad(inner-size(body)-size(E)),...E]:body;
+      }
+      return cut(head,inner);
+    }
+    const calledRows=(items,gap,depth=0)=>calledOf({called:items}).flatMap(c=>{const row=calledRow(c,gap+2*depth);return row?[row,...(depth<3?calledRows(c.called,gap,depth+1):[])]:[];});
     // The owner's own mark: it spins while it does the work itself, stands as a dim `●` while its workers run, and keeps the
     // route's state mark when nothing runs.
     const ownerGlyph=(r,supervising)=>live(r)?(supervising?text('●','dim'):{...routeGlyph(r,leadPaint(r).harness)}):routeGlyph(r);
@@ -1300,8 +1357,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // One session's blocks, as the route box draws them: `who` (or, with its CTX row folded in, `one`), `ctx`, and `now` in its two
     // forms (`now2`, `now1`). The steps below (short of rows) drop the second NOW row, then the CTX row (its number goes into `one`),
     // then the first NOW row.
-    const sessionOf=({who,one,p,kind,gap,time,lead})=>({who,one,ctx:ctxRowOf(p,gap,time,who?null:lead),now2:nowRows(p,kind,gap,2),now1:nowRows(p,kind,gap,1)});
-    const sessionRowsOf=u=>[...(keepCtxLine?(u.who?[u.who,...(u.ctx?[u.ctx]:[])]:[u.ctx||u.one]):[u.one||u.who]),...(keepNow?(nowTwo?u.now2:u.now1):[])];
+    const sessionOf=({who,one,p,kind,gap,time,lead,called=[]})=>({who,one,called,ctx:ctxRowOf(p,gap,time,who?null:lead),now2:nowRows(p,kind,gap,2),now1:nowRows(p,kind,gap,1)});
+    const sessionRowsOf=u=>[...(keepCtxLine?(u.who?[u.who,...(u.ctx?[u.ctx]:[])]:[u.ctx||u.one]):[u.one||u.who]),...(keepNow?(nowTwo?u.now2:u.now1):[]),...(keepCalled&&u.called?u.called:[])];
     // The one-row form (an owner's, and since spec rule 48 (c) its workers' too, two cells in):
     // who, then the percent and the time at the right in columns shared by every route and worker.
     function foldRow(lead0,p,role0,E){
@@ -1353,7 +1410,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const room=inner-1-measure(stamp),tight=whoOf(lead,p,role,room);
         if(tight&&size(tight)<=room&&size(tight)>size(lead))who=[...tight,pad(inner-size(tight)-measure(stamp)),text(stamp,'dim')];
       }
-      return sessionOf({who,one:foldRow(lead,p,role,E)||cut(lead,inner),p,kind:w.kind,gap,time:w.elapsed});
+      return sessionOf({who,one:foldRow(lead,p,role,E)||cut(lead,inner),p,kind:w.kind,gap,time:w.elapsed,called:calledRows(w.called,gap)});
     }
     // Spec rule 24 (11-12), 36 (b), 11-17: the stage line under the owner: `staged 3/6: execute`, the current stage's name
     // the one thing that blinks (a failed one keeps `✕`, a done one `✓`); with no stage running, the next stage and what it
@@ -1497,12 +1554,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const running=stages.find(stage=>stage.current||stage.mark==='✕');
         routeRows.push({zone:r.zone==='direct'?'direct':'dispatch',parts:folded(r),two:side,bnow:side?null:nowRow(leadPaint(r),r.kind,2),first:side?headRow(r):null,
           // The owner's blocks (11-18); its time is the route's own, which stands on the first line, so it has none here.
-          session:side&&!open?sessionOf({who:whoRow(r,supervising),one:leadRow(r,supervising),p:leadPaint(r),kind:r.kind,gap:4,time:'',lead:ownerLead(r,supervising)}):null,
+          session:side&&!open?sessionOf({who:whoRow(r,supervising),one:leadRow(r,supervising),p:leadPaint(r),kind:r.kind,gap:4,time:'',lead:ownerLead(r,supervising),called:calledRows(r.called,4)}):null,
           // A route with no session values and no kind word (no first line to end in its time) keeps its time alone on a row, at the right edge.
           time:side&&!open&&r.elapsed&&!whoRow(r,supervising)&&!headRow(r)?[pad(inner-measure(r.elapsed)),text(r.elapsed)]:null,
           names,name:[cut(title,inner-2)],glyph,place,action:key,kind:r.kind,
           // The stage name blinks while the stage line stands and a stage runs; else the first line's dot does.
           stageBlinks:!!place&&live(r)&&running&&running.mark==='●',
+          calledRows:side?null:(calledBottom.get(r)||[]).map(c=>folded(c)),calledCount:flatCalled(r).length,
           ...(tree?{tree,workers,groups,boxed,counted:workers.length?placeRow(r,workers.length):null}:{})});
       }
       for(const q of requestList){
@@ -1538,12 +1596,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // else one row each, as their owners) or go (the kind row counts them).
     let keepWorkers=true;
     const anyWorkers=side&&routeRows.some(x=>x.tree&&x.workers.length);
+    const anyCalled=routeRows.some(x=>x.calledCount>0);
     const twoFull=side&&routeRows.some(x=>x.two);
     let twoRows=twoFull;
     // Spec rule 38: who / context and time / what (two rows, then one) / which kind.
     const routeForm=x=>{
       // Under the native area (11-18) the route's NOW stands on the row under its one row (the first to go short of rows).
-      if(!(twoRows&&x.two))return [x.parts,...(keepNow&&x.bnow?[x.bnow]:[])];
+      if(!(twoRows&&x.two))return [x.parts,...(keepNow&&x.bnow?[x.bnow]:[]),...(keepCalled&&x.calledRows?x.calledRows:[])];
       // A request: who and age / title / status; the kind rows gone, the title and the status share a row.
       if(x.request)return [x.head,...(keepPlace&&x.statusRow?[x.titleRow,x.statusRow]:[x.titled])];
       return routeRowsOf(x);
@@ -1629,7 +1688,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         if(routeRule()&&item.zone&&(!before||before.zone!==item.zone))block.push(zoneRow(item.zone,key));
         before=item;
         // A press on any row of a route opens the route popup with it unfolded.
-        for(const parts of item.two||item.bnow?routeForm(item):[item.parts])block.push(boxRow({parts,action:item.action},key));
+        for(const parts of item.two||item.bnow||item.calledRows&&item.calledRows.length?routeForm(item):[item.parts])block.push(boxRow({parts,action:item.action},key));
       });
       block.push(boxBottom(key,below?hiddenNote('↓'+below):[]));
       return {block,area:{offset:routeOffset,max:routeMax,step:routeStep}};
@@ -1866,6 +1925,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>kept.QUESTIONS&&keepQuestionBox,()=>{keepQuestionBox=false;},()=>{keepQuestionBox=true;});
     give(()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
     // The box comes back with its context rows only while the workers stand.
+    // The unit rows a worker's calls add are the first of the route's rows to go.
+    give(()=>anyCalled&&keepCalled,()=>{keepCalled=false;},()=>{keepCalled=true;},'route');
     give(()=>keepBoxEnd,()=>{keepBoxEnd=false;},()=>{keepBoxEnd=true;},'route');
     give(()=>nowTwo,()=>{nowTwo=false;},()=>{nowTwo=true;},'route');
     give(()=>keepCtxLine,()=>{keepCtxLine=false;},()=>{keepCtxLine=true;},'route');
@@ -1893,13 +1954,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // (11-16: this window's own usage row beside the buttons costs no row, so it stays while no other usage row is left to give.)
     give(()=>keepQuota&&(!usageOn||footRule()>0),()=>{keepQuota=false;},()=>{keepQuota=true;});
     const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
-      keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus]);
+      keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]);
     const stuck=new Set();
     for(const {undo,family} of gave.reverse()){
       if(family&&stuck.has(family))continue;
       const was=choices();undo();
       if(need()>budget){if(family)stuck.add(family);const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);keepRouteRule=v[24];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus]=v.slice(25,30);}
+        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);keepRouteRule=v[24];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(25,31);}
     }
     const order=[];
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))

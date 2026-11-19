@@ -804,7 +804,50 @@ def _doer_values(doer):
     return shown
 
 
-def route_tree(row, jobs, owner, doer, get, live, now, state=None):
+def called_tree(called, caller, now, depth=0):
+    """The unit legs the attempt ``caller`` started and still run, each with the ones it started in turn.
+
+    ``called`` is the route record's own list (``live._stand_called_units``: its values, in the order they were
+    called); this keeps bounded text values and the start time, as a stage worker's row does."""
+    out = []
+    for item in called or ():
+        if not isinstance(item, dict) or item.get("caller") != caller or not item.get("unit"):
+            continue
+        shown = {"unit": str(item["unit"])[:48],
+                 "marker": item["marker"] if item.get("marker") in ("working", "idle", "blocked", "dead", "stale") else "idle"}
+        for key, limit in (("harness", 64), ("effort", 64)):
+            if isinstance(item.get(key), str) and 0 < len(item[key]) <= limit:
+                shown[key] = item[key]
+        pair = item.get("model")
+        if isinstance(pair, (list, tuple)) and pair and isinstance(pair[0], str) and pair[0]:
+            shown["model"] = pair[0][:128]
+        if isinstance(item.get("title"), str) and item["title"]:
+            shown["title"] = item["title"][:160]
+        for key in ("kind", "field"):
+            if isinstance(item.get(key), str) and item[key]:
+                shown[key] = item[key][:32]
+        minutes = _number(item.get("elapsed_min"))
+        if minutes is not None:
+            shown["since"] = now - minutes * 60
+        if depth < 3 and item.get("attempt"):
+            below = called_tree(called, item["attempt"], now, depth + 1)
+            if below:
+                shown["called"] = below
+        out.append(shown)
+    return out[:8]
+
+
+def lead_called(called, placed, now):
+    """The unit legs started by attempts that no stage worker row carries (the owner, or a unit route's worker)."""
+    by_attempt = {item.get("attempt") for item in called or () if isinstance(item, dict)}
+    out = []
+    for caller in dict.fromkeys(item.get("caller") for item in called or () if isinstance(item, dict)):
+        if caller not in by_attempt and caller not in placed:
+            out.extend(called_tree(called, caller, now))
+    return out[:8]
+
+
+def route_tree(row, jobs, owner, doer, get, live, now, state=None, called=None, placed=None):
     """Spec E9 rule 43: the owner and each stage worker running now, apart.
 
     The workers are Fleet's own (the row's ``worker_contexts``, the live workers its route
@@ -860,6 +903,11 @@ def route_tree(row, jobs, owner, doer, get, live, now, state=None):
         elapsed = _number(get(job, "elapsed_min"))
         if elapsed is not None:
             worker["since"] = now - elapsed * 60
+        below = called_tree(called, get(job, "attempt_id"), now) if called else None
+        if below:
+            worker["called"] = below
+            if placed is not None:
+                placed.add(get(job, "attempt_id"))
         tree["workers_live"].append(worker)
     return tree
 
@@ -915,8 +963,14 @@ def route_details(snapshot, panels, routes=None, now=None):
                 else:
                     row["elapsed_min"] = round(max(elapsed), 1)
             doer = route_doer(route if isinstance(route, dict) else row, jobs, get, live)
+            called = route.get("called") if isinstance(route, dict) else None
+            placed = set()
             row.update(route_tree(row, jobs, owner, doer, get, live, now,
-                                  (route if isinstance(route, dict) else row).get("state")))
+                                  (route if isinstance(route, dict) else row).get("state"), called, placed))
+            # The unit legs a worker of this route started stand under that worker's row; the rest under the lead's.
+            lead = lead_called(called, placed, now) if called else None
+            if lead:
+                row["called"] = lead
             if not doer:
                 continue
             for key, limit in (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64),
