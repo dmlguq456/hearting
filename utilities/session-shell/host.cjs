@@ -2133,9 +2133,10 @@ function watchRelease() {
 }
 // The old host's conditions for starting the hand-over. `empty` is not assumed: it is proven
 // by one readiness read of this exact screen. Anything a person or a delivery is in the middle of keeps this false.
+// A question waiting on the panel is not such a moment: the new host draws it again and it is answered the same way.
 function successionSafe(skipEmpty=false) {
   const quiet=!relay&&activated&&!ended&&running&&!succeeding&&state==='idle'&&!paste&&!keyTail&&!block.focused&&!settings&&!fleetView
-    &&!currentDelivery&&!releasing&&heldBytes===0&&!table&&!actionWorker&&!panelModel.answerable&&!dragging&&!settingsPaste
+    &&!currentDelivery&&!releasing&&heldBytes===0&&!table&&!actionWorker&&!dragging&&!settingsPaste
     &&displayVTs.size===0&&!rebuilding&&!checkingNativeSelection&&!modelReading&&!mouseInput.pending()&&terminal.modes.bracketedPasteMode;
   return quiet&&(skipEmpty||empty);
 }

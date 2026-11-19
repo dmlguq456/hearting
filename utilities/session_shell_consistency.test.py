@@ -63,6 +63,23 @@ const below=['  📁 project · ⎇ main · context 42%',...box,'  ⏵⏵ auto m
 assert.equal(d.claudeStatusRows(below,'exact',record).size,0,'text above the box is conversation');
 const quoted=[...box,'● reply','  📁 project · ⎇ main · context 42%','  ⏵⏵ auto mode on'];
 assert.equal(d.claudeStatusRows(quoted,'exact',record).size,0,'only the rows directly under the box');
+// A named session draws its name in the box's upper border (invented names): the box is still the box.
+const named=top=>[rule,'conversation',top,'❯  ',rule,'  📁 project · ⎇ main · context 42%','  ⏵⏵ auto mode on'];
+const tail='─'.repeat(30);
+for(const [what,top] of [['right-aligned',tail+tail+' demo-session ──'],['left-aligned','── demo-session '+tail+tail],['centred',tail+' demo-session '+tail],
+  ['long name clipped with an ellipsis',tail+' a-very-long-demo-session-na… ──'],['name with spaces',tail+tail+' demo session two ──'],['indented',' '+tail+' demo-session ──']])
+  assert.deepEqual([...d.claudeStatusRows(named(top),'exact',record)],[5],'named upper border: '+what);
+// Shapes that are not the box's named border keep today's answer: nothing concealed.
+for(const [what,top] of [['no blanks around the text',tail+'demo-session──'],['text at the very start',"demo-session "+tail],['text at the very end',tail+' demo-session'],
+  ['two pieces of text',tail+' demo ── session ──'],['too short a rule','─ demo ─'],['only text','  demo-session  ']]){
+  assert.equal(d.claudeStatusRows(named(top),'exact',record).size,0,'not a named border: '+what);
+}
+// The named line is only an upper border when the prompt row sits directly under it.
+const quotedNamed=[rule,'❯ typed',rule,'● reply',tail+' demo-session ──','  📁 project · ⎇ main · context 42%','  ⏵⏵ auto mode on'];
+assert.equal(d.claudeStatusRows(quotedNamed,'exact',record).size,0,'a named-looking line in the conversation is no box');
+// The lower border stays a plain rule: a named one below the prompt is not a box.
+const namedBelow=[rule,'❯  ',tail+' demo-session ──','  📁 project · ⎇ main · context 42%'];
+assert.equal(d.claudeStatusRows(namedBelow,'exact',record).size,0,'only the upper border may carry a name');
 '''
         result = subprocess.run(['node','-e',script,str(ROOT/'utilities/session-shell/native-display.cjs')],capture_output=True,text=True,timeout=5)
         self.assertEqual(result.returncode,0,result.stderr)

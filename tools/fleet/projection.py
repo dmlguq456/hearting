@@ -1408,11 +1408,17 @@ def _adopt_exact_owner_job_binding(entity, jobs):
 
 
 def _owner_children(entity, jobs):
-    """Return only children named by the stable owner-link contracts."""
+    """Return only children named by the stable owner-link contracts.
+
+    A unit leg a worker started (`caller_attempt_id`) is another route called by that worker, not a child of
+    its owner: the registry row carries the calling session's id and Fleet hangs it below its caller by
+    `parent_slug`, but neither makes it part of the caller's own route."""
     sid = _field(entity, "session_id")
     slug = _field(entity, "slug")
     children = []
     for child in jobs:
+        if _field(child, "caller_attempt_id"):
+            continue
         if sid and _field(child, "parent_sid") == sid:
             children.append(child)
         elif slug and _field(child, "parent_slug") == slug:

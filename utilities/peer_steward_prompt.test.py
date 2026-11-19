@@ -5544,6 +5544,14 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(draft("codex", lines("›\n")), "empty")
         self.assertEqual(draft("opencode", lines("  ┃  just text\n")), "unknown")      # a single bar line is no box
         self.assertEqual(draft("unheard-of", lines(CLAUDE_EMPTY)), "unknown")
+        # A named session carries its name in the box's upper border (an invented name); only the
+        # lower rule closes the box for this reader, so the name changes neither answer.
+        named = "─" * 50 + " demo-session ──"
+        self.assertEqual(draft("claude", lines("conversation\n" + named + "\n❯ \n" + RULE + "\n  footer\n")), "empty")
+        self.assertEqual(draft("claude", lines("conversation\n" + named + "\n❯ typed\n" + RULE + "\n  footer\n")), "nonempty")
+        self.assertEqual(draft("claude", lines("conversation\n" + named + "\n❯ \n  second line of a draft\n" + RULE + "\n")), "nonempty")
+        self.assertEqual(draft("claude", lines(named + "\n❯ \n")), "unknown")  # a name is no closing rule
+        self.assertIsNone(peer_steward._screen_ready("claude", lines("conversation\n" + named + "\n❯ \n" + RULE + "\n  footer\n")))
 
 
 class TidyDeferredPeerTest(_TmpRootMixin, unittest.TestCase):
