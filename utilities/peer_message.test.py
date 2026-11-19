@@ -166,7 +166,7 @@ class PeerMessageTest(_TmpRootMixin, unittest.TestCase):
             body, sender, recipient, defer=True, refs=refs,
             producer_binding=producer, receipt="native-pending")
         self.assertEqual(replay, (text, ref))
-        self.assertIn("(runtime-from: runtime [?] Hearting runtime ; pane=- ; sid=- ; ref=" + ref + ")", text)
+        self.assertIn("(runtime-from: runtime [?] Hearting runtime ; ref=" + ref + ")", text)
         transfer = peer_message._read_transfer_record(ref)
         pending = peer_message._read_pending(ref)
         self.assertEqual(transfer["from"], sender)
@@ -711,7 +711,7 @@ class F100cSenderAndStewardTest(unittest.TestCase):
 
     def test_trailer_round_trip_and_last_wins(self):
         t = peer_message.peer_trailer("claude", "sid-a", "hearting-46")
-        self.assertIn("(peer-from: claude [?] hearting-46 ; pane=- ; sid=sid-a)", t)
+        self.assertIn("(peer-from: claude [?] hearting-46)", t)
         self.assertEqual(peer_message.parse_peer_trailer("body\n\n" + t),
                          {"harness": "claude", "session_id": None, "name": "hearting-46"})
         self.assertEqual(peer_message.parse_peer_trailer("(peer-from: codex 01a0)")["name"], None)
@@ -739,15 +739,15 @@ class F100cSenderAndStewardTest(unittest.TestCase):
                                                  transfer_ref="a" * 32, pane_id="w1:p3")
 
         self.assertEqual(trailer("2026-11-57", "derived"),
-                         "(peer-from: claude [57] ; pane=w1:p3 ; sid=sid-a ; ref=" + "a" * 32 + ")")
-        self.assertIn("(peer-from: claude [57] release-notes ; pane=w1:p3", trailer("release-notes", "user"))
+                         "(peer-from: claude [57] ; ref=" + "a" * 32 + ")")
+        self.assertIn("(peer-from: claude [57] release-notes ; ref=", trailer("release-notes", "user"))
         user_set = trailer("release-57", "user")
-        self.assertIn("(peer-from: claude [57] release-57 ; pane=w1:p3 ; sid=sid-a", user_set)
+        self.assertIn("(peer-from: claude [57] release-57 ; ref=", user_set)
         self.assertEqual(peer_message.parse_peer_trailer(user_set)["name"], "release-57")
         # No registry record is no provenance: the name stays.
         (sessions / "1.json").unlink()
         with mock.patch.object(peer_message, "peer_alias", return_value="[57]"):
-            self.assertIn("claude [57] 2026-11-57 ;",
+            self.assertIn("claude [57] 2026-11-57)",
                           peer_message.peer_trailer("claude", "sid-a", "2026-11-57", pane_id="w1:p3"))
 
     def _marker_keys_on_disk(self):
@@ -1272,18 +1272,19 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
             text, ref = self.pending("한글 " * 1800, sender=sender)
         self.assertEqual(alias.call_count, 1)
         self.assertIn("[93]", text)
-        self.assertIn(" ; pane=w:sender ; sid=" + sender["session_id"], text)
+        self.assertNotIn("pane=", text)
+        self.assertNotIn("sid=", text)
         self.assertLessEqual(len(text.encode("utf-8")), 1024)
         self.assertEqual(peer_message.parse_peer_trailer(text, self.recipient)["session_id"],
                          sender["session_id"])
         self.assertIsNotNone(peer_message._read_transfer_record(ref).get("body_ref"))
 
     def test_reference_with_identity_larger_than_cap_falls_back_to_complete_inline_body(self):
-        sender = dict(self.sender, session_id="native-" + "x" * 1200, pane_id="w:sender")
+        sender = dict(self.sender, name="x" * 1200, pane_id="w:sender")
         body = "한글 " * 1800
         text, ref = self.pending(body, sender=sender)
         self.assertIn(body, text)
-        self.assertIn("sid=" + sender["session_id"], text)
+        self.assertIn("x" * 1200, text)
         self.assertIsNone(peer_message._read_transfer_record(ref).get("body_ref"))
         self.assertEqual(peer_message.parse_peer_trailer(text, self.recipient)["session_id"],
                          sender["session_id"])

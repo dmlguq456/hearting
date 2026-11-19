@@ -121,7 +121,9 @@ def _derived_name_of(harness, session_id, name):
 
 
 def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=None):
-    """Human display; the bracket token keeps display identity off the legacy path."""
+    """Human display; the bracket token keeps display identity off the legacy path.
+
+    ``pane_id`` is accepted for callers that still pass it and is not shown."""
     def clean(value):
         return " ".join("".join(ch if ch.isprintable() and ch not in ");" else " "
                                 for ch in str(value or "")).split())
@@ -139,9 +141,9 @@ def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=N
         display_name = ""
     if display_name:
         parts.append(display_name)
-    suffix = " ; pane=%s ; sid=%s" % (clean(pane_id) or "-", usable_session_id(session_id) or "-")
-    if transfer_ref:
-        suffix += f" ; ref={transfer_ref}"
+    # `pane=` and `sid=` were decoration only: no receiver reads them (see
+    # `parse_peer_trailer`), the sealed transfer named by `ref=` owns the attribution.
+    suffix = f" ; ref={transfer_ref}" if transfer_ref else ""
     tag = "runtime-from" if harness == "runtime" else "peer-from"
     return "(%s: %s%s)" % (tag, " ".join(parts), suffix)
 
