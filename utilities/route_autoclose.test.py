@@ -1127,6 +1127,28 @@ class LeftoverCyclesTest(PRODUCER_FIXTURE.ProducerTestBase):
             self.assertEqual(self._record(cycle)["state"], "sealed")
             self.assertEqual(self._manifest_routes(cycle), [route["route_id"]])
 
+    def test_a_file_outside_artifacts_leaves_the_cycle_open_for_the_sweep_proven_or_not(self):
+        # The sweep never abandons for a person: a regular file outside `artifacts/` stops both closes, so the
+        # cycle stays open with the reason recorded (as it did), whether or not the route was proven.
+        for proven in (False, True):
+            slug = "leftover-outside-" + ("proven" if proven else "unproven")
+            a = self._root_route(slug)
+            self._publish_root(a)
+            (cycle,) = self._begin_all([a])
+            stray = Path(self.P.cycle_dir(self.root, self._record(cycle)["campaign_id"], cycle["cycle_id"],
+                                          self._record(cycle))) / "logs/run.log"
+            stray.parent.mkdir(parents=True, exist_ok=True)
+            stray.write_text("a person's file\n")
+            if proven:
+                self._close(a)
+            else:
+                self._close_unproven(a)
+            summary = self._sweep()
+            answer = self._results(summary)[cycle["cycle_id"]]
+            self.assertTrue(answer.startswith("cycle-left-open:output-invalid"), (proven, answer))
+            self.assertEqual(self._record(cycle)["state"], "open")
+            self.assertEqual(stray.read_text(), "a person's file\n")
+
     def test_open_lineage_tree_keeps_ambiguity(self):
         import route_autoclose
         a = self._root_route("leftover-live")

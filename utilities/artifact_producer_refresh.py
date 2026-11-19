@@ -883,12 +883,14 @@ class _Prescan:
     bundle_selection: List[str] = field(default_factory=list)
     root: Optional[Path] = None
     cycle_id: Optional[str] = None
+    leave_outside: bool = False
 
 
 def _prescan_cycle(root: Path, cycle_id: str, *,
                    unless_recorded: Optional[Mapping[str, Any]] = None,
                    include_open: bool = False, exclude_hidden: bool = False,
-                   budget: Optional["RefreshBudget"] = None) -> Optional[_Prescan]:
+                   budget: Optional["RefreshBudget"] = None,
+                   leave_outside: bool = False) -> Optional[_Prescan]:
     """Walk and hash a cycle's files before any lock is taken (§45 D-124).
 
     An explicit `finalize` or `admit-shared` of a closed cycle compares its files with the manifest;
@@ -902,8 +904,8 @@ def _prescan_cycle(root: Path, cycle_id: str, *,
         if record is None or record.get("deleted_at"):
             return None
         if record.get("state") == "open":
-            return _prescan_open_cycle(root, record, exclude_hidden=exclude_hidden, budget=budget) \
-                if include_open else None
+            return _prescan_open_cycle(root, record, exclude_hidden=exclude_hidden, budget=budget,
+                                       leave_outside=leave_outside) if include_open else None
         if record.get("state") != "sealed":
             return None
         manifest_path = _record_cycle_manifest_path(root, record)
@@ -931,7 +933,7 @@ def _prescan_cycle(root: Path, cycle_id: str, *,
 
 
 def _prescan_open_cycle(root: Path, record: Mapping[str, Any], *, exclude_hidden: bool,
-                        budget: Optional["RefreshBudget"]) -> Optional[_Prescan]:
+                        budget: Optional["RefreshBudget"], leave_outside: bool = False) -> Optional[_Prescan]:
     """The first close's read: list an open cycle, then read each file once, outside every lock.
 
     A file whose fingerprint is the one an earlier look left in the refresh bookkeeping keeps
@@ -942,7 +944,8 @@ def _prescan_open_cycle(root: Path, record: Mapping[str, Any], *, exclude_hidden
     directory = cycle_dir(root, record["campaign_id"], cycle_id, record)
     if _path_entry_present(directory / "manifest.json"):
         return None  # a close that stopped after its manifest is for recovery to finish
-    scan = _Prescan("", [], {}, [], [], open_cycle=True, directory=directory, root=root, cycle_id=cycle_id)
+    scan = _Prescan("", [], {}, [], [], open_cycle=True, directory=directory, root=root, cycle_id=cycle_id,
+                    leave_outside=leave_outside)
     try:
         scan.bundles = _scan_directory_bundles(
             directory, selected_out=scan.bundle_selection, marker_observations=scan.marker_observations,
@@ -953,7 +956,7 @@ def _prescan_open_cycle(root: Path, record: Mapping[str, Any], *, exclude_hidden
         paths, scan.violations = _output_paths(
             directory, exclude_hidden=exclude_hidden, excluded=scan.excluded,
             excluded_symlinks=scan.excluded_symlinks, marker_observations=scan.marker_observations,
-            excluded_roots=scan.excluded_roots, skip_directories=bundle_dirs)
+            excluded_roots=scan.excluded_roots, skip_directories=bundle_dirs, leave_outside=leave_outside)
     except ProducerError as error:
         scan.error = error  # raised where the locked close always raised it
         return scan
@@ -1086,7 +1089,8 @@ def _reread_misses(prescan: _Prescan, misses: Sequence[str]) -> None:
             paths, prescan.violations = _output_paths(
                 directory, excluded=prescan.excluded, excluded_symlinks=prescan.excluded_symlinks,
                 marker_observations=prescan.marker_observations, excluded_roots=prescan.excluded_roots,
-                skip_directories=[tree.directory for tree in prescan.bundles])
+                skip_directories=[tree.directory for tree in prescan.bundles],
+                leave_outside=prescan.leave_outside)
             bundle_dirs = [tree.directory for tree in prescan.bundles]
             journal = _read_json(journal_path(prescan.root, prescan.cycle_id)) or {}
             owned_paths = {row.get("locator") for row in journal.get("directory_bundles", [])

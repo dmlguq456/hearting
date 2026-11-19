@@ -1464,7 +1464,8 @@ class FinalizeTest(ProducerTestBase):
         import artifact_entrance
         self.assertEqual(entrance.read_text(encoding="utf-8").splitlines()[0],
                          artifact_entrance.MARKER)
-        self.assertIn("final_report.md", entrance.read_text(encoding="utf-8"))
+        self.assertNotIn("final_report.md", entrance.read_text(encoding="utf-8"))
+        self.assertIn("final_report.md", (self.root / "recent-route-reports.md").read_text(encoding="utf-8"))
 
     def test_re_finalize_of_a_sealed_cycle_refreshes_the_entrance(self):
         self.activate()

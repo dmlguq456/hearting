@@ -95,7 +95,11 @@ RUNTIME_OWNED_EXACT = ("_scratch",)          # `.`-prefix is a separate predicat
 # canonical records: admission, census and residue never take them as input, and
 # a same-named file without the generator's first-line marker is left to its
 # owner (never overwritten or moved).
-ENTRANCE_NAMES = ("README.md", "index.html", "all-campaigns.md", "all-campaigns.html")
+# The route reports page (`recent-route-reports.*`) and the spec topics page
+# (`all-spec.*`) are the same kind of file.
+ENTRANCE_NAMES = ("README.md", "index.html", "all-campaigns.md", "all-campaigns.html",
+                  "recent-route-reports.md", "recent-route-reports.html",
+                  "all-spec.md", "all-spec.html")
 COMPAT_OVERRIDE_FIELDS = ("schema_version", "contract", "canonical_root",
                           "reason", "issuer", "created_at", "expires_at")
 WAIVER_FIELDS = ("reason", "issuer", "created_at", "expires_at")
