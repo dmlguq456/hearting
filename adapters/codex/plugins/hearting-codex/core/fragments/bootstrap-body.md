@@ -75,7 +75,9 @@ No directive in view: read the printed `receipt_file`; a missing directive is
   not `end-turn`, so keep launch output unfiltered.
 
 To message another session, run `hearting run peer-steward prompt
-<name-or-pane> --body-file <file>`; reply text sends nothing.
+<name-or-pane> --body-file <file>`; reply text sends nothing. The person reads
+that message in the receiving window: write a few lines, keep the detail in a
+file and give its path.
 
 ## Finishing work (Tracked-Workflow Continuation)
 

@@ -1671,7 +1671,8 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(row["state"], "pending")
         # The sender row carries no window: replies address ``harness:sid``.
         self.assertNotIn("pane_id", row["from"])
-        self.assertIn(" ; pane=- ; sid=sid-steward", row["text"])
+        self.assertNotIn("sid=", row["text"])
+        self.assertNotIn("pane=", row["text"])
         self.assertEqual(row["to"]["session_id"], "sid-opencode")
         self.assertTrue(peer_steward.peer_message.parse_peer_trailer(
             row["text"], row["to"], include_ref=True))
@@ -1682,7 +1683,8 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(pane_ownership, "verified_pane", return_value=""):
             rc, _printed, row, _sent, _schedule = self._run_claude_prompt()
         self.assertNotIn("pane_id", row["from"])
-        self.assertIn(" ; pane=- ; sid=sid-steward", row["text"])
+        self.assertNotIn("sid=", row["text"])
+        self.assertNotIn("pane=", row["text"])
         self.assertNotIn("pane_id", row["to"])
 
     def _run_claude_prompt(self, *, shell=None, producer_binding=None,

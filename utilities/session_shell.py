@@ -2071,7 +2071,7 @@ def _backend_operation(request: dict) -> dict:
         owner = process(claim.get("pid"))
         if not owner or owner["start"] != claim.get("start"):
             return {"ok": False, "reason": "claimant-unavailable"}
-        text = row.get("text")
+        text = peer.pasted_text(row)
         if (not isinstance(text, str) or not text.strip() or len(text.encode()) > 32768
                 or any(ord(c) < 32 and c not in "\n\t" or ord(c) == 127 for c in text)):
             return {"ok": False, "reason": "unsafe-payload"}

@@ -3430,6 +3430,42 @@ console.log(JSON.stringify({prompts, logs}));
                         self.assertEqual(SWEEP._opencode_delivery_expectations(
                             [self.root], "opencode-turn", self.SID, messages), [])
 
+    def test_a_finished_work_delivery_has_one_line_for_the_window_and_the_same_full_text_for_the_agent(self):
+        import dispatch_completion_join as JOIN
+        import route_parent_close
+        import work_intent
+        from types import SimpleNamespace
+        owner = SimpleNamespace(metadata={"dispatch_depth": "1", "worker_type": "owner",
+                                          "workflow_completion": "runtime-v1"})
+        summary = ("[완료 요약] autopilot-code · route rt-example\n의도: 받는 창에 찍히는 글을 줄인다\n"
+                   "결과: 끝남 — 실패·못 한 것 있음(아래)\n비용: 걸린 시간 12m 30s · 토큰 알 수 없음\n산출물: 없음")
+        did = "delivery-" + "9" * 32
+        self.seed_turn(delivery_id=did, receipt=_receipt(children=[{
+            "attempt_id": "att-0000000000000000000000000000cccc", "status": "done",
+            "readiness": "ready", "reason": "completed",
+            "required_action": "advance-completed", "harness": "claude",
+            "delivery_classification": "completion"}]))
+        record = {**self._mark_sent_ambiguous(did), SWEEP.STORAGE_KEY: self.SID}
+        korean = work_intent._ui_text().translator("ko")
+        with mock.patch.object(JOIN, "exact_attempt_row", return_value=owner), \
+                mock.patch.object(route_parent_close, "row_requested", return_value=False), \
+                mock.patch.object(work_intent, "ui_translator", return_value=korean), \
+                mock.patch.object(work_intent, "sealed_summary", return_value=summary):
+            full = SWEEP.delivery_context([(self.root, [record])])
+            line = SWEEP.delivery_display_text([(self.root, [record])])
+        self.assertEqual(line, "↳ 작업 끝: 받는 창에 찍히는 글을 줄인다 — 끝남 — 실패·못 한 것 있음 (12분 30초)")
+        # the agent's text is the one it always got: header, receipt marker, follow-up and summary
+        self.assertIn(SWEEP.COMPLETION_DELIVERY_HEADER, full)
+        self.assertIn("HEARTING_RECEIPT_V1 " + did, full)
+        self.assertIn(summary, full)
+        self.assertGreater(len(full.splitlines()), 5)
+        # a summary that cannot be read as one line keeps the whole delivery in full
+        with mock.patch.object(JOIN, "exact_attempt_row", return_value=owner), \
+                mock.patch.object(route_parent_close, "row_requested", return_value=False), \
+                mock.patch.object(work_intent, "ui_translator", return_value=korean), \
+                mock.patch.object(work_intent, "sealed_summary", return_value="[완료 요약] autopilot-code\n산출물: 없음"):
+            self.assertIsNone(SWEEP.delivery_display_text([(self.root, [record])]))
+
     def test_immediately_previous_runtime_v1_body_from_real_producer_is_recognized(self):
         # The release before the short first close shipped the current headers
         # with the earlier follow-up, with and without a sealed runtime summary.

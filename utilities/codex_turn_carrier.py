@@ -352,6 +352,18 @@ def _peer_body_first_line(text: str, origin: dict | None = None) -> str:
     return session_tidy._received_prompt_line(_peer_body(text), origin or {})
 
 
+_PEER_DISPLAY_TAIL = re.compile(
+    r"(?m)^— (?:\[(?:[0-9a-f]{2}|\?)\]|claude|codex|opencode)(?: [^\n]{1,80})?[ \t]*$")
+_PEER_DISPLAY_LINE = re.compile(r"\A\s*(?:<pasted_content[^>]*>\s*)?↳ ")
+
+
+def _looks_like_peer_prompt(text: str) -> bool:
+    """Same gate as `peer-message.looks_like_peer_text` (a test keeps them equal)."""
+    return bool(text) and ("peer-from:" in text or "runtime-from:" in text
+                           or _PEER_DISPLAY_LINE.match(text[:300]) is not None
+                           or _PEER_DISPLAY_TAIL.search(text[-400:]) is not None)
+
+
 def peer_report_item(prompt: str, sid: str = "", harness: str = "codex") -> dict | None:
     """A verified peer report that arrived as this turn's prompt.
 
@@ -364,8 +376,7 @@ def peer_report_item(prompt: str, sid: str = "", harness: str = "codex") -> dict
     with ``[report]`` or ``[notice]``) adds none either. The kind is read
     from the verified body after origin, never from a transport wrapper's line.
     """
-    if not prompt or not sid or ("peer-from:" not in prompt and "runtime-from:" not in prompt
-                                 and "cross-session-message" not in prompt):
+    if not prompt or not sid or not (_looks_like_peer_prompt(prompt) or "cross-session-message" in prompt):
         return None
     try:
         import session_tidy

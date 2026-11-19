@@ -1627,6 +1627,63 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
     return "\n\n".join(blocks)
 
 
+def _answer_line(body: str, t) -> str:
+    """One answer as one short line: its first line, cut, and how many lines were left out."""
+    lines = [line.strip() for line in str(body).splitlines() if line.strip()]
+    first = lines[0] if lines else ""
+    first = first if len(first) <= 120 else first[:119].rstrip() + "…"
+    return first + (t("delivery_line.more_lines", count=len(lines) - 1) if len(lines) > 1 else "")
+
+
+def delivery_display_text(batches: list[tuple[Path, list[dict]]]) -> str | None:
+    """What the person's window shows for the delivery ``delivery_context(batches)`` renders.
+
+    One ``↳`` line per record (equal lines of different records: one line ending `` ×N``): a
+    question answer (``↳ 질문에 답함: <답>``) or a finished runtime-v1 work (``↳ 작업 끝: <작업> — <결과> (<걸린 시간>)``, every word read back from
+    the work's own completion summary). The agent still receives ``delivery_context``'s whole
+    text beside it. ``None`` when any record has no such short form (a human gate, a
+    supervision or run notice, a completion without a summary): the whole delivery then goes
+    out in its full form, so nothing the person has to decide is shortened away."""
+    try:
+        import human_wait_state as waits
+        import work_intent
+        from dispatch_registry_cache import registry_read_scope
+        t = work_intent.ui_translator()
+        answers: list[tuple[tuple, str]] = []
+        works: list[tuple[tuple, str]] = []
+        with registry_read_scope():
+            for root, records in batches:
+                for record in records:
+                    delivery_id = record.get("delivery_id")
+                    # A record with no delivery id cannot be told from another: never merge it.
+                    ident = (str(root), str(delivery_id) if delivery_id not in (None, "")
+                             else f"no-delivery-id-{len(answers) + len(works)}-{id(record)}")
+                    receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+                    if is_human_gate_record(record) or receipt.get("kind") == "supervision":
+                        return None
+                    if receipt.get("kind") == "notice":
+                        if "answer_binding" not in receipt:
+                            return None
+                        body = waits.message_answer_body(receipt["answer_binding"])
+                        answers.append((ident, t("delivery_line.answered", answer=_answer_line(body, t))))
+                        continue
+                    lines = [work_intent.completion_line(summary, t)
+                             for summary in work_intent.split_completion_summaries(_followup(root, record))]
+                    if not lines or any(line is None for line in lines):
+                        return None
+                    works.extend((ident, line) for line in lines)
+        # The same record listed twice is one line; different records with the same line (two
+        # questions both answered "네") stay visible as `<line> ×N`, so the person sees every one.
+        owners: dict[str, list[tuple]] = {}
+        for ident, line in answers + works:
+            if ident not in owners.setdefault(line, []):
+                owners[line].append(ident)
+        shown = [line + (f" ×{len(idents)}" if len(idents) > 1 else "") for line, idents in owners.items()]
+        return "\n".join(shown) if 0 < len(shown) <= 12 else None
+    except Exception:  # noqa: BLE001 -- a delivery with no short form is sent in full
+        return None
+
+
 # Native inline limit on one hook context string, measured 2026-11-10 (PG-47).
 # Claude Code (hooks reference, "JSON output"): additionalContext is capped at
 # 10,000 characters; past it the text goes to a file and Claude sees the path

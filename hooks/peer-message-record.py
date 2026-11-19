@@ -110,6 +110,20 @@ _RECORD_TIMEOUT_S = 2.5
 _MODULES = {}
 
 
+# A trailer-form text, or a display-form one (`— [d4]` as the last line, `↳ ` first): the same
+# gate as `peer-message.looks_like_peer_text` (a test keeps them equal), checked before the
+# reader is consulted.
+_PEER_DISPLAY_TAIL = re.compile(
+    r"(?m)^— (?:\[(?:[0-9a-f]{2}|\?)\]|claude|codex|opencode)(?: [^\n]{1,80})?[ \t]*$")
+_PEER_DISPLAY_LINE = re.compile(r"\A\s*(?:<pasted_content[^>]*>\s*)?↳ ")
+
+
+def _looks_like_peer_prompt(text):
+    return bool(text) and ("peer-from:" in text or "runtime-from:" in text
+                           or _PEER_DISPLAY_LINE.match(text[:300]) is not None
+                           or _PEER_DISPLAY_TAIL.search(text[-400:]) is not None)
+
+
 def _deadline():
     return _STARTED + _HOOK_BUDGET_S
 
@@ -723,8 +737,7 @@ def main(exit_guard=False):
         mod = _peer_message_module()
         guidance = ""
         guidance_seen = []
-        if mod and ("peer-from:" in prompt or "runtime-from:" in prompt
-                    or "cross-session-message" in prompt):
+        if mod and (_looks_like_peer_prompt(prompt) or "cross-session-message" in prompt):
             guidance = mod.receiver_guidance_once(
                 prompt, {"harness": "claude", "session_id": payload.get("session_id")},
                 cwd=payload.get("cwd") or os.getcwd(), deferred=guidance_seen)
