@@ -98,6 +98,7 @@ import artifact_directory_bundle  # noqa: E402
 import artifact_campaign  # noqa: E402
 import route_identity  # noqa: E402
 import route_lineage  # noqa: E402
+import route_form  # noqa: E402
 import directory_record_index  # noqa: E402
 import dispatch_contract  # noqa: E402
 import dispatch_lock_order  # noqa: E402
@@ -1835,7 +1836,7 @@ def _quick_refine_write_gate(root: Path, target: Path, route=None) -> None:
         return
     if "_internal" in parts:
         return
-    if route.get("effective_intensity") != "quick":
+    if not route_form.one_shot_owner(route):
         return
     node = next((n for n in route.get("nodes", []) if n.get("id") == "one-shot"), {})
     if node.get("inline_human_gates") != ["preview-disposition"]:

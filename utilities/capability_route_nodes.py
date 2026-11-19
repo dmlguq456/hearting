@@ -12,6 +12,7 @@ from pathlib import Path
 
 import dispatch_runtime_support as RUNTIME_SUPPORT
 import model_profile as PROFILE
+import route_form as ROUTE_FORM
 
 from capability_route_base import (
     DEFAULTS, ROOT, TOPO,
@@ -42,16 +43,18 @@ def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=No
     return profile, selection
 
 
-def _owner_node(node, effective):
-    """Whether `node` IS the route's owner: only the quick shape's `one-shot`
-    node (the owner and the node are one process there). A standard+ recipe's
+def _owner_node(node, effective, form=None):
+    """Whether `node` IS the route's owner: only the one-shot owner form's `one-shot`
+    node (the owner and the node are one process there). `form` is the route form
+    (`route_plan.form_of`); a caller with only an intensity leaves it out. A standard+ recipe's
     depth-1 `_kernel/owner` *stage* nodes (prd-transaction, handback, deploy,
     ...) are not the owner and never inherit its profile (review R2 B1: sealing
     `top` onto them made compile and verify disagree again, and would have
     spent the main-session model on stages nobody asked for). One predicate
     for the compiler and every verify check."""
 
-    return (effective == "quick" and node.get("id") == "one-shot"
+    form = form or ROUTE_FORM.form_of(None, effective)
+    return (form == "solo" and node.get("id") == "one-shot"
             and node.get("dispatch_depth") == 1 and node.get("unit") == "_kernel/owner")
 
 

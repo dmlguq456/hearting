@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from artifact_context import scope_matches
+from route_form import one_shot_owner
 
 
 OWNED_CONTAINERS={"documents","research"}
@@ -266,7 +267,7 @@ def prepare(args) -> int:
     if capability not in {"autopilot-refine","autopilot-draft"}:
         emit({"status":"skipped","reason":"capability-does-not-own-snapshots","target":str(target)})
         return 0
-    if capability == "autopilot-refine" and intensity == "quick":
+    if capability == "autopilot-refine" and one_shot_owner(route):
         from artifact_producer import _quick_refine_write_gate, ProducerError
         try:
             _quick_refine_write_gate(artifact_root, target, route)
@@ -305,7 +306,7 @@ def prepare(args) -> int:
         if found is None:
             raise
         (artifact_dir,relative),in_repository=found,True
-    if capability == "autopilot-refine" and intensity != "quick":
+    if capability == "autopilot-refine" and not one_shot_owner(route):
         # The owner's own `transaction` changes the target after the person released the preview it
         # raised: the fence the entry gate holds for a child launch, asked only once the path is known
         # to be the bound target, for the step that precedes the edit.
