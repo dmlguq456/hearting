@@ -1,7 +1,7 @@
 """11-17 (the person: route row sketch 5): Fleet's route cell reads the shell panel's grammar, and the panel gets what it needs.
 
 Fleet's ROUTES row (the ROUTE popup, the session page and OVERVIEW draw the same cell) reads `frame ✓ → code(standard) ·
-staged 3/6: execute` for a route that continues a frame, `frame → ??` for a frame route, `code(quick)` for a route its owner
+3/6: execute` for a route that continues a frame, `frame → ??` for a frame route, `code(quick)` for a route its owner
 does alone. The kind is the one bold word, the stage name the one thing that blinks (no `●` after it). The backend hands the
 panel the intensity and the chain of kinds the route already carries, and a frame route's two legs as its live workers.
 Everything is synthetic.
@@ -66,19 +66,22 @@ class FleetRouteCell(unittest.TestCase):
 
     def test_a_route_that_continues_a_frame_reads_the_chain_kind_intensity_and_stage(self):
         text, _ = cell(staged(), 70)
-        self.assertEqual(text, "frame ✓ → code(standard) · staged 3/6: execute")
-        self.assertEqual(cell(staged(chain=False), 70)[0], "code(standard) · staged 3/6: execute")
-        self.assertEqual(cell(staged(at=1, mark="failed"), 70)[0], "frame ✓ → code(standard) · staged 2/6: plan-check ✕")
-        for old in ("›", "execute ●", "staged 3/6 execute"):
+        # 11-19: the bracket says the form and the intensity (`staged·standard`), so the stage line no longer leads with `staged`
+        self.assertEqual(text, "frame ✓ → code(team·standard) · 3/6: execute")
+        self.assertEqual(cell(staged(chain=False), 70)[0], "code(team·standard) · 3/6: execute")
+        self.assertEqual(cell(staged(at=1, mark="failed"), 70)[0], "frame ✓ → code(team·standard) · 2/6: plan-check ✕")
+        for old in ("›", "execute ●", "3/6 execute", "staged"):
             self.assertNotIn(old, text)
         # Several kinds in one plan (what is behind is dim with ✓, this one bold).
         route = staged()
         route["legs"] = (("research", "done", None), ("draft", "done", None), ("code", "active", "2/6"))
-        self.assertEqual(cell(route, 80)[0], "research ✓ → draft ✓ → code(standard) · staged 3/6: execute")
+        self.assertEqual(cell(route, 80)[0], "research ✓ → draft ✓ → code(team·standard) · 3/6: execute")
 
-    def test_short_of_cells_the_chain_goes_then_the_intensity_the_kind_the_word_staged_then_the_position(self):
-        want = [(46, "frame ✓ → code(standard) · staged 3/6: execute"), (40, "code(standard) · staged 3/6: execute"),
-                (34, "code · staged 3/6: execute"), (24, "staged 3/6: execute"), (16, "3/6: execute")]
+    def test_short_of_cells_the_chain_goes_then_the_intensity_the_bracket_the_kind_then_the_position(self):
+        # 11-19: the intensity (`·standard`) goes first in the bracket, then the bracket and the chain; `staged` is never written before the position
+        # (11-19: the form `team` is in the bracket)
+        want = [(46, "frame ✓ → code(team·standard) · 3/6: execute"), (40, "code(team·standard) · 3/6: execute"),
+                (34, "code(team·standard) · 3/6: execute"), (33, "code(team) · 3/6: execute"), (28, "code(team) · 3/6: execute"), (24, "code · 3/6: execute"), (16, "3/6: execute")]
         for width, expect in want:
             self.assertEqual(cell(staged(), width)[0], expect, width)
         for width in range(14, 70):                     # the stage stays at every width
@@ -109,10 +112,10 @@ class FleetRouteCell(unittest.TestCase):
             self.assertNotRegex(cell(frame(), width)[0], r"→$", width)
 
     def test_a_route_its_owner_does_alone_reads_its_kind_and_intensity(self):
-        self.assertEqual(cell(solo(), 40)[0], "code(quick)")
-        self.assertNotIn("one-shot", cell(solo(), 40)[0])
+        self.assertEqual(cell(solo(), 40)[0], "code(solo·quick)")          # (11-19: before `code(quick)`)
+        self.assertEqual(cell(solo(), 14)[0], "code(solo)")                # the intensity goes first
         chained = solo(legs=(("frame", "done", None), ("code", "active", None)))
-        self.assertEqual(cell(chained, 40)[0], "frame ✓ → code(quick)")
+        self.assertEqual(cell(chained, 40)[0], "frame ✓ → code(solo·quick)")
 
     def test_every_route_with_a_stage_list_reads_the_stage_line_with_its_own_shape_word(self):
         # A research route (map-reduce), refine, ship and spec (transactional-owner) and a resumed route read as a staged one does:
@@ -120,9 +123,9 @@ class FleetRouteCell(unittest.TestCase):
         three = [{"name": "search", "st": "done"}, {"name": "analyze", "st": "active"}, {"name": "report", "st": "todo"}]
         route = lambda shape, **kw: {"state": "working", "shape": shape, "capability": "research", "intensity": "standard",
                                      "stages": three, "legs": (("research", "active", None),), **kw}
-        self.assertEqual(cell(route("map-reduce"), 70)[0], "research(standard) · map-reduce 2/3: analyze")
+        self.assertEqual(cell(route("map-reduce"), 70)[0], "research(team·standard) · map-reduce 2/3: analyze")      # (11-19, correction 4: a team form)
         self.assertEqual(cell({**route("transactional-owner"), "capability": "refine"}, 70)[0],
-                         "refine(standard) · transactional-owner 2/3: analyze")
+                         "refine(team·standard) · transactional-owner 2/3: analyze")
         resumed = route("resource+verification", resume="2m", legs=(("code", "done", None), ("code", "active", None)))
         self.assertEqual(cell(resumed, 90)[0], "code ✓ → research(standard) · resource+verification 2/3: analyze  resume 2m")
         self.assertEqual(cell(route(""), 70)[0], "research(standard) · 2/3: analyze")      # no shape named: the position and the stage
@@ -141,7 +144,7 @@ class FleetRouteCell(unittest.TestCase):
         grid = CellGrid(60, 1)
         route = solo(doer={"tool": "Bash", "target": "tools/run-tests.py"})
         self.assertTrue(tables._draw_route_now(grid, 0, 60, 0, route, tables.route_now_texts(route)))
-        self.assertTrue("".join(c[0] for c in grid.cells[0]).startswith("code(quick) Bash tools/run-tests.py"))
+        self.assertTrue("".join(c[0] for c in grid.cells[0]).startswith("code(solo·quick) Bash tools/run-tests.py"))
 
     def test_every_fleet_place_draws_the_one_cell(self):
         import inspect
