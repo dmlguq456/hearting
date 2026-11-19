@@ -377,7 +377,6 @@ tools/memory/tests/test_tidy_home_worktree.py	0.43
 tools/memory/tests/test_tidy_isolation.py	1.53
 tools/memory/tests/test_tidy_native.py	67.67
 tools/memory/tests/test_tidy_runner.py	150.65
-tools/migration_manifest.test.py	0.76
 tools/native-skill-discovery.test.py	0.14
 tools/opencode-text-request.test.py	0.21
 tools/release/ci_scope.test.py	1.19

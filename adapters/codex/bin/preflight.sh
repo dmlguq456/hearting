@@ -97,8 +97,7 @@ is_worker_session() {
 
 usage() {
   cat <<'EOF'
-usage: preflight.sh write <file> [session-id] [turn-id]
-       preflight.sh read <file> [session-id]
+usage: preflight.sh read <file> [session-id]
        preflight.sh route <capability> [cwd] [session-id] [mode] [intensity]
        preflight.sh stages [--capability <name>] [--json]
        preflight.sh capability <name> [cwd] [session-id]
@@ -302,18 +301,6 @@ case "$cmd" in
         exit 64
         ;;
     esac
-    ;;
-  write)
-    if [ "${2:-}" = "-h" ] || [ "${2:-}" = "--help" ]; then
-      [ "$#" -eq 2 ] || { echo "codex preflight: write help accepts no extra arguments" >&2; exit 64; }
-      printf '%s\n' 'usage: preflight.sh write <file> [session-id] [turn-id]'
-      exit 0
-    fi
-    [ "$#" -ge 2 ] && [ "$#" -le 4 ] || { echo "codex preflight: write expects <file> [session-id] [turn-id]" >&2; exit 64; }
-    file=$2
-    case "$file" in -*) echo "codex preflight: write file must be absolute or ./-prefixed" >&2; exit 64;; esac
-    # Compatibility command: write gates have been retired.
-
     ;;
   read)
     [ "$#" -ge 2 ] || { echo "codex preflight: read requires a file path" >&2; exit 64; }

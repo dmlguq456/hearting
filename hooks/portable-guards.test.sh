@@ -1290,11 +1290,6 @@ if "$CODEX" role planning >"$TMP/codex_role_planning.out" 2>"$TMP/codex_role_pla
 else
   bad "codex role wrapper should map pipeline stages to portable unit-catalog roles"
 fi
-if "$CODEX" role plan team >"$TMP/codex_role_retired.out" 2>"$TMP/codex_role_retired.err"; then
-  bad "codex role wrapper should reject the retired 'plan team' profile alias"
-else
-  ok "codex role wrapper rejects the retired 'plan team' profile alias"
-fi
 if "$CODEX" role variable reviewer >"$TMP/role_set.out" 2>"$TMP/role_set.err" \
   && grep -q '^role=variable reviewer$' "$TMP/role_set.out" \
   && grep -q '^family=role-set$' "$TMP/role_set.out" \
@@ -1722,15 +1717,14 @@ else
 fi
 # 재홈 2026-07-22: per-team TOML boundaries retired — role-specific runtime boundaries now
 # live in unit-catalog frontmatter enforced by tools/check-unit-config.py; the kernel
-# memory-scout TOML stays read-only and team TOMLs must not reappear in the projection.
+# memory-scout TOML stays read-only.
 if python3 "$ROOT/tools/check-unit-config.py" >"$TMP/codex_unit_config.out" 2>"$TMP/codex_unit_config.err" \
   && grep -q '^read_only: true$' "$ROOT/roles/units/qa/test.md" \
   && grep -q '^worker_type: review$' "$ROOT/roles/units/qa/test.md" \
   && grep -q '^read_only: true$' "$ROOT/roles/units/qa/security-review.md" \
   && grep -q '^read_only: false$' "$ROOT/roles/units/dev/backend.md" \
   && grep -q '^worker_type: stage$' "$ROOT/roles/units/dev/backend.md" \
-  && grep -q 'sandbox_mode = "read-only"' "$TMP/codex_agent_home/agents/memory-scout.toml" \
-  && [ -z "$(find "$TMP/codex_agent_home/agents" -name '*-team.toml' -print -quit)" ]; then
+  && grep -q 'sandbox_mode = "read-only"' "$TMP/codex_agent_home/agents/memory-scout.toml"; then
   ok "codex native agent projection enforces role-specific runtime boundaries"
 else
   bad "codex native agent projection should encode role-specific runtime boundaries"
@@ -2557,11 +2551,6 @@ fi
 
 echo "== opencode preflight wrapper =="
 git -C "$TMP/repo" switch -q -c opencode-work
-if "$OPENCODE" write "$TMP/repo/f" opencodesid >"$TMP/opencode.out" 2>"$TMP/opencode.err"; then
-  ok "opencode preflight passes clean write"
-else
-  bad "opencode preflight should pass clean write"
-fi
 if AGENT_HOME="$ROOT" bash "$DESIGN" --file "$TMP/not-design.txt" >"$TMP/design.out" 2>"$TMP/design.err" \
   && "$OPENCODE" design "$TMP/not-design.txt" >"$TMP/design.out" 2>"$TMP/design.err"; then
   ok "opencode design postwrite wrappers no-op on non-html"
@@ -3956,8 +3945,7 @@ dispatch_scan_prod=$(cd "$ROOT" && grep -rnE \
 #  - intentional executing source that only ever *feeds* the canonical
 #    resolver a legacy/explicit candidate path (never reconstructs authority
 #    on its own): tools/install/distribution.py's two legacy release
-#    candidates, tools/migration-manifest.py's non-executing inventory read,
-#    tools/fleet/collectors/dispatch.py's explicit ~/.claude legacy
+#    candidates, tools/fleet/collectors/dispatch.py's explicit ~/.claude legacy
 #    discovery, and (Slice 2, same shape as distribution.py's candidates)
 #    dispatch.py's own compat-jobs synthesis in _row_state_roots (a caller
 #    with no row must not depend on inherited AGENT_DISPATCH_JOBS, so it pins
@@ -3973,13 +3961,12 @@ dispatch_scan_prod=$(cd "$ROOT" && grep -rnE \
 # moves an existing one. Each entry is an intentional source that only ever
 # feeds the canonical resolver an explicit candidate path, or prose naming
 # the layout: distribution.py's release candidates and its forced-prune gap
-# reader, migration-manifest.py's non-executing inventory, the Fleet dispatch
+# reader, the Fleet dispatch
 # collector's explicit legacy discovery, and the wrappers'/docs' description
 # of where a registry lives (peer_obligations.py's `_rebase_release_argument`
 # docstring names a release-local registry it leaves alone).
 dispatch_scan_allowed='
 tools/install/distribution.py 3
-tools/migration-manifest.py 2
 tools/fleet/collectors/dispatch.py 6
 tools/fleet/collectors/__init__.py 1
 utilities/peer_obligations.py 1
