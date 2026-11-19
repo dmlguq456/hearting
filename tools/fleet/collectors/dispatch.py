@@ -6388,7 +6388,8 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
     paths = _candidate_jobs_paths(jobs_path)
     split_registries = _validated_split_registry_paths(paths, session_rows=session_rows)
     paths.extend(split_registries)
-    if (display_scope := _ROUTE_DISPLAY_ROWS.get()) is not None:
+    display_scope = _ROUTE_DISPLAY_ROWS.get()
+    if display_scope is not None:
         _prime_route_display_rows(paths, display_scope)
     orphan_rows_cache = ({} if _dispatch_registry_cache.registry_scope_active()
                          else None)
@@ -6458,7 +6459,9 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
     # a failed mark leaves the row on its already collected observations.
     for j in jobs:
         j._worker_home_admitted = _note_home_view(j, jobs_path)
-    if not fast_first:
+    # A route display (a session's popup or panel cache) draws no location, campaign label or
+    # pending-delivery count; the campaign label is still read once by `work_titles.annotate`.
+    if not fast_first and display_scope is None:
         _fill_locations(jobs)      # explanatory metadata, filled by live details
         _campaign_labels(jobs)
     # Typed-mode+profile backfill for proc jobs whose argv/env omitted metadata.
@@ -6631,7 +6634,9 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
     # last_malformed/last_route_nodes above -- additive, no return-signature
     # change. Enumeration failure fails open: keep every job row, drop the count.
     try:
-        if not fast_first:
+        if display_scope is not None:
+            collect.last_pending_delivery = None
+        elif not fast_first:
             collect.last_pending_delivery = _pending_delivery_counts(
                 paths, session_observation=session_observation)
     except Exception:

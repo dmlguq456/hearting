@@ -40,8 +40,8 @@ from artifact_producer_routes import (
 from artifact_producer_history import (
     _campaign_lines_locked, _command_line, _command_stamp, _flush_campaign_pending_locked,
     _flush_cycle_pending_locked, _HAND_ACTOR, _history_by, _history_deliver_locked,
-    _last_known_path, _locator_suffix, _merge_pending, _observe_root_controls,
-    _preserve_current_manifest, _read_manifest_raw, _UNSET, _with_cycle_lines, _with_pending,
+    _last_known_path, _locator_suffix, _merge_pending,
+    _observe_root_controls, _preserve_current_manifest, _read_manifest_raw, _UNSET, _with_cycle_lines, _with_pending,
 )
 
 from artifact_producer_interim import (
@@ -451,8 +451,10 @@ def _adopt_location_locked(root: Path, record: Mapping[str, Any], new_directory:
     manifest (a new document, the earlier one preserved) and index row follow, in an order a stopped run
     is finished by the next look.  `parent` (when given) is the new parent cycle ID or `None`.  Returns
     the record as written and the campaign IDs whose locator index is now stale.  `manifest` (the
-    `_read_manifest_raw` result, `None` for none) and its `manifest_digest` are what a reconcile read
-    before it took the lock; left out, the folder's manifest is read here."""
+    `_read_manifest_raw` result, `None` for none) and its `manifest_digest` are what the caller already
+    read (a reconcile, before it took the lock; a move, once); left out, the folder's manifest is read here.
+    A closed cycle that has left its campaign needs its manifest kept before this runs: the old campaign
+    is read in here, and its close binds the cycle to those bytes."""
     cycle_id = record["cycle_id"]
     import artifact_request
     anchor = artifact_request.scope_anchor(new_directory) if record.get("request_binding") else None
@@ -502,6 +504,8 @@ def _adopt_location_locked(root: Path, record: Mapping[str, Any], new_directory:
             operation="update", field="parent", before={"value": record.get("parent_cycle_id")},
             after={"value": parent}, reason=reason, now=now, by=by))
         changed.append(new_campaign_id)
+    # The manifest the old campaign's close reads was kept by the caller before this (see `cycle_move`,
+    # `_reconcile_locked_run`): once the folder has left, the campaign is read with the kept copy.
     # The binding the folder carries names the campaign it sits under.
     binding = artifact_locator.read_cycle_binding(new_directory / artifact_locator.CYCLE_BINDING)
     if binding is None or binding.get("campaign_id") != new_campaign_id or binding.get("cycle_id") != cycle_id:
@@ -553,6 +557,8 @@ def _adopt_location_locked(root: Path, record: Mapping[str, Any], new_directory:
     # An explicit request-folder move already moved these bytes. Apply the
     # same existing metadata/history operation to each logical scope too.
     if command == "cycle-move" and (old_campaign_id != new_campaign_id or record.get("locator") != new_locator):
+        # The members' manifests were kept before this ran (`cycle_move` before the rename; a reconcile
+        # lists each member as a moved cycle of its own), so the old campaign read above found them.
         for member in artifact_request.members(root, new_directory):
             child = read_cycle_record(root, member.name)
             _, touched = _adopt_location_locked(
@@ -586,6 +592,29 @@ def _retarget_index_paths(root: Path, old_prefix: str, new_prefix: str) -> None:
         artifact_admission._write_index(root, replace(index, cycles=cycles))
 
 
+def _campaign_is_closed(root: Path, campaign_id: str) -> bool:
+    campaign = read_campaign(root, campaign_id)
+    return campaign is not None and campaign.get("state") == "satisfied"
+
+
+def _record_place_holds(root: Path, record: Mapping[str, Any]) -> bool:
+    """Is the cycle's folder where its record says: there, in the campaign and under the name the record
+    names, carrying this cycle's binding?  Read from that one folder; nothing else is looked at."""
+    try:
+        folder = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
+        if not folder.is_dir() or folder.is_symlink():
+            return False
+        import artifact_request
+        anchor = artifact_request.scope_anchor(folder)
+        holder = anchor if anchor is not None else folder
+        campaign = _read_json(holder.parent / "campaign.json") or {}
+        return (campaign.get("campaign_id") == record["campaign_id"]
+                and _folder_cycle_id(folder) == record["cycle_id"]
+                and not (isinstance(record.get("locator"), str) and record["locator"] != holder.name))
+    except (ProducerError, artifact_locator.LocatorError, OSError):
+        return False
+
+
 def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional[str] = None, parent: Optional[str] = None,
                no_parent: bool = False, reason: Optional[str] = None, now: Optional[float] = None,
                target_artifact_root: Optional[Path] = None, source_campaign: Optional[str] = None,
@@ -609,6 +638,16 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
     if campaign is None and parent is None and not no_parent:
         raise ProducerError("request-invalid", "cycle-move changes the campaign and/or the parent")
     stamp = _command_stamp()
+    # A folder that is not where its record says (an earlier run stopped after the folder moved, or it was
+    # moved by hand) is for the one look every writer takes first, before the lock, as `campaign-close`
+    # takes it: it keeps the evidence, makes the records say where the folder is, and the move asked for
+    # then goes on from there (a cycle already under the target campaign is `unchanged`).  The folders
+    # of the root are read only when the record's own place does not hold; a look that could not finish
+    # leaves the answer to the checks below, which refuse as they did.
+    if cycle_id:
+        asked = read_cycle_record(root, cycle_id)
+        if asked is not None and not asked.get("deleted_at") and not _record_place_holds(root, asked):
+            reconcile_root(root, now=now)
     lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
     stale: List[str] = []
     old_campaign_id = None
@@ -633,6 +672,8 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
         import artifact_request
         member_ids = [path.name for path in artifact_request.members(root, source)]
         destination = source
+        read_once: Any = _UNSET
+        read_digest: Optional[str] = None
         if target is not None and target["campaign_id"] != old_campaign_id:
             artifact_locator.prepare_index_update(root, [old_campaign_id, target["campaign_id"]])
             if target.get("state") == "satisfied":
@@ -651,16 +692,34 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
             else:
                 locator_name = keep.name
             destination = target_dir / locator_name
-            # The folder moves first; whatever stops after this is what the next look finishes.
+            # The evidence the old campaign's close reads stays behind the folder: the manifest is read and
+            # hashed once here, kept, and handed on to the adoption below.  The folders of a request's
+            # members keep theirs the same way; a member whose bytes the move cannot keep stops it here,
+            # before anything moved.  The folder then moves, and whatever stops after this is what the
+            # next look finishes (`_reconcile_locked_run` keeps the same bytes first).
+            read_once = _read_manifest_raw(source) if _closed_record(record) else None
+            read_digest = artifact_manifest.manifest_digest(read_once[1]) if read_once is not None else None
+            _preserve_current_manifest(root, record, source, found=read_once, digest=read_digest, match_record=True)
+            # The members' bytes are kept before the old campaign is read, as the cycle's own are.  A member
+            # whose recorded document cannot be kept, in a campaign that is closed, would leave that close
+            # without its evidence once the folder has gone: the move stops here, before anything moved.
+            for member in artifact_request.members(root, source):
+                member_record = read_cycle_record(root, member.name)
+                if (member_record is not None
+                        and not _preserve_current_manifest(root, member_record, member, match_record=True)
+                        and _campaign_is_closed(root, old_campaign_id)):
+                    raise ProducerError("manifest-not-kept", member.name)
             os.rename(str(source), str(destination))
             _fsync_dir(target_dir)
             _fsync_dir(source.parent)
         if destination == source and new_parent is _UNSET:
             return {"status": "unchanged", "cycle_id": cycle_id, "campaign_id": old_campaign_id,
                     "cycle_dir": str(source)}
-        written, stale = _adopt_location_locked(
+        written, moved_stale = _adopt_location_locked(
             root, record, destination, command="cycle-move", stamp=stamp, reason=reason, now=now,
-            by="human", parent=new_parent, old_campaign_folder=source.parent)
+            by="human", parent=new_parent, old_campaign_folder=source.parent,
+            manifest=read_once, manifest_digest=read_digest)
+        stale += moved_stale
         stale = list(dict.fromkeys(stale + [old_campaign_id, written["campaign_id"]]))
         artifact_locator.update_indexes(root, stale)
         _flush_cycle_pending_locked(root, cycle_id)
@@ -1237,6 +1296,16 @@ def _reconcile_locked_run(root: Path, now: Optional[float], scan: _LayoutScan, p
                 pre = manifests.get(cycle_id)
                 if pre is None or pre.fingerprint != _manifest_fingerprint(folder):
                     return None
+        # Every cycle that left a closed campaign keeps the manifest its close binds it to before any of them
+        # is adopted: adopting one reads the campaign it left, and that read asks for the bytes of all the
+        # cycles the close names, the ones not yet looked at too.  The bytes are those read before the lock.
+        for cycle_id, folder in list(changes["cycle_moves"]) + list(changes["cycle_revive"]):
+            current = read_cycle_record(root, cycle_id)
+            if current is not None:
+                pre = (manifests or {}).get(cycle_id)
+                _preserve_current_manifest(
+                    root, current, folder, found=pre.found if pre is not None else None,
+                    digest=pre.digest if pre is not None else None, match_record=True)
         stamp = _command_stamp()
         by = _HAND_ACTOR
         stale: List[str] = []
