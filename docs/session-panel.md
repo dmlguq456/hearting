@@ -67,7 +67,9 @@ sections step down to one row first (`RESOURCES` before any of them), then the r
 (the closed workers' box becomes the open one, each NOW's second row goes, the `CTX` row folds into the first row, each NOW's first row goes, then the kind row, then one row each; a zone's rule stays while one row of the zone shows) and scrolls
 in place under the wheel, its border counting what it hides. A press on a
 section's head or rows opens its popup (below); a press on any row of a route
-opens the routes popup with that route unfolded, a request's row the MESSAGES
+opens the routes popup on that route's page (Fleet's stage boxes; until its own
+reading comes, the stage boxes the panel's values already draw), a press on the
+section's head (or Ctrl+], ←→) the routes table, a request's row the MESSAGES
 popup. Values the host could not refresh for a while are shown, not claimed:
 nothing spins, and the frame takes no route state. A value that cannot be read
 stays `?`.
@@ -98,9 +100,9 @@ choice stands on its own blue ground (reversed in mono, eight colors, or
 | **Ctrl+]** | Open a popup: the question you can answer here, else the first section with something in it; again (or **Esc**) closes it |
 | **←/→** | Move to the next or previous section (`STATUS · NOW · QUESTIONS · ROUTE · MESSAGES`, its name on the popup's bottom line); **Ctrl+]** skips NOW |
 | **Tab**, **1–9**, **t** | In a question: the next waiting question, an option (**↑/↓** too; **PgUp/PgDn** read a long question), an answer in text, including pasted text; **p**, **f**, **r**, **w** below work while you choose and are letters while you type |
-| **Enter** | In a question: send, once every form field is answered; the popup closes and keys go back to the native CLI. In ROUTE: the unfolded route's page, and again back to the table |
+| **Enter** | In a question: send, once every form field is answered; the popup closes and keys go back to the native CLI. In ROUTE: the unfolded route's page, and again back to the table (a popup opened on a route's page goes to the table first, then back to the page) |
 | **↑/↓** | In ROUTE: unfold the next route; elsewhere read on (**PgUp/PgDn** a page) |
-| **↑/↓**, **Enter** | In NOW: choose a line of the story (oldest first, the latest NOW at the bottom; a prompt's own NOW values fold under it and open with it). **Enter** reads that part of the conversation in the popup and again goes back to the list; on a route, question, or message line it opens that section's popup. Nothing is sent to the agent's window. A very long story shows `… N earlier lines` on top where the oldest were left out |
+| **↑/↓**, **Enter** | In NOW: choose a line of the story (oldest first, the latest NOW at the bottom; a prompt's own NOW values fold under it and open with it). **Enter** reads that part of the conversation in the popup and again goes back to the list; on a route line it opens that route's page, on a question or message line that section's popup. Nothing is sent to the agent's window. A very long story shows `… N earlier lines` on top where the oldest were left out |
 | **p** | Fold the panel into the strip, or open a folded one (the popup closes) |
 | **f** | Open Fleet in the same window; **Ctrl+]** closes it and returns |
 | **r**, **w** | The MESSAGES popup; this repository's open work |

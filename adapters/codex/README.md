@@ -21,9 +21,9 @@ capability/stage contract. It does not explicitly read the full adapter
 target project's `AGENTS.md`; no verified per-worker disable switch is claimed,
 so this is prompt isolation with a documented physical-masking fallback.
 
-Registered-headless child attempts are exact-parent bound across both Codex and
-Claude Code. Codex liveness/harvest normalize Codex `turn.completed` and Claude
-stream-json `result` envelopes, while parent-death reconciliation uses only
+Registered-headless child attempts are exact-parent bound across Codex, Claude
+Code and OpenCode. Codex liveness/harvest normalize Codex `turn.completed`, Claude
+stream-json `result` and OpenCode terminal envelopes, while parent-death reconciliation uses only
 sealed attempt and PID/start/PGID evidence; runtime-native subagents are a
 separate surface.
 
@@ -69,7 +69,7 @@ uninstall removes only it.
 
 The always-loaded `adapters/codex/AGENTS.md` keeps purpose, judgment, where
 to look, and the instruction to follow the next action the runtime prints.
-The command detail it used to carry lives here; command output stays
+The command detail lives here; command output stays
 authoritative for current support.
 
 If the memory prompt hook is unavailable, record `recall` or `skip` with
@@ -132,7 +132,7 @@ Check `preflight.sh headless [--check] [--require-hook-trust] <worktree>`.
 `preflight.sh dispatch --dry-run|--register|--start [--require-hook-trust]`
 runs the raw wrapper; the route commands reach it with the sealed tuple.
 A direct interactive launch selects completion by the parent runtime: a Codex
-parent uses its native queue and a Claude parent uses Claude resume. Native
+parent uses its native queue, a Claude parent uses Claude resume and an OpenCode parent the `opencode-turn` carrier. Native
 queue delivery does not force Stop/PreToolUse trust. Keep the parent
 conversational; a wait is never an in-model `sleep`/liveness loop.
 `--allow-unmanaged-parent-poll` stays operator-only. Legacy stamped Stop state
@@ -399,8 +399,6 @@ entrypoints are represented by Codex-native Skills and the installable
 
 ## Native Hook Projection
 
-Write-denying hook gates are retired; no write preflight or core-read marker is required.
-
 Fleet reads structured rollout question evidence. Blocking `request_user_input`
 calls remain pending until their matching output or turn boundary. Async
 `request_user_input_async` calls retain only call/turn identity, time and
@@ -515,7 +513,7 @@ Claude Code-specific files remain valid as implementation references, not as Cod
 When porting a behavior, copy the underlying invariant from `CORE.md`, `WORKFLOW.md`, `CONVENTIONS.md`, or `OPERATIONS.md`; then map it to Codex's tool, approval, and session model.
 # Material-route boundary
 
-Hook write gates are retired except the two kept core write gates and the route presence gate (`core/HOOKS.md`). Spec-read observations, design checks, memory and session signals remain available.
+Hook write gates: the two core write gates and the route presence gate (`core/HOOKS.md`). Spec-read observations, design checks, memory and session signals remain available.
 
 Resource-runner startup requires a sealed route, exact detached resource node,
 and smoke attestation before launch state or a child process exists. Installing

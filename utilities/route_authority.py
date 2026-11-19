@@ -26,6 +26,7 @@ from typing import Mapping, NamedTuple
 
 from dispatch_attempt_policy import committed_outcome, readable_result, verdict_pass
 import review_round_cap as _ROUND
+from route_form import serial_attempt_route
 from session_identity import identity as session_identity, session_label
 
 
@@ -1430,7 +1431,7 @@ def depth1_supported_harnesses(route, *, worker_type: str | None) -> set[str]:
     if not isinstance(route, dict):
         return set()
     route = route_in_force(route)
-    if route.get("effective_intensity") == "quick" or route.get("registered_headless_candidates") is not None:
+    if serial_attempt_route(route) or route.get("registered_headless_candidates") is not None:
         rows, fields = route.get("registered_headless_candidates") or [], ("harness",)
     else:
         rows = (route.get("dispatch_evidence") or {}).get("tuples") or []
