@@ -382,6 +382,16 @@ class ClosedCampaignOneReadTest(ClosedCampaignFixture):
 class ClosedCampaignCommandsFinishTest(ClosedCampaignFixture):
     """`campaign-close` and `campaign-reopen` look the root over first, so they finish a half-moved cycle."""
 
+    def test_move_refuses_as_before_when_the_look_cannot_finish(self):
+        self.reported_state("v1", False)
+        with mock.patch.object(OPS, "reconcile_root", return_value={"status": "skipped", "reason": "CampaignError"}):
+            with self.assertRaises((P.ProducerError, LOC.LocatorError)):
+                P.cycle_move(self.root, self.cycle_id, campaign=self.new_id)
+        self.assertEqual(P.read_cycle_record(self.root, self.cycle_id)["campaign_id"], self.old_id)  # nothing was changed
+        under_new = [LOC.read_cycle_binding(child) for child in self.campaign_json(self.new_id).parent.iterdir()
+                     if child.is_dir()]
+        self.assertIn(self.cycle_id, [binding["cycle_id"] for binding in under_new if binding])  # the folder stayed
+
     def test_campaign_close_finishes_the_half_moved_cycle(self):
         self.reported_state("v1", False)
         C.close(self.root, self.new_id, reason="done")
