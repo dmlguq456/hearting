@@ -332,9 +332,13 @@ When the direction is clear, open `--shape solo|staged` (below); otherwise use
 frame chooses the capability, stages, and solo or staged shape, judging each
 leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first; an
 omitted shape follows it. Direct has no review-worker path of its own: work that
-needs an independent review is not direct (omit `--shape`, or `staged`), and a
-light check of a direct change may use the harness's own native subagent
-(decision 2026-11-03).
+needs an independent review is not direct. Open it with `--shape solo --intensity standard`
+(one session and one independent review, where the kind declares a one-shot review;
+the owner starts the route's declared review node with the command its task gives, and
+cannot close that review itself), or omit `--shape` and let the frame choose, or use
+`staged` when the size of the work calls for stages (`staged` is chosen for size, not to
+obtain a review). A light check of a direct change may use the harness's own native
+subagent (decision 2026-11-03).
 
 | Main decision | Command | Result |
 |---|---|---|

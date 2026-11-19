@@ -121,13 +121,17 @@ created: {YYYY-MM-DD}
      `core/WORKFLOW.md §0.2.1`, including a small feature or fix with its source,
      regression tests and README. The owner session makes and checks it itself;
      file and verb counts do not split the unit.
-   - `one-pass` → `solo`: bounded work already assigned to one worker, or
-     several independent outcomes it can finish and check in one pass, with
-     no shared contract to settle first. Related files alone do not turn
-     `one-change` into `one-pass`.
-   - `multi-stage` → `staged`: the change needs its own plan check and
-     independent review — shared contracts or specs, several modules or
-     adapters, a migration, or a direction that can still bend.
+   - `one-pass` → `solo`: work one session can make and check — bounded work
+     already assigned to one worker, or several independent outcomes it can
+     finish and check in one pass. Related files alone do not turn
+     `one-change` into `one-pass`. A shared contract or a second reader's
+     review raises the `intensity` to `standard`, not the shape: a `solo` leg
+     at `standard` gets one independent review in the same route where its kind
+     declares one (code does).
+   - `multi-stage` → `staged`: the work does not fit one session — separable
+     durable stages, several modules or adapters, a migration, or a direction
+     that can still bend. Choose it for the size of the work, never to obtain
+     a review.
    A staged leg for one-pass work adds stages, review rounds and cost without
    catching more. Omit `shape` and it follows `size`; a different `shape` is
    kept and the difference is shown to the person.
@@ -168,7 +172,7 @@ created: {YYYY-MM-DD}
          size: multi-stage       # one-change | one-pass | multi-stage, judged before the shape
          shape: staged           # direct | solo | staged; omitted, it follows size
          graph: [eval-run, metrics, report]   # staged only; stage ids or capability:stage[:unit] from the catalogue; never a frame stage
-         intensity: standard     # optional; direct fixes direct, solo fixes quick, and staged allows standard+
+         intensity: standard     # optional; direct fixes direct, solo allows quick or (where its kind declares a one-shot review) standard, and staged allows standard+
          cwd: /path/to/task-repository  # optional: existing checkout or requested new repository; relative to the frame's cwd
          why: "one sentence"
          done_when:              # optional, 1-5: what shows this leg is finished (a sentence or {text, check})

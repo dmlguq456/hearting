@@ -5265,7 +5265,10 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         # already settled history.
         if job.afterglow:
             continue
-        if job.intensity != "quick" or not job.route_id or not job.route_node:
+        # A serial owner row: a quick route's rows, and the owner of any route that makes its work itself
+        # (the node `one-shot`; the middle cell `solo·standard` is one). Its depth-2 review is not held to this shape.
+        serial_owner = job.worker_type == "owner" and job.route_node == "one-shot"
+        if not (job.intensity == "quick" or serial_owner) or not job.route_id or not job.route_node:
             continue
         key = (job.route_id, job.route_node)
         quick_groups.setdefault(key, []).append(job)

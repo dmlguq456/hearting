@@ -1289,7 +1289,12 @@ def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
                 completed = dispatch_stage_advance.completed_nodes(Path(jobs), route["route_id"])
                 started = dispatch_stage_advance.started_nodes(Path(jobs), route["route_id"], route["route_hash"])
                 for node in dispatch_stage_advance.runnable_successors(route, completed, started):
-                    if worker_bootstrap._dispatchable_stage(node):
+                    from route_form import one_shot_review_route
+                    if one_shot_review_route(route) and node.get("id") == "one-shot":
+                        # The middle cell: the review is done; the owner's end is its own final handoff.
+                        lines.append("Next ready: nothing to start; the independent review has finished. "
+                                     "Act on its verdict as your task describes, then return your final handoff.")
+                    elif worker_bootstrap._dispatchable_stage(node):
                         lines.append("Next ready: " + worker_bootstrap.route_start_command(route_file, node["id"]))
                     else:
                         lines.append(f"Next ready: run {node['id']} yourself (per your Route steps).")

@@ -335,6 +335,19 @@
         "max_dispatch_depth": 1,
         "model_profile": "balanced-deep"
       },
+      "one_shot_review": {
+        "node": "impl-review",
+        "inputs": [
+          "source-diff"
+        ],
+        "fallback_hops": [
+          "same-harness-headless",
+          "cross-harness-headless",
+          "native-subagent"
+        ],
+        "model_profile": "deep",
+        "owner_model_profile": "balanced"
+      },
       "standard_plus": {
         "topology": "staged",
         "nodes": [

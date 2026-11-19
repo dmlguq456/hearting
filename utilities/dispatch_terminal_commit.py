@@ -24,7 +24,7 @@ import artifact_lifecycle
 import route_identity
 import route_lineage
 from route_plan import is_depth0_leg
-from route_form import serial_attempt_route
+from route_form import one_shot_review_node, serial_attempt_route
 import dispatch_contract
 import dispatch_lock_order
 from dispatch_attempt_policy import verdict_pass
@@ -2227,7 +2227,7 @@ def owner_workflow_continuation(jobs, owner_attempt_id, route_file):
         "gates": {node: {"passed": False, "reason": reason} for node, reason in missing.items()}})
     if choice.allowed:
         return None
-    return (
+    text = (
         "[workflow-completion-pending]\n"
         "Your report is preserved, but the selected route still lacks completion evidence: "
         + json.dumps(missing, ensure_ascii=False, sort_keys=True)
@@ -2237,6 +2237,16 @@ def owner_workflow_continuation(jobs, owner_attempt_id, route_file):
         "Return the final handoff after the declared stages finish. If execution cannot proceed, "
         "report the actual blocker and retained report instead of PASS. Runtime settlement owns close/finalize."
     )
+    review = one_shot_review_node(route)
+    if review is not None and review["id"] in missing:
+        # The middle cell: the owner skipped (or never finished) the review it makes the work for. It cannot
+        # close that review itself, so the exact start command is the way forward.
+        import worker_bootstrap
+        text += ("\nYour route's independent review has not run. Commit your work, then start it with exactly: "
+                 f"`{worker_bootstrap.route_start_command(route_file, review['id'], jobs=jobs)}` and yield "
+                 "runtime_wait: registered-children. You cannot review your own work or close this review "
+                 "inline; do not report PASS without it.")
+    return text
 
 
 def _historical_request(jobs, status, metadata, *, selected_registry_rows=None, observer=None):

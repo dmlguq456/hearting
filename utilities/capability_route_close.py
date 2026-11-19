@@ -105,6 +105,16 @@ def terminal_gate_observation(route, *, jobs=None, exact_terminal=False, registr
             rows[node_id]=_marker_identity_row(route,node,node_id,node.get("terminal_gate"), jobs=jobs,
                                               exact_terminal=exact_terminal,
                                               registry_lines=registry_lines)
+            if (rows[node_id].get("passed") and owner_executed_terminal(node)
+                    and ROUTE_FORM.one_shot_review_route(route)):
+                # The middle cell's owner marker (a harness that writes one at the owner's end) does not
+                # stand in for the review its end waits on: the owner made the work, it cannot also pass it.
+                try:
+                    missing=owner_terminal_prerequisites(route,node,jobs,registry_lines=registry_lines)
+                except (OSError,ValueError,KeyError,TypeError):
+                    missing={"review":"owner-prerequisite-unreadable"}
+                if missing:
+                    rows[node_id]={"passed":False,"reason":"owner-prerequisite-unproven:"+json.dumps(missing,sort_keys=True)}
     for group_id,error in sorted(owner_merge_auxiliary_groups(route).items()):
         key=f"parallel_group:{group_id}"
         row=_arbitration_observation(route,group_id,error)
