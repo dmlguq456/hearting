@@ -440,24 +440,30 @@ class NamedBlockers(Sealed):
         self.assertIsNone(P.read_cycle_record(self.root, member["cycle_id"]).get("deleted_at"))
 
     def test_a_folder_that_cannot_be_opened_is_unreadable_not_a_folder_without_a_campaign(self):
-        if os.geteuid() == 0:
-            self.skipTest("a superuser opens it")
         self.vanished()
         locked = self.root / "campaigns" / "locked"
         locked.mkdir()
         (locked / "campaign.json").write_text("{}")
         os.chmod(locked, 0)
         self.addCleanup(os.chmod, locked, 0o755)
+        if os.access(locked, os.R_OK | os.X_OK):
+            self.skipTest("this user opens a folder whatever its mode")
         self.assertIn((self.rel(locked), "unreadable"), self.blockers())
         self.assertIn(self.rel(locked) + " (unreadable)", self.detail())
 
     def test_a_folder_inside_the_campaign_that_cannot_be_read_is_a_refusal_not_an_exception(self):
-        if os.geteuid() == 0:
-            self.skipTest("a superuser opens it")
         locked = self.path.parent / "locked-inside"
         locked.mkdir()
         os.chmod(locked, 0)
         self.addCleanup(os.chmod, locked, 0o755)
+        if os.access(locked, os.R_OK | os.X_OK):
+            self.skipTest("this user opens a folder whatever its mode")
+        try:
+            (locked / ".cycle.json").exists()
+        except PermissionError:
+            pass
+        else:
+            self.skipTest("this Python's Path.exists hides a permission error, so the folder is not read as a cycle at all")
         status = C.status(self.root, self.path)
         self.assertFalse(status["closable"], status)
         self.assertEqual(status["close_refusal"]["reason"], "campaign-directory-unreadable")
