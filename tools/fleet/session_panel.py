@@ -804,6 +804,8 @@ def usage_rows(harness, values):
 # 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): a host sample older than this is
 # not drawn (the producer takes a new one at most once a minute, and only while a side panel draws it: `human_wait_state.RESOURCE_SAMPLE_S`).
 RESOURCES_MAX_AGE = 150.0
+# The widths of the memory gauge a GPU's group may take (11-19): the panel picks one of these, 4 to 10 cells.
+GAUGE_MIN, GAUGE_MAX = 4, 10
 
 
 def resource_rows(value, now):
@@ -812,10 +814,23 @@ def resource_rows(value, now):
     none where it does not know them). A GPU a process runs on has its percent in its level's color; one nothing runs on is
     shown the same way with the sample's own values, all of it ``dim`` and with no session numbers (11-19, the person: "빈 GPU도
     일관성있게 표시해줘. 그냥 0% 0/48GB 이런식으로 해놔. 컬러만 좀 어둡게 하면 되잖아. 0%에"). Fleet's host sample as the shared
-    producer kept it; nothing is read here. A sample older than ``RESOURCES_MAX_AGE`` gives no rows."""
+    producer kept it; nothing is read here. A sample older than ``RESOURCES_MAX_AGE`` gives no rows.
+
+    11-19 (the person, on v4.59.6's panel: "가로로 길어지면 RESOURCE에 게이지도 넣어주면 좋고"): each GPU also carries its memory
+    gauge drawn at every width the panel may give it (``gauge4`` … ``gauge10``, the keys the panel picks one of; it never draws a
+    fill of its own). It is Fleet's VRAM gauge: the fill is ``_gauge_segs`` over the memory ratio and the fill's color
+    ``_resource_level_key(ratio, True)``, so it reads the same as Fleet's ``VRAM ━━━━━─ 21/24GB``. A GPU nothing runs on has all of
+    it ``dim``; an unknown memory is Fleet's unknown gauge (the empty track, ``dim``) at the same width."""
     if not isinstance(value, dict) or not isinstance(value.get("observed_at"), (int, float)) or now - value["observed_at"] > RESOURCES_MAX_AGE:
         return []
+    from .render_gpu import _gauge_segs, _resource_level_key
     percent = lambda x: "%d%%" % round(x)  # noqa: E731
+
+    def vram_gauge(used, total, busy, cells):
+        ratio = 100.0 * used / total if used is not None and total else None
+        key = _resource_level_key(ratio, True) if busy else "dim"
+        (filled, _), (empty, _) = _gauge_segs(ratio, cells, track=cells)
+        return [part for part in ((filled, key), (empty, "dim")) if part[0]]
     rows = []
     for host in value.get("hosts") or ():
         gpus = []
@@ -824,8 +839,10 @@ def resource_rows(value, now):
             util, used, total = gpu["util"], gpu["used"], gpu["total"]
             row = {"label": [("GPU%d" % gpu["i"], "dim")]}
             if util is not None:
-                # 11-18: no gauge (the section is laid out side by side); the use is its number, in its level's color.
+                # 11-18: the use is its number, in its level's color (the gauge, 11-19, is the memory's).
                 row["pct"] = [(percent(util), _level(util) if busy else "dim")]
+            for cells in range(GAUGE_MIN, GAUGE_MAX + 1):
+                row["gauge%d" % cells] = vram_gauge(used, total, busy, cells)
             if used is not None and total:
                 row["mem"] = [("%d/%dG" % (round(used), round(total)), "dim")]
             users = [("[" + str(tag).strip("[]") + "]", "loc_repo") for tag in gpu["users"]] if busy else []

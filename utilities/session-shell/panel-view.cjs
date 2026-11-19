@@ -1823,13 +1823,20 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // "RESOURCE는 세로로 차지하는 공간이 너무 많은데, 이걸 게이지는 없애자 그리고 가로로 나열이 가능하면 가로로 나열을 좀 하자"): RESOURCES stands
     // right above USAGE. One row for each host: its name and `CPU 34%  MEM 61%`. Under it every GPU of the host in its number's order, side by
     // side (`GPU0  93% 21/24G [3b]  GPU1  40% 10/48G`, `GPU2   0%  0/48G` under them: the grid below), onto the next row where they do not fit; one GPU's group is never split
-    // between rows. No gauge: the use is its number, in the level's color. 11-19 (the person: "빈 GPU도 일관성있게 표시해줘. 그냥 0% 0/48GB
+    // between rows. The use is its number, in the level's color. 11-19 (the person: "빈 GPU도 일관성있게 표시해줘. 그냥 0% 0/48GB
     // 이런식으로 해놔. 컬러만 좀 어둡게 하면 되잖아. 0%에"): a GPU nothing runs on has the same group with the sample's own values and no session
     // number, all of it `dim` (the producer paints it so; the host row no longer counts them). The values are the sample the shared producer
     // already took. Short of cells on a host row the values go in this order: MEM, then CPU, then the name is cut with `…` (12 cells at least);
     // short of cells for one GPU's group the memory goes first, then the use, and the session's number stays (who holds the GPU is what the
     // section is for). Short of rows it gives way before everything else: the GPU rows (from the last), the host rows (from the last; the name
     // row goes with the last of them), so USAGE and the sections above it stand as they did without it.
+    // 11-19 (the person, on v4.59.6's panel: "가로로 길어지면 RESOURCE에 게이지도 넣어주면 좋고"): where the width allows, a GPU's group has a
+    // memory gauge (Fleet's VRAM gauge: `GPU0  93% ━━━━━━━━─ 21/24G [3b]`) right before its memory number. The rows come first (the person,
+    // 11-18: the section took too many), so the gauge is only what the width has left over: it stands only when the rows are as many as
+    // without it and it has 4 cells at least, in the widest width (up to 10) the section has room for, the same for every group. The
+    // groups may then stand fewer to a row where that keeps the rows as many (a host of two GPUs on a width for three). The backend draws
+    // the gauge at each width (`gauge4` … `gauge10`, the fill and the color are its); the panel only picks one. Not in the forms without
+    // the memory, and not on the host rows.
     const resourceData=Array.isArray(model.resources)?model.resources.filter(h=>h&&typeof h==='object'&&Array.isArray(h.host)).slice(0,8):[];
     let resHosts=resourceData.length,resGpus=Infinity;
     // 11-19 (the person: "그리고 GPU 표시를 행과 열 간격을 맞춰."): one grid for the whole section, from every host's values. The host rows: the name
@@ -1862,7 +1869,22 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const parts=f=>[w.label&&'label',f<=1&&w.pct&&'pct',f===0&&w.mem&&'mem',f<=2&&w.users&&'users'].filter(Boolean);
       const full=f=>parts(f).reduce((n,k)=>n+(n?1:0)+w[k],0);
       let form=0;while(form<3&&2+full(form)>inner)form++;
-      return {hosts,nameW,cols,kept,w,form,parts:parts(form),perRow:Math.max(1,Math.floor(inner/(full(form)+2)))};
+      const perRow=Math.max(1,Math.floor(inner/(full(form)+2)));
+      // The gauge: only in the whole form (the memory is there), and only if every GPU has its widths drawn. Of the groups-to-a-row `k` (at most the
+      // section's now) that keep the rows as many, the one that gives the gauge the most; none with 4 cells, no gauge (the rows as they were).
+      let gauge=0,across=perRow;
+      const drawn=cells.length&&w.mem&&resourceData.every(h=>painted(h.gpus).every(g=>painted(g.gauge4).length));
+      if(form===0&&drawn){
+        const counts=resourceData.map(h=>painted(h.gpus).length),rowsAt=k=>counts.reduce((n,c)=>n+Math.ceil(c/k),0),rows0=rowsAt(perRow);
+        for(let k=perRow;k>=1;k--){
+          if(rowsAt(k)!==rows0)break;
+          const room=Math.min(10,Math.floor(inner/k)-2-full(0)-1);
+          if(room>=4&&room>gauge){gauge=room;across=k;}
+        }
+      }
+      if(gauge){w.gauge=gauge;}
+      const order=gauge?['label','pct','gauge','mem','users'].filter(k=>w[k]):parts(form);
+      return {hosts,nameW,cols,kept,w,form,gauge,parts:order,perRow:across};
     })();
     const resourceHostRow=h=>{
       const at=resourceData.indexOf(h),{name,stats}=grid.hosts[at];
@@ -1876,11 +1898,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     // One GPU's group: the same columns for every GPU (see above); `end` leaves a group last on its row without its trailing blanks.
     const resourceGpuGroup=(g,end)=>{
-      const c={label:painted(g.label),pct:painted(g.pct),mem:painted(g.mem),users:painted(g.users)},{w}=grid;
+      const c={label:painted(g.label),pct:painted(g.pct),mem:painted(g.mem),users:painted(g.users),gauge:grid.gauge?painted(g['gauge'+grid.gauge]):[]},{w}=grid;
       const out=[];
       for(const k of grid.parts){
         if(out.length)out.push(text(' '));
-        out.push(...(k==='label'||k==='users'?leftIn(c[k],w[k]):rightIn(c[k],w[k])));
+        out.push(...(k==='label'||k==='users'||k==='gauge'?leftIn(c[k],w[k]):rightIn(c[k],w[k])));
       }
       return end?trimEnd(out):out;
     };
