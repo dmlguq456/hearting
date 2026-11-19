@@ -1,9 +1,9 @@
 # Unit-Def Schema (canonical authoring contract)
 
 > A **unit** is the single declaration of one dispatchable behavior atom — the SoT that
-> replaces both the `roles/modes/*` / `adapters/*/agent-modes/*` persona double-copy and
-> the runtime team agents. Units are dispatched as dispatch-depth-2 nodes; they are never native
-> team subagents. `family:` is a grouping label only.
+> replaces the `roles/modes/*` / `adapters/*/agent-modes/*` persona double-copy. Units run as
+> route nodes — a stage at dispatch depth 2, or the one leg of a unit route at depth 1; a sealed
+> fallback may run a node on a runtime-native subagent. `family:` is a grouping label only.
 
 ## File layout
 

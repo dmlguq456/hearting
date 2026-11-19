@@ -27,7 +27,7 @@ and native completion remains separate from process liveness.
 
 The always-loaded `adapters/claude/CLAUDE.md` keeps purpose, judgment, where
 to look, and the instruction to follow the next action the runtime prints.
-Detail it used to carry lives here and in the core sections it names.
+Detail lives here and in the core sections it names.
 
 - Claude hooks realize portable invariants for workflow signals, spec-read
   observations, memory, and design checks. Main-session memory lifecycle does
@@ -115,7 +115,7 @@ The Claude Code adapter maps portable roles from `core/CONVENTIONS.md §2` to co
 | `deep orchestrator` | `opus` xhigh | Stage gates, failover, and evidence judgment for standard+ dispatch-depth-1 ownership |
 | `fast implementer` | `sonnet` | Routine implementation and refactoring; escalate complex API/library design |
 | `orchestrator` | `sonnet` medium | Balanced mechanical coordination of decided calls, paths, and states |
-| `external adversary` | Codex CLI via `codex-review-team` | Independent hostile review for the `adversarial` intensity pass. The same Codex engine may host a neutral cross-harness parallel leg, but that is a reviewer role, not this hostile role. |
+| `external adversary` | a different reviewer, engine or harness, proven by the adapter (`CONVENTIONS §1`) | Independent hostile review for the `adversarial` intensity pass. The same Codex engine may host a neutral cross-harness parallel leg, but that is a reviewer role, not this hostile role. |
 | `external adversary orchestrator` | `sonnet` wrapper | Invoke and summarize the external engine rather than perform the review |
 
 Route-bound registered work uses a second, independent execution-budget axis:

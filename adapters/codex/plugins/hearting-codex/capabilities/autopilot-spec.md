@@ -36,10 +36,7 @@ Adapters may expose this capability through native commands, skill files, prompt
 
 **One gate, raised from the frame legs (SD-123/SD-129).** A `quick+` route seals `human_gates: ["frame-review"]` and both
 `frame` and `frame-alternative` continuations as that human gate, bound at
-`one-shot`'s entry for `quick` and `research`'s entry for `standard+`. `frame-review` is the recipe's only human gate: the old
-`intent-confirmation` declaration is retired, because no node ever raised it
-and no command in the harness could release it — the intent question it named
-is exactly what the frame interview now asks. A route sealed before this cycle
+`one-shot`'s entry for `quick` and `research`'s entry for `standard+`. `frame-review` is the recipe's only human gate; the intent question is what the frame interview asks. A route sealed before this cycle
 keeps its own generation's gate name, binding and node shape and is **never
 retro-fitted** — the entry fence in `utilities/dispatch_contract.py` reads
 only the route object it was handed.
