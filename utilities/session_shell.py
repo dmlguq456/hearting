@@ -1418,7 +1418,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["peers"] = peer_groups((view.get("session_peers") or {}).get(harness + "\0" + read_sid), tag, harness)
     # 11-18: the RESOURCES section (the compute hosts' CPU, memory and GPU use and the numbers of the sessions that hold a GPU): the
     # sample the shared producer already took, in the cache read above (no read of its own).
-    panel["resources"] = [{"host": styled(row["host"]), "stats": [styled(item) for item in row["stats"]], "idle": row["idle"],
+    panel["resources"] = [{"host": styled(row["host"]), "stats": [styled(item) for item in row["stats"]],
                            "gpus": [{name: styled(parts) for name, parts in gpu.items()} for gpu in row["gpus"]]}
                           for row in resource_rows(view.get("resources"), time.time())]
     for request in panel["requests"]:
