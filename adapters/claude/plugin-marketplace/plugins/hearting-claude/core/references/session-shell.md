@@ -440,9 +440,10 @@ v4.36.4 drew it (restored 11-15: the person had asked for the routes to open a
 popup, not for the box to go), its title in its top line (`╭─ 2 ROUTE ─╮`,
 under the native area `route 2`; 11-17: the title counts the routes alone, `ROUTE` where only requests
 stand, and the `PEER REQUEST` word is gone from it, the requests being a zone of the box, below). Nothing opens in place: a press on a
-head or on any row of its section opens its popup (any row of a route, its workers'
-box too, the routes popup with that route unfolded; the box's top line the routes
-popup; a request row the MESSAGES popup).
+head or on any row of its section opens its popup (11-19, the person: "라우트를 눌렀을때 fleet에서 처럼 스테이지별 단계가
+시각화되었으면 한다": any row of a route, its workers' box too, that route's page, Fleet's stage boxes; until its own
+reading comes, the stage boxes the panel's values already draw, and a route with no stage line its panel box; the
+box's top line the routes popup, the table; a request row the MESSAGES popup).
 
 - QUESTIONS (11-16, the person: "질문은 이전처럼 그냥 붉은색 블록으로 감싸는게 모양은 제일 나아" / "붉은 바운더리
   말이야"): one thin rounded box like the route box's (v4.33.1's question box, restored: no ground is painted), its
@@ -1033,8 +1034,8 @@ past the host's 60 KB leaves its oldest rows off at a group's start (a date, a d
 its first row (`… 이전 N줄`, dim). ↑↓ move the row stood on (the chosen tint, reversed where there is no hue), PgUp/PgDn a page of rows;
 Enter on a prompt or NOW row reads that part of the conversation in the popup (`timeline.passage`, drawn as the
 harness draws it; a part that cannot be read is one dim line in words from the layer's reason) and Enter again is
-back on that row (keys `Enter 목록으로 돌아가기`); on a route, question or message row Enter opens that
-section's popup (the route unfolded). No key or press goes to the native window and the window never
+back on that row (keys `Enter 목록으로 돌아가기`); on a route row Enter opens that route's page (11-19), on a
+question or message row that section's popup. No key or press goes to the native window and the window never
 moves. Keys row: `↑↓ · Enter 그 대목 읽기 · ←→ 구획 · …`. The folded strip and a window too small for the panel's NOW row
 reach it as every popup is reached: `Ctrl+]`, then ←→.
 The question popup answers this session's own questions; another session's wait is answered in
