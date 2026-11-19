@@ -209,7 +209,7 @@ created: {YYYY-MM-DD}
          hands_over: [reports/latency.md]                   # optional: what the next leg reads
          parallel: [...]                                    # optional: slices the owner may use to assign workers or permitted sub-sessions; not compiled as nodes
          extra_stages: [{id, unit, after, verify}]          # optional: compiled as node plan-<id> after `after`, shaped on a catalogue check/measurement stage of that unit (never one that edits source)
-     execution_scope: complete   # optional: complete (default: the legs run through to the end) | report (stop after the first leg; the next leg waits for the person's word)
+     execution_scope: complete   # optional: complete (default: the legs run through to the end) | report (stop after each leg; the next leg starts only on the person's word)
    ```
 
    When a later leg must wait for the person's approval of an earlier leg's

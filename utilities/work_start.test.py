@@ -1947,6 +1947,26 @@ class WorkStartTest(unittest.TestCase):
                                     run=None, sleep=None, clock=None)
         self.assertNotIn("shared_publication", quiet["plan_advanced"])
 
+    def test_a_report_plan_stops_after_every_leg_and_a_complete_plan_goes_on_to_the_last(self):
+        # Three legs: the choice is read from the one decision record each time a leg finishes.
+        route = {"route_id": "rt-leg", "artifact_root": self.tmp.name, "route_plan": {"index": 0}}
+        for scope, starts in (("report", 0), ("complete", 1)):
+            for index in (0, 1):
+                with self.subTest(scope=scope, finished_leg=index):
+                    finished = {"state": "completed", "next_leg": {"index": index + 1}}
+                    record = {"record": {"decision": {"approvals": {"execution_scope": scope}}}}
+                    with mock.patch.object(W.RP, "validate_sealed", return_value={"decision": "d.json", "index": index}), \
+                         mock.patch.object(W.RP, "read_route_plan", return_value=record), \
+                         mock.patch.object(W, "_plan_leg", return_value=({"route_id": "rt-next"}, Path("next.json"))) as leg, \
+                         mock.patch.object(W, "start_work", return_value={"state": "running"}) as started:
+                        advanced = W._advance_plan(route, self.jobs, finished, run=None, sleep=None, clock=None)
+                    self.assertEqual(started.call_count, starts)
+                    self.assertEqual(leg.call_count, starts)
+                    if starts:
+                        leg.assert_called_once_with(route, self.jobs, index + 1)
+                    else:
+                        self.assertEqual(advanced, finished)
+
     def test_closed_runtime_owner_with_unpublishable_spec_completes_and_reports_the_gap(self):
         import artifact_producer
         import dispatch_terminal_commit as terminal
@@ -2686,13 +2706,14 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.assertEqual(self.calls, ["gate", "release"])
         self.assertEqual(self.step(answers=real)["state"], "released")
         self.assertEqual(self.calls, ["gate", "release"])
-    def routed(self, *, approve=0, route_choice=0):
+    def routed(self, *, approve=0, route_choice=0, legs=1, scope=None):
         """An interview that maps its one route question to a proposal with a start approval."""
         import frame_interview as FI
         leg = {"capability": "autopilot-lab", "mode": "setup", "shape": "staged",
                "graph": ["scaffold", "smoke", "full-run", "run-verify", "handoff"]}
-        proposal = {"summary": "Set the experiment up and run it", "legs": [leg],
-                    "entry_approvals": [{"key": "full-run", "leg": 0, "question": "run-ok"}]}
+        proposal = {"summary": "Set the experiment up and run it", "legs": [leg] * legs,
+                    "entry_approvals": [{"key": "full-run", "leg": 0, "question": "run-ok"}],
+                    **({"execution_scope": scope} if scope else {})}
         ask = lambda qid, text, labels: {"id": qid, "topic": qid, "question": text, "kind": "yes-no", "recommended": 0,
                                          "options": [{"label": label, "means": label, **({"approves": True} if at == 0 else {})}
                                                      for at, label in enumerate(labels)],
@@ -3113,6 +3134,31 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
                 self.assertEqual(self.resolution()["actor_kind"], "user")
                 self.assertEqual(self.calls, ["gate", "release"])
 
+    def test_the_scope_line_on_a_multi_leg_route_card_leaves_the_answer_and_its_bytes_alone(self):
+        # The line is read from the proposal when a card is shown; the answer is still the option's
+        # label, so a board answer and a conversation answer record the same bytes either way.
+        for scope in ("complete", "report"):
+            with self.subTest(scope):
+                self.setUp()
+                question, answer = self.routed(legs=3, scope=scope)
+                self.step(interview=self.question_file, answers=answer)                  # in conversation
+                talked = self.frame_files()
+                self.assertTrue(all(talked.values()), talked)
+                rows = [line for line in talked["intent.md"].decode().split("\n") if line.startswith("- Leg ")]
+                self.assertEqual(len(rows), 3)
+                self.assertTrue(rows[2].endswith("(waits for the person's word)" if scope == "report" else
+                                                 "(starts when the leg before it ends, without asking again)"))
+                self.setUp()
+                question, answer = self.routed(legs=3, scope=scope)
+                self.board_answered(answer)
+                self.assertEqual(self.step()["state"], "released")
+                self.assertEqual(self.frame_files(), talked)
+                recorded = self.resolution()["answers"]["answers"]["go"]
+                self.assertEqual(recorded, {"choice": 0, "note": ""})
+                import frame_interview as FI
+                self.assertEqual(FI.route_choice(question, json.loads(answer.read_text()))["label"],
+                                 question["questions"][0]["options"][0]["label"])
+
     def test_the_plain_start_that_fills_the_intent_is_repeatable_without_rewriting(self):
         self.board_answered(self.answers())
         first = self.step()
@@ -3163,6 +3209,58 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
                 self.assertEqual(self.calls.count("release"), 1)
                 self.assertEqual(self.step(), result)
 
+    def crash_at(self, point, **kwargs):
+        # The question is already on the board (gate raised); a reply then stops at `point`.
+        self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
+        def stop(name):
+            if name == point:
+                raise RuntimeError("crash at " + name)
+        W.FAULT_HOOK = stop
+        self.addCleanup(setattr, W, "FAULT_HOOK", None)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "crash at " + point):
+                self.step(**kwargs)
+        finally:
+            W.FAULT_HOOK = None
+
+    def assert_still_asking(self, result):
+        self.assertEqual(result["state"], "needs-question", result)
+        self.assertEqual(self.resolution()["status"], "blocked")
+        self.assertEqual(self.calls.count("release"), 0)
+        for name in ("round-1/intent.md", "intent.md"):
+            self.assertFalse((self.output / "shards/frame" / name).exists(), name)
+
+    def test_a_saved_answer_of_another_decision_is_not_released_as_proceed_by_a_plain_start(self):
+        # `--answers <file> --decision revise|stop` saved the answer and stopped before its release;
+        # the person said "change it" / "stop", and a plain start (decision defaults to proceed) must
+        # not turn that saved file into a `proceed`.
+        for decision in ("revise", "stop"):
+            with self.subTest(decision):
+                self.setUp()
+                self.crash_at("after-answer-save", answers=self.answers(), decision=decision)
+                self.assertTrue((self.output / "shards/frame/round-1/answers.json").is_file())
+                self.assert_still_asking(self.step())
+
+    def test_a_proceed_answer_saved_before_its_intent_is_asked_again_as_before(self):
+        self.crash_at("after-answer-save", answers=self.answers())
+        self.assertTrue((self.output / "shards/frame/round-1/answers.json").is_file())
+        self.assert_still_asking(self.step())
+
+    def test_a_failed_release_of_another_decision_does_not_become_proceed_on_the_plain_start(self):
+        original = self.run_command
+        def fail(argv, **kwargs):
+            if argv[2] == "release":
+                return subprocess.CompletedProcess(argv, 70, "", "release failed")
+            return original(argv, **kwargs)
+        for decision in ("revise", "stop"):
+            with self.subTest(decision):
+                self.setUp()
+                with self.assertRaisesRegex(ValueError, "frame-release-pending"):
+                    W.frame_interview_step(self.route, self.path, self.jobs, interview=self.question_file,
+                                           answers=self.answers(), decision=decision, run=fail)
+                self.assertEqual(self.resolution()["status"], "blocked")
+                self.assert_still_asking(self.step())
+
     def test_only_a_proceed_with_its_answer_and_no_intent_is_released_without_intent(self):
         self.assertFalse(W.released_without_intent(self.route, self.jobs))            # nothing raised
         self.step(interview=self.question_file)
@@ -3185,6 +3283,22 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.assertEqual(self.step()["state"], "released")                          # kept as it is
         self.assertEqual((self.output / "shards/frame/intent.md").read_bytes(), before)
         self.assertFalse((self.output / "shards/frame/round-1/intent.md").exists())
+
+    def test_a_released_gate_whose_recorded_question_cannot_be_read_is_left_as_it_was(self):
+        # A cycle folder moved or removed after the release: nothing is left to fill, so the start
+        # passes the released gate exactly as it did before the fill existed.
+        for how in ("moved", "removed"):
+            with self.subTest(how):
+                self.setUp()
+                self.board_answered(self.answers())
+                self.assertTrue(W.released_without_intent(self.route, self.jobs))
+                frame = self.output / "shards/frame"
+                if how == "moved":
+                    frame.rename(self.base / "moved-frame")
+                else:
+                    (frame / "round-1/interview.json").unlink()
+                self.assertFalse(W.released_without_intent(self.route, self.jobs))
+                self.assertFalse(frame.joinpath("intent.md").exists())
 
     def test_a_board_answer_to_a_revision_or_stop_is_not_an_intent_and_stays_so(self):
         for decision, state in (("revise", "needs-revision"), ("stop", "cancelled")):

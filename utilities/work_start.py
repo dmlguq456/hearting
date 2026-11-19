@@ -289,8 +289,10 @@ def released_without_intent(route, jobs):
     resolution = WS.human_gate_resolution(
         WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs).journal(), "frame-review")
     artifact = resolution.get("artifact")
+    # The fill needs the recorded question and the answer both readable: a cycle folder that was moved
+    # or removed leaves nothing to fill, and that start goes on past the released gate as it always did.
     return bool(resolution["status"] == "proceed" and artifact and resolution.get("answers")
-                and not _intent_placed(Path(artifact).parent.parent))
+                and os.path.isfile(artifact) and not _intent_placed(Path(artifact).parent.parent))
 
 
 def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
@@ -351,8 +353,10 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
     if not answers and not next_round and decision == "proceed" and resolution["status"] in {"revise", "stop"}:
         decision = resolution["status"]  # A plain resume cannot replace the person's decision.
     if resolution["status"] in {"proceed", "revise", "stop"} and not next_round:
-        # A submitted answer remains readable after its cycle is sealed. Do not
-        # reopen the producer or write into a completed cycle on a lost reply.
+        # A submitted answer remains readable after its cycle is sealed. A lost reply does not reopen
+        # the producer. The one write below (the intent a board answer left unrendered) may land in a
+        # sealed cycle: closed cycles accept writes, their proofs and the campaign close ignore later
+        # files, and the next refresh adds them to the manifest (artifact_seal_abolition.test.py).
         recorded_path = Path(resolution["artifact"])
         recorded = FI.load_json_file(recorded_path)
         if "repository_preparation" in recorded and "repository_preparation" not in supplied:
@@ -417,7 +421,9 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
     if not answers and not next_round and resolution["status"] == "blocked" and native.is_file():
         answers = native                    # the person's native reply, recorded when it arrived
     elif (not answers and not next_round and not automatic and resolution["status"] == "blocked"
-            and answer_path.is_file()):
+            and answer_path.is_file() and (directory / "intent.md").is_file()):
+        # The answer file holds no decision. The round's intent is written only for a `proceed`, just
+        # before its release, so it is the record that this answer's proceed flow reached the render.
         saved_answers = FI.load_json_file(answer_path, max_bytes=FI.MAX_ANSWERS_BYTES, kind="answers")
         if isinstance(saved_answers, dict) and saved_answers.get("basis") != FI.AUTOMATIC_BASIS:
             answers = answer_path           # saved by this flow before the release it did not reach
