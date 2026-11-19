@@ -371,7 +371,7 @@ class PanelAndTables(unittest.TestCase):
             lines = self.drawn(vm, view, folds=(("sopen:OVERVIEW", "4f"),) if view == "OVERVIEW" else ())
             text = "\n".join(lines)
             self.assertIn("review of", text, view)
-            at = next(i for i, line in enumerate(lines) if "staged 3/6: execute" in line)
+            at = next(i for i, line in enumerate(lines) if "3/6: execute" in line)
             self.assertIn("review of", lines[at + 1], view)
             self.assertIn("code-review", lines[at + 1], view)
             self.assertNotIn("[4f]", lines[at + 1], view)
@@ -475,7 +475,7 @@ class PanelAndTables(unittest.TestCase):
         for view in ("OVERVIEW", "ROUTES"):
             grid = draw(vm, NavState(view=view, folds=(("sopen:OVERVIEW", "4f"),) if view == "OVERVIEW" else ()), 150, 40)
             text = ["".join(cell[0] for cell in row) for row in grid.cells]
-            route_y = next(i for i, line in enumerate(text) if "staged 3/6: execute" in line)
+            route_y = next(i for i, line in enumerate(text) if "3/6: execute" in line)
             called_y = route_y + 1
             self.assertIn("review of", text[called_y], view)
             action = lambda y: [repr(hit.action) for hit in grid.hits if hit.y == y and hit.x0 <= 100 < hit.x1]   # noqa: E731

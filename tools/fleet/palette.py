@@ -178,6 +178,19 @@ def kind_word_key(field):
     return "kind_" + field if field in KIND_FIELDS else None
 
 
+def route_form(capability, shape, field=None):
+    """The word for HOW a route in the dispatch zone runs, the one place that decides it (the panel carries it as ``kind_form``,
+    Fleet's tables call it): ``unit`` (a unit route, one unit called, its field recorded), ``one-shot`` (shape
+    ``one-shot-owner``: one session does the whole procedure), ``staged`` (``staged`` and ``staged+resource``: the procedure split in
+    stages, a worker each). English in every language. Any other shape (a frame, an older record) has none: ``""``."""
+    if str(capability or "").strip() == "unit":
+        return "unit" if str(field or "").strip() in ROUTE_FIELDS else ""
+    shape = str(shape or "").strip()
+    if shape == "one-shot-owner":
+        return "one-shot"
+    return "staged" if shape in ("staged", "staged+resource") else ""
+
+
 def kind_intensity_key(field, word):
     """The key of the whole bracket after a kind word (``(standard)``, ``(dev·q)``): the field's hue at the weight of the
     intensity it holds (the last of its ``·``-joined words that names one); a bracket with none (a mode alone) is plain."""

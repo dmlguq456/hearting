@@ -95,14 +95,24 @@ class KindCell(unittest.TestCase):
         for field in FIELDS:
             for intensity, weight in (("quick", "kindq_"), ("standard", "kinds_"), ("strong", "kindb_"), ("thorough", "kindb_"), ("adversarial", "kindb_")):
                 got = tables._kind_cell({"capability": "word", "field": field, "shape": "staged", "intensity": intensity})
-                self.assertEqual(got, [("word", "kind_" + field), ("(%s)" % intensity, weight + field)])
+                # 11-19: the bracket holds the form and the intensity (`staged·quick`); its color and weight follow the intensity
+                self.assertEqual(got, [("word", "kind_" + field), ("(staged·%s)" % intensity, weight + field)])
         self.assertEqual(tables._kind_cell({"capability": "spec", "field": "plan", "shape": "staged", "intensity": "strong"}),
-                         [("spec", "grp"), ("(strong)", "dim")])
+                         [("spec", "grp"), ("(staged·strong)", "dim")])
         # An older route (no field) with a field's own name as its kind.
         self.assertEqual(tables._kind_cell({"capability": "lab", "shape": "one-shot-owner", "intensity": "quick"}),
-                         [("lab", "kind_lab"), ("(quick)", "kindq_lab")])
+                         [("lab", "kind_lab"), ("(one-shot·quick)", "kindq_lab")])
         self.assertEqual(tables._kind_cell({"capability": "draft", "shape": "staged", "intensity": "quick"}),
-                         [("draft", "grp"), ("(quick)", "dim")])
+                         [("draft", "grp"), ("(staged·quick)", "dim")])
+        # No intensity in the record: the form alone; a shape with no form keeps its intensity bracket alone; the form alone is plain.
+        self.assertEqual(tables._kind_cell({"capability": "code", "field": "code", "shape": "staged"}), [("code", "kind_code"), ("(staged)", "kinds_code")])
+        self.assertEqual(tables._kind_cell({"capability": "code", "field": "code", "shape": "map-reduce", "intensity": "strong"}),
+                         [("code", "kind_code"), ("(strong)", "kindb_code")])
+        # `staged+resource` is staged; the tail folds first and the colour stays that of the intensity
+        self.assertEqual(tables._kind_cell({"capability": "lab", "field": "lab", "shape": "staged+resource", "intensity": "thorough"}, tail=False),
+                         [("lab", "kind_lab"), ("(staged)", "kindb_lab")])
+        self.assertEqual(tables._kind_cell({"capability": "lab", "field": "lab", "shape": "staged", "intensity": "strong"}, bracket=False),
+                         [("lab", "kind_lab")])
 
     def test_the_whole_bracket_of_the_unfolded_kind_row_follows_the_same_rule(self):
         from fleet.explorer.tables import draw_routes  # noqa: F401  (the row is drawn there; its pieces are the helpers below)

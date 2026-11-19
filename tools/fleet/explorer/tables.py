@@ -5,7 +5,7 @@ from .live import current_route_counts, route_marker_state, unknown_kind, unknow
 from .grid import CellGrid, cell_width
 from .style import recede_key
 from ..config import ui_text
-from ..palette import ROUTE_FIELDS, harness_spin, kind_intensity_key, kind_word_key, route_field
+from ..palette import ROUTE_FIELDS, harness_spin, kind_intensity_key, kind_word_key, route_field, route_form
 
 X = 34
 GAP = 3
@@ -1294,23 +1294,25 @@ def _is_unit_route(route):
     return str(route.get("capability") or "").strip() == "unit"
 
 
-def _kind_cell(route, bracket=True):
-    """``code(standard)``: the kind word (bold) and its intensity in dim brackets; nothing else goes in the brackets.
-    A unit route (one worker, no owner) reads its field and ``(unit)``, ``code(unit)``: what the work is, and that it does
-    one thing instead of walking the kind's whole procedure (its intensity, always ``quick``, is no choice and is not
-    told; the unit's name stands on the worker's row). 11-19 (the person: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?",
-    "code(unit) 이렇게 쓰는건 이상한가?", "근데 강도랑은 좀 다르잖아. 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만
-    수행하는 건지"). The ``(unit)`` bracket is a plain dim one: it takes no field hue and no weight step. An older one that
-    records no field keeps ``unit`` with no bracket. ``bracket=False``: the bare kind word (the narrow forms)."""
+def _kind_cell(route, bracket=True, tail=True):
+    """``code(staged·standard)``: the kind word (bold) and, in brackets, the route's FORM and its INTENSITY after a ``·``, always
+    both (``code(unit·quick)``, ``code(one-shot·quick)``, ``lab(staged·strong)``); only the form where the record names no intensity.
+    11-19 (the person, in order: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?", "code(unit) 이렇게 쓰는건 이상한가?", "근데
+    강도랑은 좀 다르잖아. 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만 수행하는 건지", "unit, one-shot, staged을
+    괄호로 넣어야하나 싶은데", "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아", "강도도 표기해 항상"): two axes, the
+    form (``palette.route_form``) is how the route runs and the intensity is a separate axis over all three forms. The whole bracket's
+    color and weight follow the intensity (``kind_intensity_key``), a dim bracket where the route has no field hue. A route of another
+    shape (a frame, an older record) keeps its intensity bracket alone; an older unit route that records no field keeps ``unit``
+    with no bracket; a ``direct`` route has none. ``tail=False``: the form alone (the narrow form, the intensity goes first);
+    ``bracket=False``: the bare kind word."""
     kind = str(route.get("capability") or "").strip()
-    intensity = str(route.get("intensity") or "").strip() if bracket else ""
+    intensity = str(route.get("intensity") or "").strip()
     unit = _is_unit_route(route)
-    unit_bracket = False
     if unit:
-        intensity = ""
         recorded = str(route.get("field") or "").strip()
-        unit_bracket = bracket and recorded in ROUTE_FIELDS
         kind = recorded if recorded in ROUTE_FIELDS else kind
+        if recorded not in ROUTE_FIELDS:
+            intensity = ""           # an older unit route (no field): its bare `unit`, no bracket
     if route.get("shape") == "direct" and intensity.casefold() in ("", "direct"):
         intensity = ""               # the `direct` zone's own name says it (11-17, route zones)
     if not kind:
@@ -1319,9 +1321,12 @@ def _kind_cell(route, bracket=True):
     # with no field hue keeps the bold body word and the dim bracket.
     field = route_field(route.get("field"), kind)
     word_key = kind_word_key(field) or "grp"
+    if not bracket:
+        return [(kind, word_key)]
+    form = route_form(route.get("capability"), route.get("shape"), route.get("field"))
+    inside = (form + ("·" + intensity if intensity and tail else "")) if form else intensity
     bracket_key = kind_intensity_key(field, intensity) or "dim"
-    return ([(kind, word_key)] + ([("(" + intensity + ")", bracket_key)] if intensity else [])
-            + ([("(unit)", "dim")] if unit_bracket else []))
+    return [(kind, word_key)] + ([("(" + inside + ")", bracket_key)] if inside else [])
 
 
 def _blinking_stage(stages, at, lit):
@@ -1340,9 +1345,11 @@ def _stage_word(route):
 
 
 def _staged_cells(route, earlier, stages, at, lit):
-    """``frame ✓ → code(standard) · staged 3/6: execute``, widest first; short of cells the earlier legs go, then the
-    intensity, then the kind, then the shape word, then the position; the stage stays."""
-    kind, bare = _kind_cell(route), _kind_cell(route, bracket=False)
+    """``frame ✓ → code(staged·standard) · 3/6: execute``, widest first; short of cells the earlier legs go, then the intensity
+    (``code(staged) · 3/6: execute``), then the bracket, then the kind, then the shape word, then the position; the stage stays.
+    The stage line's shape word is left out while the bracket says it (the bracket's form is ``staged``); once the bracket is
+    gone it comes back (``staged 3/6: execute``)."""
+    kind, formal, bare = _kind_cell(route), _kind_cell(route, tail=False), _kind_cell(route, bracket=False)
     position = f"{at + 1}/{len(stages)}"
     stage = _blinking_stage(stages, at, lit)
 
@@ -1353,9 +1360,11 @@ def _staged_cells(route, earlier, stages, at, lit):
             out += ([(" · ", "dim")] if kind_cell else []) + [(word + ": ", "dim")]
         return out + stage
     word = (_stage_word(route) + " " if _stage_word(route) else "") + position
-    cells = [build(earlier, kind, word)] if earlier else []
-    return cells + [build([], kind, word), build([], bare, word), build([], [], word), build([], [], position),
-                    build([], [], "")]
+    said = _stage_word(route) == route_form(route.get("capability"), route.get("shape"), route.get("field"))
+    lead = position if said else word
+    cells = [build(earlier, kind, lead)] if earlier else []
+    return cells + [build([], kind, lead), build([], formal, lead), build([], bare, word), build([], [], word),
+                    build([], [], position), build([], [], "")]
 
 
 def _draw_route_progress(grid, x, end, y, route, card=True):
@@ -1423,7 +1432,7 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
         after.extend([("  resume ", "dim"), (str(route["resume"]), "g_idle")])
     elif route.get("loops"):
         after.append(("  " + str(route["loops"]), "dim"))
-    # 11-17 (route row 5): a route its owner does alone has no stage line: `code(quick)`, after the chain it continues; the
+    # 11-17 (route row 5): a route its owner does alone has no stage line: `code(one-shot·quick)`, after the chain it continues; the
     # row's own mark (the spinner in front) is what moves.
     if (str(route.get("shape") or "") == "one-shot-owner" and len(stages) <= 1 and not route.get("resume")
             and _kind_cell(route)):
@@ -1431,12 +1440,14 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
         cells = (earlier + [(" → ", "dim")] if earlier else []) + _kind_cell(route)
         if sum(_seg_width(text) for text, _key in cells) > end - x:
             cells = _kind_cell(route)
+        if sum(_seg_width(text) for text, _key in cells) > end - x:
+            cells = _kind_cell(route, tail=False)           # (the intensity goes first)
         cursor = _put_segments(grid, x, y, cells, end)
         cursor = _put_segments(grid, cursor, y, after, end)
         if card:
             _put_route_card(grid, cursor, end, y, route)
         return
-    # Spec E9 rule 24, 11-17 (route row 5): a route that runs a worker per stage reads `code(standard) · staged 3/7: execute`
+    # Spec E9 rule 24, 11-17 (route row 5): a route that runs a worker per stage reads `code(staged·standard) · 3/7: execute`
     # (the shell panel's route lines, in one row); the chain of kinds it continues leads it (`frame ✓ → code(standard) · …`).
     # The kind is the one bold word, the stage's name the one thing that blinks. Short of cells see `_staged_cells`.
     # Any route with a stage list reads so, whatever its shape (`map-reduce 2/3: analyze`; no word when none is named).

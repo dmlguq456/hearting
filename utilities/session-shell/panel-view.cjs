@@ -1047,7 +1047,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return hued&&FIELDS.includes(field)&&styles['kind_'+field]?field:'';
     };
     const kindText=(word,field='')=>field?{...text(clean(word),'kind_'+field),bold:true,dim:false}:{text:clean(word),foreground:null,bold:true,dim:false};
-    const bracket=(word,field='')=>field?{...text('('+word+')','kind'+(WEIGHT[String(word).trim().toLowerCase()]||'s')+'_'+field),role:'kind'}:text('('+word+')','dim');
+    const bracket=(word,field='',inten='')=>field?{...text('('+word+')','kind'+(WEIGHT[String(inten||word).trim().toLowerCase()]||'s')+'_'+field),role:'kind'}:text('('+word+')','dim');
     const framed=r=>String(r.shape||'')==='framed';
     // A direct route's word stands for its intensity when the record names none (the backend sends it in the screen language).
     const intensityRaw=r=>{
@@ -1058,33 +1058,41 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     // 11-17 (route zones): in the `direct` zone the zone's own name says it, so `(direct)` (the word the record or its shape
     // gives) is left out of the line; a real intensity (`quick`) stays.
-    // 11-19 (the person: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?" / "code(unit) 이렇게 쓰는건 이상한가?" / "근데 강도랑은 좀 다르잖아.
-    // 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만 수행하는 건지"): a formal route's bracket holds its intensity (how heavily
-    // it walks its kind's whole procedure); a unit route walks no procedure and does one thing, and its intensity is not a choice
-    // (always `quick`), so the same place holds the word `unit` (English in every language, as the zone and intensity words are). A route that
-    // records no field keeps its bare `unit`, and a unit a worker called (`called`) is a row under its caller's with no bracket.
+    // 11-19 (the person, in order: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?" / "code(unit) 이렇게 쓰는건 이상한가?" / "근데 강도랑은 좀
+    // 다르잖아. 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만 수행하는 건지" / "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" /
+    // "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" / "강도도 표기해 항상"): two axes. The bracket of a route in the `dispatch`
+    // zone holds its FORM (`kind_form`, the backend's one word for it: `unit` one unit called, `one-shot` one session doing the whole
+    // procedure, `staged` the procedure split in stages with a worker each; English in every language) and its INTENSITY after a `·`
+    // (`code(staged·standard)`), always, whatever the form. Colour and weight follow the intensity (`kind{q,s,b}_<field>`; no field: a dim
+    // bracket), also when the tail is folded away. A route of another shape (a frame, an older record) keeps its intensity bracket alone, an
+    // older unit route that records no field keeps its bare `unit`, a `direct` route has no form, and a unit a worker called (`called`)
+    // is a row under its caller's with no bracket.
     const intensityOf=r=>{
-      if(r.unit_route===true)return r.called!==true&&clean(r.kind_word||'').trim()!=='unit'?'unit':'';
+      if(r.unit_route===true&&(r.called===true||clean(r.kind_word||'').trim()==='unit'))return '';
       const word=intensityRaw(r);
       return r.zone==='direct'&&(/^direct$/i.test(word)||word===clean(r.shape||'').trim())?'':word;
     };
-    // The `(unit)` bracket wears no field hue and no weight step (a dim bracket, as a route with no field has).
-    const bracketOf=(r,word,field)=>bracket(word,r.unit_route===true?'':field);
-    const kindHead=r=>{const word=clean(r.kind_word||'').trim(),inten=intensityOf(r);
+    const formOf=r=>r.zone==='direct'||r.called===true?'':clean(r.kind_form||'').trim();
+    const bracketWord=(r,tail=true)=>{const form=formOf(r),inten=intensityOf(r);return form?form+(tail&&inten?'·'+inten:''):inten;};
+    const kindHead=(r,tail=true)=>{const word=clean(r.kind_word||'').trim(),b=bracketWord(r,tail);
       const field=kindField(r,word);
-      return word?[kindText(word,field),...(inten?[bracketOf(r,inten,field)]:[])]:[];};
-    // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(standard) · staged 3/7: execute`, a route with
-    // no stage line reads `lab(quick)`; short of cells `3/7: execute`.
+      return word?[kindText(word,field),...(b?[bracket(b,field,intensityOf(r))]:[])]:[];};
+    // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(staged·standard) · 3/7: execute` (the stage word that
+    // the bracket's form already says is left out there), a route with no stage line reads `lab(one-shot·quick)`; the intensity goes
+    // first short of cells (`code(staged) · 3/7: execute`), then the kind, then `staged 3/7: execute`, then `3/7: execute`.
     function kindCell(r){
-      const cell=shapeCell(r),head=kindHead(r);
-      if(!head.length)return cell&&{...cell,kind:cell.full};
-      if(!cell)return {full:[],short:[],kind:head};
-      return {...cell,kind:[...head,text(' · ','dim'),...cell.full]};
+      const cell=shapeCell(r),head=kindHead(r),bare=kindHead(r,false);
+      if(!head.length)return cell&&{...cell,kind:cell.full,bare:cell.full};
+      if(!cell)return {full:[],short:[],kind:head,bare};
+      const rest=stageLead(r)===stageWord(String(r.shape||''))?cell.full:cell.short;
+      return {...cell,kind:[...head,text(' · ','dim'),...rest],bare:[...bare,text(' · ','dim'),...rest]};
     }
     // 11-17 (route row 5): every route with a stage list reads its stage line, whatever its shape: the shape's own word
     // (`staged`, `map-reduce`, `transactional-owner`; none when the record names none), the position, the stage's name.
     // A frame route has no stage line (its legs hang under it), and a route its owner does alone (one stage) has none.
     const stageWord=shape=>/^staged/.test(shape)?'staged':/^(|unknown|framed|one-shot-owner)$/.test(shape)?'':shape;
+    // The word before a stage line's position, but not where the bracket of the route's first line already says it (`code(staged·standard) · 3/6: execute`).
+    const stageLead=r=>{const word=stageWord(String(r.shape||''));return word&&word===formOf(r)?'':word;};
     const stageLined=r=>{const shape=String(r.shape||''),n=Array.isArray(r.stages)?r.stages.length:0;
       return !framed(r)&&(/^staged/.test(shape)?n>0:n>1);};
     function shapeCell(r){
@@ -1103,9 +1111,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // beside the native area: a route reads its harness, model and context number, and its NOW on the row under it.
     const planBottom=(ow,gw,C)=>{
       const kinds=C.set.map(kindCell);
-      const widths=Object.fromEntries(['kind','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
+      const widths=Object.fromEntries(['kind','bare','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
       const longest=C.width(titleCols),avail=inner-(2+3+ow+3+gw+1+C.elapsed);
-      const order=widths.kind>widths.full?['kind','full','short']:['full','short'];
+      const order=widths.kind>widths.full?['kind',...(widths.bare<widths.kind&&widths.bare>widths.full?['bare']:[]),'full','short']:['full','short'];
       for(const level of order){
         if(!widths[level])break;
         const room=avail-(3+widths[level]);
@@ -1446,7 +1454,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const at=given!==null&&stages[given]?given:currentAt(r),position=(at+1)+'/'+stages.length;
       const stage=stageCell(stages[at],stageInk(stages[at].key)),pieces=piecesOf(r);
       // Spec rule 43 (g): the workers gone for rows, the stage line ends with their count (it stays while the values before it go).
-      for(const end of workers?[[text(' · ','dim'),text('worker '+workers,'dim')],[]]:[[]])for(const word of [...new Set([(stageWord(shape)?stageWord(shape)+' ':'')+position,position])])for(let n=pieces.length;n>=0;n--){
+      for(const end of workers?[[text(' · ','dim'),text('worker '+workers,'dim')],[]]:[[]])for(const word of [...new Set([(stageLead(r)?stageLead(r)+' ':'')+position,position])])for(let n=pieces.length;n>=0;n--){
         const row=[text(word,'dim'),text(': ','dim'),...stage,...pieces.slice(0,n).flatMap(piece=>[text(' · ','dim'),...piece]),...end];
         if(size(row)<=limit)return row;
       }
@@ -1454,9 +1462,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     // The first line: a state mark, then the chain of kinds the route continues (`frame ✓ → code(standard)`: what is behind
     // dim with `✓`, this one bold, what is left dim; a frame route reads `frame → ??` until its direction is chosen).
-    function chainParts(r,{past=true,inten=true}={}){
-      const kind=clean(r.kind_word||'').trim(),word=inten?intensityOf(r):'';
-      const own=name=>{const field=kindField(r,name);return [kindText(name,field),...(word?[bracketOf(r,word,field)]:[])];};
+    function chainParts(r,{past=true,inten=true,tail=true}={}){
+      const kind=clean(r.kind_word||'').trim(),word=inten?bracketWord(r,tail):'';
+      const own=name=>{const field=kindField(r,name);return [kindText(name,field),...(word?[bracket(word,field,intensityOf(r))]:[])];};
       const legs=(Array.isArray(r.chain)?r.chain:[]).filter(l=>l&&l.name);
       if(!legs.length)return kind?own(kind):[];
       const out=[];
@@ -1479,7 +1487,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // then the whole), as the waiting-for-direction text does.
     function stageForms(r,name){
       if(!stageLined(r))return [];
-      const stages=stagesOf(r),at=currentAt(r),word=(stageWord(String(r.shape||''))?stageWord(String(r.shape||''))+' ':'')+(at+1)+'/'+stages.length;
+      const stages=stagesOf(r),at=currentAt(r),word=(stageLead(r)?stageLead(r)+' ':'')+(at+1)+'/'+stages.length;
       const forms=[];
       if(name){const stage=stageCell(stages[at],stageInk(stages[at].key)),pieces=piecesOf(r);
         for(let n=pieces.length;n>=0;n--)forms.push({named:true,parts:[text(word,'dim'),text(': ','dim'),...stage,...pieces.slice(0,n).flatMap(piece=>[text(' · ','dim'),...piece])]});}
@@ -1487,7 +1495,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return forms.map(form=>({named:form.named,parts:[text(' · ','dim'),...form.parts]}));
     }
     function headRow(r){
-      const chains=[{},{past:false},{past:false,inten:false}].map(o=>chainParts(r,o));
+      const chains=[{},{tail:false},{past:false,tail:false},{past:false,inten:false}].map(o=>chainParts(r,o));
       if(!chains[0].length)return null;
       const wait=directionWait(r)?[text(' · ','dim'),text(t('direction_wait','waiting for direction'),'dim')]:[];
       const width=inner,room=width-2;     // the box's inner width, read now (the row is drawn after the box's width is given back)

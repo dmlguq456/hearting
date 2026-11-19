@@ -231,6 +231,18 @@ for(const [name,routes,unit] of combos){
 }
 """)
 
+    def test_the_stage_box_title_does_not_lead_with_staged_where_the_bracket_says_it(self):
+        # 11-19: a route whose bracket holds the form `staged` (`code(staged·standard)`) has a stage box titled `3/6: execute`, not `staged 3/6: execute`;
+        # a route with no form (an older record) keeps the word
+        self.node(r"""
+const formal={...R,kind_form:'staged'};
+const rows=only(formal);
+assert(/^● code\(staged·standard\)/.test(rows[0])&&rows.some(s=>/┌ 3\/6: execute ─+┐/.test(s))&&!rows.some(s=>/staged 3\/6/.test(s)),rows.join('\n'));
+assert(only(R).some(s=>/┌ staged 3\/6: execute ─+┐/.test(s)));
+const solo1={...solo(),kind_form:'one-shot'};
+assert(/^● code\(one-shot·quick\)/.test(only(solo1)[0]),only(solo1).join('\n'));
+""")
+
     def test_the_three_harness_panels_draw_the_same_rows(self):
         self.node(r"""
 const want=only(R);

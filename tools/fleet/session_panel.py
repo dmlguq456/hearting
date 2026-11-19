@@ -128,11 +128,16 @@ def route_kind(row):
         shown["legs"] = row["legs"]
     # 11-17 (route row 5): the kind's own intensity word and the chain of kinds the route continues (name and state).
     intensity = sanitize_title(str(row.get("intensity") or ""))[:32]
+    # 11-19 (the person: "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" / "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" /
+    # "강도도 표기해 항상"): the intensity of every route is sent, a unit route's too; and the route's FORM (`unit`, `one-shot`, `staged`:
+    # `palette.route_form`, decided here once), which the panel draws in the bracket before the intensity (`code(staged·standard)`).
     unit_route = str(row.get("capability") or "") == "unit"
-    # (a unit route's `quick` is not a choice, so it is not sent: the panel's first line draws the word `unit` in that bracket
-    # itself, 11-19 "code(unit) 이렇게 쓰는건 이상한가?" — the screen's word, never the record's `intensity=quick`)
-    if intensity and not unit_route:
+    if intensity:
         shown["intensity"] = intensity
+    from .palette import route_form
+    form = route_form(row.get("capability"), row.get("shape"), row.get("field"))
+    if form:
+        shown["kind_form"] = form
     chain = [{"name": sanitize_title(str(leg[0]))[:24], "state": sanitize_title(str(leg[1]))[:12]}
              for leg in (row.get("chain") or ())[:6]
              if isinstance(leg, (list, tuple)) and len(leg) >= 2 and sanitize_title(str(leg[0]))]

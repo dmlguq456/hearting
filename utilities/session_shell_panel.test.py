@@ -1114,21 +1114,23 @@ for(let width=56;width<=140;width+=2)for(const s of draw(four,width,20,{side:fal
 
     def test_a_unit_route_leads_with_its_field_and_its_worker_line_names_the_unit(self):
         # 11-18 (the person: "Unit에서는 무슨 작업인지가 안보이잖아"): a unit route (one worker called with no owner) reads its
-        # field on the first line and, in the bracket's place, `(unit)` (11-19: a unit route does one thing and walks no procedure,
-        # its intensity is no choice; before: `code` with no bracket) and the unit's short name stands in the role word's place on
-        # its worker line; a route with an owner keeps `owner` and its intensity bracket. An older route that records no field keeps
-        # `unit` with no bracket. The name goes whole, never cut, where the row has no room for it.
+        # field on the first line and, in the bracket, its form and the record's intensity `(unit·quick)` (11-19; before: `code` with no
+        # bracket) and the unit's short name stands in the role word's place on its worker line; a route with an owner keeps `owner`
+        # and its form and intensity bracket (`one-shot·quick`). An older route that records no field keeps `unit` with no bracket.
+        # The name goes whole, never cut, where the row has no room for it.
         script = self.FIXTURE + r'''
-const unit={...oneShot,id:'u',title:'PR 독립 검토',kind_word:'code',kind_field:'code',unit_route:true,unit_word:'code-review',role:'worker',elapsed:'17m',
+const unit={...oneShot,id:'u',title:'PR 독립 검토',kind_word:'code',kind_field:'code',kind_form:'unit',intensity:'quick',unit_route:true,unit_word:'code-review',role:'worker',elapsed:'17m',
  stages:[],paint:{...oneShot.paint,model_text:P('Opus 5.5'),ctx:P('14%'),gauge_row:[P('━───── 14%')]}};
-const own={...oneShot,kind_word:'code',intensity:'quick',role:'owner',owner_paint:oneShot.paint};
+const own={...oneShot,kind_word:'code',kind_form:'one-shot',intensity:'quick',role:'owner',owner_paint:oneShot.paint};
 const first=(rows,re)=>rows.find(s=>s.startsWith('│ │ ')&&re.test(s));
 const w44=draw([unit,own],44,60);
-assert(first(w44,/● code\(unit\) +17m │ │$/),w44.join('\n'));
-assert(first(w44,/● code\(quick\)/),w44.join('\n'));                      // the route with an owner keeps its bracket
-assert(w44.filter(s=>/unit/.test(s)).length===1,w44.join('\n'));          // the `(unit)` of the first line is the one `unit` word
+assert(first(w44,/● code\(unit·quick\) +17m │ │$/),w44.join('\n'));
+assert(first(w44,/● code\(one-shot·quick\)/),w44.join('\n'));            // the route with an owner reads its form and intensity too
+assert(w44.filter(s=>/unit/.test(s)).length===1,w44.join('\n'));          // the `(unit·quick)` of the first line is the one `unit` word
 const w32=draw([unit],32,60);
-assert(first(w32,/● code\(unit\) +17m │ │$/),w32.join('\n'));
+assert(first(w32,/● code\(unit·quick\) +17m │ │$/),w32.join('\n'));
+const w28=draw([unit],28,60);
+assert(first(w28,/● code\(unit\) +17m │ │$/),w28.join('\n'));         // narrower the intensity goes first
 // The worker line: the unit's name where a role word stands, then harness, model, effort; the owner route keeps `owner`.
 assert(w44.some(s=>/⠋ code-review claude Opus 5\.5/.test(s)),w44.join('\n'));
 assert(w44.some(s=>/⠋ owner claude/.test(s)),w44.join('\n'));
@@ -1138,55 +1140,89 @@ const longName={...unit,unit_word:'research-survey-with-a-very-long-name'};
 const w26=draw([longName],26,60);
 assert(!w26.some(s=>/research-s/.test(s))&&w26.some(s=>/⠋ .*Opus 5\.5/.test(s)),w26.join('\n'));
 // An older route that records no field keeps `unit`, with no bracket (not `unit(unit)`) and no name on the first line.
-const old=draw([{...unit,kind_word:'unit',kind_field:undefined}],44,60);
+const old=draw([{...unit,kind_word:'unit',kind_field:undefined,kind_form:undefined}],44,60);       // (the backend sends such a route no form)
 assert(first(old,/● unit +17m │ │$/)&&old.some(s=>/⠋ code-review claude/.test(s)),old.join('\n'));
 // Another field: `docs` / `research` read as themselves (only five hues, the rest the body color).
-for(const field of ['docs','research','plan'])assert(first(draw([{...unit,kind_word:field,kind_field:field==='plan'?undefined:field}],44,60),new RegExp('● '+field+'\\(unit\\) +17m')),field);
+for(const field of ['docs','research','plan'])assert(first(draw([{...unit,kind_word:field,kind_field:field==='plan'?undefined:field}],44,60),new RegExp('● '+field+'\\(unit·quick\\) +17m')),field);
 // An ended route's first line reads the same; its `success · title` line is the one it had.
 const ended=draw([{...unit,kind:'done',state:'done',outcome:'success'}],44,60);
-assert(first(ended,/ code\(unit\) +17m/)&&ended.some(s=>/success · PR 독립 검토/.test(s)),ended.join('\n'));
+assert(first(ended,/ code\(unit·quick\) +17m/)&&ended.some(s=>/success · PR 독립 검토/.test(s)),ended.join('\n'));
 // The bottom layout: the kind cell is the field, the unit's name leads the doer column.
 const bottom=draw([unit],140,20,{side:false});
-assert(bottom.some(s=>/code-review claude Opus 5\.5 xhigh .*│ code\(unit\)/.test(s)),bottom.join('\n'));
+assert(bottom.some(s=>/code-review claude Opus 5\.5 xhigh .*│ code\(unit·quick\)/.test(s)),bottom.join('\n'));
 '''
         self.node(script, "panel-view.cjs")
 
 
-    def test_the_unit_bracket_is_a_plain_dim_one_and_a_regular_routes_bracket_keeps_its_field_hue_and_weight(self):
-        # 11-19: `(unit)` is not a step of intensity, so it wears no field hue and no weight step (the dim bracket a route with no field
-        # has); `(quick)`/`(standard)` keep the field's hue at their weight. No `(unit)` on a called unit's row, none on an older unit route
-        # (its bare `unit`), and a unit route draws no `→` chain; the chain of a regular route is as it was.
+    def test_the_bracket_holds_the_form_and_the_intensity_and_the_whole_bracket_follows_the_intensitys_color_and_weight(self):
+        # 11-19 (the person: "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" / "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" /
+        # "강도도 표기해 항상"): the bracket of a route in the dispatch zone holds the backend's form word (`kind_form`) and its intensity after a `·`,
+        # always (`code(staged·standard)`); a route with no intensity reads the form alone; one with no form (a frame, an older record) its
+        # intensity alone; an older unit route its bare `unit`; a called unit's row has none. The whole bracket wears the intensity's color and
+        # weight (a dim one where the route has no field hue), also where the tail is folded away. The stage line does not lead with `staged` again.
         script = self.FIXTURE + r'''
-const styles={dim:{dim:true},kind_code:{foreground:69},kindq_code:{foreground:69,dim:true},kinds_code:{foreground:69},kindb_code:{foreground:69,bold:true}};
-const rendered=(routes,width,side=true)=>view.render({width,height:60,side,fill:side,colors:256,model:{...head,styles,routes,route_count:routes.length},state:'working',
+const styles={dim:{dim:true},kind_code:{foreground:69},kindq_code:{foreground:69,dim:true},kinds_code:{foreground:69},kindb_code:{foreground:69,bold:true},
+ kind_lab:{foreground:214},kindq_lab:{foreground:214,dim:true},kinds_lab:{foreground:214},kindb_lab:{foreground:214,bold:true}};
+const rendered=(routes,width,side=true,extra={})=>view.render({width,height:60,side,fill:side,colors:256,model:{...head,styles,routes,route_count:routes.length,...extra},state:'working',
  configuration:{},expandedKeys:[],questions:()=>[]}).rows;
+const texts=rows=>rows.map(r=>r.map(p=>p.text).join(''));
 const find=(rows,t)=>rows.flat().filter(p=>p.text===t);
-const unit={...oneShot,id:'u',title:'PR 독립 검토',kind_word:'code',kind_field:'code',unit_route:true,unit_word:'code-review',role:'worker',elapsed:'17m',
- stages:[],paint:{...oneShot.paint,model_text:P('Opus 5.5'),ctx:P('14%'),gauge_row:[P('━───── 14%')]}};      // (the backend sends a unit route no chain)
-const quick={...oneShot,id:'q',kind_word:'code',kind_field:'code',intensity:'quick',role:'owner',owner_paint:oneShot.paint};
-const std={...staged,id:'s',kind_word:'code',kind_field:'code',intensity:'standard',role:'owner',chain:[{name:'frame',state:'done'},{name:'code',state:'active'}]};
-const old={...unit,kind_word:'unit',kind_field:undefined};
+const own0={...oneShot,role:'owner',owner_paint:oneShot.paint};
+const unit={...own0,id:'u',kind_word:'code',kind_field:'code',kind_form:'unit',intensity:'quick',unit_route:true,unit_word:'code-review',role:'worker',elapsed:'17m',stages:[]};
+const quick={...own0,id:'q',kind_word:'code',kind_field:'code',kind_form:'one-shot',intensity:'quick'};
+const std={...staged,id:'s',kind_word:'code',kind_field:'code',kind_form:'staged',intensity:'standard',role:'owner',chain:[{name:'frame',state:'done'},{name:'code',state:'active'}]};
+const strong={...staged,id:'l',kind_word:'lab',kind_field:'lab',kind_form:'staged',intensity:'strong',role:'owner'};
+const none={...staged,id:'n',kind_word:'code',kind_field:'code',kind_form:'staged',intensity:'',role:'owner'};
+const old={...unit,kind_word:'unit',kind_field:undefined,kind_form:undefined,id:'o'};
+const all=[unit,quick,std,old,strong,none];
 for(const [width,side] of [[44,true],[36,true],[28,true],[160,false],[130,false]]){
-  const rows=rendered([unit,quick,std,old],width,side),tag=width+(side?' side':' bottom');
-  const bracket=find(rows,'(unit)');
-  assert(bracket.length>=1&&bracket.every(p=>p.dim===true&&!p.foreground&&p.role!=='kind'),tag+JSON.stringify(bracket)+'\n'+rows.map(r=>r.map(p=>p.text).join('')).join('\n'));
-  assert(find(rows,'(quick)').every(p=>p.foreground===69&&p.dim===true)&&find(rows,'(standard)').every(p=>p.foreground===69&&!p.dim),tag);
-  const text=rows.map(r=>r.map(p=>p.text).join(''));
-  assert(!text.some(s=>/unit\(unit\)|\(unit\)\(|→ code\(unit\)|unit →/.test(s)),tag+'\n'+text.join('\n'));
-  assert(text.some(s=>/(● |│ )unit(?!\()/.test(s)),tag+'\n'+text.join('\n'));                     // the older route: bare `unit`
-  assert(!side||text.some(s=>/frame ✓ → code\(standard\)/.test(s))||width<40,tag);          // (the chain of a regular route, as it was)
+  const rows=rendered(all,width,side),text=texts(rows),tag=width+(side?' side':' bottom')+'\n'+text.join('\n');
+  const has=re=>text.some(s=>re.test(s));
+  if(width>=36||!side){
+    assert(has(/code\(unit·quick\)/)&&has(/code\(one-shot·quick\)/)&&has(/lab\(staged·strong\)/)&&has(/code\(staged\)/),tag);
+    assert(side||has(/code\(staged·standard\)/),tag);              // (beside the native area the chain and the stage take the room: the tail folds)
+    assert(!has(/staged \d\/\d/)&&has(/ \d\/\d: /),tag);                 // (the stage line does not lead with `staged` where the bracket says it)
+    assert(!has(/unit\(/)&&!has(/\(quick\)|\(standard\)|\(strong\)/),tag);
+  }
+  assert(has(/(● |│ )unit(?![(·])/),tag);                                  // (the older unit route: bare `unit`)
+  // color: the whole bracket follows the intensity (quick dim, standard plain, strong bold) in the field's hue
+  const key=(t,fg,dim,bold)=>find(rows,t).forEach(p=>assert(p.foreground===fg&&!!p.dim===dim&&!!p.bold===bold&&p.role==='kind',tag+JSON.stringify(p)));
+  if(width>=36||!side){key('(unit·quick)',69,true,false);key('(one-shot·quick)',69,true,false);if(!side)key('(staged·standard)',69,false,false);key('(staged·strong)',214,false,true);}
 }
-// mono / NO_COLOR / under 256 colors: the same dim bracket
+// the tail folds first, the colour stays that of the intensity; the form goes after the chain
+const row28=texts(rendered([std],28)).find(s=>/● frame|● code/.test(s));
+assert(/● code\(staged\)/.test(row28)||/● frame ✓ → code\(staged\)/.test(row28),row28);
+for(const [routes,word,fg,dim,bold] of [[[unit],'(unit)',69,true,false],[[strong],'(staged)',214,false,true]]){
+  const got=[22,24,26,28,30,32,34,36].flatMap(w=>find(rendered(routes,w),word));
+  assert(got.length&&got.every(p=>p.foreground===fg&&!!p.dim===dim&&!!p.bold===bold),word+JSON.stringify(got));}
+// as the width narrows the bracket only ever loses its tail, then itself (never the other way round)
+const stateOf=s=>/code\(staged·standard\)/.test(s)?0:/code\(staged\)/.test(s)?1:/● code/.test(s)||/→ code/.test(s)?2:3;
+let last=0;
+for(let w=60;w>=20;w--){const line=texts(rendered([std],w)).find(s=>/● (frame|code)/.test(s));if(!line)continue;const st=stateOf(line);assert(st>=last,w+' '+line);last=st;}
+assert(last>=1);
+// beneath the native area the kind column folds the intensity first, then the kind, and `staged` comes back with the bracket gone
+const kindState=line=>/code\(staged·standard\) · \d\/\d: /.test(line)?0:/code\(staged\) · \d\/\d: /.test(line)?1:/\bstaged \d\/\d: /.test(line)?2:/ \d\/\d: /.test(line)?3:-1;
+const seen=[];
+for(let w=170;w>=60;w--){const line=texts(rendered([{...std,chain:undefined},quick],w,false)).find(s=>/\d\/\d: /.test(s));if(line)seen.push(kindState(line));}
+assert(seen.every(v=>v>=0)&&seen.every((v,i)=>i===0||v>=seen[i-1])&&seen.includes(0)&&seen.includes(1)&&seen.includes(2),JSON.stringify(seen));
+// mono / NO_COLOR / under 256 colors: dim brackets, the same text
 for(const extra of [{no_color:true},{colors:16}]){
-  const rows=view.render({width:44,height:60,side:true,fill:true,model:{...head,styles,routes:[unit],route_count:1,...extra},state:'working',configuration:{},expandedKeys:[],questions:()=>[]}).rows;
-  assert(find(rows,'(unit)').every(p=>p.dim===true&&!p.foreground),JSON.stringify(extra));
+  const rows=rendered([unit,std],44,true,extra);
+  assert(texts(rows).some(s=>/code\(unit·quick\)/.test(s)),JSON.stringify(extra));
+  assert(find(rows,'(unit·quick)').every(p=>p.dim===true&&!p.foreground),JSON.stringify(extra));
+  assert(find(rows,'(staged·standard)').every(p=>!p.foreground),JSON.stringify(extra));
 }
 // a unit a worker called (under the route): no bracket on its row
-const caller={...staged,id:'c',kind_word:'code',kind_field:'code',intensity:'standard',role:'owner',workers_live:[{kind:'working',role:'worker',stage:'execute',elapsed:'12m',
+const caller={...staged,id:'c',kind_word:'code',kind_field:'code',kind_form:'staged',intensity:'standard',role:'owner',workers_live:[{kind:'working',role:'worker',stage:'execute',elapsed:'12m',
  paint:{glyph:P('⠸'),harness:P('claude'),model_text:P('Sonnet 5.5')},called:[{kind:'working',unit_word:'code-review',elapsed:'3m',title:'review',kind_word:'code',kind_field:'code',
  paint:{glyph:P('⠸'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh')}}]}]};
-const under=rendered([caller],130,false).map(r=>r.map(p=>p.text).join(''));
-assert(under.some(s=>/code-review/.test(s))&&!under.some(s=>/\(unit\)/.test(s)),under.join('\n'));
+const under=texts(rendered([caller],130,false));
+assert(under.some(s=>/code-review/.test(s))&&!under.some(s=>/code-review.*\((unit|quick|one-shot)/.test(s)),under.join('\n'));
+// a `direct` route has no form; a route with no form keeps its intensity bracket
+const direct=texts(rendered([{...own0,kind_word:'code',kind_field:'code',kind_form:'one-shot',intensity:'quick',zone:'direct',shape:'direct'}],44));
+assert(!direct.some(s=>/one-shot/.test(s)),direct.join('\n'));
+const plain=texts(rendered([{...own0,kind_word:'code',kind_field:'code',intensity:'standard'}],44));
+assert(plain.some(s=>/● code\(standard\)/.test(s)),plain.join('\n'));
 '''
         self.node(script, "panel-view.cjs")
 

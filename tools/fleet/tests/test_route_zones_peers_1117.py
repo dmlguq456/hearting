@@ -163,10 +163,10 @@ class SessionPageZones(unittest.TestCase):
         self.assertEqual(tables._kind_cell({"capability": "code", "shape": "direct", "intensity": "quick"}),
                          [("code", "kind_code"), ("(quick)", "kindq_code")])
         self.assertEqual(tables._kind_cell({"capability": "code", "shape": "staged", "intensity": "standard"}),
-                         [("code", "kind_code"), ("(standard)", "kinds_code")])
+                         [("code", "kind_code"), ("(staged·standard)", "kinds_code")])          # (11-19: the form leads the intensity)
         # A route with no field hue keeps the bold body word and the dim bracket.
         self.assertEqual(tables._kind_cell({"capability": "spec", "shape": "staged", "intensity": "standard"}),
-                         [("spec", "grp"), ("(standard)", "dim")])
+                         [("spec", "grp"), ("(staged·standard)", "dim")])
 
 
 class SinglestageStaged(unittest.TestCase):
@@ -184,14 +184,14 @@ class SinglestageStaged(unittest.TestCase):
     def test_a_staged_route_with_one_stage_reads_the_stage_line_the_panel_reads(self):
         one = {"state": "working", "shape": "staged", "capability": "code", "intensity": "standard",
                "stages": [{"name": "execute", "st": "active"}], "legs": (("code", "active", "1/1"),)}
-        self.assertEqual(self.cell(one, 60), "code(standard) · staged 1/1: execute")
+        self.assertEqual(self.cell(one, 60), "code(staged·standard) · 1/1: execute")
         self.assertEqual(self.cell(one, 24), "staged 1/1: execute")
         self.assertNotIn("●", self.cell(one, 60))
         self.assertNotIn("(execute", self.cell(one, 60))
         # The route its owner does alone (shape one-shot-owner) stays as it was.
         solo = {"state": "working", "shape": "one-shot-owner", "capability": "code", "intensity": "quick",
                 "stages": [{"name": "one-shot", "st": "active"}], "legs": (("code", "active", None),)}
-        self.assertEqual(self.cell(solo, 60), "code(quick)")
+        self.assertEqual(self.cell(solo, 60), "code(one-shot·quick)")
 
 
 class PeersLine(unittest.TestCase):

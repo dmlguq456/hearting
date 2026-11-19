@@ -128,17 +128,23 @@ class UnitRouteWords(unittest.TestCase):
         return "".join(c[0] for c in grid.cells[0]).rstrip()
 
     def test_the_progress_cell_leads_with_the_field_and_the_unit_bracket(self):
-        # 11-19: `code(unit)` (before: `code`, no bracket). The `(unit)` is a plain dim bracket: no field hue, no weight step.
-        self.assertEqual(self.cell(self.unit(field="code"), 40), "code(unit)")
-        self.assertEqual(self.cell(self.unit(field="docs"), 20), "docs(unit)")
-        self.assertEqual(self.cell(self.unit(field="research", worker_unit="research/research-survey"), 40), "research(unit)")
-        self.assertEqual(self.cell(self.unit(field="code", state="done"), 40), "code(unit)")   # (the `success · title` line is the one left as it was)
-        self.assertEqual(self.cell(self.unit(field="plan"), 40), "plan(unit)")
+        # 11-19: `code(unit·quick)` (before: `code`, no bracket): the form and the record's intensity, as every route's bracket reads.
+        self.assertEqual(self.cell(self.unit(field="code"), 40), "code(unit·quick)")
+        self.assertEqual(self.cell(self.unit(field="docs"), 20), "docs(unit·quick)")
+        self.assertEqual(self.cell(self.unit(field="research", worker_unit="research/research-survey"), 40), "research(unit·quick)")
+        self.assertEqual(self.cell(self.unit(field="code", state="done"), 40), "code(unit·quick)")   # (the `success · title` line is the one left as it was)
+        self.assertEqual(self.cell(self.unit(field="plan"), 40), "plan(unit·quick)")
+        self.assertEqual(self.cell(self.unit(field="code"), 14), "code(unit)")                       # the intensity goes first
+        self.assertEqual(self.cell(self.unit(field="code", intensity="strong"), 40), "code(unit·strong)")   # (a unit's intensity is a record's value too)
+        self.assertEqual(self.cell({k: v for k, v in self.unit(field="code").items() if k != "intensity"}, 40), "code(unit)")
         # An older unit route records no field: `unit`, still with no bracket (never `unit(unit)`) and no unit name.
         self.assertEqual(self.cell(self.unit(), 40), "unit")
         # A route with an owner keeps its intensity bracket.
-        self.assertEqual(self.cell({**self.unit(), "capability": "code", "worker_unit": "dev/backend"}, 40), "code(quick)")
-        self.assertEqual(tables._kind_cell(self.unit(field="code")), [("code", "kind_code"), ("(unit)", "dim")])
+        self.assertEqual(self.cell({**self.unit(), "capability": "code", "worker_unit": "dev/backend"}, 40), "code(one-shot·quick)")
+        # the whole bracket follows the intensity's color and weight (quick: the field's hue, dim; strong: bold); no field hue: dim
+        self.assertEqual(tables._kind_cell(self.unit(field="code")), [("code", "kind_code"), ("(unit·quick)", "kindq_code")])
+        self.assertEqual(tables._kind_cell(self.unit(field="code", intensity="strong")), [("code", "kind_code"), ("(unit·strong)", "kindb_code")])
+        self.assertEqual(tables._kind_cell(self.unit(field="plan")), [("plan", "grp"), ("(unit·quick)", "dim")])
         self.assertEqual(tables._kind_cell(self.unit(field="code"), bracket=False), [("code", "kind_code")])
         self.assertEqual(tables._kind_cell(self.unit()), [("unit", "grp")])
 
@@ -149,9 +155,15 @@ class UnitRouteWords(unittest.TestCase):
         self.assertEqual((shown["kind_word"], shown["kind_field"], shown["unit_word"], shown["unit_route"]),
                          ("code", "code", "code-review", True))
         kind = session_panel.route_kind({**row, "chain": [["unit", "active"]]})
-        self.assertNotIn("intensity", kind)             # (a unit route's `quick` is no choice: no bracket)
+        self.assertEqual((kind["intensity"], kind["kind_form"]), ("quick", "unit"))   # (11-19: the intensity of a unit route is sent too, and its form)
         self.assertNotIn("chain", kind)                 # (and it is nobody's leg)
-        self.assertEqual(session_panel.route_kind({**row, "capability": "code"})["intensity"], "quick")
+        owned = session_panel.route_kind({**row, "capability": "code", "shape": "staged"})
+        self.assertEqual((owned["intensity"], owned["kind_form"]), ("quick", "staged"))
+        self.assertEqual(session_panel.route_kind({**row, "capability": "code", "shape": "one-shot-owner"})["kind_form"], "one-shot")
+        self.assertEqual(session_panel.route_kind({**row, "capability": "code", "shape": "staged+resource"})["kind_form"], "staged")
+        for shape in ("framed", "direct", "", "map-reduce", "transactional-owner"):      # (no form: the intensity bracket as before)
+            self.assertNotIn("kind_form", session_panel.route_kind({**row, "capability": "code", "shape": shape}), shape)
+        self.assertNotIn("kind_form", session_panel.route_kind({**row, "field": ""}))   # (an older unit route: no form, no bracket)
         plan = session_panel.route_row({**row, "field": "plan"})
         self.assertEqual(plan["kind_word"], "plan")
         self.assertNotIn("kind_field", plan)
@@ -188,7 +200,7 @@ class UnitRouteWords(unittest.TestCase):
         opened = draw(vm, NavState(view="ROUTES", title="ROUTES", folds=(("ropen:ROUTES", rid),)), 180, 60)
         pane = ["".join(cell[0] for cell in row[34:]) for row in opened.cells]
         kind = next(line for line in pane if "└ kind" in line)
-        self.assertIn("└ kind code(unit)", kind)
+        self.assertIn("└ kind code(unit·quick)", kind)
         self.assertNotIn("owner", kind)                                                      # no owner on a unit route
         self.assertTrue(any("└ unit · qa/code-review" in line for line in pane), pane[:14])
         self.assertFalse(any("└ worker" in line for line in pane))
