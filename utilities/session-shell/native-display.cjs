@@ -79,15 +79,22 @@ function observe(harness, lines, sid) {
 }
 // Rows whose text equals the statusline output Claude's callback recorded for
 // this exact session. Only Claude's statusline area counts: the rows directly
-// under the lowest input box (a rule, a `❯` prompt row, a rule). A screen
+// under the lowest input box (a rule that may carry the session's name, a `❯` prompt row, a rule). A screen
 // without that box, such as the Ctrl+O transcript, conceals nothing, and only a
 // complete contiguous match counts; the previous record covers the paint in flight.
 function claudeStatusRows(lines,sid,record) {
   if(!sid||!record||record.session_id!==sid)return new Set();
   const rule=s=>/^─{8,}$/.test(String(s).trim());
+  // A named session carries its name in the box's upper border: rule glyphs, one
+  // blank-set-off piece of text, rule glyphs (the name at either end or between).
+  const named=s=>{
+    const m=String(s).trim().match(/^(─+) [^─]*\S[^─]* (─+)$/);
+    return !!m&&m[1].length+m[2].length>=8;
+  };
+  const upper=s=>rule(s)||named(s);
   let bottom=-1;
   for(let y=lines.length-2;y>=1&&bottom<0;y--)if(rule(lines[y])){
-    let top=y-1;while(top>=0&&!rule(lines[top]))top--;
+    let top=y-1;while(top>=0&&!upper(lines[top]))top--;
     if(top>=0&&top<y-1&&/^❯/.test(String(lines[top+1])))bottom=y;
     else return new Set();
   }
