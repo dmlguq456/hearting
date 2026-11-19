@@ -69,10 +69,10 @@ const coloured=render(60,50,{resources:[A,B]}).rows.flat().filter(p=>/^\d+%$/.te
 assert.deepEqual(coloured.map(p=>[p.text,p.foreground]),[['92%',217],['58%',186],['71%',186]]);
 assert(!render(60,50,{resources:[A,B]}).rows.flat().some(p=>/[━─]{2}/.test(p.text)&&p.foreground===114),'no gauge');
 assert(rows.every(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0)===44),'every row keeps the width');
-// A session that is not known leaves its number cell empty; a GPU whose use is not known keeps its memory.
+// A session that is not known leaves its number cell empty; a GPU whose use is not known keeps its memory (in the column of the others').
 const odd=plain(render(44,50,{resources:[host('host-a',34,61,[gpu(0,92,'21/24G',null),{label:[D('GPU1')],mem:[D('3/24G')]}])]}));
 const o=odd.findIndex(s=>/^│ RESOURCES/.test(s));
-assert.deepEqual(odd.slice(o+1,o+3).map(s=>s.slice(2,-2).trimEnd()),['host-a  CPU 34%  MEM 61%','  GPU0 92% 21/24G  GPU1 3/24G'],odd.join('\n'));
+assert.deepEqual(odd.slice(o+1,o+3).map(s=>s.slice(2,-2).trimEnd()),['host-a  CPU 34%  MEM 61%','  GPU0 92% 21/24G  GPU1      3/24G'],odd.join('\n'));
 // No resources, no section; a panel beside the native area only.
 assert(!plain(render(44,50,{})).some(s=>/RESOURCES/.test(s)));
 assert(!plain(render(100,24,{resources:[A]},{side:false})).some(s=>/RESOURCES/.test(s)));
@@ -86,8 +86,8 @@ const four=host('host-d',5,10,[0,1,2,3].map(i=>idleGpu(i,'0/48G')));
 const none=host('host-e',7,8,[]);
 const body=(w,h)=>{const rows=plain(render(w,h,{resources:[eight,four,none]})),at=rows.findIndex(s=>/^│ RESOURCES/.test(s)),us=rows.findIndex(s=>/^│ USAGE/.test(s));return rows.slice(at+1,us).map(s=>s.slice(2,-2).trimEnd());};
 const wide=body(60,60);
-assert.deepEqual(wide,['host-c  CPU 20%  MEM 30%','  GPU0 92% 21/24G [3b]  GPU1 0% 0/24G  GPU2 0% 0/24G','  GPU3 58% 14/24G [c7]  GPU4 0% 0/24G  GPU5 0% 0/24G','  GPU6 0% 0/24G  GPU7 0% 0/24G',
- 'host-d  CPU 5%  MEM 10%','  GPU0 0% 0/48G  GPU1 0% 0/48G  GPU2 0% 0/48G','  GPU3 0% 0/48G','host-e  CPU 7%  MEM 8%'],wide.join('\n'));
+assert.deepEqual(wide,['host-c  CPU 20%  MEM 30%','  GPU0 92% 21/24G [3b]  GPU1  0%  0/24G','  GPU2  0%  0/24G       GPU3 58% 14/24G [c7]','  GPU4  0%  0/24G       GPU5  0%  0/24G','  GPU6  0%  0/24G       GPU7  0%  0/24G',
+ 'host-d  CPU  5%  MEM 10%','  GPU0  0%  0/48G       GPU1  0%  0/48G','  GPU2  0%  0/48G       GPU3  0%  0/48G','host-e  CPU  7%  MEM  8%'],wide.join('\n'));
 assert(!wide.some(s=>/idle/.test(s)));
 // The idle group is all dim (the use too: no level color); the working one keeps its level's color.
 const parts=render(60,60,{resources:[eight]}).rows.flat();
@@ -98,6 +98,44 @@ assert(parts.filter(p=>/^0\/24G$/.test(p.text)).every(p=>p.dim));
 const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 for(const width of [18,20,24,28,36,46]){const rows=plain(render(width,60,{resources:[eight,four,none]}));assert(rows.every(s=>cells(s)===width),width+'\n'+rows.join('\n'));
  const g=rows.join(' ');for(let i=0;i<8;i++)assert(g.includes('GPU'+i),width+' GPU'+i);}
+""")
+
+    def test_the_gpu_groups_and_the_host_values_stand_on_one_grid_at_every_width(self):
+        # 11-19 (the person: "그리고 GPU 표시를 행과 열 간격을 맞춰."): every group the same width, the label left, the use and the memory
+        # right-aligned, the session numbers left after them (blank where there is none); the same number of groups on every row of every host.
+        self.node(r"""
+const hosts=[host('host-a',34,61,[gpu(0,92,'21/24G','[3b]'),gpu(1,40,'10/48G','[c7]'),idleGpu(2,'0/48G'),idleGpu(3,'0/48G'),gpu(4,100,'48/48G','[d4]'),idleGpu(5,'0/48G'),idleGpu(6,'0/48G')]),
+ host('longer-host-b',3,12,[idleGpu(0,'0/24G'),idleGpu(1,'0/24G'),gpu(2,7,'2/24G',null)]),host('c',100,5,[])];
+const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
+const bodyOf=w=>{const rows=plain(render(w,60,{resources:hosts})),at=rows.findIndex(s=>/^│ RESOURCES/.test(s)),us=rows.findIndex(s=>/^│ USAGE/.test(s));
+ assert(rows.every(s=>cells(s)===w),w+'\n'+rows.join('\n'));return rows.slice(at+1,us).map(s=>s.slice(2,-2).trimEnd());};
+for(let width=28;width<=60;width++){
+ const body=bodyOf(width),gpuRows=body.filter(s=>/^  GPU\d/.test(s)),ctx=width+'\n'+body.join('\n');
+ assert(gpuRows.length>0,ctx);
+ const starts=s=>[...s.matchAll(/GPU\d/g)].map(m=>m.index);
+ // The groups start on the same cells on every row, and every row but the last of each host has as many groups as the first.
+ const first=starts(gpuRows[0]);
+ for(const r of gpuRows){const at=starts(r);assert.deepEqual(at,first.slice(0,at.length),ctx);}
+ const perRow=first.length;
+ // Where a host's GPUs end, its last row holds the rest; no row has more groups than the section's.
+ assert(gpuRows.every(r=>starts(r).length<=perRow),ctx);
+ // The values stand at the same offset from the start of their group: the use ends, the memory ends, the session number starts.
+ const rel=(re)=>new Set(gpuRows.flatMap(r=>{const at=starts(r);return at.map((a,i)=>{const seg=r.slice(a,at[i+1]??r.length),m=seg.match(re);return m?m.index+m[0].length:null;}).filter(x=>x!==null);}));
+ if(gpuRows.some(r=>/%/.test(r)))assert.equal(rel(/\d%/).size,1,'the use ends on one cell '+ctx);
+ if(gpuRows.some(r=>/\dG/.test(r)))assert.equal(rel(/\dG/).size,1,'the memory ends on one cell '+ctx);
+ const sess=new Set(gpuRows.flatMap(r=>{const at=starts(r);return at.map((a,i)=>{const seg=r.slice(a,at[i+1]??r.length),m=seg.indexOf('[');return m<0?null:m;}).filter(x=>x!==null);}));
+ assert(sess.size<=1,'the session numbers start on one cell '+ctx);
+ // The host rows: the stats in the same columns for every host, a value's end on the same cell (the names are whole while any stat is).
+ const hostRows=body.filter(s=>/^(host-a|longer-host-b|c) /.test(s));
+ if(hostRows.every(r=>/CPU/.test(r))){
+  assert.equal(new Set(hostRows.map(r=>r.indexOf('CPU'))).size,1,ctx);
+  assert.equal(new Set(hostRows.map(r=>r.search(/CPU +\d+%/)+r.match(/CPU +\d+%/)[0].length)).size,1,ctx);
+ }
+ if(hostRows.every(r=>/MEM/.test(r)))assert.equal(new Set(hostRows.map(r=>r.indexOf('MEM'))).size,1,ctx);
+}
+// The picture at 60 (inner 56): a group 21 wide, two to a row, `100%` the widest use.
+assert.deepEqual(bodyOf(60),['host-a         CPU  34%  MEM 61%','  GPU0  92% 21/24G [3b]  GPU1  40% 10/48G [c7]','  GPU2   0%  0/48G       GPU3   0%  0/48G','  GPU4 100% 48/48G [d4]  GPU5   0%  0/48G','  GPU6   0%  0/48G',
+ 'longer-host-b  CPU   3%  MEM 12%','  GPU0   0%  0/24G       GPU1   0%  0/24G','  GPU2   7%  2/24G','c              CPU 100%  MEM  5%'],bodyOf(60).join('\n'));
 """)
 
     def test_narrow_groups_drop_the_memory_then_the_use_and_keep_the_number_of_the_session(self):
