@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from parent_next_directive import entrypoint
-from route_form import one_shot_owner
+from route_form import one_shot_owner, one_shot_review_node, one_shot_review_route
 
 WORKER_TYPES = ("owner", "stage", "review", "support", "frame")
 UNIT_REF_RE = re.compile(r"^[a-z-]+/[a-z-]+$")
@@ -970,12 +970,39 @@ def owner_inline_marker_prompt(args) -> str:
                   and not dispatch_contract._owner_executed_node(n)]
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return ""
-    if not stages:
-        return ""
+    if not stages or one_shot_review_route(route):
+        return ""  # the middle cell's owner never closes its review inline: `one_shot_review_prompt`
     command = (f"python3 {shlex.quote(entrypoint(_REPO_ROOT, 'utilities/capability-route.py'))} complete --inline "
                f"--node <node> --reason \"<one line>\"")
     return (f"A declared stage ({', '.join(str(n['id']) for n in stages)}) you run yourself instead of dispatching "
             f"still publishes its completion marker: `{command}` (route and attempt axes are derived; pass --evidence with a cycle-local file when the stage produced one or the route has no bound cycle). Without it the route never settles.\n\n")
+
+
+def _review_rounds(route) -> int:
+    import review_round_cap
+    return review_round_cap.max_review_rounds(route["effective_intensity"])
+
+
+def one_shot_review_prompt(route, route_file, jobs=None) -> str:
+    """The middle cell's paragraph for its owner: make the work, then start the declared review with this
+    one command and wait for it. Text only; the runtime still decides every start and every verdict."""
+    node = one_shot_review_node(route)
+    if node is None:
+        return ""
+    command = route_start_command(route_file, node["id"], jobs=jobs)
+    return (f"This route is one session that makes the work and one independent review ({node['id']}, "
+            f"{node.get('unit')}) of it. Make the work, run your own checks, and commit it in this worktree. "
+            f"Once those checks pass, start the independent review with exactly this command: `{command}`. "
+            "When the receipt shows the child started, end the turn with the standalone line "
+            "`runtime_wait: registered-children`; the runtime waits for the review and brings its verdict back "
+            "to this same session. (A receipt that prints `parent_next=bounded-wait` instead names its own wait "
+            "command: run that printed command once, then read the review's result.) If the verdict blocks, fix every blocking finding in this worktree in one "
+            "pass, run the same checks, commit, and start the closure check with the same command, then wait "
+            f"again. The review gets {_review_rounds(route)} rounds in all: if the closure check blocks too, correct "
+            "no further, write the remaining findings in your report, and end with `verdict: FAIL`. "
+            "If it does not block, return your final handoff. You cannot review your own work or close "
+            "this review yourself: do not run `complete --inline` for it, and do not report PASS without the "
+            "review. Do not start the review before your work is committed.\n\n")
 
 
 def route_start_command(route_file, node_id: str, *, jobs=None, reviewed_evidence=None) -> str:
@@ -1103,6 +1130,13 @@ def continuation_followup_fields(route, node, metadata, jobs, route_file):
             producers = [n for n in _route_nodes(route) if n.get("kind") == "pipeline-stage"
                          and node["id"] in {n2["id"] for n2 in judging_stages(route, n["id"])}]
             source_review = bool(subject and subject.get("family") == "source")
+            if one_shot_review_node(route) is not None and node["id"] == one_shot_review_node(route)["id"]:
+                # The middle cell: the owner made the work this review blocked, so the owner corrects it.
+                verdicts = sum(1 for st, m in _lineage_rows(route, jobs).get(node["id"], ())
+                               if ROUND.classify_round_row(st, m, worker_type="review") == "verdict")
+                return {"kind": "review", "attempt": attempt, "artifact": str(artifact), "target": "",
+                        "source": True, "command": command, "producer_command": "", "owner_fixes": True,
+                        "closure_spent": verdicts >= ROUND.max_review_rounds(route["effective_intensity"])}
             targets = [reviewed["path"]] if reviewed else []
             if (reviewed and subject and any(item.get("path") == "checklist.md"
                     for item in subject.get("manifest", ()) if isinstance(item, dict))):
@@ -1163,6 +1197,15 @@ def continuation_followup_text(fields):
                     + (" First use " + "; ".join(producers) + "." if producers else "")
                     + " Then run the same start for the closure check: " + "; ".join(commands))
         return "\n".join(dict.fromkeys(filter(None, (continuation_followup_text(item) for item in fields))))
+    if fields.get("kind") == "review" and fields.get("owner_fixes"):
+        if fields.get("closure_spent"):
+            return (f"Review FAIL {fields['attempt']}: the closure check still blocks, and the one correction "
+                    f"allowed is spent. Do not correct further. Write the remaining findings from "
+                    f"{bounded(fields['artifact'])} in your report and end with `verdict: FAIL`.")
+        return (f"Review FAIL {fields['attempt']}: the independent review of your work blocks. Fix every blocking "
+                f"finding in {bounded(fields['artifact'])} in this worktree in one pass, run the same checks you "
+                f"ran before, commit, then start the closure check with the same command: {command(fields['command'])}. "
+                "Do not review it yourself and do not close it inline.")
     if fields.get("kind") == "review":
         target = bounded(fields.get("target")) or ("the source through the bounded producing stage" if fields.get("source") else "the reviewed inputs")
         producer = (" First use " + command(fields["producer_command"]) + ".") if fields.get("producer_command") else ""
@@ -1241,6 +1284,8 @@ def owner_route_steps_prompt(args, environ) -> str:
         stages = [n for n in nodes if _dispatchable_stage(n)]
         if not stages:
             return ""
+        if one_shot_review_route(route):
+            return one_shot_review_prompt(route, route_file)
         ready = [n["id"] for n in dispatch_stage_advance.runnable_successors(route, frozenset(), frozenset())]
     except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError):
         return ""

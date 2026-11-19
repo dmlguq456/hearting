@@ -14,7 +14,7 @@ import subprocess
 import sys
 import frame_repository
 from route_plan import is_depth0_leg
-from route_form import serial_attempt_route
+from route_form import serial_attempt_route, starts_depth2_nodes
 from owner_route_binding import OwnerRouteBindingError, validate_owner_route_binding, derive_quick_owner_binding, derive_frame_route_binding
 from dispatch_mode_contract import DispatchModeContractError, resolve_qa
 from dispatch_contract import (DispatchContractError, frame_harness_admission,
@@ -239,7 +239,10 @@ def _sealed_owner_context(path, *, worker_type="owner", route_node=None):
     intensity = route.get("effective_intensity")
     if intensity == "direct":
         raise OwnerError("route-evidence-direct-route-has-no-owner")
-    if not (serial_attempt_route(route) or route.get("registered_headless_candidates") is not None):
+    if starts_depth2_nodes(route) or not (
+            serial_attempt_route(route) or route.get("registered_headless_candidates") is not None):
+        # B (the owner starts depth-2 nodes) re-checks the evidence in this worktree; the middle cell is
+        # both an owner with candidates and a route that starts a review.
         rows = (route.get("dispatch_evidence") or {}).get("tuples") or []
         if any(
             isinstance(row, dict)
@@ -1182,8 +1185,10 @@ def main(argv):
         if route_evidence:
             route_data = json.loads(Path(route_evidence).read_text(encoding="utf-8"))
             leg_launch = bool(values.get("--route-node")) and values["--worker-type"] != "owner"
-            if leg_launch or route_data.get("effective_intensity") == "quick":
-                # W3: quick is a three-node route, so the caller's own
+            if leg_launch or serial_attempt_route(route_data):
+                # A route whose owner makes the work itself (and a unit leg) carries its route by
+                # argument, read from the route's nodes, not from its intensity: the middle cell
+                # (`solo·standard`) is an owner like quick's. W3: quick is a three-node route, so the caller's own
                 # `--route-node` selects which node this launch binds to. The
                 # default keeps every existing quick OWNER launch identical.
                 derive = derive_frame_route_binding if leg_launch else derive_quick_owner_binding

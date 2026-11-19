@@ -858,13 +858,18 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
 
 def _supervised_owner(args: argparse.Namespace) -> bool:
     """A sealed route binding supervises its owner; a registered depth-1 owner
-    without one (the quick and solo shape) is supervised too. Route identity
-    stays separate from the reason to supervise."""
+    without one is supervised when it is quick or solo, or when it is bound to its
+    route by its own node (the middle cell's owner: standard, no binding, the route
+    passed as arguments). Route identity stays separate from the reason to supervise.
+
+    The question Claude and Codex ask (any registered depth-1 owner) is not asked here:
+    a standard+ owner with no route would change its one-shot launch."""
     if getattr(args, "owner_route_binding", None):
         return True
     return (getattr(args, "dispatch_depth", None) == 1
             and getattr(args, "worker_type", None) == "owner"
-            and getattr(args, "intensity", None) not in STANDARD_PLUS_INTENSITIES)
+            and (getattr(args, "intensity", None) not in STANDARD_PLUS_INTENSITIES
+                 or WRAPPER_COMMON.supervisor_route(args) is not None))
 
 
 def initialize_supervised_owner_input(args: argparse.Namespace, jobs: Path) -> None:

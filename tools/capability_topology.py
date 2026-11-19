@@ -1036,6 +1036,34 @@ def _validate_continuations(recipe, registry, nodes, by_id):
             )
 
 
+
+ONE_SHOT_REVIEW_KEYS = {"node", "inputs", "fallback_hops", "model_profile", "owner_model_profile"}
+
+
+def _validate_one_shot_review(recipe, registry):
+    """The middle cell's review node: a kind that declares `one_shot_review` borrows one of its own
+    standard review nodes (inputs, registered fallback hops without `inline` or `native-subagent`, model role); everything else about the
+    node is that node's own. `owner_model_profile` is the model role of the owner that makes the work."""
+    where = f"{recipe['capability']}:one_shot_review"
+    declared = recipe["one_shot_review"]
+    if not isinstance(declared, dict) or set(declared) != ONE_SHOT_REVIEW_KEYS:
+        raise TopologyError(f"{where}: must declare exactly {sorted(ONE_SHOT_REVIEW_KEYS)}")
+    node = next((n for n in recipe["standard_plus"]["nodes"] if n.get("id") == declared["node"]), None)
+    if (node is None or node.get("kind") != "review-worker" or node.get("dispatch_depth") != 2
+            or not node.get("completion_gate")):
+        raise TopologyError(f"{where}: node must be one of the recipe's depth-2 review-worker nodes")
+    inputs = declared["inputs"]
+    if not isinstance(inputs, list) or not inputs or any(not isinstance(i, str) for i in inputs):
+        raise TopologyError(f"{where}: inputs must be a non-empty list")
+    hops = declared["fallback_hops"]
+    if (not isinstance(hops, list) or "inline" in hops or "native-subagent" in hops or len(hops) != len(set(hops))
+            or set(hops) - FALLBACK_HOPS or not hops):
+        # A native subagent's completion is recorded inline, which the cell refuses for the review of the owner's own work.
+        raise TopologyError(f"{where}: fallback_hops must be distinct registered dispatch hops without inline "
+                            "or native-subagent")
+    _validate_model_profile(registry, declared["model_profile"], where)
+    _validate_model_profile(registry, declared["owner_model_profile"], where + ":owner")
+
 def _validate_recipe(recipe, registry, standard_plus_owner_profile):
     required = {"capability", "modes", "topology_class", "direct_predicates", "promotion_signals",
                 "quick", "standard_plus", "completion_gates", "human_gates",
@@ -1068,6 +1096,8 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
     _validate_guard_scope(recipe, quick.get("write_scope", []), quick.get("guard_preconditions", []), registry, "quick")
     _validate_bucket_anchor(recipe, registry, quick.get("write_scope", []), None, "quick")
     graph = recipe["standard_plus"]
+    if "one_shot_review" in recipe:
+        _validate_one_shot_review(recipe, registry)
     if any(key in graph for key in bare_depth_keys):
         raise TopologyError(f"{recipe['capability']}: bare standard+ dispatch-depth fields are forbidden")
     if graph.get("owner_dispatch_depth") != 1:

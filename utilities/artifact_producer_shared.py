@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -904,7 +905,23 @@ def completed_route_spec_publication(route: Mapping[str, Any], *, settle: bool =
     return publication if publication.get("status") != "not-applicable" else result
 
 
-def admit_shared(
+def admit_shared(root: Path, **kwargs: Any) -> Dict[str, Any]:
+    """Admit one shared revision; a new spec revision also asks for the entrance to be drawn again.
+
+    The entrance links each spec topic to its latest revision, so a publication redraws it
+    the way a seal does (`finalize`): best effort, without waiting, outside the admission
+    lock. Neither a slow refresh nor its failure changes the admission."""
+    result = _admit_shared(root, **kwargs)
+    if kwargs.get("kind") == "spec" and result.get("status") == "admitted":
+        try:
+            import artifact_entrance  # lazy: an admission never depends on the entrance
+            artifact_entrance.request_refresh(Path(root))
+        except Exception as exc:  # noqa: BLE001 -- the entrance never changes or fails an admission
+            print(f"artifact_entrance skipped error={type(exc).__name__}", file=sys.stderr)
+    return result
+
+
+def _admit_shared(
     root: Path,
     *,
     cycle_id: str,
