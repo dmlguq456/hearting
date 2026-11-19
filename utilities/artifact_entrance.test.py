@@ -1022,9 +1022,10 @@ class SectionFixture(EntranceFixture):
             self.assertEqual(E._command_reports(self.root), 0)
         return out.getvalue()
 
-    def open_line(self, number):
+    def open_line(self, number, screen=True):
         out = io.StringIO()
         with mock.patch.object(E, "_show_viewer", return_value=None), \
+                mock.patch.object(E, "_can_open_externally", return_value=screen), \
                 mock.patch.object(E, "_open_externally"), contextlib.redirect_stdout(out):
             self.assertEqual(E._command_open(self.root, [str(number)]), 0)
         return out.getvalue().strip()
@@ -1570,11 +1571,45 @@ class SectionTests(SectionFixture):
                 mock.patch.object(E.artifact_meta, "_membership", return_value={}):
             self.refresh()
         readme = self.entrance()
-        self.assertIn("   x &lt;i&gt;tag&lt;/i&gt; &amp; \\*star\\* a&gt;b\n", readme)
+        self.assertIn("   x \\<i\\>tag\\</i\\> \\& \\*star\\* a\\>b\n", readme)
         self.assertNotIn("<i>", readme)
+        self.assertNotIn("&amp;", readme)  # backslash escapes, never entities: the viewer does not decode them
         self.assertIn("[A <b>T</b> & co]", readme)  # the title keeps its earlier behaviour
-        self.assertIn("x &lt;i&gt;tag&lt;/i&gt; &amp;", E._md_summary(doc["campaign"]["summary"]))
+        escaped = E._md_summary(doc["campaign"]["summary"])
+        self.assertEqual(escaped, "x \\<i\\>tag\\</i\\> \\& \\*star\\* a\\>b")
+        import artifact_markdown
+        # the viewer shows the summary as it was typed (its HTML escapes the three characters once)
+        self.assertEqual(artifact_markdown.render_markdown(escaped + "\n").strip(),
+                         "<p>x &lt;i&gt;tag&lt;/i&gt; &amp; *star* a&gt;b</p>")
         self.assertIn("x &lt;i&gt;tag&lt;/i&gt; &amp; *star* a&gt;b", self.entrance("index.html"))
+
+    def test_a_shell_without_a_screen_opens_the_md_chapter_and_a_screen_opens_the_html_one(self):
+        self.spec(12)
+        self._routes()
+        self.refresh()
+        lines = [item for section in E.entrance_sections(E.scan(self.root), E._translator())
+                 for item in section["lines"] if item["number"] is not None]
+        derived = [item for item in lines if item["kind"] in E.DERIVED_KINDS]
+        self.assertEqual({item["kind"] for item in derived}, set(E.DERIVED_KINDS))
+        for item in derived:
+            self.assertTrue(item["md"].endswith(".md") and item["target"].endswith(".html"), item)
+            self.assertEqual(self.open_line(item["number"], screen=False), str(self.root / item["md"]), item["kind"])
+            self.assertEqual(self.open_line(item["number"], screen=True), str(self.root / item["target"]), item["kind"])
+        other = next(item for item in lines if item["kind"] not in E.DERIVED_KINDS)
+        self.assertEqual(self.open_line(other["number"], screen=False), self.open_line(other["number"], screen=True))
+
+    def test_a_number_with_no_entrance_lines_says_not_found_and_names_no_range(self):
+        missing = self.root / "no-such-root"
+        err = io.StringIO()
+        with mock.patch.object(E, "_show_viewer") as viewer, mock.patch.object(E, "_open_externally") as opener, \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(err):
+            code = E._command_open(missing, ["1"])
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue().strip(), "No artifact matches 1.")
+        self.assertNotIn("lines 1 to 0", err.getvalue())
+        viewer.assert_not_called()
+        opener.assert_not_called()
 
     def test_the_route_reports_page_has_no_numbers_in_either_form_and_keeps_its_order_and_limit(self):
         for day in range(1, 23):

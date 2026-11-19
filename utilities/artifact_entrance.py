@@ -742,8 +742,9 @@ def _md_text(value: str) -> str:
 
 
 def _md_summary(value: str) -> str:
-    """A model-written summary line: Markdown specials and `<`, `>`, `&` show as typed."""
-    return _md_text(value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    """A model-written summary line: Markdown specials and `<`, `>`, `&` show as typed.
+    Backslash escapes, not entities: the viewer does not decode entities, and the raw file stays readable."""
+    return re.sub(r"([\\`*_\[\]<>&])", r"\\\1", _nfc(value))
 
 
 def _md_href(path: str) -> str:
@@ -1322,11 +1323,14 @@ def _print_rows(rows: Sequence[Dict[str, Any]], root: Path) -> None:
             print(f"   {_translator()('entrance.open_result')}: {item['path']}")
 
 
+def _can_open_externally() -> bool:
+    """Whether this shell has a screen to open a document on."""
+    return sys.stdout.isatty() and bool(
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY") or sys.platform == "darwin")
+
+
 def _open_externally(path: Path | str) -> None:
-    if not sys.stdout.isatty():
-        return
-    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-            or sys.platform == "darwin"):
+    if not _can_open_externally():
         return
     opener = "open" if sys.platform == "darwin" else "xdg-open"
     try:
@@ -1388,11 +1392,17 @@ def _command_open(root: Path, args: Sequence[str]) -> int:
     line: Optional[Dict[str, Any]] = None
     chosen: Optional[Dict[str, Any]] = None
     if len(args) == 1 and args[0].isascii() and args[0].isdigit():
+        if not numbered:  # no entrance lines at all: there is no range to name
+            print(t("open.not_found", query=selector), file=sys.stderr)
+            return 1
         if not 1 <= int(args[0]) <= len(numbered):  # a number is a line, never a search word
             print(t("open.no_line", number=args[0], last=len(numbered)), file=sys.stderr)
             return 1
         line = numbered[int(args[0]) - 1]
-        chosen = line["row"] or {"doc_path": line["target"], "kind": line["kind"]}
+        doc_path = line["target"]
+        if line["kind"] in DERIVED_KINDS and not _can_open_externally():
+            doc_path = line["md"]  # a shell without a screen reads the `.md` chapter
+        chosen = line["row"] or {"doc_path": doc_path, "kind": line["kind"]}
     if chosen is None:
         rows = (snapshot["recent"] + snapshot["topics"]) if snapshot else []
         words = [word.casefold() for word in args if word.strip()]
