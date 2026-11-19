@@ -477,8 +477,10 @@ class ProposalValidationTest(ValidationBase):
              "ignored:legs[0].intensity:standard-for-direct"),
             ({"capability": "autopilot-code", "shape": "direct", "intensity": "strong"}, "direct",
              "ignored:legs[0].intensity:strong-for-direct"),
-            ({"capability": "autopilot-code", "shape": "solo", "intensity": "standard"}, "quick",
-             "ignored:legs[0].intensity:standard-for-solo"),
+            # solo carries quick, and standard where its kind declares a one-shot review (code does): a
+            # proposal above that keeps the highest intensity the form allows at or below it.
+            ({"capability": "autopilot-code", "shape": "solo", "intensity": "strong"}, "standard",
+             "ignored:legs[0].intensity:strong-for-solo"),
             ({"capability": "autopilot-code", "shape": "staged", "intensity": "quick", "graph": ["execute"]},
              "standard", "ignored:legs[0].intensity:quick-for-staged"),
             ({"capability": "autopilot-code", "shape": "staged", "intensity": "direct", "graph": ["execute"]},
@@ -490,6 +492,10 @@ class ProposalValidationTest(ValidationBase):
                 self.assertEqual(row["reason"], "valid", row)
                 self.assertEqual(row["facts"]["legs"][0]["intensity"], effective)
                 self.assertEqual(row["read_notes"], [note])
+        solo_standard = self.evaluate([{"capability": "autopilot-code", "shape": "solo", "intensity": "standard"}])
+        self.assertEqual(solo_standard["reason"], "valid", solo_standard)
+        self.assertEqual(solo_standard["facts"]["legs"][0]["intensity"], "standard")
+        self.assertEqual(solo_standard.get("read_notes", []), [])
         staged_strong = self.evaluate([{"capability": "autopilot-code", "shape": "staged", "intensity": "strong",
                                         "graph": ["execute"]}])
         self.assertEqual(staged_strong["reason"], "valid", staged_strong)

@@ -26,6 +26,7 @@ from session_identity import session_label
 from route_identity import registered_node_identity
 from dispatch_attempt_policy import committed_outcome, verdict_pass, terminal_conflict_pending
 from route_authority import depth1_supported_harnesses
+from route_form import one_shot_review_route
 from stage_session_contract import load_manifest
 
 from dispatch_contract_base import (
@@ -546,7 +547,13 @@ def completion_marker_gate(
     markers = {}
     proceeding = []
     blocked: list[tuple[str, AttemptReadiness]] = []
+    by_id = {row.get("id"): row for row in route.get("nodes", []) if isinstance(row, dict)}
+    # The middle cell's owner (`one-shot`) is started first; the review its end waits on is a child it starts
+    # itself (`owner_terminal_prerequisites` holds the end). That depth-2 dependency is not a start predecessor.
+    owner_starts_review = route_node == "one-shot" and one_shot_review_route(route)
     for dep in node.get("depends_on", []):
+        if owner_starts_review and (by_id.get(dep) or {}).get("dispatch_depth") == 2:
+            continue
         marker_path = next(
             (
                 candidate

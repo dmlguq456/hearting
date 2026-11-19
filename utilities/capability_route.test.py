@@ -7552,12 +7552,16 @@ class ShapeIntensityDiagnosticTest(unittest.TestCase):
   return R.compose_route(**d)
 
  def test_cli_mismatch_names_allowed_values(self):
-  cases=(("direct", "standard", "direct"), ("solo", "standard", "quick"),
+  cases=(("direct", "standard", "direct"), ("solo", "strong", "quick,standard"),
          ("staged", "quick", "standard,strong,thorough,adversarial"))
   for shape, intensity, allowed in cases:
    with self.subTest(shape=shape):
     with self.assertRaisesRegex(ValueError, rf"compose-shape-intensity-mismatch:{shape} .*allowed: {allowed}"):
      self.compose(shape=shape,graph=None if shape != "staged" else "execute,test,report",intensity=intensity)
+ def test_a_kind_that_declares_no_one_shot_review_still_carries_only_quick_on_solo(self):
+  # The middle cell is declared per kind (`one_shot_review`); lab declares none.
+  with self.assertRaisesRegex(ValueError, r"compose-shape-intensity-mismatch:solo .*allowed: quick\)"):
+   self.compose(capability="autopilot-lab",capability_mode="setup",shape="solo",graph=None,intensity="standard")
 
 
 class ComposeRouteTest(TestRoute):
@@ -9745,8 +9749,14 @@ class OwnerNodeBoundTerminalTest(unittest.TestCase):
   self.assertFalse(gate["passed"],gate)
   self.assertIn(gate["reason"],("owner-route-identity-mismatch","owner-terminal-evidence-unverified"))
 
- def test_node_bound_owner_needs_a_quick_route(self):
-  gate=self.observe(self.row(),route=dict(self.route,effective_intensity="standard"))
+ def test_node_bound_owner_needs_the_route_whose_owner_makes_the_work(self):
+  # read from the nodes (a depth-1 owner `one-shot`), not from the intensity: an owner node that is not the
+  # maker's `one-shot` (a team's) is not the node-bound shape, whatever the record says
+  team=dict(self.route,effective_intensity="standard",nodes=[dict(self.node,id="execute")])
+  self.jobs.write_text(self.row(route_node="execute")+"\n")
+  with patch_split(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
+       patch_split(R,"owner_terminal_prerequisites",return_value={}):
+   gate=R.terminal_gate_observation(team,jobs=self.jobs,exact_terminal=True)["execute"]
   self.assertFalse(gate["passed"],gate)
   self.assertEqual(gate["reason"],"owner-route-identity-mismatch")
 

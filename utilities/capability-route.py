@@ -176,6 +176,7 @@ from capability_route_nodes import (  # noqa: F401
     _capture_unit_frontmatter, _expected_nodes_under_frame_policy, _frame_node,
     _frameless_recipe, _load_sd160_snapshots, _no_model_node, _one_leg_frame_recipe,
     _owner_node, _profile_input_maps, _quick_frame_diversity, _quick_gate_bindings,
+    one_shot_owner_default, one_shot_review_declared, one_shot_review_node,
     _recipe_has_frame, _resolve_owner_profile, _sd160_snapshot_path, _seal_confirmation_mode,
     _seal_profile_demands, _seal_small_work_confirmation, _seal_terminal_commit_support,
     _stamp_frame_profiles, _unit_blocks_digest, _verify_profile_contract, unit_leg_node,
@@ -1113,7 +1114,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     requested = intensity or SHAPE_INTENSITY[shape]
     if requested not in ORDER:
         raise ValueError("invalid intensity")
-    mismatch = ROUTE_FORM.intensity_mismatch(shape, requested)
+    mismatch = ROUTE_FORM.intensity_mismatch(shape, requested, one_shot_review_declared(base))
     if mismatch is not None:
         raise ValueError(mismatch)
     cwd = str(Path(cwd).resolve(strict=True))
@@ -1141,6 +1142,10 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     if resume_graph:
         predicates = [p for p in predicates if p not in ("no-resource-run", "no-independent-verifier")]
     signals = sorted(set(signals or ()))
+    # The middle cell `solo·standard`: a `solo` route of a kind that declares a review, raised above quick
+    # by an explicit `--intensity standard` or a promotion signal (a signal raises the intensity, not the form).
+    middle_cell = (shape == "solo" and one_shot_review_declared(base) and not resume_graph
+                   and max((requested, "standard" if signals else "quick"), key=ORDER.get) != "quick")
     if shape == "direct" and signals:
         raise ValueError("compose-direct-signals-conflict")
     if selection_pins:
@@ -1189,6 +1194,9 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
             nodes = [{"id": "inline", "write_scope": list(base["quick"]["write_scope"])}]
         elif unit is not None:
             nodes = [{"id": TOPO.UNIT_NODE_ID, "write_scope": list(base["quick"]["write_scope"])}]
+        elif middle_cell:
+            # The middle cell: the kind's declared review node, then the owner's end node.
+            nodes = [one_shot_review_node(base), {"id": "one-shot", "write_scope": list(base["quick"]["write_scope"])}]
         elif shape == "solo" and not signals:
             if resume_graph and RESOURCE_RESUME.recipe_selected(base):
                 nodes = RESOURCE_RESUME.nodes(base, registry["owner_profile_by_intensity"]["quick"])
@@ -1239,7 +1247,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
                 row for row in dispatch_evidence["tuples"] if row.get("parent_harness") != "codex"
             ] + readiness["tuples"]}
     owner_pin = (selection_pins or {}).get("owner", {}).get("harness")
-    if shape in ("staged", "framed") and not owner_only and dispatch_evidence is None:
+    if (shape in ("staged", "framed") or middle_cell) and not owner_only and dispatch_evidence is None:
         readiness = _compose_readiness(cwd, jobs or _compose_default_jobs(), parent_harness,
                                        children or _compose_default_children(selection_pins),
                                        gpu_route=gpu_route if shape == "staged" else None,
@@ -1490,8 +1498,11 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
     if capability==TOPO.UNIT_CAPABILITY and effective not in unit_intensities:
         raise ValueError(f"compose-unit-conflict:{effective} (a unit route is {','.join(unit_intensities)})")
     # The route form this request builds; every form-dependent step below reads it, never `effective`.
-    form=ROUTE_FORM.form_of(capability,effective,shape)
+    review_declared=one_shot_review_declared(recipe)
+    form=ROUTE_FORM.form_of(capability,effective,shape,review_declared)
     serial_attempt=ROUTE_FORM.serial_attempt_form(form)
+    # The middle cell: one owner makes the work and starts its kind's one declared review node.
+    review_cell=form=="solo" and effective!="quick"
     resume_recipe = composed and RESOURCE_RESUME.recipe_selected(recipe) and form == "solo"
     if composed and not ROUTE_FORM.staged_form(form) and not resume_recipe:
         raise ValueError("composed routes require a standard+ effective intensity")
@@ -1527,8 +1538,9 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
     elif form=="solo":
         if transport not in (None, "headless"):
             raise ValueError(f"invalid quick transport: {transport!r}")
-        if frameless:
-            # A leg of an approved route plan was framed already: its one-shot runs without the quick frame pair.
+        if frameless or review_cell:
+            # A leg of an approved route plan was framed already: its one-shot runs without the quick frame pair
+            # (and the middle cell, whose owner is a decided shape, never has one).
             recipe=_frameless_recipe(recipe)
         if (requested=="direct" and set(predicates)!=known_pred
                 and registered_headless_evidence is None):
@@ -1557,6 +1569,8 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         _frame_diversity=_quick_frame_diversity(registered_headless_candidates)
         transport="headless"
         owner_model_profile=registry["owner_profile_by_intensity"]["quick"]
+        if review_cell:
+            owner_model_profile=recipe["one_shot_review"]["owner_model_profile"]  # the maker, not a conductor
         # What quick's frame legs LOSE compared to standard+: no
         # `dispatch_evidence.tuples` per-field sealing of
         # parent_transport/parent_sandbox/child_harness, and no `fallback_hops`
@@ -1595,6 +1609,12 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         if resume_recipe:
             nodes = RESOURCE_RESUME.nodes(recipe, owner_model_profile)
             gates = ["resource-exit", "quick-complete"]
+        if review_cell:
+            # The middle cell `solo·standard`: the kind's declared review node, then the owner's end node,
+            # which waits on it (the review never waits on the owner). No frame pair (a decided shape).
+            nodes = [one_shot_review_node(recipe), nodes[-1]]
+            nodes[1]["depends_on"] = [nodes[0]["id"]]
+            gates = [nodes[0]["completion_gate"], "quick-complete"]
         selection_basis=[{"axis":"direct-predicate-gap","signal":p,"source":"compiler"} for p in sorted(known_pred-set(predicates))]
     else:
         if transport not in (None, "headless"):
@@ -1617,9 +1637,12 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         raise ValueError("structured inline_reason required")
     evidence=_validate_tracking_evidence(tracking, tracked_gate_evidence)
     checked_dispatch=None
+    # B: the owner starts depth-2 nodes. Read from the nodes just built, so the middle cell (an owner that
+    # makes the work and starts one review) takes the dispatch evidence a team route takes.
+    starts_stages=ROUTE_FORM.starts_depth2_nodes({"nodes":nodes})
     if ROUTE_FORM.staged_form(form) and _single_owner_nodes(nodes):
         registered_headless_candidates = _validate_registered_headless_evidence(registered_headless_evidence)
-    elif ROUTE_FORM.staged_form(form):
+    elif starts_stages or ROUTE_FORM.staged_form(form):
         parent_dispatch_depth=_evidence_parent_dispatch_depth(
             nodes, recipe["standard_plus"]["owner_dispatch_depth"])
         checked_dispatch=_validate_dispatch_evidence(
@@ -1630,7 +1653,10 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
             expected_worktree=cwd, require_scope=True)
         for node in nodes:
             if node.get("dispatch_depth")==2:
-                node["fallback_hops"]=json.loads(json.dumps(chain))
+                # A node that declared its hops (the middle cell's review, no `inline`) keeps only those.
+                declared_hops=node.get("fallback_hops") if review_cell else None
+                node["fallback_hops"]=json.loads(json.dumps(
+                    [hop for hop in chain if declared_hops is None or hop["fallback_hop"] in declared_hops]))
     if profile is not None:
         if profile not in PROFILE.PORTABLE_PROFILES:
             raise ValueError("profile-explicit-unknown:" + str(profile))
@@ -1639,7 +1665,8 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
     profile_demands, explicit_profiles = _profile_input_maps(nodes, profile_demands, explicit_profiles)
     owner_demand = profile_demands.get("__owner__")
     owner_model_profile, owner_profile_selection = _resolve_owner_profile(
-        effective, registry, owner_demand, explicit_profiles.get("__owner__"))
+        effective, registry, owner_demand, explicit_profiles.get("__owner__"),
+        owner_default=one_shot_owner_default(recipe, effective, form == "solo"))
     resolved_owner_profile = owner_profile_selection["resolved_profile"]
     if owner_demand is not None or "__owner__" in explicit_profiles:
         # Quick's one-shot is the owner process, so there is one selection.
@@ -1700,7 +1727,8 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
       "owner_profile_demand":owner_demand,"owner_profile_selection":owner_profile_selection,
       "execution_topology":("resource+verification" if resume_recipe else "inline" if form=="direct" else recipe["quick"]["topology"] if serial_attempt else recipe["topology_class"]),
       "owner_dispatch_depth":0 if form=="direct" else (recipe["quick"]["owner_dispatch_depth"] if serial_attempt else recipe["standard_plus"]["owner_dispatch_depth"]),
-      "max_dispatch_depth":recipe["quick"]["max_dispatch_depth"] if serial_attempt else (0 if form=="direct" else recipe["standard_plus"]["max_dispatch_depth"]),
+      "max_dispatch_depth":(recipe["quick"]["max_dispatch_depth"] if serial_attempt and not starts_stages
+                            else 0 if form=="direct" else recipe["standard_plus"]["max_dispatch_depth"]),
       "tracking":tracking,"tracked_gate_evidence":evidence,"spec_touch":spec_touch,
       "artifact_storage_contract_version":2,
       "cwd":str(cwd),"artifact_root":str(artifact),"source_commit":_git_commit(cwd),

@@ -7112,7 +7112,13 @@ class QuickThreeNodeRegistrationTest(_AttemptPolicyFixture):
                         ("frame-alternative",{"unit":"_kernel/owner"})):
    with self.subTest(node_id=node_id,wrong=wrong):
     exception=self.refusal(self.route(**{node_id:wrong}),route_node=node_id,intensity="quick")
-    self.assertEqual((exception.reason,exception.detail),("quick-route-shape-invalid",node_id))
+    if (node_id,wrong)==("one-shot",{"unit":"plan/frame"}):
+     # the owner is read from the nodes (a `one-shot` node of unit `_kernel/owner`): a one-shot node that is not
+     # one reads as no owner, so the route is not a serial-attempt route and its depth-1 node is refused by the
+     # checked-chain rule instead (still a refusal; only the rule that names it differs)
+     self.assertEqual((exception.reason,exception.detail),("route-fallback-hops-missing",node_id))
+    else:
+     self.assertEqual((exception.reason,exception.detail),("quick-route-shape-invalid",node_id))
 
  def test_a_node_id_outside_the_table_is_a_shape_refusal(self):
   """`mystery` is a real node in the route -- it is not `route-node-unknown`.

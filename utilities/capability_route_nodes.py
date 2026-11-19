@@ -19,13 +19,15 @@ from capability_route_base import (
 )
 
 
-def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=None):
+def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=None, owner_default=None):
     """One selection for compile and verify: demand, otherwise legacy default.
 
     Intensity describes the workflow shape; its compatibility default must not
-    veto the independently validated judgment/execution demand.
+    veto the independently validated judgment/execution demand. `owner_default` is the default of an
+    owner that makes the work itself at a higher intensity (the middle cell `solo·standard`, whose
+    recipe declares it): that owner is read as the maker (A), not as the intensity's conductor.
     """
-    default = registry["owner_profile_by_intensity"].get(effective) or "light"
+    default = owner_default or registry["owner_profile_by_intensity"].get(effective) or "light"
     selection = PROFILE.resolve_profile_demand(
         demand, explicit_profile=explicit_profile if explicit_profile is not None else default if demand is None else None,
         legacy=explicit_profile is None, existing_versioned_stage=True)
@@ -118,6 +120,37 @@ def unit_leg_node(recipe, unit, registry=None):
     node = json.loads(json.dumps(recipe["standard_plus"]["nodes"][0]))
     node.update({"role": head["role"], "unit": unit, "worker_type": head["worker_type"],
                  "model_profile": staged_unit_profile(registry or TOPO.load_registry(), unit)})
+    return node
+
+
+def one_shot_review_declared(recipe):
+    """Whether this recipe declares the middle cell `solo·standard` (`one_shot_review`)."""
+    return isinstance(recipe, dict) and "one_shot_review" in recipe
+
+
+def one_shot_owner_default(recipe, effective, owner_makes_the_work):
+    """The default model role of the owner that makes the middle cell's work, or None for any other route.
+
+    `owner_makes_the_work` is A (a `one-shot` owner node / the `solo` form): a team conductor at the same
+    intensity keeps the intensity's default."""
+    if (not owner_makes_the_work or effective in (None, "direct", "quick")
+            or not one_shot_review_declared(recipe)):
+        return None
+    return recipe["one_shot_review"]["owner_model_profile"]
+
+
+def one_shot_review_node(recipe):
+    """The middle cell's review node: the recipe's own standard review node, borrowed.
+
+    ONE function for the compiler and `verify_route`. It keeps the node's unit, outputs, write scope and
+    completion gate; it depends on nothing (the owner's end node waits on it, never the reverse), reads
+    the declared inputs (the owner's source, not a plan), takes the declared model role, and its fallback
+    chain is the declared hops (no `inline`: the maker cannot close a review of its own work)."""
+    declared = recipe["one_shot_review"]
+    node = next(n for n in recipe["standard_plus"]["nodes"] if n.get("id") == declared["node"])
+    node = json.loads(json.dumps(node))
+    node.update({"depends_on": [], "inputs": list(declared["inputs"]),
+                 "fallback_hops": list(declared["fallback_hops"]), "model_profile": declared["model_profile"]})
     return node
 
 

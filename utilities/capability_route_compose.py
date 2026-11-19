@@ -1045,24 +1045,29 @@ def _pin_change_probe(route, jobs, target, harness, caller):
     owner: from the new owner harness to the route's children. worker: from the owner
     harness in force to the new worker harness. frame: from this depth-0 session to the new
     frame harness. A quick route (one owner, its registered-headless candidates) is probed for
-    candidates instead; it starts no stage, so a worker change there needs nothing probed.
+    candidates instead; it starts no stage, so a worker change there needs nothing probed. The middle
+    cell (an owner that makes the work, A, and starts one review, B) is both: an owner pin is probed for
+    the owner's candidates and the review's tuples, a worker pin for the review's tuples.
     Nothing supported for the new pin is refused before anything is recorded."""
     if harness not in DEFAULTS.current_enabled_harnesses():
         raise ValueError(f"explicit-adapter-disabled-by-user-policy:{target}={harness}")
     import route_authority as RA
     view = RA.route_in_force(route)
     quick = ROUTE_FORM.serial_attempt_route(route) or route.get("registered_headless_candidates") is not None
+    stages = ROUTE_FORM.starts_depth2_nodes(route)   # B: the owner starts depth-2 nodes
     rows = [row for row in (view.get("dispatch_evidence") or {}).get("tuples") or [] if isinstance(row, dict)]
-    if quick and target == "worker":
+    if quick and not stages and target == "worker":
         return [], []
-    if target == "owner" or quick:
+    if target == "owner" or (quick and not stages):
         children = sorted({row.get("child_harness") for row in rows if row.get("child_harness")}) \
             or list(_compose_default_children())
         probe = _compose_readiness(route["cwd"], jobs, harness, children, gpu_route=route)
-        tuples = [] if quick else [row for row in probe.get("tuples") or [] if row.get("parent_harness") == harness]
+        tuples = ([row for row in probe.get("tuples") or [] if row.get("parent_harness") == harness]
+                  if stages or not quick else [])
         candidates = [row for row in probe.get("candidates") or [] if row.get("harness") == harness] if quick else []
-        ready = (any(row.get("status") == "supported" for row in candidates) if quick else
-                 any(row.get("status") == "supported" and row.get("launch_authority") == "conductor" for row in tuples))
+        ready = ((any(row.get("status") == "supported" for row in candidates) if quick else True)
+                 and (any(row.get("status") == "supported" and row.get("launch_authority") == "conductor"
+                          for row in tuples) if stages or not quick else True))
     else:
         if target == "worker":
             owner = ((view.get("selection_pins") or {}).get("owner") or {}).get("harness")
