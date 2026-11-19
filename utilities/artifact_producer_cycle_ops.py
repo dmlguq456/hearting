@@ -282,17 +282,21 @@ _MOVED_FIELDS = ("campaign_id", "parent_cycle_id")
 
 
 def _precheck_move(root: Path, record: Mapping[str, Any], source: Path, target_dir: Path, new_campaign_id: str,
-                   parent: Any, members: Sequence[Path], *, found: Any = _UNSET, digest: Optional[str] = None) -> None:
+                   parent: Any, members: Sequence[Path], *, found: Any = _UNSET, digest: Optional[str] = None,
+                   ) -> artifact_index.IndexDocument:
     """Refuse, before the folder moves, a manifest the adoption would stop on.  The adoption (see
     `_adopt_location_locked`) writes the cycle's and each member's next document after the folder has moved, so
-    the same documents are computed and checked here, read-only, first: a refusal leaves every byte as it was."""
+    the same documents are computed and checked here, read-only, first: a refusal leaves every byte as it was.
+    The admission index is read once (the lock is held, and nothing before the adoption writes it); it is returned,
+    for the adoption to publish the cycle's own document from the same read."""
     target = _read_json(target_dir / "campaign.json") or {}
+    index = artifact_admission.load_index(root)
 
     def one(rec: Mapping[str, Any], folder: Path, parent_value: Any, read: Any, read_digest: Optional[str]) -> None:
         if read is _UNSET:
             read = _read_manifest_raw(folder) if _closed_record(rec) else None
         _precheck_publish(root, rec, _cycle_rel(root, folder),
-                          _plan_document(root, rec, parent_value, new_campaign_id, target, read, read_digest))
+                          _plan_document(root, rec, parent_value, new_campaign_id, target, read, read_digest), index)
 
     # The cycle's own manifest was read (and hashed) once by the caller, which hands the same read on to the adoption.
     one(record, source, record.get("parent_cycle_id") if parent is _UNSET else parent, found, digest)
@@ -300,6 +304,7 @@ def _precheck_move(root: Path, record: Mapping[str, Any], source: Path, target_d
         member_record = read_cycle_record(root, member.name)
         if member_record is not None:
             one(member_record, member, member_record.get("parent_cycle_id"), _UNSET, None)
+    return index
 
 
 def _plan_document(root: Path, record: Mapping[str, Any], parent: Any, new_campaign_id: str,
@@ -334,13 +339,16 @@ def _plan_document(root: Path, record: Mapping[str, Any], parent: Any, new_campa
     return raw, document, refreshed, digest, publish
 
 
-def _precheck_publish(root: Path, record: Mapping[str, Any], where: str, plan: Any) -> None:
-    """What `_publish_document_locked` would refuse for this plan, said before anything is written: the copy kept
-    for the document's revision holds another document, or the next document does not pass `validate_update`.
-    A refusal names what the manifest differs from and what a person can do, and nothing was moved."""
+def _precheck_publish(root: Path, record: Mapping[str, Any], where: str, plan: Any,
+                      index: Optional[artifact_index.IndexDocument] = None) -> None:
+    """What `_publish_document_locked` would refuse for this plan, said before anything is written.  The refusals are
+    the ones that function makes (`_publication_refusals`, called by both): the copy kept for the document's revision
+    holds another document, the next document does not pass `validate_update`, the index lists another document
+    for the cycle than the one in the folder, or the index would not take the next one.  A refusal names what the
+    manifest differs from and what a person can do, and nothing was moved."""
     if plan is None or not plan[4]:
         return
-    raw, document, refreshed, _digest_, _publish = plan
+    raw, document, refreshed, digest, _publish = plan
     cycle_id = record["cycle_id"]
     sealed = record.get("manifest_digest")
     if not _snapshot_holds_document(root, cycle_id, raw, document):
@@ -349,21 +357,66 @@ def _precheck_publish(root: Path, record: Mapping[str, Any], where: str, plan: A
             "another document than the manifest in the folder, so the move would stop half done; nothing was moved. "
             "next=put manifest.json back as that kept copy holds it (the copy is the document the cycle was sealed "
             "with), then run cycle-move again"))
+    digest = digest or artifact_manifest.manifest_digest(document)
+    edited = digest != sealed
+    differs = (f"the record names {sealed} as the sealed manifest and the folder holds {digest}, and no copy of "
+               "the sealed document is kept to go back to") if edited else ""
+    back = ("next=put manifest.json back as it was sealed (from a backup of the folder, if there is one)"
+            if edited else "next=put manifest.json back as it was sealed")
+    try:
+        _publication_refusals(root, record, document, refreshed, digest, _MOVED_FIELDS, index)
+    except ProducerError as exc:
+        if exc.code == "manifest-invalid":
+            raise ProducerError("manifest-invalid", (
+                f"{where}/manifest.json: the next document of this cycle breaks the manifest rules ({exc.detail})"
+                + (f"; {differs}" if edited else "")
+                + f"; nothing was moved. {back}, or take out what breaks the rules named above, then run cycle-move again")
+            ) from exc
+        if exc.code == "already-sealed-mismatch":
+            raise ProducerError("manifest-invalid", (
+                f"{where}/manifest.json: the manifest in the folder is not the one the cycle was sealed with "
+                f"({exc.detail})" + (" and no copy of the sealed document is kept to go back to" if edited else "")
+                + f"; the move would stop half done; nothing was moved. {back}, then run cycle-move again")) from exc
+        raise ProducerError(exc.code, (
+            f"{where}/manifest.json: the index would not take the next document of this cycle ({exc.detail}); "
+            f"nothing was moved. {back}, then run cycle-move again")) from exc
+
+
+def _publication_refusals(root: Path, record: Mapping[str, Any], document: Mapping[str, Any],
+                          refreshed: Mapping[str, Any], digest: str, moved_fields: Sequence[str],
+                          index: Optional[artifact_index.IndexDocument]) -> Tuple[str, bytes, artifact_index.IndexDocument]:
+    """Everything that decides whether `refreshed` may replace `document` as the cycle's current document, read-only:
+    the rules of `validate_update`, the document the index lists for the cycle being the earlier one (`digest`), and
+    the index taking the next document.  The one judgment behind `_publish_document_locked`, which makes it before
+    it writes anything, and `_precheck_publish`, which makes it before a move renames the folder.  Raises the
+    `ProducerError` of the first refusal (`manifest-invalid` with the violation codes, `already-sealed-mismatch`
+    with the digest the index lists, `index-rejected`); returns the next document's digest and bytes, and the index read."""
+    cycle_id = record["cycle_id"]
     earlier = {old.get("manifest_revision_id"): old for old in _earlier_documents(root, cycle_id, refreshed)}
     earlier[document.get("manifest_revision_id")] = dict(document)
     report = artifact_manifest.validate_update(refreshed, preserved=list(earlier.values()), previous=document,
-                                               changeable_cycle_fields=_MOVED_FIELDS)
+                                               changeable_cycle_fields=moved_fields)
     if not report.ok:
-        edited = artifact_manifest.manifest_digest(document) != sealed
-        raise ProducerError("manifest-invalid", (
-            f"{where}/manifest.json: the next document of this cycle breaks the manifest rules "
-            f"({';'.join(v.code for v in report.violations)})"
-            + (f"; the manifest in the folder is not the one the cycle was sealed with (the record names {sealed}) "
-               "and no copy of the sealed document is kept to go back to" if edited else "")
-            + "; nothing was moved. next=put manifest.json back as it was sealed"
-            + (" (from a backup of the folder, if there is one)" if edited else "")
-            + ", or take out what breaks the rules named above, then run cycle-move again"))
-
+        raise ProducerError("manifest-invalid", ";".join(v.code for v in report.violations))
+    new_digest = artifact_manifest.manifest_digest(refreshed)
+    new_raw = artifact_manifest.canonical_bytes(refreshed)
+    if index is None:
+        index = artifact_admission.load_index(root)  # the one read of a locked section
+    row = index.manifests.get(cycle_id)
+    if isinstance(row, dict) and row.get("manifest_digest") != digest:
+        raise ProducerError("already-sealed-mismatch", (
+            f"the index lists {row.get('manifest_digest')} for the cycle, the manifest at hand is {digest}"))
+    identity = artifact_lifecycle.read_root_identity(root)
+    index_report = artifact_index.check(
+        index, refreshed, idempotency_key=cycle_id, manifest_digest=new_digest,
+        repository_id=identity.repository_id if identity else None,
+        replaces_manifest_digest=digest if isinstance(row, dict) else None,
+        known_parent_cycle_ids=(set(artifact_admission._producer_cycle_ids(root)) |
+            ({record["parent_cycle_id"]} if record.get("parent_cycle_id") and
+             (record.get("relocation") or {}).get("external_parent_root") else set())))
+    if not index_report.ok:
+        raise ProducerError("index-rejected", ";".join(v.code for v in index_report.violations))
+    return new_digest, new_raw, index
 
 
 def _publish_document_locked(root: Path, record: Mapping[str, Any], directory: Path, raw: bytes,
@@ -386,30 +439,10 @@ def _publish_document_locked(root: Path, record: Mapping[str, Any], directory: P
     manifest_path = directory / "manifest.json"
     if digest is None:
         digest = artifact_manifest.manifest_digest(document)
+    # Nothing is written until the next document is accepted: a copy kept for this revision is the bytes the
+    # cycle was sealed with, and a refused attempt must not leave the bytes it was refused for in that place.
+    new_digest, new_raw, index = _publication_refusals(root, record, document, refreshed, digest, moved_fields, index)
     _keep_snapshot(root, cycle_id, raw, document)
-    earlier = {old.get("manifest_revision_id"): old for old in _earlier_documents(root, cycle_id, refreshed)}
-    earlier[document.get("manifest_revision_id")] = dict(document)
-    report = artifact_manifest.validate_update(refreshed, preserved=list(earlier.values()), previous=document,
-                                               changeable_cycle_fields=moved_fields)
-    if not report.ok:
-        raise ProducerError("manifest-invalid", ";".join(v.code for v in report.violations))
-    new_digest = artifact_manifest.manifest_digest(refreshed)
-    new_raw = artifact_manifest.canonical_bytes(refreshed)
-    if index is None:
-        index = artifact_admission.load_index(root)  # the one read of this locked section
-    row = index.manifests.get(cycle_id)
-    if isinstance(row, dict) and row.get("manifest_digest") != digest:
-        raise ProducerError("already-sealed-mismatch", "index")
-    identity = artifact_lifecycle.read_root_identity(root)
-    index_report = artifact_index.check(
-        index, refreshed, idempotency_key=cycle_id, manifest_digest=new_digest,
-        repository_id=identity.repository_id if identity else None,
-        replaces_manifest_digest=digest if isinstance(row, dict) else None,
-        known_parent_cycle_ids=(set(artifact_admission._producer_cycle_ids(root)) |
-            ({record["parent_cycle_id"]} if record.get("parent_cycle_id") and
-             (record.get("relocation") or {}).get("external_parent_root") else set())))
-    if not index_report.ok:
-        raise ProducerError("index-rejected", ";".join(v.code for v in index_report.violations))
     base_record = dict(record_after if record_after is not None else record)
     pending = _merge_pending(base_record.get("history_pending") or [], lines)
     if _history_deliver_locked(root, pending):
@@ -775,6 +808,7 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
         import artifact_request
         member_ids = [path.name for path in artifact_request.members(root, source)]
         destination = source
+        checked_index = None  # the admission index the check of the documents read; `None` when no check was made
         read_once: Any = _UNSET
         read_digest: Optional[str] = None
         if target is not None and target["campaign_id"] != old_campaign_id:
@@ -783,9 +817,9 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
             # folder has moved are checked from that read first (read-only), then kept and handed on to the adoption.
             read_once = _read_manifest_raw(source) if _closed_record(record) else None
             read_digest = artifact_manifest.manifest_digest(read_once[1]) if read_once is not None else None
-            _precheck_move(root, record, source, campaign_dir(root, target["campaign_id"], target),
-                           target["campaign_id"], new_parent, artifact_request.members(root, source),
-                           found=read_once, digest=read_digest)
+            checked_index = _precheck_move(root, record, source, campaign_dir(root, target["campaign_id"], target),
+                                           target["campaign_id"], new_parent, artifact_request.members(root, source),
+                                           found=read_once, digest=read_digest)
             if target.get("state") == "satisfied":
                 try:
                     artifact_campaign._reopen_locked(
@@ -823,12 +857,12 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
             anchor = artifact_request.scope_anchor(source) if record.get("request_binding") else None
             read_once = _read_manifest_raw(source) if _closed_record(record) else None
             read_digest = artifact_manifest.manifest_digest(read_once[1]) if read_once is not None else None
-            _precheck_move(root, record, source, anchor.parent if anchor is not None else source.parent,
-                           old_campaign_id, new_parent, [], found=read_once, digest=read_digest)
+            checked_index = _precheck_move(root, record, source, anchor.parent if anchor is not None else source.parent,
+                                           old_campaign_id, new_parent, [], found=read_once, digest=read_digest)
         written, moved_stale = _adopt_location_locked(
             root, record, destination, command="cycle-move", stamp=stamp, reason=reason, now=now,
             by="human", parent=new_parent, old_campaign_folder=source.parent,
-            manifest=read_once, manifest_digest=read_digest)
+            manifest=read_once, manifest_digest=read_digest, index=checked_index)
         stale += moved_stale
         stale = list(dict.fromkeys(stale + [old_campaign_id, written["campaign_id"]]))
         artifact_locator.update_indexes(root, stale)

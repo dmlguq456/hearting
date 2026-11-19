@@ -750,6 +750,64 @@ class ScanTopFields(unittest.TestCase):
         self.assertLess(peak, SMALL)
 
 
+class SizeThreshold(unittest.TestCase):
+    """A small manifest is parsed whole and a big one is scanned: the same values either way."""
+
+    DOC = ScanTopFields.DOC
+
+    def test_both_ways_answer_the_same_values_for_the_canonical_document(self):
+        raw = M.canonical_bytes(self.DOC)
+        for names in (("cycle", "producer"), ("artifact_root_id", "campaign", "cycle", "producer", "routes", "zz"),
+                      ("zz",), ("nope",), ("cycle", "nope")):
+            scanned = M.scan_top_fields(io.BytesIO(raw), names)
+            with mock.patch.object(M, "TOP_FIELDS_PARSE_LIMIT", len(raw)), \
+                    mock.patch.object(M, "scan_top_fields", side_effect=AssertionError("scanned")):  # at the limit: parsed whole
+                whole = M.top_fields(raw, names)
+            with mock.patch.object(M, "TOP_FIELDS_PARSE_LIMIT", len(raw) - 1), \
+                    mock.patch.object(M, "scan_top_fields", wraps=M.scan_top_fields) as scan:  # one over: scanned
+                long_way = M.top_fields(raw, names)
+                self.assertTrue(scan.called)
+            self.assertEqual(whole, scanned, names)
+            self.assertEqual(long_way, scanned, names)
+
+    def test_a_file_is_read_by_the_size_it_has(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "manifest.json"
+            raw = M.canonical_bytes(self.DOC)
+            path.write_bytes(raw)
+            expect = "sha256:" + hashlib.sha256(raw).hexdigest()
+            names = ("cycle", "producer")
+            answers = []
+            for limit, scans in ((len(raw), False), (len(raw) - 1, True)):
+                with mock.patch.object(M, "TOP_FIELDS_PARSE_LIMIT", limit), \
+                        mock.patch.object(M, "scan_top_fields", wraps=M.scan_top_fields) as scan:
+                    answers.append(LOC.read_sealed_head(path, names))
+                    self.assertEqual(scan.called, scans, limit)
+            self.assertEqual(answers[0], answers[1])
+            self.assertEqual(answers[0][0], expect)
+            self.assertEqual(answers[0][1], {k: self.DOC[k] for k in names})
+            self.assertEqual(LOC.read_sealed_head(path)[1:], (None, len(raw)))  # no names: only a hash
+
+    def test_a_small_manifest_is_not_hashed_to_find_a_cycle_id(self):
+        """The locator's scan reads a small manifest as it always did: no record read, no hash."""
+        with mock.patch.object(LOC, "read_sealed_head", side_effect=AssertionError("hashed")):
+            self.assertIsNone(LOC._sealed_cycle_head(Path("/nonexistent"), {"cycle_id": "cyc_x"}, Path(__file__)))
+
+
+class HeadCaptureAskedForOtherNames(Sealed):
+    def test_a_second_look_for_other_names_is_answered_for_its_names(self):
+        reads = C.CampaignReads(self.root) if hasattr(C, "CampaignReads") else None
+        self.assertIsNotNone(reads)
+        manifest_path = Path(self.first["cycle_dir"]) / "manifest.json"
+        first = reads.read_head(self.root, manifest_path, ("cycle",))
+        second = reads.read_head(self.root, manifest_path, ("producer",))
+        self.assertEqual(set(first[1]), {"cycle"})
+        self.assertEqual(set(second[1]), {"producer"})
+        self.assertEqual(first[0], second[0])
+        self.assertEqual(reads.read_head(self.root, manifest_path, ("cycle", "producer"))[1].keys(), {"cycle", "producer"})
+
+
 # ---------------------------------------------------------------------------------------------------
 # 5: the shortcut reads the manifest's bytes, not the record's copy of them
 # ---------------------------------------------------------------------------------------------------
@@ -1075,6 +1133,124 @@ class MoveChecksFirst(Sealed):
         self.assertIs(real, LC.preserve_manifest_snapshot)
 
 
+    # -- a manifest edited by hand within the rules, with no kept copy of the sealed one ------------------
+
+    def edit_within_the_rules(self, path):
+        """Change `cycle.started_on` (a rule-abiding edit), save it in the canonical form, drop the kept copies; the
+        sealed bytes are returned."""
+        sealed = path.read_bytes()
+        document = json.loads(sealed)
+        document["cycle"]["started_on"] = "2026-01-02T03:04:05Z"
+        self.assertTrue(M.validate(document).ok)
+        path.write_bytes(M.canonical_bytes(document))
+        shutil.rmtree(LC.manifest_snapshot_dir(self.root, self.first["cycle_id"]))
+        return sealed
+
+    def test_a_rule_abiding_edit_with_no_kept_copy_is_refused_before_anything_moves_and_taken_back_it_moves(self):
+        other = self.other()
+        path = self.manifest()
+        sealed = self.edit_within_the_rules(path)
+        before = tree_state(self.root)
+        with self.assertRaises(P.ProducerError) as caught:
+            P.cycle_move(self.root, self.first["cycle_id"], campaign=other["campaign_id"])
+        self.assertEqual(caught.exception.code, "manifest-invalid")
+        detail = caught.exception.detail
+        self.assertIn("nothing was moved", detail)
+        self.assertIn("is not the one the cycle was sealed with", detail)
+        self.assertIn("no copy of the sealed document is kept", detail)
+        self.assertIn("next=put manifest.json back as it was sealed", detail)
+        self.assertIn(Path(self.first["cycle_dir"]).relative_to(self.root).as_posix(), detail)
+        self.assertEqual(tree_state(self.root), before)  # every path, mode and byte as before the move, kept copies included
+        path.write_bytes(sealed)
+        moved = P.cycle_move(self.root, self.first["cycle_id"], campaign=other["campaign_id"])
+        self.assertEqual(moved["status"], "moved", moved)
+        self.assertEqual(P.reconcile_root(self.root)["status"], "unchanged")
+
+    def test_a_refused_publication_keeps_nothing_for_the_revision_it_refused(self):
+        """What is kept for a revision is the document the cycle was sealed with: an attempt that is refused (after the
+        folder has moved, as a hand move meets it) leaves the bytes it was refused for out of that place."""
+        other = self.other()
+        path = self.manifest()
+        sealed = self.edit_within_the_rules(path)
+        record = P.read_cycle_record(self.root, self.first["cycle_id"])
+        with self.assertRaises(P.ProducerError) as caught:
+            with mock.patch.object(OPS, "_precheck_move", return_value=None):  # as a move by hand: nothing looked at before
+                P.cycle_move(self.root, self.first["cycle_id"], campaign=other["campaign_id"])
+        self.assertEqual(caught.exception.code, "already-sealed-mismatch")
+        self.assertIn(record["manifest_digest"], caught.exception.detail)
+        self.assertFalse(LC.manifest_snapshot_dir(self.root, self.first["cycle_id"]).exists()
+                         and list(LC.manifest_snapshot_dir(self.root, self.first["cycle_id"]).glob("*.json")))
+        # the folder moved (the half-done state a hand move is in); the sealed bytes put back, the next look finishes it
+        moved_to = P.campaign_dir(self.root, other["campaign_id"]) / Path(self.first["cycle_dir"]).name
+        (moved_to / "manifest.json").write_bytes(sealed)
+        self.assertEqual(P.reconcile_root(self.root)["status"], "reconciled")
+        self.assertEqual(P.read_cycle_record(self.root, self.first["cycle_id"])["campaign_id"], other["campaign_id"])
+        self.assertEqual(P.reconcile_root(self.root)["status"], "unchanged")
+
+    def test_a_folder_carried_by_hand_with_a_hand_edited_manifest_is_finished_when_the_sealed_bytes_are_back(self):
+        other = self.other()
+        sealed_in = self.sealed_in("stays", key="followups")  # the old campaign keeps a member after the move
+        path = self.manifest()
+        document = json.loads(path.read_bytes())
+        sealed = path.read_bytes()
+        path.write_text(json.dumps(dict(document, edited_by_hand=True)))
+        shutil.rmtree(LC.manifest_snapshot_dir(self.root, self.first["cycle_id"]))
+        target = P.campaign_dir(self.root, other["campaign_id"]) / path.parent.name
+        path.parent.rename(target)
+        self.assertEqual(P.reconcile_root(self.root)["status"], "skipped")
+        self.assertEqual(P.reconcile_root(self.root)["status"], "skipped")
+        # the person takes the edit out: nothing a refused attempt wrote stands in the way
+        (target / "manifest.json").write_bytes(sealed)
+        self.assertEqual(P.reconcile_root(self.root)["status"], "reconciled")
+        self.assertEqual(P.read_cycle_record(self.root, self.first["cycle_id"])["campaign_id"], other["campaign_id"])
+        self.assertEqual(P.reconcile_root(self.root)["status"], "unchanged")
+        self.assertTrue(sealed_in)
+
+    def test_status_names_the_manifest_a_hand_moved_cycle_waits_on(self):
+        other = self.other()
+        self.sealed_in("stays", key="followups")
+        path = self.manifest()
+        document = json.loads(path.read_bytes())
+        sealed = path.read_bytes()
+        path.write_text(json.dumps(dict(document, edited_by_hand=True)))
+        shutil.rmtree(LC.manifest_snapshot_dir(self.root, self.first["cycle_id"]))
+        target = P.campaign_dir(self.root, other["campaign_id"]) / path.parent.name
+        path.parent.rename(target)
+        P.reconcile_root(self.root)
+        new_path = target.parent / "campaign.json"
+        refusal = C.status(self.root, new_path)["close_refusal"]
+        self.assertEqual(refusal["reason"], "campaign-membership-drift")
+        detail = refusal["detail"]  # what a person reads
+        self.assertIn("manifest_not_as_sealed", detail)
+        self.assertIn((target / "manifest.json").relative_to(self.root).as_posix(), detail)
+        self.assertIn(self.first["cycle_id"], detail)
+        self.assertIn("put manifest.json back as it was sealed", detail)
+        self.assertEqual(
+            [row["cycle_id"] for row in C._manifests_not_as_sealed(self.root, target.parent, [self.first["cycle_id"]])],
+            [self.first["cycle_id"]])
+        # once the sealed bytes are back the next close finishes the move and the campaign is whole
+        (target / "manifest.json").write_bytes(sealed)
+        self.assertEqual(C.close(self.root, new_path, reason="x")["status"], "satisfied")
+
+    def test_a_manifest_that_is_the_sealed_one_or_has_a_kept_copy_is_not_named(self):
+        """Only a manifest the move cannot go on from is named: the sealed bytes, or a re-saved file with the sealed
+        document kept, are no reason for a move to stop."""
+        folder = Path(self.first["cycle_dir"])
+        named = lambda: C._manifests_not_as_sealed(self.root, folder.parent, [self.first["cycle_id"]])
+        self.assertEqual(named(), [])
+        path = self.manifest()
+        sealed = path.read_bytes()
+        path.write_text(json.dumps(json.loads(sealed), indent=2))  # re-saved; the sealed document is kept
+        self.assertEqual(named(), [])
+        document = json.loads(sealed)
+        path.write_text(json.dumps(dict(document, edited_by_hand=True)))  # edited; the kept copy is there to go back to
+        self.assertEqual(named(), [])
+        shutil.rmtree(LC.manifest_snapshot_dir(self.root, self.first["cycle_id"]))  # nothing to go back to
+        self.assertEqual([row["cycle_id"] for row in named()], [self.first["cycle_id"]])
+        self.assertEqual(C._manifests_not_as_sealed(self.root, folder.parent, ["cyc_" + "0" * 32]), [])
+        self.assertEqual(C._manifests_not_as_sealed(self.root, folder.parent, []), [])
+
+
 class MemberMove(Q.RequestFolderTest):
     """The same for the members of a request folder, which move with their frame."""
 
@@ -1110,6 +1286,32 @@ class MemberMove(Q.RequestFolderTest):
         self.assertIn("nothing was moved", caught.exception.detail)
         self.assertTrue(source.is_dir())
         self.assertEqual(tree_state(self.root), before)
+
+    def test_a_rule_abiding_edit_of_a_member_with_no_kept_copy_stops_the_move_before_the_rename(self):
+        frame, record = self.completed_request()
+        target = self.target_campaign()
+        source, member = self.member_manifest(frame, record)
+        sealed = member.read_bytes()
+        document = json.loads(sealed)
+        document["cycle"]["started_on"] = "2026-01-02T03:04:05Z"
+        self.assertTrue(M.validate(document).ok)
+        member.write_bytes(M.canonical_bytes(document))
+        shutil.rmtree(S.L.manifest_snapshot_dir(self.root, record["cycle_id"]))
+        before = tree_state(self.root)
+        with self.assertRaises(P.ProducerError) as caught:
+            P.cycle_move(self.root, frame["cycle_id"], campaign=target["campaign_id"])
+        self.assertEqual(caught.exception.code, "manifest-invalid")
+        self.assertIn(member.parent.relative_to(self.root).as_posix(), caught.exception.detail)
+        self.assertIn("nothing was moved", caught.exception.detail)
+        self.assertIn("is not the one the cycle was sealed with", caught.exception.detail)
+        self.assertTrue(source.is_dir())
+        self.assertEqual(tree_state(self.root), before)
+        member.write_bytes(sealed)  # taken back as it was sealed, the move goes through, frame and member both
+        moved = P.cycle_move(self.root, frame["cycle_id"], campaign=target["campaign_id"])
+        self.assertEqual(moved["status"], "moved", moved)
+        for cycle_id in (frame["cycle_id"], record["cycle_id"]):
+            self.assertEqual(P.read_cycle_record(self.root, cycle_id)["campaign_id"], target["campaign_id"])
+        self.assertEqual(P.reconcile_root(self.root)["status"], "unchanged")
 
 
 if __name__ == "__main__":

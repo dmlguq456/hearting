@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
@@ -931,6 +930,38 @@ def _walk_cycle_dirs(root, campaign_dir):
                             + " could not be read (permission or I/O error): make it readable, then run again") from exc
 
 
+def _manifests_not_as_sealed(root, campaign_dir, cycle_ids):
+    """Of the listed cycles whose record says another campaign, those whose folder is here with a manifest.json that
+    is not the document the record was sealed with and has no kept copy of it to go back to (a move is finished
+    from such a copy, so one that is there is no reason to stop): `[{"cycle_id", "path", "sealed_manifest_digest",
+    "manifest_digest"}]`.  Read-only, from the records and the folders the campaign already has, and only when the
+    campaign is refused for its members; whatever cannot be read leaves the cycle out, never a second error."""
+    wanted = {cid for cid in cycle_ids if isinstance(cid, str)}
+    found = []
+    if not wanted:
+        return found
+    try:
+        for entry, _layout in _walk_cycle_dirs(root, campaign_dir):
+            if not _exact_cycle_control(root, campaign_dir, entry, ".cycle.json"):
+                continue
+            binding, _ = read_json(root, entry / ".cycle.json")
+            cid = binding.get("cycle_id")
+            if cid not in wanted:
+                continue
+            record, _ = read_json(root, root / ".runtime/artifact-producer/v1/cycles" / f"{cid}.json")
+            sealed = record.get("manifest_digest")
+            if not isinstance(sealed, str) or not _exact_cycle_control(root, campaign_dir, entry, "manifest.json"):
+                continue
+            current = locator.read_sealed_head(entry / "manifest.json")[0]
+            if (current is not None and current != sealed
+                    and lifecycle.find_manifest_snapshot(root, cid, manifest_digest=sealed) is None):
+                found.append({"cycle_id": cid, "path": (entry / "manifest.json").relative_to(root).as_posix(),
+                              "sealed_manifest_digest": sealed, "manifest_digest": current})
+    except (CampaignError, OSError, ValueError, TypeError, AttributeError, locator.LocatorError, locator.NotRegularFile):
+        pass
+    return sorted(found, key=lambda row: row["cycle_id"])
+
+
 def _cycle_rows(root, path, campaign, reads=None):
     ids = campaign.get("cycles")
     if (not isinstance(ids, list) or not ids or not all(isinstance(cid, str) for cid in ids)
@@ -961,7 +992,14 @@ def _cycle_rows(root, path, campaign, reads=None):
     if members != set(listed) or not listed:
         unrecorded = sorted(set(listed) - members)
         unlisted = sorted(members - set(listed))
-        if unrecorded or unlisted:
+        differing = _manifests_not_as_sealed(root, path.parent, unrecorded)
+        if differing:
+            # A folder carried here by hand is taken in by the next close or begin; what it stops on is the manifest
+            # that is no longer the document its record was sealed with (the move keeps no document it did not seal).
+            next_step = ("a-listed-cycle-folder-was-moved-and-its-manifest-is-not-the-document-it-was-sealed-with: "
+                         "put manifest.json back as it was sealed (from a backup of the folder), then run "
+                         "campaign-close again and the move is finished")
+        elif unrecorded or unlisted:
             # No command settles these: the producer record is missing, or a live cycle is not listed.
             next_step = ("a-listed-id-has-no-producer-record-or-a-member-is-not-listed: "
                          "no command settles it, report it to the owner of this root")
@@ -978,6 +1016,7 @@ def _cycle_rows(root, path, campaign, reads=None):
             "detached_listed_cycle_ids": sorted(set(ids) & detached_ids),
             "unrecorded_listed_cycle_ids": unrecorded,
             "unlisted_member_cycle_ids": unlisted,
+            **({"manifest_not_as_sealed": differing} if differing else {}),
             "next_step": next_step,
         })
     ids = listed
@@ -1567,20 +1606,29 @@ class CampaignReads:
         """`(digest, head)` of a file, or None when it is missing: the bytes are hashed as a stream and the named
         top-level values read from them (None when they are not the canonical form), and nothing of the bytes is
         kept but their digest and size, so what a 255 MB input costs the capture does not grow with it.  The
-        input is bound as any other: `inputs()` lists its digest and size and `check_mutation` hashes it again."""
+        input is bound as any other: `inputs()` lists its digest and size and `check_mutation` hashes it again.  Asked
+        again for names the first look did not take, the values are read again for all of them; each answer holds
+        the names asked for."""
         path = self._path(path)
         rel = self._rel(path)
         self.used.add(("file", rel))
         info = self.files.get(rel)
+        wanted = frozenset(names)
+        if info is not None and info.get("raw") is None and info.get("digest") is not None and info.get("error") is None \
+                and not wanted <= info.get("head_names", wanted):
+            # An earlier look asked for other names: the values are read again for all of them (the file is bound
+            # once, and a change since is found by `check_mutation` as for any input), never the first answer.
+            wanted |= info["head_names"]
+            info = None
         if info is None:
             signature = self._stat(path)
             info = {"signature": signature, "raw": None, "error": None, "limit": None,
-                    "digest": None, "size": None, "head": None}
+                    "digest": None, "size": None, "head": None, "head_names": wanted}
             self.files[rel] = info
             if signature is not None:
                 try:
                     _safe(self.root, path)
-                    digest, head, size = locator.read_sealed_head(path, names)
+                    digest, head, size = locator.read_sealed_head(path, tuple(wanted))
                     if digest is None:
                         self.changed.add(rel)
                     info.update(digest=digest, head=head, size=size)
@@ -1597,11 +1645,12 @@ class CampaignReads:
         if info["signature"] is None:
             return None
         if info["raw"] is not None:  # an earlier whole read of this file: the same answer from those bytes
-            head = (manifest.scan_top_fields(io.BytesIO(info["raw"]), names) if names else None)
+            head = (manifest.top_fields(info["raw"], names) if names else None)
             return "sha256:" + hashlib.sha256(info["raw"]).hexdigest(), head
         if info.get("digest") is None:
             raise CampaignError("input-changed", path)
-        return info["digest"], info["head"]
+        head = info["head"]
+        return info["digest"], ({name: head[name] for name in names if name in head} if isinstance(head, dict) else head)
 
     def is_missing(self, path):
         rel = self._rel(path)

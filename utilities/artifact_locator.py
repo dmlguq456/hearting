@@ -76,14 +76,15 @@ class NotRegularFile(Exception):
 
 
 def read_sealed_head(path: Path, names: Sequence[str] = ()) -> Tuple[Optional[str], Optional[Dict[str, Any]], int]:
-    """`(digest, fields, size)` of a regular file read once, a chunk at a time (never followed through a link).
+    """`(digest, fields, size)` of a regular file read once (never followed through a link).
 
     `digest` is `sha256:<hex>` of the bytes, or None when the file changed while it was read.  `fields` are the
-    named top-level values when the bytes are the compact sorted-key form a sealed manifest has (see
-    `artifact_manifest.scan_top_fields`), otherwise None; with no names it is None and the file is only hashed.
-    No more than a chunk and the wanted values are in memory, however large the file is.  The fields are only
-    as trustworthy as the bytes: a caller that has not already shown the digest is the recorded one must be ready
-    for a file that is not what it looks like."""
+    named top-level values of the document (see `artifact_manifest.top_fields`): a file of at most
+    `TOP_FIELDS_PARSE_LIMIT` bytes is read whole and parsed, a larger one is read a chunk at a time and only the
+    wanted values are parsed, so no more than the limit and the wanted values are in memory, however large the file
+    is.  With no names `fields` is None and the file is only hashed.  The fields are only as trustworthy as the
+    bytes: a caller that has not already shown the digest is the recorded one must be ready for a file that is not
+    what it looks like."""
     import artifact_manifest
 
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -92,7 +93,18 @@ def read_sealed_head(path: Path, names: Sequence[str] = ()) -> Tuple[Optional[st
         if not stat.S_ISREG(before.st_mode):
             raise NotRegularFile(str(path))
         hasher = hashlib.sha256()
-        fields = artifact_manifest.scan_top_fields(stream, names, hasher=hasher) if names else None
+        fields = None
+        whole = names and before.st_size <= artifact_manifest.TOP_FIELDS_PARSE_LIMIT
+        if whole:
+            data = stream.read(before.st_size + 1)  # not a buffer the size of the limit for a small file
+            if len(data) > before.st_size or len(data) > artifact_manifest.TOP_FIELDS_PARSE_LIMIT:  # it grew since: the long way
+                whole = False
+                stream.seek(0)
+            else:
+                hasher.update(data)
+                fields = artifact_manifest.top_fields(data, names)
+        if names and not whole:
+            fields = artifact_manifest.scan_top_fields(stream, names, hasher=hasher)
         for chunk in iter(lambda: stream.read(1 << 20), b""):
             hasher.update(chunk)
         after = os.fstat(stream.fileno())
@@ -327,8 +339,13 @@ def _manifest_cycle_id(root: Path, campaign: Path, path: Path,
 def _sealed_cycle_head(root: Path, binding: Optional[Mapping[str, Any]], manifest_path: Path) -> Optional[Dict[str, Any]]:
     """The manifest's `cycle` value read as a stream, when the bytes are the ones the folder's record sealed
     (their digest is the record's `manifest_digest`), else None and the caller reads the document: a big sealed
-    manifest costs a hash here, not a parse."""
+    manifest costs a hash here, not a parse.  A manifest small enough to parse whole (`TOP_FIELDS_PARSE_LIMIT`) is
+    not read here at all: the caller reads the document as it always did, which costs less than the record and the
+    hash this would ask for, and a root of thousands of small cycles is scanned as fast as before."""
     try:
+        import artifact_manifest
+        if os.lstat(manifest_path).st_size <= artifact_manifest.TOP_FIELDS_PARSE_LIMIT:
+            return None
         record = read_cycle_record(root, binding["cycle_id"]) if binding else None
         recorded = record.get("manifest_digest") if record else None
         if not isinstance(recorded, str):

@@ -7,6 +7,7 @@
 # there both halves carry its duration apportioned by a local per-half timing
 # (216 s : 223 s); peer_steward.test.py, split in three after all four runs, likewise
 # (218 s : 140 s : 134 s). Unknown suites use the runner's median of known weights.
+# artifact_close_followups.test.py has one local isolated run (--jobs 2) until a shard report has it.
 # Refresh this table from recent shard reports when shard times drift apart.
 suite_path	duration_s
 adapters/claude/bin/dispatch-headless.already-claimed.test.py	4.31
@@ -406,6 +407,7 @@ utilities/artifact_campaign.test.py	19.19
 utilities/artifact_campaign_current.test.py	7.61
 utilities/artifact_campaign_documents.test.py	0.56
 utilities/artifact_checkpoint.test.py	9.05
+utilities/artifact_close_followups.test.py	77.96
 utilities/artifact_context.test.py	4.04
 utilities/artifact_cross_root_move.test.py	38.33
 utilities/artifact_cutover.test.py	10.96

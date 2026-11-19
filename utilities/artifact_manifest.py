@@ -10,6 +10,7 @@ never used for sorting or identity).
 """
 
 import hashlib
+import io
 import json
 import re
 from dataclasses import dataclass
@@ -360,11 +361,20 @@ def manifest_digest(document: Mapping[str, Any]) -> str:
 # `artifact_revisions` and `events`, which a caller that only wants `cycle`, `producer` or `routes`
 # has no use for.  `scan_top_fields` walks the compact, sorted-key form `canonical_bytes` writes, one
 # chunk at a time, and parses only the named top-level values: memory does not grow with the size.
-# It answers `None` for anything that is not that form (spaces, another key order, a duplicate key,
-# a truncated or misplaced bracket), so a caller reads such a file the long way.  It does not prove
-# that the bytes are valid JSON everywhere: the bytes must already be known to be the canonical
-# document (their digest is the recorded one), or the caller must be ready for a wrong answer.
+# It costs about 13 times a hash per byte and, on a small file, 5 to 8 times `json.loads`, so a file
+# of at most `TOP_FIELDS_PARSE_LIMIT` bytes is parsed whole instead (`top_fields`): the same values,
+# a few MiB at most in memory, and a root of thousands of small cycles is read as fast as before.
+#
+# What the scanner does and does not check: it reads keys in order and stops as soon as every
+# wanted key is found (or a later key shows it cannot be there), so what follows is never looked at:
+# a key out of order or repeated after that point, a bracket of the wrong kind inside a value it
+# skips, a document that is broken further on.  It answers `None` when what it did read is not
+# the compact sorted-key form (spaces, a key out of order or repeated before that point, a truncated
+# value).  So its values are as trustworthy as the bytes: use them only when the bytes are already
+# known to be the canonical document (their digest is the recorded one), never to learn what a
+# file that has not been checked contains.
 
+TOP_FIELDS_PARSE_LIMIT = 4 << 20  # see `top_fields`: below this a whole parse is cheaper than the scanner
 _SCAN_CHUNK = 256 << 10
 _SCAN_MAX_VALUE = 4 << 20  # the most one wanted value may take (routes, cycle, producer are a few KB)
 _SCAN_MAX_STRING = 64 << 20
@@ -532,7 +542,10 @@ def scan_top_fields(stream: Any, names: Iterable[str], *, hasher: Any = None,
 
     Only values that are present are returned (a name the document lacks is absent from the answer).
     Reading stops once every name is found or a later key shows it cannot be there (the keys are
-    sorted); with a `hasher` the rest is not read, so the caller finishes the stream itself."""
+    sorted); with a `hasher` the rest is not read, so the caller finishes the stream itself.  What lies
+    after the point it stops at is not looked at (order, repeated keys, brackets), and the brackets of the
+    values it skips are counted, not matched by kind: the answer is right for the canonical document and
+    for nothing else, so use it only for bytes whose digest is the recorded one (see the note above)."""
     wanted = set(names)
     last_wanted = max(wanted) if wanted else ""
     scan = _TopScan(stream, hasher, max_value)
@@ -566,6 +579,24 @@ def scan_top_fields(stream: Any, names: Iterable[str], *, hasher: Any = None,
             return found
         if not scan.take(b","):
             return None
+
+
+def top_fields(data: bytes, names: Iterable[str]) -> Optional[Dict[str, Any]]:
+    """The named top-level values of the document in `data` (those present), or `None` when it is not a JSON object.
+
+    A document of at most `TOP_FIELDS_PARSE_LIMIT` bytes is parsed whole (`json.loads`); a larger one goes through
+    `scan_top_fields`, which parses only the wanted values.  For the canonical document the two answer the same
+    values; for bytes that are not that form a whole parse answers what the document says and the scanner may answer
+    `None` or stop early, which is why a caller trusts either only after the digest of the bytes is the recorded one."""
+    if len(data) > TOP_FIELDS_PARSE_LIMIT:
+        return scan_top_fields(io.BytesIO(data), names)
+    try:
+        document = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeError, RecursionError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    return {name: document[name] for name in set(names) if name in document}
 
 
 # ---------------------------------------------------------------------------
