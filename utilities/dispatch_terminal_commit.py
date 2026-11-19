@@ -611,7 +611,7 @@ def _row_epoch(stamp) -> Optional[float]:
 
 def _completion_cost(request, route, *, now=None) -> dict[str, Any]:
     """Elapsed time and session tokens of this route's registered attempts (the owner, its
-    workers and their retries), for the summary's cost line.
+    workers and their retries), for the summary's cost line. A continued unit turn counts its own attempt only.
 
     Elapsed runs from the first registry row of those attempts to this seal. Tokens are
     the counts each session wrote into its exact attempt log -- the rows Fleet reads,
@@ -626,6 +626,12 @@ def _completion_cost(request, route, *, now=None) -> dict[str, Any]:
             request.owner_attempt_id, str(route.get("route_id") or ""), str(route.get("route_hash") or ""))
         latest: dict[str, Mapping[str, Any]] = {}
         started = []
+        records = list(records)
+        if any(record.completion_metadata().get("attempt_id") == request.owner_attempt_id
+               and record.completion_metadata().get("continues_attempt_id") for record in records):
+            # A unit route's continued turn is its own attempt: count that turn, not every turn before it.
+            records = [record for record in records
+                       if record.completion_metadata().get("attempt_id") == request.owner_attempt_id]
         for record in records:
             metadata = record.completion_metadata()
             attempt = metadata.get("attempt_id")

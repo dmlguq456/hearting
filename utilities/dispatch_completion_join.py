@@ -1371,6 +1371,16 @@ def unit_leg_report_line(metadata, *, jobs=None) -> str:
     return f"Report: {artifact}" if artifact else ""
 
 
+def unit_leg_reason_line(metadata) -> str:
+    """`Reason: <why>` for a continued unit turn (one that wakes an earlier session) that ended as an error,
+    from the reason the row already records (`app-server-request-failed:thread/resume` when Codex refused to
+    wake the thread). "" for a first turn, any other row, or an end that recorded none."""
+    reason = str(metadata.get("reconcile_reason") or "").strip()
+    if not metadata.get("continues_attempt_id") or not reason:
+        return ""
+    return f"Reason: {reason}"
+
+
 def completion_followup_text(receipt: dict, *, jobs: str) -> str:
     if receipt.get("children") and all(child.get("reason") == "cancelled-by-parent"
             and child.get("required_action") == "advance-completed" for child in receipt["children"]):
@@ -1382,6 +1392,7 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
     work_commands = {}
     completed_work = set()
     summaries = []
+    kept_notes = []
     parked_notes = []
     unit_reports, other_work = [], False
     if jobs:
@@ -1401,8 +1412,17 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                         completed_work.add(child["attempt_id"])
                         import work_intent
                         summary = work_intent.sealed_summary(meta, child["attempt_id"])
+                        import unit_continue
+                        try:
+                            head, kept = unit_continue.notice_lines(jobs, meta)
+                        except (OSError, ValueError):
+                            head, kept = "", ""     # a turn's own line is a courtesy: never lose its summary
+                        if summary and head:
+                            summary = head + "\n" + summary
                         if summary and summary not in summaries:
                             summaries.append(summary)
+                        if kept:
+                            kept_notes.append(kept)
                     continue  # Already sealed; successful work has no extra command obligation.
                 path = Path(meta.get("owner_route_file") or meta.get("route_file") or "")
                 route = json.loads(path.read_text())
@@ -1415,7 +1435,7 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                     path, jobs, agent_home=Path(__file__).resolve().parents[1])
                 report = unit_leg_report_line(meta)
                 if meta["worker_type"] not in {"owner", "frame"}:
-                    unit_reports.append(report)
+                    unit_reports.append("\n".join(filter(None, (report, unit_leg_reason_line(meta)))))
                 else:
                     other_work = True
                 if meta["worker_type"] == "owner" and child["required_action"] == "inspect-done-failure":
@@ -1436,6 +1456,7 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                  f"{child['next_leg']['compose_command']}" for child in receipt["children"] if child.get("next_leg")]
         return (RUNTIME_V1_FOLLOWUP_PREFIXES[bool(summaries)]
                 + "".join("\n" + summary for summary in summaries)
+                + "".join("\n" + note for note in kept_notes)
                 + ("".join("\n" + note for note in notes)
                    + ("\nIf this next leg is already approved, execute it in this turn or its existing registered continuation. "
                       "Nothing starts it from receipt alone; obtain approval only for work outside the existing scope." if notes else "")))
