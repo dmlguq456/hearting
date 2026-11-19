@@ -1,1 +1,0 @@
-../../../tools/migration_manifest.test.py
