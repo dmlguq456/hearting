@@ -76,18 +76,20 @@ const FACES={
     // an L* gap of 15 apart; these are 34 apart (L* 79 and 44.5), the darker still readable.
     waitBlink:[217,95],
     // 11-16 (the person: "usage에서 하네스 이름도 어둡게 원래 테마 컬러를 넣어주고"): the harness names of the USAGE rows, each in
-    // its Fleet hue (`hb_*`: claude orange 173, codex lavender 147, opencode sky 153) one step down (L* 48.6, 59.3, 70.0; the lit hues
-    // are L* 63.8, 74.2, 84.4), so a name reads as a label and never louder than its numbers.
+    // its Fleet hue (`hb_*`: claude orange 209, codex lavender 147, opencode sky 153) one step down (L* 54.7, 59.3, 70.0; the lit hues
+    // are L* 69.1, 74.2, 84.4), so a name reads as a label and never louder than its numbers.
     // 11-18 (the harness colors follow the products' own themes): Claude's name was 66, now 130; Codex's was 133, now 104
     // (the step under 147); OpenCode's was 104, now 110 (the step under 153). Each pair is 13 or more apart (CIEDE2000).
-    harnessName:{claude:130,codex:104,opencode:110},
+    // 11-19 (the person: "claude 컬러가 주황색이 조금만 더 밝았으면 해"): Claude's hue is 209 (was 173), so its name is 166 (was 130), the same
+    // 15 L* down (CIEDE2000 15.2 from 209; 46 from Codex's 104 and OpenCode's 110, which stay 13.4 apart).
+    harnessName:{claude:166,codex:104,opencode:110},
     // 11-18 (the person: "패널 스캐너 동작도"): while a session works, the moving frame and the head rule's light take the
     // session's harness color instead of the vanilla ramp: the same steps (the arc's four, the head rule's five, the wave's two
     // ends), each a step of that harness's hue (`orbit` brightest first: a lit tint of the harness color, the color, two steps
     // toward the still frame's gray; `scan` the head rule's, dimmest first, from the still frame's gray to the lit tint, each step 8 or more L* above the one before and the last as bright as the body text; `waveRGB` the same two
     // ends in 24-bit color: the still frame's gray and the lit tint's own RGB). A waiting frame's reds, the unknown harness's
     // vanilla and mono are as before.
-    ramp:{claude:{orbit:[216,173,137,102],scan:[243,137,209,216,223],waveRGB:[[128,128,128],[255,175,135]]},
+    ramp:{claude:{orbit:[216,209,173,137],scan:[243,137,209,216,223],waveRGB:[[128,128,128],[255,175,135]]},
       codex:{orbit:[189,147,104,245],scan:[243,104,177,183,189],waveRGB:[[128,128,128],[215,215,255]]},
       opencode:{orbit:[195,153,110,246],scan:[243,103,74,117,195],waveRGB:[[128,128,128],[215,255,255]]}}},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
@@ -116,11 +118,12 @@ const FACES={
 // 11-18 (OpenCode's sky 153 -> 31, #0087af, 4.1 on white; Codex's 147 shares Sonnet's, so its deep pair is 25: the person chose the same color.)
 // 11-18 (Claude's harness orange 173 -> 166, #d75f00, 3.3 on white: the deep orange nearest its hue (56°; 130 is 64° and is the
 // direct zone's and lab's own deep hue here), 9.4 from that 130 by CIEDE2000: see PR text).
+// 11-19: Fleet's Claude orange is now 209 (#ff875f, was 173), so the pair is `209:166`; 166 is the lightest deep orange that reads on white, and stays.
 // 11-18: the three zone hues (orange, violet, aqua) and the five field hues (code blue, lab amber, design rose, docs sand,
 // research sky) take their dark counterparts on the light face: the same hue at a contrast of 4.5 or more on white
 // (130 4.7, 55 10, 29 4.5; 26 5.8, 130 4.7, 162 5.0, 94 5.7, 24 7.0), set apart from each other and the state hues
 // (Lab distance 20 or more; lab 130 and docs 94 are the closest pair, as amber and sand are in the dark set).
-const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,173:166,176:60,147:25,153:31,230:22,219:132,137:94,
+const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,209:166,176:60,147:25,153:31,230:22,219:132,137:94,
   208:130,99:55,43:29,69:26,214:130,205:162,180:94,38:24}};
 const LINES=new Set(['frame','route','messages']);
 function face(theme,background){return theme==='light'?'light':background==='light'||background==='dark'?background:'';}
@@ -1079,20 +1082,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const kindHead=(r,tail=true)=>{const word=clean(r.kind_word||'').trim(),b=bracketWord(r,tail);
       const field=kindField(r,word);
       return word?[kindText(word,field),...(b?[bracket(b,field,intensityOf(r))]:[])]:[];};
-    // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(team·standard) · 3/7: execute` (`staged` is never written before the position), a route with no stage line reads `lab(solo·quick)`; the intensity goes
-    // first short of cells (`code(team) · 3/7: execute`), then the kind, then `staged 3/7: execute`, then `3/7: execute`.
+    // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(team·standard) · 3/7: execute` (`staged` is never written before the position), a route with no stage line reads `lab(solo·quick)`; short of cells
+    // the stage's name goes first (`code(team·standard) · 3/7`; 11-19, "강도도 표기해 항상": the intensity outlasts it), then the intensity
+    // (`code(team) · 3/7`), then the kind (`3/7`). The levels: `kind`, `kindPos`, `bare`, `pos` (the position with its shape word where one stands), `short` (the position).
     function kindCell(r){
       const cell=shapeCell(r),head=kindHead(r),bare=kindHead(r,false);
-      if(!head.length)return cell&&{...cell,kind:cell.full,bare:cell.full};
-      if(!cell)return {full:[],short:[],kind:head,bare};
-      const rest=cell.full;
-      return {...cell,kind:[...head,text(' · ','dim'),...rest],bare:[...bare,text(' · ','dim'),...rest]};
+      if(!head.length)return cell&&{...cell,kind:cell.full,kindPos:cell.pos,bare:cell.pos};
+      if(!cell)return {full:[],pos:[],short:[],kind:head,kindPos:head,bare};
+      const join=(h,rest)=>[...h,text(' · ','dim'),...rest];
+      return {...cell,kind:join(head,cell.full),kindPos:join(head,cell.pos),bare:join(bare,cell.pos)};
     }
     // 11-17 (route row 5): every route with a stage list reads its stage line, whatever its shape: the shape's own word
-    // (`staged`, `map-reduce`, `transactional-owner`; none when the record names none), the position, the stage's name.
+    // (none where the bracket holds a form, `map-reduce` and `transactional-owner` included; `resource+verification` and the like keep theirs), the position, the stage's name.
     // A frame route has no stage line (its legs hang under it), and a route its owner does alone (one stage) has none.
-    // The word before a stage line's position: never `staged` (the route's form is `team` in the bracket, or the line has no bracket; 11-19:
-    // `code(team·standard) · 3/6: execute`), another shape's own word (`map-reduce`) as before.
+    // The word before a stage line's position: never `staged` and never a shape's word where the route's bracket holds a form (`kind_form`; 11-19:
+    // `code(team·standard) · 3/6: execute`); a route with no form keeps another shape's own word (`resource+verification`).
     const stageLead=r=>stageLeadOf(r);
     const stageLined=stageLinedOf;
     function shapeCell(r){
@@ -1101,19 +1105,20 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(stageLined(r)){
         const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length,word=stageLead(r);
         const stage=stageCell(stages[at],'loc_repo');
-        return {full:[text((word?word+' ':'')+position+': ','dim'),...stage],short:[text(position+': ','dim'),...stage]};
+        return {full:[text((word?word+' ':'')+position+': ','dim'),...stage],pos:[text((word?word+' ':'')+position,'dim')],short:[text(position,'dim')]};
       }
-      return r.step&&!shape?{full:[text(r.step)],short:[text(r.step)]}:null;
+      return r.step&&!shape?{full:[text(r.step)],pos:[text(r.step)],short:[text(r.step)]}:null;
     }
-    // Which of the kind column's forms the bottom rows keep, the same for every row: the kind with its stage word first, then
-    // the stage word alone; the title keeps ten cells (or its whole width) through both. Short of that the rows keep the
+    // Which of the kind column's forms the bottom rows keep, the same for every row: the kind with its stage line, then (the stage's name
+    // first) the intensity, the bracket's form alone, the position alone; the title keeps ten cells (or its whole width) through them. Short of that the rows keep the
     // earlier columns (title, owner, context, then the stage). 11-18: the command column (`>_ Bash`) is gone, as it is
     // beside the native area: a route reads its harness, model and context number, and its NOW on the row under it.
     const planBottom=(ow,gw,C)=>{
-      const kinds=C.set.map(kindCell);
-      const widths=Object.fromEntries(['kind','bare','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
+      const kinds=C.set.map(kindCell),levels=['kind','kindPos','bare','pos','short'];
+      const widths=Object.fromEntries(levels.map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
       const longest=C.width(titleCols),avail=inner-(2+3+ow+3+gw+1+C.elapsed);
-      const order=widths.kind>widths.full?['kind',...(widths.bare<widths.kind&&widths.bare>widths.full?['bare']:[]),'full','short']:['full','short'];
+      // (a level is kept where it is wider than the one after it: the stage's name, then the intensity, then the kind give way in turn)
+      const order=levels.filter((level,i)=>widths[level]>(widths[levels[i+1]]||0));
       for(const level of order){
         if(!widths[level])break;
         const room=avail-(3+widths[level]);
@@ -2647,9 +2652,9 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
   return {rows,hits:[],routes};
 }
 // The shape's own word before a stage line's position (`staged`, `map-reduce`; none for a route that names none), the word `staged` itself
-// never written (11-19: the form `team` says it), and the test for a route that reads a stage line: one each, for `render` and `routePageFirst`.
+// never written, nor any shape's word where the route's bracket holds a form (11-19: `team` says it, `kind_form`), and the test for a route that reads a stage line: one each, for `render` and `routePageFirst`.
 function stageWordOf(shape){return /^staged/.test(shape)?'staged':/^(|unknown|framed|one-shot-owner)$/.test(shape)?'':shape;}
-function stageLeadOf(r){const word=stageWordOf(String((r&&r.shape)||''));return word==='staged'?'':word;}
+function stageLeadOf(r){const word=stageWordOf(String((r&&r.shape)||''));return word==='staged'||String((r&&r.kind_form)||'').trim()?'':word;}
 function stageLinedOf(r){const shape=String((r&&r.shape)||''),n=Array.isArray(r&&r.stages)?r.stages.length:0;
   return shape!=='framed'&&(/^staged/.test(shape)?n>0:n>1);}
 module.exports={render,keyRows,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,veil,

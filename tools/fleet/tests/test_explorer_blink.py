@@ -430,7 +430,8 @@ class FramePhaseTests(BlinkAssertions):
         values["sessions"] += [dict(seed, tag=f"{i:02x}", steward=False, title="Session")
                                for i in range(20, 60)]
         vm = ExplorerViewModel.from_mapping(values)
-        on, off = (draw(vm, NavState(), 168, 45, beat=b) for b in (1, 0))
+        # (11-19: 196 columns, where the table's PROGRESS cell still has room for the stage's name; narrower it folds the name first)
+        on, off = (draw(vm, NavState(), 196, 45, beat=b) for b in (1, 0))
         self.assert_structure(on, off)
         # The long session list forces the closing ROUTES/RECENT block to be pinned.
         y = next(y for y, line in enumerate(on.text_rows())
@@ -458,7 +459,7 @@ class FramePhaseTests(BlinkAssertions):
             values["sessions"] += [dict(seed, tag=f"{i:02x}", steward=False, title="Session")
                                    for i in range(20, 60)]
             pinned_vm = ExplorerViewModel.from_mapping(values)
-            for cols in (140, 168):
+            for cols in (196, 220):         # (11-19: widths where the route cell still has room for the stage's name and its metadata)
                 for state in states:
                     with self.subTest(status=status, cols=cols, state=state):
                         current_vm = pinned_vm if state == NavState() else vm

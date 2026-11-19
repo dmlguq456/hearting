@@ -4,7 +4,7 @@ session take that harness's ramp (`FACES.*.ramp`), in every `rule motion` kind, 
 unknown harness's vanilla, mono and no-color are as before.
 
 Synthetic scenes only. The route box's owner row, worker rows (boxed and hung), frame legs and the head line's session spinner take
-`hb_<harness>`'s color (Claude 173, Codex 147, OpenCode 153); a worker with no known harness, the route's first-line dot, a waiting,
+`hb_<harness>`'s color (Claude 209, Codex 147, OpenCode 153); a worker with no known harness, the route's first-line dot, a waiting,
 failed or finished mark and the no-color/mono panel read as before; the light face maps the harness color to its deep pair.
 """
 import os, sys  # noqa: E401
@@ -20,9 +20,9 @@ SHELL = ROOT / "utilities/session-shell"
 FIXTURE = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]+'/panel-view.cjs');
 const text=r=>r.map(p=>p.text).join('');
-const HB={claude:173,codex:147,opencode:153};
+const HB={claude:209,codex:147,opencode:153};
 const STYLES={dim:{dim:true},loc_repo:{foreground:253},g_spin:{foreground:230},g_work:{foreground:150,bold:true},g_work_off:{foreground:150,dim:true},
-  g_blocked:{foreground:217},g_dead:{foreground:217,bold:true},hb_claude:{foreground:173},hb_codex:{foreground:147},hb_opencode:{foreground:153}};
+  g_blocked:{foreground:217},g_dead:{foreground:217,bold:true},hb_claude:{foreground:209},hb_codex:{foreground:147},hb_opencode:{foreground:153}};
 const G={text:'⠸',foreground:230};      // (the route's own spinner as the backend paints it: Fleet's vanilla `g_spin`)
 const H=h=>({text:h,foreground:HB[h]}),P=t=>({text:t});
 const SPIN=new Set([...view.SPIN]);
@@ -109,9 +109,9 @@ for(const state of ['idle','blocked']){
 const v=render([owner('claude',{workers_live:[worker('claude'),worker('codex'),worker('opencode')]})]);
 const light=view.appearance(v.rows,{theme:'light'},{colors:256,background:'light'});
 const deep=light.flatMap(r=>r.filter(p=>SPIN.has(p.text)&&p.spin)).map(p=>p.foreground);
-assert.deepEqual(deep.slice(-3),[166,25,31]);                               // claude 173 -> 166, codex 147 -> 25, opencode 153 -> 31
+assert.deepEqual(deep.slice(-3),[166,25,31]);                               // claude 209 -> 166, codex 147 -> 25, opencode 153 -> 31
 const dark=view.appearance(v.rows,{theme:'terminal'},{colors:256,background:'dark'});
-assert.deepEqual(dark.flatMap(r=>r.filter(p=>SPIN.has(p.text)&&p.spin)).map(p=>p.foreground).slice(-3),[173,147,153]);
+assert.deepEqual(dark.flatMap(r=>r.filter(p=>SPIN.has(p.text)&&p.spin)).map(p=>p.foreground).slice(-3),[209,147,153]);
 const mono=view.appearance(v.rows,{theme:'mono'},{colors:256});
 assert(mono.flat().filter(p=>SPIN.has(p.text)&&p.spin).every(p=>p.foreground===null));
 // No color: the styles carry none, so the spinner keeps the state's own (no) color.

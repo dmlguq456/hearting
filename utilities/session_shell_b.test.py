@@ -78,7 +78,7 @@ for(const [keys,want] of [['\x1b[B\r','two'],['\x1bOB\x1bOB\x1b[A\r','two'],['2\
         self.node(r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
 const view=require(require('node:path').join(require('node:path').dirname(process.argv[1]),'panel-view.cjs'));
-const color={dim:{foreground:-1,dim:true},loc_repo:{foreground:253},g_blocked:{foreground:217},lvl_g:{foreground:150},lvl_r:{foreground:210},harness:{foreground:173}};
+const color={dim:{foreground:-1,dim:true},loc_repo:{foreground:253},g_blocked:{foreground:217},lvl_g:{foreground:150},lvl_r:{foreground:210},harness:{foreground:209}};
 const plain={dim:{foreground:null,dim:false},loc_repo:{foreground:null},g_blocked:{foreground:null},lvl_g:{foreground:null},lvl_r:{foreground:null},harness:{foreground:null}};
 const S=(t,st,styles)=>({text:t,...styles[st]});
 const long='a choice whose words run past one row';
@@ -101,7 +101,7 @@ for(const [styles,colored] of [[color,true],[plain,false]]){
    // (a) `▸` in the harness color, bold, on the choice's first row; the words bold in the bright
    // body color. (d) The same words on every row of a wrapped choice.
    if(i===1){assert.equal(row[0].text,'▸',JSON.stringify(row));assert.equal(row[0].bold,true);assert.equal(row[1].text,' ');
-    if(colored)assert.equal(row[0].foreground,173);}
+    if(colored)assert.equal(row[0].foreground,209);}
    else{assert.equal(row[0].text,'  ',JSON.stringify(row));assert(!row.some(p=>p.text==='▸'));}
    assert(words(row).every(p=>p.bold===true&&!p.dim&&(colored?p.foreground===253:true)),JSON.stringify(row));
   }else{
@@ -120,7 +120,7 @@ for(const [styles,colored] of [[color,true],[plain,false]]){
    model:{styles:color,colors:256},configuration,background}).rows.flat();
  for(const [cfg,background] of [[{},''],[{},'dark'],[{shade:'medium'},'dark']]){
   const mark=pop(cfg,background).find(p=>p.text==='▸');assert(mark,JSON.stringify(cfg));
-  assert.notEqual(mark.foreground,view.FACES.dark.accent,JSON.stringify(cfg));assert.equal(mark.foreground,173,JSON.stringify(cfg));assert.equal(mark.bold,true);}
+  assert.notEqual(mark.foreground,view.FACES.dark.accent,JSON.stringify(cfg));assert.equal(mark.foreground,209,JSON.stringify(cfg));assert.equal(mark.bold,true);}
  assert.equal(pop({theme:'mono'},'').find(p=>p.text==='▸').bold,true);
 }
 """)

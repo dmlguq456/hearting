@@ -273,9 +273,9 @@ assert.equal(lit('light',num('a2')[0]).foreground,view.FACES.light.peerOther.ope
 assert.equal(lit('light',num('a1')[0]).foreground,view.FACES.light.peerOther.claude);
 // 11-18 review: on every face (dark, light, unknown, and each with a shade) this window's number is never the color of another
 // window's of the same harness: the light face's other-window value is its own lighter step, not the deep hue (was the same 166 / 31).
-// (The harness colors are the product's own, 173 / 147 / 153, not this file's older fixture values: the light face derives this window's
+// (The harness colors are the product's own, 209 / 147 / 153, not this file's older fixture values: the light face derives this window's
 // number from them, so only the real ones show the old bug.)
-const REAL={...STYLES,hb_claude:{foreground:173},hb_codex:{foreground:147},hb_opencode:{foreground:153}};
+const REAL={...STYLES,hb_claude:{foreground:209},hb_codex:{foreground:147},hb_opencode:{foreground:153}};
 for(const h of ['claude','codex','opencode']){
   const grp={me:'3b',groups:[{steward:end('3b','hb_'+h,true),members:[end('a1','hb_'+h)]}]};
   const r=render([],[],70,30,{peers:grp,styles:REAL}).rows.find(x=>/^│ PEERS/.test(text(x)));

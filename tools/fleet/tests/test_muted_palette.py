@@ -49,22 +49,23 @@ class MutedPaletteTest(unittest.TestCase):
         self.assertEqual(render._KIND_PAIR_START - (render._TINT_PAIR_START + used), 6)
 
     def test_claude_harness_color_is_orange_apart_from_the_teal(self):
-        """11-18: the Claude harness keys wear orange 173 (the mock-up's brand orange, now #d97757); the teal 116 stays
+        """11-19: the Claude harness keys wear orange 209 (#ff875f, one step brighter than 173's #d7875f; xterm's own value, so no
+        palette entry is redefined for it); the teal 116 stays
         in `_MUTED_256` for the Opus family and the stage palette, so the pinned table above is unchanged."""
-        self.assertEqual(render._HARNESS_256, {"claude": 173, "codex": 147, "opencode": 153})
-        self.assertEqual(render._HARNESS_RGB_1000, {"claude": (851, 467, 341)})      # #d97757; the others open nothing
+        self.assertEqual(render._HARNESS_256, {"claude": 209, "codex": 147, "opencode": 153})
+        self.assertFalse(hasattr(render, "_HARNESS_RGB_1000"))      # nothing of the harness hues is opened
         self.assertEqual({k: v for k, v in render._HARNESS_256.items() if k in render._MUTED_256}, {})
         with mock.patch.object(render.curses, "COLORS", 256, create=True):
-            self.assertEqual(render._palette_fg("claude", 6), 173)
+            self.assertEqual(render._palette_fg("claude", 6), 209)
             self.assertEqual(render._palette_fg("cyan", 6), 116)
         with mock.patch.object(render.curses, "COLORS", 8, create=True):
             self.assertEqual(render._palette_fg("claude", 6), 6)       # 8 colors: still the native cyan
         from fleet import palette
-        for colors, claude, opus in ((256, 173, 116), (8, 6, 6)):
+        for colors, claude, opus in ((256, 209, 116), (8, 6, 6)):
             hues = palette.hue_colors(colors)
             self.assertEqual((hues["cl"], hues["c"]), (claude, opus))
         for key in ("hb_claude", "hbb_claude", "h_claude", "nm_claude", "nmd_claude"):
-            self.assertEqual(palette.style_components(key)["foreground"], 173, key)
+            self.assertEqual(palette.style_components(key)["foreground"], 209, key)
         self.assertTrue(palette.style_components("hbb_claude")["bold"])
         self.assertTrue(palette.style_components("h_claude")["dim"])
         for key in ("fam_opus", "famd_opus", "stg1_on", "gpu_ada", "gpu_rtx4090"):
@@ -88,7 +89,7 @@ class MutedPaletteTest(unittest.TestCase):
         a harness Fleet does not name and any other glyph keep the vanilla `g_spin`."""
         from fleet import palette
         from fleet.explorer.style import recede_key
-        for harness, number in (("claude", 173), ("codex", 147), ("opencode", 153)):
+        for harness, number in (("claude", 209), ("codex", 147), ("opencode", 153)):
             self.assertEqual(palette.harness_spin("g_spin", harness), "spin_" + harness)
             self.assertEqual(palette.harness_spin("spin", harness), "spin_" + harness)
             self.assertEqual(palette.harness_spin("g_spin_dim", harness), "spind_" + harness)
@@ -154,10 +155,6 @@ class MutedPaletteTest(unittest.TestCase):
             mock.call(index, *rgb)
             for index, rgb in render._TINT_RGB_1000.items()
         )
-        expected[len(render._RICHER_RGB_1000):len(render._RICHER_RGB_1000)] = [
-            mock.call(render._HARNESS_256[name], *rgb)
-            for name, rgb in render._HARNESS_RGB_1000.items()
-        ]
         self.assertEqual(init_color.call_args_list, expected)
 
     def test_model_family_pairs_keep_default_background_after_all_pairs_init(self):

@@ -1338,33 +1338,34 @@ def _blinking_stage(stages, at, lit):
 
 
 def _stage_word(route):
-    """The word before the stage line's position: ``staged`` for a staged shape, else the route's own shape (``map-reduce``,
-    ``transactional-owner``), none when the record names none. One rule with the shell panel's stage line."""
+    """The word before the stage line's position: none where the route's bracket holds a form (``team`` says it; 11-19: ``map-reduce``
+    and ``transactional-owner`` are team forms, ``staged`` too), else the route's own shape (``resource+verification``), none when the
+    record names none. One rule with the shell panel's stage line (``stageLeadOf``)."""
     shape = str(route.get("shape") or "")
-    if shape.startswith("staged"):
-        return "staged"
+    if shape.startswith("staged") or route_form(route.get("capability"), shape, route.get("field")):
+        return ""
     return "" if shape in ("", "unknown", "framed", "direct", "one-shot-owner") else shape
 
 
 def _staged_cells(route, earlier, stages, at, lit):
-    """``frame ✓ → code(team·standard) · 3/6: execute``, widest first; short of cells the earlier legs go, then the intensity
-    (``code(team) · 3/6: execute``), then the bracket, then the kind, then another shape's own word, then the position; the stage
-    stays. The word ``staged`` is never written before the position."""
+    """``frame ✓ → code(team·standard) · 3/6: execute``, widest first; short of cells the earlier legs go, then the stage's name
+    (``code(team·standard) · 3/6``), then the intensity (``code(team) · 3/6``), then the bracket, then the kind word, then the
+    position (11-19, "강도도 표기해 항상": the intensity outlasts the stage's name). The words ``staged``, and ``map-reduce`` where
+    the bracket holds the form, are never written before the position."""
     kind, formal, bare = _kind_cell(route), _kind_cell(route, tail=False), _kind_cell(route, bracket=False)
-    position = f"{at + 1}/{len(stages)}"
+    word = _stage_word(route)
+    position = (word + " " if word else "") + f"{at + 1}/{len(stages)}"
     stage = _blinking_stage(stages, at, lit)
 
-    def build(chain, kind_cell, word):
+    def build(chain, kind_cell, place, named=False):
         out = (chain + [(" → ", "dim")]) if chain else []
         out += kind_cell
-        if word:
-            out += ([(" · ", "dim")] if kind_cell else []) + [(word + ": ", "dim")]
-        return out + stage
-    # (the word `staged` is never written before the position: 11-19, the form `team` stands in the bracket)
-    word = (_stage_word(route) + " " if _stage_word(route) not in ("", "staged") else "") + position
-    cells = [build(earlier, kind, word)] if earlier else []
-    return cells + [build([], kind, word), build([], formal, word), build([], bare, word), build([], [], word),
-                    build([], [], position), build([], [], "")]
+        if place:
+            out += ([(" · ", "dim")] if kind_cell else []) + [(place + (": " if named else ""), "dim")]
+        return out + (stage if named else [])
+    cells = [build(earlier, kind, position, True)] if earlier else []
+    return cells + [build([], kind, position, True), build([], kind, position), build([], formal, position),
+                    build([], bare, position), build([], [], position), build([], [], f"{at + 1}/{len(stages)}")]
 
 
 def _draw_route_progress(grid, x, end, y, route, card=True):
@@ -1450,7 +1451,7 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
     # Spec E9 rule 24, 11-17 (route row 5): a route that runs a worker per stage reads `code(team·standard) · 3/7: execute`
     # (the shell panel's route lines, in one row); the chain of kinds it continues leads it (`frame ✓ → code(standard) · …`).
     # The kind is the one bold word, the stage's name the one thing that blinks. Short of cells see `_staged_cells`.
-    # Any route with a stage list reads so, whatever its shape (`map-reduce 2/3: analyze`; no word when none is named).
+    # Any route with a stage list reads so, whatever its shape (`2/3: analyze` after a form; another shape's own word, `resource+verification 2/3: analyze`, where none stands).
     if len(stages) > 1 or (stages and str(route.get("shape") or "").startswith("staged")):
         at = next((i for i, stage in enumerate(stages) if stage.get("st") in ("active", "failed")),
                   next((i for i, stage in enumerate(stages) if stage.get("st") != "done"), len(stages) - 1))

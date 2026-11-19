@@ -475,12 +475,12 @@ for(const o of [{theme:'mono'},{model:{colors:8}}]){
     # 2 (corrected 11-16 12:57) ---------------------------------------------------------------------------------
     def test_the_usage_rows_name_each_harness_in_its_hue_one_step_down(self):
         self.node(r"""
-const F=view.FACES,hb={claude:173,codex:147,opencode:153};   // 11-18: the harness hues: Claude orange 173, Codex lavender 147, OpenCode sky 153
+const F=view.FACES,hb={claude:209,codex:147,opencode:153};   // 11-19: the harness hues: Claude orange 209 (was 173), Codex lavender 147, OpenCode sky 153
 const L=(n)=>{const c=[0,95,135,175,215,255],m=n-16,rgb=[c[Math.floor(m/36)],c[Math.floor(m/6)%6],c[m%6]].map(x=>x/255).map(x=>x<=0.04045?x/12.92:((x+0.055)/1.055)**2.4);
   const y=0.2126*rgb[0]+0.7152*rgb[1]+0.0722*rgb[2];return 116*Math.cbrt(y)-16;};
 const none=[{harness:'claude',parts:USAGE[0].parts},{harness:'codex',parts:[]},{harness:'opencode',parts:[]}];
 const nameOf=(v,name)=>v.rows.flat().find(p=>p.role==='harness-name'&&p.text===name);
-for(const [opt,table,face] of [[{},{claude:130,codex:104,opencode:110},'dark'],[{light:true,theme:'light'},{claude:166,codex:68,opencode:31},'light']]){
+for(const [opt,table,face] of [[{},{claude:166,codex:104,opencode:110},'dark'],[{light:true,theme:'light'},{claude:166,codex:68,opencode:31},'light']]){
   assert.deepEqual(F[face].harnessName,table);
   for(const usage of [USAGE,none]){
     const v=draw({...opt,background:face,usage});

@@ -676,7 +676,7 @@ assert(r80.includes('⠋ owner claude Opus 5.5 xhigh')&&r80.includes('CTX ━━
 // The bottom layout's kind column: the kind leads it (`code · 3/7: execute`) and goes first, before the tool.
 const kindAt=w=>draw([one,stg,wait,{...failed,role:'owner',kind_word:'code'}],w,20,{side:false}).find(s=>s.startsWith('│ │ ')&&s.includes('세션 간'));
 assert(/│ code · 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(140))&&!kindAt(140).includes('>_'),kindAt(140));   // (11-18: no command column)
-assert(/│ code · 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(100))&&/│ code · 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(90))&&!kindAt(84).includes('code ·')&&/│ 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(84)),kindAt(84)+'\n'+kindAt(100));   // (11-19: with no `staged ` the kind stays to 87 cells)
+assert(/│ code · 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(100))&&/│ code · 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(88))&&/│ code · 3\/7 +(\d+h )?\d+m │ │$/.test(kindAt(86))&&/│ code · 3\/7 +(\d+h )?\d+m │ │$/.test(kindAt(76))&&!kindAt(75).includes('code ·')&&/│ 3\/7 +(\d+h )?\d+m │ │$/.test(kindAt(75)),kindAt(76)+'\n'+kindAt(75));   // (11-19: with no `staged ` the stage's name stays to 87 cells, then goes before the kind word does: `code · 3/7` to 76, then `3/7`)
 // (c) A title takes two rows at most, the second ending in `…`; short of rows, one.
 const long={...one,id:'l',title:'아주 긴 route 이름 — 셸 패널의 접힌 route 줄에서 이름이 세 줄을 넘으면 둘째 줄 끝에 줄임 표시가 붙는지 확인하는 이름'};
 const lr=box(draw([one,long],40,50)),li=lr.findIndex(s=>s.includes('아주 긴'));
@@ -1086,7 +1086,8 @@ for(let width=32;width<=72;width++){
     def test_a_bottom_route_row_names_its_kind_and_has_no_command_column(self):
         # Spec E9 rule 34 (d), 11-17 (route row 5): after model and context, the side layout's and Fleet's words: the kind with
         # its intensity (`lab(quick)`, `code(standard) · 3/7: execute`), a failed `2/3: execute ✕`; short of
-        # cells the kind word goes, then `staged`, then the whole column. 11-18: the command column (`>_ Edit`) is gone.
+        # cells the stage's name goes first (11-19, "강도도 표기해 항상": `code(standard) · 3/7`), then the intensity, then the kind word
+        # (`3/7`), then the whole column. 11-18: the command column (`>_ Edit`) is gone.
         script = self.FIXTURE + r'''
 const four=[{...oneShot,kind_word:'lab',intensity:'quick'},{...staged,kind_word:'code',intensity:'standard'},waiting,failed];
 const row=(rows,title)=>rows.find(s=>s.startsWith('│ │ ')&&s.includes(title));
@@ -1100,12 +1101,13 @@ assert(!r140.some(s=>/execute ✕ 2\/3/.test(s))&&!r140.some(s=>s.includes('>_')
 // 100 cells (11-19: `staged ` is no longer written before the position, so the kind still stands here): the kind and the stage stay, no command.
 const r100=draw(four,100,20,{side:false});
 assert(row(r100,'세션 간').includes('│ code(standard) · 3/7: execute')&&!r100.join('').includes('>_'),r100.join('\n'));
-// 90 cells: the kind word goes first (its bracket with it); the stage and its mark stay.
+// 90 cells: the stage's name goes first (a failed one's `✕` with it: the row's own mark says it); the kind and its intensity stay.
 const r90=draw(four,90,20,{side:false});
-assert(row(r90,'세션 간').includes('│ 3/7: execute')&&!r90.join('').includes('code(')&&!r90.join('').includes('lab(')&&!r90.join('').includes('>_'),r90.join('\n'));
-// 80 cells: the stage and its mark stay (`staged` is never written).
+assert(row(r90,'세션 간').includes('│ code(standard) · 3/7 ')&&row(r90,'셸 상태').includes('│ lab(quick) ')&&row(r90,'PG-50').includes('│ 2/3 ')
+ &&!r90.join('').includes('execute')&&!r90.join('').includes('host-run')&&!r90.join('').includes('>_'),r90.join('\n'));
+// 80 cells: the kind goes (its bracket with it); the position stays (`staged` is never written).
 const r80=draw(four,80,20,{side:false});
-assert(row(r80,'세션 간').includes('│ 3/7: execute')&&row(r80,'PG-50').includes('│ 2/3: execute ✕')&&!r80.join('').includes('staged'),r80.join('\n'));
+assert(row(r80,'세션 간').includes('│ 3/7 ')&&row(r80,'PG-50').includes('│ 2/3 ')&&!r80.join('').includes('code(')&&!r80.join('').includes('lab(')&&!r80.join('').includes('execute')&&!r80.join('').includes('staged'),r80.join('\n'));
 // Narrower still the whole column goes; the earlier columns stay.
 const r64=draw(four,64,20,{side:false});
 assert(!r64.join('').includes('lab(')&&!r64.join('').includes('3/7')&&/claude Opus 5\.5 xhigh +│ ━━─── 38%/.test(row(r64,'셸')),r64.join('\n'));
@@ -1185,7 +1187,7 @@ for(const [width,side] of [[44,true],[36,true],[28,true],[160,false],[130,false]
   if(width>=36||!side){
     assert(has(/code\(unit·quick\)/)&&has(/code\(solo·quick\)/)&&has(/lab\(team·strong\)/)&&has(/code\(team\)/),tag);
     assert(side||has(/code\(team·standard\)/),tag);              // (beside the native area the chain and the stage take the room: the tail folds)
-    assert(!has(/staged/)&&has(/ \d\/\d: /),tag);                 // (the stage line never leads with `staged`)
+    assert(!has(/staged/)&&has(/ \d\/\d\b/)&&(width!==160||has(/ \d\/\d: /)),tag);                 // (the stage line never leads with `staged`; 11-19: short of cells its name goes first)
     assert(!has(/unit\(/)&&!has(/\(quick\)|\(standard\)|\(strong\)/),tag);
   }
   assert(has(/(● |│ )unit(?![(·])/),tag);                                  // (the older unit route: bare `unit`)
@@ -1204,10 +1206,10 @@ const stateOf=s=>/code\(team·standard\)/.test(s)?0:/code\(team\)/.test(s)?1:/�
 let last=0;
 for(let w=60;w>=20;w--){const line=texts(rendered([std],w)).find(s=>/● (frame|code)/.test(s));if(!line)continue;const st=stateOf(line);assert(st>=last,w+' '+line);last=st;}
 assert(last>=1);
-// beneath the native area the kind column folds the intensity first, then the bracket (`code · 3/6: execute`), then the kind; `staged` is never written
-const kindState=line=>/code\(team·standard\) · \d\/\d: /.test(line)?0:/code\(team\) · \d\/\d: /.test(line)?1:/code · \d\/\d: /.test(line)?2:/ \d\/\d: /.test(line)?3:-1;
+// beneath the native area the kind column folds the stage's name first (11-19, "강도도 표기해 항상"), then the intensity, then the bracket (`code · 3/6`), then the kind; `staged` is never written
+const kindState=line=>/code\(team·standard\) · \d\/\d: /.test(line)?0:/code\(team·standard\) · \d\/\d\b/.test(line)?1:/code\(team\) · \d\/\d\b/.test(line)?2:/code · \d\/\d\b/.test(line)?3:/│ \d\/\d\b/.test(line)?4:-1;
 const seen=[];
-for(let w=170;w>=60;w--){const line=texts(rendered([{...std,chain:undefined},quick],w,false)).find(s=>/\d\/\d: /.test(s));if(line)seen.push(kindState(line));}
+for(let w=170;w>=60;w--){const line=texts(rendered([{...std,chain:undefined},quick],w,false)).find(s=>/│ (code\S* · )?\d\/\d\b/.test(s));if(line)seen.push(kindState(line));}
 assert(seen.every(v=>v>=0)&&seen.every((v,i)=>i===0||v>=seen[i-1])&&seen.includes(0)&&seen.includes(1),JSON.stringify(seen));
 // mono / NO_COLOR / under 256 colors: dim brackets, the same text
 for(const extra of [{no_color:true},{colors:16}]){

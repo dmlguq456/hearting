@@ -276,10 +276,13 @@ const wide=draw([R.staged,R.solo,R.failed],140,16,{side:false});
 assert.equal(cell(wide,'패널').replace(/ +$/,''),'code(standard) · 3/6: execute');
 assert(wide.some(s=>/code\(quick\)/.test(s)));
 assert(wide.some(s=>/code\(standard\) · 2\/3: execute ✕/.test(s)),wide.join('\n'));
-// Short of cells the kind goes first, then the word `staged`.
+// Short of cells the stage's name goes first (11-19: the intensity outlasts it), then the intensity, then the kind.
 const mid=draw([R.staged,R.failed],80,16,{side:false});
-assert(mid.some(s=>/3\/6: execute/.test(s))&&!mid.join('').includes('code('),mid.join('\n'));
+assert(mid.some(s=>/code\(standard\) · 3\/6 /.test(s))&&mid.some(s=>/code\(standard\) · 2\/3 /.test(s))&&!mid.join('').includes('execute'),mid.join('\n'));
+const low=draw([R.staged,R.failed],68,16,{side:false});
+assert(low.some(s=>/│ 3\/6 /.test(s))&&low.some(s=>/│ 2\/3 /.test(s))&&!low.join('').includes('code(')&&!low.join('').includes('execute'),low.join('\n'));
 for(const s of [...wide,...mid])assert([140,80].includes(cells(s)),s);
+for(const s of low)assert.equal(cells(s),68,s);
 """)
 
     def test_every_route_with_a_stage_list_reads_the_stage_line_under_its_owner(self):
@@ -298,6 +301,10 @@ want('map-reduce','● research(standard) · map-reduce 2/3: analyze',{},64);
 want('transactional-owner','● research(standard) · transactional-owner 2/3: analyze',{},80);
 want('resource+verification','● research(standard) · resource+verification 2/3: analyze',{chain:[{name:'research',state:'active'}]},84);
 want('unknown','● research(standard) · 2/3: analyze',{},64);
+// 11-19: where the bracket holds a form (`kind_form`: the backend's `team` for map-reduce, transactional-owner, staged) the shape's word is not written again.
+want('map-reduce','● research(team·standard) · 2/3: analyze',{kind_form:'team'},72);
+want('transactional-owner','● research(team·standard) · 2/3: analyze',{kind_form:'team'},80);
+want('resource+verification','● research(standard) · resource+verification 2/3: analyze',{chain:[{name:'research',state:'active'}],kind_form:''},84);   // (no form: its own word stays)
 // One blinking thing, the stage's name where it stands (on the first line, or on the stage row under the owner); the first line's dot stands still.
 for(const shape of ['map-reduce','transactional-owner','resource+verification']){
  const own=render([mk(shape)],84,60).rows.flat().filter(p=>p.beat===true&&!/ROUTE$/.test(p.text));assert.equal(own.length,1,shape);assert.equal(own[0].text,'analyze',shape);
@@ -316,6 +323,8 @@ assert(!only(R.frame,50).some(s=>/\d\/\d/.test(s))&&!only(R.solo,50).some(s=>/\d
 // The bottom layout names the shape word in its one cell.
 const wide=draw([mk('map-reduce'),mk('transactional-owner')],140,16,{side:false});
 assert(wide.some(s=>/research\(standard\) · map-reduce 2\/3: analyze/.test(s))&&wide.some(s=>/transactional-owner 2\/3: analyze/.test(s)),wide.join('\n'));
+const team=draw([mk('map-reduce',{kind_form:'team'}),mk('transactional-owner',{kind_form:'team',id:'t'})],140,16,{side:false});
+assert(team.filter(s=>/research\(team·standard\) · 2\/3: analyze/.test(s)).length===2&&!team.join('').includes('map-reduce')&&!team.join('').includes('transactional-owner'),team.join('\n'));
 """)
 
     def test_a_route_with_no_worker_has_its_stage_name_on_the_first_line_or_on_a_stage_row_under_its_owner(self):

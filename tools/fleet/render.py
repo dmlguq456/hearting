@@ -99,7 +99,7 @@ from .render_cells import (  # noqa: F401
     _MW, _NAME2_MAX, _NAME_COL, _NAME_GAP, _NAME_HUE, _NAME_KEY, _NAME_KEY_DIM, _NAME_WIDE_MAX,
     _NARROW_CUTOFF, _NARROW_L2_STAGE_COL, _narrow_session_cell_budget, _native_context_gauge,
     _NW_S, _OPTW, _pad, _pad_to_column, _palette_fg, _pct_key, _PIPE_STAGES, _QA_INT,
-    _resolved_alias_model, _resolved_alias_models, _RICHER_RGB_1000, _HARNESS_256, _HARNESS_RGB_1000, _ROLE_MODEL_NAME,
+    _resolved_alias_model, _resolved_alias_models, _RICHER_RGB_1000, _HARNESS_256, _ROLE_MODEL_NAME,
     _route_current_index, _ROUTE_STAGE_ZONE_MAX, _route_zone_width, _SESSION_CELL_MAX,
     _session_routing_column, _short_model_id, _shorten_model_suffix, _SPIN, _STAGE_RESERVE,
     _STAGE_ROLE, _stage_role_label, _STAGE_ZONE_MAX, _state_key, _STEWARD_PAIR, _TAG_W,
@@ -259,8 +259,6 @@ def _init_colors():
         if curses.COLORS >= 256 and curses.can_change_color():
             for name, rgb in _RICHER_RGB_1000.items():
                 curses.init_color(_MUTED_256[name], *rgb)
-            for name, rgb in _HARNESS_RGB_1000.items():
-                curses.init_color(_HARNESS_256[name], *rgb)
             for index, rgb in _TINT_RGB_1000.items():
                 curses.init_color(index, *rgb)
     except Exception:
