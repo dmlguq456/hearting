@@ -722,7 +722,7 @@ def _bindings_detail(root, ids, directories):
             parts.append("next=campaign-close records a vanished folder as gone by itself once nothing under "
                          "campaigns/ of this artifact root (any campaign) holds it back; what holds it back is "
                          f"named above. {advice}. Then run campaign-close again.")
-            lead = "Or, one cycle at a time,"
+            lead = "Without waiting for that, one cycle can be recorded as gone by itself (not a step to take first):"
         else:
             parts.append("next=campaign-close records a vanished folder as gone by itself and nothing under "
                          "campaigns/ holds it back, so run campaign-close.")
