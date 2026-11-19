@@ -381,7 +381,7 @@ class CyclePathTests(EntranceFixture):
         def swapped(_root):
             document.unlink()
             document.symlink_to(outside)
-            return {}, {"recent": rows, "topics": [], "campaigns": []}
+            return {}, {"recent": rows, "topics": [], "campaigns": [], "all_campaigns": []}
         with mock.patch.object(E, "_refresh_and_snapshot", side_effect=swapped), \
                 mock.patch.object(E, "_open_externally") as opener, \
                 contextlib.redirect_stderr(io.StringIO()):
@@ -690,7 +690,7 @@ class RowSourceTests(EntranceFixture):
 
 
 class LimitTests(EntranceFixture):
-    def test_recent_list_stops_at_twenty_and_campaigns_at_ten(self):
+    def test_recent_list_stops_at_twenty_and_the_entrance_campaigns_at_three(self):
         for index in range(30):
             day = f"2026-02-{index + 1:02d}"
             campaign = f"{day}_campaign-{index:02d}" if index < 12 else "2026-01-01_shared"
@@ -699,8 +699,12 @@ class LimitTests(EntranceFixture):
                        sealed_on=f"{day}T00:00:00Z")
         snapshot = E.scan(self.root)
         self.assertEqual(len(snapshot["recent"]), E.RECENT_LIMIT)
-        self.assertEqual(len(snapshot["campaigns"]), E.CAMPAIGN_LIMIT)
+        self.assertEqual(len(snapshot["campaigns"]), E.ENTRANCE_CAMPAIGN_LINES)
+        self.assertEqual(E.ENTRANCE_CAMPAIGN_LINES, 3)
         self.assertEqual(len(snapshot["all_campaigns"]), 13)
+        # another caller keeps its own, unchanged line count
+        self.assertEqual(E.CAMPAIGN_LIMIT, 10)
+        self.assertEqual(len(E.campaign_groups(self.root)), 10)
 
     def test_an_oversized_manifest_is_skipped(self):
         self.cycle("2026-01-02_big", "2026-01-02_big",
@@ -725,8 +729,9 @@ class LimitTests(EntranceFixture):
         self.assertEqual(len(re.findall(r"^[-*] \[.*?\]\(<campaigns/", page, re.MULTILINE)), 12)
         entrance = self.entrance()
         campaign_items = re.findall(r"^\d+\. .*\]\(<campaigns/\d{4}", entrance, re.MULTILINE)
-        self.assertEqual(len(campaign_items), E.CAMPAIGN_LIMIT)
-        self.assertIn("all-campaigns.md", entrance)
+        self.assertEqual(len(campaign_items), E.ENTRANCE_CAMPAIGN_LINES)
+        self.assertIn("[All 12 campaigns](<all-campaigns.md>)", entrance)
+        self.assertTrue(page.startswith(E.MARKER + "\n# All campaigns\n"))  # the page's title is unchanged
 
 
 class LinkTests(EntranceFixture):
@@ -1069,47 +1074,155 @@ class SectionTests(SectionFixture):
         self.assertTrue(page.startswith(E.MARKER + "\n# Recent route reports\n"))
         self.assertIn("[Back to the entrance](<README.md>)", page)
 
+    def _heads(self, name):
+        return ("# 라우팅 — 갈래, 유닛, 엮기 — 제품 요구사항 (PRD)\n" if name == "c02"
+                else "# Plain title\n" if name == "c03"
+                else "No heading here\n" if name == "c04"
+                else f"# Component {name} — Spec (PRD)\n")
+
     def test_spec_lines_dates_titles_order_limit_and_the_rest_line(self):
-        self.spec(12, h1=lambda name: ("# 라우팅 — 갈래, 유닛, 엮기 — 제품 요구사항 (PRD)\n" if name == "c02"
-                                         else "# Plain title\n" if name == "c03"
-                                         else "No heading here\n" if name == "c04"
-                                         else f"# Component {name} — Spec (PRD)\n"))
+        self.spec(12, h1=self._heads)
         snapshot = E.scan(self.root)
         sections = E.entrance_sections(snapshot, E._translator())
         spec = sections[0]
         self.assertEqual(spec["key"], "spec")
+        self.assertEqual(E.ENTRANCE_SPEC_LINES, 3)
         lines = spec["lines"]
-        self.assertEqual(len(lines), E.SPEC_LIMIT + 1)
-        self.assertEqual([line["date"] for line in lines[:E.SPEC_LIMIT]],
-                         ["2026-11-18"] + ["2026-11-10"] * (E.SPEC_LIMIT - 1))
-        titles = [line["title"] for line in lines[:E.SPEC_LIMIT]]
-        self.assertEqual(titles[0], "Component c01")
-        self.assertEqual(titles[1], "라우팅 — 갈래, 유닛, 엮기")
-        self.assertEqual(titles[2], "Plain title")
-        self.assertEqual(titles[3], "c04")  # no H1: the component name
-        self.assertEqual(titles[4:], [f"Component c{number:02d}" for number in range(5, 11)])
+        self.assertEqual(len(lines), E.ENTRANCE_SPEC_LINES + 1)
+        self.assertEqual([line["date"] for line in lines[:3]], ["2026-11-18", "2026-11-10", "2026-11-10"])
+        self.assertEqual([line["title"] for line in lines[:3]],
+                         ["Component c01", "라우팅 — 갈래, 유닛, 엮기", "Plain title"])
         rest = lines[-1]
-        self.assertEqual((rest["kind"], rest["title"]), ("spec-rest", "2 more"))
-        index = next(row for row in snapshot["topics"] if not row["component"])
-        self.assertEqual(rest["target"], index["doc_path"])
-        self.assertEqual(rest["number"], E.SPEC_LIMIT + 1)
+        self.assertEqual((rest["kind"], rest["title"]), ("spec-rest", "9 more"))
+        self.assertEqual((rest["md"], rest["html"], rest["target"]), ("all-spec.md", "all-spec.html", "all-spec.html"))
+        self.assertEqual(rest["number"], E.ENTRANCE_SPEC_LINES + 1)
         self.refresh()
-        self.assertIn(f"{E.SPEC_LIMIT + 1}. 2 more", self.entrance().replace("[2 more]", "2 more").replace(
-            f"(<{rest['md']}>)", ""))
+        self.assertIn("4. [9 more](<all-spec.md>)", self.entrance())
+        self.assertIn('<li><a href="all-spec.html">9 more</a></li>', self.entrance("index.html"))
         os.environ["FLEET_NOW_LANG"] = "ko"
-        self.assertIn("나머지 2개", E.render_markdown(E.scan(self.root), E._translator()))
+        self.assertIn("4. [나머지 9개](<all-spec.md>)", E.render_markdown(E.scan(self.root), E._translator()))
 
-    def test_an_index_less_rest_line_is_plain_text_without_a_number(self):
-        self.spec(12)
+    def test_the_rest_line_appears_only_when_a_topic_is_hidden(self):
+        for count, hidden in ((2, None), (3, None), (4, 1), (5, 2)):
+            self._clear_spec()
+            self.spec(count)
+            lines = E.entrance_sections(E.scan(self.root), E._translator())[0]["lines"]
+            self.assertEqual(len(lines), min(count, 3) + (1 if hidden else 0), count)
+            self.assertEqual(lines[-1]["kind"], "spec-rest" if hidden else "spec", count)
+            if hidden:
+                self.assertEqual(lines[-1]["title"], f"{hidden} more")
+
+    def _clear_spec(self):
+        shutil.rmtree(self.root / "shared", ignore_errors=True)  # destructive-ok: own temporary fixture
+
+    def test_all_spec_page_holds_every_topic_in_the_entrance_order_and_form(self):
+        self.spec(12, h1=self._heads)
+        self.refresh()
         snapshot = E.scan(self.root)
-        snapshot["topics"] = [row for row in snapshot["topics"] if row["component"]]
-        spec = E.entrance_sections(snapshot, E._translator())[0]["lines"]
-        self.assertEqual(spec[-1]["kind"], "spec-rest")
-        self.assertIsNone(spec[-1]["number"])
-        self.assertIsNone(spec[-1]["md"])
-        readme = E.render_markdown(snapshot, E._translator())
-        self.assertIn("\n2 more\n", readme)
-        self.assertNotIn("11. 2 more", readme)
+        expected = [(row["date"], row["title"], E._record_md_href(row), E._record_href(row))
+                    for row in snapshot["topics"] if row.get("component")]
+        self.assertEqual(len(expected), 12)
+        self.assertEqual([title for _, title, _, _ in expected][:4],
+                         ["Component c01", "라우팅 — 갈래, 유닛, 엮기", "Plain title", "c04"])
+        md = self.entrance(E.SPEC_MD)
+        self.assertEqual(re.findall(r"^- (\S+)  \[(.*?)\]\(<(.*?)>\)$", md, re.MULTILINE),
+                         [(d, E._md_text(t), m) for d, t, m, _ in expected])
+        page = self.entrance(E.SPEC_HTML)
+        self.assertEqual(re.findall(r'<li><span class="meta">([^<]*)</span> <a href="([^"]+)">(.*?)</a></li>', page),
+                         [(d, h, E._escape(t)) for d, t, _, h in expected])
+        # the same line the entrance shows for each of its first three topics
+        entrance = E.entrance_sections(snapshot, E._translator())[0]["lines"][:3]
+        self.assertEqual([(l["date"], l["title"], l["md"], l["html"]) for l in entrance],
+                         [(d, t, m, h) for d, t, m, h in expected[:3]])
+        self.assertTrue(md.startswith(E.MARKER + "\n# All spec topics\n\n[Back to the entrance](<README.md>)\n"))
+        self.assertIn("<h1>All spec topics</h1>", page)
+        self.assertIn('<p><a href="index.html">Back to the entrance</a></p>', page)
+        self.assertEqual(md, E.render_spec_markdown(snapshot, E._translator()))
+        os.environ["FLEET_NOW_LANG"] = "ko"
+        self.assertTrue(E.render_spec_markdown(E.scan(self.root), E._translator()).startswith(
+            E.MARKER + "\n# spec 주제 전체\n"))
+
+    def test_all_spec_page_with_no_topic_says_there_are_no_documents_like_the_route_reports_page(self):
+        self._routes()
+        self.refresh()
+        for name in (E.SPEC_MD, E.SPEC_HTML, E.RECORDS_MD):
+            self.assertTrue((self.root / name).is_file(), name)
+        self.assertIn("No documents yet.", self.entrance(E.SPEC_MD))
+        self.assertIn("<li>No documents yet.</li>", self.entrance(E.SPEC_HTML))
+        empty = self.base / "empty"
+        empty.mkdir()
+        self.assertIn("No documents yet.", E.render_recent_markdown(E.scan(empty), E._translator()))
+        self.assertIn("No documents yet.", E.render_spec_markdown(E.scan(empty), E._translator()))
+
+    def test_all_spec_page_is_deterministic_recreated_and_follows_the_ownership_rule(self):
+        self.spec(12)
+        self.refresh()
+        before = {name: (self.root / name).read_bytes() for name in (E.SPEC_MD, E.SPEC_HTML)}
+        self.assertEqual(self.refresh()["status"], "unchanged")
+        (self.root / E.SPEC_HTML).unlink()  # destructive-ok: own temporary fixture
+        result = self.refresh()
+        self.assertEqual((result["status"], result["created"]), ("written", [E.SPEC_HTML]))
+        self.assertEqual({name: (self.root / name).read_bytes() for name in before}, before)
+        self.assertEqual(len(E.ENTRANCE_NAMES), 8)
+        self.assertIn(E.SPEC_MD, E.ENTRANCE_NAMES)
+        self.assertIn(E.SPEC_HTML, E.ENTRANCE_NAMES)
+        for name in (E.SPEC_MD, E.SPEC_HTML):
+            self.assertTrue(_has_entrance_marker(self.root / name), name)
+        # a same-named file without the marker, and a link, are neither overwritten nor followed
+        mine = "# my own spec page\n"
+        (self.root / E.SPEC_MD).write_text(mine, encoding="utf-8")
+        outside = self.base / "outside-spec.html"
+        outside.write_text("outside\n", encoding="utf-8")
+        (self.root / E.SPEC_HTML).unlink()  # destructive-ok: own temporary fixture
+        os.symlink(outside, self.root / E.SPEC_HTML)
+        result = self.refresh()
+        self.assertEqual(sorted(result["foreign"]), sorted([E.SPEC_MD, E.SPEC_HTML]))
+        self.assertEqual((self.root / E.SPEC_MD).read_text(encoding="utf-8"), mine)
+        self.assertTrue((self.root / E.SPEC_HTML).is_symlink())
+        self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+        self.assertEqual(self.refresh()["status"], "unchanged")
+
+    def test_section_notes_are_on_markdown_html_and_the_terminal_and_are_not_numbered(self):
+        self.spec(12)
+        self._routes()
+        self.refresh()
+        notes = ("How this repo works now. 12 topics; each change edits the same document.",
+                 "One line per stream of work.", "Reports left by routes. Not usually opened.")
+        readme, page, terminal = self.entrance(), self.entrance("index.html"), self.reports()
+        self.assertIn("## spec\n\n" + notes[0] + "\n\n1. ", readme)
+        self.assertIn("## Campaigns\n\n" + notes[1] + "\n\n5. ", readme)
+        self.assertIn("8. [Recent route reports](<recent-route-reports.md>)\n   " + notes[2], readme)
+        self.assertIn(f'<h2>spec</h2>\n<p class="meta">{notes[0]}</p>\n<ul>', page)
+        self.assertIn(f'<h2>Campaigns</h2>\n<p class="meta">{notes[1]}</p>\n<ul>', page)
+        self.assertIn(f'<a href="recent-route-reports.html">Recent route reports</a> <span class="meta">{notes[2]}</span></li>', page)
+        self.assertIn(f"spec\n   {notes[0]}\n1. ", terminal)
+        self.assertIn(f"Campaigns\n   {notes[1]}\n5. ", terminal)
+        self.assertIn(f"8. Recent route reports\n   recent-route-reports.html\n   {notes[2]}\n", terminal)
+        for text in (readme, terminal):
+            self.assertNotRegex(text, r"(?m)^\d+\. (How this|One line|Reports left)")
+        os.environ["FLEET_NOW_LANG"] = "ko"
+        self.refresh()
+        readme = self.entrance()
+        for note in ("이 repo가 지금 어떻게 동작하는지. 주제 12개, 고칠 때마다 같은 문서를 고칩니다.",
+                     "일의 흐름 하나에 한 줄.", "route가 남긴 보고입니다. 평소에는 열지 않습니다."):
+            self.assertIn(note, readme)
+        self.assertIn("[전체 캠페인 2개](<all-campaigns.md>)", readme)
+
+    def test_the_entrance_has_the_agreed_shape(self):
+        self.spec(18)
+        self._routes()
+        self.refresh()
+        readme = self.entrance()
+        lines = readme.splitlines()
+        sections = [at for at, line in enumerate(lines) if line.startswith("## ")]
+        self.assertEqual([lines[at] for at in sections], ["## spec", "## Campaigns", "## Records"])
+        numbers = [int(m.group(1)) for line in lines if (m := re.match(r"^(\d+)\. ", line))]
+        self.assertEqual(numbers, list(range(1, 10)))
+        spec_part = "\n".join(lines[sections[0]:sections[1]])
+        self.assertEqual(len(re.findall(r"(?m)^\d+\. ", spec_part)), E.ENTRANCE_SPEC_LINES + 1)
+        self.assertIn("[15 more](<all-spec.md>)", spec_part)
+        campaign_part = "\n".join(lines[sections[1]:sections[2]])
+        self.assertEqual(len(re.findall(r"(?m)^\d+\. ", campaign_part)), 2 + 1)  # two campaigns and the fold line
 
     def test_no_components_means_no_spec_section(self):
         self._routes()
@@ -1138,7 +1251,7 @@ class SectionTests(SectionFixture):
             self.assertNotIn(gone, snapshot["campaigns"][0])
         readme = self.entrance()
         self.assertIn("1. 2026-01-03  [Second campaign](<campaigns/2026-01-03_two>)\n2. 2026-01-02  "
-                      "[First campaign](<campaigns/2026-01-02_one>)\n   one line\n3. [All campaigns]", readme)
+                      "[First campaign](<campaigns/2026-01-02_one>)\n   one line\n3. [All 2 campaigns]", readme)
         self.assertIn('<li><span class="meta">2026-01-02</span> <a href="campaigns/2026-01-02_one">First '
                       'campaign</a><br><span class="meta">one line</span></li>', self.entrance("index.html"))
         self.assertNotIn("Alpha result", readme + self.entrance("index.html"))
@@ -1160,8 +1273,9 @@ class SectionTests(SectionFixture):
         self.assertTrue((self.root / targets[-4]).is_dir() or targets[-4].startswith("campaigns/"))
         spec_first = self.open_line(1)
         self.assertTrue(spec_first.endswith("c01/prd.md"))
-        self.assertEqual(self.open_line(E.SPEC_LIMIT + 1).rsplit("/", 1)[-1], "prd.md")
-        campaign_line = E.SPEC_LIMIT + 2
+        self.assertEqual(targets[E.ENTRANCE_SPEC_LINES], "all-spec.html")
+        self.assertEqual(self.open_line(E.ENTRANCE_SPEC_LINES + 1), str(self.root / "all-spec.html"))
+        campaign_line = E.ENTRANCE_SPEC_LINES + 2
         self.assertEqual(self.open_line(campaign_line), str(self.root / "campaigns/2026-01-03_two"))
         self.assertEqual(names[0], "c01")
 
@@ -1218,7 +1332,7 @@ class SectionTests(SectionFixture):
             os.environ["FLEET_NOW_LANG"] = lang
             self.refresh()
             shown = [self.entrance(name) for name in E.ENTRANCE_NAMES] + [self.reports()]
-            self.assertEqual(len(shown), 7)
+            self.assertEqual(len(shown), 9)
             for text in shown:
                 lowered = text.lower()
                 for word in ("사이클", "cycle", "user-facing"):

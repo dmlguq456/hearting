@@ -397,7 +397,7 @@ class LogicalRevisionReaderTest(unittest.TestCase):
         self.indirect()
         row = entrance._source_row(self.root, storage.entrance_snapshot(self.root)['rows'][0])
         with mock.patch.object(entrance, '_refresh_and_snapshot',
-                               return_value=({}, {'recent': [], 'topics': [row], 'campaigns': []})), \
+                               return_value=({}, {'recent': [], 'topics': [row], 'campaigns': [], 'all_campaigns': []})), \
                 mock.patch.object(entrance, '_open_externally') as external, \
                 mock.patch.object(entrance, '_show_viewer', return_value=None) as viewer, \
                 contextlib.redirect_stdout(io.StringIO()):

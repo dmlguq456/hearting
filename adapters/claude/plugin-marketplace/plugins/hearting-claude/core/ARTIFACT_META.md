@@ -268,21 +268,29 @@ shows.
 
 ### Root `README.md` / `index.html` — the read entrance
 
-Six files directly under the artifact root, written by `utilities/artifact_entrance.py`:
+Eight files directly under the artifact root, written by `utilities/artifact_entrance.py`:
 `README.md` and `index.html` (the entrance), `all-campaigns.md` / `all-campaigns.html`
-(every campaign) and `recent-route-reports.md` / `recent-route-reports.html` (the recent
-route reports). They are a derived reading surface, not canonical records: admission,
+(every campaign), `all-spec.md` / `all-spec.html` (every spec topic) and
+`recent-route-reports.md` / `recent-route-reports.html` (the recent route reports). They are a derived reading surface, not canonical records: admission,
 census and residue never take them as input, and deleting them is safe — the next publish
 recreates them. They are classified `C-RT` in `core/CORE.md` §3.
 
 - **When.** Right after a seal (the first seal and a re-seal refresh alike), and whenever
   `hearting reports` or `hearting open` runs. No other write path touches them.
-- **Content.** The entrance has three sections, top to bottom: **spec** (the 10 most
+- **Content.** The entrance has three sections, top to bottom: **spec** (the 3 most
   recently changed spec topics, each with the day it was last changed and its title, and
-  one "N more" line that opens the spec contents PRD), **campaigns** (the 10 most recent
-  campaigns with date, title and the campaign's one-line summary from `meta.json`, then a
-  link to the full campaign list) and **records** (a link to the recent route reports
-  page and a link to the ID index `campaigns/INDEX.md`), plus the root totals. The recent
+  one "N more" line, N being the topics not shown, absent when none is hidden, that opens
+  `all-spec.*`), **campaigns** (the 3 most recent campaigns with date, title and the
+  campaign's one-line summary from `meta.json`, then one "All N campaigns" line, N being
+  every campaign, that opens `all-campaigns.*`) and **records** (a link to the recent
+  route reports page and a link to the ID index `campaigns/INDEX.md`), plus the root
+  totals. The line counts are the constants `ENTRANCE_SPEC_LINES` and
+  `ENTRANCE_CAMPAIGN_LINES` (not settings). Under the spec and campaigns titles one
+  explanatory line says what the section is (the spec line carries the topic count), and
+  the "recent route reports" line carries one line saying the page is not usually opened;
+  none of these lines is numbered. `all-spec.*` lists every spec topic in the entrance's
+  form and order (date, linked title) with a link back to the entrance, or "No documents
+  yet." when there is none. The recent
   route reports page lists the 20 most recent user-facing documents (date, title,
   one-line summary, "+N more"), with a link back to the entrance. Every link is a
   relative path; there is no absolute path, host name, user name, script or external
@@ -306,7 +314,7 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
 - **Ownership.** Each file starts with `<!-- hearting:artifact-entrance v1 -->` (an HTML
   file keeps `<!DOCTYPE html>` above it). A same-named file without that marker, or a
   symbolic link at that name, is never overwritten, followed, or moved — it stays its
-  owner's; this holds for all six files. Rewriting is byte-deterministic: identical root
+  owner's; this holds for all eight files. Rewriting is byte-deterministic: identical root
   content and declared language produce identical bytes.
 - **First record.** When a root first shows a user-facing document, one call with a
   cycle id writes `.runtime/artifact-entrance.json`
