@@ -50,6 +50,12 @@ _REQUEST_TTL = 60.0
 _REGISTRY_WAKE_SECONDS = 1.0
 _REGISTRY_MIN_GAP = 0.5
 _ROUTE_DEMAND_LIMIT = 64
+# The form of the route values (`route_panels` rows, labels, doers, peers) the producer that wrote
+# a cache drew them in. Raise it when `tools/fleet/session_line.py` gains or changes a row key: a
+# release that draws the new form does not draw the values of a producer that still holds the
+# shared cache with an older one (the cache of an older release has no such key: form 0).
+_ROUTE_ROW_FORM = 1
+_DISPLAY_KEYS = ("route_sessions", "route_status", "route_panels", "session_doers", "session_peers", "resources")
 _ROUTE_DEMAND_MAX_BYTES = 32 * 1024
 _ROUTE_DEMAND_TTL = 600.0
 _SELECTED_DRAFT_MAX = 4096
@@ -338,8 +344,11 @@ def _cache_write_lock():
         os.close(fd)
 
 
-def _read_cache_file():
-    path = _cache_path()
+def _panels_path() -> Path:
+    return state_root() / "panels.json"
+
+
+def _read_private_json(path):
     try:
         parent = os.lstat(path.parent)
         if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid()
@@ -352,7 +361,42 @@ def _read_cache_file():
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return None
-    return value if isinstance(value, dict) and value.get("schema_version") == 3 else None
+    return value if isinstance(value, dict) else None
+
+
+def _read_cache_file():
+    value = _read_private_json(_cache_path())
+    return value if value is not None and value.get("schema_version") == 3 else None
+
+
+def _row_form(value):
+    form = value.get("route_row_form") if isinstance(value, dict) else None
+    return form if type(form) is int and form >= 0 else 0
+
+
+def _read_panels(*, now=None):
+    """The route values this release's own panels producer wrote, or None when absent, stale or of an older form."""
+    value = _read_private_json(_panels_path())
+    current = time.time() if now is None else float(now)
+    observed = value.get("observed_at") if value else None
+    if (value is None or _row_form(value) < _ROUTE_ROW_FORM
+            or not isinstance(observed, (int, float)) or isinstance(observed, bool)
+            or not math.isfinite(float(observed)) or not 0 <= current - float(observed) <= _DISPLAY_TTL):
+        return None
+    return value
+
+
+def _own_form_view(value, *, now=None):
+    """`value` with route values this release may draw.
+
+    A cache whose producer is of an older release keeps its questions (the same form in every
+    release since the cache began) but its route values are of that release's form: they come
+    from this release's panels producer instead, and are empty until it has written them.
+    """
+    if value is None or _row_form(value) >= _ROUTE_ROW_FORM:
+        return value
+    panels = _read_panels(now=now) or {}
+    return {**value, **{key: panels.get(key, {}) for key in _DISPLAY_KEYS}}
 
 
 def _write_cache_value(value):
@@ -1378,6 +1422,21 @@ def resources_view(snapshot, sampled_at, index):
     return _valid_resources({"observed_at": sampled_at, "hosts": hosts})
 
 
+def _display_projection(result: dict) -> dict:
+    """The route values of one pass, bounded; the cache and the panels file carry them alike."""
+    panels = result.get("route_panels", {})
+    # Optional display detail must never crowd question truth out of this cache.
+    # Missing detail is unknown; do not manufacture an empty-route observation.
+    if not isinstance(panels, dict) or len(json.dumps(panels, ensure_ascii=False).encode()) > _CACHE_MAX_BYTES // 4:
+        panels = {}
+    return {"route_status": result.get("route_status", {}),
+            "route_panels": panels,
+            "session_doers": _valid_doers(result.get("session_doers")),
+            "session_peers": _valid_peers(result.get("session_peers")),
+            "resources": _valid_resources(result.get("resources")),
+            "route_sessions": result.get("route_sessions", [])}
+
+
 def publish_cache(result: dict) -> bool:
     """Publish private and question-free Fleet views atomically per projection."""
     if not isinstance(result, dict) or not isinstance(result.get("items"), list):
@@ -1411,21 +1470,11 @@ def publish_cache(result: dict) -> bool:
     counts = wait_counts(items)
     current_total, stale_total = counts["total"], counts["older"]
     observed_at = float(result.get("observed_at") or time.time())
-    panels = result.get("route_panels", {})
-    # Optional display detail must never crowd question truth out of this cache.
-    # Missing detail is unknown; do not manufacture an empty-route observation.
-    if not isinstance(panels, dict) or len(json.dumps(panels, ensure_ascii=False).encode()) > _CACHE_MAX_BYTES // 4:
-        panels = {}
     value = {"schema_version": 3, "observed_at": observed_at,
              "complete": bool(result.get("complete")), "total": current_total,
              "older": stale_total, "stale_total": stale_total, "ownerless": counts["ownerless"],
              "items": items, "by_session": by_session,
-             "route_status": result.get("route_status", {}),
-             "route_panels": panels,
-             "session_doers": _valid_doers(result.get("session_doers")),
-             "session_peers": _valid_peers(result.get("session_peers")),
-             "resources": _valid_resources(result.get("resources")),
-             "route_sessions": result.get("route_sessions", []),
+             **_display_projection(result), "route_row_form": _ROUTE_ROW_FORM,
              "unattributed": [item.get("id") for item in items
                               if item.get("attribution") == "unattributed" and not item.get("stale")],
              "health": [{"source": row.get("source"), "state": row.get("state")}
@@ -1637,6 +1686,7 @@ def cached_view(*, now=None, request=True):
         observed = value.get("observed_at") if value else None
         if observed is None or (time.time() if now is None else float(now)) - float(observed) > _REQUEST_TTL:
             _request_producer()
+    value = _own_form_view(value, now=now)
     if value is None:
         return None
     indexed = {tuple(key.split("\0", 1)): ids for key, ids in value.get("by_session", {}).items()
@@ -4696,7 +4746,7 @@ def cached_count(harness: str, session_id: str, *, now: float | None = None,
 
 def cached_statusline(harness, session_id):
     """One cache read for both badges; never imports the collection pipeline."""
-    value = _read_cache()
+    value = _own_form_view(_read_cache())
     key = str(harness) + "\0" + str(session_id)
     sessions = value.get("route_sessions", {}) if value else {}
     if isinstance(sessions, dict):
@@ -4789,20 +4839,27 @@ def _request_producer(harness=None, session_id=None):
         now = time.time()
         cache = _read_cache(now=now)
         fresh = cache is not None and now - float(cache["observed_at"]) <= _REQUEST_TTL
-        if not fresh or changed:
-            _ensure_producer()
+        started = (not fresh or changed) and _ensure_producer()
+        if cache is not None and _row_form(cache) < _ROUTE_ROW_FORM and not started:
+            # A producer of an older release holds the shared cache and keeps writing it, for its own
+            # windows and with the questions. This release draws its route values from its own panels
+            # producer (only while that cache is of an older form; a producer of this release ends it).
+            panels = _read_panels(now=now)
+            if changed or panels is None or now - float(panels["observed_at"]) > _REQUEST_TTL:
+                _ensure_producer(panels=True)
     except OSError:
         return
 
 
-def _ensure_producer():
+def _ensure_producer(panels=False):
     root = state_root()
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     root_meta = os.lstat(root)
     if not stat.S_ISDIR(root_meta.st_mode) or root_meta.st_uid != os.getuid():
         return False
     _chmod_private(root, 0o700, root_meta)
-    fd = os.open(root / ".projection.lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    fd = os.open(root / (".panels.lock" if panels else ".projection.lock"),
+                 os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     os.fchmod(fd, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -4811,7 +4868,8 @@ def _ensure_producer():
         return False
     try:
         end_with_test(subprocess.Popen(
-                         [sys.executable, str(Path(__file__).resolve()), "--refresh-cache", "--lock-fd", str(fd)],
+                         [sys.executable, str(Path(__file__).resolve()),
+                          "--refresh-panels" if panels else "--refresh-cache", "--lock-fd", str(fd)],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, close_fds=True, pass_fds=(fd,),
                          start_new_session=True))
@@ -4970,6 +5028,52 @@ def _bounded(value):
     return dict(list(value.items())[:_SESSION_DOERS]) if isinstance(value, dict) else {}
 
 
+def _observe_routes(result: dict, demands: dict):
+    """Add the displays' route values to `result` from one collection pass; return the pass's snapshot (or None)."""
+    result["route_sessions"] = demands
+    result["route_status"] = {}
+    result["route_panels"] = {}
+    wake_snapshot = None
+    if demands:
+        try:
+            # Share registry generations with the answer-wait pass, and interpret
+            # only the native sessions the displays actually requested.
+            from tools.fleet.collectors import collect_all
+            # The shared line helper adds each route row's job values from this
+            # same snapshot and counts their states in the label.
+            from tools.fleet.session_line import session_route_status
+            requested = [tuple(key.split("\0", 1)) for key in demands]
+            snapshot = collect_all(harness_filter={h for h, _ in requested},
+                                   route_sessions=requested, include_report_verification=False)
+            wake_snapshot = snapshot
+            if snapshot.observations.get("basic", {}).get("all_new") is True:
+                records = []
+                labels, panels = session_route_status(snapshot, include_details=True, records_out=records)
+                result["route_status"] = {key: label for key, label in labels.items() if key in demands}
+                result["route_panels"] = {key: panel for key, panel in panels.items() if key in demands}
+                # The displayed sessions' own model and effort from this same pass: a panel names
+                # the other session of a peer request with them (no second read or collection).
+                result["session_doers"] = session_doers(snapshot)
+                if records:
+                    # Each session's repository name as Fleet writes it (a request line names the other session's).
+                    from tools.fleet.explorer.live import session_repos
+                    for key, repo in session_repos(records[0]).items():
+                        if (key in result["session_doers"] or len(result["session_doers"]) < _SESSION_DOERS) and 0 < len(repo) <= 64 and repo.isprintable():
+                            result["session_doers"][key] = {**result["session_doers"].get(key, {}), "repo": repo}
+                # Who supervises whom (the steward records this pass already holds): the panel's PEERS line.
+                # (The session records the pass worked out for the route rows are used again, not worked out twice.)
+                from tools.fleet.explorer.live import session_peers
+                result["session_peers"] = _bounded(session_peers(snapshot, records=records[0] if records else None))
+                # The compute hosts' last sample (the resident producer's loop only, and only while a side panel that draws RESOURCES
+                # asks for it; a one-shot refresh has none): CPU, memory and each GPU's use.
+                if _resources["on"] and records and _resources_wanted(time.time()):
+                    sample, sampled_at = _resource_sample(time.time())
+                    result["resources"] = resources_view(sample, sampled_at, records[0][1])
+        except Exception:
+            pass  # route observation failure must not discard answer waits
+    return wake_snapshot
+
+
 def _refresh_cache() -> bool:
     """Run one observational refresh. Caller owns the single-flight lock."""
     try:
@@ -4980,48 +5084,7 @@ def _refresh_cache() -> bool:
         import human_gate_observation
         result = human_gate_observation.read_answer_waits(
             jobs_paths=dispatch.human_gate_registry_paths())
-        demands = _route_demands()
-        result["route_sessions"] = demands
-        result["route_status"] = {}
-        result["route_panels"] = {}
-        wake_snapshot = None
-        if demands:
-            try:
-                # Share registry generations with the answer-wait pass, and interpret
-                # only the native sessions the displays actually requested.
-                from tools.fleet.collectors import collect_all
-                # The shared line helper adds each route row's job values from this
-                # same snapshot and counts their states in the label.
-                from tools.fleet.session_line import session_route_status
-                requested = [tuple(key.split("\0", 1)) for key in demands]
-                snapshot = collect_all(harness_filter={h for h, _ in requested},
-                                       route_sessions=requested, include_report_verification=False)
-                wake_snapshot = snapshot
-                if snapshot.observations.get("basic", {}).get("all_new") is True:
-                    records = []
-                    labels, panels = session_route_status(snapshot, include_details=True, records_out=records)
-                    result["route_status"] = {key: label for key, label in labels.items() if key in demands}
-                    result["route_panels"] = {key: panel for key, panel in panels.items() if key in demands}
-                    # The displayed sessions' own model and effort from this same pass: a panel names
-                    # the other session of a peer request with them (no second read or collection).
-                    result["session_doers"] = session_doers(snapshot)
-                    if records:
-                        # Each session's repository name as Fleet writes it (a request line names the other session's).
-                        from tools.fleet.explorer.live import session_repos
-                        for key, repo in session_repos(records[0]).items():
-                            if (key in result["session_doers"] or len(result["session_doers"]) < _SESSION_DOERS) and 0 < len(repo) <= 64 and repo.isprintable():
-                                result["session_doers"][key] = {**result["session_doers"].get(key, {}), "repo": repo}
-                    # Who supervises whom (the steward records this pass already holds): the panel's PEERS line.
-                    # (The session records the pass worked out for the route rows are used again, not worked out twice.)
-                    from tools.fleet.explorer.live import session_peers
-                    result["session_peers"] = _bounded(session_peers(snapshot, records=records[0] if records else None))
-                    # The compute hosts' last sample (the resident producer's loop only, and only while a side panel that draws RESOURCES
-                    # asks for it; a one-shot refresh has none): CPU, memory and each GPU's use.
-                    if _resources["on"] and records and _resources_wanted(time.time()):
-                        sample, sampled_at = _resource_sample(time.time())
-                        result["resources"] = resources_view(sample, sampled_at, records[0][1])
-            except Exception:
-                pass  # route observation failure must not discard answer waits
+        wake_snapshot = _observe_routes(result, _route_demands())
         if not publish_cache(result):
             failure = {"items": [], "complete": False, "observed_at": time.time(),
                        "health": [{"source": "producer", "state": "unknown"}]}
@@ -5038,6 +5101,35 @@ def _refresh_cache() -> bool:
     finally:
         if _producer_root is not None:
             _release_memory()
+
+
+# Set only inside the detached panels producer (`--refresh-panels`): this release's route values
+# beside a shared cache that a producer of an older release holds. It reads no question and writes
+# only `panels.json`: the cache, its answer records and the notifications stay with that producer.
+_panels_lane = False
+
+
+def _refresh_panels() -> bool:
+    """One pass of the panels producer: the route values alone, written to `panels.json`."""
+    try:
+        project_root = str(Path(__file__).resolve().parents[1])
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        result = {}
+        wake_snapshot = _observe_routes(result, _route_demands())
+        _write(_panels_path(), {"observed_at": time.time(), "route_row_form": _ROUTE_ROW_FORM,
+                                **_display_projection(result)})
+        _remember_wake_sources(wake_snapshot)
+        return True
+    except Exception:
+        return False
+    finally:
+        _release_memory()
+
+
+def _older_producer_holds_cache(now) -> bool:
+    cache = _read_cache(now=now)
+    return cache is not None and _row_form(cache) < _ROUTE_ROW_FORM
 
 
 def _release_memory():
@@ -5491,7 +5583,7 @@ def _timed_refresh():
     registry = _registry_generation()
     before = {row[0]: row for row in map(_stat_row, previous)}
     began = time.monotonic()
-    _refresh_cache()
+    _refresh_panels() if _panels_lane else _refresh_cache()
     duration = time.monotonic() - began
     # A file the pass newly learned of is stamped now; every other keeps the stamp taken before
     # the pass read it, so a write during the pass is still a change.
@@ -5514,7 +5606,8 @@ def _follow_installed_release(fd: int) -> None:
             return
         import peer_obligations
         os.set_inheritable(fd, True)  # the flock descriptor survives exec under the same number
-        peer_obligations.follow_installed_release(__file__, ["--refresh-cache", "--lock-fd", str(fd)])
+        peer_obligations.follow_installed_release(
+            __file__, ["--refresh-panels" if _panels_lane else "--refresh-cache", "--lock-fd", str(fd)])
     except Exception:  # noqa: BLE001 -- a failed move keeps refreshing with this code
         pass
 
@@ -5536,9 +5629,11 @@ def _producer_loop(fd: int) -> None:
                 demand = (root / ".demand").stat().st_mtime
             except OSError:
                 demand = 0
+            if _panels_lane and not _older_producer_holds_cache(now):
+                return   # no cache of an older form to draw beside: the shared producer is this release's
             cached = _read_cache(now=now, max_age=float("inf")) or {}
-            boundary = _notification_delay(cached.get("items", ()), now,
-                                           enabled=_notification_available())
+            boundary = (None if _panels_lane else
+                        _notification_delay(cached.get("items", ()), now, enabled=_notification_available()))
             idle = now - demand
             if idle >= 600 and boundary is None:
                 try:
@@ -5590,6 +5685,7 @@ def main(argv=None) -> int:
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--refresh-cache", action="store_true")
+    parser.add_argument("--refresh-panels", action="store_true")
     parser.add_argument("--reconnect-cache", action="store_true")
     parser.add_argument("--lock-fd", type=int)
     parser.add_argument("--count", nargs=2, metavar=("HARNESS", "SESSION"))
@@ -5600,6 +5696,12 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.reconnect_cache:
         reconnect_cache_producer(wait_for_commit=True)
+        return 0
+    if args.refresh_panels:
+        global _panels_lane
+        if args.lock_fd is not None:   # only `_ensure_producer(panels=True)` starts it, with its lock
+            _panels_lane = True
+            _producer_loop(args.lock_fd)
         return 0
     if args.refresh_cache:
         if args.lock_fd is not None:

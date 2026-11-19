@@ -98,7 +98,7 @@ class SessionShellSurvivalTest(unittest.TestCase):
         policy.parent.mkdir(parents=True,exist_ok=True);policy.write_text('{"enabled":true}');policy.chmod(0o600)
         cache=Path(env['XDG_STATE_HOME'])/'hearting/human-waits/projection.json';cache.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
         sid='survival-native-'+mode+('' if cols==130 else '-'+str(cols));key='claude\0'+sid;now=time.time()
-        cache.write_text(json.dumps({'schema_version':3,'observed_at':now,'items':[],'by_session':{},
+        cache.write_text(json.dumps({'schema_version':3,'route_row_form':1,'observed_at':now,'items':[],'by_session':{},
             'total':0,'older':0,'complete':True,'route_status':{key:''},'route_sessions':{key:now}}));cache.chmod(0o600)
         entry_script=ROOT/'utilities/session-shell/entry.py'
         if inflight:

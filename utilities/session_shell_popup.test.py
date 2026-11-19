@@ -404,7 +404,7 @@ class SessionShellPopupTest(unittest.TestCase):
         key = harness + '\0' + sid
         target = cache / 'projection.json'
         value = json.loads(target.read_text()) if target.exists() else {
-            'schema_version': 3, 'items': [], 'by_session': {}, 'total': 0, 'older': 0, 'complete': True,
+            'schema_version': 3, 'route_row_form': 1, 'items': [], 'by_session': {}, 'total': 0, 'older': 0, 'complete': True,
             'route_panels': {}, 'route_status': {}, 'route_sessions': {}}
         value.update(observed_at=time.time())
         value['route_panels'][key] = []; value['route_status'][key] = ''; value['route_sessions'][key] = time.time() + 3600
