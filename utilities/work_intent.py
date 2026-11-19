@@ -1261,6 +1261,62 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     return rendered[:MAX_SUMMARY_CHARS].rstrip() + "\n" + _results_tables(text)
 
 
+def completion_line(summary: str, t=None) -> str | None:
+    """The one line the person's window shows for a sealed completion summary.
+
+    ``↳ 작업 끝: <work> — <result> (<elapsed>)`` in the current UI language. Every word is read
+    back from the summary's own lines (the intent, the ``결과:`` result judgment and the cost's
+    elapsed time, in whichever catalog language the writer chose), so the line can never say
+    something the summary does not. ``None`` when the summary cannot be read that way."""
+    if not isinstance(summary, str):
+        return None
+    module = _ui_text()
+    t = t or ui_translator()
+    probe, other = "\x00", "\x01"
+
+    def prefix(lang, key, **fields):
+        return module.text(key, lang, **fields).split(probe, 1)[0]
+
+    for lang in module.LANGUAGES:
+        head = module.text("completion.head", lang)
+        if not summary.startswith(head):
+            continue
+        lines = summary.splitlines()
+        intent_prefix = prefix(lang, "completion.intent", intent=probe, original="")
+        original_prefix = prefix(lang, "completion.intent_original", original=probe)
+        result_prefix = prefix(lang, "completion.result", result=probe)
+        cost_prefix = prefix(lang, "completion.cost", elapsed=probe, tokens=other)
+        intent = next((ln[len(intent_prefix):] for ln in lines if ln.startswith(intent_prefix)), "")
+        result = next((ln[len(result_prefix):] for ln in lines if ln.startswith(result_prefix)), "")
+        cost = next((ln[len(cost_prefix):] for ln in lines if ln.startswith(cost_prefix)), "")
+        name = intent.split(original_prefix, 1)[0].strip()
+        if not name:
+            words = lines[0][len(head):].split(" · ")[0].strip()
+            name = words if words and words != "-" else ""
+        result = re.sub(r"\s*\((?:아래|below)\)", "", result).strip()
+        if not name or not result:
+            return None
+        elapsed = cost.split(" · ", 1)[0].strip()
+        if not elapsed or elapsed == module.text("completion.cost_unknown", lang):
+            elapsed = ""
+        elif t.lang == "ko":
+            elapsed = re.sub(r"^(\d+)h (\d+)m$", r"\1시간 \2분", elapsed)
+            elapsed = re.sub(r"^(\d+)m (\d+)s$", r"\1분 \2초", elapsed)
+            elapsed = re.sub(r"^(\d+)s$", r"\1초", elapsed)
+        name = name if len(name) <= 40 else name[:39].rstrip() + "…"
+        result = result if len(result) <= 70 else result[:69].rstrip() + "…"
+        fields = dict(name=name, result=result, elapsed=elapsed)
+        return t("delivery_line.work_done" if elapsed else "delivery_line.work_done_no_time", **fields)
+    return None
+
+
+def split_completion_summaries(text: str) -> list[str]:
+    """The summaries inside a delivered completion text, each from its head line to the next."""
+    heads = summary_heads()
+    spans = sorted(match.start() for head in heads for match in re.finditer(re.escape(head), text or ""))
+    return [text[start:end] for start, end in zip(spans, spans[1:] + [len(text or "")])]
+
+
 def _results_tables(text: str) -> str:
     """The report's experiment results tables as the catalog printed them, after the summary lines, so the
     route parent pastes the worker's table instead of drawing another one; "" when the report has none."""

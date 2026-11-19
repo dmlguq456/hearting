@@ -290,6 +290,22 @@
    "en": "{label} · {name} · transcript {status}: {reason}",
    "ko": "{label} · {name} · 원문 {status}: {reason}"
   },
+  "delivery_line.answered": {
+   "en": "↳ Answered: {answer}",
+   "ko": "↳ 질문에 답함: {answer}"
+  },
+  "delivery_line.more_lines": {
+   "en": " (+{count} lines)",
+   "ko": " (+{count}줄)"
+  },
+  "delivery_line.work_done": {
+   "en": "↳ Work done: {name} — {result} ({elapsed})",
+   "ko": "↳ 작업 끝: {name} — {result} ({elapsed})"
+  },
+  "delivery_line.work_done_no_time": {
+   "en": "↳ Work done: {name} — {result}",
+   "ko": "↳ 작업 끝: {name} — {result}"
+  },
   "direction.default_means": {
    "en": "Start in the direction both legs agreed on",
    "ko": "두 갈래가 함께 낸 방향대로 시작합니다"

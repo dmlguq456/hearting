@@ -177,6 +177,8 @@ _DISPLAY_FORM = 2
 _DISPLAY_AGENT_MAX_CHARS = 12000
 _DISPLAY_NAME_MAX = 60
 _DISPLAY_LINE_MAX = 400
+_DISPLAY_LINES_MAX = 12
+_DISPLAY_TEXT_MAX = 2400
 _DISPLAY_HARNESSES = ("claude", "codex", "opencode")
 _DISPLAY_TAIL_RE = re.compile(
     r"(?m)^— (?:\[(?:[0-9a-f]{2}|\?)\]|claude|codex|opencode)(?: [^\n]{1,%d})?[ \t]*$" % (_DISPLAY_NAME_MAX + 20))
@@ -266,9 +268,10 @@ def _display_entry(kind, old_text, trailer, sender, line=None):
         return {"form": _DISPLAY_FORM, "kind": "peer",
                 "sha256": hashlib.sha256(visible.encode("utf-8")).hexdigest(),
                 "tail": tail, "agent": trailer}
-    if (kind == "runtime" and isinstance(line, str) and line.startswith("↳ ")
-            and "\n" not in line and len(line) <= _DISPLAY_LINE_MAX
-            and all(ch.isprintable() for ch in line)
+    if (kind == "runtime" and isinstance(line, str) and 0 < len(line) <= _DISPLAY_TEXT_MAX
+            and 1 <= len(line.split("\n")) <= _DISPLAY_LINES_MAX
+            and all(one.startswith("↳ ") and len(one) <= _DISPLAY_LINE_MAX
+                    and all(ch.isprintable() for ch in one) for one in line.split("\n"))
             and len(old_text) <= _DISPLAY_AGENT_MAX_CHARS):
         return {"form": _DISPLAY_FORM, "kind": "runtime",
                 "sha256": hashlib.sha256(line.encode("utf-8")).hexdigest(),
@@ -2589,7 +2592,7 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
 
     A display form (see the block above ``_transfer_path``) is sealed only for a recipient
     session that has shown its code reads it: a peer message always, a runtime message when
-    its producer supplies ``display_line``.
+    its producer supplies ``display_line`` (not to Codex, see below).
 
     ``prepared`` (a list) receives the authoritative sealed row, stored or reused, so a
     caller can keep its courier even when a later read of that row fails.
@@ -2605,7 +2608,10 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
             and receiver_reads_display(recipient)):
         if producer_binding is None and sender.get("harness") in _DISPLAY_HARNESSES:
             display = {"kind": "peer"}
-        elif producer_binding is not None and display_line:
+        elif producer_binding is not None and display_line and recipient.get("harness") != "codex":
+            # Codex keeps the full runtime text in its own queue: its delivery recovery reads the
+            # receipt marker lines from the thread's input history (`codex_queue_delivery`), and
+            # the one-line form has none. A person's window there still reads the full text.
             display = {"kind": "runtime", "line": display_line}
     body_hash = hashlib.sha256(body.rstrip("\n").encode("utf-8")).hexdigest()
     request_seal = dict(request["seal"]) if request is not None else None

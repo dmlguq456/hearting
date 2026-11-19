@@ -382,8 +382,14 @@ class RuntimeDisplayForms(DisplayFixture):
                                             display_line=line)
         return text, ref, producer, pm.pasted_text(pm._read_pending(ref))
 
+    def test_codex_keeps_the_full_runtime_text(self):
+        recipient = {"harness": "codex", "session_id": "runtime-codex-full"}
+        text, ref, _producer, shown = self.runtime_prompt(recipient, "↳ 작업 끝: 설계 — 완료")
+        self.assertEqual(shown, text)
+        self.assertNotIn("display", pm._read_transfer_record(ref))
+
     def test_runtime_line_is_the_whole_visible_text_and_the_agent_context_is_the_old_text(self):
-        for harness in ("claude", "codex", "opencode"):
+        for harness in ("claude", "opencode"):
             with self.subTest(harness=harness):
                 recipient = {"harness": harness, "session_id": "runtime-" + harness}
                 line = "↳ 작업 끝: 설계 확정 — 완료 (3분)"
@@ -559,5 +565,75 @@ process.stdout.write(JSON.stringify(result));
         self.assertTrue(pm.receiver_reads_display({"harness": "opencode", "session_id": "sign-pending"}))
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+class RuntimeLines(unittest.TestCase):
+    """The producer's one-line forms: every word comes from the same records the full text does."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.intent = module("display_work_intent", "utilities/work_intent.py")
+        cls.sweep = module("display_sweep", "utilities/dispatch_session_sweep.py")
+
+    KO = ("[완료 요약] autopilot-code · route rt-demo\n의도: 받는 창에 찍히는 글을 줄인다 (원문 \"글 줄이기\")\n"
+          "결과: 끝남 — 실패·못 한 것 있음(아래)\n비용: 걸린 시간 12m 30s · 토큰 1,000\n변경: a.py")
+    EN = ("[Completion summary] autopilot-code · route rt-demo\nIntent: Trim the text shown in the window\n"
+          "Result: Done\nCost: 1h 05m elapsed · tokens unknown\nChanged: a.py")
+
+    def t(self, lang):
+        ui = self.intent._ui_text()
+        return ui.translator(lang)
+
+    def test_a_korean_summary_becomes_one_korean_line(self):
+        self.assertEqual(self.intent.completion_line(self.KO, self.t("ko")),
+                         "↳ 작업 끝: 받는 창에 찍히는 글을 줄인다 — 끝남 — 실패·못 한 것 있음 (12분 30초)")
+
+    def test_an_english_summary_becomes_one_english_line_and_the_line_follows_the_window_language(self):
+        self.assertEqual(self.intent.completion_line(self.EN, self.t("en")),
+                         "↳ Work done: Trim the text shown in the window — Done (1h 05m)")
+        self.assertEqual(self.intent.completion_line(self.EN, self.t("ko")),
+                         "↳ 작업 끝: Trim the text shown in the window — Done (1시간 05분)")
+
+    def test_unknown_time_is_left_out_and_an_unreadable_summary_has_no_line(self):
+        summary = self.KO.replace("걸린 시간 12m 30s", "걸린 시간 " + self.intent._ui_text().text("completion.cost_unknown", "ko"))
+        self.assertEqual(self.intent.completion_line(summary, self.t("ko")),
+                         "↳ 작업 끝: 받는 창에 찍히는 글을 줄인다 — 끝남 — 실패·못 한 것 있음")
+        for bad in ("그냥 글", "[완료 요약] autopilot-code\n비용: 걸린 시간 1s · x", ""):
+            self.assertIsNone(self.intent.completion_line(bad, self.t("ko")))
+
+    def test_summaries_inside_one_followup_are_split_one_each(self):
+        text = "Owner finished; no harvest.\n" + self.KO + "\n" + self.EN + "\nnext"
+        parts = self.intent.split_completion_summaries(text)
+        self.assertEqual(len(parts), 2)
+        self.assertTrue(parts[0].startswith("[완료 요약]") and parts[1].startswith("[Completion summary]"))
+
+    def record(self, **receipt):
+        return {"delivery_id": "delivery-x", "receipt": receipt}
+
+    def test_the_delivery_line_is_built_only_when_every_record_has_a_short_form(self):
+        sweep, intent = self.sweep, self.intent
+        answer = self.record(kind="notice", subject="Question answer", text="private-answer",
+                             answer_binding={"request_id": "S4:" + "a" * 64})
+        work = self.record(children=[{"attempt_id": "att-1"}])
+        gate = {"delivery_id": "d", "receipt": {"kind": "human-gate"}}
+        failure = self.record(children=[{"attempt_id": "att-2"}])
+        with mock.patch.object(sweep, "_followup", side_effect=lambda root, record: (
+                "Owner finished; no harvest.\n" + self.KO if record is work else "no summary here")), \
+                mock.patch("human_wait_state.message_answer_body", return_value="네, 그렇게 하세요\n그리고 하나 더") as body:
+            line = sweep.delivery_display_text([(Path("/x"), [work, answer])])
+            self.assertEqual(line.split("\n")[0].split(":")[0], "↳ 질문에 답함")
+            self.assertIn("네, 그렇게 하세요", line.split("\n")[0])
+            self.assertIn("(+1줄)", line.split("\n")[0])
+            self.assertTrue(line.split("\n")[1].startswith("↳ 작업 끝: "))
+            self.assertEqual(len(line.split("\n")), 2)
+            for batch in ([gate], [work, gate], [failure], [work, failure],
+                          [self.record(kind="supervision")], [self.record(kind="notice", subject="x", text="y")]):
+                self.assertIsNone(sweep.delivery_display_text([(Path("/x"), batch)]), batch)
+            self.assertIsNone(sweep.delivery_display_text([]))
+        self.assertTrue(body.called)
+
+
+class QuestionAnswerForm(DisplayFixture):
+    """The question-answer notice end to end through the producer's own text builders."""
+
+    def test_the_answer_prompt_is_one_line_for_the_window_and_the_whole_text_for_the_agent(self):
+        from fixtures.message_questions import MessageQuestionHarness  # noqa: F401  (existence of the fixture)

@@ -2712,9 +2712,6 @@ function spawnPeerNotice(sid, prompt, cwd) {
   } catch {}
 }
 
-// Pending transport uses the current plugin client and exact callback SID. It
-// never touches the TUI draft or system-transform output. Acceptance is queued;
-// only persisted exact text followed by a completed assistant turn acknowledges.
 // A trailer-form text, or a display-form one (`— [d4]` as the last line, `↳ ` first). The same
 // gate as `peer-message.looks_like_peer_text`; a test keeps the two equal.
 const PEER_DISPLAY_TAIL = /^— (?:\[(?:[0-9a-f]{2}|\?)\]|claude|codex|opencode)(?: [^\n]{1,80})?[ \t]*$/m
@@ -2725,6 +2722,9 @@ function looksLikePeerPrompt(prompt) {
       || PEER_DISPLAY_LINE.test(prompt.slice(0, 300)) || PEER_DISPLAY_TAIL.test(prompt.slice(-400)))
 }
 
+// Pending transport uses the current plugin client and exact callback SID. It
+// never touches the TUI draft or system-transform output. Acceptance is queued;
+// only persisted exact text followed by a completed assistant turn acknowledges.
 function pendingPeerCommand(sid, options = []) {
   if (!sid) return null
   const result = spawnSync("python3", [path.join(root, "utilities", "peer-message.py"),
