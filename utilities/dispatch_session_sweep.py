@@ -1654,7 +1654,10 @@ def delivery_display_text(batches: list[tuple[Path, list[dict]]]) -> str | None:
         with registry_read_scope():
             for root, records in batches:
                 for record in records:
-                    ident = (str(root), str(record.get("delivery_id")))
+                    delivery_id = record.get("delivery_id")
+                    # A record with no delivery id cannot be told from another: never merge it.
+                    ident = (str(root), str(delivery_id) if delivery_id not in (None, "")
+                             else f"no-delivery-id-{len(answers) + len(works)}-{id(record)}")
                     receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
                     if is_human_gate_record(record) or receipt.get("kind") == "supervision":
                         return None

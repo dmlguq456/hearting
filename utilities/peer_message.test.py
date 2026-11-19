@@ -3420,7 +3420,10 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
             guidance = peer_message.receiver_guidance(
                 text, self.recipient, cwd=str(self.tmp_root))
 
-        self.assertEqual(guidance, peer_message._ordinary_receiver_guidance())
+        # the ordinary guidance, led by the sealed sender's reply address (the trailer shows only a tag)
+        self.assertTrue(guidance.endswith("\n\n" + peer_message._ordinary_receiver_guidance()))
+        self.assertTrue(guidance.startswith("Sender of the message above: (peer-from: "))
+        self.assertEqual(guidance.count("\n\n"), 1)
         self.assertNotIn("handoff accept", guidance)
         resolve.assert_not_called()
         target.assert_not_called()

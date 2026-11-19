@@ -243,8 +243,14 @@ class DisplayForms(DisplayFixture):
         self.assertNotIn("peer-from", shown)
         once = pm.receiver_guidance_once(shown, self.recipient, cwd=str(ROOT))
         self.assertIn(ref, once)
-        # the old-form text keeps its old guidance unchanged
-        self.assertEqual(pm.receiver_guidance(text, self.recipient), pm._ordinary_receiver_guidance())
+        # the trailer-form text (no `sid=`) bound to its transfer gets the same sender sentence,
+        # then the ordinary guidance; a text that is not bound to a transfer gets the ordinary one only
+        old_guidance = pm.receiver_guidance(text, self.recipient)
+        self.assertTrue(old_guidance.startswith("Sender of the message above: (peer-from: codex"), old_guidance)
+        self.assertIn("hearting run peer-steward prompt codex:" + self.sender["session_id"], old_guidance)
+        self.assertTrue(old_guidance.endswith(pm._ordinary_receiver_guidance()))
+        self.assertEqual(guidance.split("): ", 1)[1].split("\n\n")[0],
+                         old_guidance.split(": ", 1)[1].split("\n\n")[0])      # the same sender and reply sentence
 
     def test_a_form_that_is_not_the_sealed_one_is_never_bound(self):
         _text, ref, _row, shown = self.sealed("본문")
@@ -722,6 +728,12 @@ class RuntimeLines(unittest.TestCase):
             # the same delivery id under another root is another record
             self.assertEqual(sweep.delivery_display_text([(Path("/x"), [first]), (Path("/y"), [first])]),
                              "↳ 질문에 답함: 네 ×2")
+        # records with no delivery id cannot be told apart: they are never merged
+        bare1, bare2 = answer("x"), answer("x")
+        bare1.pop("delivery_id"), bare2.pop("delivery_id")
+        with mock.patch("work_intent.ui_translator", return_value=self.t("ko")), \
+                mock.patch("human_wait_state.message_answer_body", return_value="네"):
+            self.assertEqual(sweep.delivery_display_text([(Path("/x"), [bare1, bare2])]), "↳ 질문에 답함: 네 ×2")
         # a work line shared by two finished works counts the same way, after the answers
         work1, work2 = {"delivery_id": "delivery-w1", "receipt": {}}, {"delivery_id": "delivery-w2", "receipt": {}}
         with mock.patch("work_intent.ui_translator", return_value=self.t("ko")), \
@@ -801,6 +813,73 @@ class SameVisibleText(DisplayFixture):
         guidance1 = self.arrive(shown1, ref1, self.S1)
         self.assertNotIn(self.S2["session_id"], guidance1)
 
+    def edge_pair(self, first_body, second_body):
+        return [self.seal(self.S1, body=first_body), self.seal(self.S2, body=second_body)]
+
+    def test_texts_that_differ_only_in_edge_whitespace_bind_each_arrival_to_its_own_record(self):
+        # the receiver tries the arrival's raw, rstripped and stripped forms, so a fingerprint of a
+        # text with edge whitespace could be hit by its trimmed twin's arrival (and the reverse)
+        for order in (("검토 바랍니다", " 검토 바랍니다"), (" 검토 바랍니다", "검토 바랍니다")):
+            with self.subTest(order=order):
+                (_t1, ref1, row1, shown1), (_t2, ref2, row2, shown2) = self.edge_pair(*order)
+                trimmed = (ref1, row1, shown1) if order[0] == order[0].strip() else (ref2, row2, shown2)
+                spaced = (ref2, row2, shown2) if trimmed[0] == ref1 else (ref1, row1, shown1)
+                # the trimmed text is the display form, the one with edge whitespace the old form
+                self.assertEqual(trimmed[2], "검토 바랍니다\n\n— claude")
+                self.assertIn("display", trimmed[1])
+                self.assertNotIn("display", spaced[1])
+                self.assertIn("ref=" + spaced[0], spaced[2])
+                self.assertIn(trimmed[0], self.pointers(trimmed[2]))
+                self.assertNotIn(spaced[0], self.pointers(trimmed[2]))
+                # arrivals: the display one, and the old one in each whitespace variation a window gives
+                for arrival in (" " + trimmed[2], trimmed[2] + "\n", "  " + trimmed[2] + "\n\n"):
+                    self.assertEqual(pm._display_resolve(arrival, self.recipient)["ref"], trimmed[0])
+                self.assertIsNone(pm._display_resolve(spaced[2], self.recipient))   # the old form is read by its ref
+                sender_of = {ref1: self.S1, ref2: self.S2}
+                self.arrive(spaced[2], spaced[0], sender_of[spaced[0]])
+                self.assertEqual(pm._read_pending(trimmed[0])["state"], "pending")
+                self.arrive(trimmed[2], trimmed[0], sender_of[trimmed[0]])
+
+    def test_the_text_with_edge_whitespace_stays_in_the_old_form_even_when_alone(self):
+        for body in (" 검토 바랍니다", "  \t검토 바랍니다", "\n검토 바랍니다"):
+            _t, ref, row, shown = self.seal(self.S1, body=body)
+            self.assertNotIn("display", row)
+            self.assertNotIn("display", pm._read_transfer_record(ref))
+            self.assertEqual(shown, _t)
+            self.assertEqual(self.pointers(shown), [])
+        # a runtime line with edge whitespace is not sealed in the display form either
+        sender = {"harness": "runtime", "session_id": None, "name": "Hearting runtime"}
+        for line in (" ↳ 질문에 답함: 네", "↳ 질문에 답함: 네 "):
+            self.assertIsNone(pm._display_entry("runtime", "full text", None, sender, line=line))
+        self.assertIsNotNone(pm._display_entry("runtime", "full text", None, sender, line="↳ 질문에 답함: 네"))
+
+    def test_a_text_without_edge_whitespace_keeps_its_visible_form(self):
+        _t, ref, row, shown = self.seal(self.S1, body="[요청] 변경 범위를 확인해 주세요.\n자세한 내용은 /tmp/notes/scope.md 에 있습니다. (2)")
+        self.assertEqual(shown, "[요청] 변경 범위를 확인해 주세요.\n자세한 내용은 /tmp/notes/scope.md 에 있습니다. (2)\n\n— claude")
+        self.assertIn("display", row)
+
+    def test_a_trailer_form_text_bound_to_its_transfer_carries_the_senders_reply_address(self):
+        _t1, ref1, _r1, shown1 = self.seal(self.S1)
+        _t2, ref2, row2, shown2 = self.seal(self.S2)             # overlap: the second is the trailer form
+        self.assertNotIn("display", row2)
+        guidance2 = pm.receiver_guidance(shown2, self.recipient)
+        reply2 = "Reply with `hearting run peer-steward prompt claude:%s --body-file <file>`." % self.S2["session_id"]
+        trailer2 = shown2[shown2.index("(peer-from:"):]
+        self.assertTrue(guidance2.startswith("Sender of the message above: %s. %s" % (trailer2, reply2)), guidance2)
+        self.assertTrue(guidance2.endswith(pm._ordinary_receiver_guidance()))
+        self.assertNotIn(self.S1["session_id"], guidance2)
+        # the display form's sentence has the same shape (only its lead differs), written once
+        guidance1 = pm.receiver_guidance(shown1, self.recipient)
+        self.assertEqual(guidance1.count("Sender of the message above"), 1)
+        self.assertRegex(guidance1, r"^Sender of the message above \(the person sees only `[^`]+`\): \(peer-from: [^)]*\)\. "
+                                    r"Reply with `hearting run peer-steward prompt claude:%s --body-file <file>`\." % self.S1["session_id"])
+        # the shown text itself is the same as before
+        self.assertEqual(shown2, _t2)
+        # a text bound to no record, or quoting another session's record, gets no sender sentence
+        other = {"harness": "claude", "session_id": "someone-else"}
+        self.assertEqual(pm.receiver_guidance(shown2, other), pm._ordinary_receiver_guidance())
+        self.assertEqual(pm.receiver_guidance("hello", self.recipient), pm._ordinary_receiver_guidance())
+
     def test_the_arrival_order_does_not_matter(self):
         _t1, ref1, _r1, shown1 = self.seal(self.S1)
         _t2, ref2, _r2, shown2 = self.seal(self.S2)
@@ -877,6 +956,20 @@ class SameVisibleText(DisplayFixture):
         _t3, ref3, row3, shown3 = self.seal(self.S1)   # lock released: the display form again
         self.assertEqual(shown3, shown1)
         self.assertIn("display", row3)
+
+    def test_an_unexpected_error_while_sealing_releases_the_seal_lock_at_once(self):
+        # the exception (and its traceback, so the frames) is still alive when the lock is looked at:
+        # the lock directory must be gone because the seal left its `with`, not because of garbage collection
+        caught = None
+        with mock.patch.object(pm, "_display_unreceived_holder", side_effect=RuntimeError("boom")):
+            try:
+                self.seal(self.S1)
+            except RuntimeError as exc:
+                caught = exc          # kept: its traceback keeps the sealing frames alive
+        self.assertIsNotNone(caught)
+        self.assertEqual(sorted(path.name for path in pm._pending_dir().glob(".lock-prepare-*")), [])
+        _t, _ref, row, _shown = self.seal(self.S1)      # and the text can be sealed at once, in the display form
+        self.assertIn("display", row)
 
     def test_the_visible_text_of_another_recipient_is_independent(self):
         other = {"harness": "claude", "session_id": "recipient-other"}

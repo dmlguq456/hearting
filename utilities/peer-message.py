@@ -294,11 +294,17 @@ def _display_entry(kind, old_text, trailer, sender, line=None):
         if tail is None or not old_text.endswith("\n\n" + trailer):
             return None
         visible = old_text[:len(old_text) - len(trailer)] + tail
+        if visible != visible.strip():
+            # A receiver also looks a text up by its stripped variants (`_display_variants`), so
+            # every sealed fingerprint must be a stripped text: then an arrival matches one
+            # fingerprint at most, and a text that differs only in edge whitespace stays in the
+            # old form (ref shown) instead of sharing a record with its trimmed twin.
+            return None
         return {"form": _DISPLAY_FORM, "kind": "peer",
                 "sha256": hashlib.sha256(visible.encode("utf-8")).hexdigest(),
                 "tail": tail, "agent": trailer}
     if (kind == "runtime" and isinstance(line, str) and 0 < len(line) <= _DISPLAY_TEXT_MAX
-            and 1 <= len(line.split("\n")) <= _DISPLAY_LINES_MAX
+            and line == line.strip() and 1 <= len(line.split("\n")) <= _DISPLAY_LINES_MAX
             and all(one.startswith("↳ ") and len(one) <= _DISPLAY_LINE_MAX
                     and all(ch.isprintable() for ch in one) for one in line.split("\n"))
             and len(old_text) <= _DISPLAY_AGENT_MAX_CHARS):
@@ -318,6 +324,29 @@ def _publish_display_pointer(entry, ref):
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(directory / ref, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     os.close(fd)
+
+
+def remove_display_hint(ref, digest):
+    """Remove the fingerprint hint ``.display/<digest>/<ref>`` and its folder once empty.
+
+    Called by the history prune when it drops the received row that names this fingerprint, so
+    the hints a common visible text collects do not grow without end. Best effort; a hint that
+    is already gone, or a folder another seal is still filling, is left as it is."""
+    if (not isinstance(ref, str) or not _TRANSFER_REF_RE.fullmatch(ref)
+            or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+        return False
+    directory = _display_root() / digest
+    removed = False
+    try:
+        (directory / ref).unlink()
+        removed = True
+    except OSError:
+        pass
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
+    return removed
 
 
 def _display_seal_key(digest, recipient):
@@ -469,13 +498,42 @@ def _display_agent_block(resolved):
     if entry["kind"] == "runtime":
         return ("Hearting delivery (the person sees only the one `↳` line above); the full text:\n"
                 + entry["agent"])
-    sender = transfer.get("from") or {}
+    return _sender_sentence(" (the person sees only `%s`)" % entry["tail"], entry["agent"],
+                            transfer.get("from"), always=True)
+
+
+def _sender_sentence(lead, trailer, sender, *, always=False):
+    """``Sender of the message above<lead>: <trailer>. Reply with `…`.`` for a sealed sender.
+
+    Without a reply address (a sender that is not one of the three harnesses or has no usable
+    session id) the sentence still names the sender when ``always``, else it is ``""``."""
+    sender = sender if isinstance(sender, dict) else {}
     reply = ""
-    if (sender.get("harness") in _DISPLAY_HARNESSES and usable_session_id(sender.get("session_id"))):
+    if sender.get("harness") in _DISPLAY_HARNESSES and usable_session_id(sender.get("session_id")):
         reply = (" Reply with `hearting run peer-steward prompt %s:%s --body-file <file>`."
                  % (sender["harness"], sender["session_id"]))
-    return ("Sender of the message above (the person sees only `%s`): %s.%s"
-            % (entry["tail"], entry["agent"], reply))
+    elif not always:
+        return ""
+    return "Sender of the message above%s: %s.%s" % (lead, trailer, reply)
+
+
+def _trailer_form_sender_sentence(text, recipient):
+    """The reply address for a trailer-form (`sid=` omitted) peer text bound to its sealed transfer.
+
+    The tag shows only `[xx]` or `[?]`, so the agent has no address to answer; the sealed
+    sender has. Same sentence as the display form's. ``""`` when the text is not bound."""
+    if not isinstance(text, str) or not _valid_transfer_endpoint(recipient):
+        return ""
+    matches = list(_PEER_TRAILER_RE.finditer(text))
+    if (not matches or matches[-1].group("tag") != "peer" or not matches[-1].group("sid").startswith("[")
+            or "; sid=" in matches[-1].group(0)):   # a decorated trailer already shows its sender's sid
+        return ""
+    parsed = parse_peer_trailer(text, recipient, include_ref=True)
+    ref = parsed.get("transfer_ref") if isinstance(parsed, dict) else None
+    if not ref or parsed.get("source") == "runtime-completion":
+        return ""
+    transfer = _read_transfer_record(ref)
+    return _sender_sentence("", matches[-1].group(0), transfer.get("from") if isinstance(transfer, dict) else None)
 
 
 def pasted_text(row, *, strict=False):
@@ -873,29 +931,29 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
     record = {"schema_version": 1, "message_id": ref, "from": dict(sender),
               "to": dict(recipient), "body_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
               "refs": list(refs)}
-    sealing = contextlib.ExitStack()  # holds the display seal lock until the transfer is written
-    display_entry = None
-    if display is not None and include_trailer and trailer is not None:
-        # The visible text is sealed beside the old-form text. The pointer is published first:
-        # one without a transfer proves nothing, a transfer without it would strand the text.
-        display_entry = _display_entry(
-            display.get("kind"), text, trailer, sender, line=display.get("line"))
-        if display_entry is not None:
-            # A receiver finds the record a visible text stands for by that text alone, so a
-            # recipient holds at most one unreceived message per visible text: when one is
-            # already waiting, this one is sealed in the old-form text (a peer message shows its
-            # ref, a runtime message its full text) and the receiver finds it by that. The check
-            # and the pointer sit under one lock per visible text and recipient; a busy lock means
-            # another seal of the same text is in flight, so this one takes the old form too.
-            try:
-                sealing.enter_context(pending_lock(_display_seal_key(display_entry["sha256"], recipient)))
-                if _display_unreceived_holder(display_entry, text, trailer, recipient):
+    # The display seal lock is held until the transfer is written, and released on any exit.
+    with contextlib.ExitStack() as sealing:
+        display_entry = None
+        if display is not None and include_trailer and trailer is not None:
+            # The visible text is sealed beside the old-form text. The pointer is published first:
+            # one without a transfer proves nothing, a transfer without it would strand the text.
+            display_entry = _display_entry(
+                display.get("kind"), text, trailer, sender, line=display.get("line"))
+            if display_entry is not None:
+                # A receiver finds the record a visible text stands for by that text alone, so a
+                # recipient holds at most one unreceived message per visible text: when one is
+                # already waiting, this one is sealed in the old-form text (a peer message shows its
+                # ref, a runtime message its full text) and the receiver finds it by that. The check
+                # and the pointer sit under one lock per visible text and recipient; a busy lock means
+                # another seal of the same text is in flight, so this one takes the old form too.
+                try:
+                    sealing.enter_context(pending_lock(_display_seal_key(display_entry["sha256"], recipient)))
+                    if _display_unreceived_holder(display_entry, text, trailer, recipient):
+                        display_entry = None
+                    else:
+                        _publish_display_pointer(display_entry, ref)
+                except (OSError, ValueError):
                     display_entry = None
-                else:
-                    _publish_display_pointer(display_entry, ref)
-            except (OSError, ValueError):
-                display_entry = None
-    with sealing:
         if display_entry is not None:
             record["display"] = display_entry
         if handoff is not None:
@@ -4496,8 +4554,14 @@ def receiver_guidance(text="", recipient=None, *, cwd=None):
     except UnsupportedPendingSchema:
         resolved = None
     if resolved is not None:
-        inner = receiver_guidance(resolved["old_text"], recipient, cwd=cwd)
+        inner = _plain_receiver_guidance(resolved["old_text"], recipient, cwd=cwd)
         return "\n\n".join(part for part in (_display_agent_block(resolved), inner) if part)
+    return _plain_receiver_guidance(text, recipient, cwd=cwd, name_sender=True)
+
+
+def _plain_receiver_guidance(text, recipient, *, cwd=None, name_sender=False):
+    """The guidance for a text that is not a display form; ``name_sender`` leads the ordinary
+    guidance with the sealed sender's reply address when the text shows only a trailer tag."""
     current_origin = parse_peer_trailer(text, recipient, include_ref=True)
     if isinstance(current_origin, dict) and current_origin.get("source") == "runtime-completion":
         return ""
@@ -4507,6 +4571,15 @@ def receiver_guidance(text="", recipient=None, *, cwd=None):
     ordinary = _ordinary_receiver_guidance()
     body_reference_guidance = _body_reference_guidance(text, recipient)
     guidance = ordinary + ("\n\n" + body_reference_guidance if body_reference_guidance else "")
+    if name_sender:
+        try:
+            sender_line = _trailer_form_sender_sentence(text, recipient)
+        except UnsupportedPendingSchema:
+            sender_line = ""
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            sender_line = ""
+        if sender_line:
+            guidance = sender_line + "\n\n" + guidance
     if not isinstance(recipient, dict) or not _valid_transfer_endpoint(recipient):
         return guidance
     try:
