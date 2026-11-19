@@ -204,10 +204,14 @@ const measure=async(label,press_=opened)=>{
     const staged=sc==='row_page';
     const lines=f=>fs.existsSync(cfg.control+'/'+f)?fs.readFileSync(cfg.control+'/'+f,'utf8').split('\n').filter(Boolean):[];
     const paged=s=>popupHas('║')(s);
-    const boxTops=s=>plain(s).filter(l=>/┌─ (plan|plan-check|execute|impl-review|test|report) /.test(l));
-    const boxNames=s=>plain(s).flatMap(l=>l.match(/┌─ (?:plan|plan-check|execute|impl-review|test|report) /g)||[]);
+    // (a box's name that does not fit its title is cut with `…`, as Fleet's is: `plan-che…`, `impl-rev…`; the boxes are read by its first letters)
+    const boxTops=s=>plain(s).filter(l=>/┌─ (plan|execute|impl|test|report)/.test(l));
+    const boxNames=s=>plain(s).flatMap(l=>l.match(/┌─ (?:plan|execute|impl|test|report)\S* /g)||[]);
+    // Where a stage's box stands in the popup's rows and what its top line says past the name (the mark and the word, if there is room).
+    const boxGeo=ls=>{const l=ls.find(x=>/┌─ execute/.test(x));if(!l)return null;const left=l.indexOf('┌─ execute'),end=l.indexOf('┐',left);
+      return {left,width:end-left+1,tag:l.slice(left+'┌─ execute'.length,end).replace(/[─ ]/g,'')};};
     const marks=s=>{const t=boxTops(s).join('');return {done:[...t].filter(c=>c==='✓').length,active:[...t].filter(c=>c==='●').length};};
-    const order=s=>{const t=plain(s).join('\n');return ['plan ','plan-check ','execute '].map(n=>t.indexOf('┌─ '+n));};
+    const order=s=>{const t=plain(s).join('\n');return [/┌─ plan /,/┌─ plan-c/,/┌─ execute/].map(r=>t.search(r));};
     const widths=staged?[196,120,80]:[160];
     checks.widths={};
     for(const w of widths){
@@ -223,12 +227,17 @@ const measure=async(label,press_=opened)=>{
       const first=await until(s=>!!box(s)&&(boxTops(s).length>0||either(s)),'a first content at '+w);
       c.first_ms=Date.now()-t0;c.first_has_fleet=popupHas('FLEET_R')(first.s);c.first_paged=paged(first.s);c.first_title=title(first.s);
       c.first_boxes=boxNames(first.s).length;c.first_marks=marks(first.s);c.first_order=order(first.s);
+      {const fl=plain(first.s),ft=fl.join('\n'),rule=fl.find(l=>l.includes('╔═'))||'';
+       // the route pressed (PANEL_R2) is the one drawn, not another's
+       c.first_named=rule.includes('PANEL_R2')&&!rule.includes('PANEL_R1')&&!rule.includes('PANEL_R3');
+       // the panel's pass mark `gate: true` is not drawn as a word; an empty `out`/`unit` is `·`
+       c.first_true=/\btrue\b/.test(ft);c.first_dot=/out +· +│/.test(ft)&&/unit +· +│/.test(ft);c.first_box=boxGeo(fl);}
       c.first_rule=popupHas('╔═')(first.s);c.first_keys=popupHas('Enter 표로 돌아가기')(first.s);
       frames['row_page_'+w+'_first']=plain(first.s);
       // (b) Fleet's page.
       const full=await until(s=>paged(s)&&popupHas('FLEET_R2')(s)&&!staleWords(s),'Fleet\'s page at '+w,cfg.delay*1000+20000);
       c.full_ms=Date.now()-t0;c.full_title=title(full.s);frames['row_page_'+w+'_page']=plain(full.s);
-      c.full_keys=popupHas('Enter 표로 돌아가기')(full.s);
+      c.full_keys=popupHas('Enter 표로 돌아가기')(full.s);c.page_box=boxGeo(plain(full.s));
       // the page's stage boxes (Fleet's own drawing: a narrow page cuts a name, `plan-che…`), inside the page's `║` frame
       const tops=plain(full.s).filter(l=>/║.*┌─ (plan|execute|impl-r|test|report)/.test(l));
       c.full_boxes=tops.flatMap(l=>[...l.matchAll(/┌─ (\S+)/g)].map(m=>m[1])).filter(n=>!/^(frame|leg)$/.test(n));
@@ -531,7 +540,9 @@ STAGES = ('plan', 'plan-check', 'execute', 'impl-review', 'test', 'report')
 
 def stage_values(i, n):
     """The values a staged route's stage carries (the producer's `_panel_stage` and Fleet's route read the same record)."""
-    return {'name': n, 'st': 'done' if i < 2 else 'active' if i == 2 else 'pending', 'verdict': 'PASS' if i < 2 else '',
+    # (a finished stage's `gate: True` is the pass mark the producer's `stage_doer` carries; the word is Fleet's box's: `PASS`, `running`, `pending`)
+    return {'name': n, 'st': 'done' if i < 2 else 'active' if i == 2 else 'pending',
+            'verdict': 'PASS' if i < 2 else 'running' if i == 2 else 'pending', 'gate': i < 2,
             'when': '%dm' % (30 - 10 * i) if i < 3 else '', 'unit': 'dev/backend' if i == 2 else '', 'out': 'artifacts/%s.md' % n if i < 2 else ''}
 
 
@@ -892,6 +903,13 @@ class RoutePopupFirstTest(unittest.TestCase):
             self.assertGreaterEqual(w['first_boxes'], 3, w)
             self.assertEqual(w['first_marks'], {'done': 2, 'active': 1}, w)
             self.assertTrue(all(x >= 0 for x in w['first_order']) and w['first_order'] == sorted(w['first_order']), w)
+            # (the route pressed, not another's; no `true` for the panel's pass mark; an empty place is `·`)
+            self.assertTrue(w['first_named'], w)
+            self.assertFalse(w['first_true'], w)
+            self.assertTrue(w['first_dot'], w)
+            # (the first screen's box is the page's: the same width, the same left cell, the same mark and word on its top line)
+            self.assertIsNotNone(w['first_box'], w)
+            self.assertEqual(w['first_box'], w['page_box'], w)
             self.assertIn('다시 읽는 중', w['first_title'], w)
             self.assertIn('에 읽은 내용', w['first_title'], w)
             self.assertTrue(w['first_keys'], w)
@@ -959,52 +977,93 @@ class RoutePopupFirstTest(unittest.TestCase):
 const assert=require('node:assert/strict'),path=require('node:path');
 const view=require(path.join(process.argv[1],'panel-view.cjs'));
 const names=['plan','plan-check','execute','impl-review','test','report'];
+// The panel's value for a finished stage carries `gate: true` (a pass mark, `tools/fleet/session_panel.py` `stage_doer`); a gate in words is a string.
 const stage=(n,i)=>({name:n,state:i<2?'done':i===2?'active':'pending',mark:i<2?'✓':i===2?'●':'',current:i===2,key:'stg'+(i%5)+'_on',
-  ...(i<2?{verdict:'PASS',when:'30m',out:'artifacts/'+n+'.md',unit:'qa/'+n}:{}),...(i===2?{harness:'claude',model:'Opus 5.5',unit:'dev/backend',when:'4m'}:{})});
+  ...(i<2?{verdict:'PASS',when:'30m',out:'artifacts/'+n+'.md',unit:'qa/'+n,gate:true}:{}),...(i===2?{harness:'claude',model:'Opus 5.5',unit:'dev/backend',when:'4m',gate:true}:{}),
+  ...(i===3?{gate:'code-plan'}:{})});
 const route=(id,extra={})=>({id,title:'제목 '+id,kind:'working',state:'working',elapsed:'23m',shape:'staged',stages:names.map(stage),
   chain:[{name:'frame',state:'done'},{name:'code',state:'active'}],...extra});
 const model={styles:{dim:{dim:true},stg2_on:{foreground:150,bold:true}},routes:[route('r1'),route('r2',{shape:'one-shot-owner',stages:[{name:'one-shot',mark:'●'}]})]};
 const text=r=>r.map(p=>p.text).join('');
+function measure(s){return [...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);}
+// Fleet's own cut (`grid.clip_cells`): a value that fits stays, else it ends in `…` within the room.
+const clip=(v,room)=>{const s=String(v);if(s.length<=room)return s;return s.slice(0,Math.max(0,room-1))+'…';};
+// Fleet's page lays the boxes in `stage_room = columns-10` (the page's frame and its legs' frame around), from the 5th cell (index 4);
+// fewer than three stages stand at most 64 cells a stage.
+const layout=(columns,n)=>{let room=Math.max(1,columns-10);if(n<3)room=Math.min(room,64*n);
+  const per=Math.min(n,Math.max(3,Math.min(6,Math.floor((room+4)/40))));return {room,per,w:Math.floor((room-4*(per-1))/per)};};
+const wordOf=s=>s.verdict||s.state;
+const rightOf=(w,s)=>3+(w<34||!wordOf(s)?0:wordOf(s).length+1);
 for(const columns of [192,116,76]){
   const b=view.routePageFirst({model,id:'r1',columns});
   assert(b,'a page at '+columns);
   const lines=b.rows.map(text);
   for(const row of b.rows)assert(row.every(p=>!('beat' in p)&&!('spin' in p)));
   for(const t of lines)assert(measure(t)<=columns,'a line of '+measure(t)+' cells at '+columns+': '+t);
-  // (i) every stage box once, at most max(3,min(6,(columns+4)//40)) boxes to a row, arrows between boxes and rows.
-  const tops=lines.filter(l=>/┌─ (plan|plan-check|execute|impl-review|test|report) /.test(l));
-  assert.equal(tops.length>=2,true);
-  const per=Math.max(3,Math.min(6,Math.floor((columns+4)/40)));
-  for(const l of tops)assert((l.match(/┌─ (plan|plan-check|execute|impl-review|test|report) /g)||[]).length<=per,'row of '+l);
-  assert.equal(names.every(n=>lines.some(l=>l.includes('┌─ '+n+' '))),true,'six stages');
+  const {room,per,w}=layout(columns,6);
+  const vroom=w-4-7;
+  const shown=(n,i)=>clip(n,Math.max(0,w-6-rightOf(w,stage(n,i))));
+  // (i) every stage box once, at most `per` boxes to a row, arrows between boxes and rows.
+  const found=lines.flatMap(l=>[...l.matchAll(/┌─ (\S+) /g)].map(m=>m[1])).filter(n=>n!=='frame'&&n!=='code');
+  assert.deepEqual([...found].sort(),names.map(shown).sort(),'six stages at '+columns);   // (a snake: an odd row reads leftward)
+  for(const l of lines.filter(l=>/┌─ \S+ /.test(l)&&!/┌─ (frame|code) /.test(l)))assert([...l.matchAll(/┌─ \S+ /g)].length<=per,'row of '+l);
   assert(lines.some(l=>l.includes('▶')),'▶');assert(lines.some(l=>l.includes('▼')),'▼');assert(lines.some(l=>l.includes('◀')),'◀');
-  // (ii) a value is in its own stage's box; a stage with none has an empty place (the time's own is `·`).
-  const at=n=>lines.findIndex(l=>l.includes('┌─ '+n+' '));
-  const boxOf=n=>{const top=at(n),left=lines[top].indexOf('┌─ '+n+' '),width=[...lines[top].slice(left)].findIndex(c=>c==='┐')+1,out=[];
-    for(let y=top;y<lines.length&&!/^└/.test(lines[y].slice(left));y++)out.push([...lines[y]].slice(left,left+width).join(''));return out;};
-  const done=boxOf('plan-check').join('\n'),running=boxOf('execute').join('\n'),todo=boxOf('test').join('\n');
-  // (a value narrower than its place is cut at the box's edge, as Fleet's is)
-  const wide=columns>=116;
-  assert(done.includes(wide?'artifacts/plan-check.md':'artifacts/')&&done.includes(wide?'qa/plan-check':'qa/')&&done.includes('30m'),done);
-  assert(running.includes('claude')&&running.includes('dev/backend')&&running.includes('4m')&&(!wide||running.includes('Opus 5.5')),running);
-  const outLine=boxOf('test').find(l=>l.includes('out')),unitLine=boxOf('test').find(l=>l.includes('unit')),timeLine=boxOf('test').find(l=>l.includes('time'));
-  assert(/^│ out +│/.test(outLine)&&/^│ unit +│/.test(unitLine),outLine+unitLine);
+  // (ii) a value is in its own stage's box; a stage with none has an empty place (`·`, as Fleet's `out`/`unit`).
+  const at=(n,i)=>lines.findIndex(l=>l.includes('┌─ '+shown(n,i)+' '));
+  const boxOf=(n,i)=>{const top=at(n,i),left=lines[top].indexOf('┌─ '+shown(n,i)+' '),width=[...lines[top].slice(left)].findIndex(c=>c==='┐')+1,out=[];
+    for(let y=top;y<lines.length&&!/^└/.test(lines[y].slice(left));y++)out.push([...lines[y]].slice(left,left+width).join(''));out.left=left;out.width=width;return out;};
+  const first=boxOf('plan',0);
+  // (iii) the box's width and its left cell are Fleet's (`_stage_grid` in `stage_room`, from cell 4)
+  assert.equal(first.left,4,'the first box starts at cell 4 at '+columns);
+  assert.equal(first.width,w,'the box is '+w+' wide at '+columns);
+  for(const [n,i] of names.map((n,i)=>[n,i]))assert.equal(boxOf(n,i).width,w,n+' at '+columns);
+  // (the status word stands in a box of 34 cells or more, as Fleet's does)
+  const topOf=(n,i)=>lines[at(n,i)];
+  assert.equal(/ PASS /.test(topOf('plan',0)),w>=34,'the word PASS at '+columns+' (box '+w+')');
+  const done=boxOf('plan-check',1).join('\n'),running=boxOf('execute',2).join('\n'),todo=boxOf('test',4).join('\n');
+  // (a value narrower than its place stands whole; a longer one ends in `…`, one cell before the right edge, as Fleet's does)
+  const v1=clip('artifacts/plan-check.md',vroom),v2=clip('qa/plan-check',vroom);
+  assert(done.includes(v1)&&done.includes(v2)&&done.includes('30m'),done);
+  if(vroom<'artifacts/plan-check.md'.length)assert(v1.endsWith('…')&&done.includes(v1+' │'),'a cut value: '+done);
+  assert(running.includes('claude')&&running.includes(clip('dev/backend',vroom))&&running.includes('4m'),running);
+  // (a value fills at most up to one cell before the right edge: no line of a box that has a value touches it)
+  for(const l of [...boxOf('plan',0),...boxOf('plan-check',1),...boxOf('execute',2)].slice(1,-1))assert(!/[^ ]│$/.test(l),'a value on the edge: '+l);
+  const outLine=boxOf('test',4).find(l=>l.includes('out')),unitLine=boxOf('test',4).find(l=>l.includes('unit')),timeLine=boxOf('test',4).find(l=>l.includes('time'));
+  // (an empty `out`/`unit` is `·`, as Fleet fills it)
+  assert(/^│ out +· +│$/.test(outLine)&&/^│ unit +· +│$/.test(unitLine),outLine+unitLine);
   assert(timeLine.includes('·'),timeLine);
   assert(!todo.includes('claude'),'a harness a stage does not have');
+  // (iv) the pass mark `gate: true` is not a word: no `true` anywhere, no gate line for it (the box's title mark already says ✓); a gate in words is drawn.
+  for(const l of lines)assert(!/\btrue\b/.test(l),'a true at '+columns+': '+l);
+  assert(!boxOf('plan',0).some(l=>l.includes('gate')),'a gate line for a pass mark');
+  const gated=boxOf('impl-review',3).join('\n');
+  assert(gated.includes('gate')&&gated.includes(clip('code-plan',vroom-3)),'a gate in words: '+gated);
   assert.deepEqual(b.routes,['r1','r2']);assert.deepEqual(b.hits,[]);
 }
-// (iii) no stage line: the owner alone, a unit's route, no stages, an unknown route.
+// (v) a word gate on a finished stage ends in the check mark.
+{const g=view.routePageFirst({model:{...model,routes:[route('g',{stages:names.map((n,i)=>({...stage(n,i),...(i===1?{gate:'code-plan-review-long'}:{})}))})]},id:'g',columns:192});
+ const l=g.rows.map(text).find(l=>l.includes('gate')&&l.includes('code-plan'));assert(l&&/code-plan-review-long ✓ +│/.test(l),String(l));}
+// (vi) few stages stand at most 64 cells each: two stages at 192 columns are two boxes of 62 cells, from cell 4.
+{const two=view.routePageFirst({model:{...model,routes:[route('t',{stages:names.slice(0,2).map(stage)})]},id:'t',columns:192});
+ const ls=two.rows.map(text),top=ls.findIndex(l=>/┌─ plan /.test(l)),{w}=layout(192,2);
+ assert.equal(w,62);assert.equal(ls[top].indexOf('┌─ plan '),4);assert.equal([...ls[top].slice(4)].findIndex(c=>c==='┐')+1,w);
+ assert.equal(ls[top].indexOf('┌─ plan-check '),4+w+4);}
+// (vii) a narrow page does not break: no exception, no line over the width (the box's width falls to a few cells).
+for(const columns of [20,40,56]){
+  const b=view.routePageFirst({model,id:'r1',columns});assert(b,'a page at '+columns);
+  for(const r of b.rows)assert(measure(text(r))<=columns,'a line over '+columns+': '+text(r));
+}
+// (viii) no stage line: the owner alone, a unit's route, no stages, an unknown route.
 assert.equal(view.routePageFirst({model,id:'r2',columns:100}),null);
 assert.equal(view.routePageFirst({model:{routes:[route('u',{unit_route:true})]},id:'u',columns:100}),null);
 assert.equal(view.routePageFirst({model:{routes:[route('z',{stages:[]})]},id:'z',columns:100}),null);
 assert.equal(view.routePageFirst({model,id:'nope',columns:100}),null);
-// (iv) a name with control characters is cleaned.
+// (ix) a name with control characters is cleaned.
 const dirty=view.routePageFirst({model:{routes:[route('d',{title:'a\x1b[31mb',stages:names.map((n,i)=>stage(n+'\x07',i))})]},id:'d',columns:100});
 assert(dirty.rows.every(r=>!/[\x00-\x1f\x7f-\x9f]/.test(text(r))));
-// stages beyond the sixteen the panel carries: `+N`.
+// stages beyond the sixteen the panel carries: `+N`, at the boxes' left cell.
 const more=view.routePageFirst({model:{routes:[route('m',{stage_more:3})]},id:'m',columns:100});
-assert(more.rows.map(text).some(l=>l==='+3'));
-function measure(s){return [...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);}
+assert(more.rows.map(text).some(l=>l.trim()==='+3'));
 console.log('ok');
 """
         result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell')], capture_output=True, text=True, timeout=120)
