@@ -592,14 +592,11 @@ def _retarget_index_paths(root: Path, old_prefix: str, new_prefix: str) -> None:
         artifact_admission._write_index(root, replace(index, cycles=cycles))
 
 
-def _campaign_is_closed(root: Path, campaign_id: str) -> bool:
-    campaign = read_campaign(root, campaign_id)
-    return campaign is not None and campaign.get("state") == "satisfied"
-
-
 def _record_place_holds(root: Path, record: Mapping[str, Any]) -> bool:
     """Is the cycle's folder where its record says: there, in the campaign and under the name the record
     names, carrying this cycle's binding?  Read from that one folder; nothing else is looked at."""
+    if record.get("journal_migration"):
+        return True  # its folder is a backup outside campaigns/: a look at campaigns/ has nothing to settle for it
     try:
         folder = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
         if not folder.is_dir() or folder.is_symlink():
@@ -607,7 +604,9 @@ def _record_place_holds(root: Path, record: Mapping[str, Any]) -> bool:
         import artifact_request
         anchor = artifact_request.scope_anchor(folder)
         holder = anchor if anchor is not None else folder
-        campaign = _read_json(holder.parent / "campaign.json") or {}
+        # The oldest layout keeps the cycle one level down, in `<campaign>/cycles/<id>`.
+        old_layout = anchor is None and holder.parent.name == "cycles" and not record.get("locator")
+        campaign = _read_json((holder.parent.parent if old_layout else holder.parent) / "campaign.json") or {}
         return (campaign.get("campaign_id") == record["campaign_id"]
                 and _folder_cycle_id(folder) == record["cycle_id"]
                 and not (isinstance(record.get("locator"), str) and record["locator"] != holder.name))
@@ -647,7 +646,8 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
     if cycle_id:
         asked = read_cycle_record(root, cycle_id)
         if asked is not None and not asked.get("deleted_at") and not _record_place_holds(root, asked):
-            reconcile_root(root, now=now)
+            if reconcile_root(root, now=now).get("status") == "reconciled":
+                _request_entrance_refresh(root)  # what it set right is on the entrance, whatever this move then does
     lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
     stale: List[str] = []
     old_campaign_id = None
@@ -700,15 +700,12 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
             read_once = _read_manifest_raw(source) if _closed_record(record) else None
             read_digest = artifact_manifest.manifest_digest(read_once[1]) if read_once is not None else None
             _preserve_current_manifest(root, record, source, found=read_once, digest=read_digest, match_record=True)
-            # The members' bytes are kept before the old campaign is read, as the cycle's own are.  A member
-            # whose recorded document cannot be kept, in a campaign that is closed, would leave that close
-            # without its evidence once the folder has gone: the move stops here, before anything moved.
+            # The members' bytes are kept before the old campaign is read, as the cycle's own are, and, as for the
+            # cycle, what cannot be kept does not stop the move (it is met again where the manifest is replaced).
             for member in artifact_request.members(root, source):
                 member_record = read_cycle_record(root, member.name)
-                if (member_record is not None
-                        and not _preserve_current_manifest(root, member_record, member, match_record=True)
-                        and _campaign_is_closed(root, old_campaign_id)):
-                    raise ProducerError("manifest-not-kept", member.name)
+                if member_record is not None:
+                    _preserve_current_manifest(root, member_record, member, match_record=True)
             os.rename(str(source), str(destination))
             _fsync_dir(target_dir)
             _fsync_dir(source.parent)
@@ -988,7 +985,8 @@ def _scan_layout(root: Path) -> _LayoutScan:
     """Where every campaign and cycle ID sits, read from the folders alone (a `lstat` and a few small files each).
 
     A symbolic link, an unreadable folder, a folder that carries no ID or an ID seen twice makes the
-    answer `complete=False`: such a scan can say where something moved to, never that something is gone."""
+    answer `complete=False`: such a scan can say where something moved to, never that something is gone.
+    `scan.blockers` names each entry that did so, with its path from the root and the reason."""
     scan = _LayoutScan({}, {}, {}, set(), True)
     base = Path(root) / "campaigns"
     try:
@@ -996,7 +994,7 @@ def _scan_layout(root: Path) -> _LayoutScan:
     except FileNotFoundError:
         return scan
     except OSError:
-        scan.complete = False
+        scan.block(root, base, "unreadable")
         return scan
     for name in names:
         if name.startswith("."):
@@ -1005,27 +1003,27 @@ def _scan_layout(root: Path) -> _LayoutScan:
         try:
             mode = os.lstat(str(entry)).st_mode
         except OSError:
-            scan.complete = False
+            scan.block(root, entry, "unreadable")
             continue
         if stat.S_ISLNK(mode):
-            scan.complete = False
+            scan.block(root, entry, "symbolic-link")
             continue
         if not stat.S_ISDIR(mode):
             continue
         campaign = _read_json(entry / "campaign.json")
         campaign_id = campaign.get("campaign_id") if campaign else None
         if not artifact_identity.is_well_formed(campaign_id, "campaign"):
-            scan.complete = False
+            scan.block(root, entry, "no-campaign-id")
             continue
         if campaign_id in scan.campaigns:
             scan.duplicates.add(campaign_id)
-            scan.complete = False
+            scan.block(root, entry, f"id-seen-twice {campaign_id} (also {_rel_or_abs(root, scan.campaigns[campaign_id])})")
             continue
         scan.campaigns[campaign_id] = entry
         try:
             children = sorted(os.listdir(str(entry)))
         except OSError:
-            scan.complete = False
+            scan.block(root, entry, "unreadable")
             continue
         for child in children:
             path = entry / child
@@ -1034,25 +1032,25 @@ def _scan_layout(root: Path) -> _LayoutScan:
             try:
                 mode = os.lstat(str(path)).st_mode
             except OSError:
-                scan.complete = False
+                scan.block(root, path, "unreadable")
                 continue
             if stat.S_ISLNK(mode):
-                scan.complete = False
+                scan.block(root, path, "symbolic-link")
                 continue
             if not stat.S_ISDIR(mode):
                 continue
             if child == "cycles":
-                scan.complete = False  # an old layout: moves are not judged from it
+                scan.block(root, path, "old-cycles-layout")  # moves are not judged from it
                 continue
             cycle_id = _folder_cycle_id(path)
             if cycle_id is None:
-                scan.complete = False
+                scan.block(root, path, "not-a-cycle")
                 continue
             if cycle_id in scan.cycles or cycle_id in scan.duplicates:
                 scan.duplicates.add(cycle_id)
-                scan.cycles.pop(cycle_id, None)
+                first = scan.cycles.pop(cycle_id, None)
                 scan.folder_campaign.pop(cycle_id, None)
-                scan.complete = False
+                scan.block(root, path, f"id-seen-twice {cycle_id}" + (f" (also {_rel_or_abs(root, first)})" if first else ""))
                 continue
             scan.cycles[cycle_id] = path
             scan.folder_campaign[cycle_id] = campaign_id
@@ -1061,13 +1059,20 @@ def _scan_layout(root: Path) -> _LayoutScan:
                 member_id = member.name
                 if member_id in scan.cycles or member_id in scan.duplicates:
                     scan.duplicates.add(member_id)
-                    scan.cycles.pop(member_id, None)
+                    first = scan.cycles.pop(member_id, None)
                     scan.folder_campaign.pop(member_id, None)
-                    scan.complete = False
+                    scan.block(root, member, f"id-seen-twice {member_id}" + (f" (also {_rel_or_abs(root, first)})" if first else ""))
                     continue
                 scan.cycles[member_id] = member
                 scan.folder_campaign[member_id] = campaign_id
     return scan
+
+
+def _rel_or_abs(root: Path, path: Path) -> str:
+    try:
+        return Path(path).relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _hand_changes(root: Path, scan: _LayoutScan, published: Mapping[str, str]) -> Dict[str, Any]:

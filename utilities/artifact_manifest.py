@@ -46,6 +46,14 @@ _MAX_LOCATOR_LENGTH = 1024
 _MAX_PAYLOAD_DEPTH = 16
 _MAX_PAYLOAD_BYTES = 64 * 1024
 
+# The most a reader parses of one `manifest.json` when it has to read the document itself.  A cycle
+# seals one manifest whatever its file count (about 1.7 KB per file; 150,000 files made 255 MB), so
+# the writer has no cap of its own and the reader must not be the one that stops such a cycle:
+# a reader that can show the bytes are the ones the producer sealed and recorded (see
+# `artifact_campaign._sealed_as_recorded`) reads no JSON at all, whatever the size.  Only bytes
+# that changed since the seal, or a legacy file, are parsed, and then under this one limit.
+MAX_MANIFEST_BYTES = 512 * 1024 * 1024
+
 _EVENT_TYPES = frozenset(
     {
         "campaign.satisfied",

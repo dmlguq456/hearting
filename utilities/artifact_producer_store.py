@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -1565,6 +1565,16 @@ class _LayoutScan:
     folder_campaign: Dict[str, str]   # cycle ID -> ID of the campaign folder it sits in
     duplicates: Set[str]
     complete: bool                    # every folder was read and every entry was one this scan understands
+    # What made `complete` false: `(folder relative to the root, reason)` for each entry in the way, in the order met.
+    blockers: List[Tuple[str, str]] = field(default_factory=list)
+
+    def block(self, root: Path, path: Path, reason: str) -> None:
+        self.complete = False
+        try:
+            where = Path(path).relative_to(root).as_posix()
+        except ValueError:
+            where = str(path)
+        self.blockers.append((where, reason))
 
     def mapping(self, root: Path) -> Dict[str, str]:
         found = {identifier: _cycle_rel(root, path) for identifier, path in self.campaigns.items()}

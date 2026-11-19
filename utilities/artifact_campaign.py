@@ -150,21 +150,24 @@ def _safe(root, path):
     return path
 
 
-def read_json(root, path, reads=None):
+def read_json(root, path, reads=None, limit=None):
     if reads is not None:
-        return reads.read_json(root, path)
-    return _read_json_raw(root, path)
+        return reads.read_json(root, path, limit=limit)
+    return _read_json_raw(root, path, limit)
 
 
-def _read_json_raw(root, path):
+def _read_json_raw(root, path, limit=None):
+    limit = MAX_JSON if limit is None else limit  # read at call time, so one patched value is every reader's
     path = _safe(root, path)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as stream:
             info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_JSON:
+            if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
                 raise CampaignError("campaign-input-kind-or-size", path)
-            raw = stream.read(MAX_JSON + 1)
+            raw = stream.read(limit + 1)
+            if len(raw) > limit:
+                raise CampaignError("campaign-input-kind-or-size", path)
         value = json.loads(raw)
         if not isinstance(value, dict):
             raise ValueError("object required")
@@ -233,7 +236,7 @@ def _rename_evidence_map(root, campaign_dir, required, reads=None):
         cycle_id, _manifest_id, revision_id = key
         candidate = root / lifecycle.MANIFEST_SNAPSHOT_REL / cycle_id / (revision_id + ".json")
         try:
-            document, raw = read_json(root, candidate, reads=reads)
+            document, raw = read_json(root, candidate, reads=reads, limit=manifest.MAX_MANIFEST_BYTES)
         except CampaignError as exc:
             if (exc.code == "campaign-input-missing"
                     or isinstance(exc.__cause__, FileNotFoundError)):
@@ -252,7 +255,7 @@ def _rename_evidence_map(root, campaign_dir, required, reads=None):
         if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
             continue
         try:
-            document, raw = read_json(root, candidate, reads=reads)
+            document, raw = read_json(root, candidate, reads=reads, limit=manifest.MAX_MANIFEST_BYTES)
         except CampaignError:
             continue
         cycle = document.get("cycle") if isinstance(document, dict) else None
@@ -665,8 +668,40 @@ def _open_refusal_detail(pending):
             "then rerun campaign-status")
 
 
+# What a person can do about each kind of entry that keeps the layout scan (the one a close uses to
+# take a vanished folder for gone) from being complete. A folder moved out of campaigns/ is simply no
+# longer looked at: nothing here deletes it.
+_BLOCKER_ADVICE = {
+    "unreadable": "could not be read (permission or I/O error): make it readable, or move it out of campaigns/",
+    "symbolic-link": "is a symbolic link, which is never followed: replace it with the real folder, or move the link out of campaigns/",
+    "no-campaign-id": "has no campaign.json that names a campaign: if it is not one of your campaigns (notes, evidence files, "
+                      "a copy) move it out of campaigns/, where nothing touches it; if it is a campaign, its campaign.json "
+                      "has to be readable and name the campaign; renaming the folder changes nothing",
+    "id-seen-twice": "holds an id that another folder holds too: move the copy out of campaigns/; renaming a folder "
+                     "does not help, the id is inside it",
+    "not-a-cycle": "is inside a campaign folder but has neither a .cycle.json nor a manifest.json naming a cycle, so it "
+                   "is not a cycle: if it is not this campaign's work (feedback, notes) move it out of campaigns/; "
+                   "if it is a cycle that lost its .cycle.json it needs that file again to count as one; "
+                   "renaming it changes nothing",
+    "old-cycles-layout": "is the oldest layout (a cycles/ folder inside a campaign), from which no move is judged: it "
+                         "stops holding things back once no cycles/ folder is left under campaigns/; moving it out "
+                         "records the cycles it held as gone until it comes back",
+}
+
+
+def _layout_blockers(root):
+    """`[(path from the root, reason)]` of what keeps the root's layout scan incomplete, read-only; [] when the
+    scan is complete or cannot be taken."""
+    try:
+        import artifact_producer_cycle_ops as cycle_ops
+        return list(cycle_ops._scan_layout(Path(root)).blockers)
+    except Exception:  # noqa: BLE001 -- naming a blocker never makes the refusal itself fail
+        return []
+
+
 def _bindings_detail(root, ids, directories):
-    """Which listed cycle has no folder and which folder is not listed, and what settles it."""
+    """Which listed cycle has no folder and which folder is not listed, what keeps the close from taking a
+    vanished folder for gone (named by its path from the root), and what a person can do about it."""
     missing = sorted(set(ids) - set(directories))
     unlisted = sorted(set(directories) - set(ids))
     parts = []
@@ -675,13 +710,24 @@ def _bindings_detail(root, ids, directories):
     if unlisted:
         parts.append(f"folder-not-listed={', '.join(unlisted[:10])}" + (f" +{len(unlisted) - 10} more" if len(unlisted) > 10 else ""))
     if missing:
+        blockers = _layout_blockers(root)
+        if blockers:
+            shown = "; ".join(f"{where} ({reason})" for where, reason in blockers[:5])
+            more = f" +{len(blockers) - 5} more" if len(blockers) > 5 else ""
+            parts.append(f"held-back-by={shown}{more}")
+            kinds = list(dict.fromkeys(reason.split(" ", 1)[0] for _where, reason in blockers))
+            advice = "; ".join(f"{kind}: {_BLOCKER_ADVICE[kind]}" for kind in kinds if kind in _BLOCKER_ADVICE)
+            parts.append("next=campaign-close records a vanished folder as gone by itself once nothing under "
+                         "campaigns/ of this artifact root (any campaign) holds it back; what holds it back is "
+                         f"named above. {advice}. Then run campaign-close again.")
+            lead = "Or, one cycle at a time,"
+        else:
+            parts.append("next=campaign-close records a vanished folder as gone by itself and nothing under "
+                         "campaigns/ holds it back, so run campaign-close.")
+            lead = "If it still refuses,"
         producer = Path(__file__).with_name("artifact_producer.py")
         parts.append(
-            "next=campaign-close records a vanished folder as gone by itself, but only while nothing under "
-            "campaigns/ of this artifact root (any campaign) is a symbolic link, a folder it cannot read, a folder "
-            "that names no cycle or campaign, an id seen twice, or an old cycles/ layout; with one of those it "
-            "refuses as here, so settle that first and run campaign-close again. If it still refuses, "
-            "`python3 " + str(producer) + " delete --artifact-root " + str(root) + " --cycle <cycle id above>` "
+            lead + " `python3 " + str(producer) + " delete --artifact-root " + str(root) + " --cycle <cycle id above>` "
             "records that one cycle as deleted for good: it stays deleted even if its folder comes back, so if "
             "the folder may only be out of sight for now (a share not mounted), look for the folder before deleting")
     return " ".join(parts)
@@ -709,6 +755,82 @@ def _in_its_place(root, campaign_dir, directory, record, cid):
         return False
 
 
+def _file_sha256(root, path):
+    """`sha256:<hex>` of a regular file read in chunks, so no more than one chunk is in memory, or
+    None when the file changed while it was read. A file that is not a regular one is refused as
+    `read_json` refuses it."""
+    path = _safe(root, path)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise CampaignError("campaign-input-kind-or-size", path)
+            hasher = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                hasher.update(chunk)
+            after = os.fstat(stream.fileno())
+    except OSError as exc:
+        raise CampaignError("campaign-input-invalid", path) from exc
+    if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+        return None
+    return "sha256:" + hasher.hexdigest()
+
+
+def _sealed_as_recorded(root, path, cid, record, campaign_id, index):
+    """The row of a cycle whose manifest bytes are the bytes the producer sealed, read without parsing them.
+
+    Sealing validated the document, wrote it as canonical JSON and recorded its digest in three places:
+    the cycle record (which also carries its own content digest), the admission index's cycle row and its
+    manifest row (which carry the manifest and revision IDs and the campaign). When the digest of the
+    bytes on disk is all of those, the file is that canonical document byte for byte, so what a parse would show (the IDs, the
+    state, the digest of the canonical form, which is the digest of these very bytes) is what was
+    recorded, and the checks a parse would make were made when it was sealed. Anything else (bytes that
+    changed since, a legacy or non-canonical file, a missing or disagreeing record, a state still
+    `active`, which needs the document's routes) returns None and the caller reads and validates the
+    whole document as before. A 255 MB manifest costs a hash here, not a parse."""
+    stat_digest = _file_sha256(root, path)
+    if stat_digest is None:
+        return None
+    if record.get("manifest_digest") != stat_digest:
+        return None
+    # The record is as the producer last wrote it: a hand edit of its producer or state would leave this
+    # digest of its own content behind (a record without one is read the long way).
+    import artifact_producer_store as store
+    if not record.get("control_record_digest") or record["control_record_digest"] != store._record_content_digest(record):
+        return None
+    cycle_row = index.cycles.get(cid)
+    if (not isinstance(cycle_row, dict) or cycle_row.get("manifest_digest") != stat_digest
+            or cycle_row.get("campaign_id") != campaign_id or record.get("campaign_id") != campaign_id):
+        return None
+    rows = [row for row in index.manifests.values()
+            if isinstance(row, dict) and row.get("cycle_id") == cid and row.get("manifest_digest") == stat_digest]
+    state = record.get("cycle_state")
+    if (len(rows) != 1 or not isinstance(state, str) or state == "active"
+            or not identity.is_well_formed(rows[0].get("manifest_id"), "manifest")
+            or not identity.is_well_formed(rows[0].get("manifest_revision_id"), "manifest_revision")
+            or not record.get("producer_id")):
+        return None
+    return {"cycle_id": cid, "state": state, "manifest_digest": stat_digest, "index_digest": stat_digest,
+            "route_id": record["route_id"], "manifest_id": rows[0]["manifest_id"],
+            "manifest_revision_id": rows[0]["manifest_revision_id"]}
+
+
+def _walk_cycle_dirs(root, campaign_dir):
+    """`locator.iter_cycle_dirs`, one folder at a time as before, with its refusal of a leg folder that sits in a
+    request frame its record does not place there said as a refusal (`CampaignError`), naming the folder from
+    the root, instead of an exception out of `status` and `close`."""
+    try:
+        yield from locator.iter_cycle_dirs(campaign_dir)
+    except locator.LocatorError as exc:
+        detail = str(exc.detail)
+        try:
+            detail = Path(detail).relative_to(root).as_posix()
+        except ValueError:
+            pass
+        raise CampaignError(exc.code, detail) from exc
+
+
 def _cycle_rows(root, path, campaign, reads=None):
     ids = campaign.get("cycles")
     if (not isinstance(ids, list) or not ids or not all(isinstance(cid, str) for cid in ids)
@@ -724,7 +846,8 @@ def _cycle_rows(root, path, campaign, reads=None):
         root_id = lifecycle.read_root_identity(root)
     if root_id is None:
         raise CampaignError("root-identity-missing", "the artifact root carries no readable root identity")
-    if admission.load_index(root).artifact_root_id != root_id.artifact_root_id:
+    producer_index = admission.load_index(root)
+    if producer_index.artifact_root_id != root_id.artifact_root_id:
         raise CampaignError("campaign-index-root-mismatch",
                             "the producer index belongs to another artifact root than this one")
     # A campaign list alone cannot hide an open member or an unregistered tree.
@@ -760,14 +883,14 @@ def _cycle_rows(root, path, campaign, reads=None):
     ids = listed
     directories = {}
     skipped = set()
-    for entry, layout in locator.iter_cycle_dirs(path.parent):
+    for entry, layout in _walk_cycle_dirs(root, path.parent):
         _safe(path.parent, entry)
         if _exact_cycle_control(root, path.parent, entry, ".cycle.json"):
             binding, _ = read_json(root, entry / ".cycle.json", reads=reads)
         elif _exact_cycle_control(root, path.parent, entry, "manifest.json"):
             # Historical sealed cycles predate .cycle.json. Their immutable
             # manifest plus producer record and index still prove the binding.
-            document, _ = read_json(root, entry / "manifest.json", reads=reads)
+            document, _ = read_json(root, entry / "manifest.json", reads=reads, limit=manifest.MAX_MANIFEST_BYTES)
             binding = document.get("cycle", {})
         elif layout == "legacy-id" and entry.name in ids:
             binding = {"cycle_id": entry.name, "campaign_id": campaign["campaign_id"]}
@@ -778,6 +901,8 @@ def _cycle_rows(root, path, campaign, reads=None):
         if not isinstance(binding, dict) or binding.get("campaign_id") != campaign["campaign_id"]:
             raise CampaignError("campaign-cycle-binding-mismatch", entry)
         cid = binding.get("cycle_id")
+        if not isinstance(cid, str):  # a hand-edited binding: before the id is looked up in any set
+            raise CampaignError("campaign-cycle-binding-duplicate", entry)
         if cid in detached_ids:
             # A detached cycle (abandoned, no-lineage, deleted, moved) may keep its folder and
             # files; the folder is the person's, never a member the close has to account for.
@@ -786,7 +911,7 @@ def _cycle_rows(root, path, campaign, reads=None):
                 raise CampaignError("campaign-cycle-binding-duplicate", entry)
             skipped.add(cid)
             continue
-        if not isinstance(cid, str) or cid in directories or cid in skipped:
+        if cid in directories or cid in skipped:
             raise CampaignError("campaign-cycle-binding-duplicate", entry)
         directories[cid] = entry
     if set(directories) != set(ids):
@@ -814,7 +939,13 @@ def _cycle_rows(root, path, campaign, reads=None):
                          "route_id": record["route_id"], "manifest_id": None, "manifest_revision_id": None,
                          "route_closed": True})
             continue
-        document, raw = read_json(root, directory / "manifest.json", reads=reads)
+        recorded = (None if reads is not None else
+                    _sealed_as_recorded(root, directory / "manifest.json", cid, record, campaign["campaign_id"],
+                                        producer_index))
+        if recorded is not None:
+            rows.append(recorded)
+            continue
+        document, raw = read_json(root, directory / "manifest.json", reads=reads, limit=manifest.MAX_MANIFEST_BYTES)
         if reads is not None:
             earlier = [old for _old_raw, old in reads.read_manifest_snapshots(root, cid)
                        if old.get("manifest_revision_id") != document.get("manifest_revision_id")]
@@ -1306,7 +1437,8 @@ class CampaignReads:
         except OSError as exc:
             return ("error", exc.errno)
 
-    def _capture(self, path):
+    def _capture(self, path, limit=None):
+        limit = MAX_JSON if limit is None else limit
         path = self._path(path)
         rel = self._rel(path)
         self.used.add(("file", rel))
@@ -1322,11 +1454,11 @@ class CampaignReads:
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             with os.fdopen(fd, "rb") as stream:
                 before = os.fstat(stream.fileno())
-                if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_JSON:
+                if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
                     raise CampaignError("campaign-input-kind-or-size", path)
-                raw = stream.read(MAX_JSON + 1)
+                raw = stream.read(limit + 1)
                 after = os.fstat(stream.fileno())
-                if len(raw) > MAX_JSON:
+                if len(raw) > limit:
                     raise CampaignError("campaign-input-kind-or-size", path)
                 if (self._signature(before) != signature
                         or self._signature(after) != signature):
@@ -1345,14 +1477,14 @@ class CampaignReads:
         info = self.listings.get(rel) or self.files.get(rel)
         return info is not None and info["signature"] is None
 
-    def read_raw(self, root, path):
-        info = self._capture(path)
+    def read_raw(self, root, path, limit=None):
+        info = self._capture(path, limit)
         if info["error"]:
             raise CampaignError(info["error"], path)
         return info["raw"]
 
-    def read_json(self, root, path):
-        raw = self.read_raw(root, path)
+    def read_json(self, root, path, limit=None):
+        raw = self.read_raw(root, path, limit)
         if raw is None:
             raise CampaignError("campaign-input-missing", path)
         try:

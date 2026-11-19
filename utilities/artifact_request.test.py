@@ -388,22 +388,23 @@ class RequestFolderTest(S.SourceRepoStartBase):
             self.assertEqual(P.reconcile_root(self.root)["status"], "reconciled")
         self.assert_members_kept_before_the_old_campaign_is_read(order, frame, record)
 
-    def test_request_move_stops_before_the_rename_when_a_member_manifest_cannot_be_kept(self):
+    def test_request_move_does_not_use_whether_a_member_manifest_was_kept(self):
+        # As for the cycle itself: keeping the bytes is attempted and its answer is not a reason to stop the
+        # move (there is no refusal of its own; a document that cannot be replaced is met where it is replaced).
         import artifact_producer_cycle_ops as OPS
         frame, record = self.completed_request()
         target = self.target_campaign()
         source = P.cycle_dir(self.root, frame["campaign_id"], frame["cycle_id"])
-        member = source / "_internal/executions" / record["cycle_id"]
-        document = json.loads((member / "manifest.json").read_text())
-        (member / "manifest.json").write_text(json.dumps(dict(document, edited_by_hand=True)))
-        import shutil
-        shutil.rmtree(S.L.manifest_snapshot_dir(self.root, record["cycle_id"]))  # no copy of the recorded document
-        with mock.patch.object(OPS, "_campaign_is_closed", return_value=True):  # a closed campaign of members cannot be made here
-            with self.assertRaises(P.ProducerError) as caught:
-                P.cycle_move(self.root, frame["cycle_id"], campaign=target["campaign_id"])
-        self.assertEqual(caught.exception.code, "manifest-not-kept")
-        self.assertTrue(source.is_dir())  # nothing moved
-        self.assertEqual(P.read_cycle_record(self.root, record["cycle_id"])["campaign_id"], frame["campaign_id"])
+        kept = []
+
+        def cannot_keep(root, rec, directory, **kwargs):
+            kept.append(rec["cycle_id"])
+            return False
+        with mock.patch.object(OPS, "_preserve_current_manifest", side_effect=cannot_keep):
+            moved = P.cycle_move(self.root, frame["cycle_id"], campaign=target["campaign_id"])
+        self.assertEqual(moved["status"], "moved")
+        self.assertIn(record["cycle_id"], kept)  # the member's bytes were still asked to be kept
+        self.assertFalse(source.exists())
 
     def test_moved_open_member_resumes_same_cycle_in_current_campaign(self):
         leg, path, _ = self.selected([S.CODE_STAGED])

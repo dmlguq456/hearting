@@ -472,11 +472,10 @@ class CloseRefusalNamesTheCycle(TidyBase):
         self.assertIn("folder-missing=", refusal["detail"])
         self.assertIn("delete --artifact-root", refusal["detail"])
         self.assertIn("campaign-close", refusal["detail"])
-        # The condition under which the close does it by itself is the layout scan's, root-wide ...
-        for word in ("any campaign", "symbolic link", "folder it cannot read", "names no cycle or campaign",
-                     "an id seen twice", "old cycles/ layout"):
-            self.assertIn(word, refusal["detail"])
-        # ... and the delete it names is final, so look for a folder that may only be out of sight first.
+        # Nothing holds the close back here, and the text says so rather than listing what might.
+        self.assertNotIn("held-back-by", refusal["detail"])
+        self.assertIn("nothing under campaigns/ holds it back", refusal["detail"])
+        # The delete it names is final, so look for a folder that may only be out of sight first.
         self.assertIn("stays deleted even if its folder comes back", refusal["detail"])
         self.assertIn("look for the folder before deleting", refusal["detail"])
 
