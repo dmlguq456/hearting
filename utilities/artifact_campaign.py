@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -165,7 +166,7 @@ def _read_json_raw(root, path, limit=None):
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
                 raise CampaignError("campaign-input-kind-or-size", path)
-            raw = stream.read(limit + 1)
+            raw = stream.read(min(limit, info.st_size) + 1)  # not a buffer the size of the limit for a small file
             if len(raw) > limit:
                 raise CampaignError("campaign-input-kind-or-size", path)
         value = json.loads(raw)
@@ -224,26 +225,57 @@ def _validate_event_row(root, path, event, raw, expected_sequence, campaign_id, 
     return event
 
 
+# The identity a historical manifest has to show for a close to be bound to it after a root rename.
+_EVIDENCE_FIELDS = ("artifact_root_id", "campaign", "cycle", "manifest_id", "manifest_revision_id", "repository_id")
+
+
+def _evidence_view(root, candidate, reads=None):
+    """`(digest, identity fields)` of a manifest read as evidence.  The bytes are hashed as a stream and, when
+    they are the compact canonical form a sealed manifest has, the identity is read from them without parsing
+    the document (a manifest can be 255 MB); only another form is parsed, as before, under the one read
+    limit.  The caller compares the digest with the recorded one before it trusts the identity."""
+    if reads is not None:
+        got = reads.read_head(root, candidate, _EVIDENCE_FIELDS)
+        if got is None:
+            raise CampaignError("campaign-input-missing", candidate)
+        digest, head = got
+    else:
+        digest, head, _size = _file_head(root, candidate, _EVIDENCE_FIELDS)
+        if digest is None:
+            raise CampaignError("campaign-input-invalid", candidate)
+    if head is None:
+        document, raw = read_json(root, candidate, reads=reads, limit=manifest.MAX_MANIFEST_BYTES)
+        digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        head = {key: document[key] for key in _EVIDENCE_FIELDS if key in document}
+    return digest, head
+
+
 def _rename_evidence_map(root, campaign_dir, required, reads=None):
     """Read only the named historical revisions, before current fallback.
 
     A present historical revision is authoritative even when malformed. Its
     errors cannot be concealed by the current manifest for the same revision.
-    All reads participate in the export's immutable input capture.
+    All reads participate in the export's immutable input capture.  Each file
+    is hashed as a stream and shows its identity from the same pass, so the
+    answer is `{key: (path, identity fields, digest)}` and no document is held.
     """
     found = {}
     for key in sorted(required):
         cycle_id, _manifest_id, revision_id = key
         candidate = root / lifecycle.MANIFEST_SNAPSHOT_REL / cycle_id / (revision_id + ".json")
         try:
-            document, raw = read_json(root, candidate, reads=reads, limit=manifest.MAX_MANIFEST_BYTES)
+            digest, head = _evidence_view(root, candidate, reads=reads)
         except CampaignError as exc:
             if (exc.code == "campaign-input-missing"
                     or isinstance(exc.__cause__, FileNotFoundError)):
                 continue
+            # What cannot be read is not what was tampered with: a file that is not a regular file or is
+            # too big to be read under the limit is said as that.
             raise CampaignError("campaign-event-invalid", {
-                "path": str(candidate), "detail": "rename-evidence-tampered"}) from exc
-        found[key] = (candidate, document, raw)
+                "path": str(candidate),
+                "detail": ("rename-evidence-kind-or-size" if exc.code == "campaign-input-kind-or-size"
+                           else "rename-evidence-tampered")}) from exc
+        found[key] = (candidate, head, digest)
     if required.issubset(found):
         return found
     for entry, _layout in (reads.cycle_dirs(campaign_dir) if reads is not None else locator.iter_cycle_dirs(campaign_dir)):
@@ -255,14 +287,14 @@ def _rename_evidence_map(root, campaign_dir, required, reads=None):
         if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
             continue
         try:
-            document, raw = read_json(root, candidate, reads=reads, limit=manifest.MAX_MANIFEST_BYTES)
+            digest, head = _evidence_view(root, candidate, reads=reads)
         except CampaignError:
             continue
-        cycle = document.get("cycle") if isinstance(document, dict) else None
+        cycle = head.get("cycle")
         key = (cycle.get("cycle_id") if isinstance(cycle, dict) else None,
-               document.get("manifest_id"), document.get("manifest_revision_id"))
+               head.get("manifest_id"), head.get("manifest_revision_id"))
         if all(isinstance(part, str) for part in key) and key in required:
-            found.setdefault(key, (candidate, document, raw))
+            found.setdefault(key, (candidate, head, digest))
     return found
 
 
@@ -339,13 +371,13 @@ def _bind_root(root, campaign_dir, payload, snapshot, record_campaign_id, event_
                                 {"path": str(event_path), "detail": "rename-binding-mismatch",
                                  "cycle_id": cycle_id if isinstance(cycle_id, str) else None})
         if reads is not None:
-            reads.read_raw(root, Path(root) / lifecycle.MANIFEST_SNAPSHOT_REL / cycle_id / (revision_id + ".json"))
+            reads.read_head(root, Path(root) / lifecycle.MANIFEST_SNAPSHOT_REL / cycle_id / (revision_id + ".json"),
+                            _EVIDENCE_FIELDS)
         match = evidence.get((cycle_id, manifest_id, revision_id))
         if match is None:
             raise CampaignError("campaign-event-invalid",
                                 {"path": str(event_path), "detail": "rename-evidence-missing", "cycle_id": cycle_id})
-        _entry, document, raw = match
-        actual = "sha256:" + hashlib.sha256(raw).hexdigest()
+        _entry, document, actual = match
         campaign = document.get("campaign") if isinstance(document, dict) else None
         cycle = document.get("cycle") if isinstance(document, dict) else None
         if (actual != row_digest or document.get("manifest_id") != manifest_id
@@ -683,11 +715,14 @@ _BLOCKER_ADVICE = {
                      "does not help, the id is inside it",
     "not-a-cycle": "is inside a campaign folder but has neither a .cycle.json nor a manifest.json naming a cycle, so it "
                    "is not a cycle: if it is not this campaign's work (feedback, notes) move it out of campaigns/; "
-                   "if it is a cycle that lost its .cycle.json it needs that file again to count as one; "
-                   "renaming it changes nothing",
-    "old-cycles-layout": "is the oldest layout (a cycles/ folder inside a campaign), from which no move is judged: it "
-                         "stops holding things back once no cycles/ folder is left under campaigns/; moving it out "
-                         "records the cycles it held as gone until it comes back",
+                   "if it is a cycle that lost its .cycle.json, no command writes that file back, and moving the "
+                   "folder out would make campaign-close record that cycle as deleted for good, so do not move it "
+                   "for this and report it to the owner of this root; renaming it changes nothing",
+    "old-cycles-layout": "is the oldest layout (a cycles/ folder inside a campaign), from which no move is judged. It "
+                         "stops holding things back once no cycles/ folder is left under campaigns/, but no command "
+                         "settles it today, and moving it out is not the way: campaign-close would then record the "
+                         "cycles it held as deleted for good, and they do not come back when it is moved back. "
+                         "Leave it where it is and report it to the owner of this root",
 }
 
 
@@ -719,9 +754,10 @@ def _bindings_detail(root, ids, directories):
             parts.append(f"held-back-by={shown}{more}")
             kinds = list(dict.fromkeys(reason.split(" ", 1)[0] for _where, reason in blockers))
             advice = "; ".join(f"{kind}: {_BLOCKER_ADVICE[kind]}" for kind in kinds if kind in _BLOCKER_ADVICE)
+            settleable = any(kind != "old-cycles-layout" for kind in kinds)
             parts.append("next=campaign-close records a vanished folder as gone by itself once nothing under "
                          "campaigns/ of this artifact root (any campaign) holds it back; what holds it back is "
-                         f"named above. {advice}. Then run campaign-close again.")
+                         f"named above. {advice}." + (" Then run campaign-close again." if settleable else ""))
             lead = "Without waiting for that, one cycle can be recorded as gone by itself (not a step to take first):"
         else:
             parts.append("next=campaign-close records a vanished folder as gone by itself and nothing under "
@@ -757,80 +793,142 @@ def _in_its_place(root, campaign_dir, directory, record, cid):
         return False
 
 
-def _file_sha256(root, path):
-    """`sha256:<hex>` of a regular file read in chunks, so no more than one chunk is in memory, or
-    None when the file changed while it was read. A file that is not a regular one is refused as
+def _file_head(root, path, names=()):
+    """`(digest, fields, size)` of a regular file read once in chunks (see `locator.read_sealed_head`): the
+    digest is None when the file changed while it was read.  A file that is not a regular one is refused as
     `read_json` refuses it."""
     path = _safe(root, path)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, "rb") as stream:
-            before = os.fstat(stream.fileno())
-            if not stat.S_ISREG(before.st_mode):
-                raise CampaignError("campaign-input-kind-or-size", path)
-            hasher = hashlib.sha256()
-            for chunk in iter(lambda: stream.read(1 << 20), b""):
-                hasher.update(chunk)
-            after = os.fstat(stream.fileno())
+        return locator.read_sealed_head(path, names)
+    except locator.NotRegularFile as exc:
+        raise CampaignError("campaign-input-kind-or-size", path) from exc
     except OSError as exc:
         raise CampaignError("campaign-input-invalid", path) from exc
-    if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
-        return None
-    return "sha256:" + hasher.hexdigest()
 
 
-def _sealed_as_recorded(root, path, cid, record, campaign_id, index):
+# What a close takes from a manifest: who it is, who sealed it, whether it is the campaign's, the state of its
+# cycle and (for a cycle sealed while its route was open) the routes that tell whether that route has ended.
+_SEAL_FIELDS = ("artifact_root_id", "campaign", "cycle", "manifest_id", "manifest_revision_id", "producer", "routes")
+
+
+class _IndexView:
+    """The admission index and, counted once for the whole campaign, how many manifest rows say each
+    `(cycle, digest)`, so that a member costs a lookup and not a pass over every row of the root."""
+
+    def __init__(self, index):
+        self.index = index
+        self.counts = {}
+        for row in index.manifests.values():
+            if isinstance(row, dict):
+                key = (row.get("cycle_id"), row.get("manifest_digest"))
+                self.counts[key] = self.counts.get(key, 0) + 1
+
+
+def _checked_row(root, cid, campaign_id, root_id, record, document, mdigest, index_digest, reads=None):
+    """What a close does with a manifest once it is read, whichever way it was read (the whole document, or
+    the few top-level values of the sealed bytes): the document must be this cycle's, this campaign's, this
+    root's and sealed by the producer the record names, then the row; a cycle sealed `active` also answers
+    for its route.  Returns `(row, pending)`; `pending` is a route that is still open."""
+    cycle, campaign, producer = document.get("cycle"), document.get("campaign"), document.get("producer")
+    if (not isinstance(cycle, dict) or cycle.get("cycle_id") != cid or cycle.get("campaign_id") != campaign_id
+            or not isinstance(campaign, dict) or campaign.get("campaign_id") != campaign_id
+            or document.get("artifact_root_id") != root_id.artifact_root_id
+            or not isinstance(producer, dict) or producer.get("producer_id") != record.get("producer_id")):
+        raise CampaignError("campaign-seal-mismatch", cid)
+    row = {"cycle_id": cid, "state": cycle["state"], "manifest_digest": mdigest, "index_digest": index_digest,
+           "route_id": record["route_id"], "manifest_id": document["manifest_id"],
+           "manifest_revision_id": document["manifest_revision_id"]}
+    if cycle["state"] == "active":
+        outcome = _route_outcome(root, record, document, reads=reads)
+        if outcome is None:
+            return row, True
+        outcome_doc, outcome_raw = outcome
+        gates = outcome_doc.get("terminal_gates")
+        reasons = []
+        if isinstance(gates, dict):
+            for node_id, gate_row in gates.items():
+                if not isinstance(gate_row, dict) or gate_row.get("passed") is not True:
+                    reason = gate_row.get("reason") if isinstance(gate_row, dict) else None
+                    reasons.append(f"{node_id}:{reason or 'unknown'}")
+            reasons.sort()
+        row["route_closed"] = True
+        row["terminal_gate_proven"] = outcome_doc.get("terminal_gate_proven")
+        row["terminal_gate_reasons"] = reasons
+        row["route_outcome_digest"] = "sha256:" + hashlib.sha256(outcome_raw).hexdigest()
+    return row, False
+
+
+def _sealed_as_recorded(root, path, cid, record, campaign_id, view, root_id):
     """The row of a cycle whose manifest bytes are the bytes the producer sealed, read without parsing them.
 
-    Sealing validated the document, wrote it as canonical JSON and recorded its digest in three places:
-    the cycle record (which also carries its own content digest), the admission index's cycle row and its
-    manifest row (which carry the manifest and revision IDs and the campaign). When the digest of the
-    bytes on disk is all of those, the file is that canonical document byte for byte, so what a parse would show (the IDs, the
-    state, the digest of the canonical form, which is the digest of these very bytes) is what was
-    recorded, and the checks a parse would make were made when it was sealed. Anything else (bytes that
-    changed since, a legacy or non-canonical file, a missing or disagreeing record, a state still
-    `active`, which needs the document's routes) returns None and the caller reads and validates the
-    whole document as before. A 255 MB manifest costs a hash here, not a parse."""
-    stat_digest = _file_sha256(root, path)
-    if stat_digest is None:
+    Sealing validated the document, wrote it as canonical JSON and recorded its digest in three places: the
+    cycle record (which also carries its own content digest), and the admission index's cycle row and its
+    manifest row (which carry the manifest and revision IDs and the campaign).  When the digest of the bytes
+    on disk is all of those, the file is that canonical document byte for byte.  What a close needs from it
+    (its cycle, campaign, root, producer and state, and the routes of a cycle sealed `active`) is then read
+    from the bytes themselves, as a stream, never from the record's copies (a record is rewritten by every
+    producer command, so its digest says "the producer wrote this", not "this agrees with the manifest"),
+    and goes through the checks a whole read ends with (`_checked_row`).  A 255 MB manifest costs a hash.
+
+    The rule this takes, on purpose: bytes that are the ones sealed are not judged again by `validate()` as
+    it reads today.  The document was validated by the rules of the day it was sealed, and a rule tightened
+    since cannot be met by a file nobody may change, so refusing it would leave a close no person can mend.
+    Bytes that changed, a legacy or non-canonical file, a missing or disagreeing record or row, and a
+    document that does not look like what was sealed return None: the caller reads and validates the whole
+    document with every rule it has now."""
+    try:
+        stat_digest, head, _size = _file_head(root, path, _SEAL_FIELDS)
+    except CampaignError:
         return None
-    if record.get("manifest_digest") != stat_digest:
+    if stat_digest is None or head is None or record.get("manifest_digest") != stat_digest:
         return None
-    # The record is as the producer last wrote it: a hand edit of its producer or state would leave this
-    # digest of its own content behind (a record without one is read the long way).
+    # The record is as the producer last wrote it: a hand edit that left its own digest behind (or one that
+    # cannot be digested, a lone surrogate among its strings) is read the long way.
     import artifact_producer_store as store
-    if not record.get("control_record_digest") or record["control_record_digest"] != store._record_content_digest(record):
+    try:
+        own = store._record_content_digest(record)
+    except (UnicodeError, ValueError, TypeError):
         return None
-    cycle_row = index.cycles.get(cid)
+    if not record.get("control_record_digest") or record["control_record_digest"] != own:
+        return None
+    cycle_row, manifest_row = view.index.cycles.get(cid), view.index.manifests.get(cid)
     if (not isinstance(cycle_row, dict) or cycle_row.get("manifest_digest") != stat_digest
-            or cycle_row.get("campaign_id") != campaign_id or record.get("campaign_id") != campaign_id):
+            or cycle_row.get("campaign_id") != campaign_id or record.get("campaign_id") != campaign_id
+            or not isinstance(manifest_row, dict) or manifest_row.get("cycle_id") != cid
+            or manifest_row.get("manifest_digest") != stat_digest
+            or view.counts.get((cid, stat_digest)) != 1):
         return None
-    rows = [row for row in index.manifests.values()
-            if isinstance(row, dict) and row.get("cycle_id") == cid and row.get("manifest_digest") == stat_digest]
-    state = record.get("cycle_state")
-    if (len(rows) != 1 or not isinstance(state, str) or state == "active"
-            or not identity.is_well_formed(rows[0].get("manifest_id"), "manifest")
-            or not identity.is_well_formed(rows[0].get("manifest_revision_id"), "manifest_revision")
-            or not record.get("producer_id")):
+    cycle = head.get("cycle")
+    if (not isinstance(cycle, dict) or not isinstance(cycle.get("state"), str)
+            or not identity.is_well_formed(head.get("manifest_id"), "manifest")
+            or not identity.is_well_formed(head.get("manifest_revision_id"), "manifest_revision")
+            or head.get("manifest_id") != manifest_row.get("manifest_id")
+            or head.get("manifest_revision_id") != manifest_row.get("manifest_revision_id")
+            or (cycle["state"] == "active" and not isinstance(head.get("routes"), list))):
         return None
-    return {"cycle_id": cid, "state": state, "manifest_digest": stat_digest, "index_digest": stat_digest,
-            "route_id": record["route_id"], "manifest_id": rows[0]["manifest_id"],
-            "manifest_revision_id": rows[0]["manifest_revision_id"]}
+    row, pending = _checked_row(root, cid, campaign_id, root_id, record, head, stat_digest, stat_digest)
+    return row, pending
 
 
 def _walk_cycle_dirs(root, campaign_dir):
-    """`locator.iter_cycle_dirs`, one folder at a time as before, with its refusal of a leg folder that sits in a
-    request frame its record does not place there said as a refusal (`CampaignError`), naming the folder from
-    the root, instead of an exception out of `status` and `close`."""
+    """`locator.iter_cycle_dirs`, one folder at a time as before, with what stops it said as a refusal
+    (`CampaignError`) naming the folder from the root, instead of an exception out of `status` and `close`:
+    a leg folder in a request frame its record does not place there (`request-binding-invalid`), a folder
+    that cannot be read (`campaign-directory-unreadable`)."""
+    def relative(value):
+        try:
+            return Path(value).relative_to(root).as_posix()
+        except (ValueError, TypeError):
+            return str(value)
+
     try:
         yield from locator.iter_cycle_dirs(campaign_dir)
     except locator.LocatorError as exc:
-        detail = str(exc.detail)
-        try:
-            detail = Path(detail).relative_to(root).as_posix()
-        except ValueError:
-            pass
-        raise CampaignError(exc.code, detail) from exc
+        raise CampaignError(exc.code, relative(exc.detail)) from exc
+    except OSError as exc:
+        raise CampaignError("campaign-directory-unreadable",
+                            relative(exc.filename or campaign_dir)
+                            + " could not be read (permission or I/O error): make it readable, then run again") from exc
 
 
 def _cycle_rows(root, path, campaign, reads=None):
@@ -904,7 +1002,8 @@ def _cycle_rows(root, path, campaign, reads=None):
             raise CampaignError("campaign-cycle-binding-mismatch", entry)
         cid = binding.get("cycle_id")
         if not isinstance(cid, str):  # a hand-edited binding: before the id is looked up in any set
-            raise CampaignError("campaign-cycle-binding-duplicate", entry)
+            raise CampaignError("campaign-cycle-binding-mismatch",
+                                f"{entry.relative_to(root).as_posix()}: cycle_id is not a string")
         if cid in detached_ids:
             # A detached cycle (abandoned, no-lineage, deleted, moved) may keep its folder and
             # files; the folder is the person's, never a member the close has to account for.
@@ -920,6 +1019,7 @@ def _cycle_rows(root, path, campaign, reads=None):
         raise CampaignError("campaign-cycle-bindings-incomplete", _bindings_detail(root, ids, directories))
     rows = []
     pending_open = []
+    view = _IndexView(producer_index)
     for cid in sorted(ids):
         if not identity.is_well_formed(cid, "cycle"):
             raise CampaignError("campaign-cycle-id-invalid", cid)
@@ -943,9 +1043,13 @@ def _cycle_rows(root, path, campaign, reads=None):
             continue
         recorded = (None if reads is not None else
                     _sealed_as_recorded(root, directory / "manifest.json", cid, record, campaign["campaign_id"],
-                                        producer_index))
+                                        view, root_id))
         if recorded is not None:
-            rows.append(recorded)
+            row, pending = recorded
+            if pending:
+                pending_open.append((cid, record["route_id"]))
+            else:
+                rows.append(row)
             continue
         document, raw = read_json(root, directory / "manifest.json", reads=reads, limit=manifest.MAX_MANIFEST_BYTES)
         if reads is not None:
@@ -964,36 +1068,12 @@ def _cycle_rows(root, path, campaign, reads=None):
         # noncanonical JSON formatting; their bytes are never rewritten, so the
         # digest is of the bytes on disk.  Whether the record, the index and the
         # files still agree with it is the refresh's business, not the close's.
-        mdigest = "sha256:" + hashlib.sha256(raw).hexdigest()
-        cycle = document["cycle"]
-        if (cycle.get("cycle_id") != cid or cycle.get("campaign_id") != campaign["campaign_id"]
-                or document["campaign"]["campaign_id"] != campaign["campaign_id"]
-                or document["artifact_root_id"] != root_id.artifact_root_id
-                or document["producer"]["producer_id"] != record.get("producer_id")):
-            raise CampaignError("campaign-seal-mismatch", cid)
-        row = {"cycle_id": cid, "state": cycle["state"], "manifest_digest": mdigest,
-               "index_digest": manifest.manifest_digest(document),
-               "route_id": record["route_id"],
-               "manifest_id": document["manifest_id"],
-               "manifest_revision_id": document["manifest_revision_id"]}
-        if cycle["state"] == "active":
-            outcome = _route_outcome(root, record, document, reads=reads)
-            if outcome is None:
-                pending_open.append((cid, record["route_id"]))
-                continue
-            outcome_doc, outcome_raw = outcome
-            gates = outcome_doc.get("terminal_gates")
-            reasons = []
-            if isinstance(gates, dict):
-                for node_id, gate_row in gates.items():
-                    if not isinstance(gate_row, dict) or gate_row.get("passed") is not True:
-                        reason = gate_row.get("reason") if isinstance(gate_row, dict) else None
-                        reasons.append(f"{node_id}:{reason or 'unknown'}")
-                reasons.sort()
-            row["route_closed"] = True
-            row["terminal_gate_proven"] = outcome_doc.get("terminal_gate_proven")
-            row["terminal_gate_reasons"] = reasons
-            row["route_outcome_digest"] = "sha256:" + hashlib.sha256(outcome_raw).hexdigest()
+        row, pending = _checked_row(root, cid, campaign["campaign_id"], root_id, record, document,
+                                    "sha256:" + hashlib.sha256(raw).hexdigest(), manifest.manifest_digest(document),
+                                    reads=reads)
+        if pending:
+            pending_open.append((cid, record["route_id"]))
+            continue
         rows.append(row)
     if pending_open:
         raise CampaignError("campaign-cycle-provisional-active", _open_refusal_detail(pending_open))
@@ -1444,10 +1524,19 @@ class CampaignReads:
         path = self._path(path)
         rel = self._rel(path)
         self.used.add(("file", rel))
-        if rel in self.files:
-            return self.files[rel]
+        cached = self.files.get(rel)
+        if cached is not None:
+            # The first read's limit does not decide a later read that allows more: only a refusal for size is
+            # taken again, and what was read is refused to a reader that allows less.
+            if (cached.get("limit") is not None and cached["error"] == "campaign-input-kind-or-size"
+                    and limit > cached["limit"]) or (cached["raw"] is None and cached.get("digest") is not None):
+                del self.files[rel]
+            else:
+                if cached["raw"] is not None and len(cached["raw"]) > limit:
+                    return {"signature": cached["signature"], "raw": None, "error": "campaign-input-kind-or-size"}
+                return cached
         signature = self._stat(path)
-        info = {"signature": signature, "raw": None, "error": None}
+        info = {"signature": signature, "raw": None, "error": None, "limit": limit}
         self.files[rel] = info
         if signature is None:
             return info
@@ -1458,7 +1547,7 @@ class CampaignReads:
                 before = os.fstat(stream.fileno())
                 if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
                     raise CampaignError("campaign-input-kind-or-size", path)
-                raw = stream.read(limit + 1)
+                raw = stream.read(min(limit, before.st_size) + 1)
                 after = os.fstat(stream.fileno())
                 if len(raw) > limit:
                     raise CampaignError("campaign-input-kind-or-size", path)
@@ -1473,6 +1562,46 @@ class CampaignReads:
         if self._stat(path) != signature:
             self.changed.add(rel)
         return info
+
+    def read_head(self, root, path, names):
+        """`(digest, head)` of a file, or None when it is missing: the bytes are hashed as a stream and the named
+        top-level values read from them (None when they are not the canonical form), and nothing of the bytes is
+        kept but their digest and size, so what a 255 MB input costs the capture does not grow with it.  The
+        input is bound as any other: `inputs()` lists its digest and size and `check_mutation` hashes it again."""
+        path = self._path(path)
+        rel = self._rel(path)
+        self.used.add(("file", rel))
+        info = self.files.get(rel)
+        if info is None:
+            signature = self._stat(path)
+            info = {"signature": signature, "raw": None, "error": None, "limit": None,
+                    "digest": None, "size": None, "head": None}
+            self.files[rel] = info
+            if signature is not None:
+                try:
+                    _safe(self.root, path)
+                    digest, head, size = locator.read_sealed_head(path, names)
+                    if digest is None:
+                        self.changed.add(rel)
+                    info.update(digest=digest, head=head, size=size)
+                except locator.NotRegularFile:
+                    info["error"] = "campaign-input-kind-or-size"
+                except CampaignError as exc:
+                    info["error"] = exc.code
+                except OSError:
+                    info["error"] = "campaign-input-unreadable"
+                if self._stat(path) != signature:
+                    self.changed.add(rel)
+        if info["error"]:
+            raise CampaignError(info["error"], path)
+        if info["signature"] is None:
+            return None
+        if info["raw"] is not None:  # an earlier whole read of this file: the same answer from those bytes
+            head = (manifest.scan_top_fields(io.BytesIO(info["raw"]), names) if names else None)
+            return "sha256:" + hashlib.sha256(info["raw"]).hexdigest(), head
+        if info.get("digest") is None:
+            raise CampaignError("input-changed", path)
+        return info["digest"], info["head"]
 
     def is_missing(self, path):
         rel = self._rel(path)
@@ -1595,6 +1724,8 @@ class CampaignReads:
             elif kind == "directory":
                 row.update(entries=info["entries"], listing_sha256="sha256:" +
                            hashlib.sha256(canonical(info["entries"])).hexdigest())
+            elif info["raw"] is None and info.get("digest") is not None:
+                row.update(sha256=info["digest"], bytes=info["size"])
             else:
                 raw = info["raw"]
                 row.update(sha256="sha256:" + hashlib.sha256(raw).hexdigest(), bytes=len(raw))
@@ -1616,6 +1747,12 @@ class CampaignReads:
                     if path.read_bytes() != info["raw"]:
                         changed.add(rel)
                 except OSError:
+                    changed.add(rel)
+            elif info.get("digest") is not None:
+                try:
+                    if locator.read_sealed_head(path)[0] != info["digest"]:
+                        changed.add(rel)
+                except (OSError, locator.NotRegularFile):
                     changed.add(rel)
         for rel, info in self.listings.items():
             path = self.root / rel

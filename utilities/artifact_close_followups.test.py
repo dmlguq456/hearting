@@ -7,11 +7,14 @@ refusals, no exception), the entrance after a reconcile, and the place check for
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
+import dataclasses
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import io
 import shutil
+import tracemalloc
 import unittest
 from unittest import mock
 
@@ -19,6 +22,7 @@ os.environ.setdefault("AGENT_ARTIFACT_CHECKPOINT", "off")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import artifact_campaign as C
 import artifact_identity as I
+import artifact_lifecycle as LC
 import artifact_locator as LOC
 import artifact_manifest as M
 import artifact_producer as P
@@ -67,13 +71,54 @@ class Sealed(F.ProducerTestBase):
         return status["close_refusal"]
 
 
+def peak_of(function):
+    """`(result, peak bytes)` of what the Python allocator held at most while `function` ran."""
+    tracemalloc.start()
+    try:
+        result = function()
+        return result, tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+SMALL = 4 * 1024 * 1024  # what a read that does not hold a manifest may use (it holds ~2.4 MiB); the fixtures' manifests are 9 MiB and up
+
+
+def outcome(function):
+    """`closable`, or the reason a close refuses, or the exception, of a status-like read."""
+    try:
+        status = function()
+        return "closable" if status.get("closable") else (status.get("close_refusal") or {}).get("reason")
+    except C.CampaignError as exc:
+        return exc.code
+    except Exception as exc:  # noqa: BLE001
+        return type(exc).__name__
+
+
+def whole_read_rows(root, path):
+    """The rows the long way gives.  A record that does not carry its own content digest is not taken as
+    written by the producer, so every manifest is read and judged whole; the records are put back after."""
+    records = sorted((Path(root) / ".runtime/artifact-producer/v1/cycles").glob("*.json"))
+    saved = {record: record.read_bytes() for record in records}
+    try:
+        for record, raw in saved.items():
+            document = json.loads(raw)
+            document.pop("control_record_digest", None)
+            record.write_text(json.dumps(document))
+        return {row["cycle_id"]: row for row in C._snapshot(root, path)["cycles"]}
+    finally:
+        for record, raw in saved.items():
+            record.write_bytes(raw)
+
+
 # ---------------------------------------------------------------------------------------------------
 # 1: a manifest the producer wrote that is larger than the old read limit
 # ---------------------------------------------------------------------------------------------------
 
 
-class BigManifestRead(Sealed):
-    FILES = 4800
+class BigFixture(Sealed):
+    """The campaign of `Sealed` and, beside its small cycle, one whose manifest is over the old read limit."""
+    FILES = 2400
     PARTS = 3
     PART_BYTES = 240
 
@@ -81,7 +126,7 @@ class BigManifestRead(Sealed):
         super().setUp()
         self.big = self.big_cycle()
         self.manifest = Path(self.big["cycle_dir"]) / "manifest.json"
-        self.assertGreater(self.manifest.stat().st_size, C.MAX_JSON, "the fixture must be larger than the old limit")
+        self.assertGreater(self.manifest.stat().st_size, 2 * SMALL, "the fixture must be well over what a read may hold")
 
     def big_cycle(self):
         # Long paths, not many files, make the bytes: the manifest names every file about four times.
@@ -98,36 +143,33 @@ class BigManifestRead(Sealed):
         P.finalize(self.root, cycle_id=begun["cycle_id"])
         return begun
 
-    def parsed_manifests(self):
-        seen = []
-        real = C.read_json
 
-        def spy(root, path, reads=None, limit=None):
-            if Path(path).name == "manifest.json":
-                seen.append(Path(path))
-            return real(root, path, reads=reads, limit=limit)
-        return seen, mock.patch.object(C, "read_json", side_effect=spy)
+class BigManifestRead(BigFixture):
+    FILES = 4800  # a manifest larger than the old read limit
 
-    def test_status_and_close_read_a_manifest_larger_than_the_old_limit_without_parsing_it(self):
-        seen, spy = self.parsed_manifests()
-        with spy:
-            status = C.status(self.root, self.path)
-            self.assertTrue(status["closable"], status)
-            rows = {row["cycle_id"]: row for row in status["cycles"]}
-            self.assertEqual(set(rows), {self.first["cycle_id"], self.big["cycle_id"]})
-            on_disk = "sha256:" + hashlib.sha256(self.manifest.read_bytes()).hexdigest()
-            self.assertEqual(rows[self.big["cycle_id"]]["manifest_digest"], on_disk)
-            self.assertEqual(rows[self.big["cycle_id"]]["index_digest"], on_disk)
-            self.assertEqual(C.close(self.root, self.path, reason="big")["status"], "satisfied")
-        # The close and status read the same rows the long way would give (the small cycle is read in full).
-        self.assertNotIn(self.manifest, [path for path in seen])
+    def setUp(self):
+        super().setUp()
+        self.assertGreater(self.manifest.stat().st_size, C.MAX_JSON, "the fixture must be larger than the old limit")
+
+    def test_status_and_close_do_not_hold_a_manifest_larger_than_the_old_limit(self):
+        # What is observed is what the reader holds, not how it is called: a read that parses the 17 MiB
+        # document holds several times that (see the changed-bytes test), this one holds a chunk.
+        status, peak = peak_of(lambda: C.status(self.root, self.path))
+        self.assertTrue(status["closable"], status)
+        self.assertLess(peak, SMALL)
+        rows = {row["cycle_id"]: row for row in status["cycles"]}
+        self.assertEqual(set(rows), {self.first["cycle_id"], self.big["cycle_id"]})
+        on_disk = "sha256:" + hashlib.sha256(self.manifest.read_bytes()).hexdigest()
+        self.assertEqual(rows[self.big["cycle_id"]]["manifest_digest"], on_disk)
+        self.assertEqual(rows[self.big["cycle_id"]]["index_digest"], on_disk)
+        closed, peak = peak_of(lambda: C.close(self.root, self.path, reason="big"))
+        self.assertEqual(closed["status"], "satisfied")
+        self.assertLess(peak, SMALL)
         self.assertEqual(C.status(self.root, self.path)["state"], "satisfied")
 
     def test_the_fast_row_is_the_row_a_full_read_gives(self):
         fast = {row["cycle_id"]: row for row in C._snapshot(self.root, self.path)["cycles"]}
-        with mock.patch.object(C, "_sealed_as_recorded", return_value=None):
-            slow = {row["cycle_id"]: row for row in C._snapshot(self.root, self.path)["cycles"]}
-        self.assertEqual(fast, slow)
+        self.assertEqual(fast, whole_read_rows(self.root, self.path))
 
     def test_bytes_that_changed_or_a_record_that_does_not_agree_are_read_and_checked_in_full(self):
         raw = self.manifest.read_bytes()
@@ -137,11 +179,8 @@ class BigManifestRead(Sealed):
         self.assertIn(self.campaign.encode(), raw)
         # 1: the same size, a campaign that is not this one's.
         self.manifest.write_bytes(raw.replace(self.campaign.encode(), other.encode()))
-        self.assertGreater(self.manifest.stat().st_size, C.MAX_JSON)
-        seen, spy = self.parsed_manifests()
-        with spy:
-            refusal = self.refusal()
-        self.assertIn(self.manifest, seen)  # parsed, not taken as recorded
+        refusal, peak = peak_of(self.refusal)
+        self.assertGreater(peak, len(raw))  # the document was parsed, not taken as recorded
         self.assertIn(refusal["reason"], {"campaign-seal-mismatch", "campaign-cycle-binding-mismatch",
                                           "campaign-manifest-invalid"}, refusal)
         with self.assertRaises(C.CampaignError):
@@ -155,13 +194,71 @@ class BigManifestRead(Sealed):
         record = json.loads(record_raw)
         record["producer_id"] = "prod_" + "0" * 32
         record_path.write_text(json.dumps(record))
-        seen, spy = self.parsed_manifests()
-        with spy:
-            refusal = self.refusal()
-        self.assertIn(self.manifest, seen)
+        refusal, peak = peak_of(self.refusal)
+        self.assertGreater(peak, len(raw))
         self.assertEqual(refusal["reason"], "campaign-seal-mismatch", refusal)
         record_path.write_bytes(record_raw)
         self.assertTrue(C.status(self.root, self.path)["closable"])
+
+    def test_a_file_that_changes_while_it_is_hashed_is_read_the_long_way(self):
+        real = LOC.hashlib.sha256
+
+        class Touch:
+            def __init__(self, path):
+                self.inner, self.path, self.done = real(), path, False
+
+            def update(self, data):
+                if not self.done:
+                    self.done = True
+                    with open(self.path, "ab") as handle:
+                        handle.write(b" ")
+                self.inner.update(data)
+
+            def hexdigest(self):
+                return self.inner.hexdigest()
+        with mock.patch.object(LOC.hashlib, "sha256", lambda: Touch(self.manifest)):
+            digest, fields, _size = LOC.read_sealed_head(self.manifest, ("cycle",))
+        self.assertIsNone(digest)
+        # The file is not the sealed bytes any more (one space was added): the document is read and judged whole.
+        status, peak = peak_of(lambda: C.status(self.root, self.path))
+        self.assertTrue(status["closable"], status)
+        self.assertGreater(peak, self.manifest.stat().st_size)
+
+
+class BigActiveCycle(BigFixture):
+    """A cycle sealed while its route was open (`active`), the route ended since: a normal state, and the
+    shortcut answers for the route from the bytes (the whole read held every kept copy besides)."""
+
+    def big_cycle(self):
+        route, route_file = self.route(slug="big-active", campaign_key="followups")
+        begun = P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct",
+                        campaign_id=self.campaign)
+        deep = Path(begun["cycle_dir"]) / "artifacts" / "/".join(
+            ("p%d" % k) + "x" * self.PART_BYTES for k in range(self.PARTS))
+        deep.mkdir(parents=True)
+        for index in range(self.FILES):
+            (deep / ("f%05d.md" % index)).write_bytes(b"x%d\n" % index)
+        self.write_output(begun)
+        P.finalize(self.root, cycle_id=begun["cycle_id"], allow_open_route=True)
+        self.route_args = (route, route_file)
+        return begun
+
+    def test_an_open_route_is_refused_and_an_ended_one_is_closable_without_holding_the_manifest(self):
+        status, peak = peak_of(lambda: C.status(self.root, self.path))
+        self.assertEqual(status["close_refusal"]["reason"], "campaign-cycle-provisional-active", status)
+        self.assertLess(peak, SMALL)
+        self.close(*self.route_args)
+        status, peak = peak_of(lambda: C.status(self.root, self.path))
+        self.assertTrue(status["closable"], status)
+        self.assertLess(peak, SMALL)
+        self.assertEqual(status["unproven_cycles"]["count"], 1)
+        self.assertEqual({row["cycle_id"]: row for row in status["cycles"]}[self.big["cycle_id"]],
+                         whole_read_rows(self.root, self.path)[self.big["cycle_id"]] | {"disposition": "sealed-unproven"})
+
+    def test_the_fast_row_is_the_row_a_full_read_gives(self):
+        self.close(*self.route_args)
+        fast = {row["cycle_id"]: row for row in C._snapshot(self.root, self.path)["cycles"]}
+        self.assertEqual(fast, whole_read_rows(self.root, self.path))
 
 
 class ReadLimit(Sealed):
@@ -263,7 +360,8 @@ class NamedBlockers(Sealed):
         self.assertIn((self.rel(shaped), "not-a-cycle"), self.blockers())
         detail = self.detail()
         self.assertIn(self.rel(shaped) + " (not-a-cycle)", detail)
-        self.assertIn("needs that file again to count as one", detail)
+        self.assertIn("no command writes that file back", detail)
+        self.assertNotIn("needs that file again", detail)
 
     def test_files_and_hidden_names_hold_nothing_back(self):
         # Of the shapes one may suspect, these do not make the scan incomplete.
@@ -310,6 +408,64 @@ class NamedBlockers(Sealed):
         detail = self.detail()
         self.assertIn(self.rel(old) + " (old-cycles-layout)", detail)
         self.assertIn("no cycles/ folder is left", detail)
+        # What is said is what happens (see `test_moving_the_oldest_layout_out_deletes_what_it_held`): no promise of a way back.
+        self.assertIn("no command settles it today", detail)
+        self.assertIn("do not come back when it is moved back", detail)
+        self.assertNotIn("until it comes back", detail)
+        self.assertNotIn("Then run campaign-close again", detail.split("old-cycles-layout:")[1].split("Without waiting")[0])
+
+    def test_moving_the_oldest_layout_out_deletes_what_it_held(self):
+        # The fact the advice rests on: out of campaigns/ the cycles of `cycles/` are recorded as deleted by the
+        # close, and the deletion stays when the folder comes back.
+        cycle_id = self.first["cycle_id"]
+        old = self.path.parent / "cycles"
+        (old).mkdir()
+        shutil.move(self.first["cycle_dir"], str(old / cycle_id))
+        record = dict(P.read_cycle_record(self.root, cycle_id))
+        record.pop("locator", None)
+        P._write_cycle_record(self.root, record, exclusive=False)
+        member = self.sealed_in("second-member")
+        outside = self.root / "outside"
+        outside.mkdir()
+        shutil.move(str(old), str(outside / "cycles"))
+        self.assertEqual(self.blockers(), [])
+        try:
+            C.close(self.root, self.path, reason="x")
+        except C.CampaignError:
+            pass
+        self.assertTrue(P.read_cycle_record(self.root, cycle_id).get("deleted_at"))
+        shutil.move(str(outside / "cycles"), str(old))
+        P.reconcile_root(self.root)
+        self.assertTrue(P.read_cycle_record(self.root, cycle_id).get("deleted_at"))
+        self.assertIsNone(P.read_cycle_record(self.root, member["cycle_id"]).get("deleted_at"))
+
+    def test_a_folder_that_cannot_be_opened_is_unreadable_not_a_folder_without_a_campaign(self):
+        if os.geteuid() == 0:
+            self.skipTest("a superuser opens it")
+        self.vanished()
+        locked = self.root / "campaigns" / "locked"
+        locked.mkdir()
+        (locked / "campaign.json").write_text("{}")
+        os.chmod(locked, 0)
+        self.addCleanup(os.chmod, locked, 0o755)
+        self.assertIn((self.rel(locked), "unreadable"), self.blockers())
+        self.assertIn(self.rel(locked) + " (unreadable)", self.detail())
+
+    def test_a_folder_inside_the_campaign_that_cannot_be_read_is_a_refusal_not_an_exception(self):
+        if os.geteuid() == 0:
+            self.skipTest("a superuser opens it")
+        locked = self.path.parent / "locked-inside"
+        locked.mkdir()
+        os.chmod(locked, 0)
+        self.addCleanup(os.chmod, locked, 0o755)
+        status = C.status(self.root, self.path)
+        self.assertFalse(status["closable"], status)
+        self.assertEqual(status["close_refusal"]["reason"], "campaign-directory-unreadable")
+        self.assertIn(self.rel(locked), status["close_refusal"]["detail"])
+        self.assertNotIn(str(self.root), status["close_refusal"]["detail"])
+        with self.assertRaises(C.CampaignError) as caught:
+            C.close(self.root, self.path, reason="x")
+        self.assertEqual(caught.exception.code, "campaign-directory-unreadable")
 
     def test_an_unreadable_folder_is_named(self):
         self.vanished()
@@ -445,7 +601,8 @@ class PlaceHoldsForOldLayouts(Sealed):
 
 
 class HandEditedBinding(Sealed):
-    """(d) A `.cycle.json` whose `cycle_id` is not a string is a typed refusal from `status` and `close`."""
+    """(d) A `.cycle.json` whose `cycle_id` is not a string is a typed refusal from `status` and `close`, named for
+    what it is (a binding of the wrong shape), not as an id seen twice."""
 
     def test_status_and_close_refuse_in_type(self):
         binding = Path(self.first["cycle_dir"]) / LOC.CYCLE_BINDING
@@ -454,10 +611,14 @@ class HandEditedBinding(Sealed):
             binding.write_text(json.dumps(dict(document, cycle_id=bad)))
             status = C.status(self.root, self.path)
             self.assertFalse(status["closable"], status)
-            self.assertEqual(status["close_refusal"]["reason"], "campaign-cycle-binding-duplicate", bad)
+            # Not an overlap, so not called one: the binding's shape is wrong, and the folder is named from the root.
+            self.assertEqual(status["close_refusal"]["reason"], "campaign-cycle-binding-mismatch", bad)
+            self.assertIn("cycle_id is not a string", status["close_refusal"]["detail"])
+            self.assertIn(Path(self.first["cycle_dir"]).relative_to(self.root).as_posix(), status["close_refusal"]["detail"])
+            self.assertNotIn(str(self.root), status["close_refusal"]["detail"])
             with self.assertRaises(C.CampaignError) as caught:
                 C.close(self.root, self.path, reason="x")
-            self.assertEqual(caught.exception.code, "campaign-cycle-binding-duplicate")
+            self.assertEqual(caught.exception.code, "campaign-cycle-binding-mismatch")
 
 
 class LegInAnotherFrame(S.SourceRepoStartBase):
@@ -509,6 +670,440 @@ class LegInAnotherFrame(S.SourceRepoStartBase):
         with self.assertRaises(C.CampaignError) as caught:
             C.close(self.root, campaign_path, reason="x")
         self.assertEqual(caught.exception.code, "request-binding-invalid")
+
+
+# ---------------------------------------------------------------------------------------------------
+# 4: the few top-level values of a canonical document, read as a stream
+# ---------------------------------------------------------------------------------------------------
+
+
+class ScanTopFields(unittest.TestCase):
+    DOC = {"artifact_revisions": [{"a": 'x"[{', "b": [1, 2, {"c": "}]\\"}], "\u00e9": "\u00fc\n"} for _ in range(5)],
+           "artifact_root_id": "r", "campaign": {"campaign_id": "c"}, "cycle": {"state": "completed"},
+           "events": [1, 2, [3], "\\"], "producer": {"producer_id": "p"}, "routes": [{"r": 1}], "zz": 1.5}
+
+    def scan(self, raw, names, chunk=1 << 20):
+        with mock.patch.object(M, "_SCAN_CHUNK", chunk):
+            return M.scan_top_fields(io.BytesIO(raw), names)
+
+    def test_the_named_values_and_only_those_are_answered_whatever_the_chunking(self):
+        raw = M.canonical_bytes(self.DOC)
+        for chunk in (1, 2, 3, 7, 64, 1 << 20):
+            for names in (("cycle", "producer"), ("artifact_root_id", "campaign", "cycle", "producer", "routes", "zz"),
+                          ("zz",), ("nope",), ()):
+                self.assertEqual(self.scan(raw, names, chunk), {k: self.DOC[k] for k in names if k in self.DOC},
+                                 (chunk, names))
+
+    def test_random_documents_agree_with_a_parse(self):
+        import random
+        rng = random.Random(7)
+
+        def value(depth=0):
+            kind = rng.random()
+            if depth > 3 or kind < 0.3:
+                return rng.choice([1, -2, 3.5, True, None, "s", 'a"b', "}{][", "\\", '\\"', "\u00fc", '"\\"', "x\\"])
+            if kind < 0.65:
+                return [value(depth + 1) for _ in range(rng.randint(0, 4))]
+            return {rng.choice("abcdefgh") + str(i): value(depth + 1) for i in range(rng.randint(0, 4))}
+        for _ in range(400):
+            document = {rng.choice("abcdefghijk") + str(i): value() for i in range(rng.randint(1, 6))}
+            names = rng.sample(sorted(document), rng.randint(1, len(document)))
+            self.assertEqual(self.scan(M.canonical_bytes(document), names, rng.choice([1, 3, 8, 100, 1 << 20])),
+                             {k: document[k] for k in names}, document)
+
+    def test_a_document_that_is_not_the_compact_sorted_form_is_not_answered(self):
+        raw = M.canonical_bytes(self.DOC)
+        names = ("cycle", "producer", "zz")
+        for other in (json.dumps(self.DOC).encode(), json.dumps(self.DOC, sort_keys=True, indent=1).encode(),
+                      b"[1]", raw.replace(b'"cycle"', b'"bycle"', 1), raw.replace(b'"zz"', b'"campaign"', 1)):
+            self.assertIsNone(self.scan(other, names), other[:40])
+
+    def test_what_is_held_does_not_grow_with_the_document(self):
+        class Endless:
+            """About 96 MiB of one canonical document, made as it is read."""
+            def __init__(self):
+                def pieces():
+                    yield b'{"artifact_revisions":['
+                    for i in range(130000):
+                        yield b'{"p":"%s","n":%d},' % (b"x" * 700, i)
+                    yield (b'{"p":"end"}],"artifact_root_id":"r","campaign":{"campaign_id":"c"},'
+                           b'"cycle":{"state":"completed"},"producer":{"producer_id":"p"}}\n')
+                self.parts = pieces()
+                self.rest = b""
+
+            def read(self, count):
+                while len(self.rest) < count:
+                    try:
+                        self.rest += next(self.parts)
+                    except StopIteration:
+                        break
+                out, self.rest = self.rest[:count], self.rest[count:]
+                return out
+        found, peak = peak_of(lambda: M.scan_top_fields(Endless(), ("cycle", "producer", "artifact_root_id")))
+        self.assertEqual(found, {"artifact_root_id": "r", "cycle": {"state": "completed"}, "producer": {"producer_id": "p"}})
+        self.assertLess(peak, SMALL)
+
+
+# ---------------------------------------------------------------------------------------------------
+# 5: the shortcut reads the manifest's bytes, not the record's copy of them
+# ---------------------------------------------------------------------------------------------------
+
+
+class ShortcutReadsTheManifest(Sealed):
+    def provisional(self):
+        route, route_file = self.route(slug="prov", campaign_key="followups")
+        child = P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct",
+                        campaign_id=self.campaign)
+        self.write_output(child)
+        P.finalize(self.root, cycle_id=child["cycle_id"], allow_open_route=True)
+        return child
+
+    def edit_record(self, cycle_id, **changes):
+        record_path = P.cycle_record_path(self.root, cycle_id)
+        record = json.loads(record_path.read_text())
+        record.update(changes)
+        record_path.write_text(json.dumps(record, indent=2))
+
+    def launder(self, cycle_id):
+        """A producer command that rewrites the record: its own digest is made new over what was edited."""
+        OPS.cycle_mark(self.root, cycle_id, discard=True, reason="test")
+        OPS.cycle_mark(self.root, cycle_id, clear=True)
+
+    def whole_outcome(self):
+        try:
+            whole_read_rows(self.root, self.path)
+            return "closable"
+        except C.CampaignError as exc:
+            return exc.code
+
+    def test_a_state_edited_into_the_record_and_laundered_is_not_believed(self):
+        child = self.provisional()
+        cycle_id = child["cycle_id"]
+        self.assertEqual(self.refusal()["reason"], "campaign-cycle-provisional-active")
+        self.edit_record(cycle_id, cycle_state="completed")
+        self.assertEqual(self.refusal()["reason"], "campaign-cycle-provisional-active")  # its digest is stale
+        self.launder(cycle_id)
+        record = json.loads(P.cycle_record_path(self.root, cycle_id).read_text())
+        self.assertEqual(record["cycle_state"], "completed")
+        self.assertEqual(record["control_record_digest"], P._record_content_digest(record))  # the edit is now "as written"
+        self.assertEqual(self.refusal()["reason"], "campaign-cycle-provisional-active")
+        self.assertEqual(self.whole_outcome(), "campaign-cycle-provisional-active")
+        with self.assertRaises(C.CampaignError):
+            C.close(self.root, self.path, reason="x")
+
+    def test_a_producer_edited_into_the_record_and_laundered_is_not_believed(self):
+        cycle_id = self.first["cycle_id"]
+        self.edit_record(cycle_id, producer_id="prod_" + "0" * 32)
+        self.assertEqual(self.refusal()["reason"], "campaign-seal-mismatch")
+        self.launder(cycle_id)
+        self.assertEqual(self.refusal()["reason"], "campaign-seal-mismatch")
+        self.assertEqual(self.whole_outcome(), "campaign-seal-mismatch")
+
+    def test_a_cycle_a_person_abandoned_is_the_same_row_both_ways(self):
+        route, route_file = self.route(slug="to-abandon", campaign_key="followups")
+        member = P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct",
+                         campaign_id=self.campaign)
+        self.write_output(member)
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=member["cycle_id"], state="abandoned", abandon_reason="operator-decision",
+                   leave_outside=True)
+        record = P.read_cycle_record(self.root, member["cycle_id"])
+        self.assertEqual((record["state"], record["cycle_state"]), ("sealed", "abandoned"))
+        fast = {row["cycle_id"]: row for row in C._snapshot(self.root, self.path)["cycles"]}
+        self.assertEqual(fast, whole_read_rows(self.root, self.path))
+        self.assertEqual(fast[member["cycle_id"]]["state"], "abandoned")
+
+    def test_a_lone_surrogate_in_the_record_is_read_the_long_way_not_raised(self):
+        record_path = P.cycle_record_path(self.root, self.first["cycle_id"])
+        text = record_path.read_text().rstrip()
+        record_path.write_text(text[:-1] + ', "note": "\\ud800"}\n')
+        self.assertEqual(outcome(lambda: C.status(self.root, self.path)), "closable")
+        self.assertEqual(self.whole_outcome(), "closable")
+        self.assertEqual(C.close(self.root, self.path, reason="x")["status"], "satisfied")
+
+    def test_bytes_sealed_under_a_rule_since_tightened_are_not_judged_again_and_changed_bytes_are(self):
+        # The rule, on purpose: a document that is still the sealed bytes is not refused by a `validate()`
+        # tightened since (no person can mend a file that must not change); once the bytes differ, every rule
+        # of today applies.
+        rejects = M.ValidationReport(ok=False, violations=(M.Violation("new-rule", "$", "x"),))
+        with mock.patch.object(M, "validate", return_value=rejects):
+            self.assertEqual(outcome(lambda: C.status(self.root, self.path)), "closable")
+            manifest_path = Path(self.first["cycle_dir"]) / "manifest.json"
+            manifest_path.write_bytes(manifest_path.read_bytes() + b" ")
+            self.assertEqual(outcome(lambda: C.status(self.root, self.path)), "campaign-manifest-invalid")
+
+    def test_a_row_the_index_holds_twice_is_not_taken_as_recorded(self):
+        import artifact_admission as A
+        record = P.read_cycle_record(self.root, self.first["cycle_id"])
+        manifest_path = Path(self.first["cycle_dir"]) / "manifest.json"
+        index = A.load_index(self.root)
+        root_id = LC.read_root_identity(self.root)
+        got = C._sealed_as_recorded(self.root, manifest_path, self.first["cycle_id"], record, self.campaign,
+                                    C._IndexView(index), root_id)
+        self.assertIsNotNone(got)
+        row = index.manifests[self.first["cycle_id"]]
+        twice = dataclasses.replace(index, manifests=dict(index.manifests, other_key=dict(row)))
+        self.assertIsNone(C._sealed_as_recorded(self.root, manifest_path, self.first["cycle_id"], record, self.campaign,
+                                                C._IndexView(twice), root_id))
+
+
+# ---------------------------------------------------------------------------------------------------
+# 6: a root whose path changed, and what a capture keeps
+# ---------------------------------------------------------------------------------------------------
+
+
+class RenamedRoot(BigFixture):
+    """A closed campaign whose root now has another path: the evidence a close is bound to by its identity is
+    hashed as a stream and shows its identity from the same pass, whatever its size."""
+
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(C.close(self.root, self.path, reason="r")["status"], "satisfied")
+        self.wait_for_entrance()
+        self.moved = self.root.with_name(self.root.name + "-moved")
+        os.rename(self.root, self.moved)
+        self.addCleanup(lambda: os.rename(self.moved, self.root) if self.moved.exists() else None)
+        self.new_path = self.moved / self.path.relative_to(self.root)
+
+    def test_status_and_export_of_a_closed_campaign_do_not_hold_its_manifests(self):
+        status, peak = peak_of(lambda: C.status(self.moved, self.new_path))
+        self.assertEqual(status["state"], "satisfied", status)
+        self.assertLess(peak, SMALL)
+        export, peak = peak_of(lambda: C.export_current(self.moved))
+        self.assertEqual((export["status"], export["reason"]), ("valid", None), export)
+        self.assertLess(peak, SMALL)
+        rows = [row for row in export["campaigns"] if row["campaign_id"] == self.campaign]
+        self.assertEqual(rows[0]["state"], "satisfied")
+        self.assertTrue(any(item.get("bytes", 0) > 2 * SMALL for item in rows[0]["inputs"]), rows[0]["inputs"])
+
+    def evidence(self):
+        return LC.manifest_snapshot_dir(self.moved, self.big["cycle_id"])
+
+    def test_evidence_that_is_not_what_was_closed_is_still_tampered(self):
+        kept = sorted(self.evidence().glob("*.json"))
+        self.assertTrue(kept)
+        target = max(kept, key=lambda path: path.stat().st_size)
+        raw = target.read_bytes()
+        target.write_bytes(raw.replace(self.campaign.encode(), ("camp_" + "d" * 32).encode()))
+        for reader in (lambda: C.status(self.moved, self.new_path), lambda: C.export_current(self.moved)):
+            try:
+                result = reader()
+                reason = (result.get("campaigns") or [{}])[0].get("reason") or (result.get("close_refusal") or {}).get("reason")
+            except C.CampaignError as exc:
+                reason = exc.detail
+            self.assertIn("tampered", str(reason))
+
+    def test_evidence_too_large_to_read_is_not_called_tampered(self):
+        # A copy that is not in the compact form is parsed, under the one limit: past it, the answer says so.
+        target = max(self.evidence().glob("*.json"), key=lambda path: path.stat().st_size)
+        target.write_bytes(json.dumps(json.loads(target.read_bytes()), indent=1).encode())
+        with mock.patch.object(M, "MAX_MANIFEST_BYTES", 1024):
+            with self.assertRaises(C.CampaignError) as caught:
+                C.campaign_state(self.moved, self.new_path)
+        self.assertEqual(caught.exception.context["detail"], "rename-evidence-kind-or-size")
+
+
+class CaptureKeepsHashesOfBigFiles(Sealed):
+    def test_a_head_capture_keeps_a_digest_and_not_the_bytes_and_still_catches_a_change(self):
+        reads = C.CampaignReads(self.root)
+        target = Path(self.first["cycle_dir"]) / "manifest.json"
+        raw = target.read_bytes()
+        digest, head = reads.read_head(self.root, target, ("cycle",))
+        self.assertEqual(digest, "sha256:" + hashlib.sha256(raw).hexdigest())
+        self.assertEqual(head["cycle"]["cycle_id"], self.first["cycle_id"])
+        info = reads.files[target.relative_to(self.root).as_posix()]
+        self.assertIsNone(info["raw"])
+        row = next(item for item in reads.inputs() if item["path"].endswith("manifest.json"))
+        self.assertEqual((row["sha256"], row["bytes"]), (digest, len(raw)))
+        self.assertEqual(reads.check_mutation(), [])
+        target.write_bytes(raw.replace(b"a", b"b", 1))
+        self.assertIn(target.relative_to(self.root).as_posix(), reads.check_mutation())
+
+    def test_the_first_read_s_limit_does_not_decide_a_later_read_that_allows_more(self):
+        reads = C.CampaignReads(self.root)
+        with self.assertRaises(C.CampaignError):
+            reads.read_raw(self.root, self.path, limit=16)
+        self.assertTrue(reads.read_raw(self.root, self.path, limit=1 << 20))
+        self.assertTrue(reads.read_raw(self.root, self.path, limit=1 << 20))
+        with self.assertRaises(C.CampaignError):  # and a smaller one is still refused what was read
+            reads.read_raw(self.root, self.path, limit=16)
+
+
+# ---------------------------------------------------------------------------------------------------
+# 7: close, reconcile and the locator do not parse a manifest whose bytes are the recorded ones
+# ---------------------------------------------------------------------------------------------------
+
+
+class CloseDoesNotParseSealedBytes(BigFixture):
+    def test_reconcile_and_the_locator_update_hold_a_chunk(self):
+        result, peak = peak_of(lambda: P.reconcile_root(self.root))
+        self.assertNotEqual(result["status"], "skipped", result)
+        self.assertLess(peak, SMALL)
+        update, peak = peak_of(lambda: LOC.prepare_index_update(self.root, [self.campaign]))
+        self.assertLess(peak, SMALL)
+        _row, peak = peak_of(lambda: LOC.scan_campaign(self.root, self.path.parent))
+        self.assertLess(peak, SMALL)
+
+    def test_a_manifest_that_is_not_the_recorded_bytes_is_still_read_for_its_cycle(self):
+        # The identity check between the folder's binding and the manifest still holds: bytes that changed are parsed.
+        raw = self.manifest.read_bytes()
+        other = "cyc_" + "f" * 32
+        self.manifest.write_bytes(raw.replace(self.big["cycle_id"].encode(), other.encode()))
+        with self.assertRaises(LOC.LocatorError) as caught:
+            LOC.scan_campaign(self.root, self.path.parent)
+        self.assertEqual(caught.exception.code, "locator-cycle-binding-id-mismatch")
+
+    def test_a_changed_manifest_is_still_logged_as_a_change(self):
+        record = P.read_cycle_record(self.root, self.big["cycle_id"])
+        raw = self.manifest.read_bytes()
+        self.assertIn(b'"title":"', raw)
+        self.manifest.write_bytes(raw.replace(b'"title":"', b'"title":"edited ', 1))  # same size class, other content
+        P.reconcile_root(self.root)
+        after = P.read_cycle_record(self.root, self.big["cycle_id"])
+        self.assertNotEqual(after.get("control_observations"), record.get("control_observations"))
+        self.assertTrue(any(line.get("reason") == "filesystem-change"
+                            for line in after.get("history_pending") or []) or after.get("control_observations"))
+
+
+# ---------------------------------------------------------------------------------------------------
+# 8: a move looks at the documents it will write before it moves anything
+# ---------------------------------------------------------------------------------------------------
+
+
+def tree_state(root):
+    """Every file under `root` (path, mode, bytes) except what a lock leaves, to compare a disk before and after."""
+    state = {}
+    for path in sorted(Path(root).rglob("*")):
+        if path.is_symlink():
+            state[path.relative_to(root).as_posix()] = ("link", os.readlink(path))
+        elif path.is_file() and path.name not in {".lock", "producer.lock"} and "lock" not in path.parent.name:
+            state[path.relative_to(root).as_posix()] = (path.stat().st_mode, hashlib.sha256(path.read_bytes()).hexdigest())
+        elif path.is_dir():
+            state[path.relative_to(root).as_posix() + "/"] = ()
+    return state
+
+
+class MoveChecksFirst(Sealed):
+    def other(self):
+        return self.sealed_in("elsewhere", key="elsewhere-campaign")
+
+    def manifest(self):
+        return Path(self.first["cycle_dir"]) / "manifest.json"
+
+    def test_a_cycle_whose_manifest_a_person_re_saved_moves_whole(self):
+        other = self.other()
+        path = self.manifest()
+        path.write_text(json.dumps(json.loads(path.read_bytes()), indent=2))
+        moved = P.cycle_move(self.root, self.first["cycle_id"], campaign=other["campaign_id"])
+        self.assertEqual(moved["status"], "moved", moved)
+        record = P.read_cycle_record(self.root, self.first["cycle_id"])
+        self.assertEqual(record["campaign_id"], other["campaign_id"])
+        document = json.loads((Path(moved["cycle_dir"]) / "manifest.json").read_bytes())
+        self.assertEqual(document["cycle"]["campaign_id"], other["campaign_id"])
+        self.assertEqual(P.reconcile_root(self.root)["status"], "unchanged")
+        self.assertEqual(P.cycle_move(self.root, self.first["cycle_id"], campaign=other["campaign_id"])["status"], "unchanged")
+
+    def test_a_manifest_with_a_key_added_and_no_kept_copy_is_refused_before_anything_moves(self):
+        other = self.other()
+        path = self.manifest()
+        document = json.loads(path.read_bytes())
+        path.write_text(json.dumps(dict(document, edited_by_hand=True)))
+        shutil.rmtree(LC.manifest_snapshot_dir(self.root, self.first["cycle_id"]))
+        before = tree_state(self.root)
+        with self.assertRaises(P.ProducerError) as caught:
+            P.cycle_move(self.root, self.first["cycle_id"], campaign=other["campaign_id"])
+        self.assertEqual(caught.exception.code, "manifest-invalid")
+        detail = caught.exception.detail
+        self.assertIn("nothing was moved", detail)
+        self.assertIn("next=put manifest.json back as it was sealed", detail)
+        self.assertIn("unknown-key", detail)
+        self.assertIn(Path(self.first["cycle_dir"]).relative_to(self.root).as_posix(), detail)
+        self.assertEqual(tree_state(self.root), before)
+
+    def test_a_kept_copy_that_holds_another_document_is_refused_before_anything_moves(self):
+        other = self.other()
+        path = self.manifest()
+        path.write_text(json.dumps(json.loads(path.read_bytes()), indent=2))  # same document
+        kept = sorted(LC.manifest_snapshot_dir(self.root, self.first["cycle_id"]).glob("*.json"))[-1]
+        document = json.loads(kept.read_bytes())
+        document["campaign"] = dict(document["campaign"], title="not what was sealed")
+        kept.write_bytes(M.canonical_bytes(document))
+        before = tree_state(self.root)
+        with self.assertRaises(P.ProducerError) as caught:
+            P.cycle_move(self.root, self.first["cycle_id"], campaign=other["campaign_id"])
+        self.assertEqual(caught.exception.code, "manifest-snapshot-conflict")
+        self.assertIn("next=put manifest.json back as that kept copy holds it", caught.exception.detail)
+        self.assertEqual(tree_state(self.root), before)
+
+    def test_a_new_parent_is_checked_the_same_way(self):
+        other = self.other()
+        path = self.manifest()
+        document = json.loads(path.read_bytes())
+        path.write_text(json.dumps(dict(document, edited_by_hand=True)))
+        shutil.rmtree(LC.manifest_snapshot_dir(self.root, self.first["cycle_id"]))
+        before = tree_state(self.root)
+        with self.assertRaises(P.ProducerError):
+            P.cycle_move(self.root, self.first["cycle_id"], parent=other["cycle_id"])
+        self.assertEqual(tree_state(self.root), before)
+
+    def test_a_stopped_move_is_finished_by_the_next_look(self):
+        other = self.other()
+        with mock.patch.object(OPS, "_publish_document_locked", side_effect=RuntimeError("stopped")):
+            with self.assertRaises(RuntimeError):
+                P.cycle_move(self.root, self.first["cycle_id"], campaign=other["campaign_id"])
+        self.assertEqual(P.read_cycle_record(self.root, self.first["cycle_id"])["campaign_id"], self.campaign)
+        self.assertEqual(P.reconcile_root(self.root)["status"], "reconciled")
+        self.assertEqual(P.read_cycle_record(self.root, self.first["cycle_id"])["campaign_id"], other["campaign_id"])
+        self.assertEqual(P.reconcile_root(self.root)["status"], "unchanged")
+
+    def test_no_lifecycle_exception_leaves_the_move(self):
+        other = self.other()
+        # A copy kept for this revision that is a link: the keeping refuses, as a refusal.
+        real = LC.preserve_manifest_snapshot
+
+        def refuse(root, cycle_id, raw):
+            raise LC.LifecycleError("manifest-snapshot-invalid", "unreadable manifest document")
+        with mock.patch.object(LC, "preserve_manifest_snapshot", side_effect=refuse):
+            with self.assertRaises((P.ProducerError, C.CampaignError)):
+                P.cycle_move(self.root, self.first["cycle_id"], campaign=other["campaign_id"])
+        self.assertIs(real, LC.preserve_manifest_snapshot)
+
+
+class MemberMove(Q.RequestFolderTest):
+    """The same for the members of a request folder, which move with their frame."""
+
+    def member_manifest(self, frame, record):
+        source = P.cycle_dir(self.root, frame["campaign_id"], frame["cycle_id"])
+        return source, source / "_internal/executions" / record["cycle_id"] / "manifest.json"
+
+    def test_a_member_re_saved_by_a_person_moves_with_its_frame(self):
+        frame, record = self.completed_request()
+        target = self.target_campaign()
+        _source, member = self.member_manifest(frame, record)
+        member.write_text(json.dumps(json.loads(member.read_bytes()), indent=2))
+        moved = P.cycle_move(self.root, frame["cycle_id"], campaign=target["campaign_id"])
+        self.assertEqual(moved["status"], "moved", moved)
+        for cycle_id in (frame["cycle_id"], record["cycle_id"]):
+            self.assertEqual(P.read_cycle_record(self.root, cycle_id)["campaign_id"], target["campaign_id"])
+        self.assertIn(record["cycle_id"], P.read_campaign(self.root, target["campaign_id"])["cycles"])
+        self.assertNotIn(record["cycle_id"], P.read_campaign(self.root, frame["campaign_id"])["cycles"])
+        self.assertEqual(P.reconcile_root(self.root)["status"], "unchanged")
+
+    def test_a_member_with_a_key_added_and_no_kept_copy_stops_the_move_before_the_rename(self):
+        frame, record = self.completed_request()
+        target = self.target_campaign()
+        source, member = self.member_manifest(frame, record)
+        document = json.loads(member.read_bytes())
+        member.write_text(json.dumps(dict(document, edited_by_hand=True)))
+        shutil.rmtree(S.L.manifest_snapshot_dir(self.root, record["cycle_id"]))
+        before = tree_state(self.root)
+        with self.assertRaises(P.ProducerError) as caught:
+            P.cycle_move(self.root, frame["cycle_id"], campaign=target["campaign_id"])
+        self.assertEqual(caught.exception.code, "manifest-invalid")
+        self.assertIn(member.parent.relative_to(self.root).as_posix(), caught.exception.detail)
+        self.assertIn("nothing was moved", caught.exception.detail)
+        self.assertTrue(source.is_dir())
+        self.assertEqual(tree_state(self.root), before)
 
 
 if __name__ == "__main__":

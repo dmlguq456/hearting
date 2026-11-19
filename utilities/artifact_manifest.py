@@ -48,10 +48,11 @@ _MAX_PAYLOAD_BYTES = 64 * 1024
 
 # The most a reader parses of one `manifest.json` when it has to read the document itself.  A cycle
 # seals one manifest whatever its file count (about 1.7 KB per file; 150,000 files made 255 MB), so
-# the writer has no cap of its own and the reader must not be the one that stops such a cycle:
-# a reader that can show the bytes are the ones the producer sealed and recorded (see
-# `artifact_campaign._sealed_as_recorded`) reads no JSON at all, whatever the size.  Only bytes
-# that changed since the seal, or a legacy file, are parsed, and then under this one limit.
+# the writer has no cap of its own and the reader must not be the one that stops such a cycle.  A
+# reader that can show the bytes are the ones the producer sealed and recorded (see
+# `artifact_campaign._sealed_as_recorded`) reads the few top-level values it needs as a stream
+# (`scan_top_fields`) and parses no document, whatever the size.  Only bytes that changed since the
+# seal, or a legacy file, are parsed, and then under this one limit.
 MAX_MANIFEST_BYTES = 512 * 1024 * 1024
 
 _EVENT_TYPES = frozenset(
@@ -349,6 +350,222 @@ def digest_bytes(data: bytes) -> str:
 
 def manifest_digest(document: Mapping[str, Any]) -> str:
     return digest_bytes(canonical_bytes(document))
+
+
+# ---------------------------------------------------------------------------
+# A few top-level values of a canonical document, read as a stream
+# ---------------------------------------------------------------------------
+#
+# A manifest grows with its file count (255 MB at 150,000 files) and nearly all of it is
+# `artifact_revisions` and `events`, which a caller that only wants `cycle`, `producer` or `routes`
+# has no use for.  `scan_top_fields` walks the compact, sorted-key form `canonical_bytes` writes, one
+# chunk at a time, and parses only the named top-level values: memory does not grow with the size.
+# It answers `None` for anything that is not that form (spaces, another key order, a duplicate key,
+# a truncated or misplaced bracket), so a caller reads such a file the long way.  It does not prove
+# that the bytes are valid JSON everywhere: the bytes must already be known to be the canonical
+# document (their digest is the recorded one), or the caller must be ready for a wrong answer.
+
+_SCAN_CHUNK = 256 << 10
+_SCAN_MAX_VALUE = 4 << 20  # the most one wanted value may take (routes, cycle, producer are a few KB)
+_SCAN_MAX_STRING = 64 << 20
+_SCAN_MAX_KEY = 1 << 20
+_JSON_STRING = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*"', re.S)
+_JSON_BRACKETS = re.compile(rb"[\[\]{}]")
+_JSON_TOKENS = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]', re.S)
+_JSON_SCALAR = re.compile(rb"[-+.0-9A-Za-z]+")
+
+
+def _open_string_start(data: bytes) -> int:
+    """Where a string that `data` ends inside begins, or `len(data)` when it ends outside any string."""
+    unescaped = data.replace(b"\\\\", b"").replace(b'\\"', b"").count(b'"')
+    if not unescaped & 1:
+        return len(data)
+    at = len(data)
+    while True:
+        at = data.rfind(b'"', 0, at)
+        if at < 0:
+            return len(data)
+        back = at
+        while back > 0 and data[back - 1] == 92:
+            back -= 1
+        if (at - back) % 2 == 0:
+            return at
+
+
+class _TopScan:
+    def __init__(self, stream: Any, hasher: Any, max_value: int) -> None:
+        self.stream, self.hasher, self.max_value = stream, hasher, max_value
+        self.buf, self.pos, self.eof = b"", 0, False
+
+    def more(self) -> bool:
+        if self.eof:
+            return False
+        chunk = self.stream.read(_SCAN_CHUNK)
+        if not chunk:
+            self.eof = True
+            return False
+        if self.hasher is not None:
+            self.hasher.update(chunk)
+        self.buf = self.buf[self.pos:] + chunk
+        self.pos = 0
+        return True
+
+    def need(self, count: int) -> bool:
+        while len(self.buf) - self.pos < count:
+            if not self.more():
+                return False
+        return True
+
+    def take(self, expected: bytes) -> bool:
+        if not self.need(1) or self.buf[self.pos:self.pos + 1] != expected:
+            return False
+        self.pos += 1
+        return True
+
+    def key(self) -> Optional[str]:
+        if not self.need(1) or self.buf[self.pos] != 34:
+            return None
+        while True:
+            found = _JSON_STRING.match(self.buf, self.pos)
+            if found is not None:
+                break
+            if len(self.buf) - self.pos > _SCAN_MAX_KEY or not self.more():
+                return None
+        self.pos = found.end()
+        try:
+            value = json.loads(found.group())
+        except ValueError:
+            return None
+        return value if isinstance(value, str) else None
+
+    def value(self, capture: bool) -> Optional[bytes]:
+        """Skip (or, with `capture`, return) the value at the cursor; `None` when it cannot be taken."""
+        if not self.need(1):
+            return None
+        first = self.buf[self.pos]
+        if first == 34:
+            while True:
+                found = _JSON_STRING.match(self.buf, self.pos)
+                if found is not None:
+                    break
+                if len(self.buf) - self.pos > _SCAN_MAX_STRING or not self.more():
+                    return None
+            raw = self.buf[self.pos:found.end()]
+            self.pos = found.end()
+            return raw if not capture or len(raw) <= self.max_value else None
+        if first in b"{[":
+            return self.container(capture)
+        while True:
+            found = _JSON_SCALAR.match(self.buf, self.pos)
+            if found is not None and (found.end() < len(self.buf) or self.eof):
+                break
+            if found is None and self.pos < len(self.buf):
+                return None
+            if not self.more():
+                if found is None:
+                    return None
+                break
+        raw = self.buf[self.pos:found.end()]
+        self.pos = found.end()
+        return raw
+
+    def container(self, capture: bool) -> Optional[bytes]:
+        parts: List[bytes] = []
+        taken = 0
+        depth = 0
+        while True:
+            if self.pos >= len(self.buf) and not self.more():
+                return None
+            data = self.buf[self.pos:]
+            safe = _open_string_start(data)
+            body = _JSON_STRING.sub(b"0", data[:safe])
+            if safe < len(data) and len(data) - safe > _SCAN_MAX_STRING:
+                return None
+            reached = False
+            level = depth
+            for found in _JSON_BRACKETS.finditer(body):
+                if body[found.start()] in b"{[":
+                    level += 1
+                else:
+                    level -= 1
+                    if level == 0:
+                        reached = True
+                        break
+            if not reached:
+                if capture:
+                    taken += safe
+                    if taken > self.max_value:
+                        return None
+                    parts.append(data[:safe])
+                self.pos += safe
+                depth = level
+                if not self.more():
+                    return None
+                continue
+            level = depth
+            end = None
+            for found in _JSON_TOKENS.finditer(data, 0, safe):
+                token = found.group()
+                if token[0] == 34:
+                    continue
+                if token in (b"{", b"["):
+                    level += 1
+                else:
+                    level -= 1
+                    if level == 0:
+                        end = found.end()
+                        break
+            if end is None:
+                return None
+            if capture:
+                taken += end
+                if taken > self.max_value:
+                    return None
+                parts.append(data[:end])
+            self.pos += end
+            return b"".join(parts) if capture else b""
+
+
+def scan_top_fields(stream: Any, names: Iterable[str], *, hasher: Any = None,
+                    max_value: int = _SCAN_MAX_VALUE) -> Optional[Dict[str, Any]]:
+    """The named top-level values of a canonical document read from `stream`, or `None`.
+
+    Only values that are present are returned (a name the document lacks is absent from the answer).
+    Reading stops once every name is found or a later key shows it cannot be there (the keys are
+    sorted); with a `hasher` the rest is not read, so the caller finishes the stream itself."""
+    wanted = set(names)
+    last_wanted = max(wanted) if wanted else ""
+    scan = _TopScan(stream, hasher, max_value)
+    if not scan.take(b"{"):
+        return None
+    found: Dict[str, Any] = {}
+    previous: Optional[str] = None
+    if scan.need(1) and scan.buf[scan.pos:scan.pos + 1] == b"}":
+        return found
+    decoder = json.JSONDecoder()
+    while True:
+        key = scan.key()
+        if key is None or (previous is not None and key <= previous) or not scan.take(b":"):
+            return None
+        previous = key
+        taken = scan.value(key in wanted)
+        if taken is None:
+            return None
+        if key in wanted:
+            try:
+                text = taken.decode("utf-8")
+                value, end = decoder.raw_decode(text)
+            except (ValueError, UnicodeError, RecursionError):
+                return None
+            if end != len(text):
+                return None
+            found[key] = value
+        if len(found) == len(wanted) or key >= last_wanted:
+            return found
+        if scan.take(b"}"):
+            return found
+        if not scan.take(b","):
+            return None
 
 
 # ---------------------------------------------------------------------------

@@ -378,6 +378,14 @@ def _read_manifest_raw(directory: Path) -> Optional[Tuple[bytes, Dict[str, Any]]
     return (raw, document) if isinstance(document, dict) else None
 
 
+def _streamed_digest(path: Path) -> Optional[str]:
+    """`sha256:<hex>` of a regular file read a chunk at a time, or None when it cannot be read that way."""
+    try:
+        return artifact_locator.read_sealed_head(path)[0]
+    except (OSError, artifact_locator.NotRegularFile):
+        return None
+
+
 def _observe_control_changes(root: Path, cycle_id: str, *, now: Optional[float] = None,
                              directory: Optional[Path] = None, locator_cache: bool = False,
                              record: Any = _UNSET, stored: Any = _UNSET) -> bool:
@@ -429,8 +437,13 @@ def _observe_control_changes(root: Path, cycle_id: str, *, now: Optional[float] 
             elif path.is_symlink() or not path.is_file():
                 after = None
             elif path.name == "manifest.json":
-                parsed = _read_json(path)
-                after = artifact_manifest.manifest_digest(parsed) if parsed is not None else _digest(path.read_bytes())
+                # The bytes the record names are not parsed (a manifest can be 255 MB): their digest is the answer.
+                streamed = _streamed_digest(path)
+                if streamed is not None and streamed == expected:
+                    after = expected
+                else:
+                    parsed = _read_json(path)
+                    after = artifact_manifest.manifest_digest(parsed) if parsed is not None else _digest(path.read_bytes())
             else:
                 after = _digest(path.read_bytes())
             before = prior.get(rel, expected) if baselines.get(rel, expected) == expected else expected
