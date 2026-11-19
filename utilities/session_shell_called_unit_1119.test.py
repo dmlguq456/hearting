@@ -113,7 +113,10 @@ assert.match(line(64),/^⠋ code-review claude Opus 5\.5 xhigh +3m$/);
 assert.match(line(48),/^⠋ code-review claude Opus 5\.5 3m$/);          // the effort has gone
 assert.match(line(44),/^⠋ code-review Opus 5\.5 +3m$/);                // then the harness
 assert.match(line(32),/^⠋ code-review +3m$/);                         // then the model: the name and the time stay
-assert.equal(line(28),'⠋ code-review');                                // the name whole, never cut in the middle, where the time has no room
+assert.equal(line(28),'⠋ code-review');                                // the name whole from 27 cells, where the time has no room
+assert.equal(line(27),'⠋ code-review');
+assert.equal(line(26),'⠋ code-revi…');                                  // narrower, the name is cut and ends in `…`
+assert.equal(line(24),'⠋ code-re…');
 """)
 
     def test_a_route_with_no_called_unit_reads_as_it_did(self):
@@ -157,6 +160,33 @@ assert(/│ code +\d+m$/.test(wide[1]),wide.join('\n'));
 // Narrower: the name stays in the cell with as much of the model as it holds (the effort, then the harness, give way).
 const mid=only(R,100,{side:false});
 assert(/│ code-review Opus 5.5 +│/.test(mid[1]),mid.join('\n'));
+""")
+
+    def test_under_the_route_a_called_row_never_takes_from_its_callers_row_at_any_width(self):
+        self.node(r"""
+const bars=s=>[...s].reduce((a,c,i,all)=>c==='│'?[...a,cells(all.slice(0,i).join(''))]:a,[]);
+const flat=s=>s.replace(/\s+/g,' ').trim();
+const owned=(title,h,m,e)=>staged([worker('claude','Sonnet 5.5','high','22%')],{title,paint:{glyph:P('⠸'),harness:P(h),model_text:P(m),effort:P(e)}});
+const withUnit=(r,c)=>({...r,workers_live:r.workers_live.map(w=>({...w,called:[c]}))});
+const mixes=[
+ ['usual',owned('rate limiting','claude','Opus 5.5','xhigh'),called('code-review','claude','Opus 5.5','xhigh','3m')],
+ ['short title',owned('auth','claude','Opus 5.5','xhigh'),called('code-review','claude','Opus 5.5','xhigh','3m')],
+ ['a longer worker cell',owned('rate limiting','claude','Opus 5.5','high'),called('code-review','claude','Sonnet 5.5','xhigh','3m')],
+ ['the longest worker cell',owned('rate limiting','claude','Opus 5.5','high'),called('code-review','codex','GPT-5.5-codex-max','xhigh','3m')],
+ ['a longer time',owned('auth','claude','Opus 5.5','high'),called('code-review','codex','GPT-5.5-codex-max','xhigh','1h 5m')],
+];
+for(const [name,route,unit] of mixes)for(const width of [...Array(111).keys()].map(i=>i+40)){
+ const plain=only(route,width,{side:false}),rows=only(withUnit(route,unit),width,{side:false});
+ assert.equal(rows.length,plain.length+1,name+' '+width);
+ // the route's rows read letter for letter as they read with no called unit (only the blanks between cells may differ)
+ assert.deepEqual([rows[0],...rows.slice(2)].map(flat),plain.map(flat),name+' '+width+'\n'+rows.join('\n')+'\n'+plain.join('\n'));
+ // the called row stands in the route row's columns: its bars at the route row's cells (a route row cut short by its own time
+ // keeps fewer bars, those it keeps are the same)
+ const rb=bars(rows[0]),cb=bars(rows[1]);
+ assert.deepEqual(cb.slice(0,rb.length),rb,name+' '+width+'\n'+rows.join('\n'));
+ // two cells in, the name and the time stay in the row it was given
+ assert(/^ {2}⠋/.test(rows[1]),name+' '+width+'\n'+rows.join('\n'));
+}
 """)
 
     def test_the_three_harness_panels_draw_the_same_rows(self):

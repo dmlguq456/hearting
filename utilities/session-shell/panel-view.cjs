@@ -1007,11 +1007,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const calledBottom=new Map(listed.map(r=>[r,side?[]:flatCalled(r).filter(([c])=>clean(c.unit_word||'').trim()).map(([c,depth])=>({
       title:c.title||'',kind:c.kind,paint:c.paint||{},elapsed:c.elapsed,unit_route:true,unit_word:c.unit_word,kind_word:c.kind_word,
       kind_field:c.kind_field,indent:2+2*depth,shape:''}))]));
-    const cols=[...listed,...[...calledBottom.values()].flat()];
+    const calledAll=[...calledBottom.values()].flat();
     const indentOf=r=>r.indent||0;
     const titleCols=x=>[...(indentOf(x)?[text(' '.repeat(indentOf(x)))]:[]),...titleOf(x,'')];
-    const elapsedWidth=Math.max(0,...cols.map(r=>measure(r.elapsed||'')));
-    const columnWidth=(pick)=>Math.max(0,...cols.map(r=>size(pick(r))));
+    // The columns of a set of rows: the width of one cell of each, and of the time. The routes' columns are the routes' alone;
+    // the called rows' are counted only in the set bottomLayout tries them in.
+    const columnsOf=set=>({set,elapsed:Math.max(0,...set.map(r=>measure(r.elapsed||''))),width:pick=>Math.max(0,...set.map(r=>size(pick(r))))});
+    const routeCols=columnsOf(listed);
     // Under the route (`side:false`) a unit route's worker is its unit: the unit's short name leads the doer column, dim as a role word.
     // The column is as wide as the routes' harness, model and effort. A unit's name is counted only where every route of the box is a
     // unit route (so no other route's row changes); beside any other route the name stands in the column's cells if they hold it
@@ -1093,10 +1095,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // the stage word alone; the title keeps ten cells (or its whole width) through both. Short of that the rows keep the
     // earlier columns (title, owner, context, then the stage). 11-18: the command column (`>_ Bash`) is gone, as it is
     // beside the native area: a route reads its harness, model and context number, and its NOW on the row under it.
-    const planBottom=(ow,gw)=>{
-      const kinds=cols.map(kindCell);
+    const planBottom=(ow,gw,C)=>{
+      const kinds=C.set.map(kindCell);
       const widths=Object.fromEntries(['kind','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
-      const longest=columnWidth(titleCols),avail=inner-(2+3+ow+3+gw+1+elapsedWidth);
+      const longest=C.width(titleCols),avail=inner-(2+3+ow+3+gw+1+C.elapsed);
       const order=widths.kind>widths.full?['kind','full','short']:['full','short'];
       for(const level of order){
         if(!widths[level])break;
@@ -1111,13 +1113,25 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // cell only where that changes nothing else in the box: the same stage form, the same title width (so beside a stage cell with
     // room to spare), and only from the richest stage form the box can have (the first of the order), so a width that widens it
     // widens it at every wider width; widened or not, every row's columns stand at the same cells and no row lends another its cells.
+    // 11-19 (review of #1742): a unit a worker called never takes from its caller's row. The columns and the stage form are the
+    // routes' alone (`routeCols`: the box as it stands with no called unit); the called rows are drawn into them (the title cut
+    // with `…` and empty where no cells are left, the worker cell folded in the narrow worker line's order). Only where the
+    // columns grown by the called rows leave every route row reading the same, letter for letter (as it reads in the routes'
+    // own), the box takes those wider columns, as it takes the widened named column above.
     let bottomSet;
+    const layoutOf=C=>{
+      const gw=C.width(x=>leadPaint(x).gauge5||[]),named=C.width(x=>doerCell(x,Infinity)),
+        base=listed.every(y=>y.unit_route===true)?named:C.width(x=>owner(x,false)),plan=planBottom(base,gw,C);
+      if(named>base&&plan.level&&plan.top){const wide=planBottom(named,gw,C);if(wide.level===plan.level&&wide.title===plan.title)return {ow:named,gw,plan:wide,C};}
+      return {ow:base,gw,plan,C};
+    };
     const bottomLayout=()=>{
       if(bottomSet)return bottomSet;
-      const gw=columnWidth(x=>leadPaint(x).gauge5||[]),named=columnWidth(x=>doerCell(x,Infinity)),
-        base=listed.every(y=>y.unit_route===true)?named:columnWidth(x=>owner(x,false)),plan=planBottom(base,gw);
-      if(named>base&&plan.level&&plan.top){const wide=planBottom(named,gw);if(wide.level===plan.level&&wide.title===plan.title)return bottomSet={ow:named,gw,plan:wide};}
-      return bottomSet={ow:base,gw,plan};
+      const own=layoutOf(routeCols);
+      if(!calledAll.length)return bottomSet=own;
+      const grown=layoutOf(columnsOf([...listed,...calledAll])),letters=parts=>clean(parts.map(p=>p.text).join('')).replace(/\s+/g,' ').trim();
+      return bottomSet=grown.plan.level===own.plan.level&&listed.every(r=>letters(folded(r,own))===letters(folded(r,grown)))
+        &&calledAll.every(c=>{folded(c,grown);return !clipped;})?grown:own;
     };
     // A unit route's doer cell in a column `width` wide: its name, then as much of the effort, harness and model as the column holds,
     // in the order the narrow worker line gives them up (effort, then harness, then model; the name stays last). A column that
@@ -1132,32 +1146,42 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       return owner(r,false);
     };
-    function folded(r){
+    let clipped=false;   // the last bottom row folded had its end cut away by the width
+    function folded(r,laid){
       // 11-18: beside the native area the one-row form is the leader's; under it the row reads the owner, whose NOW stands under it.
       const p=side?r.paint||{}:leadPaint(r),ind=indentOf(r),lead=[...(ind?[text(' '.repeat(ind))]:[]),routeGlyph(r,p.harness),text(' ')];
       if(!side){
-        const {ow,gw,plan}=bottomLayout(),doer=doerCell(r,ow);
+        const lay=laid||bottomLayout(),{ow,gw,plan}=lay,C=lay.C,calledRow=ind>0;
+        // A called row is drawn into columns it did not make: its title is cut to what is left of the title's; its worker cell is the
+        // unit's name with what the column holds, else the name cut (the name is what the cell is for).
+        const calledCell=(c,width)=>{const cell=doerCell(c,width),unit=clean(c.unit_word||'').trim();
+          return cell.length&&clean(cell[0].text)===unit?cell:fit([text(unit,'dim')],width);};
+        const fit=(parts,room)=>calledRow&&room<1?[]:cut(parts,room),doer=calledRow?calledCell(r,ow):doerCell(r,ow);
+        // The time of a called row is cut to the width the routes' times leave.
+        const stamp=r.elapsed?calledRow&&measure(r.elapsed)>C.elapsed?fit([text(r.elapsed)],C.elapsed):[text(r.elapsed)]:[];
+        // The title column is as wide as the routes' make it; a called row's two cells in are never wider than it (the bars stay).
+        const avail=inner-(2+3+ow+3+gw+3+1+C.elapsed),titleWidth=plan.level?plan.title:Math.min(C.width(titleCols),Math.max(6,avail-C.width(third),Math.floor(avail/2)));
+        const shift=calledRow?Math.min(ind,titleWidth):ind,row=calledRow?[text(' '.repeat(shift)),routeGlyph(r,p.harness),text(' ')]:lead;
         if(plan.level){
-          const kind=plan.kinds[cols.indexOf(r)],cell=kind?kind[plan.level]:[],name=cut(titleOf(r),plan.title-ind);
-          const parts=[...lead,...name,pad(plan.title-ind-size(name)),text(' │ '),...doer,pad(ow-size(doer)),text(' │ '),
+          const at=C.set.indexOf(r),kind=at>=0?plan.kinds[at]:kindCell(r),cell=kind?kind[plan.level]:[],name=fit(titleOf(r),plan.title-shift);
+          const parts=[...row,...name,pad(plan.title-shift-size(name)),text(' │ '),...doer,pad(ow-size(doer)),text(' │ '),
             ...(p.gauge5||[]),pad(gw-size(p.gauge5||[])),text(' │ '),...cell];
-          const end=r.elapsed?[text(' '),text(r.elapsed)]:[],left=cut(parts,inner-size(end));
+          const end=stamp.length?[text(' '),...stamp]:[],left=cut(parts,inner-size(end));clipped=size(parts)>inner-size(end);
           return [...left,pad(inner-size(left)-size(end)),...end];
         }
         // The title gives way first, but keeps half of what the stage column would take.
-        const avail=inner-(2+3+ow+3+gw+3+1+elapsedWidth),titleWidth=Math.min(columnWidth(titleCols),Math.max(6,avail-columnWidth(third),Math.floor(avail/2)));
-        const name=cut(titleOf(r),titleWidth-ind);
-        const base=[...lead,...name,pad(titleWidth-ind-size(name)),text(' │ '),...doer,pad(ow-size(doer)),text(' │ '),
+        const name=fit(titleOf(r),titleWidth-shift);
+        const base=[...row,...name,pad(titleWidth-shift-size(name)),text(' │ '),...doer,pad(ow-size(doer)),text(' │ '),
           ...(p.gauge5||[]),pad(gw-size(p.gauge5||[]))];
         // The elapsed time keeps the right edge; the stage gives way first, whole (spec rule 30 (d)).
-        const end=r.elapsed?[text(' '),text(r.elapsed)]:[],whole=[...base,text(' │ '),...third(r)];
-        const left=cut(third(r).length&&size(whole)<=inner-size(end)?whole:base,inner-size(end));
+        const end=stamp.length?[text(' '),...stamp]:[],whole=[...base,text(' │ '),...third(r)];
+        const left=cut(third(r).length&&size(whole)<=inner-size(end)?whole:base,inner-size(end));clipped=size(base)>inner-size(end);
         return [...left,pad(inner-size(left)-size(end)),...end];
       }
       // As in leadRow(): the title gives way first, and each fixed value
       // (harness, model, context, time) shows whole or not at all.
       const H=p.harness?[p.harness]:[],M=p.model_text?[p.model_text]:[],C=p.ctx?[p.ctx]:[];
-      const E=elapsedWidth?[text(' '.repeat(elapsedWidth-measure(r.elapsed||''))+(r.elapsed||''))]:[];
+      const E=routeCols.elapsed?[text(' '.repeat(routeCols.elapsed-measure(r.elapsed||''))+(r.elapsed||''))]:[];
       const drops=routeLine==='model'?[[H,M,C],[H,M],[H],[]]:[[H,C,E],[H,E],[E],[]];
       const join=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
       const right=drops.map(join).find(values=>!values.length||inner-2-size(values)-1>=4)||[];

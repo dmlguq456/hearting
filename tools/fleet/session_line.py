@@ -814,7 +814,7 @@ def called_tree(called, caller, now, depth=0):
         if not isinstance(item, dict) or item.get("caller") != caller or not item.get("unit"):
             continue
         shown = {"unit": str(item["unit"])[:48],
-                 "marker": item["marker"] if item.get("marker") in ("working", "idle", "blocked") else "idle"}
+                 "marker": item["marker"] if item.get("marker") in ("working", "idle", "blocked", "dead", "stale") else "idle"}
         for key, limit in (("harness", 64), ("effort", 64)):
             if isinstance(item.get(key), str) and 0 < len(item[key]) <= limit:
                 shown[key] = item[key]

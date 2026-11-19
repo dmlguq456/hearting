@@ -4,10 +4,11 @@
     one-unit route; an owner that shares its slug with the stage worker; the called unit running or just ended): the called row's
     `parent_slug` and its calling session's id are not owner links.
   * `live._stand_called_units` follows the caller's attempt to its row and its route (on, while that is a called unit's), lists
-    the legs that still run on that route as `called`, and takes them out of the list of routes: no count of routes holds one. A
+    the legs on that route as `called` (all but one that ended cleanly: a dead leg not yet closed, one waiting, one not known stand with
+    their state), and takes them out of the list of routes: no count of routes holds one. A
     chain that breaks (the calling row is not read) or turns back on itself leaves the leg the route it was.
   * The panel's route rows carry them under the worker (or the lead) that called, and the tables draw one indented row each
-    under the route, in its columns; the popup's unfolded rows draw one under the worker rows.
+    under the route, in its columns; the popup's unfolded rows draw one right under the worker row that called it, and a press on the table's called row opens the route.
 Everything is synthetic: the rows are the registry's own text, read by the collector's own reader.
 """
 import os, sys  # noqa: E401
@@ -114,21 +115,23 @@ class World:
         self.row(status, slug, {"attempt_id": attempt, "dispatch_depth": 1, "worker_type": "review" if "review" in unit else "worker",
                  "capability": "unit", "unit": unit, "route_id": rec["route_id"], "route_hash": rec["route_hash"], "route_file": path,
                  "route_node": "unit", "harness": "claude", "model": model, "effort": effort, "workflow_completion": "runtime-v1",
-                 "intensity": "quick", **({"caller_attempt_id": caller} if caller else {}), "parent_sid": SID}, minutes)
+                 "intensity": "quick", "attempt_schema_version": 2, "transport": "headless", "execution_surface": "registered-headless", "registered_worker": 1,
+                 "fallback_hop": "same-harness-headless", **({"caller_attempt_id": caller} if caller else {}), "parent_sid": SID}, minutes)
         if status == "done":
             self.evidence[rec["route_id"]] = {"unit": {"status": "done", "slug": "unit", "ts": NOW - 60, "pid": None, "harness": "claude",
                                                        "model": "Opus 5.5", "effort": "xhigh", "completion_gate": "unit-complete",
                                                        "note": None, "route_file": path, "route_hash": None}}
         return rec
 
-    def snapshot(self, ledger=()):
+    def snapshot(self, ledger=(), observed=False):
         path = self.tmp / "jobs.log"
         path.write_text("".join(self.rows), encoding="utf-8")
         jobs, bad = dispatch._scan_jobs_log(path, set())
         assert bad == 0
         for job in jobs:
-            job.liveness = self.liveness.get(job.attempt_id, job.liveness)
             job.pid = None
+            # (`observed`: the rows are judged by the collector's own liveness decision, none is set by hand)
+            job.liveness = dispatch._dispatch_liveness(job, NOW, track=False) if observed else self.liveness.get(job.attempt_id, job.liveness)
         session = Session(harness="claude", pid=os.getpid(), cwd=CWD, session_id=SID, title="main session", model="Opus 5.5",
                           effort="xhigh", ctx_pct=31, elapsed_min=95, branch="main", liveness="working", session_tag="4f",
                           herdr_attached=True, summary="waiting on the work")
@@ -231,6 +234,36 @@ class CalledUnitStandsBelowItsCaller(unittest.TestCase):
         routes = routes_of(world.snapshot(ledger=[rec["route_id"]]))
         self.assertEqual([rec["route_id"]], [r["id"] for r in routes])
         self.assertNotIn("called", routes[0])
+
+    def test_a_called_unit_that_is_not_running_and_not_over_is_still_listed_with_its_state_and_counts_no_route(self):
+        # a leg whose process died with its row not yet closed, one waiting for a place, one not known: they are no route and
+        # no count holds them, but they stand under their caller (only a leg that ended cleanly leaves)
+        for state, marker in (("dead", "dead"), ("queued", "idle"), ("unknown", "stale"), ("stale", "stale")):
+            world, rec = self.staged_world()
+            world.liveness[CALLED] = state
+            snapshot = world.snapshot(ledger=[rec["route_id"]])
+            routes = routes_of(snapshot)
+            self.assertEqual([rec["route_id"]], [r["id"] for r in routes], state)
+            self.assertEqual([("code-review", marker, state)], [(c["unit"], c["marker"], c["state"]) for c in routes[0]["called"]], state)
+            self.assertEqual({"4f": 1}, live.current_route_counts(routes)[0], state)
+            self.assertEqual("route 1 · execute", live.session_route_status(snapshot, NOW)["claude\0" + SID], state)
+
+    def test_a_called_row_is_judged_by_the_collectors_own_liveness_decision_as_any_attempt_is(self):
+        # the row is no `quick-shape` violation (its `parent_slug` is the hang below its caller, not an owner link), so it
+        # reaches the shared observation as its caller's row does; nothing here is set by hand
+        world, _rec = self.staged_world()
+        jobs = {job.attempt_id: job for job in world.snapshot(observed=True)["jobs"]}
+        self.assertEqual("current", jobs[CALLED].attempt_contract_status)
+        # the shared observation of the attempt ran for it (a `current` row is the one that reaches it), not the pid alone
+        self.assertIsNotNone(jobs[CALLED].state_evidence["inputs"]["observed_liveness"])
+        self.assertEqual("classify_attempt_evidence", jobs[CALLED].state_evidence["classifier_source"].rsplit(".", 1)[-1])
+        # a quick leg that is no called unit and still hangs below another slug is the violation it was
+        world.row("open", "unit-other", {"attempt_id": att("h"), "dispatch_depth": 1, "worker_type": "worker", "capability": "unit",
+                  "route_id": "rt-x", "route_node": "unit", "intensity": "quick", "attempt_schema_version": 2, "transport": "headless",
+                  "execution_surface": "registered-headless", "registered_worker": 1, "fallback_hop": "same-harness-headless",
+                  "parent": "rate-limit", "parent_sid": SID}, 1)
+        other = {job.attempt_id: job for job in world.snapshot(observed=True)["jobs"]}[att("h")]
+        self.assertIn("quick-shape", other.attempt_contract_status)
 
     def test_a_unit_called_by_a_called_unit_follows_the_chain_to_the_route_it_stands_below(self):
         world, rec = self.staged_world()
@@ -360,6 +393,79 @@ class PanelAndTables(unittest.TestCase):
         pages._draw_route_subset(folded, vm, routes, 0, 0, folded.rows - 4, no_repo_group=True)
         text = "\n".join("".join(cell[0] for cell in row).rstrip() for row in folded.cells)
         self.assertIn("revie", text)
+
+    def popup_lines(self, vm, routes, width=72, rows=30, **kw):
+        grid = CellGrid(width, rows)
+        pages._draw_route_subset(grid, vm, routes, 0, 0, grid.rows - 4, no_repo_group=True, **kw)
+        return grid, [line for line in ("".join(cell[0] for cell in row).rstrip() for row in grid.cells) if line.strip()]
+
+    def test_the_popup_table_puts_each_called_unit_right_under_the_worker_that_called_it(self):
+        world = World(self)
+        rec, path = world.staged()
+        world.owner(rec, path)
+        world.stage(rec, path)
+        world.called(CALLED, WORKER, "qa/code-review", "code", "review of execute", "unit-review-execute")
+        vm = live.build_view_model(world.snapshot(ledger=[rec["route_id"]]), now=NOW)
+        route = next(r for r in vm.routes if r.get("session_tag") == "4f")
+        other, second, orphan = att("k"), att("m"), att("n")
+        first = route["called"][0]
+        # two workers, each with one it called (the later call listed first), and one the owner called (no worker row carries it)
+        route = dict(route, worker_contexts=[*route["worker_contexts"],
+                                             {**route["worker_contexts"][0], "attempt": other, "context": 9}],
+                     called=[{**first, "unit": "fact-verify", "attempt": second, "caller": other},
+                             {**first, "unit": "web-lookup", "attempt": orphan, "caller": OWNER},
+                             first])
+        _grid, lines = self.popup_lines(vm, (route,), opened=route["id"])
+        at = {name: next(i for i, line in enumerate(lines) if name in line) for name in ("code-review", "fact-verify", "web-lookup")}
+        workers = [i for i, line in enumerate(lines) if "worker" in line and ("running" in line or "execute" in line)]
+        second_worker = next(i for i, line in enumerate(lines) if "CONTEXT 9%" in line)
+        self.assertEqual(at["code-review"] + 1, second_worker, "\n".join(lines))         # the first worker's, right below it
+        self.assertEqual(second_worker + 1, at["fact-verify"], "\n".join(lines))          # the second's, right below that
+        self.assertEqual(at["fact-verify"] + 1, at["web-lookup"], "\n".join(lines))       # the owner's after the last row
+        self.assertTrue(workers and at["code-review"] > workers[0])
+
+    def test_a_called_row_of_the_routes_table_opens_the_route_as_the_route_row_does(self):
+        world = World(self)
+        rec, path = world.staged()
+        world.owner(rec, path)
+        world.stage(rec, path)
+        world.called(CALLED, WORKER, "qa/code-review", "code", "review of execute", "unit-review-execute")
+        vm = live.build_view_model(world.snapshot(ledger=[rec["route_id"]]), now=NOW)
+        from fleet.explorer.frame import draw
+        for view in ("OVERVIEW", "ROUTES"):
+            grid = draw(vm, NavState(view=view, folds=(("sopen:OVERVIEW", "4f"),) if view == "OVERVIEW" else ()), 150, 40)
+            text = ["".join(cell[0] for cell in row) for row in grid.cells]
+            route_y = next(i for i, line in enumerate(text) if "staged 3/6: execute" in line)
+            called_y = route_y + 1
+            self.assertIn("review of", text[called_y], view)
+            action = lambda y: [repr(hit.action) for hit in grid.hits if hit.y == y and hit.x0 <= 100 < hit.x1]   # noqa: E731
+            self.assertTrue(action(route_y), view)
+            self.assertEqual(action(route_y), action(called_y), view)
+
+    def test_a_called_row_that_is_not_running_is_drawn_with_its_mark_in_the_table_and_the_popup(self):
+        for state, mark, word in (("dead", "✕", "dead"), ("queued", "●", "queued"), ("unknown", "◌", "unknown")):
+            world = World(self)
+            rec, path = world.staged()
+            world.owner(rec, path)
+            world.stage(rec, path)
+            world.liveness[CALLED] = state
+            world.called(CALLED, WORKER, "qa/code-review", "code", "review of execute", "unit-review-execute")
+            world.liveness[CALLED] = state
+            vm = live.build_view_model(world.snapshot(ledger=[rec["route_id"]]), now=NOW)
+            from fleet.explorer.frame import draw
+            grid = draw(vm, NavState(view="ROUTES"), 150, 40)
+            text = ["".join(cell[0] for cell in row).rstrip() for row in grid.cells]
+            row = next(line for line in text if "review of" in line)
+            self.assertIn(mark, row, (state, row))
+            routes = tuple(r for r in vm.routes if r.get("session_tag") == "4f")
+            _grid, lines = self.popup_lines(vm, routes, opened=routes[0]["id"])
+            called = next(line for line in lines if "code-review" in line)
+            self.assertIn(word, called, (state, called))
+            # the panel's row carries it with that mark
+            labels, panels = session_line.session_route_status(world.snapshot(ledger=[rec["route_id"]]), NOW, include_details=True)
+            unit = panels["claude\0" + SID][0]["workers_live"][0]["called"][0]
+            self.assertEqual({"dead": "dead", "queued": "idle", "unknown": "stale"}[state], unit["marker"], (state, unit))
+            self.assertEqual("route 1 ⠏1", labels["claude\0" + SID], state)
 
 
 if __name__ == "__main__":

@@ -1358,6 +1358,9 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
     return _stand_called_units(routes, collected), nodes
 
 
+_CALLED_MARK = {"working": "working", "idle": "idle", "blocked": "blocked", "dead": "dead", "queued": "idle", "stale": "stale"}
+
+
 def _stand_called_units(routes, collected):
     """A unit leg a worker started stands below its caller's route, not as a route of its own.
 
@@ -1365,7 +1368,8 @@ def _stand_called_units(routes, collected):
     its route, and on while that route is itself a called unit's. A leg whose chain ends at a route that is no
     called unit's is listed on that route as ``called``, in the order they were called (``caller`` names the
     attempt each hangs under, so a called unit's own calls nest under it); it is no route in this list, so no
-    count of routes holds it. A chain that breaks (the calling row is not read) or turns back on itself leaves
+    count of routes holds it. Only a leg that ended cleanly (``done``) is left out; one that is not running (dead and
+    not yet closed, waiting for a place, not known) stays, with its state. A chain that breaks (the calling row is not read) or turns back on itself leaves
     the leg as the route it is. Only the rows already read are followed."""
     at, called = {}, {}
     for rid, slot in collected.items():
@@ -1398,14 +1402,18 @@ def _stand_called_units(routes, collected):
         if top is None or top not in by_id or rid not in by_id or top == rid:
             continue
         gone.add(rid)
-        if _get(job, "liveness") not in ("working", "idle", "blocked"):
-            continue
+        state = _text(_get(job, "liveness")) or "unknown"
+        if state == "done":
+            continue                       # ended cleanly: its line goes (the result reaches its caller)
         shown, harness = by_id[rid], _text(_get(job, "harness"))
         order = _num(_get(job, "registry_order"))
         listed.setdefault(top, []).append((order if order is not None else len(listed.get(top, ())), {
             "id": rid, "attempt": attempt, "caller": caller, "title": shown.get("title"),
             "unit": (_text(_get(job, "unit")) or "").rsplit("/", 1)[-1] or None,
-            "kind": shown.get("tree_label"), "field": shown.get("field"), "marker": _get(job, "liveness"),
+            "kind": shown.get("tree_label"), "field": shown.get("field"),
+            # what is not running and not over still stands (a dead leg not yet closed, one waiting for a place, one not known) with
+            # the mark Fleet's route row gives that state, and its own word
+            "marker": _CALLED_MARK.get(state, "stale"), "state": state,
             "harness": harness, "model": _model_pair(_get(job, "resolved_model", "model"), harness),
             "effort": _effort(_get(job, "effort")), "elapsed_min": _num(_get(job, "elapsed_min"))}))
     for top, items in listed.items():

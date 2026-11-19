@@ -5270,7 +5270,9 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         key = (job.route_id, job.route_node)
         quick_groups.setdefault(key, []).append(job)
         violations = []
-        if job.dispatch_depth != 1 or job.parent_slug:
+        # (a unit leg a worker called hangs below that worker for the older job list through `parent_slug`, which is no
+        # owner link: it is not held to the owner-child shape)
+        if not job.caller_attempt_id and (job.dispatch_depth != 1 or job.parent_slug):
             violations.append("quick-shape")
         if (
             job.execution_surface != "registered-headless"

@@ -569,7 +569,9 @@ def _draw_overview_tail(grid, vm, state, x, use, right, y, route_rows, repos, he
                              steward=bool((source or {}).get("steward")),
                              repo_w=repo_width, show_repo=bool(repo_name),
                              columns=columns, title_w=title_w)
-        y = draw_called_rows(grid, x, use, y + 1, route, columns, title_w)
+        y = draw_called_rows(grid, x, use, y + 1, route, columns, title_w,
+                             hit=(x + IND + 1, right, ("root", "ROUTES", {"ropen:ROUTES": route.get("id")}))
+                             if getattr(state, "scope", "-") == "-" else None)
     y += 1
     y = section_head(grid, x, right, y, [("RECENT", "label"), (" · completed results", "dim")])
     shown = 0
@@ -1032,10 +1034,11 @@ def route_result_word(route):
     return "" if PASSED.fullmatch(outcome) else outcome[:16]
 
 
-def called_lines(route):
+def called_lines(route, callers=None, besides=()):
     """The unit legs a worker of this route started and still runs, as ``(item, depth)`` in the order they were called,
     each one's own calls right after it (``live._stand_called_units`` lists them on the route they stand below; they are
-    no route of this table and no count of routes holds them)."""
+    no route of this table and no count of routes holds them). ``callers`` keeps only the legs those attempts started
+    (and what those legs started in turn); ``besides`` leaves those attempts' legs out."""
     items = [item for item in (route.get("called") or ()) if isinstance(item, Mapping)]
     attempts = {item.get("attempt") for item in items}
     out, seen = [], set()
@@ -1047,7 +1050,8 @@ def called_lines(route):
                 out.append((item, depth))
                 walk(item.get("attempt"), depth + 1)
     for caller in dict.fromkeys(item.get("caller") for item in items if item.get("caller") not in attempts):
-        walk(caller, 0)
+        if (callers is None or caller in callers) and caller not in besides:
+            walk(caller, 0)
     return out
 
 
@@ -1064,10 +1068,13 @@ def called_kind_parts(item):
     return parts + ([(" · ", "dim"), (str(item["unit"]), "soft")] if item.get("unit") else [])
 
 
-def draw_called_rows(grid, x, use, y, route, c, title_w):
+def draw_called_rows(grid, x, use, y, route, c, title_w, hit=None):
     """Under a route's row, one indented row for each unit a worker of it called and still runs, in the same columns
-    (its mark two cells in, harness model effort, its title two cells in, its field and its name, its time)."""
+    (its mark two cells in, harness model effort, its title two cells in, its field and its name, its time).
+    ``hit`` is ``(from, to, action)`` of the route's own row: a press on these rows opens the route as it does there."""
     for item, depth in called_lines(route):
+        if hit is not None:
+            grid.add_hit(y, *hit)
         indent = 2 * (depth + 1)
         age = _clip(called_age(item), AGE_W + 1)
         age_x = x + use - _seg_width(age)
@@ -1810,7 +1817,7 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 _tint_row(grid, y, x - 1, right, 236)
             y += 1
             if not is_open:
-                y = draw_called_rows(grid, x, use, y, route, row_cols, row_title_w)
+                y = draw_called_rows(grid, x, use, y, route, row_cols, row_title_w, hit=(x, right, action))
                 continue
             field = route_field(route.get("field"), route.get("capability"))
             kind_parts = [(str(route.get("capability") or "·"), kind_intensity_key(field, "standard") or "soft")]
@@ -1983,15 +1990,44 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 _, y = _put_wrapped(grid, route_start + 2, y, words, right, route_start + 2, next_row)
                 _tint_row(grid, y, x - 1, right, 236)
                 y += 1
+            def put_called(y, lines):
+                """The units a worker called and still runs (or that stand not running yet, with their state), one more level
+                in: name, harness and effort, state and time as the worker row reads them."""
+                for item, depth in lines:
+                    grid.fill(x - 1, right, y, " ", tint=236)
+                    grid.add_hit(y, x, right, action)
+                    called_x = route_start + 2 * (depth + 1)
+                    # (the stage cell of a worker row stands empty here: the name may run on into it)
+                    name_end = x + cols["own"] - gap
+                    cursor = grid.put(called_x, y, "└ ", "dim", limit=name_end)
+                    grid.put(cursor, y, _clip(str(item.get("unit") or "unit"), max(0, name_end - cursor)),
+                             "title_dim", limit=name_end)
+                    parts = model_cell_parts(item.get("harness") or "·", None if cols["narrow"] else item.get("model") or None,
+                                             item.get("effort") or "")
+                    _put_model_cell(grid, x + cols["own"], y, parts, worker_owner_limit)
+                    working = item.get("marker") == "working"
+                    state_word = "running" if working else str(item.get("state") or item.get("marker") or "idle")
+                    grid.put(x + cols["prog"], y, state_word,
+                             "g_work" if working else "g_dead" if item.get("marker") == "dead" else "dim", limit=age_edge)
+                    age = _clip(called_age(item), cols["age_w"])
+                    grid.put(x + use - _seg_width(age), y, age, "dim")
+                    _tint_row(grid, y, x - 1, right, 236)
+                    y += 1
+                return y
+            # Each worker's row (and its context row) has the units that worker called right under it; units called by an
+            # attempt no row here carries (the owner, or a worker not listed) stand after the last row.
+            carried = {str(item["attempt"]) for item in worker_contexts if item.get("attempt")}
             for index, worker_context in enumerate(worker_contexts):
+                own_calls = called_lines(route, callers={str(worker_context.get("attempt") or "")}) if worker_context.get("attempt") else []
                 if body_context is not None and index == context_index and inline_context:
+                    y = put_called(y, own_calls)
                     continue
                 grid.add_hit(y, x, right, action)
                 if body_context is not None and index == context_index:
                     # At the smallest widths keep the metric as a continuation,
                     # without presenting the same worker's identity a second time.
                     grid.put(route_start, y, context_text, "dim", limit=x + use)
-                    y += 1
+                    y = put_called(y + 1, own_calls)
                     continue
                 label = str(worker_context.get("stage") or "worker")
                 grid.put(route_start, y, _clip(f"└ {label} · {index + 1}", route_end - route_start),
@@ -2008,28 +2044,8 @@ def draw_routes(grid, vm, state, x=34, y=3):
                     grid.put(x + cols["prog"], y, f"{word} ·" if pct is None else f"{word} {pct}%",
                              "dim", limit=age_edge)
                 _tint_row(grid, y, x - 1, right, 236)
-                y += 1
-            # Under the worker rows: each unit a worker called and still runs, one more level in (its name, harness and
-            # effort, state and time as the worker row reads them).
-            for item, depth in called_lines(route):
-                grid.fill(x - 1, right, y, " ", tint=236)
-                grid.add_hit(y, x, right, action)
-                called_x = route_start + 2 * (depth + 1)
-                # (the stage cell of a worker row stands empty here: the name may run on into it)
-                name_end = x + cols["own"] - gap
-                cursor = grid.put(called_x, y, "└ ", "dim", limit=name_end)
-                grid.put(cursor, y, _clip(str(item.get("unit") or "unit"), max(0, name_end - cursor)),
-                         "title_dim", limit=name_end)
-                parts = model_cell_parts(item.get("harness") or "·", None if cols["narrow"] else item.get("model") or None,
-                                         item.get("effort") or "")
-                _put_model_cell(grid, x + cols["own"], y, parts, worker_owner_limit)
-                state_word = "running" if item.get("marker") == "working" else str(item.get("marker") or "idle")
-                grid.put(x + cols["prog"], y, state_word, "g_work" if item.get("marker") == "working" else "dim",
-                         limit=age_edge)
-                age = _clip(called_age(item), cols["age_w"])
-                grid.put(x + use - _seg_width(age), y, age, "dim")
-                _tint_row(grid, y, x - 1, right, 236)
-                y += 1
+                y = put_called(y + 1, own_calls)
+            y = put_called(y, called_lines(route, besides=carried))
             if is_open and y < bottom:
                 from .pages import draw_route_detail
                 if not getattr(state, "no_repo_group", False):

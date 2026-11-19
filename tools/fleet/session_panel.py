@@ -331,7 +331,7 @@ def called_rows(items, now, depth=0):
         unit = sanitize_title(str(item.get("unit") or ""))[:48]
         if not unit:
             continue
-        marker = item.get("marker") if item.get("marker") in ("working", "idle", "blocked") else "idle"
+        marker = item.get("marker") if item.get("marker") in ("working", "idle", "blocked", "dead", "stale") else "idle"
         glyph, key = route_glyph(marker)
         shown = {"glyph": glyph, "glyph_key": key, "kind": marker, "unit_word": unit, **doer_paint(item, None)}
         # Under the route the unit is a row of its own: its title and its kind (its field: `code`, `docs`), as a unit route's.
