@@ -1680,8 +1680,10 @@ def _popup_view_model(harness, sid, kind):
     from fleet.collectors import collect_all
     from fleet.refresh import as_snapshot
     from fleet.explorer import live
+    # The routes popup draws no steward badge; the STATUS popup keeps the collection it had.
     snapshot = as_snapshot(collect_all(usage="cache-only", include_report_verification=False,
-                                       route_sessions=[(harness, sid)]))
+                                       route_sessions=[(harness, sid)],
+                                       **({"route_view": "routes"} if kind == "routes" else {})))
     return live.build_view_model(snapshot)
 
 
