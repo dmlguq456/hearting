@@ -1765,27 +1765,26 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const usageLines=()=>keepQuota&&usageOn?usageData.filter((_u,i)=>keepLine[i]):[];
     // 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"; then, on v4.54.0,
     // "RESOURCE는 세로로 차지하는 공간이 너무 많은데, 이걸 게이지는 없애자 그리고 가로로 나열이 가능하면 가로로 나열을 좀 하자"): RESOURCES stands
-    // right above USAGE. One row for each host: its name, `CPU 34%  MEM 61%` and, at the row's end, the count of the GPUs nothing runs
-    // on (`idle GPU 6`). Under it the GPUs a process runs on, side by side (`GPU0 93% 21/24G [3b]  GPU1 40% 10/48G`), onto the next
-    // row where they do not fit; one GPU's group is never split between rows. No gauge: the use is its number, in the level's color.
-    // The values are the sample the shared producer already took. Short of cells on a host row the values go in this order: MEM,
-    // then CPU, then the name is cut with `…` (12 cells at least), the idle count last (11-18 review: the idle count was first to go); short of cells for one GPU's group the memory goes first, then the use,
-    // and the session's number stays (who holds the GPU is what the section is for). Short of rows it gives way before everything else:
-    // the GPU rows (from the last), the host rows (from the last; the name row goes with the last of them), so USAGE and the sections
-    // above it stand as they did without it.
+    // right above USAGE. One row for each host: its name and `CPU 34%  MEM 61%`. Under it every GPU of the host in its number's order, side by
+    // side (`GPU0 93% 21/24G [3b]  GPU1 40% 10/48G  GPU2 0% 0/48G`), onto the next row where they do not fit; one GPU's group is never split
+    // between rows. No gauge: the use is its number, in the level's color. 11-19 (the person: "빈 GPU도 일관성있게 표시해줘. 그냥 0% 0/48GB
+    // 이런식으로 해놔. 컬러만 좀 어둡게 하면 되잖아. 0%에"): a GPU nothing runs on has the same group with the sample's own values and no session
+    // number, all of it `dim` (the producer paints it so; the host row no longer counts them). The values are the sample the shared producer
+    // already took. Short of cells on a host row the values go in this order: MEM, then CPU, then the name is cut with `…` (12 cells at least);
+    // short of cells for one GPU's group the memory goes first, then the use, and the session's number stays (who holds the GPU is what the
+    // section is for). Short of rows it gives way before everything else: the GPU rows (from the last), the host rows (from the last; the name
+    // row goes with the last of them), so USAGE and the sections above it stand as they did without it.
     const resourceData=Array.isArray(model.resources)?model.resources.filter(h=>h&&typeof h==='object'&&Array.isArray(h.host)).slice(0,8):[];
     let resHosts=resourceData.length,resGpus=Infinity;
     const resourceHostRow=h=>{
-      const idle=h.idle>0?[[text(t('resource_idle_gpus','idle GPU')+' '+h.idle,'dim')]]:[];
       const stats=painted(h.stats).filter(x=>Array.isArray(x)&&x.length).map(painted);
-      const name=painted(h.host),least=Math.min(size(name),12);
+      const name=painted(h.host);
       const tailOf=vals=>vals.flatMap(x=>[text('  '),...x]);
-      // Giving way: MEM, then CPU (the last stat first), then the name is cut (12 cells at least), the idle count last.
+      // Giving way: MEM, then CPU (the last stat first), then the name is cut (12 cells at least).
       for(let n=stats.length;n>=0;n--){
-        const tail=tailOf([...stats.slice(0,n),...idle]);
+        const tail=tailOf(stats.slice(0,n));
         if(size(name)<=inner-size(tail))return [...name,...tail];
       }
-      if(idle.length){const tail=tailOf(idle),room=inner-size(tail);if(room>=least)return [...cut(name,room),...tail];}
       return cut(name,inner);
     };
     // One GPU's group at a form (0 whole; 1 without the memory; 2 without the use too; 3 the label alone).

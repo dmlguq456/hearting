@@ -771,9 +771,11 @@ RESOURCES_MAX_AGE = 150.0
 
 def resource_rows(value, now):
     """The RESOURCES section's hosts, one dict each, its values painted as ``(text, key)`` parts: the host, its CPU and memory
-    use, one entry per GPU a process runs on (the percent in its level's color, ``21/24G``, and the numbers of the
-    sessions that hold it: none where it does not know them) and the count of the GPUs nothing runs on. Fleet's host sample
-    as the shared producer kept it; nothing is read here. A sample older than ``RESOURCES_MAX_AGE`` gives no rows."""
+    use and one entry per GPU in its number's order (the percent, ``21/24G``, and the numbers of the sessions that hold it:
+    none where it does not know them). A GPU a process runs on has its percent in its level's color; one nothing runs on is
+    shown the same way with the sample's own values, all of it ``dim`` and with no session numbers (11-19, the person: "빈 GPU도
+    일관성있게 표시해줘. 그냥 0% 0/48GB 이런식으로 해놔. 컬러만 좀 어둡게 하면 되잖아. 0%에"). Fleet's host sample as the shared
+    producer kept it; nothing is read here. A sample older than ``RESOURCES_MAX_AGE`` gives no rows."""
     if not isinstance(value, dict) or not isinstance(value.get("observed_at"), (int, float)) or now - value["observed_at"] > RESOURCES_MAX_AGE:
         return []
     percent = lambda x: "%d%%" % round(x)  # noqa: E731
@@ -781,20 +783,19 @@ def resource_rows(value, now):
     for host in value.get("hosts") or ():
         gpus = []
         for gpu in host["gpus"]:
-            if not gpu["busy"]:
-                continue
+            busy = bool(gpu["busy"])
             util, used, total = gpu["util"], gpu["used"], gpu["total"]
             row = {"label": [("GPU%d" % gpu["i"], "dim")]}
             if util is not None:
                 # 11-18: no gauge (the section is laid out side by side); the use is its number, in its level's color.
-                row["pct"] = [(percent(util), _level(util))]
+                row["pct"] = [(percent(util), _level(util) if busy else "dim")]
             if used is not None and total:
                 row["mem"] = [("%d/%dG" % (round(used), round(total)), "dim")]
-            users = [("[" + str(tag).strip("[]") + "]", "loc_repo") for tag in gpu["users"]]
+            users = [("[" + str(tag).strip("[]") + "]", "loc_repo") for tag in gpu["users"]] if busy else []
             if users:
                 row["users"] = [part for i, one in enumerate(users) for part in ((one,) if not i else ((" ", "dim"), one))]
             gpus.append(row)
-        row = {"host": [(host["name"], "loc_repo")], "gpus": gpus, "idle": sum(1 for gpu in host["gpus"] if not gpu["busy"])}
+        row = {"host": [(host["name"], "loc_repo")], "gpus": gpus}
         stats = []
         for word, number in (("CPU", host.get("cpu")), ("MEM", host.get("mem"))):
             if number is not None:
@@ -887,9 +888,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         # 11-15 (panel polish 1): the action under a question to answer here.
         "answer_action",
         # 11-17 (route row 5): a frame route whose two legs are done waits for the person's direction.
-        "direction_wait",
-        # 11-18: the RESOURCES section's count of the GPUs nothing runs on (`idle GPU 6`).
-        "resource_idle_gpus")}
+        "direction_wait")}
     # Fixed words are English in every language (spec rule 3).
     labels.update(settings="Settings", routes="route", context="context", route_line="route line", worker_box="worker box",
                   rule_motion="rule motion")
