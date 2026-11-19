@@ -597,8 +597,9 @@ def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
                      "soft" if values else "dim", limit=right)
             y += 1
     y = _route_visibility_lines(grid, route.get("visibility"), x, right, y, bottom, whole)
-    y = _draw_route_subset(grid, vm, (route,), x, y, bottom, opened=ident, no_repo_group=True,
-                           view_key="route:" + ident, state=state)
+    # (The units a worker of this route called are not drawn on the route page: it reads as it did before the call.)
+    y = _draw_route_subset(grid, vm, ({key: value for key, value in route.items() if key != "called"},), x, y, bottom,
+                           opened=ident, no_repo_group=True, view_key="route:" + ident, state=state)
     draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y + 1, state,
                       bottom=min(bottom, grid.rows - 6))
 

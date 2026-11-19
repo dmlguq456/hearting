@@ -1370,6 +1370,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         if isinstance(row.get("now"), str) and row["now"]:
             paint["now"] = row["now"]
         return paint
+    def called_paint(rows):
+        for item in rows or ():
+            item["paint"] = route_paint(item)
+            called_paint(item.get("called"))
     for row in panel["routes"]:
         row["paint"] = route_paint(row)
         # Spec E9 rule 43: the owner apart from a worker that leads the row, and each live worker.
@@ -1377,6 +1381,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             row["owner_paint"] = route_paint(row["owner_paint"])
         for worker in row.get("workers_live") or ():
             worker["paint"] = route_paint(worker)
+            called_paint(worker.get("called"))
+        called_paint(row.get("called"))
     # The repo's open work, as the earlier panel's tail row read it.
     # (`◌` is Fleet's stale route alone: the open work's line has no glyph, popup design F 10.)
     panel["work"] = styled([(str(open_count(work)) + " open · " + _plain(work[0].get("headline")), "loc_repo")]) if work else []
