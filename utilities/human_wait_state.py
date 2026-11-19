@@ -1426,6 +1426,7 @@ def publish_cache(result: dict) -> bool:
              "session_peers": _valid_peers(result.get("session_peers")),
              "resources": _valid_resources(result.get("resources")),
              "route_sessions": result.get("route_sessions", []),
+             "reconnect_aware": True,   # absent from an older release's cache (see `_replace_older_producer`)
              "unattributed": [item.get("id") for item in items
                               if item.get("attribution") == "unattributed" and not item.get("stale")],
              "health": [{"source": row.get("source"), "state": row.get("state")}
@@ -4774,6 +4775,7 @@ def _request_producer(harness=None, session_id=None):
                 age = time.time() - marker.stat().st_mtime
             except OSError:
                 age = _REQUEST_TTL
+            recorded = False
             demands = _route_demands() if harness and session_id else None
             key = str(harness) + "\0" + str(session_id)
             changed = demands is not None and time.time() - demands.get(key, 0) >= _REQUEST_TTL
@@ -4781,6 +4783,7 @@ def _request_producer(harness=None, session_id=None):
                 demands[key] = time.time()
                 demands = dict(sorted(demands.items(), key=lambda item: item[1], reverse=True)[:_ROUTE_DEMAND_LIMIT])
                 _write(marker, demands)
+                recorded = True
             elif age >= _REQUEST_TTL:
                 marker.touch(exist_ok=True)
                 marker.chmod(0o600)
@@ -4789,9 +4792,30 @@ def _request_producer(harness=None, session_id=None):
         now = time.time()
         cache = _read_cache(now=now)
         fresh = cache is not None and now - float(cache["observed_at"]) <= _REQUEST_TTL
-        if not fresh or changed:
-            _ensure_producer()
+        if (not fresh or changed) and not _ensure_producer() and fresh and recorded:
+            _replace_older_producer(cache)
     except OSError:
+        return
+
+
+def _replace_older_producer(cache):
+    """Ask the install-time handoff, detached (a render never waits), to replace an older release's producer.
+
+    Its proof is unchanged: it signals only the one same-user, same-state, same-install producer that
+    holds the lock and is not already the installed release.
+    """
+    if cache.get("reconnect_aware") is True:   # an older release builds the cache afresh, without this key
+        return
+    try:
+        import peer_obligations
+        root = Path(__file__).resolve().parents[1]
+        if peer_obligations.installed_release(root=root) != root:   # only a window of the installed release asks
+            return
+        end_with_test(subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--reconnect-cache"],
+                         env={**os.environ, "AGENT_HOME": str(root), "PYTHONDONTWRITEBYTECODE": "1"},
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         close_fds=True, start_new_session=True))
+    except (OSError, subprocess.SubprocessError, ImportError):
         return
 
 
@@ -4836,10 +4860,12 @@ def _cache_release_committed(code_root, observers):
 
 
 def reconnect_cache_producer(*, wait_for_commit=False):
-    """Install-time handoff through the existing managed observer lifecycle.
+    """Handoff through the existing managed observer lifecycle.
 
-    Ordinary render requests never call this. No new process ownership record
-    is needed: the existing private state root and actual flock identify duty.
+    The installer calls it after an install, and a window's request calls it
+    (`_replace_older_producer`); both run it in a detached child, so a render
+    never waits here. No new process ownership record is needed: the existing
+    private state root and actual flock identify duty.
     """
     import peer_obligations as observers
     code_root = Path(__file__).resolve().parents[1]
