@@ -192,7 +192,7 @@ created: {YYYY-MM-DD}
    ```yaml
    route_proposal_v1:
      summary: "one plain sentence: what runs, in which order"
-     legs:                       # 1-4 legs in run order; only legs[0] starts on approval
+     legs:                       # 1-4 legs in run order; one approval covers every leg, and each next leg starts when the one before it ends, without asking again
        - capability: autopilot-lab
          mode: eval              # only when the capability has several modes
          field: lab              # optional: plan | design | code | lab | research | docs | admin | other; omitted, the capability's default field
@@ -209,8 +209,12 @@ created: {YYYY-MM-DD}
          hands_over: [reports/latency.md]                   # optional: what the next leg reads
          parallel: [...]                                    # optional: slices the owner may use to assign workers or permitted sub-sessions; not compiled as nodes
          extra_stages: [{id, unit, after, verify}]          # optional: compiled as node plan-<id> after `after`, shaped on a catalogue check/measurement stage of that unit (never one that edits source)
-     execution_scope: complete   # optional: complete (default) | report
+     execution_scope: complete   # optional: complete (default: the legs run through to the end) | report (stop after the first leg; the next leg waits for the person's word)
    ```
+
+   When a later leg must wait for the person's approval of an earlier leg's
+   result, write `execution_scope: report`. The `summary` sentence does not make
+   the runtime wait; only this field does.
 
    `parallel` is an optional list of non-empty strings, each at most 200
    characters after trimming. Valid entries are kept in order with no separate
