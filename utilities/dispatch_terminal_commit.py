@@ -2203,10 +2203,12 @@ def owner_workflow_gaps(jobs, metadata, route):
 def _completion_owner_choice(jobs, status, metadata, *, executing=False,
                              selected_registry_rows=None):
     import route_parent_close
+    import unit_continue
     from route_authority import decide_continuation
     return decide_continuation(action="completion-owner", status=status, metadata=metadata,
         facts={"closing": route_parent_close.row_requested(
-            metadata, jobs, registry_rows=selected_registry_rows), "executing": executing})
+            metadata, jobs, registry_rows=selected_registry_rows), "executing": executing,
+            "continued": unit_continue.continued_by_later_turn(jobs, metadata)})
 
 
 def owner_workflow_continuation(jobs, owner_attempt_id, route_file):

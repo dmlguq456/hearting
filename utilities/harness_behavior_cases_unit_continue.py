@@ -10,6 +10,15 @@
     set-aside closure record, the two cycles' reports (the first left as it was), the second cycle sealed as a
     child of the first, and what the second turn's model received.
 
+``unit-continue-chain``
+    The same, then a third turn (``correct`` again): every turn ends with a verdict, so each end notice is the
+    success receipt with the turn's summary, and ``start --route`` reads the route as completed after turns 2
+    and 3 (an earlier turn the next one continued does not hold the closed route back).
+
+``unit-continue-blocked``
+    The second turn ends without a verdict (``BLOCKED``): its end stays an attention notice and the route reads as
+    not finished (``start --route`` offers ``compose-again``), as before.
+
 ``unit-continue-missing``
     The first turn's worker home is gone when the text is sent: the turn starts a fresh session
     (``session=fresh:session-missing``) that is told the original brief and the previous result.
@@ -41,7 +50,14 @@ CONT = "SCENARIO-CONT correct the unit route and end your turn"
 AGAIN = "SCENARIO-CONT start the unit route again and end your turn"
 T1_MARK = "HB-CONT-T1-MARK"
 T2_TEXT = "HB-CONT-T2-TEXT now also check the empty-list case and report again."
+T3_TEXT = "HB-CONT-T3-TEXT now also check the single-item case and report once more."
+CONT3 = "SCENARIO-CONT3 correct the unit route once more and end your turn"
 WAITING = "A request kept for this unit route is waiting for its next turn"
+
+
+def _turn_index(text: str) -> int:
+    """Which turn of the unit route a worker request belongs to (a resumed session still carries the earlier texts)."""
+    return 3 if "HB-CONT-T3-TEXT" in text else 2 if "HB-CONT-T2-TEXT" in text else 1
 
 
 def _tool_text(record) -> str:
@@ -53,6 +69,9 @@ class UnitContinueScenario(unit.UnitRouteBlockingScenario):
     summary = ("A closed unit route asked for another turn with `correct --route`: a new attempt in a new cycle "
                "wakes the first turn's session, ends and closes the route again.")
     variant = "resume"
+    turns = 2            # how many turns the scenario asks for
+    blocked_turn = 0     # the turn that ends BLOCKED, without a verdict (0: none)
+    moved_head = False   # the work tree's head moves on between turn 1 and turn 2 (the sealed head stays an ancestor)
 
     # -- the fixture model ------------------------------------------------------------------------
     def script(self, run):
@@ -71,15 +90,17 @@ class UnitContinueScenario(unit.UnitRouteBlockingScenario):
             if "Dispatch metadata:" in text and unit.WORK in text:                 # a unit worker, any turn
                 outputs = re.findall(r"artifact_output_dir: (\S+)", text)
                 target = (outputs[-1] if outputs else "/nonexistent") + "/units/unit/report.md"
-                turn2 = "HB-CONT-T2-TEXT" in text
+                turn = _turn_index(text)
                 wrote = any("report.md" in str(r["reply"].get("shell") or "")
-                            and ("HB-CONT-T2-TEXT" in r["text"]) == turn2 and "Dispatch metadata:" in r["text"]
+                            and _turn_index(r["text"]) == turn and "Dispatch metadata:" in r["text"]
                             for r in earlier)
-                body = (report.format(head=self.report_head) if not turn2 else
-                        unit.REPORT.format(head="Final verdict: issues") + "\nHB-CONT-T2-DONE\n")
+                body = (report.format(head=self.report_head) if turn == 1 else
+                        unit.REPORT.format(head="Final verdict: issues") + f"\nHB-CONT-T{turn}-DONE\n")
+                if turn == self.blocked_turn:       # this turn ends without a verdict and without a report
+                    return Reply("artifact: -\nverdict: BLOCKED\nblocker: HB-CONT-BLOCKED the fixture is not reachable")
                 if record["last_kind"] != "tool" and not wrote:
                     return Reply(shell=f"mkdir -p \"$(dirname '{target}')\" && printf %s {shlex.quote(body)} > '{target}'")
-                if turn2:
+                if turn > 1:
                     return Reply(f"artifact: {target}\nverdict: PASS\nblocker: none")
                 return self.final_reply(target)
             if record["last_kind"] == "tool":
@@ -89,7 +110,7 @@ class UnitContinueScenario(unit.UnitRouteBlockingScenario):
                 return Reply(shell=" ".join(shlex.quote(x) for x in [
                     sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"), "start",
                     "--route", route_id()]))
-            for marker, command in ((unit.START, None), (CONT, "correct"), (AGAIN, "start")):
+            for marker, command in ((unit.START, None), (CONT, "correct"), (CONT3, "correct3"), (AGAIN, "start")):
                 if marker in last and marker not in self.ran:
                     self.ran.add(marker)
                     if command is None:
@@ -99,10 +120,10 @@ class UnitContinueScenario(unit.UnitRouteBlockingScenario):
                             "--prompt-file", str(run.home.root / "brief.md"), "--cwd", str(run.home.workspace),
                             "--artifact-root", run.home.env["AGENT_ARTIFACT_ROOT"], "--unassigned",
                             "--slug", "hb-unit-route"]))
-                    cli = [sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"), command,
-                           "--route", route_id()]
-                    if command == "correct":
-                        cli += ["--message-file", str(run.home.root / "cont.md")]
+                    cli = [sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"),
+                           command.rstrip("3"), "--route", route_id()]
+                    if command.startswith("correct"):
+                        cli += ["--message-file", str(run.home.root / ("cont3.md" if command == "correct3" else "cont.md"))]
                     return Reply(shell=" ".join(shlex.quote(x) for x in cli))
             return Reply("Nothing new.")
         return answer
@@ -110,6 +131,7 @@ class UnitContinueScenario(unit.UnitRouteBlockingScenario):
     def prepare(self, run):
         super().prepare(run)
         (run.home.root / "cont.md").write_text(T2_TEXT + "\n", encoding="utf-8")
+        (run.home.root / "cont3.md").write_text(T3_TEXT + "\n", encoding="utf-8")
 
     # -- the run ----------------------------------------------------------------------------------
     def row_view(self, row):
@@ -146,6 +168,102 @@ class UnitContinueScenario(unit.UnitRouteBlockingScenario):
     def session_turns(self, run, marker, *needles):
         return [r for r in unit.resting_session_requests(run) if marker in r["last_text"] and all(n in r["text"] for n in needles)]
 
+    def end_notices(self, run, attempt_id):
+        """What the resting session was told about one turn's end: each place its attempt id appears in the
+        session's latest request, with the receipt words around it (state/classification/reason) and whether a
+        completion summary follows."""
+        requests = unit.resting_session_requests(run)
+        text = requests[-1]["text"] if requests else ""
+        found = []
+        for hit in re.finditer(re.escape(f"attempt_id={attempt_id}"), text):
+            around = text[max(0, hit.start() - 160):hit.start() + 900]
+            words = {}
+            for key in ("state", "classification", "reason", "required_action"):
+                match = re.search(rf"\b{key}=([\w-]+)", around[150:])
+                words[key] = match.group(1) if match else None
+            words["has_summary"] = "[Completion summary]" in around[150:]
+            if words["state"] or words["classification"]:
+                found.append(words)
+        return found
+
+    def move_head(self, run):
+        """Move the work tree's head on past the sealed one the way a merge of the finished work does: a new commit
+        on an unrelated line that merges the sealed head in as its second parent (the sealed head is an ancestor of
+        the new head, not on its first-parent line)."""
+        ws, env = run.home.workspace, run.home.env
+        def git(*args):
+            return subprocess.run(["git", "-C", str(ws), *args], check=True, env=env, capture_output=True, text=True)
+        sealed = git("rev-parse", "HEAD").stdout.strip()
+        git("checkout", "-q", "--orphan", "hb-trunk")
+        git("rm", "-rqf", ".")
+        (ws / "trunk.txt").write_text("trunk moved on\n", encoding="utf-8")
+        git("add", "trunk.txt")
+        git("commit", "-q", "-m", "trunk")
+        git("merge", "-q", "--no-ff", "--allow-unrelated-histories", "-m", "merge the finished work", "hb-task")
+        return {"sealed": sealed, "head": git("rev-parse", "HEAD").stdout.strip()}
+
+    def lineage_reading(self, sealed):
+        """The lineage the route guard reads between the sealed head and the work tree's head now (its shared probe)."""
+        sys.path.insert(0, str(_base().SOURCE / "utilities"))
+        import capability_route_continuation as continuation
+        verdict = continuation.source_lineage_verdict(self.run_workspace, sealed)
+        return {"kind": verdict.kind, "distance": verdict.distance}
+
+    def terminal_inspect(self, run, attempt_id):
+        """`dispatch_terminal_commit.py inspect` for one attempt, as a recovery reader would run it."""
+        done = subprocess.run([sys.executable, str(_base().SOURCE / "utilities" / "dispatch_terminal_commit.py"),
+                               "inspect", "--jobs", str(self.jobs), "--attempt", attempt_id],
+                              env=dict(run.home.env), cwd=str(run.home.workspace), text=True, capture_output=True,
+                              timeout=120)
+        try:
+            view = json.loads(done.stdout)
+        except ValueError:
+            return {"exit": done.returncode, "output": (done.stdout + done.stderr)[-300:]}
+        return {k: view.get(k) for k in ("state", "reason", "checkpoint", "detail")}
+
+    def earlier_delivery(self, run, rows, n):
+        """How the end of each turn before turn `n` reads now that turn `n` has run: the delivery classification and
+        the completion state a late receipt for it (a rewake armed by that turn's start) would carry."""
+        code = ("import importlib.util,json,sys\nfrom pathlib import Path\n"
+                "import dispatch_completion_join as j\n"
+                "s=j.current_delivery_state(Path(sys.argv[1]),sys.argv[2],parent_attempt_id=sys.argv[2],advance=False)\n"
+                "spec=importlib.util.spec_from_file_location('rewake',sys.argv[3]+'/hooks/dispatch-owner-rewake.py')\n"
+                "hook=importlib.util.module_from_spec(spec); sys.modules['rewake']=hook; spec.loader.exec_module(hook)\n"
+                "launch=hook.Launch(sys.argv[2],Path(sys.argv[1]),'fixture-session','registry')\n"
+                "_,text=hook.classified_receipt(launch,'ready','x',Path(sys.argv[3]))\n"
+                "print(json.dumps({'classification':j.delivery_classification(s),'required_action':j.delivery_required_action(s),"
+                "'workflow_state':s.workflow_state,'workflow_reason':s.workflow_reason,'receipt':text[:420],"
+                "'receipt_has_summary':'[Completion summary]' in text}))\n")
+        env = dict(run.home.env, PYTHONPATH=str(_base().SOURCE / "utilities"))
+        out = []
+        for row in rows[:n - 1]:
+            done = subprocess.run([sys.executable, "-c", code, str(self.jobs), row["attempt_id"], str(_base().SOURCE)], env=env,
+                                  cwd=str(run.home.workspace), text=True, capture_output=True, timeout=120)
+            try:
+                out.append(json.loads(done.stdout.strip().splitlines()[-1]))
+            except (ValueError, IndexError):
+                out.append({"error": (done.stdout + done.stderr)[-300:]})
+        return out
+
+    def after_turn(self, run, route, rows, n):
+        """What a reader sees once turn `n` has ended: its end notice, `start --route`, the supervisor's view and
+        the closure reading of every turn so far."""
+        attempt = rows[n - 1]["attempt_id"]
+        return {"turn": n, "attempt_id": attempt, "notices": self.end_notices(run, attempt),
+                "start_route": self.start_route_again(run, route),
+                "supervisor": self.supervisor_status(run, route),
+                "earlier_delivery": self.earlier_delivery(run, rows, n),
+                "inspect": [self.terminal_inspect(run, row["attempt_id"]) for row in rows[:n]]}
+
+    def ask_turn(self, run, ev, n, marker):
+        """Send turn `n`'s request through the resting session and wait for the turn to end and the route to settle."""
+        run.prompt(marker)
+        wait_for(lambda: len(self.unit_rows()) >= n, 120, 1)
+        done = wait_for(lambda: (lambda rows: len(rows) >= n and rows[-1]["status"] in TERMINAL_STATES)(self.unit_rows()),
+                        self.WAIT, 2)
+        run.wait_idle(8, 60)
+        return done
+
     def drive(self, run):
         ev = run.evidence
         try:
@@ -162,6 +280,8 @@ class UnitContinueScenario(unit.UnitRouteBlockingScenario):
         ev["reports_before"] = [str(p) for p in reports]
         before = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in reports}
         first_rows = self.unit_rows()
+        if self.moved_head:
+            ev["moved_head"] = self.move_head(run)
         if self.variant == "missing":
             if run.harness == "opencode":
                 # OpenCode's sessions live in one shared store, not in the worker home: delete the session itself.
@@ -200,20 +320,91 @@ class UnitContinueScenario(unit.UnitRouteBlockingScenario):
         ev["session_store_leak"] = self.session_store_leak(run, rows)
         if not two or not done or len(rows) < 2:
             return "inconclusive"
+        route = json.loads(route_file.read_text(encoding="utf-8")) if route_file else {}
+        ev["after_turn2"] = self.after_turn(run, route, rows, 2) if route else {}
+        if self.moved_head and route_file:
+            self.run_workspace = run.home.workspace
+            ev["lineage_after_move"] = self.lineage_reading(ev["moved_head"]["sealed"])
+            ev["turn2_row_lineage"] = {k: rows[1].get(k) for k in ("launch_head", "source_commit_sealed",
+                                                                  "source_commit_distance", "source_commit_branch")}
         second = rows[1]
+        blocked = self.blocked_turn == 2
         ok = (len(rows) == 2 and second.get("turn") == "2" and second.get("continues_attempt_id") == rows[0]["attempt_id"]
-              and second["attempt_id"] != rows[0]["attempt_id"] and ev["first_report_kept"] and ev["one_cycle"] and len(after) == 2
-              and ev["second_report_has_marker"] and ev["route_closed_again"] and len(ev["superseded_closures"]) == 1
+              and second["attempt_id"] != rows[0]["attempt_id"] and ev["first_report_kept"]
               and second.get("workflow_completion") == "runtime-v1")
+        if not blocked:     # a turn without a verdict writes no report and does not close the route again
+            ok = ok and (ev["one_cycle"] and len(after) == 2 and ev["second_report_has_marker"]
+                         and ev["route_closed_again"] and len(ev["superseded_closures"]) == 1)
         ev["same_authority"] = {k: (rows[0].get(k), second.get(k)) for k in ("permission_mode", "runtime_sandbox")}
         ok = ok and all(a == b for a, b in ev["same_authority"].values())
         ok = ok and ev["session_store_leak"] in ([], "shared")
+        ok = ok and self.turn_reading(ev["after_turn2"], blocked=blocked)
+        if self.moved_head:
+            reading = ev.get("lineage_after_move") or {}
+            ok = ok and reading.get("kind") == "descendant" and isinstance(reading.get("distance"), int)
+        if self.turns >= 3 and ok:
+            ok = self.third_turn(run, ev)
         if self.variant == "missing":
             ok = ok and second.get("session") == "fresh:session-missing" and ev["turn2_request_has_brief"] \
                 and not ev["turn2_request_has_turn1_history"]
         else:
             ok = ok and second.get("session") == "resumed" and ev["turn2_request_has_turn1_history"]
         return "pass" if ok else "fail"
+
+    def turn_reading(self, after, *, blocked) -> bool:
+        """A turn that ended with a verdict reads as finished: the success receipt with its summary and a completed
+        `start --route`. A turn that ended without one stays an attention notice and offers `compose-again`."""
+        notice = after.get("notices") or []
+        start = after.get("start_route") or {}
+        earlier = after.get("earlier_delivery") or []
+        if any(d.get("classification") != "success" for d in earlier):
+            return False
+        if blocked:
+            return (not any(n.get("classification") == "success" or n.get("state") == "success" for n in notice)
+                    and start.get("state") != "completed")
+        return (bool(notice)
+                and all((n.get("classification") == "success" or n.get("state") == "success")
+                        and n.get("state") != "attention" and n.get("classification") != "attention" for n in notice)
+                and any(n.get("has_summary") for n in notice)
+                and start.get("state") == "completed" and not start.get("mentions_compose_again")
+                and (after.get("supervisor") or {}).get("workflow_state") == "COMPLETE")
+
+    def third_turn(self, run, ev) -> bool:
+        before = len(self.reports(run))
+        done = self.ask_turn(run, ev, 3, CONT3)
+        rows = self.unit_rows()
+        route_file = next(iter(self.route_files(run)), None)
+        ev["rows3"] = [self.row_view(r) for r in rows]
+        ev["superseded_closures3"] = self.superseded(run)
+        route = json.loads(route_file.read_text(encoding="utf-8")) if route_file else {}
+        if not done or len(rows) < 3 or not route:
+            return False
+        ev["after_turn3"] = self.after_turn(run, route, rows, 3)
+        third = rows[2]
+        return (len(rows) == 3 and third.get("turn") == "3" and third.get("continues_attempt_id") == rows[1]["attempt_id"]
+                and len(self.reports(run)) == before + 1 and len(ev["superseded_closures3"]) == 2
+                and self.turn_reading(ev["after_turn3"], blocked=False))
+
+
+class UnitContinueChainScenario(UnitContinueScenario):
+    name = "unit-continue-chain"
+    summary = ("Three turns, each ended with a verdict: every end is the success notice with its summary and "
+               "`start --route` reads the route as completed after each of them.")
+    turns = 3
+
+
+class UnitContinueBlockedScenario(UnitContinueScenario):
+    name = "unit-continue-blocked"
+    summary = ("The second turn ends without a verdict (BLOCKED): its end stays an attention notice and `start --route` "
+               "does not read the route as completed.")
+    blocked_turn = 2
+
+
+class UnitContinueMovedScenario(UnitContinueScenario):
+    name = "unit-continue-moved"
+    summary = ("The work tree's head moved on between the turns (a merge that carries the sealed head as its second "
+               "parent): the guard reads the sealed head as an ancestor, not as `diverged`.")
+    moved_head = True
 
 
 class UnitContinueMissingScenario(UnitContinueScenario):
@@ -262,4 +453,5 @@ class UnitContinueRetainedScenario(UnitContinueScenario):
             self.worker_end.set()
 
 
-SCENARIOS = [UnitContinueScenario, UnitContinueMissingScenario, UnitContinueRetainedScenario]
+SCENARIOS = [UnitContinueScenario, UnitContinueChainScenario, UnitContinueBlockedScenario,
+             UnitContinueMovedScenario, UnitContinueMissingScenario, UnitContinueRetainedScenario]
