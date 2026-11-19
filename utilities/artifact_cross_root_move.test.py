@@ -3,11 +3,13 @@
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
+import hashlib
 import importlib.util
 import errno
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -527,6 +529,32 @@ class CorrectionMoveTest(CrossRootMoveTest):
         self.assertEqual(self.move()["operation_id"], out["operation_id"])
 
 
+
+
+class ClosedSourceMoveTest(CrossRootMoveFixture, F.ProducerTestBase):
+    """A closed source campaign whose close reads its evidence from manifest bytes stays valid after the
+    cycle's folder has left the source root: the copy is kept before the folder is published elsewhere."""
+
+    def test_source_close_still_finds_its_evidence_after_the_folder_left(self):
+        path = Path(self.src["cycle_dir"]).parent / "campaign.json"
+        real = C._snapshot
+
+        def without_repository(*args, **kwargs):
+            value = real(*args, **kwargs)
+            value.pop("repository_id", None)  # a close that binds each row to manifest bytes
+            return value
+        with mock.patch.object(C, "_snapshot", side_effect=without_repository):
+            C.close(self.source, path, reason="done")
+        row = {r["cycle_id"]: r for r in json.loads(
+            sorted((path.parent / C.EVENTS_DIR).glob("*.json"))[0].read_text())["payload"]["snapshot"]["cycles"]
+        }[self.src["cycle_id"]]
+        shutil.rmtree(P.artifact_lifecycle.manifest_snapshot_dir(self.source, self.src["cycle_id"]),
+                      ignore_errors=True)  # a cycle closed before copies existed
+        self.assertEqual(self.move()["status"], "moved")
+        self.assertFalse(Path(self.src["cycle_dir"]).exists())
+        self.assertIn(C.campaign_state(self.source, path).state, {"satisfied", "superseded"})
+        kept = P.artifact_lifecycle.manifest_snapshot_path(self.source, self.src["cycle_id"], row["manifest_revision_id"])
+        self.assertEqual("sha256:" + hashlib.sha256(kept.read_bytes()).hexdigest(), row["manifest_digest"])
 
 
 class RenameMoveTest(CrossRootMoveFixture, F.ProducerTestBase):
