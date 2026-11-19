@@ -127,7 +127,8 @@ created: {YYYY-MM-DD}
      `one-change` into `one-pass`. A shared contract or a second reader's
      review raises the `intensity` to `standard`, not the shape: a `solo` leg
      at `standard` gets one independent review in the same route where its kind
-     declares one (code does).
+     declares one (code does). Where the kind declares no one-shot review, work
+     that needs an independent review opens `staged`.
    - `multi-stage` → `staged`: the work does not fit one session — separable
      durable stages, several modules or adapters, a migration, or a direction
      that can still bend. Choose it for the size of the work, never to obtain

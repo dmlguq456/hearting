@@ -342,8 +342,7 @@
         ],
         "fallback_hops": [
           "same-harness-headless",
-          "cross-harness-headless",
-          "native-subagent"
+          "cross-harness-headless"
         ],
         "model_profile": "deep",
         "owner_model_profile": "balanced"

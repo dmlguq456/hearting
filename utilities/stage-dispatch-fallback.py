@@ -536,9 +536,10 @@ def load_node(route_path: Path, node_id: str, launch_phase: str) -> tuple[dict, 
         raise ValueError(f"unknown route node: {node_id}")
     chain = node.get("fallback_hops")
     hops = [row.get("fallback_hop") for row in chain] if isinstance(chain, list) else None
-    if hops != ORDER and not (hops == ORDER[:-1] and one_shot_review_node(route) is not None
+    if hops != ORDER and not (hops == ORDER[:2] and one_shot_review_node(route) is not None
                               and one_shot_review_node(route)["id"] == node_id):
-        # The middle cell's review declares its own chain without `inline` (a maker cannot close its own review).
+        # The middle cell's review declares its own chain: registered headless hops only. Neither `inline` nor a
+        # native subagent (whose completion is recorded as inline) can close the review of the owner's own work.
         raise ValueError("route node lacks checked ordered fallback")
     return route, node
 

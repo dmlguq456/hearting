@@ -2241,14 +2241,36 @@ def owner_workflow_continuation(jobs, owner_attempt_id, route_file):
     )
     review = one_shot_review_node(route)
     if review is not None and review["id"] in missing:
-        # The middle cell: the owner skipped (or never finished) the review it makes the work for. It cannot
-        # close that review itself, so the exact start command is the way forward.
-        import worker_bootstrap
-        text += ("\nYour route's independent review has not run. Commit your work, then start it with exactly: "
-                 f"`{worker_bootstrap.route_start_command(route_file, review['id'], jobs=jobs)}` and yield "
-                 "runtime_wait: registered-children. You cannot review your own work or close this review "
-                 "inline; do not report PASS without it.")
+        text += "\n" + _middle_cell_review_sentence(route, route_file, review, missing[review["id"]], jobs)
     return text
+
+
+def _middle_cell_review_sentence(route, route_file, review, reason, jobs):
+    """What is true of the middle cell's review when its owner ends without it standing: it has not run, it
+    passed work the owner has since changed, it blocked (the verdict text's own instruction), or its rounds are
+    spent. The owner cannot close the review itself, so each sentence leads to the one start command or to the end."""
+    import review_round_cap as ROUND
+    import worker_bootstrap
+    start = (f"`{worker_bootstrap.route_start_command(route_file, review['id'], jobs=jobs)}` and yield "
+             "runtime_wait: registered-children")
+    no_inline = "You cannot review your own work or close this review inline; do not report PASS without it."
+    rows = [(status, meta) for status, meta in worker_bootstrap._lineage_rows(route, jobs).get(review["id"], ())]
+    verdicts = [(status, meta) for status, meta in rows
+                if ROUND.classify_round_row(status, meta, worker_type="review") == "verdict"]
+    if verdicts and ROUND.last_verdict_blocking(rows, "review"):
+        fields = worker_bootstrap.continuation_followup_fields(route, review, verdicts[-1][1], jobs, route_file)
+        if fields.get("owner_fixes"):
+            return worker_bootstrap.continuation_followup_text(fields)
+        return ("Your route's independent review blocks your current work. Fix the blocking findings in its report, "
+                f"commit, then start it again with exactly: {start}. {no_inline}")
+    if str(reason).startswith("completion-review-source-stale"):
+        return ("Your route's independent review passed, but the work changed after it. Commit your work, then start "
+                f"the review again with exactly: {start}. {no_inline}")
+    if rows and not verdicts:
+        return ("Your route's independent review ended without a verdict. Commit your work, then start it again with "
+                f"exactly: {start}. {no_inline}")
+    return ("Your route's independent review has not run. Commit your work, then start it with exactly: "
+            f"{start}. {no_inline}")
 
 
 def _historical_request(jobs, status, metadata, *, selected_registry_rows=None, observer=None):

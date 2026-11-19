@@ -10,6 +10,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 import json
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -40,6 +41,8 @@ import dispatch_terminal_commit as DTC  # noqa: E402
 import dispatch_owner_input as OWNER_INPUT  # noqa: E402
 import artifact_lifecycle as LIFECYCLE  # noqa: E402
 import capability_route_compose as COMPOSE  # noqa: E402
+import capability_route_close as CLOSE  # noqa: E402
+import work_start as WS  # noqa: E402
 
 
 def reseal(route):
@@ -81,9 +84,10 @@ class Cell(FORM.FormFixtures):
         self.assertEqual((owner["id"], owner["unit"], owner["dispatch_depth"], owner["depends_on"], owner["terminal"],
                           owner["model_profile"], route["owner_model_profile"]),
                          ("one-shot", "_kernel/owner", 1, ["impl-review"], True, "balanced", "balanced"))
-        # the review's chain is the declared hops: no `inline` (a maker cannot close its own review)
+        # the review's chain is the declared registered headless hops only: no `inline` and no native subagent
+        # (its completion is recorded inline), since the maker cannot close its own review
         self.assertEqual([hop["fallback_hop"] for hop in review["fallback_hops"]],
-                         ["same-harness-headless", "cross-harness-headless", "native-subagent"])
+                         ["same-harness-headless", "cross-harness-headless"])
         self.assertFalse(owner.get("fallback_hops"))
         # the owner keeps its candidates; the review's checked evidence is sealed beside them
         self.assertTrue(route["registered_headless_candidates"])
@@ -197,11 +201,13 @@ class Cell(FORM.FormFixtures):
         recipe = R.TOPO.resolve_recipe(registry, "autopilot-code", "dev")
         self.assertEqual(recipe["one_shot_review"], {
             "node": "impl-review", "inputs": ["source-diff"], "model_profile": "deep", "owner_model_profile": "balanced",
-            "fallback_hops": ["same-harness-headless", "cross-harness-headless", "native-subagent"]})
-        bad = json.loads(json.dumps(recipe))
-        bad["one_shot_review"]["fallback_hops"].append("inline")
-        with self.assertRaisesRegex(R.TOPO.TopologyError, "without inline"):
-            R.TOPO._validate_recipe(bad, registry, registry["owner_profile_by_intensity"]["standard"])
+            "fallback_hops": ["same-harness-headless", "cross-harness-headless"]})
+        # no native or inline hop in the chain: a registered reviewer is the only one that can close this review
+        for hop in ("inline", "native-subagent"):
+            bad = json.loads(json.dumps(recipe))
+            bad["one_shot_review"]["fallback_hops"].append(hop)
+            with self.assertRaisesRegex(R.TOPO.TopologyError, "without inline"):
+                R.TOPO._validate_recipe(bad, registry, registry["owner_profile_by_intensity"]["standard"])
         bad = json.loads(json.dumps(recipe))
         bad["one_shot_review"]["node"] = "execute"
         with self.assertRaisesRegex(R.TOPO.TopologyError, "review-worker"):
@@ -260,6 +266,78 @@ class Cell(FORM.FormFixtures):
         self.assertTrue(self.decide(team, team_node, same_bytes, "d2", action="owner-closure").allowed)
         self.assertTrue(self.decide(team, team_node, [], "d1", action="complete-inline").allowed)
 
+
+    # -- the command that composes an autoclosed route's work again ----------------------------------------
+    def compose_again_argv(self, route):
+        # the task file the command names is written under the route's artifact root: keep it in the fixture's
+        route = {**route, "artifact_root": str(self.root)}
+        argv = shlex.split(WS._compose_again(route))
+        flag = lambda name: argv[argv.index(name) + 1] if name in argv else None  # noqa: E731
+        return argv, flag("--shape"), flag("--intensity"), flag("--graph")
+
+    def test_composing_an_autoclosed_route_again_builds_its_own_form_at_its_own_intensity(self):
+        """The command is read from the closed route's nodes and intensity, not from the word recorded for its
+        shape: the cell does not come back as a `solo·quick` with no review, and the team route an older
+        release sealed under the word `solo` comes back as a team route."""
+        cell = self.cell()
+        quick = self.compose(shape="solo", slug="again-quick")
+        old_team = self.solo_signal_team_route()
+        staged = self.compose(shape="staged", graph="execute,test,report", intensity="strong", slug="again-staged")
+        unit = self.unit_route(slug="again-unit")[0]
+        team = ["plan", "plan-check", "execute", "impl-review", "test", "report"]
+        rows = [  # label, route, --shape, --intensity, the nodes composing that argv gives
+            ("the cell", cell, "solo", "standard", ["impl-review", "one-shot"]),
+            ("solo quick", quick, "solo", None, ["one-shot"]),
+            ("older solo + signal (team nodes)", old_team, "staged", "standard", team),
+            ("staged", staged, "staged", "strong", ["execute", "test", "report"]),
+        ]
+        for label, route, shape, intensity, nodes in rows:
+            with self.subTest(label):
+                argv, got_shape, got_intensity, graph = self.compose_again_argv(route)
+                self.assertEqual((got_shape, got_intensity), (shape, intensity))
+                again = self.compose(shape=got_shape, intensity=got_intensity, graph=graph, slug="again-" + shape)
+                self.assertEqual([n["id"] for n in again["nodes"]], nodes)
+                self.assertEqual(again["effective_intensity"], route["effective_intensity"])
+                self.assertEqual(RF.one_shot_review_route(again), RF.one_shot_review_route(route))
+                self.verify(again)
+        quick_argv = self.compose_again_argv(quick)[0]
+        self.assertNotIn("--intensity", quick_argv)
+        # a unit route is still named by its unit, never read as a team route
+        unit_argv = self.compose_again_argv(unit)[0]
+        self.assertEqual((unit_argv[unit_argv.index("--unit") + 1], "--intensity" in unit_argv, "--capability" in unit_argv),
+                         (unit["nodes"][0]["unit"], False, False))
+
+    # -- the owner's marker cannot stand in for the review (the end gate) -------------------------------
+    def end_gate_row(self, route, review):
+        """The terminal gate row of `route` with an owner marker on disk and the review's marker in the state
+        `review` names (`None`: the marker passes; otherwise the reason it does not)."""
+        jobs = Path(self.root) / "jobs.log"
+        jobs.write_text("", encoding="utf-8")
+        owner = route["nodes"][-1]
+        marker = CLOSE.completion_dir(route["route_id"], jobs=jobs) / (owner["id"] + ".json")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("{}", encoding="utf-8")
+
+        def identity(_route, node, node_id, gate, **kw):
+            if node_id == owner["id"] or review is None:
+                return {"passed": True, "reason": "completion-marker-verified"}
+            return {"passed": False, "reason": review}
+        with mock.patch.object(CLOSE, "_marker_identity_row", side_effect=identity):
+            return CLOSE.terminal_gate_observation(route, jobs=jobs)[owner["id"]]
+
+    def test_an_owner_marker_does_not_stand_in_for_the_cells_review(self):
+        cell, quick = self.cell(), self.compose(shape="solo", slug="gate-quick")
+        # the owner's marker is there and the review has no marker, or its marker is stale: the end is not proven
+        for review in ("completion-marker-absent", "completion-review-source-stale"):
+            with self.subTest(review):
+                row = self.end_gate_row(cell, review)
+                self.assertFalse(row["passed"], row)
+                self.assertTrue(row["reason"].startswith("owner-prerequisite-unproven:"), row)
+                self.assertIn(review, row["reason"])
+        # the review passed (current): the owner's marker then proves the end
+        self.assertTrue(self.end_gate_row(cell, None)["passed"])
+        # `solo·quick` has no review to wait on: the owner's marker alone passes, as it always did
+        self.assertTrue(self.end_gate_row(quick, "completion-marker-absent")["passed"])
 
 
 class CellTexts(Cell):
@@ -325,14 +403,16 @@ class CellTexts(Cell):
                          "through the bounded producing stage. First use python3 start-execute. "
                          "Then run the same start for the closure check: python3 start-review")
 
-    def continuation(self, route):
+    def continuation(self, route, reason="completion-marker-absent", rows=(), fields=None):
         path = self.route_file(route)
         row = SimpleNamespace(status="open", metadata={"attempt_id": "att-owner"})
-        gaps = {n["id"]: "completion-marker-absent" for n in route["nodes"] if n.get("dispatch_depth") == 2}
+        gaps = {n["id"]: reason for n in route["nodes"] if n.get("dispatch_depth") == 2}
         import dispatch_completion_join as JOIN
         with mock.patch.object(JOIN, "exact_attempt_row", return_value=row), \
              mock.patch.object(DTC, "_completion_owner_choice", return_value=SimpleNamespace(allowed=True)), \
-             mock.patch.object(DTC, "owner_workflow_gaps", return_value=gaps):
+             mock.patch.object(DTC, "owner_workflow_gaps", return_value=gaps), \
+             mock.patch.object(W, "_lineage_rows", return_value={"impl-review": list(rows)}), \
+             mock.patch.object(W, "continuation_followup_fields", return_value=fields or {}):
             return DTC.owner_workflow_continuation("/jobs.log", "att-owner", str(path)), path
 
     def test_an_owner_that_skipped_the_review_is_woken_with_the_start_command(self):
@@ -346,6 +426,83 @@ class CellTexts(Cell):
         self.assertNotIn("stage-dispatch-fallback.py", team_text)
         self.assertTrue(team_text.endswith("Runtime settlement owns close/finalize."))
         self.assertNotIn("independent review has not run", team_text)
+
+    def test_the_wake_text_says_what_is_true_of_the_review_for_each_reason(self):
+        """The sentence after the pending notice follows why the review does not stand: it has not run, it ran and
+        passed work the owner changed since, it blocked (the verdict text's own instruction) or its rounds are spent."""
+        route = self.cell()
+        passed = ("done", {"attempt_id": "att-p", "note": "completed-marker", "failure_class": "pass",
+                           "worker_type": "review", "review_subject_digest": "d1"})
+        dead = ("done", {"attempt_id": "att-d", "note": "dead-capacity", "failure_class": "capacity",
+                         "worker_type": "review", "review_subject_digest": "d1"})
+        blocked = row(BLOCKING, "d1", "att-1")
+        fields = {"kind": "review", "attempt": "att-1", "artifact": "/c/report.md", "target": "", "source": True,
+                  "command": "python3 start-review", "producer_command": "", "owner_fixes": True,
+                  "closure_spent": False}
+        tail = " You cannot review your own work or close this review inline; do not report PASS without it."
+        unrun, path = self.continuation(route)
+        # the sentence a review that has not run has always got, byte for byte
+        self.assertTrue(unrun.endswith(
+            "\nYour route's independent review has not run. Commit your work, then start it with exactly: "
+            f"`{W.route_start_command(path, 'impl-review', jobs='/jobs.log')}` and yield "
+            "runtime_wait: registered-children." + tail))
+        stale, path = self.continuation(route, reason="completion-review-source-stale", rows=[passed])
+        self.assertIn("\nYour route's independent review passed, but the work changed after it. Commit your work, "
+                      "then start the review again with exactly: ", stale)
+        self.assertNotIn("has not run", stale)
+        self.assertIn("stage-dispatch-fallback.py", stale)
+        again, path = self.continuation(route, rows=[dead])
+        self.assertIn("independent review ended without a verdict", again)
+        self.assertNotIn("has not run", again)
+        # a blocking verdict: the verdict text's own instruction, not "has not run"
+        blocks, path = self.continuation(route, rows=[blocked], fields=fields)
+        self.assertTrue(blocks.endswith("\n" + W.continuation_followup_text(fields)))
+        self.assertIn("Fix every blocking finding in /c/report.md", blocks)
+        self.assertNotIn("has not run", blocks)
+        # the rounds spent: no start is asked for; the owner ends failed, as the verdict text says
+        spent, path = self.continuation(route, rows=[blocked, blocked], fields={**fields, "closure_spent": True})
+        self.assertTrue(spent.endswith("\n" + W.continuation_followup_text({**fields, "closure_spent": True})))
+        self.assertIn("Do not correct further", spent)
+        self.assertIn("`verdict: FAIL`", spent)
+        self.assertNotIn("stage-dispatch-fallback.py", spent)
+        self.assertNotIn("has not run", spent)
+        # a blocking verdict whose report cannot be projected still says the review blocks (never "has not run")
+        unread, path = self.continuation(route, rows=[blocked], fields={})
+        self.assertIn("independent review blocks your current work", unread)
+        self.assertNotIn("has not run", unread)
+
+    def test_the_task_states_the_review_limit_and_the_next_ready_line_does_not_contradict_a_block(self):
+        text = W.owner_route_steps_prompt(self.owner_args(self.cell()), {})
+        self.assertIn("The review gets 2 rounds in all: if the closure check blocks too, correct no further, write "
+                      "the remaining findings in your report, and end with `verdict: FAIL`.", text)
+        import dispatch_completion_join as JOIN
+        import dispatch_stage_advance as ADVANCE
+        for label, route, node_id, successor in (("cell", self.cell(), "impl-review", "one-shot"),
+                                                 ("team", self.preset("autopilot-code", "dev", "standard"),
+                                                  "impl-review", "test")):
+            path = self.route_file(route)
+            successor = next(n for n in route["nodes"] if n["id"] == successor)
+            lines = {}
+            for note in ("completed-review-blocking", "completed-marker"):
+                meta = {"dispatch_depth": "2", "worker_type": "review", "route_file": str(path),
+                        "route_id": route["route_id"], "route_hash": route["route_hash"], "note": note,
+                        "route_node": node_id, "attempt_id": "att-r"}
+                with mock.patch.object(JOIN, "exact_attempt_row", return_value=SimpleNamespace(metadata=meta)), \
+                     mock.patch.object(ADVANCE, "completed_nodes", return_value=set()), \
+                     mock.patch.object(ADVANCE, "started_nodes", return_value=set()), \
+                     mock.patch.object(ADVANCE, "runnable_successors", return_value=[successor]):
+                    lines[note] = JOIN._next_ready_start_lines({"children": [{"attempt_id": "att-r"}]}, "/jobs.log")
+            with self.subTest(label):
+                blocking, passing = lines["completed-review-blocking"], lines["completed-marker"]
+                if label == "cell":
+                    self.assertEqual(passing, ["Next ready: nothing to start; the independent review has finished. "
+                                               "Act on its verdict as your task describes, then return your final handoff."])
+                    self.assertEqual(len(blocking), 1)
+                    self.assertIn("Follow the Review FAIL instruction above", blocking[0])
+                    self.assertNotIn("then return your final handoff", blocking[0])
+                else:   # a team conductor's line is the start command, blocking or not
+                    self.assertEqual(blocking, passing)
+                    self.assertTrue(blocking[0].startswith("Next ready: python3 "))
 
     def test_the_owner_with_a_review_waits_and_is_woken_so_no_other_turn_notice_is_given(self):
         cell = self.route_file(self.cell())

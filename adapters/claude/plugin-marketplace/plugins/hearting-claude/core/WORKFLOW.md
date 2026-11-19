@@ -337,7 +337,8 @@ needs an independent review is not direct. Open it with `--shape solo --intensit
 the owner starts the route's declared review node with the command its task gives, and
 cannot close that review itself), or omit `--shape` and let the frame choose, or use
 `staged` when the size of the work calls for stages (`staged` is chosen for size, not to
-obtain a review). A light check of a direct change may use the harness's own native
+obtain a review where the kind declares a one-shot review; where it declares none, work that
+needs an independent review opens `staged`). A light check of a direct change may use the harness's own native
 subagent (decision 2026-11-03).
 
 | Main decision | Command | Result |

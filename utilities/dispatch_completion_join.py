@@ -1291,9 +1291,16 @@ def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
                 for node in dispatch_stage_advance.runnable_successors(route, completed, started):
                     from route_form import one_shot_review_route
                     if one_shot_review_route(route) and node.get("id") == "one-shot":
-                        # The middle cell: the review is done; the owner's end is its own final handoff.
-                        lines.append("Next ready: nothing to start; the independent review has finished. "
-                                     "Act on its verdict as your task describes, then return your final handoff.")
+                        # The middle cell: the review is done; the owner's end is its own final handoff, unless
+                        # the verdict blocks (then the verdict text above is the instruction).
+                        import review_round_cap
+                        if meta.get("note") == review_round_cap.REVIEW_BLOCKING_NOTE:
+                            lines.append("Next ready: nothing to start; the independent review has finished and "
+                                         "blocks. Follow the Review FAIL instruction above; do not return a final "
+                                         "handoff before you have.")
+                        else:
+                            lines.append("Next ready: nothing to start; the independent review has finished. "
+                                         "Act on its verdict as your task describes, then return your final handoff.")
                     elif worker_bootstrap._dispatchable_stage(node):
                         lines.append("Next ready: " + worker_bootstrap.route_start_command(route_file, node["id"]))
                     else:

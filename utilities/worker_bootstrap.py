@@ -978,6 +978,11 @@ def owner_inline_marker_prompt(args) -> str:
             f"still publishes its completion marker: `{command}` (route and attempt axes are derived; pass --evidence with a cycle-local file when the stage produced one or the route has no bound cycle). Without it the route never settles.\n\n")
 
 
+def _review_rounds(route) -> int:
+    import review_round_cap
+    return review_round_cap.max_review_rounds(route["effective_intensity"])
+
+
 def one_shot_review_prompt(route, route_file, jobs=None) -> str:
     """The middle cell's paragraph for its owner: make the work, then start the declared review with this
     one command and wait for it. Text only; the runtime still decides every start and every verdict."""
@@ -993,7 +998,9 @@ def one_shot_review_prompt(route, route_file, jobs=None) -> str:
             "to this same session. (A receipt that prints `parent_next=bounded-wait` instead names its own wait "
             "command: run that printed command once, then read the review's result.) If the verdict blocks, fix every blocking finding in this worktree in one "
             "pass, run the same checks, commit, and start the closure check with the same command, then wait "
-            "again. If it does not block, return your final handoff. You cannot review your own work or close "
+            f"again. The review gets {_review_rounds(route)} rounds in all: if the closure check blocks too, correct "
+            "no further, write the remaining findings in your report, and end with `verdict: FAIL`. "
+            "If it does not block, return your final handoff. You cannot review your own work or close "
             "this review yourself: do not run `complete --inline` for it, and do not report PASS without the "
             "review. Do not start the review before your work is committed.\n\n")
 

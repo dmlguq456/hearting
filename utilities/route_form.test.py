@@ -93,11 +93,11 @@ class FormFixtures(U.UnitLegBase):
 
     def solo_signal_team_route(self):
         """The route `compose --shape solo --signal <signal>` sealed before the middle cell opened:
-        `selection.shape: solo`, `effective_intensity: standard`, the kind's whole team recipe for nodes.
-        Rebuilt from a team route (a signal raises the intensity, not the form) with the shape recorded
-        as `solo` and the seal recomputed, exactly the bytes an older release wrote."""
-        route = json.loads(json.dumps(self.compose(shape="staged", graph=None, slug="rf-solo-signal-team",
-                                                   signals=["shared-contract"])))
+        `selection.shape: solo`, `effective_intensity: standard`, the kind's whole team recipe for nodes
+        *with its frame pair* (eight nodes). Built from the standard preset route, whose nodes are that
+        recipe, with the shape recorded as `solo` and the seal recomputed: the nodes, intensity and shape word
+        an older release wrote, not a byte-for-byte copy of its record."""
+        route = json.loads(json.dumps(self.preset("autopilot-code", "dev", "standard", signals=["shared-contract"])))
         route["selection"]["shape"] = "solo"
         route["route_hash"] = R.route_hash({k: v for k, v in route.items() if k not in ("route_hash", "route_id")})
         route["route_id"] = R.ROUTE_IDENTITY.route_id_from_hash(route["route_hash"])
@@ -178,7 +178,7 @@ class SameAnswerTest(FormFixtures):
         """Review of 3a, 🟡 1: widening the table must not turn this already sealed route into a solo owner's."""
         team = self.solo_signal_team_route()
         self.assertEqual([n["id"] for n in team["nodes"]],
-                         ["plan", "plan-check", "execute", "impl-review", "test", "report"])
+                         ["frame", "frame-alternative", "plan", "plan-check", "execute", "impl-review", "test", "report"])
         self.assertFalse(RF.one_shot_owner(team))
         self.assertFalse(RF.serial_attempt_route(team))
         self.assertTrue(RF.starts_depth2_nodes(team))

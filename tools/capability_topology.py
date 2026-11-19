@@ -1042,7 +1042,7 @@ ONE_SHOT_REVIEW_KEYS = {"node", "inputs", "fallback_hops", "model_profile", "own
 
 def _validate_one_shot_review(recipe, registry):
     """The middle cell's review node: a kind that declares `one_shot_review` borrows one of its own
-    standard review nodes (inputs, fallback hops without `inline`, model role); everything else about the
+    standard review nodes (inputs, registered fallback hops without `inline` or `native-subagent`, model role); everything else about the
     node is that node's own. `owner_model_profile` is the model role of the owner that makes the work."""
     where = f"{recipe['capability']}:one_shot_review"
     declared = recipe["one_shot_review"]
@@ -1056,9 +1056,11 @@ def _validate_one_shot_review(recipe, registry):
     if not isinstance(inputs, list) or not inputs or any(not isinstance(i, str) for i in inputs):
         raise TopologyError(f"{where}: inputs must be a non-empty list")
     hops = declared["fallback_hops"]
-    if (not isinstance(hops, list) or "inline" in hops or len(hops) != len(set(hops))
+    if (not isinstance(hops, list) or "inline" in hops or "native-subagent" in hops or len(hops) != len(set(hops))
             or set(hops) - FALLBACK_HOPS or not hops):
-        raise TopologyError(f"{where}: fallback_hops must be distinct dispatch hops without inline")
+        # A native subagent's completion is recorded inline, which the cell refuses for the review of the owner's own work.
+        raise TopologyError(f"{where}: fallback_hops must be distinct registered dispatch hops without inline "
+                            "or native-subagent")
     _validate_model_profile(registry, declared["model_profile"], where)
     _validate_model_profile(registry, declared["owner_model_profile"], where + ":owner")
 

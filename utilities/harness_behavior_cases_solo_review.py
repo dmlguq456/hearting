@@ -93,7 +93,7 @@ class SoloReviewScenario(unit.UnitRouteScenario):
                 # a call the harness handed to the background: keep waiting for it, as its notice says
                 return Reply(tool=("write_stdin", {"session_id": int(running.group(1)), "chars": "",
                                                    "yield_time_ms": 120000}))
-            if "[workflow-completion-pending]" in last and "review has not run" in last:
+            if "[workflow-completion-pending]" in last and START_COMMAND.search(last):
                 found = START_COMMAND.search(last)
                 steps.append("restart")
                 return shell_step(record, found.group(1) if found else "echo no-start-command")
@@ -280,9 +280,10 @@ class SoloReviewScenario(unit.UnitRouteScenario):
         ev["task_paragraph"] = first[mark:mark + 1500].split("\n\n")[0] if mark >= 0 else ""
         ev["verdict_texts"] = [r["last_text"][r["last_text"].index("Review FAIL"):][:700] for r in owner_requests
                                if "Review FAIL" in r["last_text"]]
-        ev["pending_texts"] = [r["last_text"][r["last_text"].index("[workflow-completion-pending]"):][:1500]
+        ev["pending_texts"] = [r["last_text"][r["last_text"].index("[workflow-completion-pending]"):][:2600]
                                for r in owner_requests if "[workflow-completion-pending]" in r["last_text"]]
         ev["owner_requests"] = len(owner_requests)
+        ev["supervisor_turns"] = [self.supervisor_turns(row) for row in owners]
         # what each start command answered the owner (the receipts that show a refused or degraded start)
         ev["start_results"] = [r["last_text"][-900:] for r in owner_requests
                                if r["last_kind"] == "tool" and ("selected_hop" in r["last_text"]
@@ -291,24 +292,69 @@ class SoloReviewScenario(unit.UnitRouteScenario):
         ev["resting_fail_notice"] = next((r["last_text"][:1400] for r in requests[before:]
                                           if "NOTIFICATION" in r["last_text"] or "HEARTING_RECEIPT_V1" in r["last_text"]
                                           or "AGENT_HARNESS_COMPLETION_V1" in r["last_text"]), "")
+        ev["session_proof"] = self.session_proof(ev)
         ok = self.judge(run, ev, owners, reviews)
         run.note(f"owner rows={len(owners)} review rows={len(reviews)} closed={ev['route_closed']} "
-                 f"notices={ev['completion_notices']} steps={list(ev['owner_sessions'].values())}")
+                 f"notices={ev['completion_notices']} steps={list(ev['owner_sessions'].values())} "
+                 f"same-session={ev['session_proof']}"
+                 + (" (this harness leaves no supervisor turn record to prove it)" if ev["session_proof"] == "unproven" else ""))
         if not owners or not done:
             return "inconclusive"
         return "pass" if ok else "fail"
+
+    @staticmethod
+    def supervisor_turns(row):
+        """The owner attempt's own supervisor records (its log is a receipt log): one entry per model turn the
+        supervisor ran for it. Claude's and OpenCode's supervisor records `resume` (the turn continued the bound
+        session); Codex's records the thread each turn ran in. Empty when no record can be read."""
+        turns = []
+        try:
+            text = Path(row.get("log_file") or "").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return turns
+        for line in text.splitlines():
+            if not line.startswith("{"):
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            kind = record.get("type")
+            if kind == "dispatch.supervisor.turn-started":
+                turns.append({"resume": bool(record.get("resume")), "thread": None})
+            elif kind == "dispatch.supervisor.turn.started":
+                turns.append({"resume": None, "thread": record.get("thread_id")})
+        return turns
+
+    @staticmethod
+    def session_proof(ev, wakes=True):
+        """Whether the owner was woken in its one session, from the supervisor's own turn records and not from the
+        fixture's session labels (OpenCode names every session `owner`): `proven` (two or more turns, every later
+        one a resume of the bound session or in the same thread), `broken` (a later turn began a new session),
+        `unproven` (no readable record on this harness, or no wake to prove)."""
+        turns = next(iter(ev.get("supervisor_turns") or []), [])
+        if not turns:
+            return "unproven"
+        if len(turns) < 2:
+            return "unproven" if not wakes else "broken"
+        if all(turn["thread"] is not None for turn in turns):
+            return "proven" if len({turn["thread"] for turn in turns}) == 1 else "broken"
+        return "proven" if all(turn["resume"] for turn in turns[1:]) else "broken"
 
     def owner_requests(self, run):
         return [r for r in run.main_requests() if "Dispatch metadata:" in r["text"] and WORK in r["text"]
                 and "- worker_type: review" not in r["text"]]
 
+    def closed(self, ev):
+        return bool(ev["route_closed"] and (ev["outcome"] or {}).get("terminal_gate_proven") is True)
+
     def judge(self, run, ev, owners, reviews):
         steps = next(iter(ev["owner_sessions"].values()), [])
-        outcome = ev["outcome"] or {}
-        proven = outcome.get("terminal_gate_proven")
         ok = (len(owners) == 1 and ev["task_paragraph_seen"] and ev["route"]["effective_intensity"] == "standard"
               and ev["route"]["shape"] == "solo" and [n[0] for n in ev["route"]["nodes"]] == ["impl-review", "one-shot"])
-        return ok and ev["route_closed"] and proven is True and len(reviews) == 1 and steps[-1] == "final"
+        # one completion notice reaches the session that started the route (it is watched for QUIET seconds after)
+        return (ok and self.closed(ev) and len(reviews) == 1 and steps[-1] == "final"
+                and ev["completion_notices"] == 1 and ev["session_proof"] != "broken")
 
 
 class SoloReviewFixScenario(SoloReviewScenario):
@@ -319,10 +365,12 @@ class SoloReviewFixScenario(SoloReviewScenario):
 
     def judge(self, run, ev, owners, reviews):
         steps = next(iter(ev["owner_sessions"].values()), [])
-        outcome = ev["outcome"] or {}
-        return (len(owners) == 1 and len(ev["owner_sessions"]) == 1 and len(reviews) == 2
+        # the runtime's verdict text reached the owner and said what to do, and the owner did it in its session
+        verdict = any("Fix every blocking finding" in text and "start the closure check with the same command" in text
+                      for text in ev["verdict_texts"])
+        return (len(owners) == 1 and len(reviews) == 2 and verdict and ev["session_proof"] != "broken"
                 and "fix" in steps and steps.count("start") == 2 and steps[-1] == "final"
-                and ev["route_closed"] and outcome.get("terminal_gate_proven") is True)
+                and self.closed(ev))
 
 
 class SoloReviewSpentScenario(SoloReviewScenario):
@@ -333,10 +381,10 @@ class SoloReviewSpentScenario(SoloReviewScenario):
 
     def judge(self, run, ev, owners, reviews):
         steps = next(iter(ev["owner_sessions"].values()), [])
-        outcome = ev["outcome"] or {}
-        return (len(owners) == 1 and len(reviews) == 2 and steps[-1] == "fail"
-                and not (ev["route_closed"] and outcome.get("terminal_gate_proven") is True)
-                and bool(ev["resting_fail_notice"]))
+        # the second verdict text told the owner to stop correcting and end failed, and it did
+        verdict = any("Do not correct further" in text and "`verdict: FAIL`" in text for text in ev["verdict_texts"])
+        return (len(owners) == 1 and len(reviews) == 2 and verdict and steps[-1] == "fail"
+                and ev["session_proof"] != "broken" and not self.closed(ev) and bool(ev["resting_fail_notice"]))
 
 
 class SoloReviewSkipScenario(SoloReviewScenario):
@@ -347,11 +395,10 @@ class SoloReviewSkipScenario(SoloReviewScenario):
 
     def judge(self, run, ev, owners, reviews):
         steps = next(iter(ev["owner_sessions"].values()), [])
-        outcome = ev["outcome"] or {}
-        closed = ev["route_closed"] and outcome.get("terminal_gate_proven") is True
-        rewoken = len(reviews) == 1 and "restart" in steps and closed
-        # a harness with no wake never closes the route on the skipped review: the end is not accepted
-        return len(owners) >= 1 and "skipped" in steps and (rewoken or (not closed and not reviews))
+        # the runtime's wake text reached the owner with the start command, the owner ran it, the review ran, the route closed
+        woken = any(START_COMMAND.search(text) and "has not run" in text for text in ev["pending_texts"])
+        return (len(owners) >= 1 and "skipped" in steps and woken and "restart" in steps and len(reviews) == 1
+                and self.closed(ev) and ev["session_proof"] != "broken")
 
 
 class SoloReviewStaleScenario(SoloReviewScenario):
@@ -362,19 +409,16 @@ class SoloReviewStaleScenario(SoloReviewScenario):
 
     def judge(self, run, ev, owners, reviews):
         # The owner's first final handoff, made after it changed source, is not accepted: the same session is woken
-        # with the review's start command (the stale review named), runs a new review, and only then does the route close.
+        # with a text that names why (the review passed work that has since changed) and the start command, runs a
+        # new review, and only then does the route close.
         steps = next(iter(ev["owner_sessions"].values()), [])
-        outcome = ev["outcome"] or {}
         edited = steps.index("edit-after-pass") if "edit-after-pass" in steps else -1
-        closed = ev["route_closed"] and outcome.get("terminal_gate_proven") is True
         if edited < 0:
             return False
-        # The route never closes on a review of content the owner has since changed: either the same session is woken
-        # (the stale review named), runs a new review and the route closes after it, or (a harness with no wake) the
-        # end is simply not accepted and the route stays open.
-        rewoken = (steps[edited:edited + 3] == ["edit-after-pass", "final", "restart"] and len(reviews) == 2
-                   and any("completion-review-source-stale" in text for text in ev["pending_texts"]) and closed)
-        return len(owners) >= 1 and (rewoken or not closed)
+        woken = any("completion-review-source-stale" in text and "passed, but the work changed after it" in text
+                    and START_COMMAND.search(text) for text in ev["pending_texts"])
+        return (len(owners) >= 1 and steps[edited:edited + 3] == ["edit-after-pass", "final", "restart"] and woken
+                and len(reviews) == 2 and self.closed(ev) and ev["session_proof"] != "broken")
 
 
 class SoloReviewVerdictlessScenario(SoloReviewScenario):
