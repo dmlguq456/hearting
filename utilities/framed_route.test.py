@@ -577,6 +577,9 @@ class RegistryRegistrationTest(unittest.TestCase):
         self.assertEqual(execute["write_scope"],
                          ["source/**", "spec/**", "checklist.md", "dev_logs/**", "evidence/**"])
         self.assertEqual(execute["guard_preconditions"], ["artifact-order-prechecked"])
+        # The middle cell's declaration (`one_shot_review`) is one additive key on the code recipe (the route
+        # form 3b-1); every other field of the recipe stays what the frozen digests below hold.
+        self.assertEqual(code.pop("one_shot_review")["node"], "impl-review")
         code["quick"]["write_scope"].remove("spec/**")
         del code["quick"]["guard_preconditions"]
         execute["write_scope"].remove("spec/**")

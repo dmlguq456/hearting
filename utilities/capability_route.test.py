@@ -9753,7 +9753,10 @@ class OwnerNodeBoundTerminalTest(unittest.TestCase):
   # read from the nodes (a depth-1 owner `one-shot`), not from the intensity: an owner node that is not the
   # maker's `one-shot` (a team's) is not the node-bound shape, whatever the record says
   team=dict(self.route,effective_intensity="standard",nodes=[dict(self.node,id="execute")])
-  gate=self.observe(self.row(route_node="execute"),route=team)
+  self.jobs.write_text(self.row(route_node="execute")+"\n")
+  with patch_split(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
+       patch_split(R,"owner_terminal_prerequisites",return_value={}):
+   gate=R.terminal_gate_observation(team,jobs=self.jobs,exact_terminal=True)["execute"]
   self.assertFalse(gate["passed"],gate)
   self.assertEqual(gate["reason"],"owner-route-identity-mismatch")
 
