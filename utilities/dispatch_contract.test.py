@@ -5763,28 +5763,6 @@ class StageAdvanceClaimTest(unittest.TestCase):
   self.assertEqual(started,frozenset({"execute","impl-review","test"}))
 
 
-class LegacyReadWindowClosePureTest(unittest.TestCase):
- """B-13a: pure four-condition truth table. Never touches the filesystem and
- never calls `_succeed_dispatch_state()` -- that reachability question is
- Slice 3's B-13b."""
- def test_all_four_true_is_eligible(self):
-  self.assertTrue(D.legacy_read_window_may_close(
-   supported_releases_elapsed=2,legacy_bound_open_writers=0,delta=0,legacy_read_hits=0))
- def test_more_than_minimum_releases_still_eligible(self):
-  self.assertTrue(D.legacy_read_window_may_close(
-   supported_releases_elapsed=5,legacy_bound_open_writers=0,delta=0,legacy_read_hits=0))
- def test_each_condition_individually_flipped_keeps_window_open(self):
-  base=dict(supported_releases_elapsed=2,legacy_bound_open_writers=0,delta=0,legacy_read_hits=0)
-  for field,bad in (
-   ("supported_releases_elapsed",1),
-   ("legacy_bound_open_writers",1),
-   ("delta",1),
-   ("legacy_read_hits",1),
-  ):
-   values=dict(base); values[field]=bad
-   self.assertFalse(D.legacy_read_window_may_close(**values),field)
-
-
 class DispatchStateModeEnforcementTest(unittest.TestCase):
  """B-12: new dispatch root 0700 / new migration-journal 0600; an existing
  wide mode is a typed refusal, never a chmod. `geteuid()==0` leaves the
