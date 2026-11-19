@@ -123,9 +123,9 @@ class FleetRouteCell(unittest.TestCase):
         three = [{"name": "search", "st": "done"}, {"name": "analyze", "st": "active"}, {"name": "report", "st": "todo"}]
         route = lambda shape, **kw: {"state": "working", "shape": shape, "capability": "research", "intensity": "standard",
                                      "stages": three, "legs": (("research", "active", None),), **kw}
-        self.assertEqual(cell(route("map-reduce"), 70)[0], "research(standard) · map-reduce 2/3: analyze")
+        self.assertEqual(cell(route("map-reduce"), 70)[0], "research(team·standard) · map-reduce 2/3: analyze")      # (11-19, correction 4: a team form)
         self.assertEqual(cell({**route("transactional-owner"), "capability": "refine"}, 70)[0],
-                         "refine(standard) · transactional-owner 2/3: analyze")
+                         "refine(team·standard) · transactional-owner 2/3: analyze")
         resumed = route("resource+verification", resume="2m", legs=(("code", "done", None), ("code", "active", None)))
         self.assertEqual(cell(resumed, 90)[0], "code ✓ → research(standard) · resource+verification 2/3: analyze  resume 2m")
         self.assertEqual(cell(route(""), 70)[0], "research(standard) · 2/3: analyze")      # no shape named: the position and the stage

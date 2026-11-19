@@ -68,7 +68,7 @@ sections step down to one row first (`RESOURCES` before any of them), then the r
 in place under the wheel, its border counting what it hides. A press on a
 section's head or rows opens its popup (below); a press on any row of a route
 opens the routes popup on that route's page (Fleet's stage boxes; until its own
-reading comes, the stage boxes the panel's values already draw), a press on the
+reading comes, the stage boxes the panel's values already draw (its top rule ends in the route's form word, `team` or `solo`, as in the route's bracket, never `staged`)), a press on the
 section's head (or Ctrl+], ←→) the routes table, a request's row the MESSAGES
 popup. Values the host could not refresh for a while are shown, not claimed:
 nothing spins, and the frame takes no route state. A value that cannot be read

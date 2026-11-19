@@ -1091,12 +1091,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-17 (route row 5): every route with a stage list reads its stage line, whatever its shape: the shape's own word
     // (`staged`, `map-reduce`, `transactional-owner`; none when the record names none), the position, the stage's name.
     // A frame route has no stage line (its legs hang under it), and a route its owner does alone (one stage) has none.
-    const stageWord=shape=>/^staged/.test(shape)?'staged':/^(|unknown|framed|one-shot-owner)$/.test(shape)?'':shape;
     // The word before a stage line's position: never `staged` (the route's form is `team` in the bracket, or the line has no bracket; 11-19:
     // `code(team·standard) · 3/6: execute`), another shape's own word (`map-reduce`) as before.
-    const stageLead=r=>{const word=stageWord(String(r.shape||''));return word==='staged'?'':word;};
-    const stageLined=r=>{const shape=String(r.shape||''),n=Array.isArray(r.stages)?r.stages.length:0;
-      return !framed(r)&&(/^staged/.test(shape)?n>0:n>1);};
+    const stageLead=r=>stageLeadOf(r);
+    const stageLined=stageLinedOf;
     function shapeCell(r){
       const shape=String(r.shape||''),stages=Array.isArray(r.stages)?r.stages:[];
       const current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
@@ -2516,9 +2514,9 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
   const route=list.find(r=>String(r.id)===String(id));
   if(!route)return null;
   const stages=Array.isArray(route.stages)?route.stages.filter(s=>s&&typeof s==='object'):[];
-  // The panel's own test for a route that reads a stage line (`stageLined` in `render`).
+  // The panel's own test for a route that reads a stage line (`stageLinedOf`, the one `render` uses too).
   const shape=String(route.shape||'');
-  if(route.unit_route===true||shape==='framed'||shape==='one-shot-owner'||!(/^staged/.test(shape)?stages.length>0:stages.length>1))return null;
+  if(route.unit_route===true||shape==='one-shot-owner'||!stageLinedOf({...route,stages}))return null;
   const cfg={...defaults,...configuration},styles=model.styles||{};
   const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
   const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
@@ -2544,9 +2542,10 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
     put(x,y,'┌'+'─'.repeat(Math.max(0,w-2))+'┐',key);put(x,y+h-1,'└'+'─'.repeat(Math.max(0,w-2))+'┘',key);
     for(let i=1;i<h-1;i++){put(x,y+i,'│',key);put(x+w-1,y+i,'│',key);}
   };
-  // The top rule: `╔═ <title>  <age> · N legs · <shape> ═══╗`; the name in the body color, the rest dim.
+  // The top rule: `╔═ <title>  <age> · N legs · <form> ═══╗` (11-19: the route's `kind_form`, the backend's one word for how it runs (`team`, `solo`, `unit`; `route_form` is the only place that
+  // decides it), or, where an older backend sends none, the shape's own word with `staged` left out, as `stageLead` does); the name in the body color, the rest dim.
   const legs=Array.isArray(route.chain)?route.chain.filter(l=>l&&typeof l==='object'):[];
-  const tail=[route.elapsed,legs.length?legs.length+' leg'+(legs.length===1?'':'s'):'',stageWordOf(shape)].map(v=>clean(v).trim()).filter(Boolean).join(' · ');
+  const tail=[route.elapsed,legs.length?legs.length+' leg'+(legs.length===1?'':'s'):'',String(route.kind_form||'').trim()||stageLeadOf(route)].map(v=>clean(v).trim()).filter(Boolean).join(' · ');
   const tailText=tail?'  '+tail+' ':' ';
   put(0,0,'╔═ ','dim');
   const room=Math.max(0,columns-4-size(tailText));
@@ -2586,7 +2585,7 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
     const rowsUsed=Math.floor((legs.length-1)/per)+1;
     y+=rowsUsed*3+(rowsUsed-1)+1;
   }
-  const LW=7,lab=(bx,by,word)=>put(bx,by,word.padEnd(LW),'dim');
+  const LW=7,lab=(bx,by,word,limit)=>put(bx,by,word.padEnd(LW),'dim',limit);   // (the word too stays inside the box: its right rail is bx+w-1)
   // Fleet's page lays its boxes from cell 4 (the page's `║` frame at 0, the legs' frame at 2, the box at `panel_left + 2`) in `stage_room`,
   // the popup's columns less ten; fewer than three stages stand at most 64 cells a stage. Fleet counts flow steps; the panel holds no level,
   // so the stages count one each (a chain; parallel stages are not told apart here).
@@ -2624,7 +2623,7 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
     put(bx+2,by,' '+clip(stage.name||'·',Math.max(0,w-6-size(right)))+' ',ink(stage.key));
     // (the values stand one cell short of the right rail, and a box's rows beyond its height are not drawn)
     linesOf(stage).slice(0,h-2).forEach(([word_,parts],k)=>{
-      lab(bx+2,by+1+k,word_);let px=bx+2+LW;
+      lab(bx+2,by+1+k,word_,bx+w-1);let px=bx+2+LW;
       for(const [value,key] of parts)px=put(px,by+1+k,value,key,bx+w-2);
     });
   });
@@ -2647,8 +2646,12 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
   const routes=[];for(const r of list)if(!routes.includes(String(r.id)))routes.push(String(r.id));
   return {rows,hits:[],routes};
 }
-// The shape's own word in the top rule (`staged`, `map-reduce`; none for a route that names none).
+// The shape's own word before a stage line's position (`staged`, `map-reduce`; none for a route that names none), the word `staged` itself
+// never written (11-19: the form `team` says it), and the test for a route that reads a stage line: one each, for `render` and `routePageFirst`.
 function stageWordOf(shape){return /^staged/.test(shape)?'staged':/^(|unknown|framed|one-shot-owner)$/.test(shape)?'':shape;}
+function stageLeadOf(r){const word=stageWordOf(String((r&&r.shape)||''));return word==='staged'?'':word;}
+function stageLinedOf(r){const shape=String((r&&r.shape)||''),n=Array.isArray(r&&r.stages)?r.stages.length:0;
+  return shape!=='framed'&&(/^staged/.test(shape)?n>0:n>1);}
 module.exports={render,keyRows,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,veil,
   RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST,EASE:RULE_EASE},scanAt,WAVE:{COUNT:WAVE_COUNT,LAP:WAVE_LAP,STEPS:WAVE_STEPS,FLOOR:WAVE_FLOOR,MIN:WAVE_MIN},
   BORDER:{LIT:BORDER_LIT,ARC:BORDER_ARC,LAP:BORDER_LAP,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};

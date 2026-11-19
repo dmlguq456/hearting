@@ -106,7 +106,7 @@ class KindCell(unittest.TestCase):
                          [("draft", "grp"), ("(team·quick)", "dim")])
         # No intensity in the record: the form alone; a shape with no form keeps its intensity bracket alone; the form alone is plain.
         self.assertEqual(tables._kind_cell({"capability": "code", "field": "code", "shape": "staged"}), [("code", "kind_code"), ("(team)", "kinds_code")])
-        self.assertEqual(tables._kind_cell({"capability": "code", "field": "code", "shape": "map-reduce", "intensity": "strong"}),
+        self.assertEqual(tables._kind_cell({"capability": "code", "field": "code", "shape": "resource+verification", "intensity": "strong"}),
                          [("code", "kind_code"), ("(strong)", "kindb_code")])
         # `staged+resource` is staged; the tail folds first and the colour stays that of the intensity
         self.assertEqual(tables._kind_cell({"capability": "lab", "field": "lab", "shape": "staged+resource", "intensity": "thorough"}, tail=False),
