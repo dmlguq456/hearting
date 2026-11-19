@@ -665,11 +665,30 @@ def _open_refusal_detail(pending):
             "then rerun campaign-status")
 
 
+def _bindings_detail(root, ids, directories):
+    """Which listed cycle has no folder and which folder is not listed, and what settles it."""
+    missing = sorted(set(ids) - set(directories))
+    unlisted = sorted(set(directories) - set(ids))
+    parts = []
+    if missing:
+        parts.append(f"folder-missing={', '.join(missing[:10])}" + (f" +{len(missing) - 10} more" if len(missing) > 10 else ""))
+    if unlisted:
+        parts.append(f"folder-not-listed={', '.join(unlisted[:10])}" + (f" +{len(unlisted) - 10} more" if len(unlisted) > 10 else ""))
+    if missing:
+        producer = Path(__file__).with_name("artifact_producer.py")
+        parts.append("next=campaign-close records a vanished folder as gone first when every folder under "
+                     "campaigns/ can be read; if it still refuses, run: python3 " + str(producer)
+                     + " delete --artifact-root " + str(root) + " --cycle <cycle id above>")
+    return " ".join(parts)
+
+
 def _cycle_rows(root, path, campaign, reads=None):
     ids = campaign.get("cycles")
     if (not isinstance(ids, list) or not ids or not all(isinstance(cid, str) for cid in ids)
             or len(set(ids)) != len(ids)):
-        raise CampaignError("campaign-membership-invalid")
+        shape = ("not-a-list" if not isinstance(ids, list) else "empty" if not ids
+                 else "non-string-id" if not all(isinstance(cid, str) for cid in ids) else "duplicate-id")
+        raise CampaignError("campaign-membership-invalid", f"campaign.json cycles is {shape}")
     _validate_runlog(root, path, campaign, ids)
     records = root / ".runtime/artifact-producer/v1/cycles"
     if reads is not None:
@@ -677,19 +696,34 @@ def _cycle_rows(root, path, campaign, reads=None):
     else:
         root_id = lifecycle.read_root_identity(root)
     if root_id is None:
-        raise CampaignError("root-identity-missing")
+        raise CampaignError("root-identity-missing", "the artifact root carries no readable root identity")
     if admission.load_index(root).artifact_root_id != root_id.artifact_root_id:
-        raise CampaignError("campaign-index-root-mismatch")
+        raise CampaignError("campaign-index-root-mismatch",
+                            "the producer index belongs to another artifact root than this one")
     # A campaign list alone cannot hide an open member or an unregistered tree.
     # Detached records (see `is_member_record`) are reported, never counted.
     member_records, detached = campaign_records(root, campaign["campaign_id"], reads=reads)
     members = {record.get("cycle_id") for record in member_records}
+    detached_ids = {record.get("cycle_id") for record in detached}
     if members != set(ids):
+        stale = sorted(set(ids) & detached_ids)
+        unrecorded = sorted(set(ids) - members - detached_ids)
+        unlisted = sorted(members - set(ids))
+        if unrecorded or unlisted:
+            # No command settles these: the producer record is missing, or a live cycle is not listed.
+            next_step = ("a-listed-id-has-no-producer-record-or-a-member-is-not-listed: "
+                         "no command settles it, report it to the owner of this root")
+        else:
+            next_step = ("campaign-close takes the detached cycles (abandoned, no-lineage, deleted, "
+                         "moved to another root) off the list itself, then closes")
         raise CampaignError("campaign-membership-drift", {
             "campaign_id": campaign["campaign_id"],
             "listed_cycle_ids": sorted(ids),
             "producer_cycle_ids": sorted(members),
-            "next_step": "reconcile-campaign-membership-with-producer-records",
+            "detached_listed_cycle_ids": stale,
+            "unrecorded_listed_cycle_ids": unrecorded,
+            "unlisted_member_cycle_ids": unlisted,
+            "next_step": next_step,
         })
     directories = {}
     for entry, layout in locator.iter_cycle_dirs(path.parent):
@@ -710,11 +744,15 @@ def _cycle_rows(root, path, campaign, reads=None):
         if not isinstance(binding, dict) or binding.get("campaign_id") != campaign["campaign_id"]:
             raise CampaignError("campaign-cycle-binding-mismatch", entry)
         cid = binding.get("cycle_id")
+        if cid in detached_ids:
+            # A detached cycle (abandoned, no-lineage, deleted, moved) may keep its folder and
+            # files; the folder is the person's, never a member the close has to account for.
+            continue
         if not isinstance(cid, str) or cid in directories:
             raise CampaignError("campaign-cycle-binding-duplicate", entry)
         directories[cid] = entry
     if set(directories) != set(ids):
-        raise CampaignError("campaign-cycle-bindings-incomplete")
+        raise CampaignError("campaign-cycle-bindings-incomplete", _bindings_detail(root, ids, directories))
     rows = []
     pending_open = []
     for cid in sorted(ids):
@@ -992,6 +1030,29 @@ def _commit_event(root, path, event, action):
         raise CampaignError("campaign-%s-not-committed" % action, str(exc)) from exc
 
 
+def _take_detached_off_list(root, path):
+    """The list is the stale side: it still names cycles whose producer record is detached.
+
+    A record that is detached (`is_member_record` false: abandoned, no-lineage, deleted, moved to
+    another root) is not a member, so a list naming it is out of date.  The close (the one writer
+    that reads the list as membership) takes those ids off before it reads the members.  An id with
+    no record at all, or a member the list lacks, is left alone: `_cycle_rows` still refuses it.
+    Called under the admission lock, for an active campaign only, so a closed campaign's list is
+    never rewritten."""
+    record, _ = read_json(root, path)
+    ids = record.get("cycles")
+    if not isinstance(ids, list):
+        return
+    _members, detached = campaign_records(root, record["campaign_id"])
+    stale = {item.get("cycle_id") for item in detached} & set(ids)
+    remaining = [cid for cid in ids if cid not in stale]
+    if not stale or not remaining:
+        return
+    import artifact_producer as producer
+    producer._write_campaign(root, dict(record, cycles=remaining), exclusive=False)
+    _index_update(locator.update_indexes, root, record["campaign_id"])
+
+
 def _close_locked(root, path, *, reason=None, before_publish=None):
     state = campaign_state(root, path)
     if state.state == "satisfied":
@@ -1001,6 +1062,7 @@ def _close_locked(root, path, *, reason=None, before_publish=None):
         return result
     if state.state != "active":
         raise CampaignError("campaign-not-active", state.state)
+    _take_detached_off_list(root, path)
     snapshot = _snapshot(root, path)
     criterion = snapshot["campaign"].get("completion_criterion", {}).get("statement")
     # §45 D-127: the reason records why the campaign was judged done; it is never a

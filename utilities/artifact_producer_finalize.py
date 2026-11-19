@@ -146,7 +146,7 @@ def _finalize(
     # (`_prescan` on that second call).
     prescan = _prescan if _last_try else _prescan_cycle(
         root, cycle_id, unless_recorded=expected_binding, include_open=True,
-        exclude_hidden=exclude_hidden, budget=_scan_budget)
+        exclude_hidden=exclude_hidden, budget=_scan_budget, leave_outside=state == "abandoned")
     lock_fd = _admission_lock_fd
     interim_guard = contextlib.ExitStack()
     sweep_unresolved: List[Dict[str, Any]] = []
@@ -403,7 +403,8 @@ def _finalize(
                                               marker_observations=marker_observations,
                                               excluded_roots=excluded_roots,
                                               skip_directories=[tree.directory for tree in bundle_trees],
-                                              read_markers=marker_read)
+                                              read_markers=marker_read,
+                                              leave_outside=state == "abandoned")
             bundle_dirs = [tree.directory for tree in bundle_trees]
             journal = _read_json(journal_path(root, cycle_id)) or {}
             owned = {row.get("locator") for row in journal.get("directory_bundles", [])
@@ -579,7 +580,7 @@ def _finalize(
         _recovery_scope=_recovery_scope, _last_try=True, _scan_budget=_scan_budget,
         _prescan=_prescan_cycle(root, cycle_id, unless_recorded=expected_binding,
                                 include_open=True, exclude_hidden=exclude_hidden,
-                                budget=_scan_budget))
+                                budget=_scan_budget, leave_outside=state == "abandoned"))
 
 
 def finalize(root: Path, *, cycle_id: str, **kwargs: Any) -> Dict[str, Any]:

@@ -158,8 +158,13 @@ def _output_paths(directory: Path, *, exclude_hidden: bool = False,
                   excluded_symlinks: Optional[List[str]] = None,
                   marker_observations: Optional[Dict[str, Any]] = None,
                   excluded_roots: Optional[List[str]] = None,
-                  skip_directories: Sequence[str] = (), read_markers: bool = True) -> Tuple[List[Tuple[str, Path]], List[str]]:
+                  skip_directories: Sequence[str] = (), read_markers: bool = True,
+                  leave_outside: bool = False) -> Tuple[List[Tuple[str, Path]], List[str]]:
     """`_enumerate_output` without its reads: the kept `(path, file)` list and the violations.
+
+    `leave_outside` (an abandon, which publishes no output lineage of its own) leaves a regular
+    file outside `artifacts/` where it is, out of the manifest, reported through `excluded`
+    instead of refusing the close on it.
 
     Nothing is opened here (links and kinds are `lstat`-ed), so a first close can list a cycle
     before the admission lock and read each file only once, in chunks."""
@@ -188,6 +193,10 @@ def _output_paths(directory: Path, *, exclude_hidden: bool = False,
             violations.append(f"non-regular-file:{rel}")
             continue
         if payload_root is None:
+            if leave_outside:
+                if excluded is not None:
+                    excluded.append(rel)
+                continue
             violations.append(f"file-outside-artifacts:{rel}")
             continue
         if (exclude_hidden and payload_root == "artifacts"
