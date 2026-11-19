@@ -1005,7 +1005,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const walkCalled=(items,depth)=>(Array.isArray(items)?items:[]).filter(c=>c&&typeof c==='object').slice(0,8).flatMap(c=>[[c,depth],...walkCalled(c.called,depth+1)]);
     const flatCalled=r=>[...walkCalled(r.called,0),...workersAll(r).flatMap(w=>walkCalled(w.called,0))];
     const calledBottom=new Map(listed.map(r=>[r,side?[]:flatCalled(r).filter(([c])=>clean(c.unit_word||'').trim()).map(([c,depth])=>({
-      title:c.title||'',kind:c.kind,paint:c.paint||{},elapsed:c.elapsed,unit_route:true,unit_word:c.unit_word,kind_word:c.kind_word,
+      title:c.title||'',kind:c.kind,paint:c.paint||{},elapsed:c.elapsed,unit_route:true,called:true,unit_word:c.unit_word,kind_word:c.kind_word,
       kind_field:c.kind_field,indent:2+2*depth,shape:''}))]));
     const calledAll=[...calledBottom.values()].flat();
     const indentOf=r=>r.indent||0;
@@ -1047,7 +1047,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return hued&&FIELDS.includes(field)&&styles['kind_'+field]?field:'';
     };
     const kindText=(word,field='')=>field?{...text(clean(word),'kind_'+field),bold:true,dim:false}:{text:clean(word),foreground:null,bold:true,dim:false};
-    const bracket=(word,field='')=>field?{...text('('+word+')','kind'+(WEIGHT[String(word).trim().toLowerCase()]||'s')+'_'+field),role:'kind'}:text('('+word+')','dim');
+    const bracket=(word,field='',inten='')=>field?{...text('('+word+')','kind'+(WEIGHT[String(inten||word).trim().toLowerCase()]||'s')+'_'+field),role:'kind'}:text('('+word+')','dim');
     const framed=r=>String(r.shape||'')==='framed';
     // A direct route's word stands for its intensity when the record names none (the backend sends it in the screen language).
     const intensityRaw=r=>{
@@ -1058,34 +1058,48 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     // 11-17 (route zones): in the `direct` zone the zone's own name says it, so `(direct)` (the word the record or its shape
     // gives) is left out of the line; a real intensity (`quick`) stays.
-    // A unit route's intensity is not a choice (it is always `quick`), so its first line has no bracket.
+    // 11-19 (the person, in order: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?" / "code(unit) 이렇게 쓰는건 이상한가?" / "근데 강도랑은 좀
+    // 다르잖아. 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만 수행하는 건지" / "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" /
+    // "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" / "강도도 표기해 항상" / "unit과 one-shot의 의미가 딱 들으면 잘 구분이 되나?
+    // staged도 그 framed랑 함께 잘 표현이 되는 단어인가? 전반적으로 전향적 검토가 필요해" / "team도 괜찮은데?"): two axes. The bracket of a route in
+    // the `dispatch` zone holds its FORM (`kind_form`, the backend's one word for it, read as who makes the work: `unit` one unit called, `solo` the
+    // owner alone doing the whole procedure, `team` the owner and a worker for each stage; English in every language; `direct` has no bracket)
+    // and its INTENSITY after a `·` (`code(team·standard)`), always, whatever the form. (The commands still say `--shape solo|staged`: `staged` is `team`.)
+    // Colour and weight follow the intensity (`kind{q,s,b}_<field>`; no field: a dim
+    // bracket), also when the tail is folded away. A route of another shape (a frame, an older record) keeps its intensity bracket alone, an
+    // older unit route that records no field keeps its bare `unit`, a `direct` route has no form, and a unit a worker called (`called`)
+    // is a row under its caller's with no bracket.
     const intensityOf=r=>{
-      if(r.unit_route===true)return '';
+      if(r.unit_route===true&&(r.called===true||clean(r.kind_word||'').trim()==='unit'))return '';
       const word=intensityRaw(r);
       return r.zone==='direct'&&(/^direct$/i.test(word)||word===clean(r.shape||'').trim())?'':word;
     };
-    const kindHead=r=>{const word=clean(r.kind_word||'').trim(),inten=intensityOf(r);
+    const formOf=r=>r.zone==='direct'||r.called===true?'':clean(r.kind_form||'').trim();
+    const bracketWord=(r,tail=true)=>{const form=formOf(r),inten=intensityOf(r);return form?form+(tail&&inten?'·'+inten:''):inten;};
+    const kindHead=(r,tail=true)=>{const word=clean(r.kind_word||'').trim(),b=bracketWord(r,tail);
       const field=kindField(r,word);
-      return word?[kindText(word,field),...(inten?[bracket(inten,field)]:[])]:[];};
-    // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(standard) · staged 3/7: execute`, a route with
-    // no stage line reads `lab(quick)`; short of cells `3/7: execute`.
+      return word?[kindText(word,field),...(b?[bracket(b,field,intensityOf(r))]:[])]:[];};
+    // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(team·standard) · 3/7: execute` (`staged` is never written before the position), a route with no stage line reads `lab(solo·quick)`; the intensity goes
+    // first short of cells (`code(team) · 3/7: execute`), then the kind, then `staged 3/7: execute`, then `3/7: execute`.
     function kindCell(r){
-      const cell=shapeCell(r),head=kindHead(r);
-      if(!head.length)return cell&&{...cell,kind:cell.full};
-      if(!cell)return {full:[],short:[],kind:head};
-      return {...cell,kind:[...head,text(' · ','dim'),...cell.full]};
+      const cell=shapeCell(r),head=kindHead(r),bare=kindHead(r,false);
+      if(!head.length)return cell&&{...cell,kind:cell.full,bare:cell.full};
+      if(!cell)return {full:[],short:[],kind:head,bare};
+      const rest=cell.full;
+      return {...cell,kind:[...head,text(' · ','dim'),...rest],bare:[...bare,text(' · ','dim'),...rest]};
     }
     // 11-17 (route row 5): every route with a stage list reads its stage line, whatever its shape: the shape's own word
     // (`staged`, `map-reduce`, `transactional-owner`; none when the record names none), the position, the stage's name.
     // A frame route has no stage line (its legs hang under it), and a route its owner does alone (one stage) has none.
-    const stageWord=shape=>/^staged/.test(shape)?'staged':/^(|unknown|framed|one-shot-owner)$/.test(shape)?'':shape;
-    const stageLined=r=>{const shape=String(r.shape||''),n=Array.isArray(r.stages)?r.stages.length:0;
-      return !framed(r)&&(/^staged/.test(shape)?n>0:n>1);};
+    // The word before a stage line's position: never `staged` (the route's form is `team` in the bracket, or the line has no bracket; 11-19:
+    // `code(team·standard) · 3/6: execute`), another shape's own word (`map-reduce`) as before.
+    const stageLead=r=>stageLeadOf(r);
+    const stageLined=stageLinedOf;
     function shapeCell(r){
       const shape=String(r.shape||''),stages=Array.isArray(r.stages)?r.stages:[];
       const current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
       if(stageLined(r)){
-        const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length,word=stageWord(shape);
+        const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length,word=stageLead(r);
         const stage=stageCell(stages[at],'loc_repo');
         return {full:[text((word?word+' ':'')+position+': ','dim'),...stage],short:[text(position+': ','dim'),...stage]};
       }
@@ -1097,9 +1111,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // beside the native area: a route reads its harness, model and context number, and its NOW on the row under it.
     const planBottom=(ow,gw,C)=>{
       const kinds=C.set.map(kindCell);
-      const widths=Object.fromEntries(['kind','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
+      const widths=Object.fromEntries(['kind','bare','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
       const longest=C.width(titleCols),avail=inner-(2+3+ow+3+gw+1+C.elapsed);
-      const order=widths.kind>widths.full?['kind','full','short']:['full','short'];
+      const order=widths.kind>widths.full?['kind',...(widths.bare<widths.kind&&widths.bare>widths.full?['bare']:[]),'full','short']:['full','short'];
       for(const level of order){
         if(!widths[level])break;
         const room=avail-(3+widths[level]);
@@ -1117,7 +1131,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // routes' alone (`routeCols`: the box as it stands with no called unit); the called rows are drawn into them (the title cut
     // with `…` and empty where no cells are left, the worker cell folded in the narrow worker line's order). Only where the
     // columns grown by the called rows leave every route row reading the same, letter for letter (as it reads in the routes'
-    // own), the box takes those wider columns, as it takes the widened named column above.
+    // own), the box takes those wider columns, as it takes the widened named column above, and as that one only from the richest stage
+    // form the box can have (`plan.top`; 11-19 review N1: else the columns widen and narrow again as the window is widened).
     let bottomSet;
     const layoutOf=C=>{
       const gw=C.width(x=>leadPaint(x).gauge5||[]),named=C.width(x=>doerCell(x,Infinity)),
@@ -1130,7 +1145,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const own=layoutOf(routeCols);
       if(!calledAll.length)return bottomSet=own;
       const grown=layoutOf(columnsOf([...listed,...calledAll])),letters=parts=>clean(parts.map(p=>p.text).join('')).replace(/\s+/g,' ').trim();
-      return bottomSet=grown.plan.level===own.plan.level&&listed.every(r=>letters(folded(r,own))===letters(folded(r,grown)))
+      return bottomSet=grown.plan.level===own.plan.level&&own.plan.top&&listed.every(r=>letters(folded(r,own))===letters(folded(r,grown)))
         &&calledAll.every(c=>{folded(c,grown);return !clipped;})?grown:own;
     };
     // A unit route's doer cell in a column `width` wide: its name, then as much of the effort, harness and model as the column holds,
@@ -1439,7 +1454,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const at=given!==null&&stages[given]?given:currentAt(r),position=(at+1)+'/'+stages.length;
       const stage=stageCell(stages[at],stageInk(stages[at].key)),pieces=piecesOf(r);
       // Spec rule 43 (g): the workers gone for rows, the stage line ends with their count (it stays while the values before it go).
-      for(const end of workers?[[text(' · ','dim'),text('worker '+workers,'dim')],[]]:[[]])for(const word of [...new Set([(stageWord(shape)?stageWord(shape)+' ':'')+position,position])])for(let n=pieces.length;n>=0;n--){
+      for(const end of workers?[[text(' · ','dim'),text('worker '+workers,'dim')],[]]:[[]])for(const word of [...new Set([(stageLead(r)?stageLead(r)+' ':'')+position,position])])for(let n=pieces.length;n>=0;n--){
         const row=[text(word,'dim'),text(': ','dim'),...stage,...pieces.slice(0,n).flatMap(piece=>[text(' · ','dim'),...piece]),...end];
         if(size(row)<=limit)return row;
       }
@@ -1447,9 +1462,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     // The first line: a state mark, then the chain of kinds the route continues (`frame ✓ → code(standard)`: what is behind
     // dim with `✓`, this one bold, what is left dim; a frame route reads `frame → ??` until its direction is chosen).
-    function chainParts(r,{past=true,inten=true}={}){
-      const kind=clean(r.kind_word||'').trim(),word=inten?intensityOf(r):'';
-      const own=name=>{const field=kindField(r,name);return [kindText(name,field),...(word?[bracket(word,field)]:[])];};
+    function chainParts(r,{past=true,inten=true,tail=true}={}){
+      const kind=clean(r.kind_word||'').trim(),word=inten?bracketWord(r,tail):'';
+      const own=name=>{const field=kindField(r,name);return [kindText(name,field),...(word?[bracket(word,field,intensityOf(r))]:[])];};
       const legs=(Array.isArray(r.chain)?r.chain:[]).filter(l=>l&&l.name);
       if(!legs.length)return kind?own(kind):[];
       const out=[];
@@ -1472,7 +1487,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // then the whole), as the waiting-for-direction text does.
     function stageForms(r,name){
       if(!stageLined(r))return [];
-      const stages=stagesOf(r),at=currentAt(r),word=(stageWord(String(r.shape||''))?stageWord(String(r.shape||''))+' ':'')+(at+1)+'/'+stages.length;
+      const stages=stagesOf(r),at=currentAt(r),word=(stageLead(r)?stageLead(r)+' ':'')+(at+1)+'/'+stages.length;
       const forms=[];
       if(name){const stage=stageCell(stages[at],stageInk(stages[at].key)),pieces=piecesOf(r);
         for(let n=pieces.length;n>=0;n--)forms.push({named:true,parts:[text(word,'dim'),text(': ','dim'),...stage,...pieces.slice(0,n).flatMap(piece=>[text(' · ','dim'),...piece])]});}
@@ -1480,7 +1495,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return forms.map(form=>({named:form.named,parts:[text(' · ','dim'),...form.parts]}));
     }
     function headRow(r){
-      const chains=[{},{past:false},{past:false,inten:false}].map(o=>chainParts(r,o));
+      const chains=[{},{tail:false},{past:false,tail:false},{past:false,inten:false}].map(o=>chainParts(r,o));
       if(!chains[0].length)return null;
       const wait=directionWait(r)?[text(' · ','dim'),text(t('direction_wait','waiting for direction'),'dim')]:[];
       const width=inner,room=width-2;     // the box's inner width, read now (the row is drawn after the box's width is given back)
@@ -2499,9 +2514,9 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
   const route=list.find(r=>String(r.id)===String(id));
   if(!route)return null;
   const stages=Array.isArray(route.stages)?route.stages.filter(s=>s&&typeof s==='object'):[];
-  // The panel's own test for a route that reads a stage line (`stageLined` in `render`).
+  // The panel's own test for a route that reads a stage line (`stageLinedOf`, the one `render` uses too).
   const shape=String(route.shape||'');
-  if(route.unit_route===true||shape==='framed'||shape==='one-shot-owner'||!(/^staged/.test(shape)?stages.length>0:stages.length>1))return null;
+  if(route.unit_route===true||shape==='one-shot-owner'||!stageLinedOf({...route,stages}))return null;
   const cfg={...defaults,...configuration},styles=model.styles||{};
   const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
   const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
@@ -2527,9 +2542,10 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
     put(x,y,'┌'+'─'.repeat(Math.max(0,w-2))+'┐',key);put(x,y+h-1,'└'+'─'.repeat(Math.max(0,w-2))+'┘',key);
     for(let i=1;i<h-1;i++){put(x,y+i,'│',key);put(x+w-1,y+i,'│',key);}
   };
-  // The top rule: `╔═ <title>  <age> · N legs · <shape> ═══╗`; the name in the body color, the rest dim.
+  // The top rule: `╔═ <title>  <age> · N legs · <form> ═══╗` (11-19: the route's `kind_form`, the backend's one word for how it runs (`team`, `solo`, `unit`; `route_form` is the only place that
+  // decides it), or, where an older backend sends none, the shape's own word with `staged` left out, as `stageLead` does); the name in the body color, the rest dim.
   const legs=Array.isArray(route.chain)?route.chain.filter(l=>l&&typeof l==='object'):[];
-  const tail=[route.elapsed,legs.length?legs.length+' leg'+(legs.length===1?'':'s'):'',stageWordOf(shape)].map(v=>clean(v).trim()).filter(Boolean).join(' · ');
+  const tail=[route.elapsed,legs.length?legs.length+' leg'+(legs.length===1?'':'s'):'',String(route.kind_form||'').trim()||stageLeadOf(route)].map(v=>clean(v).trim()).filter(Boolean).join(' · ');
   const tailText=tail?'  '+tail+' ':' ';
   put(0,0,'╔═ ','dim');
   const room=Math.max(0,columns-4-size(tailText));
@@ -2569,7 +2585,7 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
     const rowsUsed=Math.floor((legs.length-1)/per)+1;
     y+=rowsUsed*3+(rowsUsed-1)+1;
   }
-  const LW=7,lab=(bx,by,word)=>put(bx,by,word.padEnd(LW),'dim');
+  const LW=7,lab=(bx,by,word,limit)=>put(bx,by,word.padEnd(LW),'dim',limit);   // (the word too stays inside the box: its right rail is bx+w-1)
   // Fleet's page lays its boxes from cell 4 (the page's `║` frame at 0, the legs' frame at 2, the box at `panel_left + 2`) in `stage_room`,
   // the popup's columns less ten; fewer than three stages stand at most 64 cells a stage. Fleet counts flow steps; the panel holds no level,
   // so the stages count one each (a chain; parallel stages are not told apart here).
@@ -2607,7 +2623,7 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
     put(bx+2,by,' '+clip(stage.name||'·',Math.max(0,w-6-size(right)))+' ',ink(stage.key));
     // (the values stand one cell short of the right rail, and a box's rows beyond its height are not drawn)
     linesOf(stage).slice(0,h-2).forEach(([word_,parts],k)=>{
-      lab(bx+2,by+1+k,word_);let px=bx+2+LW;
+      lab(bx+2,by+1+k,word_,bx+w-1);let px=bx+2+LW;
       for(const [value,key] of parts)px=put(px,by+1+k,value,key,bx+w-2);
     });
   });
@@ -2630,8 +2646,12 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
   const routes=[];for(const r of list)if(!routes.includes(String(r.id)))routes.push(String(r.id));
   return {rows,hits:[],routes};
 }
-// The shape's own word in the top rule (`staged`, `map-reduce`; none for a route that names none).
+// The shape's own word before a stage line's position (`staged`, `map-reduce`; none for a route that names none), the word `staged` itself
+// never written (11-19: the form `team` says it), and the test for a route that reads a stage line: one each, for `render` and `routePageFirst`.
 function stageWordOf(shape){return /^staged/.test(shape)?'staged':/^(|unknown|framed|one-shot-owner)$/.test(shape)?'':shape;}
+function stageLeadOf(r){const word=stageWordOf(String((r&&r.shape)||''));return word==='staged'?'':word;}
+function stageLinedOf(r){const shape=String((r&&r.shape)||''),n=Array.isArray(r&&r.stages)?r.stages.length:0;
+  return shape!=='framed'&&(/^staged/.test(shape)?n>0:n>1);}
 module.exports={render,keyRows,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,veil,
   RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST,EASE:RULE_EASE},scanAt,WAVE:{COUNT:WAVE_COUNT,LAP:WAVE_LAP,STEPS:WAVE_STEPS,FLOOR:WAVE_FLOOR,MIN:WAVE_MIN},
   BORDER:{LIT:BORDER_LIT,ARC:BORDER_ARC,LAP:BORDER_LAP,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};

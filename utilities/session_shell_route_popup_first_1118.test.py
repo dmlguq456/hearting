@@ -230,6 +230,8 @@ const measure=async(label,press_=opened)=>{
       {const fl=plain(first.s),ft=fl.join('\n'),rule=fl.find(l=>l.includes('╔═'))||'';
        // the route pressed (PANEL_R2) is the one drawn, not another's
        c.first_named=rule.includes('PANEL_R2')&&!rule.includes('PANEL_R1')&&!rule.includes('PANEL_R3');
+       // (11-19: the head's word is the route's form, `team`, and never `staged`)
+       c.first_form=/ team ═/.test(rule)&&!/staged/.test(rule);c.first_rule_text=rule;
        // the panel's pass mark `gate: true` is not drawn as a word; an empty `out`/`unit` is `·`
        c.first_true=/\btrue\b/.test(ft);c.first_dot=/out +· +│/.test(ft)&&/unit +· +│/.test(ft);c.first_box=boxGeo(fl);}
       c.first_rule=popupHas('╔═')(first.s);c.first_keys=popupHas('Enter 표로 돌아가기')(first.s);
@@ -247,7 +249,7 @@ const measure=async(label,press_=opened)=>{
       // (c) Enter: the table, the route unfolded; (d) Enter: the page again.
       await key('\r',0);const tab=await until(s=>!paged(s)&&!!unfolded(s)&&popupHas('FLEET_R')(s),'the table at '+w);
       // (a narrow table cuts the name: `FLEET_R…`)
-      c.table_unfolded=plain(tab.s).join('\n');c.table_paged=paged(tab.s);frames['row_page_'+w+'_table']=plain(tab.s);
+      c.table_unfolded=plain(tab.s).join('\n');c.table_has_team=/code\(team/.test(c.table_unfolded)&&!/staged/.test(c.table_unfolded);c.table_full_bracket=/code\(team·standard\)/.test(c.table_unfolded);c.table_paged=paged(tab.s);frames['row_page_'+w+'_table']=plain(tab.s);
       if(w===120){
         // (the limit: a page left for the table and closed opens at its stage boxes again, then Fleet's page after the delay)
         await close();control('vm-delay',cfg.delay);
@@ -565,7 +567,7 @@ def route_row(rid, title, state='working', staged=False):
            'stages': [{'name': 'one-shot', 'st': 'failed' if state == 'dead' else 'active'}], 'harness': 'claude',
            'model': 'Opus 5.5', 'effort': 'high'}
     if staged:  # the producer's staged route (what a real route's row carries), for the pictures of the first screen
-        row.update(shape='staged', worker_stage='execute', capability='autopilot-code', mode='dev', intensity='standard',
+        row.update(shape='staged', kind_form='team', worker_stage='execute', capability='autopilot-code', mode='dev', intensity='standard',
                    chain=[{'name': 'frame', 'state': 'done'}, {'name': 'code', 'state': 'active'}],
                    stages=[stage_values(i, n) for i, n in enumerate(STAGES)])
     return row
@@ -577,7 +579,7 @@ def fleet_route(rid, title, state='working', staged=False):
            'mode': 'dev', 'intensity': 'quick', 'stages': [{'name': 'one-shot', 'st': 'failed' if state == 'dead' else 'active'}],
            'worker_stage': 'one-shot'}
     if staged:
-        row.update(intensity='standard', worker_stage='execute', legs=[['frame', 'done', None], ['code', 'active', None]],
+        row.update(intensity='standard', shape='staged', worker_stage='execute', legs=[['frame', 'done', None], ['code', 'active', None]],
                    stages=[stage_values(i, n) for i, n in enumerate(STAGES)])
     return row
 
@@ -905,6 +907,7 @@ class RoutePopupFirstTest(unittest.TestCase):
             self.assertTrue(all(x >= 0 for x in w['first_order']) and w['first_order'] == sorted(w['first_order']), w)
             # (the route pressed, not another's; no `true` for the panel's pass mark; an empty place is `·`)
             self.assertTrue(w['first_named'], w)
+            self.assertTrue(w['first_form'], w)
             self.assertFalse(w['first_true'], w)
             self.assertTrue(w['first_dot'], w)
             # (the first screen's box is the page's: the same width, the same left cell, the same mark and word on its top line)
@@ -929,6 +932,9 @@ class RoutePopupFirstTest(unittest.TestCase):
                 self.assertFalse(w['limit']['paged'] or w['limit']['fleet'], w)
             # (c) Enter: the table with the route unfolded and no frame; (d) Enter: the page again.
             self.assertIn('FLEET_R', w['table_unfolded'], w)
+            self.assertNotIn('staged', w['table_unfolded'], w)
+            if width == '196':  # (the table's route row reads `code(team·standard)` where its progress cell has the room; a narrower table shows the stage name)
+                self.assertTrue(w['table_has_team'] and w['table_full_bracket'], w)
             self.assertIn('▶', w['table_unfolded'], w)
             self.assertFalse(w['table_paged'], w)
             self.assertTrue(w['again_paged'], w)
@@ -981,7 +987,7 @@ const names=['plan','plan-check','execute','impl-review','test','report'];
 const stage=(n,i)=>({name:n,state:i<2?'done':i===2?'active':'pending',mark:i<2?'✓':i===2?'●':'',current:i===2,key:'stg'+(i%5)+'_on',
   ...(i<2?{verdict:'PASS',when:'30m',out:'artifacts/'+n+'.md',unit:'qa/'+n,gate:true}:{}),...(i===2?{harness:'claude',model:'Opus 5.5',unit:'dev/backend',when:'4m',gate:true}:{}),
   ...(i===3?{gate:'code-plan'}:{})});
-const route=(id,extra={})=>({id,title:'제목 '+id,kind:'working',state:'working',elapsed:'23m',shape:'staged',stages:names.map(stage),
+const route=(id,extra={})=>({id,title:'제목 '+id,kind:'working',state:'working',elapsed:'23m',shape:'staged',kind_form:'team',stages:names.map(stage),
   chain:[{name:'frame',state:'done'},{name:'code',state:'active'}],...extra});
 const model={styles:{dim:{dim:true},stg2_on:{foreground:150,bold:true}},routes:[route('r1'),route('r2',{shape:'one-shot-owner',stages:[{name:'one-shot',mark:'●'}]})]};
 const text=r=>r.map(p=>p.text).join('');
@@ -1039,6 +1045,12 @@ for(const columns of [192,116,76]){
   const gated=boxOf('impl-review',3).join('\n');
   assert(gated.includes('gate')&&gated.includes(clip('code-plan',vroom-3)),'a gate in words: '+gated);
   assert.deepEqual(b.routes,['r1','r2']);assert.deepEqual(b.hits,[]);
+  // (x) 11-19: the head's word is the route's `kind_form` (`team`), never `staged`; where an older backend sends none, the shape's own word without `staged`.
+  assert(/^╔═ .* · team ═+╗$/.test(lines[0])&&!lines[0].includes('staged'),'the head at '+columns+': '+lines[0]);
+  const old=view.routePageFirst({model:{...model,routes:[route('o',{kind_form:undefined})]},id:'o',columns});
+  assert(!old.rows.map(text).join('\n').includes('staged')&&!/team/.test(text(old.rows[0])),'an older backend at '+columns+': '+text(old.rows[0]));
+  const mr=view.routePageFirst({model:{...model,routes:[route('m',{kind_form:undefined,shape:'map-reduce'})]},id:'m',columns});
+  assert(/ · map-reduce ═/.test(text(mr.rows[0])),text(mr.rows[0]));       // (another shape's own word stays where no form is sent)
 }
 // (v) a word gate on a finished stage ends in the check mark.
 {const g=view.routePageFirst({model:{...model,routes:[route('g',{stages:names.map((n,i)=>({...stage(n,i),...(i===1?{gate:'code-plan-review-long'}:{})}))})]},id:'g',columns:192});
@@ -1052,6 +1064,15 @@ for(const columns of [192,116,76]){
 for(const columns of [20,40,56]){
   const b=view.routePageFirst({model,id:'r1',columns});assert(b,'a page at '+columns);
   for(const r of b.rows)assert(measure(text(r))<=columns,'a line over '+columns+': '+text(r));
+}
+// (vii-b) 11-19: the label word of a content row stays inside its box too: a box's right rail `│` stands at its right cell on every content line
+// (at 40 and 47 the label used to overwrite it).
+for(const columns of [40,46,47,50,55]){
+  const ls=view.routePageFirst({model,id:'r1',columns}).rows.map(text);
+  let tops=0;
+  ls.forEach((l,i)=>{for(const m of l.matchAll(/┌─/g)){const left=m.index,right=l.indexOf('┐',left);if(right<0)continue;tops++;
+    for(let j=i+1;j<ls.length&&!/└/.test(ls[j].slice(left,left+1));j++)assert.equal(ls[j][right],'│','the right rail at '+columns+' row '+j+': '+ls[j]);}});
+  assert(tops>0,'a box at '+columns);
 }
 // (viii) no stage line: the owner alone, a unit's route, no stages, an unknown route.
 assert.equal(view.routePageFirst({model,id:'r2',columns:100}),null);
