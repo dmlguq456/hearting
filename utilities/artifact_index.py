@@ -343,7 +343,11 @@ def check(
 
     for root_id, route_id in declared_routes(document):
         existing = index.routes.get(root_id, {}).get(route_id)
-        if existing is not None and not is_idempotent_retry and not owned_by_this_cycle(existing):
+        if (existing is not None and not is_idempotent_retry and not owned_by_this_cycle(existing)
+                and not (isinstance(existing, dict) and cycle.get("parent_cycle_id")
+                         and existing.get("cycle_id") == cycle["parent_cycle_id"])):
+            # (A unit route's next turn begins a cycle that is the child of its previous turn's: the route's
+            # row then names the newer cycle. Any other second cycle of a route is still refused.)
             violations.append(
                 Violation(
                     "index-route-composite-duplicate",
@@ -539,6 +543,24 @@ def retire(index: IndexDocument, cycle_id: str) -> IndexDocument:
         streams=index.streams, manifests=manifests, cycles=cycles)
 
 
+def _parents_first(items):
+    """The documents with each cycle after its parent (otherwise in their given order), so the fold is the
+    same whatever order the folders were read in: a route's row names its newest cycle."""
+    def cycle_of(item):
+        return item[0].get("cycle") if isinstance(item[0].get("cycle"), dict) else {}
+
+    by_cycle = {cycle_of(item).get("cycle_id"): item for item in items}
+    ordered, placed = [], set()
+    for item in items:
+        chain = []
+        while item is not None and id(item) not in placed:
+            placed.add(id(item))
+            chain.append(item)
+            item = by_cycle.get(cycle_of(item).get("parent_cycle_id"))
+        ordered.extend(reversed(chain))      # the oldest ancestor not yet placed first
+    return ordered
+
+
 def build(
     admitted: Iterable[Tuple[Mapping[str, Any], str, str, str]],
     *,
@@ -564,7 +586,7 @@ def build(
     Every other uniqueness rule is the same `check()` used incrementally —
     a conflict is a refusal, never a silent overwrite (D-7).
     """
-    items = list(admitted)
+    items = _parents_first(list(admitted))
     if not items and not artifact_root_id:
         raise ValueError("build() requires at least one admitted document to seed artifact_root_id")
     root_id = items[0][0].get("artifact_root_id") if items else artifact_root_id
