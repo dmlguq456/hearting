@@ -3027,6 +3027,45 @@ class OneTurnStageTransportTest(unittest.TestCase):
             self.assertEqual(resume["params"][key], start["params"][key], key)
         self.assertIn('"thread_id":"thread-new"', woken.stdout.replace(" ", ""))
 
+    def test_a_thread_that_cannot_be_woken_ends_the_turn_with_its_reason_and_starts_no_fresh_thread(self):
+        trace = self.root / "refuse_trace.jsonl"
+        env = {**os.environ, "STAGE_TRACE": str(trace)}
+        for name, answer in (("refused", "{'error': {'code': -32000, 'message': 'no rollout'}}"),
+                             ("renamed", "{'result': {'thread': {'id': 'thread-other'}}}")):
+            fake = self.root / f"{name}.py"
+            fake.write_text(textwrap.dedent(f"""\
+                import json, os, sys
+                trace = os.environ['STAGE_TRACE']
+                def send(value): print(json.dumps(value), flush=True)
+                def record(value):
+                    with open(trace, 'a', encoding='utf-8') as out:
+                        out.write(json.dumps(value) + '\\n')
+                for line in sys.stdin:
+                    value = json.loads(line); method = value.get('method')
+                    if method == 'initialize':
+                        send({{'jsonrpc':'2.0','id':value['id'],'result':{{}}}})
+                    elif method in ('thread/start', 'thread/resume', 'turn/start'):
+                        record({{'event': method}})
+                        if method == 'thread/resume':
+                            send({{'jsonrpc':'2.0','id':value['id'], **{answer}}})
+                        else:
+                            send({{'jsonrpc':'2.0','id':value['id'],'result':{{'thread':{{'id':'thread-new'}}}}}})
+                    elif method == 'shutdown':
+                        break
+                """), encoding="utf-8")
+            woken = subprocess.run([sys.executable, str(SUPERVISOR), "--one-turn", "--worktree", str(self.root),
+                                    "--sandbox", "read-only", "--keep-session", "--resume-thread", "thread-new",
+                                    "--app-server-command", f"{sys.executable} {fake}"],
+                                   input="turn two", text=True, capture_output=True, env=env, timeout=15)
+            rows = [json.loads(line) for line in woken.stdout.splitlines()]
+            self.assertEqual(woken.returncode, 70, name + woken.stdout)
+            reason = next(row["reason"] for row in rows if row.get("type") == "dispatch.supervisor.error")
+            self.assertEqual(reason, {"refused": "app-server-request-failed:thread/resume",
+                                      "renamed": "resume-native-session-changed"}[name])
+            self.assertFalse(any(row.get("type") == "turn.completed" for row in rows), name)
+        events = [json.loads(line)["event"] for line in trace.read_text().splitlines()]
+        self.assertEqual(events, ["thread/resume", "thread/resume"])     # no fresh thread, no turn
+
     def test_empty_prompt_and_app_server_eof_fail_without_terminal_success(self):
         marker = self.root / "started"
         fake = self.root / "eof.py"

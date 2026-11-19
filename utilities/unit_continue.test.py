@@ -292,7 +292,7 @@ class KeepWindowTest(unittest.TestCase):
     def test_the_last_turn_of_a_unit_route_waits_by_where_its_parent_is(self):
         m = meta(route_file="/nonexistent/rt.json")
         import route_autoclose
-        self.assertEqual(self.window(m, {}, "live"), float("inf"))
+        self.assertEqual(self.window(m, {}, "live"), route_autoclose.IDLE_SECONDS)     # a live parent has an end too
         self.assertEqual(self.window(m, {}, "dead"), route_autoclose.QUIET_SECONDS)
         self.assertEqual(self.window(m, {}, "unknown"), route_autoclose.IDLE_SECONDS)
 
@@ -310,7 +310,8 @@ class KeepWindowTest(unittest.TestCase):
     def test_a_leg_a_worker_started_waits_while_that_worker_runs(self):
         m = meta(route_file="/nonexistent/rt.json", caller_attempt_id="att-caller")
         caller = self.rows(("running", meta("att-caller")))
-        self.assertEqual(self.window(m, caller), float("inf"))
+        import route_autoclose
+        self.assertEqual(self.window(m, caller), route_autoclose.IDLE_SECONDS)
         ended = self.rows(("done", meta("att-caller")))
         self.assertEqual(self.window(m, ended), self.DEFAULT)
 
@@ -343,6 +344,32 @@ class AdapterSessionTest(unittest.TestCase):
         self.assertEqual(woken[woken.index("--session") + 1], "ses_1")
         self.assertEqual([x for x in woken if x not in ("--session", "ses_1")], plain)
 
+    def test_the_woken_turn_names_its_harness_by_the_adapter_folder(self):
+        import dispatch_headless_main as DHM
+        import worker_bootstrap
+        seen = []
+
+        class Stop(Exception):
+            pass
+
+        def plan_for_args(args, jobs, harness):
+            seen.append(harness)
+            raise Stop
+
+        with tempfile.TemporaryDirectory() as tmp:
+            route = Path(tmp) / "rt.json"
+            route.write_text("{}")
+            args = types.SimpleNamespace(capability="unit", dispatch_depth=1, route_file=str(route), route_node=NODE,
+                                         continues_attempt_id=FIRST, jobs_path="jobs.log")
+            for harness in ("claude", "codex", "opencode"):
+                adapter = types.SimpleNamespace(__file__=str(HERE.parent / "adapters" / harness / "bin" / "dispatch-headless.py"))
+                with mock.patch.object(worker_bootstrap, "resolve_node_scope", return_value={}), \
+                        mock.patch.object(worker_bootstrap, "_child_scope_environment", return_value={}), \
+                        mock.patch.object(UC, "plan_for_args", side_effect=plan_for_args):
+                    with self.assertRaises(Stop):
+                        DHM.unit_leg_prompt(adapter, args, "brief")
+        self.assertEqual(seen, ["claude", "codex", "opencode"])
+
     def test_the_row_carries_the_chain_only_for_a_unit_leg(self):
         import dispatch_contract_rows as ROWS
         plan = UC.SessionPlan("fresh", "session-missing", "", "")
@@ -369,7 +396,7 @@ class CorrectUnitRouteTest(unittest.TestCase):
                         mock.patch.object(work_start, "_rows", side_effect=lambda jobs: self.rows)]
         for patch in self.patches:
             patch.start()
-        self.rows = {FIRST: ("done", meta())}
+        self.rows = {FIRST: ("done", meta(failure_class="pass"))}
 
     def tearDown(self):
         for patch in self.patches:
@@ -413,6 +440,39 @@ class CorrectUnitRouteTest(unittest.TestCase):
         start.assert_called_once()
         self.assertEqual(len(UC.entries(self.jobs, "rt-abc")), 1)
 
+    def test_a_text_that_already_ran_as_a_turn_is_not_answered_with_that_turns_result(self):
+        def start(route, path, jobs, **kw):
+            self.rows[UC.attempt_id_for("rt-abc", NODE, UC.entries(jobs, "rt-abc")[0]["id"])] = (
+                "done", meta("att-2", 2, continues_attempt_id=FIRST, session="resumed", failure_class="pass"))
+            return {"state": "running"}
+        with mock.patch.object(self.W, "start_work", side_effect=start), \
+                mock.patch.object(self.W, "require_route_parent"):
+            self.W.correct_unit_route(self.route, self.dir.name + "/rt.json", self.jobs, "fixed, look again")
+        with mock.patch.object(self.W, "start_work", return_value={"state": "completed"}) as again, \
+                mock.patch.object(self.W, "require_route_parent"):
+            code, receipt = self.W.correct_unit_route(self.route, self.dir.name + "/rt.json", self.jobs,
+                                                      "fixed, look again")
+        again.assert_not_called()
+        self.assertEqual((code, receipt["state"], receipt["duplicate"], receipt["retained"]), (0, "already-asked", True, False))
+        self.assertNotEqual(receipt["state"], "completed")
+        self.assertEqual((receipt["turn"], receipt["unit_attempt_id"]),
+                         (2, UC.attempt_id_for("rt-abc", NODE, receipt["request_id"])))
+        from start_receipt import next_line
+        line = next_line(receipt)
+        self.assertIn("already ran as that turn", line)
+        self.assertIn("send a different text or pass a new --request-id", line)
+        self.assertNotIn("route is complete", line)
+
+    def test_a_turn_that_ended_without_a_verdict_keeps_no_text_and_says_to_compose_again(self):
+        self.rows = {FIRST: ("done", meta(failure_class="blocked"))}
+        with mock.patch.object(self.W, "_compose_again", return_value="compose --unit x"):
+            (code, receipt), start = self.call("ask")
+        start.assert_not_called()
+        self.assertEqual((code, receipt["state"], receipt["reason"]), (69, "not-admitted", "unit-continue-last-turn-no-verdict"))
+        self.assertEqual((receipt["required_action"], receipt["parent_next_command"]), ("compose-again", "compose --unit x"))
+        self.assertEqual(UC.entries(self.jobs, "rt-abc"), [])
+        self.assertNotIn("retained", receipt)
+
     def test_the_turn_that_started_is_named_in_the_receipt(self):
         def start(route, path, jobs, **kw):
             self.rows[UC.attempt_id_for("rt-abc", NODE, UC.entries(jobs, "rt-abc")[0]["id"])] = (
@@ -437,10 +497,10 @@ class RetentionPlumbingTest(unittest.TestCase):
         self.assertEqual(RET._window_seconds(snapshot, None), RET.IDLE_SECONDS)
         unit = RET._Row("raw", fields({"attempt_id": "att-u", "capability": "unit", "workflow_completion": "runtime-v1",
                                        "route_file": "/nonexistent/rt.json"}))
+        import route_autoclose
         with mock.patch.object(RET, "_main_runtime_state", return_value="live"):
-            self.assertEqual(RET._window_seconds(snapshot, unit), float("inf"))
+            self.assertEqual(RET._window_seconds(snapshot, unit), route_autoclose.IDLE_SECONDS)
         with mock.patch.object(RET, "_main_runtime_state", return_value="unknown"):
-            import route_autoclose
             self.assertEqual(RET._window_seconds(snapshot, unit), route_autoclose.IDLE_SECONDS)
 
 
@@ -513,6 +573,13 @@ class NoticeLinesTest(unittest.TestCase):
         UC.submit(self.jobs, "rt-abc", "second")
         with mock.patch("dispatch_completion_join.exact_attempt_row"):     # every kept request has its turn
             self.assertEqual(UC.notice_lines(str(self.jobs), meta(route_file="/x/rt.json"))[1], "")
+
+    def test_a_continued_turn_that_ended_as_an_error_carries_the_recorded_reason(self):
+        import dispatch_completion_join as JOIN
+        refused = meta("att-2", 2, continues_attempt_id=FIRST, reconcile_reason="app-server-request-failed:thread/resume")
+        self.assertEqual(JOIN.unit_leg_reason_line(refused), "Reason: app-server-request-failed:thread/resume")
+        self.assertEqual(JOIN.unit_leg_reason_line(meta(reconcile_reason="app-server-eof")), "")      # a first turn
+        self.assertEqual(JOIN.unit_leg_reason_line(meta("att-2", 2, continues_attempt_id=FIRST)), "")  # none recorded
 
     def test_other_capabilities_get_nothing(self):
         self.assertEqual(UC.notice_lines(str(self.jobs), meta(capability="autopilot-code", turn=2,

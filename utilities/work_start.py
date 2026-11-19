@@ -25,6 +25,7 @@ from dispatch_contract import (
     DispatchContractError, completion_marker_gate, owner_frame_launch_gate,
     parse_registry_metadata, verdict_pass,
 )
+from dispatch_attempt_policy import deferred_completion, terminal_conflict_pending
 from dispatch_completion_join import (
     join_selected_attempts, current_delivery_state, delivery_classification,
     delivery_required_action, completion_harvest_command,
@@ -3003,6 +3004,16 @@ def correct_unit_route(route, path, jobs, text, request_id=None, **start_kwargs)
                                  "unit again with a new brief."}
     try:
         require_route_parent(turns[-1][2], jobs, turns[-1][0])
+        last_status, last_meta = turns[-1][1], turns[-1][2]
+        if (last_status == "done" and not verdict_pass(last_meta) and deferred_completion(last_meta) != "pending"
+                and not terminal_conflict_pending(last_meta)):
+            # The last turn ended without a verdict, so the route never closes and a kept text would never start.
+            return 69, {"state": "not-admitted", "reason": "unit-continue-last-turn-no-verdict",
+                        "required_action": "compose-again", "parent_next": "compose",
+                        "parent_next_command": _compose_again(route),
+                        "next_step": "The unit worker's last turn ended without a verdict, so this route cannot "
+                                     "take another turn and nothing was kept. To run the same unit again, run "
+                                     "parent_next_command (a new route; this one stays as it ended)."}
         kept = UC.submit(jobs, route["route_id"], text, request_id)
     except DispatchContractError as exc:
         return 69, {"state": "not-admitted", "reason": exc.reason,
@@ -3012,6 +3023,15 @@ def correct_unit_route(route, path, jobs, text, request_id=None, **start_kwargs)
         return 69, {"state": "not-admitted", "reason": str(exc)}
     entry = kept["entry"]
     new_id = UC.attempt_id_for(route["route_id"], leg["id"], entry["id"])
+    if kept["duplicate"] and rows.get(new_id, ("",))[0] == "done":
+        # This text already ran as that turn and its result was delivered then. Starting nothing, say so
+        # instead of letting the closed route read back the old result as if it were new.
+        return 0, {"state": "already-asked", "route_id": route["route_id"], "request_id": entry["id"],
+                   "duplicate": True, "retained": False, "unit_attempt_id": new_id,
+                   **_turn_fields(rows[new_id][1], jobs),
+                   "next_step": "This text already ran as that turn and its result was delivered then; nothing "
+                                "new started. To ask for another turn, send a different text or pass a new "
+                                "--request-id."}
     receipt = start_work(route, path, jobs, **start_kwargs)
     rows = _rows(jobs)
     started = new_id in rows

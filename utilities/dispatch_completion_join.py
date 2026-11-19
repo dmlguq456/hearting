@@ -1371,6 +1371,16 @@ def unit_leg_report_line(metadata, *, jobs=None) -> str:
     return f"Report: {artifact}" if artifact else ""
 
 
+def unit_leg_reason_line(metadata) -> str:
+    """`Reason: <why>` for a continued unit turn (one that wakes an earlier session) that ended as an error,
+    from the reason the row already records (`app-server-request-failed:thread/resume` when Codex refused to
+    wake the thread). "" for a first turn, any other row, or an end that recorded none."""
+    reason = str(metadata.get("reconcile_reason") or "").strip()
+    if not metadata.get("continues_attempt_id") or not reason:
+        return ""
+    return f"Reason: {reason}"
+
+
 def completion_followup_text(receipt: dict, *, jobs: str) -> str:
     if receipt.get("children") and all(child.get("reason") == "cancelled-by-parent"
             and child.get("required_action") == "advance-completed" for child in receipt["children"]):
@@ -1403,7 +1413,10 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                         import work_intent
                         summary = work_intent.sealed_summary(meta, child["attempt_id"])
                         import unit_continue
-                        head, kept = unit_continue.notice_lines(jobs, meta)
+                        try:
+                            head, kept = unit_continue.notice_lines(jobs, meta)
+                        except (OSError, ValueError):
+                            head, kept = "", ""     # a turn's own line is a courtesy: never lose its summary
                         if summary and head:
                             summary = head + "\n" + summary
                         if summary and summary not in summaries:
@@ -1422,7 +1435,7 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                     path, jobs, agent_home=Path(__file__).resolve().parents[1])
                 report = unit_leg_report_line(meta)
                 if meta["worker_type"] not in {"owner", "frame"}:
-                    unit_reports.append(report)
+                    unit_reports.append("\n".join(filter(None, (report, unit_leg_reason_line(meta)))))
                 else:
                     other_work = True
                 if meta["worker_type"] == "owner" and child["required_action"] == "inspect-done-failure":

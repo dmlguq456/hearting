@@ -347,7 +347,8 @@ def keep_window(meta, rows, default, main_state="unknown") -> float:
     after it sat unused, keep the ordinary window. A leg a worker started is kept while that worker's row
     is live; a leg the main session started while that session lives (`main_state` live), for the
     ordinary window once it is gone (dead), and for the route's own unused-route window when it cannot
-    be told (unknown). The two numbers are `route_autoclose`'s, not new ones."""
+    be told (unknown). Live is capped at that same unused-route window, so a session left open for days
+    does not keep every home it called. The two numbers are `route_autoclose`'s, not new ones."""
     if meta.get("capability") != "unit" or meta.get("workflow_completion") != "runtime-v1":
         return default
     attempt = meta.get("attempt_id")
@@ -360,10 +361,10 @@ def keep_window(meta, rows, default, main_state="unknown") -> float:
         closed = None
     if isinstance(closed, dict) and closed.get("autoclose"):
         return default
+    import route_autoclose
     caller = rows.get(meta.get("caller_attempt_id") or "")
     if meta.get("caller_attempt_id"):
-        return float("inf") if caller is not None and caller.status in {"open", "running"} else default
-    import route_autoclose
+        return route_autoclose.IDLE_SECONDS if caller is not None and caller.status in {"open", "running"} else default
     if main_state == "live":
-        return float("inf")
+        return route_autoclose.IDLE_SECONDS
     return route_autoclose.IDLE_SECONDS if main_state == "unknown" else route_autoclose.QUIET_SECONDS

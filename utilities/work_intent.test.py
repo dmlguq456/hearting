@@ -779,13 +779,14 @@ class CompletionCostLineTest(unittest.TestCase):
         self.report.write_text("## 1. Change Overview\n- one\n")
         self.rows = []
 
-    def attempt(self, attempt, harness, stamp, rows, *, parent=None, status="done"):
+    def attempt(self, attempt, harness, stamp, rows, *, parent=None, status="done", extra=None):
         log = self.state / "logs" / f"slug-{attempt}.{attempt}.{harness}.jsonl"
         log.write_text("".join(json.dumps(row) + "\n" for row in rows))
         meta = {"attempt_schema_version": "2", "attempt_id": attempt, "harness": harness,
                 "log_file": str(log), "route_id": self.ROUTE_ID, "route_hash": self.route["route_hash"]}
         if parent:
             meta["parent_attempt_id"] = parent
+        meta.update(extra or {})
         line = "\t".join([stamp, status, str(self.root), str(self.root), f"slug-{attempt}",
                           ",".join(f"{k}={v}" for k, v in meta.items())])
         self.rows.append(line)
@@ -835,6 +836,20 @@ class CompletionCostLineTest(unittest.TestCase):
         line = WI.cost_line(cost, WI.ui_translator())
         self.assertEqual(line, "Cost: 1h 02m elapsed · 3,587 session tokens (4 sessions)")
         self.assertNotIn("%", line)
+
+    def test_a_continued_unit_turn_counts_its_own_attempt_only(self):
+        first = "2026-11-04T01:00:00.000000Z"
+        second = "2026-11-06T01:00:00.000000Z"                     # two days later
+        self.attempt("att-turn1", "claude", first, [
+            {"type": "result", "usage": {"input_tokens": 20, "output_tokens": 80}}])
+        self.attempt("att-turn2", "claude", second, [
+            {"type": "result", "usage": {"input_tokens": 3, "output_tokens": 2}}],
+            extra={"continues_attempt_id": "att-turn1", "turn": "2"})
+        import dispatch_terminal_commit as DTC
+        request = mock.Mock(jobs=self.jobs, owner_attempt_id="att-turn2", route_file=None)
+        cost = DTC._completion_cost(request, self.route, now=WI_epoch(second) + 95)
+        self.assertEqual((cost["sessions"], cost["tokens"], cost["elapsed_seconds"]), (1, 5, 95))
+        self.assertEqual(WI.cost_line(cost, WI.ui_translator()), "Cost: 1m 35s elapsed · 5 session tokens (1 sessions)")
 
     def test_a_session_without_counts_is_unknown_never_estimated(self):
         self.attempt("att-owner", "claude", "2026-11-04T01:00:00.000000Z", [

@@ -214,7 +214,7 @@ def unit_leg_prompt(h, args, task: str, *, commit_clause: str = "") -> str | Non
                                   route_file=args.route_file)
     if getattr(args, "continues_attempt_id", None):
         import unit_continue
-        plan = unit_continue.plan_for_args(args, args.jobs_path, Path(h.__file__).resolve().parents[2].name)
+        plan = unit_continue.plan_for_args(args, args.jobs_path, Path(h.__file__).resolve().parents[1].name)
         if plan is not None and plan.kind == "resumed":
             # The woken session holds the brief and the kernel's rules already: only this turn's facts and text.
             return unit_continue.turn_prompt(args, plan, dispatch_metadata_prompt(h, args), task, args.jobs_path)

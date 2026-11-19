@@ -1348,6 +1348,8 @@ def run_one_turn(args: argparse.Namespace) -> int:
         if not isinstance(thread, dict) or not isinstance(thread.get("id"), str):
             raise SupervisorError("thread-start-response-invalid")
         thread_id = thread["id"]
+        if args.resume_thread and thread_id != args.resume_thread:
+            raise SupervisorError("resume-native-session-changed")
         run_turn(
             server, thread_id=thread_id, prompt=prompt, args=args
         )
