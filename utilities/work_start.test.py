@@ -462,6 +462,23 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual(result["result"]["marker"]["artifact"], "/exact/report.md")
         self.start(); self.assertEqual(len(self.calls), 3)
 
+    def test_a_gate_released_without_intent_is_finished_by_the_plain_start_before_the_owner(self):
+        self.start(); self.ready = self.released = True
+        steps = []
+        def fill(route, path, jobs, **kwargs):
+            steps.append(kwargs)
+            return {"state": "released", "decision": "proceed"}
+        with mock.patch.object(W, "released_without_intent", return_value=True), \
+                mock.patch.object(W, "frame_interview_step", side_effect=fill):
+            result = self.start()
+        self.assertEqual(steps, [{"interview": None, "answers": None, "decision": "proceed"}])
+        self.assertEqual(result["state"], "completed", result)
+        self.assertEqual(len(self.calls), 3)                      # two frames, then the one owner
+        with mock.patch.object(W, "released_without_intent", return_value=False), \
+                mock.patch.object(W, "frame_interview_step", side_effect=AssertionError("asked again")):
+            self.start()
+        self.assertEqual(len(self.calls), 3)
+
     def test_partial_admission_retains_the_started_child_and_exact_resume(self):
         def partial(command, **kwargs):
             if "frame-alternative" in command:
@@ -3054,6 +3071,131 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.assertFalse((self.output / "shards/frame/round-1/interview.json").exists())
         self.assertEqual(self.resolution()["status"], "not-raised")
         self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
+
+    # -- an answer given on the question board: release records it, the next plain start renders ----
+    def board_release(self, answers_path, *, decision="proceed"):
+        """What the board's answer path runs: `release` with the person's answers file, nothing else."""
+        done = self.run_command([sys.executable, "workflow-supervisor.py", "release", "--route", str(self.path),
+                                 "--jobs", str(self.jobs), "--gate", "frame-review", "--decision", decision,
+                                 "--answers", str(answers_path)])
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def frame_files(self, *extra):
+        frame = self.output / "shards/frame"
+        # The two fixtures sit in different temp folders; only that path may differ between them.
+        return {name: (frame / name).read_bytes().replace(str(self.output).encode(), b"<output>")
+                if (frame / name).is_file() else None
+                for name in ("round-1/answers.json", "round-1/intent.md", "intent.md", *extra)}
+
+    def board_answered(self, answer):
+        """Ask, then answer on the board (release only): the gate is released and no intent exists."""
+        self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
+        self.board_release(answer)
+        self.assertEqual(self.resolution()["status"], "proceed")
+        self.assertEqual(self.resolution()["actor_kind"], "user")
+        self.assertFalse((self.output / "shards/frame/intent.md").exists())
+
+    def test_a_board_answer_is_rendered_by_the_next_plain_start_with_the_conversation_bytes(self):
+        for variant in ("plain", "routed"):
+            with self.subTest(variant):
+                self.setUp()
+                answer = self.answers() if variant == "plain" else self.routed()[1]
+                self.step(interview=self.question_file, answers=answer)         # in conversation
+                talked = self.frame_files()
+                self.assertTrue(all(talked.values()), talked)
+                self.setUp()
+                answer = self.answers() if variant == "plain" else self.routed()[1]
+                self.board_answered(answer)
+                released = self.step()                                           # the notice's resume command
+                self.assertEqual(released["state"], "released")
+                self.assertEqual(self.frame_files(), talked)
+                self.assertEqual(Path(released["intent_file"]), self.output / "shards/frame/intent.md")
+                self.assertEqual(self.resolution()["actor_kind"], "user")
+                self.assertEqual(self.calls, ["gate", "release"])
+
+    def test_the_plain_start_that_fills_the_intent_is_repeatable_without_rewriting(self):
+        self.board_answered(self.answers())
+        first = self.step()
+        before = self.frame_files()
+        stat = {name: (self.output / "shards/frame" / name).stat().st_mtime_ns for name in before if before[name]}
+        with mock.patch.object(W, "_store_once", side_effect=AssertionError("rewrote a file")), \
+             mock.patch.object(W, "_store_bytes_once", side_effect=AssertionError("rewrote a file")), \
+             mock.patch.object(WF.WS, "_atomic_write", side_effect=AssertionError("rewrote a file")):
+            self.assertEqual(self.step(), first)
+        self.assertEqual(self.frame_files(), before)
+        self.assertEqual(stat, {name: (self.output / "shards/frame" / name).stat().st_mtime_ns
+                                for name in before if before[name]})
+        self.assertEqual(sorted(stat), ["intent.md", "round-1/answers.json", "round-1/intent.md"])
+        self.assertEqual(self.calls, ["gate", "release"])
+
+    def test_a_released_gate_keeps_its_recorded_answer_when_the_intent_is_filled(self):
+        answer = self.answers()
+        self.board_answered(answer)
+        changed = json.loads(answer.read_text())
+        changed["correction"] = "Change the scope."
+        answer.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(ValueError, "frame-input-conflict"):
+            self.step(answers=answer)
+        self.assertFalse((self.output / "shards/frame/intent.md").exists())
+
+    def test_crash_points_after_the_answer_is_recorded_finish_with_one_plain_start(self):
+        for point in ("after-intent-render", "release-recorded"):
+            with self.subTest(point):
+                self.setUp()
+                answer = self.answers()
+                if point == "after-intent-render":
+                    def stop(name):
+                        if name == point:
+                            raise RuntimeError("crash at " + name)
+                    W.FAULT_HOOK = stop
+                    self.addCleanup(setattr, W, "FAULT_HOOK", None)
+                    with self.assertRaisesRegex(RuntimeError, "crash at"):
+                        self.step(interview=self.question_file, answers=answer)
+                    W.FAULT_HOOK = None
+                    self.assertEqual(self.resolution()["status"], "blocked")
+                    self.assertTrue((self.output / "shards/frame/round-1/intent.md").is_file())
+                else:
+                    self.board_answered(answer)
+                result = self.step()
+                self.assertEqual(result["state"], "released", result)
+                self.assertEqual(self.resolution()["status"], "proceed")
+                self.assertTrue((self.output / "shards/frame/intent.md").is_file())
+                self.assertEqual(self.calls.count("release"), 1)
+                self.assertEqual(self.step(), result)
+
+    def test_only_a_proceed_with_its_answer_and_no_intent_is_released_without_intent(self):
+        self.assertFalse(W.released_without_intent(self.route, self.jobs))            # nothing raised
+        self.step(interview=self.question_file)
+        self.assertFalse(W.released_without_intent(self.route, self.jobs))            # asked, unanswered
+        self.board_release(self.answers())
+        self.assertTrue(W.released_without_intent(self.route, self.jobs))
+        self.step()
+        self.assertFalse(W.released_without_intent(self.route, self.jobs))            # intent rendered
+        for decision in ("revise", "stop"):
+            self.setUp()
+            self.step(interview=self.question_file)
+            self.board_release(self.answers(), decision=decision)
+            self.assertFalse(W.released_without_intent(self.route, self.jobs))
+        self.setUp()
+        self.board_answered(self.answers())
+        (self.output / "shards/frame").mkdir(parents=True, exist_ok=True)
+        (self.output / "shards/frame/intent.md").write_text("an intent a person rendered by hand\n")
+        self.assertFalse(W.released_without_intent(self.route, self.jobs))
+        before = (self.output / "shards/frame/intent.md").read_bytes()
+        self.assertEqual(self.step()["state"], "released")                          # kept as it is
+        self.assertEqual((self.output / "shards/frame/intent.md").read_bytes(), before)
+        self.assertFalse((self.output / "shards/frame/round-1/intent.md").exists())
+
+    def test_a_board_answer_to_a_revision_or_stop_is_not_an_intent_and_stays_so(self):
+        for decision, state in (("revise", "needs-revision"), ("stop", "cancelled")):
+            with self.subTest(decision):
+                self.setUp()
+                self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
+                self.board_release(self.answers(), decision=decision)
+                self.assertEqual(self.step()["state"], state)
+                self.assertFalse((self.output / "shards/frame/intent.md").exists())
+                self.assertFalse((self.output / "shards/frame/round-1/intent.md").exists())
+                self.assertEqual(self.step()["state"], state)
 
 
 GF = load("work_start_group_fixture", W.ROOT / "utilities/artifact_workflow_groups.test.py")
