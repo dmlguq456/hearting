@@ -56,10 +56,10 @@ class CalledUnitPanelTest(unittest.TestCase):
     def test_a_called_unit_stands_under_the_worker_row_in_its_box_two_cells_in_with_its_time_at_the_right_edge(self):
         self.node(r"""
 assert.deepEqual(only(R),[
- '● code(standard) · staged 3/6    40m',
+ '● code(standard) · 3/6           40m',
  '  rate limiting',
  '  ● owner  claude Opus 5.5 xhigh',
- '  ┌ staged 3/6: execute ───────────┐',
+ '  ┌ 3/6: execute ──────────────────┐',
  '  │ ⠋ worker claude Sonnet 5.5     │',
  '  │   CTX 22% · 12m                │',
  '  │   ⠋ code-review Opus 5.5    3m │',
@@ -155,7 +155,7 @@ for(const width of [130,100,80,60]){
 const wide=only(R,130,{side:false});
 assert(/│ code-review claude Opus 5.5 xhigh +│/.test(wide[1]),wide.join('\n'));
 assert(/│ web-lookup codex GPT-5.5 high +│/.test(wide[3]),wide.join('\n'));
-// The unit's field stands in the kind cell where the route's own reads `code(standard) · staged 3/6: execute`.
+// The unit's field stands in the kind cell where the route's own reads `code(standard) · 3/6: execute`.
 assert(/│ code +\d+m$/.test(wide[1]),wide.join('\n'));
 // Narrower: the name stays in the cell with as much of the model as it holds (the effort, then the harness, give way).
 const mid=only(R,100,{side:false});
@@ -187,6 +187,60 @@ for(const [name,route,unit] of mixes)for(const width of [...Array(111).keys()].m
  // two cells in, the name and the time stay in the row it was given
  assert(/^ {2}⠋/.test(rows[1]),name+' '+width+'\n'+rows.join('\n'));
 }
+""")
+
+    def test_a_box_of_two_routes_keeps_the_other_routes_rows_as_they_read_with_no_called_unit(self):
+        # 11-19 (review of #1742, N5): the width test above has one route; with a second route in the box its rows read the same too.
+        self.node(r"""
+const flat=s=>s.replace(/\s+/g,' ').trim();
+const other=solo({id:'o',title:'cleanup of imports',elapsed:'9m'});
+const withUnit=(r,c)=>({...r,workers_live:r.workers_live.map(w=>({...w,called:[c]}))});
+const unit=called('code-review','claude','Sonnet 5.5','xhigh','3m');
+for(const width of [...Array(111).keys()].map(i=>i+40)){
+ const plain=box(draw([NONE,other],width,60,{side:false})),rows=box(draw([withUnit(NONE,unit),other],width,60,{side:false}));
+ const at=rows.findIndex(s=>/code-review/.test(s));
+ if(at<0)continue;                                  // (no room for the called row at this width: the rows are the plain ones)
+ assert.deepEqual([...rows.slice(0,at),...rows.slice(at+1)].map(flat),plain.map(flat),width+'\n'+rows.join('\n'));
+}
+""")
+
+    def test_the_widths_that_take_the_columns_grown_by_a_called_row_are_one_tail_of_the_widths(self):
+        # 11-19 (review of #1742, N1): the columns grown by a called row are taken only where the stage column has its richest form
+        # (as the widened worker column is), so the widths that take them are one run up to the widest, never in and out: a
+        # wider window never lays the columns narrower, nor takes a word (`Sonnet 5.5`) off the called row.
+        self.node(r"""
+const withUnit=(r,c)=>({...r,workers_live:r.workers_live.map(w=>({...w,called:[c]}))});
+const other=solo({id:'o',title:'cleanup of imports',elapsed:'9m'});
+const owned=(title,m,e)=>staged([worker('claude','Sonnet 5.5','high','22%')],{title,paint:{glyph:P('⠸'),harness:P('claude'),model_text:P(m),effort:P(e)}});
+const combos=[
+ ['two routes',[owned('rate limiting','Opus 5.5','high'),other],called('code-review','claude','Sonnet 5.5','xhigh','3m')],
+ ['one route',[owned('rate limiting','Opus 5.5','high')],called('code-review','claude','Sonnet 5.5','xhigh','3m')],
+ ['short title',[owned('auth','Opus 5.5','xhigh'),other],called('code-review','claude','Opus 5.5','xhigh','3m')],
+ ['a long worker cell',[owned('rate limiting','Opus 5.5','high'),other],called('code-review','codex','GPT-5.5-codex-max','xhigh','1h 5m')],
+];
+// (a width takes the grown columns where the route rows' blanks differ from those of the box with no called unit)
+const grownAt=(routes,unit,width)=>{
+ const plain=box(draw(routes,width,60,{side:false})),rows=box(draw([withUnit(routes[0],unit),...routes.slice(1)],width,60,{side:false}));
+ const at=rows.findIndex(s=>/code-review/.test(s));
+ return at>=0&&JSON.stringify([...rows.slice(0,at),...rows.slice(at+1)])!==JSON.stringify(plain);
+};
+for(const [name,routes,unit] of combos){
+ const widths=[...Array(111).keys()].map(i=>i+40).filter(width=>grownAt(routes,unit,width));
+ for(let i=1;i<widths.length;i++)assert.equal(widths[i],widths[i-1]+1,name+': the widths that take the grown columns are '+widths.join(','));
+ assert(!widths.length||widths[widths.length-1]===150,name+': the run reaches the widest width: '+widths.join(','));
+}
+""")
+
+    def test_the_stage_box_title_never_leads_with_staged(self):
+        # 11-19: the stage box title never leads with `staged`: `3/6: execute`, with the form `team` in the bracket (`code(team·standard)`) or
+        # with no form (an older record) alike
+        self.node(r"""
+const formal={...R,kind_form:'team'};
+const rows=only(formal);
+assert(/^● code\(team·standard\)/.test(rows[0])&&rows.some(s=>/┌ 3\/6: execute ─+┐/.test(s))&&!rows.some(s=>/staged/.test(s)),rows.join('\n'));
+assert(only(R).some(s=>/┌ 3\/6: execute ─+┐/.test(s))&&!only(R).some(s=>/staged/.test(s)));
+const solo1={...solo(),kind_form:'solo'};
+assert(/^● code\(solo·quick\)/.test(only(solo1)[0]),only(solo1).join('\n'));
 """)
 
     def test_the_three_harness_panels_draw_the_same_rows(self):

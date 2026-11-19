@@ -87,7 +87,7 @@ for(const c of golden.cases){
  // 11-18: a route's time stands at the right end of its first line (the kind line), no row of its own: the golden's time-only row
  // leaves with the other session rows (above), and the time on a drawn kind line is blanked to the padding the golden has there.
  const kindLine=/^│ \S (?:[a-z-]+(?: ✓)? → )*[a-z-]+(?:\([^)]*\))?(?: · \S.*?)? +(?:\d+h )?\d+m │$/;
- // 11-18 (review C3): the stage text (` · staged 3/6: execute`) stands on that first line too, and no stage row apart; the golden has it on
+ // 11-18 (review C3): the stage text (` · 3/6: execute`) stands on that first line too, and no stage row apart; the golden has it on
  // a row of its own, which leaves with the session rows above, so on the drawn first line the stage text is blanked to padding as well.
  const stageMid=/^(│ \S (?:[a-z-]+(?: ✓)? → )*[a-z-]+(?:\([^)]*\))?)( · (?:[a-z-]+ )?\d+\/\d+(?:: \S.*?)?)( +(?:\d+h )?\d+m │)$/;
  const blankStage=r=>{const m=stageMid.exec(textOf(r));if(!m)return r;
