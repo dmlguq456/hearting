@@ -18,6 +18,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 from route_plan import is_depth0_leg
+from route_form import one_shot_owner
 SCHEMA_VERSION = 4
 ATTRIBUTION_VERSION = 1
 COUNT_KEYS = ("open_routes", "open_jobs", "open_dispatch_attempts")
@@ -204,7 +205,7 @@ def _sealed_route(
         (node for node in nodes if node.get("id") == expected_node), None
     ) if expected_node is not None else None
     if binding == "quick-owner-route" and (
-        route.get("effective_intensity") != "quick"
+        not one_shot_owner(route)
         or referenced is None
         or referenced.get("id") != "one-shot"
         or referenced.get("kind") != "capability-owner"

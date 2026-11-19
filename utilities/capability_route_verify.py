@@ -13,6 +13,7 @@ from hearting_gates import note_same_work_drift
 import artifact_locator as ARTIFACT_LOCATOR
 import route_format
 from route_plan import is_depth0_leg
+from route_form import route_form, serial_attempt_route, staged_form
 import model_profile as PROFILE
 import resource_resume as RESOURCE_RESUME
 from dispatch_contract import EXECUTION_SURFACES, FALLBACK_HOPS, agent_home_equivalent
@@ -403,7 +404,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         }
     if route.get("composed"):
         resume_recipe = RESOURCE_RESUME.route_selected(route)
-        if route.get("effective_intensity") in ("direct","quick") and not resume_recipe:
+        if not staged_form(route_form(route)) and not resume_recipe:
             raise ValueError("composed routes require a standard+ effective intensity")
         composed_recipe=route.get("composed_recipe")
         if not isinstance(composed_recipe, dict):
@@ -444,13 +445,13 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         decided=((route.get("selection") or {}).get("route_origin")=="compose"
                  and (route.get("selection") or {}).get("shape") in DECIDED_SHAPES
                  and not any(_frame_node(n) for n in route.get("nodes",[])))
-        if (route.get("route_plan") is not None or decided) and route.get("effective_intensity")=="quick":
+        if (route.get("route_plan") is not None or decided) and serial_attempt_route(route):
             # A leg of a plan, or a decided compose shape; a route sealed with its frame pair keeps it.
             route_recipe=_frameless_recipe(route_recipe)
         if (route.get("capability")==ROUTE_FRAME_CAPABILITY
                 and [n.get("id") for n in route.get("nodes",[])]==TOPO.ROUTE_FRAME_ONE_LEG_NODE_IDS):
             route_recipe=_one_leg_frame_recipe(route_recipe)
-        if route.get("effective_intensity") not in ("direct", "quick"):
+        if staged_form(route_form(route)):
             expected_nodes=json.loads(json.dumps(route_recipe["standard_plus"]["nodes"]))
             expected_nodes=_expand_parallel_groups(
                 expected_nodes, route_recipe["standard_plus"].get("parallel_groups"),
@@ -496,7 +497,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             route.get("composed") or route.get("effective_intensity") != "standard"):
         raise ValueError("route-frame-shape-mismatch")
     expected_extensions=_realize_conditional_extensions(
-        route_recipe, route.get("effective_intensity")
+        route_recipe, route_form(route)
     )
     if route.get("conditional_extensions") != expected_extensions:
         raise ValueError("route conditional extensions differ from the sealed recipe")
@@ -507,9 +508,9 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     # binds nothing. Verifier and compiler must move together or a quick route
     # compiles and then refuses to verify.
     expected_bindings=json.loads(json.dumps(
-        _quick_gate_bindings(route_recipe) if route.get("effective_intensity")=="quick"
+        _quick_gate_bindings(route_recipe) if serial_attempt_route(route)
         else route_recipe["human_gate_bindings"]
-        if route.get("effective_intensity")!="direct" else []))
+        if route_form(route)!="direct" else []))
     if scope_version == 1:
         expected_bindings = [row for row in expected_bindings if row.get("gate") != "preview-disposition"]
     if route.get("human_gate_bindings") != expected_bindings:
@@ -586,6 +587,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             raise ValueError("invalid dispatch_allocation harness order")
     observed_dispatch_depths = [route["owner_dispatch_depth"]]
     effective=route.get("effective_intensity")
+    form=route_form(route)
     selected_owner, _ = _resolve_owner_profile(
         effective, registry, route.get("owner_profile_demand"),
         (route.get("explicit_profiles") or {}).get("__owner__"))
@@ -600,7 +602,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         None if effective=="direct" else registry["owner_profile_by_intensity"].get(effective)
     )
     for node in route.get("nodes",[]):
-        if _owner_node(node, effective) and node.get("model_profile")!=owner_profile:
+        if _owner_node(node, effective, form) and node.get("model_profile")!=owner_profile:
             raise ValueError(f"owner node {node.get('id')} profile differs from owner_model_profile")
     def validate_harness_policy(policy):
         if policy is None:
@@ -653,14 +655,14 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             # the two node classes allowed to hold it skip the registered check:
             # the owner, and a depth-1 frame anchor leg.
             top_owner_node = profile == PROFILE.TOP_PROFILE and (
-                _owner_node(node, effective) or _frame_node(node)
+                _owner_node(node, effective, form) or _frame_node(node)
             )
             if not top_owner_node and (
                 not isinstance(row, dict) or row.get("registered_topology") is not True
             ):
                 raise ValueError(f"node {node.get('id')} has invalid registered model_profile")
         if (
-            effective not in ("direct", "quick")
+            staged_form(form)
             and node.get("kind") == "capability-owner"
             and node.get("unit") == "_kernel/owner"
             and (
@@ -741,7 +743,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             or node.get("fallback_hops")
         ):
             raise ValueError("direct node axes mismatch")
-    elif effective=="quick" and route.get("capability")==TOPO.UNIT_CAPABILITY:
+    elif form=="unit":
         # A unit route is one depth-0 leg and no owner. The leg is rebuilt from the recipe template and
         # the unit head it names, exactly as the compiler builds it; only the sealed profile choice,
         # the harness policy and the model-grade fields are the route's own.
@@ -768,7 +770,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
                 != {k: v for k, v in expected.items() if k not in own}
                 or leg.get("fallback_hops") or not is_depth0_leg(leg)):
             raise ValueError("unit node axes mismatch")
-    elif effective=="quick":
+    elif form=="solo":
         resume_recipe = RESOURCE_RESUME.route_selected(route)
         if (
             route.get("owner_dispatch_depth") != 1
@@ -836,7 +838,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         raise ValueError("tracking cannot be an escalation basis")
     spec_touch=any(_scope_touches_spec(scope) for node in route.get("nodes",[]) for scope in node.get("write_scope",[]))
     if bool(route.get("spec_touch")) != spec_touch: raise ValueError("spec_touch declaration mismatch")
-    if effective not in ("direct","quick") and _single_owner_nodes(route.get("nodes",[])):
+    if staged_form(form) and _single_owner_nodes(route.get("nodes",[])):
         candidates = _validate_registered_headless_evidence({"candidates": route.get("registered_headless_candidates")})
         if (candidates != route.get("registered_headless_candidates")
                 or route.get("registered_headless_policy") is not None
@@ -844,7 +846,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
                 or route["nodes"][0].get("fallback_hops")
                 or route.get("selection",{}).get("transport") != "headless"):
             raise ValueError("owner-only registered-headless evidence mismatch")
-    elif route.get("effective_intensity") not in ("direct","quick"):
+    elif staged_form(form):
         if route.get("registered_headless_candidates") is not None:
             raise ValueError("nested route cannot substitute owner-only readiness")
         if route.get("selection",{}).get("transport") != "headless":

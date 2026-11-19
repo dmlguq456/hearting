@@ -4937,7 +4937,7 @@ class TestComputePollObservationBoundary(WorkflowFixture):
             "artifacts": {"checked": True, "missing": []},
         }
         if ledger.state()["nodes"]["run"]["state"] != "RUNNING":
-            ledger.record("run", "RUNNING", evidence={"fixture": "owner-terminal-settlement"},
+            ledger.record("run", "RUNNING", evidence={"fixture": "owner-terminal-owner-pass"},
                           actor="fixture")
         ledger.record("run", "STAGE_SUCCEEDED", evidence=evidence, actor="completion-controller")
         node = WS.route_node(route, "run")

@@ -25,8 +25,7 @@ Adapters may expose this capability through native commands, skill files, prompt
 
 **One gate, raised from the frame legs (SD-123/SD-129).** A `quick+` route seals `human_gates: ["frame-review"]` and both
 `frame` and `frame-alternative` continuations as that human gate, bound at
-`one-shot`'s entry for `quick` and `refs`'s entry for `standard+`. `frame-review` is the recipe's only human gate: the old
-`direction-confirmation` continuation on `refs` is retired, because a route
+`one-shot`'s entry for `quick` and `refs`'s entry for `standard+`. `frame-review` is the recipe's only human gate, because a route
 must have exactly one place a person is asked for direction. A route sealed
 before this cycle keeps its own generation's gate name, binding and node
 shape and is **never retro-fitted** — the entry fence in

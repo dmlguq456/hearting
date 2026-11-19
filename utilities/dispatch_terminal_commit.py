@@ -24,6 +24,7 @@ import artifact_lifecycle
 import route_identity
 import route_lineage
 from route_plan import is_depth0_leg
+from route_form import serial_attempt_route
 import dispatch_contract
 import dispatch_lock_order
 from dispatch_attempt_policy import verdict_pass
@@ -753,7 +754,7 @@ def validate_owner_route(*, jobs: Path, route_file: Path, owner_attempt_id: str,
             # `route-identity-unverified: quick-owner-tuple`.
             named = next((n for n in route.get("nodes") or [] if isinstance(n, dict)
                           and n.get("id") == meta.get("route_node")), None)
-            if (route.get("effective_intensity") != "quick"
+            if (not serial_attempt_route(route)
                     or not (meta.get("worker_type") == "owner" or (
                         is_depth0_leg(named) and meta.get("worker_type") == named.get("worker_type")))
                     or meta.get("dispatch_depth") != "1" or meta.get("registered_worker") != "1"
@@ -2258,7 +2259,7 @@ def _historical_request(jobs, status, metadata, *, selected_registry_rows=None, 
     digest = route_identity.route_hash(route)
     if (route.get("route_hash") != digest or route.get("route_id") != route_identity.route_id_from_hash(digest)
             or (owner and (owner.route_id != route["route_id"] or owner.route_hash != digest))
-            or (not owner and (route.get("effective_intensity") != "quick"
+            or (not owner and (not serial_attempt_route(route)
                 or meta.get("route_id") != route["route_id"] or meta.get("route_hash") != digest))
             or fields[1] not in {"open", "running", "done"} or meta.get("attempt_id") != metadata["attempt_id"]
             or meta.get("registered_worker") != "1" or meta.get("dispatch_depth") != "1"

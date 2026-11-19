@@ -1,9 +1,9 @@
 # Unit-Def Schema (canonical authoring contract)
 
 > A **unit** is the single declaration of one dispatchable behavior atom — the SoT that
-> replaces both the `roles/modes/*` / `adapters/*/agent-modes/*` persona double-copy and
-> the runtime team agents. Units are dispatched as dispatch-depth-2 nodes; they are never native
-> team subagents. `family:` is a grouping label only.
+> replaces the `roles/modes/*` / `adapters/*/agent-modes/*` persona double-copy. Units run as
+> route nodes — a stage at dispatch depth 2, or the one leg of a unit route at depth 1; a sealed
+> fallback may run a node on a runtime-native subagent. `family:` is a grouping label only.
 
 ## File layout
 
@@ -63,10 +63,7 @@ bootstrap:                    # OPTIONAL runtime bootstrap material; absent = no
 ## Body
 
 The irreducible domain persona at the declared floor. English canonical (localization is
-a projection concern). Reference `_shared/*` fragments — do not restate them. Merge, per
-unit, the three legacy sources: `roles/modes/<f>/<m>.md` (EN), the
-`adapters/claude/agent-modes/<f>/<m>.md` divergent copy (KO), and any load-bearing blocks
-from the retired team agent file. Nothing load-bearing drops silently → `_NOTES.md`.
+a projection concern). Reference `_shared/*` fragments — do not restate them.
 
 The `stance:` text is carried by the runtime into the worker prompt, just before the body.
 
@@ -89,7 +86,7 @@ units not yet moved keep the single-body form.
 
 ## Floor guidance (from the investigation gradient)
 
-- `near-zero`: material/*, qa/test, design/verifier, research/fact-check — kernel +
+- `near-zero`: material/{browser-fetch,pdf-extract,web-image-search}, qa/test, design/verifier, research/fact-check — kernel +
   worker-type + stance + I/O carry almost everything; keep THICK tool fragments.
 - `low`: dev/*, editorial/*, qa/data-curate.
 - `moderate`: qa/code-review, qa/plan-review, qa/security-review (confidence bar = 8;

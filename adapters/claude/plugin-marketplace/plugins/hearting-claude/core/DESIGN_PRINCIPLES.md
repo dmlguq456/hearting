@@ -299,17 +299,3 @@ Four design levers:
 
 Quantitative limits for line count, reference depth, and frontmatter live only in `CONVENTIONS §5.6a`.
 Cross-adapter completion and active-context budgets live only in `ADAPTATION §2.0` and `§6.1`.
-
-## Appendix — Decision History
-
-| Section | Incident or decision |
-|---|---|
-| §1 | Early autopilot orchestration mixed file reading with state control; it was separated into a state machine |
-| §2 | `782ccf6` made refinement auto-apply by default; `2058325` made user pause opt-in only after 2026-05-21 feedback |
-| §3 | `444616a` added cwd-default analysis, `d8f42cd` removed `--format-ref`, and `215fc23` cleaned legacy behavior |
-| §4 | Early output conventions moved into `CONVENTIONS §5`; `56708c4` added minor/major tracking and dual-perspective audit |
-| §5 | `bf8d565` rejected pasting a rebuttal table into paper prose after the ICML camera-ready incident; the four-step cohesion check followed |
-| §6 | `3f5a48c` created the translation role; `cfb0e12` renamed and expanded it into editorial ownership |
-| §7 | `60f141a` created the notes flow, now `mem note`, separating explicit retention from agent learning |
-| §8 | A 2026-07-06 single-owner design was reversed on 2026-07-10 into stage dispatch with file-only dispatch-depth-2 handoff |
-| §10 | The 2026-07-13 Skill-design refactor placed Pocock's four levers plus predictability here and scan-ready quantitative rules in `CONVENTIONS §5.6a` |

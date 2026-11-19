@@ -21,7 +21,7 @@ Priority, highest first:
 | 2 | External: `research/{topic}/code_resources/`, `07_resources.md` with a pretrained-checkpoint URL, or explicit user `--ref <url>` | Research output such as an official paper repository, Hugging Face Transformers, ESPnet, or Lightning |
 | 3 | Generic skeleton fallback | Use only when neither 1 nor 2 exists, after user confirmation |
 
-> **Convention-prepend priority** is independent of reference-source priority. Always load `analysis_project/code/experiment_conventions.md` first as the per-project source of truth, then `mem profile 07_coding_convention` via `python3 <agent-home>/tools/memory/mem.py profile 07_coding_convention` only as a cross-project default that fills missing details. Prepend both relevant bodies to the Phase 2 `dev/new-lib` unit prompt. On conflict, the per-project convention wins.
+> **Convention-prepend priority** is independent of reference-source priority. When `analysis_project/code/experiment_conventions.md` exists, load it first as the per-project source of truth, then `mem profile 07_coding_convention` via `python3 <agent-home>/tools/memory/mem.py profile 07_coding_convention` only as a cross-project default that fills missing details. Prepend both relevant bodies to the Phase 2 `dev/new-lib` unit prompt. On conflict, the per-project convention wins.
 
 Render the confirmation naturally in the user's communication language:
 
