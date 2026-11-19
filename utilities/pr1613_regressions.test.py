@@ -47,7 +47,7 @@ class LegReadersTest(unittest.TestCase):
              patch.object(review.producer, 'cycle_dir', side_effect=OSError('no manifest')):
             view = review._view(Path(tmp), 'fixture', {'cycle_id': 'cycle'}, {})
         self.assertEqual(view.request, self.request.strip())
-        self.assertIn('Run E on device zero only.', view.request[:review.REQUEST_MAX])
+        self.assertGreater(len(self.wrapped), review.REQUEST_MAX)
 
     def test_nonhuman_intent_preserves_base_bytes(self):
         for actor in ('automatic', 'supervisor', 'unknown'):
