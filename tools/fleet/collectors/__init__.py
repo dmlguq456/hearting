@@ -541,7 +541,7 @@ def _session_census_observation(sessions, herdr_observed):
 
 
 def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_first=False, *,
-                 include_report_verification=True, route_sessions=None):
+                 include_report_verification=True, route_sessions=None, route_view=None):
     """Return (sessions, jobs).
 
     harness_filter: optional iterable of harness names (fleet + dispatch both honor it).
@@ -551,6 +551,11 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     fast_first:     internal basic-live observation hint. Exact classification,
                     NOW and resource inputs stay attached; display details fill
                     independently. ``--once``/JSON keep the full pass.
+    route_sessions: collect only what a display of these native sessions draws; the
+                    peer-message ledger, prompt display, event times, location,
+                    campaign label and pending-delivery count are left out.
+    route_view:     ``"routes"`` (with ``route_sessions``): the routes popup, which
+                    also draws no steward badge. Any other value is ignored.
     """
     job_key = (str(jobs_path or os.environ.get("AGENT_DISPATCH_JOBS") or ""),
                tuple(sorted(harness_filter or ())))
@@ -743,8 +748,9 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
 
     # F-100c: the badge is optional for first-screen readiness. The detail
     # worker attaches it after the required screen has completed.
-    _enrich_steward(sessions, fast_first=fast_first,
-                    record_supervision=route_sessions is None)
+    if not (route_sessions is not None and route_view == "routes"):
+        _enrich_steward(sessions, fast_first=fast_first,
+                        record_supervision=route_sessions is None)
 
     # F-51d: JSON telemetry projection — cache-only lookup (never schedules a background
     # `git rev-list`; the live render path's own ahead_behind() calls are what populate the
@@ -1072,7 +1078,7 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         # This joins already observed exact child fields without further IO.
         # NOW/context/exec must be available in the basic snapshot too.
         _adopt_child_titles(sessions, jobs)
-        if not fast_first:
+        if not fast_first and route_sessions is None:
             from .. import titles
             titles.annotate(sessions + jobs)
     except Exception:
@@ -1139,13 +1145,14 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     peer = None
     try:
         from . import peer_messages
-        peer = None if fast_first else peer_messages.collect()
+        peer = None if fast_first or route_sessions is not None else peer_messages.collect()
         apply_peer_rows(sessions, (peer or {}).get("by_session") or {})
     except Exception:
         peer = None
-    collect_all.last_peer_messages = peer
+    if route_sessions is None:   # only the full pass reads the ledger (`fleet --json`); a display's pass leaves it be
+        collect_all.last_peer_messages = peer
 
-    if not fast_first:
+    if not fast_first and route_sessions is None:
         try:
             from . import prompt_inputs
             prompt_inputs.enrich(sessions)
@@ -1227,7 +1234,7 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
 
 
 def collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_first=False, *,
-                include_report_verification=True, route_sessions=None):
+                include_report_verification=True, route_sessions=None, route_view=None):
     """Run one Fleet observation with shared artifact, admission and registry inputs."""
     from contextlib import ExitStack
     from . import dispatch
@@ -1248,7 +1255,7 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_fi
         return _collect_all(
             harness_filter, jobs_path, usage, fast_first,
             include_report_verification=include_report_verification,
-            route_sessions=route_sessions)
+            route_sessions=route_sessions, route_view=route_view)
 
 
 collect_all.last_resource_jobs = []
