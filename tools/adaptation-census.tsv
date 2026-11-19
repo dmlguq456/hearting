@@ -76,6 +76,7 @@ shared-utility-deferred	harness_behavior_cases_token_budget.py
 shared-utility-deferred	harness_behavior_cases_tidy_compact.py
 shared-utility-deferred	harness_behavior_cases_unit_route.py
 shared-utility-deferred	harness_behavior_cases_unit_nested.py
+shared-utility-deferred	harness_behavior_cases_unit_continue.py
 shared-utility-deferred	harness_behavior_cases_request.py
 shared-utility-deferred	harness_behavior_cases_parked.py
 shared-utility-deferred	harness_behavior_scenarios.py
@@ -130,6 +131,7 @@ shared-utility-deferred	verification-background-lease.py
 shared-utility-deferred	work_start.py
 shared-utility-deferred	frame_repository.py
 shared-utility-deferred	work_intent.py
+shared-utility-deferred	unit_continue.py
 shared-utility-deferred	unit_ephemeral.py
 shared-utility-deferred	status_board.py
 shared-utility-deferred	start_receipt.py
@@ -359,6 +361,8 @@ utility-deferred	ripple-map.py
 utility-deferred	route_authority.py
 utility-deferred	route_authority.test.py
 utility-deferred	route_autoclose.py
+utility-deferred	route_form.py
+utility-deferred	route_form.test.py
 utility-deferred	route_format.py
 utility-deferred	route_identity.py
 utility-deferred	route_lineage.py
@@ -464,8 +468,6 @@ tool-deferred	measure_hook_before_after.py
 tool-deferred	measure_state_file_before_after.py
 tool-deferred	measure-unit-pilot.py
 tool-deferred	measure_unit_pilot.test.py
-tool-deferred	migration-manifest.py
-tool-deferred	migration_manifest.test.py
 tool-deferred	native-skill-discovery.test.py
 tool-deferred	non-git-headless-acceptance.py
 tool-deferred	opencode-text-request.test.py

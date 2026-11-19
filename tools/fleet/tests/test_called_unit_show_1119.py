@@ -264,6 +264,14 @@ class CalledUnitStandsBelowItsCaller(unittest.TestCase):
                   "parent": "rate-limit", "parent_sid": SID}, 1)
         other = {job.attempt_id: job for job in world.snapshot(observed=True)["jobs"]}[att("h")]
         self.assertIn("quick-shape", other.attempt_contract_status)
+        # 11-19 (N4): the exemption is the `parent_slug` the collector fills from the caller, not the depth: a row naming a caller
+        # at another depth (`caller_attempt_receipt` writes the field on a depth-1 unit leg only) is still a `quick-shape` violation
+        world.row("open", "unit-deep", {"attempt_id": att("j"), "dispatch_depth": 2, "worker_type": "worker", "capability": "unit",
+                  "route_id": "rt-y", "route_node": "unit", "intensity": "quick", "attempt_schema_version": 2, "transport": "headless",
+                  "execution_surface": "registered-headless", "registered_worker": 1, "fallback_hop": "same-harness-headless",
+                  "caller_attempt_id": WORKER, "parent_sid": SID}, 1)
+        deep = {job.attempt_id: job for job in world.snapshot(observed=True)["jobs"]}[att("j")]
+        self.assertIn("quick-shape", deep.attempt_contract_status)
 
     def test_a_unit_called_by_a_called_unit_follows_the_chain_to_the_route_it_stands_below(self):
         world, rec = self.staged_world()
@@ -363,7 +371,7 @@ class PanelAndTables(unittest.TestCase):
             lines = self.drawn(vm, view, folds=(("sopen:OVERVIEW", "4f"),) if view == "OVERVIEW" else ())
             text = "\n".join(lines)
             self.assertIn("review of", text, view)
-            at = next(i for i, line in enumerate(lines) if "staged 3/6: execute" in line)
+            at = next(i for i, line in enumerate(lines) if "3/6: execute" in line)
             self.assertIn("review of", lines[at + 1], view)
             self.assertIn("code-review", lines[at + 1], view)
             self.assertNotIn("[4f]", lines[at + 1], view)
@@ -424,6 +432,38 @@ class PanelAndTables(unittest.TestCase):
         self.assertEqual(at["fact-verify"] + 1, at["web-lookup"], "\n".join(lines))       # the owner's after the last row
         self.assertTrue(workers and at["code-review"] > workers[0])
 
+    def test_the_body_worker_that_is_not_the_first_of_the_contexts_keeps_its_called_unit_right_under_its_own_row(self):
+        # 11-19 (review of #1742, N2): the body worker's row stands before the loop over the workers, so the units it called stand
+        # right under it, whichever place `worker_context_index` gives it among them (a parallel slice the route's node names)
+        world = World(self)
+        rec, path = world.staged()
+        world.owner(rec, path)
+        world.stage(rec, path)
+        world.called(CALLED, WORKER, "qa/code-review", "code", "review of execute", "unit-review-execute")
+        vm = live.build_view_model(world.snapshot(ledger=[rec["route_id"]]), now=NOW)
+        route = next(r for r in vm.routes if r.get("session_tag") == "4f")
+        other, second = att("k"), att("m")
+        first = route["called"][0]
+        body = route["worker_contexts"][0]
+        for width in (72, 150):
+            # the route's own worker is the second of two; the first is another slice with a unit of its own
+            shifted = dict(route, worker_contexts=[{**body, "attempt": other, "context": 9}, body], worker_context_index=1,
+                           called=[{**first, "unit": "fact-verify", "attempt": second, "caller": other}, first])
+            _grid, lines = self.popup_lines(vm, (shifted,), width=width, opened=shifted["id"])
+            text = "\n".join(lines)
+            at = {name: next(i for i, line in enumerate(lines) if name in line) for name in ("code-review", "fact-verify")}
+            body_row = next(i for i, line in enumerate(lines) if "worker" in line and "running" in line)
+            self.assertEqual(body_row + 1, at["code-review"], (width, text))              # the body worker's, right below its row
+            self.assertGreater(at["fact-verify"], at["code-review"], (width, text))
+            first_slice = next(i for i, line in enumerate(lines) if "9%" in line)
+            self.assertEqual(first_slice + 1, at["fact-verify"], (width, text))            # the other slice's, right below that one
+            # and the first place keeps the order it had
+            plain = dict(shifted, worker_contexts=[body, {**body, "attempt": other, "context": 9}], worker_context_index=0,
+                         called=[first, {**first, "unit": "fact-verify", "attempt": second, "caller": other}])
+            _grid, lines = self.popup_lines(vm, (plain,), width=width, opened=plain["id"])
+            body_row = next(i for i, line in enumerate(lines) if "worker" in line and "running" in line)
+            self.assertIn("code-review", lines[body_row + 1], (width, lines))
+
     def test_a_called_row_of_the_routes_table_opens_the_route_as_the_route_row_does(self):
         world = World(self)
         rec, path = world.staged()
@@ -435,7 +475,7 @@ class PanelAndTables(unittest.TestCase):
         for view in ("OVERVIEW", "ROUTES"):
             grid = draw(vm, NavState(view=view, folds=(("sopen:OVERVIEW", "4f"),) if view == "OVERVIEW" else ()), 150, 40)
             text = ["".join(cell[0] for cell in row) for row in grid.cells]
-            route_y = next(i for i, line in enumerate(text) if "staged 3/6: execute" in line)
+            route_y = next(i for i, line in enumerate(text) if "3/6: execute" in line)
             called_y = route_y + 1
             self.assertIn("review of", text[called_y], view)
             action = lambda y: [repr(hit.action) for hit in grid.hits if hit.y == y and hit.x0 <= 100 < hit.x1]   # noqa: E731
@@ -443,7 +483,13 @@ class PanelAndTables(unittest.TestCase):
             self.assertEqual(action(route_y), action(called_y), view)
 
     def test_a_called_row_that_is_not_running_is_drawn_with_its_mark_in_the_table_and_the_popup(self):
-        for state, mark, word in (("dead", "✕", "dead"), ("queued", "●", "queued"), ("unknown", "◌", "unknown")):
+        from fleet.explorer.style import normalize_style
+        # 11-19 (review of #1742, N5): the table's mark is told by its color key as well as its glyph (`queued` and `blocked` are both
+        # `●`, and only the key tells them apart); the panel's row carries its own key for the same marker
+        keys = {"dead": ("g_dead", "g_dead"), "queued": ("g_work_off", "g_work_off"), "blocked": ("g_blocked", "g_blocked"),
+                "unknown": ("dim", "g_stale")}
+        seen = {}
+        for state, mark, word in (("dead", "✕", "dead"), ("queued", "●", "queued"), ("blocked", "●", "blocked"), ("unknown", "◌", "unknown")):
             world = World(self)
             rec, path = world.staged()
             world.owner(rec, path)
@@ -457,6 +503,9 @@ class PanelAndTables(unittest.TestCase):
             text = ["".join(cell[0] for cell in row).rstrip() for row in grid.cells]
             row = next(line for line in text if "review of" in line)
             self.assertIn(mark, row, (state, row))
+            cell = grid.cells[next(i for i, line in enumerate(text) if "review of" in line)][row.index(mark)]
+            self.assertEqual(normalize_style(keys[state][0]), tuple(cell[1:]), (state, cell))
+            seen[state] = tuple(cell[1:])
             routes = tuple(r for r in vm.routes if r.get("session_tag") == "4f")
             _grid, lines = self.popup_lines(vm, routes, opened=routes[0]["id"])
             called = next(line for line in lines if "code-review" in line)
@@ -464,8 +513,10 @@ class PanelAndTables(unittest.TestCase):
             # the panel's row carries it with that mark
             labels, panels = session_line.session_route_status(world.snapshot(ledger=[rec["route_id"]]), NOW, include_details=True)
             unit = panels["claude\0" + SID][0]["workers_live"][0]["called"][0]
-            self.assertEqual({"dead": "dead", "queued": "idle", "unknown": "stale"}[state], unit["marker"], (state, unit))
+            self.assertEqual({"dead": "dead", "queued": "idle", "blocked": "blocked", "unknown": "stale"}[state], unit["marker"], (state, unit))
+            self.assertEqual(keys[state][1], session_panel.called_rows([unit], NOW)[0]["glyph_key"], (state, unit))
             self.assertEqual("route 1 ⠏1", labels["claude\0" + SID], state)
+        self.assertNotEqual(seen["queued"], seen["blocked"])         # the same `●`, told apart by the color alone
 
 
 if __name__ == "__main__":

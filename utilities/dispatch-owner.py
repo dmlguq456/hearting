@@ -14,6 +14,7 @@ import subprocess
 import sys
 import frame_repository
 from route_plan import is_depth0_leg
+from route_form import serial_attempt_route
 from owner_route_binding import OwnerRouteBindingError, validate_owner_route_binding, derive_quick_owner_binding, derive_frame_route_binding
 from dispatch_mode_contract import DispatchModeContractError, resolve_qa
 from dispatch_contract import (DispatchContractError, frame_harness_admission,
@@ -71,7 +72,8 @@ _REQUIRED = {
 # absent it is derived from `--intensity` below; when present it is checked
 # against that same derivation, both through resolve_qa (the single qa/intensity
 # SoT).
-_CAPTURED = _REQUIRED | {"--unit", "--review-output", "--model-role", "--qa"}
+_CAPTURED = _REQUIRED | {"--unit", "--review-output", "--model-role", "--qa",
+                         "--attempt-id", "--continues-attempt-id"}
 # SD-OPEN-40: the depth-1 tuples this selector may launch. `review` exists so an
 # independent reviewer can be a *registered review worker* instead of an owner
 # wearing a reviewer's prompt. Before it, every ad-hoc independent review landed
@@ -237,7 +239,7 @@ def _sealed_owner_context(path, *, worker_type="owner", route_node=None):
     intensity = route.get("effective_intensity")
     if intensity == "direct":
         raise OwnerError("route-evidence-direct-route-has-no-owner")
-    if not (intensity == "quick" or route.get("registered_headless_candidates") is not None):
+    if not (serial_attempt_route(route) or route.get("registered_headless_candidates") is not None):
         rows = (route.get("dispatch_evidence") or {}).get("tuples") or []
         if any(
             isinstance(row, dict)
@@ -1207,7 +1209,10 @@ def main(argv):
                         with _first_node_of_a_new_route():
                             child_env.update(prepare_route_artifact_env(
                                 Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs),
-                                sibling_looked=bool(first) and first.get("_status") in {"open", "running"}))
+                                sibling_looked=bool(first) and first.get("_status") in {"open", "running"},
+                                # A unit route's next turn begins its own cycle (the earlier one stays sealed).
+                                fresh_cycle=(values.get("--attempt-id") if values.get("--continues-attempt-id")
+                                             else None)))
                     except ProducerError as exc:
                         raise OwnerError(f"{exc.code}:{exc.detail}") from exc
                 # Deliberately NOT export_owner_route_env() here. The adapters

@@ -1005,7 +1005,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const walkCalled=(items,depth)=>(Array.isArray(items)?items:[]).filter(c=>c&&typeof c==='object').slice(0,8).flatMap(c=>[[c,depth],...walkCalled(c.called,depth+1)]);
     const flatCalled=r=>[...walkCalled(r.called,0),...workersAll(r).flatMap(w=>walkCalled(w.called,0))];
     const calledBottom=new Map(listed.map(r=>[r,side?[]:flatCalled(r).filter(([c])=>clean(c.unit_word||'').trim()).map(([c,depth])=>({
-      title:c.title||'',kind:c.kind,paint:c.paint||{},elapsed:c.elapsed,unit_route:true,unit_word:c.unit_word,kind_word:c.kind_word,
+      title:c.title||'',kind:c.kind,paint:c.paint||{},elapsed:c.elapsed,unit_route:true,called:true,unit_word:c.unit_word,kind_word:c.kind_word,
       kind_field:c.kind_field,indent:2+2*depth,shape:''}))]));
     const calledAll=[...calledBottom.values()].flat();
     const indentOf=r=>r.indent||0;
@@ -1047,7 +1047,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return hued&&FIELDS.includes(field)&&styles['kind_'+field]?field:'';
     };
     const kindText=(word,field='')=>field?{...text(clean(word),'kind_'+field),bold:true,dim:false}:{text:clean(word),foreground:null,bold:true,dim:false};
-    const bracket=(word,field='')=>field?{...text('('+word+')','kind'+(WEIGHT[String(word).trim().toLowerCase()]||'s')+'_'+field),role:'kind'}:text('('+word+')','dim');
+    const bracket=(word,field='',inten='')=>field?{...text('('+word+')','kind'+(WEIGHT[String(inten||word).trim().toLowerCase()]||'s')+'_'+field),role:'kind'}:text('('+word+')','dim');
     const framed=r=>String(r.shape||'')==='framed';
     // A direct route's word stands for its intensity when the record names none (the backend sends it in the screen language).
     const intensityRaw=r=>{
@@ -1058,34 +1058,48 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     // 11-17 (route zones): in the `direct` zone the zone's own name says it, so `(direct)` (the word the record or its shape
     // gives) is left out of the line; a real intensity (`quick`) stays.
-    // A unit route's intensity is not a choice (it is always `quick`), so its first line has no bracket.
+    // 11-19 (the person, in order: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?" / "code(unit) 이렇게 쓰는건 이상한가?" / "근데 강도랑은 좀
+    // 다르잖아. 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만 수행하는 건지" / "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" /
+    // "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" / "강도도 표기해 항상" / "unit과 one-shot의 의미가 딱 들으면 잘 구분이 되나?
+    // staged도 그 framed랑 함께 잘 표현이 되는 단어인가? 전반적으로 전향적 검토가 필요해" / "team도 괜찮은데?"): two axes. The bracket of a route in
+    // the `dispatch` zone holds its FORM (`kind_form`, the backend's one word for it, read as who makes the work: `unit` one unit called, `solo` the
+    // owner alone doing the whole procedure, `team` the owner and a worker for each stage; English in every language; `direct` has no bracket)
+    // and its INTENSITY after a `·` (`code(team·standard)`), always, whatever the form. (The commands still say `--shape solo|staged`: `staged` is `team`.)
+    // Colour and weight follow the intensity (`kind{q,s,b}_<field>`; no field: a dim
+    // bracket), also when the tail is folded away. A route of another shape (a frame, an older record) keeps its intensity bracket alone, an
+    // older unit route that records no field keeps its bare `unit`, a `direct` route has no form, and a unit a worker called (`called`)
+    // is a row under its caller's with no bracket.
     const intensityOf=r=>{
-      if(r.unit_route===true)return '';
+      if(r.unit_route===true&&(r.called===true||clean(r.kind_word||'').trim()==='unit'))return '';
       const word=intensityRaw(r);
       return r.zone==='direct'&&(/^direct$/i.test(word)||word===clean(r.shape||'').trim())?'':word;
     };
-    const kindHead=r=>{const word=clean(r.kind_word||'').trim(),inten=intensityOf(r);
+    const formOf=r=>r.zone==='direct'||r.called===true?'':clean(r.kind_form||'').trim();
+    const bracketWord=(r,tail=true)=>{const form=formOf(r),inten=intensityOf(r);return form?form+(tail&&inten?'·'+inten:''):inten;};
+    const kindHead=(r,tail=true)=>{const word=clean(r.kind_word||'').trim(),b=bracketWord(r,tail);
       const field=kindField(r,word);
-      return word?[kindText(word,field),...(inten?[bracket(inten,field)]:[])]:[];};
-    // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(standard) · staged 3/7: execute`, a route with
-    // no stage line reads `lab(quick)`; short of cells `3/7: execute`.
+      return word?[kindText(word,field),...(b?[bracket(b,field,intensityOf(r))]:[])]:[];};
+    // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(team·standard) · 3/7: execute` (`staged` is never written before the position), a route with no stage line reads `lab(solo·quick)`; the intensity goes
+    // first short of cells (`code(team) · 3/7: execute`), then the kind, then `staged 3/7: execute`, then `3/7: execute`.
     function kindCell(r){
-      const cell=shapeCell(r),head=kindHead(r);
-      if(!head.length)return cell&&{...cell,kind:cell.full};
-      if(!cell)return {full:[],short:[],kind:head};
-      return {...cell,kind:[...head,text(' · ','dim'),...cell.full]};
+      const cell=shapeCell(r),head=kindHead(r),bare=kindHead(r,false);
+      if(!head.length)return cell&&{...cell,kind:cell.full,bare:cell.full};
+      if(!cell)return {full:[],short:[],kind:head,bare};
+      const rest=cell.full;
+      return {...cell,kind:[...head,text(' · ','dim'),...rest],bare:[...bare,text(' · ','dim'),...rest]};
     }
     // 11-17 (route row 5): every route with a stage list reads its stage line, whatever its shape: the shape's own word
     // (`staged`, `map-reduce`, `transactional-owner`; none when the record names none), the position, the stage's name.
     // A frame route has no stage line (its legs hang under it), and a route its owner does alone (one stage) has none.
-    const stageWord=shape=>/^staged/.test(shape)?'staged':/^(|unknown|framed|one-shot-owner)$/.test(shape)?'':shape;
-    const stageLined=r=>{const shape=String(r.shape||''),n=Array.isArray(r.stages)?r.stages.length:0;
-      return !framed(r)&&(/^staged/.test(shape)?n>0:n>1);};
+    // The word before a stage line's position: never `staged` (the route's form is `team` in the bracket, or the line has no bracket; 11-19:
+    // `code(team·standard) · 3/6: execute`), another shape's own word (`map-reduce`) as before.
+    const stageLead=r=>stageLeadOf(r);
+    const stageLined=stageLinedOf;
     function shapeCell(r){
       const shape=String(r.shape||''),stages=Array.isArray(r.stages)?r.stages:[];
       const current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
       if(stageLined(r)){
-        const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length,word=stageWord(shape);
+        const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length,word=stageLead(r);
         const stage=stageCell(stages[at],'loc_repo');
         return {full:[text((word?word+' ':'')+position+': ','dim'),...stage],short:[text(position+': ','dim'),...stage]};
       }
@@ -1097,9 +1111,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // beside the native area: a route reads its harness, model and context number, and its NOW on the row under it.
     const planBottom=(ow,gw,C)=>{
       const kinds=C.set.map(kindCell);
-      const widths=Object.fromEntries(['kind','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
+      const widths=Object.fromEntries(['kind','bare','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
       const longest=C.width(titleCols),avail=inner-(2+3+ow+3+gw+1+C.elapsed);
-      const order=widths.kind>widths.full?['kind','full','short']:['full','short'];
+      const order=widths.kind>widths.full?['kind',...(widths.bare<widths.kind&&widths.bare>widths.full?['bare']:[]),'full','short']:['full','short'];
       for(const level of order){
         if(!widths[level])break;
         const room=avail-(3+widths[level]);
@@ -1117,7 +1131,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // routes' alone (`routeCols`: the box as it stands with no called unit); the called rows are drawn into them (the title cut
     // with `…` and empty where no cells are left, the worker cell folded in the narrow worker line's order). Only where the
     // columns grown by the called rows leave every route row reading the same, letter for letter (as it reads in the routes'
-    // own), the box takes those wider columns, as it takes the widened named column above.
+    // own), the box takes those wider columns, as it takes the widened named column above, and as that one only from the richest stage
+    // form the box can have (`plan.top`; 11-19 review N1: else the columns widen and narrow again as the window is widened).
     let bottomSet;
     const layoutOf=C=>{
       const gw=C.width(x=>leadPaint(x).gauge5||[]),named=C.width(x=>doerCell(x,Infinity)),
@@ -1130,7 +1145,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const own=layoutOf(routeCols);
       if(!calledAll.length)return bottomSet=own;
       const grown=layoutOf(columnsOf([...listed,...calledAll])),letters=parts=>clean(parts.map(p=>p.text).join('')).replace(/\s+/g,' ').trim();
-      return bottomSet=grown.plan.level===own.plan.level&&listed.every(r=>letters(folded(r,own))===letters(folded(r,grown)))
+      return bottomSet=grown.plan.level===own.plan.level&&own.plan.top&&listed.every(r=>letters(folded(r,own))===letters(folded(r,grown)))
         &&calledAll.every(c=>{folded(c,grown);return !clipped;})?grown:own;
     };
     // A unit route's doer cell in a column `width` wide: its name, then as much of the effort, harness and model as the column holds,
@@ -1439,7 +1454,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const at=given!==null&&stages[given]?given:currentAt(r),position=(at+1)+'/'+stages.length;
       const stage=stageCell(stages[at],stageInk(stages[at].key)),pieces=piecesOf(r);
       // Spec rule 43 (g): the workers gone for rows, the stage line ends with their count (it stays while the values before it go).
-      for(const end of workers?[[text(' · ','dim'),text('worker '+workers,'dim')],[]]:[[]])for(const word of [...new Set([(stageWord(shape)?stageWord(shape)+' ':'')+position,position])])for(let n=pieces.length;n>=0;n--){
+      for(const end of workers?[[text(' · ','dim'),text('worker '+workers,'dim')],[]]:[[]])for(const word of [...new Set([(stageLead(r)?stageLead(r)+' ':'')+position,position])])for(let n=pieces.length;n>=0;n--){
         const row=[text(word,'dim'),text(': ','dim'),...stage,...pieces.slice(0,n).flatMap(piece=>[text(' · ','dim'),...piece]),...end];
         if(size(row)<=limit)return row;
       }
@@ -1447,9 +1462,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     // The first line: a state mark, then the chain of kinds the route continues (`frame ✓ → code(standard)`: what is behind
     // dim with `✓`, this one bold, what is left dim; a frame route reads `frame → ??` until its direction is chosen).
-    function chainParts(r,{past=true,inten=true}={}){
-      const kind=clean(r.kind_word||'').trim(),word=inten?intensityOf(r):'';
-      const own=name=>{const field=kindField(r,name);return [kindText(name,field),...(word?[bracket(word,field)]:[])];};
+    function chainParts(r,{past=true,inten=true,tail=true}={}){
+      const kind=clean(r.kind_word||'').trim(),word=inten?bracketWord(r,tail):'';
+      const own=name=>{const field=kindField(r,name);return [kindText(name,field),...(word?[bracket(word,field,intensityOf(r))]:[])];};
       const legs=(Array.isArray(r.chain)?r.chain:[]).filter(l=>l&&l.name);
       if(!legs.length)return kind?own(kind):[];
       const out=[];
@@ -1472,7 +1487,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // then the whole), as the waiting-for-direction text does.
     function stageForms(r,name){
       if(!stageLined(r))return [];
-      const stages=stagesOf(r),at=currentAt(r),word=(stageWord(String(r.shape||''))?stageWord(String(r.shape||''))+' ':'')+(at+1)+'/'+stages.length;
+      const stages=stagesOf(r),at=currentAt(r),word=(stageLead(r)?stageLead(r)+' ':'')+(at+1)+'/'+stages.length;
       const forms=[];
       if(name){const stage=stageCell(stages[at],stageInk(stages[at].key)),pieces=piecesOf(r);
         for(let n=pieces.length;n>=0;n--)forms.push({named:true,parts:[text(word,'dim'),text(': ','dim'),...stage,...pieces.slice(0,n).flatMap(piece=>[text(' · ','dim'),...piece])]});}
@@ -1480,7 +1495,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return forms.map(form=>({named:form.named,parts:[text(' · ','dim'),...form.parts]}));
     }
     function headRow(r){
-      const chains=[{},{past:false},{past:false,inten:false}].map(o=>chainParts(r,o));
+      const chains=[{},{tail:false},{past:false,tail:false},{past:false,inten:false}].map(o=>chainParts(r,o));
       if(!chains[0].length)return null;
       const wait=directionWait(r)?[text(' · ','dim'),text(t('direction_wait','waiting for direction'),'dim')]:[];
       const width=inner,room=width-2;     // the box's inner width, read now (the row is drawn after the box's width is given back)
@@ -1821,47 +1836,99 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const usageLines=()=>keepQuota&&usageOn?usageData.filter((_u,i)=>keepLine[i]):[];
     // 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"; then, on v4.54.0,
     // "RESOURCE는 세로로 차지하는 공간이 너무 많은데, 이걸 게이지는 없애자 그리고 가로로 나열이 가능하면 가로로 나열을 좀 하자"): RESOURCES stands
-    // right above USAGE. One row for each host: its name, `CPU 34%  MEM 61%` and, at the row's end, the count of the GPUs nothing runs
-    // on (`idle GPU 6`). Under it the GPUs a process runs on, side by side (`GPU0 93% 21/24G [3b]  GPU1 40% 10/48G`), onto the next
-    // row where they do not fit; one GPU's group is never split between rows. No gauge: the use is its number, in the level's color.
-    // The values are the sample the shared producer already took. Short of cells on a host row the values go in this order: MEM,
-    // then CPU, then the name is cut with `…` (12 cells at least), the idle count last (11-18 review: the idle count was first to go); short of cells for one GPU's group the memory goes first, then the use,
-    // and the session's number stays (who holds the GPU is what the section is for). Short of rows it gives way before everything else:
-    // the GPU rows (from the last), the host rows (from the last; the name row goes with the last of them), so USAGE and the sections
-    // above it stand as they did without it.
+    // right above USAGE. One row for each host: its name and `CPU 34%  MEM 61%`. Under it every GPU of the host in its number's order, side by
+    // side (`GPU0  93% 21/24G [3b]  GPU1  40% 10/48G`, `GPU2   0%  0/48G` under them: the grid below), onto the next row where they do not fit; one GPU's group is never split
+    // between rows. The use is its number, in the level's color. 11-19 (the person: "빈 GPU도 일관성있게 표시해줘. 그냥 0% 0/48GB
+    // 이런식으로 해놔. 컬러만 좀 어둡게 하면 되잖아. 0%에"): a GPU nothing runs on has the same group with the sample's own values and no session
+    // number, all of it `dim` (the producer paints it so; the host row no longer counts them). The values are the sample the shared producer
+    // already took. Short of cells on a host row the values go in this order: MEM, then CPU, then the name is cut with `…` (12 cells at least);
+    // short of cells for one GPU's group the memory goes first, then the use, and the session's number stays (who holds the GPU is what the
+    // section is for). Short of rows it gives way before everything else: the GPU rows (from the last), the host rows (from the last; the name
+    // row goes with the last of them), so USAGE and the sections above it stand as they did without it.
+    // 11-19 (the person, on v4.59.6's panel: "가로로 길어지면 RESOURCE에 게이지도 넣어주면 좋고"): where the width allows, a GPU's group has a
+    // memory gauge (Fleet's VRAM gauge: `GPU0  93% ━━━━━━━━─ 21/24G [3b]`) right before its memory number. The rows come first (the person,
+    // 11-18: the section took too many), so the gauge is only what the width has left over: it stands only when the rows are as many as
+    // without it and it has 4 cells at least, in the widest width (up to 10) the section has room for, the same for every group. The
+    // groups may then stand fewer to a row where that keeps the rows as many (a host of two GPUs on a width for three). The backend draws
+    // the gauge at each width (`gauge4` … `gauge10`, the fill and the color are its); the panel only picks one. Not in the forms without
+    // the memory, and not on the host rows.
     const resourceData=Array.isArray(model.resources)?model.resources.filter(h=>h&&typeof h==='object'&&Array.isArray(h.host)).slice(0,8):[];
     let resHosts=resourceData.length,resGpus=Infinity;
-    const resourceHostRow=h=>{
-      const idle=h.idle>0?[[text(t('resource_idle_gpus','idle GPU')+' '+h.idle,'dim')]]:[];
-      const stats=painted(h.stats).filter(x=>Array.isArray(x)&&x.length).map(painted);
-      const name=painted(h.host),least=Math.min(size(name),12);
-      const tailOf=vals=>vals.flatMap(x=>[text('  '),...x]);
-      // Giving way: MEM, then CPU (the last stat first), then the name is cut (12 cells at least), the idle count last.
-      for(let n=stats.length;n>=0;n--){
-        const tail=tailOf([...stats.slice(0,n),...idle]);
-        if(size(name)<=inner-size(tail))return [...name,...tail];
+    // 11-19 (the person: "그리고 GPU 표시를 행과 열 간격을 맞춰."): one grid for the whole section, from every host's values. The host rows: the name
+    // column as wide as the longest name, each stat (`CPU`, `MEM`) a column with its value right-aligned to the widest. The GPU groups: all the same
+    // width, the label left-aligned, the use and the memory right-aligned, the session numbers left-aligned after them (blank where a GPU has none, so
+    // the next group keeps its place; the last group of a row is not padded behind), two cells between groups; every row of every host takes as many
+    // groups as the widest form lets in one row, so a group and its values stand on the same cells row over row. The form of the groups (the memory,
+    // then the use goes) and the stats' columns (MEM, then CPU) are chosen for the section, not per host; a name that must be cut is the step after.
+    const plainOf=parts=>parts.map(p=>String(p.text)).join('');
+    const blank=n=>n>0?[text(' '.repeat(n))]:[];
+    const leftIn=(parts,w)=>[...parts,...blank(w-size(parts))];
+    const rightIn=(parts,w)=>[...blank(w-size(parts)),...parts];
+    const trimEnd=parts=>{const out=[...parts];while(out.length&&/^ *$/.test(String(out.at(-1).text)))out.pop();return out;};
+    const grid=(()=>{
+      const hosts=resourceData.map(h=>({name:painted(h.host),stats:painted(h.stats).filter(x=>Array.isArray(x)&&x.length).map(painted)}));
+      const nameW=Math.max(0,...hosts.map(h=>size(h.name)));
+      const cols=[];
+      for(const h of hosts)for(const st of h.stats){
+        const key=plainOf([st[0]]).trim();let c=cols.find(x=>x.key===key);
+        if(!c){c={key,labelW:0,valueW:0};cols.push(c);}
+        c.labelW=Math.max(c.labelW,size([st[0]]));c.valueW=Math.max(c.valueW,size(st.slice(1)));
       }
-      if(idle.length){const tail=tailOf(idle),room=inner-size(tail);if(room>=least)return [...cut(name,room),...tail];}
-      return cut(name,inner);
+      // The stats kept: the most whose aligned row fits; none left, the names alone (each cut to the row where it is longer).
+      let kept=cols.length;
+      while(kept>0&&nameW+cols.slice(0,kept).reduce((n,c)=>n+2+c.labelW+c.valueW,0)>inner)kept--;
+      const cells=resourceData.flatMap(h=>painted(h.gpus)).map(g=>({label:painted(g.label),pct:painted(g.pct),mem:painted(g.mem),users:painted(g.users)}));
+      const width=k=>Math.max(0,...cells.map(c=>size(c[k])));
+      const w={label:width('label'),pct:width('pct'),mem:width('mem'),users:width('users')};
+      // One form for every group (0 whole; 1 without the memory; 2 without the use too; 3 the label alone): the first that lets the widest stand alone.
+      const parts=f=>[w.label&&'label',f<=1&&w.pct&&'pct',f===0&&w.mem&&'mem',f<=2&&w.users&&'users'].filter(Boolean);
+      const full=f=>parts(f).reduce((n,k)=>n+(n?1:0)+w[k],0);
+      let form=0;while(form<3&&2+full(form)>inner)form++;
+      const perRow=Math.max(1,Math.floor(inner/(full(form)+2)));
+      // The gauge: only in the whole form (the memory is there), and only if every GPU has its widths drawn. Of the groups-to-a-row `k` (at most the
+      // section's now) that keep the rows as many, the one that gives the gauge the most; none with 4 cells, no gauge (the rows as they were).
+      let gauge=0,across=perRow;
+      const drawn=cells.length&&w.mem&&resourceData.every(h=>painted(h.gpus).every(g=>painted(g.gauge4).length));
+      if(form===0&&drawn){
+        const counts=resourceData.map(h=>painted(h.gpus).length),rowsAt=k=>counts.reduce((n,c)=>n+Math.ceil(c/k),0),rows0=rowsAt(perRow);
+        for(let k=perRow;k>=1;k--){
+          if(rowsAt(k)!==rows0)break;
+          const room=Math.min(10,Math.floor(inner/k)-2-full(0)-1);
+          if(room>=4&&room>gauge){gauge=room;across=k;}
+        }
+      }
+      if(gauge){w.gauge=gauge;}
+      const order=gauge?['label','pct','gauge','mem','users'].filter(k=>w[k]):parts(form);
+      return {hosts,nameW,cols,kept,w,form,gauge,parts:order,perRow:across};
+    })();
+    const resourceHostRow=h=>{
+      const at=resourceData.indexOf(h),{name,stats}=grid.hosts[at];
+      const cells=grid.cols.slice(0,grid.kept).map(c=>{
+        const st=stats.find(x=>plainOf([x[0]]).trim()===c.key);
+        return st?[...leftIn([st[0]],c.labelW),...rightIn(st.slice(1),c.valueW)]:null;
+      });
+      let last=cells.length;while(last>0&&!cells[last-1])last--;
+      if(!last)return cut(name,inner);   // (no stat to give, or none kept: the name alone, cut to the row)
+      return [...leftIn(name,grid.nameW),...cells.slice(0,last).flatMap((x,i)=>[text('  '),...(x||blank(grid.cols[i].labelW+grid.cols[i].valueW))])];
     };
-    // One GPU's group at a form (0 whole; 1 without the memory; 2 without the use too; 3 the label alone).
-    const resourceGpuGroup=(g,form)=>{
-      const sets=[[g.pct,g.mem,g.users],[g.pct,g.users],[g.users],[]];
-      return [...painted(g.label),...sets[form].filter(x=>Array.isArray(x)&&x.length).flatMap(x=>[text(' '),...painted(x)])];
+    // One GPU's group: the same columns for every GPU (see above); `end` leaves a group last on its row without its trailing blanks.
+    const resourceGpuGroup=(g,end)=>{
+      const c={label:painted(g.label),pct:painted(g.pct),mem:painted(g.mem),users:painted(g.users),gauge:grid.gauge?painted(g['gauge'+grid.gauge]):[]},{w}=grid;
+      const out=[];
+      for(const k of grid.parts){
+        if(out.length)out.push(text(' '));
+        out.push(...(k==='label'||k==='users'||k==='gauge'?leftIn(c[k],w[k]):rightIn(c[k],w[k])));
+      }
+      return end?trimEnd(out):out;
     };
-    // The host's GPU rows: groups side by side, two cells in, two cells between; every group in the first form that lets the widest stand alone.
+    // The host's GPU rows: `perRow` groups each (the section's), two cells in, two cells between.
     const resourceGpuRows=h=>{
       const gpus=painted(h.gpus);
-      if(!gpus.length)return [];
-      let form=0;
-      while(form<3&&gpus.some(g=>2+size(resourceGpuGroup(g,form))>inner))form++;
-      const rows=[];let row=[];
-      for(const g of gpus){
-        const group=resourceGpuGroup(g,form);
-        if(row.length&&size(row)+2+size(group)>inner){rows.push(row);row=[];}
-        row=row.length?[...row,text('  '),...group]:[text('  '),...group];
+      const rows=[];
+      for(let i=0;i<gpus.length;i+=grid.perRow){
+        const row=gpus.slice(i,i+grid.perRow).flatMap((g,j,all)=>[text('  '),...resourceGpuGroup(g,j===all.length-1)]);
+        rows.push(row);
       }
-      rows.push(row);
       return rows.map(r=>cut(r,inner));
     };
     const resourceLines=()=>{
@@ -2431,7 +2498,162 @@ function routesBody({model={},columns=72,cellWidth,configuration,background=''}=
   }
   return {rows,hits,routes};
 }
+// 11-19 (the person: "라우트를 눌렀을때 fleet에서 처럼 스테이지별 단계가 시각화되었으면 한다"): the ROUTE popup's first screen for
+// a route pressed on the panel, before its own reading (Fleet's route page) comes: the stage boxes of Fleet's page, drawn from the
+// stages the panel already holds for that route (`routes[].stages`, what `session_panel.presentation` made of them). Only the values
+// held are drawn, an empty value is an empty place, and nothing is new: the top rule, the legs' band, then the stages in the rows Fleet
+// lays them (`_stage_grid`: a snake of at most six boxes a row, `▶ ◀ ▼` between), each box as `_stage_box` fills it. What Fleet's page has
+// besides (the task's summary, the visibility line, the route row, the chosen leg's frame) is not here, so the boxes stand higher until
+// the page comes. The boxes stand in Fleet's inner width (`stage_room`: the popup's columns less ten, from cell 4, as the page lays them),
+// an empty `out`/`unit` reads `·`, a value cut to its place ends in `…`, and no value touches the right rail (one cell is left, as Fleet's
+// `_stage_box` leaves it). A route with no stage line (the owner alone, a unit's, no stages) is `null`: the popup keeps the panel's box.
+// Returns `{rows,hits:[],routes}` as `routesBody` does (the popup's table keys use `routes`). It does not move (no beat).
+function routePageFirst({model={},id,columns=72,cellWidth,configuration,background=''}={}){
+  columns=Math.max(1,Math.min(200,Math.trunc(Number(columns))||72));
+  const list=Array.isArray(model.routes)?model.routes.filter(r=>r&&typeof r==='object'&&r.id):[];
+  const route=list.find(r=>String(r.id)===String(id));
+  if(!route)return null;
+  const stages=Array.isArray(route.stages)?route.stages.filter(s=>s&&typeof s==='object'):[];
+  // The panel's own test for a route that reads a stage line (`stageLinedOf`, the one `render` uses too).
+  const shape=String(route.shape||'');
+  if(route.unit_route===true||shape==='one-shot-owner'||!stageLinedOf({...route,stages}))return null;
+  const cfg={...defaults,...configuration},styles=model.styles||{};
+  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
+  const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
+  const hued=model.no_color!==true&&cfg.theme!=='mono'&&(model.colors??256)>=256;
+  const ink=key=>key&&hued?key:'loc_repo';
+  // The drawing is a grid of cells (one character and its style key each), written into by place, read back as parts.
+  const grid=[];
+  const rowAt=y=>{while(grid.length<=y)grid.push(new Array(columns).fill(null));return grid[y];};
+  const put=(x,y,value,key,limit=columns)=>{
+    const row=rowAt(y);
+    for(const c of clean(value)){
+      const w=measure(c);if(x+w>Math.min(limit,columns))break;
+      if(x>=0){row[x]={c,key};for(let i=1;i<w;i++)row[x+i]={c:'',key};}
+      x+=w;
+    }
+    return x;
+  };
+  const size=value=>measure(clean(value));
+  const cut=(value,room)=>{let out='',used=0;for(const c of clean(value)){const w=measure(c);if(used+w>room)break;out+=c;used+=w;}return out;};
+  // Fleet's own cut (`grid.clip_cells`): a value that fits stays, one that does not ends in `…` within the room.
+  const clip=(value,room)=>{const s=clean(value);if(size(s)<=room)return s;let out='',used=0;for(const c of s){const w=measure(c);if(used+w>room-1)break;out+=c;used+=w;}return out+'…';};
+  const outline=(x,y,w,h,key)=>{
+    put(x,y,'┌'+'─'.repeat(Math.max(0,w-2))+'┐',key);put(x,y+h-1,'└'+'─'.repeat(Math.max(0,w-2))+'┘',key);
+    for(let i=1;i<h-1;i++){put(x,y+i,'│',key);put(x+w-1,y+i,'│',key);}
+  };
+  // The top rule: `╔═ <title>  <age> · N legs · <form> ═══╗` (11-19: the route's `kind_form`, the backend's one word for how it runs (`team`, `solo`, `unit`; `route_form` is the only place that
+  // decides it), or, where an older backend sends none, the shape's own word with `staged` left out, as `stageLead` does); the name in the body color, the rest dim.
+  const legs=Array.isArray(route.chain)?route.chain.filter(l=>l&&typeof l==='object'):[];
+  const tail=[route.elapsed,legs.length?legs.length+' leg'+(legs.length===1?'':'s'):'',String(route.kind_form||'').trim()||stageLeadOf(route)].map(v=>clean(v).trim()).filter(Boolean).join(' · ');
+  const tailText=tail?'  '+tail+' ':' ';
+  put(0,0,'╔═ ','dim');
+  const room=Math.max(0,columns-4-size(tailText));
+  const name=cut(route.title||route.id,room);
+  let x=put(3,0,name,'loc_repo');
+  x=put(x,0,tailText,'dim',columns-1);
+  while(x<columns-1)x=put(x,0,'═','dim',columns-1);
+  put(columns-1,0,'╗','dim');
+  // Boxes laid in a snake: even rows go right, odd rows left, `▶`/`◀` between boxes of a row and `▼` between rows.
+  const gap=4;
+  const snake=(count,per,w,h,y0,link,x0=0)=>{
+    const spots=[];
+    for(let i=0;i<count;i++){
+      const r=Math.floor(i/per),k=i%per,col=r%2===0?k:per-1-k;
+      spots.push({x:x0+col*(w+gap),y:y0+r*(h+1),row:r});
+    }
+    for(let i=0;i+1<count;i++){
+      const a=spots[i],b=spots[i+1];
+      if(a.row!==b.row)put(a.x+Math.floor(w/2),a.y+h,'▼',link);
+      else put(Math.min(a.x,b.x)+w+1,a.y+Math.floor(h/2),b.x>a.x?'▶':'◀',link);
+    }
+    return spots;
+  };
+  let y=1;
+  if(legs.length){
+    // The legs' band: a short box a leg, its name and its mark; no value is held for the inside.
+    const per=Math.max(1,Math.min(legs.length,6,Math.floor((columns+gap)/(14+gap)))),w=Math.max(8,Math.min(44,Math.floor((columns-gap*(per-1))/per)));
+    const spots=snake(legs.length,per,w,3,y,'dim');
+    legs.forEach((leg,i)=>{
+      const {x:bx,y:by}=spots[i],st=String(leg.state||'');
+      const mark=st==='done'?['✓','lvl_g']:st==='active'?['●','g_work']:st==='failed'||st==='dead'?['✕','g_dead']:['·','dim'];
+      outline(bx,by,w,3,'dim');
+      const right=' '+mark[0]+' ';
+      put(bx+w-1-size(right),by,right,mark[1]);
+      put(bx+2,by,' '+cut(leg.name||'·',Math.max(0,w-6-size(right)))+' ','loc_repo');
+    });
+    const rowsUsed=Math.floor((legs.length-1)/per)+1;
+    y+=rowsUsed*3+(rowsUsed-1)+1;
+  }
+  const LW=7,lab=(bx,by,word,limit)=>put(bx,by,word.padEnd(LW),'dim',limit);   // (the word too stays inside the box: its right rail is bx+w-1)
+  // Fleet's page lays its boxes from cell 4 (the page's `║` frame at 0, the legs' frame at 2, the box at `panel_left + 2`) in `stage_room`,
+  // the popup's columns less ten; fewer than three stages stand at most 64 cells a stage. Fleet counts flow steps; the panel holds no level,
+  // so the stages count one each (a chain; parallel stages are not told apart here).
+  const X0=4;
+  let stageRoom=Math.max(1,columns-10);
+  if(stages.length<3)stageRoom=Math.min(stageRoom,64*stages.length);
+  const per=Math.min(stages.length,Math.max(3,Math.min(6,Math.floor((stageRoom+gap)/(36+gap)))));
+  const w=Math.floor((stageRoom-gap*(per-1))/per);
+  const vroom=w-4-LW;      // Fleet: the room of a value in a box
+  const linesOf=stage=>{
+    const lines=[];
+    if(stage.harness)lines.push(['by',[[String(stage.harness),'hb_'+String(stage.harness)],...(stage.model?[[' '+stage.model,'loc_repo']]:[])]]);
+    const todo=stage.mark===''&&stage.state!=='active'&&!stage.current;
+    lines.push(['time',[[clip(stage.when||stage.elapsed||'·',vroom),todo?'dim':'loc_repo']]]);
+    if(stage.note)lines.push(['rounds',[[clip(stage.note,vroom),'dim']]]);
+    // The panel's value for a stage's gate is `true` when it passed (`stage_doer`): that is a pass mark, and the box's title already has its ✓.
+    // Only a gate in words is a line.
+    if(typeof stage.gate==='string'&&stage.gate.trim())lines.push(['gate',[[clip(stage.gate,vroom-3),'dim'],...(stage.mark==='✓'?[[' ✓','lvl_g']]:[])]]);
+    lines.push(['out',[[clip(stage.out||'·',vroom),'dim']]]);
+    lines.push(['unit',[[clip(stage.unit||'·',vroom),'dim']]]);
+    if(stage.says)lines.push(['says',[[clip(stage.says,vroom),'dim']]]);
+    return lines;
+  };
+  const h=Math.max(4,Math.min(10,Math.max(...stages.map(s=>linesOf(s).length))+2));
+  const spots=snake(stages.length,per,w,h,y,'dim',X0);
+  stages.forEach((stage,i)=>{
+    const {x:bx,y:by}=spots[i];
+    const mark=stage.mark==='✓'?['✓','lvl_g']:stage.mark==='●'?['●','g_work']:stage.mark==='✕'?['✕','g_dead']:['·','dim'];
+    const word=clean(stage.verdict||stage.state||'').trim();
+    const right=' '+mark[0]+' '+(w<34||!word?'':word+' ');
+    const frame=stage.current?(stage.key||'dim'):stage.mark==='✕'?'lvl_r':'dim';
+    outline(bx,by,w,h,frame);
+    put(bx+w-1-size(right),by,right,'dim');
+    put(bx+w-1-size(right),by,' '+mark[0],mark[1]);
+    put(bx+2,by,' '+clip(stage.name||'·',Math.max(0,w-6-size(right)))+' ',ink(stage.key));
+    // (the values stand one cell short of the right rail, and a box's rows beyond its height are not drawn)
+    linesOf(stage).slice(0,h-2).forEach(([word_,parts],k)=>{
+      lab(bx+2,by+1+k,word_,bx+w-1);let px=bx+2+LW;
+      for(const [value,key] of parts)px=put(px,by+1+k,value,key,bx+w-2);
+    });
+  });
+  y+=Math.floor((stages.length-1)/per+1)*(h+1)-1;
+  const more=Math.trunc(Number(route.stage_more))||0;
+  if(more>0)put(X0,y,'+'+more,'dim');
+  // Cells back to parts (equal keys join), the row's trailing blanks gone.
+  const text=(value,key)=>({text:value,...(key?(styles[key]||{dim:key==='dim'}):{})});
+  const rows=grid.map(cells=>{
+    const out=[];let last=cells.length;
+    while(last>0&&(!cells[last-1]||cells[last-1].c===' '))last--;
+    for(let i=0;i<last;i++){
+      const cell=cells[i]||{c:' ',key:null};
+      const prev=out[out.length-1];
+      if(prev&&prev.key===cell.key)prev.value+=cell.c;else out.push({key:cell.key,value:cell.c});
+    }
+    return out.map(p=>text(p.value,p.key));
+  });
+  while(rows.length&&!rows[rows.length-1].length)rows.pop();
+  const routes=[];for(const r of list)if(!routes.includes(String(r.id)))routes.push(String(r.id));
+  return {rows,hits:[],routes};
+}
+// The shape's own word before a stage line's position (`staged`, `map-reduce`; none for a route that names none), the word `staged` itself
+// never written (11-19: the form `team` says it), and the test for a route that reads a stage line: one each, for `render` and `routePageFirst`.
+function stageWordOf(shape){return /^staged/.test(shape)?'staged':/^(|unknown|framed|one-shot-owner)$/.test(shape)?'':shape;}
+function stageLeadOf(r){const word=stageWordOf(String((r&&r.shape)||''));return word==='staged'?'':word;}
+function stageLinedOf(r){const shape=String((r&&r.shape)||''),n=Array.isArray(r&&r.stages)?r.stages.length:0;
+  return shape!=='framed'&&(/^staged/.test(shape)?n>0:n>1);}
 module.exports={render,keyRows,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,veil,
   RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST,EASE:RULE_EASE},scanAt,WAVE:{COUNT:WAVE_COUNT,LAP:WAVE_LAP,STEPS:WAVE_STEPS,FLOOR:WAVE_FLOOR,MIN:WAVE_MIN},
   BORDER:{LIT:BORDER_LIT,ARC:BORDER_ARC,LAP:BORDER_LAP,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};
 module.exports.routesBody=routesBody;
+module.exports.routePageFirst=routePageFirst;

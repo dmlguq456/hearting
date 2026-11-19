@@ -69,13 +69,13 @@ assert.deepEqual(rows,[
  '● code                            2m',
  '  README 넷째 줄 고침',
  zr('dispatch'),
- '● code(standard) · staged 3/6 1h 52m',
+ '● code(standard) · 3/6        1h 52m',
  '  갈래를 route에 기록',
  '  ● owner  claude Opus 5.5 xhigh',
  '    CTX ━━━━──── 41%',
  '    검토 지적 둘을 고치고 시험을',
  '    다시 돌리는 중',
- '  ┌ staged 3/6: execute ───────────┐',
+ '  ┌ 3/6: execute ──────────────────┐',
  '  │ ⠋ worker claude Sonnet 5.5     │',
  '  │   CTX ━━────── 22% · 12m       │',
  '  │   route 기록에 갈래 칸을       │',
@@ -98,7 +98,7 @@ assert.deepEqual(none.slice(none.indexOf(zr('dispatch'))+1,none.indexOf(zr('requ
  '    CTX ━━━━──── 41%',
  '    검토 지적 둘을 고치고 시험을',
  '    다시 돌리는 중',
- '    staged 3/6: execute',
+ '    3/6: execute',
  '    ↳ ⠋ worker claude Sonnet 5.5',
  '        CTX ━━────── 22% · 12m',
  '        route 기록에 갈래 칸을',
@@ -135,7 +135,7 @@ assert.deepEqual(rules(box(draw([bare],[],44,60))).map(s=>s.split(' ')[1]),['dis
 const rows=box(draw([direct,directQuick,dispatch],[],44,60));
 assert(rows.includes('● code                            2m'),rows.join('\n'));
 assert(rows.includes('● code(quick)                     2m'),rows.join('\n'));
-assert(rows.includes('● code(standard) · staged 3/6 1h 52m'));
+assert(rows.includes('● code(standard) · 3/6        1h 52m'));
 assert(!rows.some(s=>/\(direct\)|\(직접\)|직접/.test(s)));
 // With no intensity recorded the shape's word stood in the brackets; in the direct zone it is gone too.
 const noIntensity=box(draw([{...direct,intensity:undefined}],[],44,60));

@@ -554,7 +554,7 @@ observation for its title and NOW. No setting or sidecar field is added.
 sweep**, the title, summary, branches, and kinds of the campaign and of every target
 cycle. Code, not the model, owns IDs, sources, times, counters, the vocabulary check, and
 history. The model chooses tags from the vocabulary or proposes at most one new branch (up
-to twelve when the vocabulary is empty). The review no longer reads or writes
+to twelve when the vocabulary is empty). The review does not read or write
 `workflow-groups.json`; existing declarations stay as they are. Past cycles are never
 filled in automatically.
 

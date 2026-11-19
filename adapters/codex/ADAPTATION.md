@@ -332,21 +332,12 @@ or surface-dependent, so this adapter treats TOML generation as the source
 projection and keeps runtime validation separate.
 
 permission-model caveat: Claude's per-agent `tools:` frontmatter allowlist
-(for example `editorial-team` and `plan-team` both carry no `Bash` and no
-network tools) has no Codex custom-agent-schema equivalent — Codex custom
-agent TOML exposes no per-agent `tools` field, only `model`,
-`model_reasoning_effort`, and `sandbox_mode`. The closest Codex approximation
-is `sandbox_mode` plus `mcp_servers`, which cannot express a fine-grained tool
-allowlist. Because `editorial-team.toml` and `plan-team.toml` both set
-`sandbox_mode = "workspace-write"`, these two roles are strictly more
-permissive under Codex than under Claude.
-
-write-access caveat: Claude `qa-team` carries `Write` in its tool allowlist
-and creates its durable review-log directly. Codex's `qa-team.toml` sets
-`sandbox_mode = "read-only"` and cannot write at all, so under this adapter
-the review-log for a Codex QA pass must be ghostwritten by the
-orchestrator/dispatch harness on the QA agent's behalf, not written by the QA
-agent itself. This is part of the Codex QA agent contract, not an oversight.
+(for example `memory-scout` lists `Bash, Read, Grep, Glob`) has no Codex
+custom-agent-schema equivalent — Codex custom agent TOML exposes no per-agent
+`tools` field, only `model`, `model_reasoning_effort`, and `sandbox_mode`. The
+closest Codex approximation is `sandbox_mode` plus `mcp_servers`, which cannot
+express a fine-grained tool allowlist; Codex narrows `memory-scout` with
+`sandbox_mode = "read-only"` instead (PG-21).
 
 See Model Mapping below for the corresponding model-tier asymmetry across
 these same custom agents.
@@ -360,8 +351,6 @@ discovery, but it does not expose a `codex debug agent` listing surface; add
 runtime discovery coverage when Codex exposes one.
 
 ## Native Hook Surface
-
-Write-denying hook gates are retired; no write preflight or core-read marker is required.
 
 Do not project Claude `hooks/` or `settings.json` into Codex. Use
 `codex_setting/codex-hooks` as the install source, and keep explicit
@@ -743,9 +732,9 @@ adjacent identity checks. PID or PGID reuse is never signalled, same-slug
 retries stay untouched, and completion markers or typed terminal handoffs
 retain precedence.
 
-The shared terminal inspector normalizes Codex `turn.completed` and Claude
-stream-json `result` events into the same three-line handoff contract. Codex
-liveness and harvest accept either registered harness while keeping runtime
+The shared terminal inspector normalizes Codex `turn.completed`, Claude
+stream-json `result` and OpenCode step-finish/`result` events into the same three-line handoff contract. Codex
+liveness and harvest accept any registered harness while keeping runtime
 native subagents, Claude subagents, and agent-team sessions outside this parity
 claim.
 

@@ -131,8 +131,8 @@ from dispatch_contract_roots import (  # noqa: F401
     _registry_safe, _REGISTRY_UNSAFE, _validated_registry_path, _versioned_source_layout,
     bytecode_cache_env, DanglingRegistryResolution, dispatch_state_root, dispatch_state_roots,
     ensure_global_registry_writable, git_optional_locks_env, inherited_jobs_argument,
-    launch_mismatch_annotation, LAUNCH_MISMATCH_VALUE_MAX, legacy_read_window_may_close,
-    LEGACY_READ_WINDOW_MIN_SUPPORTED_RELEASES, MIGRATION_ALIAS_DIGEST_PATTERN,
+    launch_mismatch_annotation, LAUNCH_MISMATCH_VALUE_MAX,
+    MIGRATION_ALIAS_DIGEST_PATTERN,
     MIGRATION_ALIAS_RECORD_VERSION, MIGRATION_JOURNAL_FILENAME, read_migration_journal,
     resolve_completed_alias, resolve_dangling_registry, resolve_dispatch_state_root,
     resolve_global_registry, stable_state_root, state_root, validate_dispatch_log_dir,
@@ -253,7 +253,7 @@ from dispatch_contract_rows import (  # noqa: F401
     launch_orphan_watch, launch_reap_watch, probe_owner_supervision,
     reconcile_attempt_terminal, reconcile_local_registry, RefusedChainClose,
     resolve_attempt_cleanup, resolve_residue_drain, resolve_terminal_conflict,
-    SupervisionProbe, terminal_attempt_never_started, workflow_completion_receipt, caller_attempt_receipt,
+    SupervisionProbe, terminal_attempt_never_started, workflow_completion_receipt, caller_attempt_receipt, unit_continue_receipt,
 )
 
 # Moved classes report the module they were defined in before the split, so

@@ -186,8 +186,8 @@ main/orchestrator chooses per job and the wrapper only reflects that choice:
   before rendering, the hook re-reads the exact row and its sealed completion
   evidence: every terminal receipt, success or attention, exits two — Claude
   Code wakes an idle session for an `asyncRewake` hook only on exit code 2 and
-  holds exit-0 output until the next user interaction (corrected 2026-08-29;
-  success still carries its structured notification on stdout). The
+  holds exit-0 output until the next user interaction (success
+  still carries its structured notification on stdout). The
   `PostToolUse` carries no completion; the turn's `Stop` carries any the transcript
   does not show received, and the SessionStart/UserPromptSubmit sweep re-delivers any
   SD-111 pending record at the next prompt as the durable backstop (the one way a turn
@@ -308,8 +308,6 @@ on 2026-07-22, and dispatch reads unit bodies from the portable catalog
 `roles/units/` directly. `roles/MODES.md` classifies which units are portable,
 tool-contract-bound, or adapter-coupled.
 
-Write-denying hook gates are retired; no write preflight or core-read marker is required.
-
 `fleet-interaction-state.py` is the Claude-native payload wrapper for the
 portable interaction-wait invariant. `PermissionRequest(*)` publishes a permission marker, and `PreToolUse(AskUserQuestion)`
 publishes a decision marker only when the native question goes through (see below);
@@ -410,7 +408,7 @@ Claude Code maps portable roles as follows:
 | `fast implementer` | `sonnet` |
 | `deep reviewer` | `opus` |
 | `deep maker` | `opus` |
-| `external adversary` | Codex CLI via `codex-review-team` when available |
+| `external adversary` | a different reviewer, engine or harness, proven by the adapter (`CONVENTIONS §1`) |
 | `orchestrator` | `sonnet` unless a task explicitly requires deep judgment |
 
 Concrete model names belong here and in Claude-native files only.

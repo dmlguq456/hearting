@@ -61,8 +61,11 @@ SHAPES = ("direct", "solo", "staged")
 # A leg's optional work size and the shape that fits it. The frame judges the size from its
 # evidence before the shape; an omitted shape follows the size, a different one is kept and shown.
 SIZE_SHAPE = {"one-change": "direct", "one-pass": "solo", "multi-stage": "staged"}
-SHAPE_INTENSITY = {"direct": "direct", "solo": "quick", "staged": "standard", "framed": "standard"}
-INTENSITIES = frozenset(("direct", "quick", "standard", "strong", "thorough", "adversarial"))
+from route_form import (  # noqa: E402,F401
+    FORM_INTENSITIES, INTENSITIES, INTENSITY_SHAPE, SHAPE_INTENSITY, UNIT_CAPABILITY, form_of,
+    intensity_mismatch, one_shot_owner, route_form, serial_attempt_form, serial_attempt_route,
+    shape_for_intensity, staged_form,
+)
 APPROVAL_KEYS = ("full-run", "deploy", "handback", "preview")
 VALID = "valid"
 _SLUG = re.compile(r"[a-z][a-z0-9-]{0,31}")
@@ -488,16 +491,10 @@ def _normal_leg(raw, index, notes=None):
         field = None
     if intensity is not None and (not isinstance(intensity, str) or not _MODE.fullmatch(intensity)):
         raise ProposalError(f"schema-invalid:legs[{index}].intensity")
-    if intensity in INTENSITIES and intensity != SHAPE_INTENSITY[shape]:
-        allowed = {
-            "direct": {"direct"},
-            "solo": {"quick"},
-            "staged": set(INTENSITIES) - {"direct", "quick"},
-        }[shape]
-        if intensity not in allowed:
-            if notes is not None:
-                notes.append(f"ignored:legs[{index}].intensity:{intensity}-for-{shape}")
-            intensity = SHAPE_INTENSITY[shape]
+    if intensity in INTENSITIES and intensity not in FORM_INTENSITIES[shape]:
+        if notes is not None:
+            notes.append(f"ignored:legs[{index}].intensity:{intensity}-for-{shape}")
+        intensity = SHAPE_INTENSITY[shape]
     graph = raw.get("graph")
     if graph is not None:
         if shape != "staged":

@@ -1131,6 +1131,9 @@ def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description=__doc__)
     value.add_argument("--one-turn", action="store_true",
                        help=argparse.SUPPRESS)
+    # A unit leg keeps its thread (not ephemeral) and its next turn wakes it.
+    value.add_argument("--keep-session", action="store_true", help=argparse.SUPPRESS)
+    value.add_argument("--resume-thread", help=argparse.SUPPRESS)
     value.add_argument("--worktree", required=True)
     from dispatch_contract import inherited_jobs_argument
     jobs_options = inherited_jobs_argument()
@@ -1320,7 +1323,8 @@ def run_one_turn(args: argparse.Namespace) -> int:
                               if args.turn_permissions_supported else None)},
         )
         server.notification("initialized")
-        thread_params: dict[str, Any] = {"cwd": frame_repository.rpc_worktree(args.worktree, server), "ephemeral": True}
+        thread_params: dict[str, Any] = {"cwd": frame_repository.rpc_worktree(args.worktree, server),
+                                         "ephemeral": not args.keep_session}
         if getattr(args, "verification_profile_active", False):
             thread_params["permissions"] = LOCAL_VERIFICATION_PROFILE_NAME
         elif args.native_permission_profile is None:
@@ -1329,11 +1333,23 @@ def run_one_turn(args: argparse.Namespace) -> int:
             thread_params["approvalPolicy"] = args.approval
         if args.model:
             thread_params["model"] = args.model
-        thread_result = server.request("thread/start", frame_repository.runtime_request(thread_params, server))
+        thread_result = None
+        if args.resume_thread:
+            # The woken thread gets this launch's own cwd, sandbox, approval and model again: resuming
+            # never carries the earlier turn's grants over.
+            resume_params = {key: value for key, value in thread_params.items() if key != "ephemeral"}
+            resume_params["threadId"] = args.resume_thread
+            # A thread that cannot be woken ends this turn as an error: the prompt of a woken turn carries
+            # no brief, so a silent fresh thread would start without one.
+            thread_result = server.request("thread/resume", frame_repository.runtime_request(resume_params, server))
+        if thread_result is None:
+            thread_result = server.request("thread/start", frame_repository.runtime_request(thread_params, server))
         thread = thread_result.get("thread")
         if not isinstance(thread, dict) or not isinstance(thread.get("id"), str):
             raise SupervisorError("thread-start-response-invalid")
         thread_id = thread["id"]
+        if args.resume_thread and thread_id != args.resume_thread:
+            raise SupervisorError("resume-native-session-changed")
         run_turn(
             server, thread_id=thread_id, prompt=prompt, args=args
         )

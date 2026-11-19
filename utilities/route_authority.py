@@ -26,6 +26,7 @@ from typing import Mapping, NamedTuple
 
 from dispatch_attempt_policy import committed_outcome, readable_result, verdict_pass
 import review_round_cap as _ROUND
+from route_form import serial_attempt_route
 from session_identity import identity as session_identity, session_label
 
 
@@ -415,7 +416,9 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
             "The exact independent review process has ended and its lease is released." if live else "")
     if action == "completion-owner":
         from dispatch_attempt_policy import verdict_pass
-        applicable = not facts.get("closing") and metadata.get("workflow_completion") == "runtime-v1"
+        # A unit turn a later turn continued has nothing left to settle: the route's end is the last turn's.
+        applicable = (not facts.get("closing") and not facts.get("continued")
+                      and metadata.get("workflow_completion") == "runtime-v1")
         applicable = applicable and (status in {"open", "running"} if facts.get("executing") else
             metadata.get("dispatch_depth") == "1" and status == "done" and verdict_pass(metadata))
         return ContinuationDecision(bool(applicable), "applicable" if applicable else "not-applicable")
@@ -1428,7 +1431,7 @@ def depth1_supported_harnesses(route, *, worker_type: str | None) -> set[str]:
     if not isinstance(route, dict):
         return set()
     route = route_in_force(route)
-    if route.get("effective_intensity") == "quick" or route.get("registered_headless_candidates") is not None:
+    if serial_attempt_route(route) or route.get("registered_headless_candidates") is not None:
         rows, fields = route.get("registered_headless_candidates") or [], ("harness",)
     else:
         rows = (route.get("dispatch_evidence") or {}).get("tuples") or []

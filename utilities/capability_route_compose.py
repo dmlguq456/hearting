@@ -17,6 +17,7 @@ from pathlib import Path
 import harness_state_roots as HARNESS_STATE_ROOTS
 import route_identity as ROUTE_IDENTITY
 import route_plan as ROUTE_PLAN
+import route_form as ROUTE_FORM
 import route_authority as ROUTE_AUTHORITY
 import gpu_execution_sandbox as GPU_SANDBOX
 from dispatch_contract import DispatchContractError, stable_state_root
@@ -48,7 +49,7 @@ SHAPE_INTENSITY = ROUTE_PLAN.SHAPE_INTENSITY
 # The compiler-internal capability behind `--shape framed`. No person and no model names it; a
 # route of any other shape can never seal it (`compose-shape-invalid`).
 ROUTE_FRAME_CAPABILITY = TOPO.ROUTE_FRAME_CAPABILITY
-INTENSITY_SHAPE = {"direct": "direct", "quick": "solo"}
+INTENSITY_SHAPE = ROUTE_FORM.INTENSITY_SHAPE
 ROUTE_ORIGINS = ("preset", "compose")
 # No longer the default of a decided shape: compose opens a named field's default recipe
 # (`field_default_recipes`) and refuses a direct/solo/staged shape naming neither kind nor
@@ -60,8 +61,7 @@ COMPOSE_DEFAULT_CAPABILITY = "autopilot-code"
 COMPOSE_DEFAULT_CHILDREN = ("claude", "codex", "opencode")
 
 
-def shape_for_intensity(effective):
-    return INTENSITY_SHAPE.get(effective, "staged")
+shape_for_intensity = ROUTE_FORM.shape_for_intensity
 
 
 def parse_graph_spec(text, capabilities=None):
@@ -1051,7 +1051,7 @@ def _pin_change_probe(route, jobs, target, harness, caller):
         raise ValueError(f"explicit-adapter-disabled-by-user-policy:{target}={harness}")
     import route_authority as RA
     view = RA.route_in_force(route)
-    quick = route.get("effective_intensity") == "quick" or route.get("registered_headless_candidates") is not None
+    quick = ROUTE_FORM.serial_attempt_route(route) or route.get("registered_headless_candidates") is not None
     rows = [row for row in (view.get("dispatch_evidence") or {}).get("tuples") or [] if isinstance(row, dict)]
     if quick and target == "worker":
         return [], []

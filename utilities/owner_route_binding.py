@@ -32,6 +32,7 @@ ROUTE = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ROUTE)
 from hearting_gates import note_same_work_drift
 from route_plan import is_depth0_leg
+from route_form import serial_attempt_route
 
 
 class OwnerRouteBindingError(ValueError):
@@ -1281,7 +1282,7 @@ def _derive_depth1_node_binding(route_file: str | Path, *, worktree: str | Path,
         if harness not in depth1_supported_harnesses(route, worker_type="frame"):
             note_same_work_drift("frame-route-harness-mismatch")
     else:
-        if route.get("effective_intensity") != "quick":
+        if not serial_attempt_route(route):
             raise OwnerRouteBindingError("quick-owner-route-required")
         validate_owner_route_binding(path, worktree=worktree, capability=capability,
                                      capability_mode=capability_mode, intensity=intensity,

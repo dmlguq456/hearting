@@ -63,9 +63,10 @@ without `⚠`, as a notice that leaves the person nothing to do), never over ano
 session's content from the head goes with it, and nothing else on the screen changes.
 A popup stands over the window: the panel under it keeps its notice slot.
 The host asks the PTY owner for a successor only at a safe moment: idle, an
-empty composer, no open form or answerable question, no popup, settings,
+empty composer, no open form, no popup, settings,
 Fleet explorer or panel focus, and no delivery, held bytes, paste, drag or
-action worker. Keys that reached native since the last submitted turn leave the
+action worker. A question waiting on the panel does not hold it (the new host draws the
+QUESTIONS box again and the same keys answer it); one being answered does, by the panel focus or a popup. Keys that reached native since the last submitted turn leave the
 composer unproven (an erased draft, a form answered with Enter, a local command such
 as `/model` whose menu opened and closed, history-scroll keys, a turn stopped without
 a stop callback) until the native has painted after them and a reading at least two
@@ -439,9 +440,10 @@ v4.36.4 drew it (restored 11-15: the person had asked for the routes to open a
 popup, not for the box to go), its title in its top line (`╭─ 2 ROUTE ─╮`,
 under the native area `route 2`; 11-17: the title counts the routes alone, `ROUTE` where only requests
 stand, and the `PEER REQUEST` word is gone from it, the requests being a zone of the box, below). Nothing opens in place: a press on a
-head or on any row of its section opens its popup (any row of a route, its workers'
-box too, the routes popup with that route unfolded; the box's top line the routes
-popup; a request row the MESSAGES popup).
+head or on any row of its section opens its popup (11-19, the person: "라우트를 눌렀을때 fleet에서 처럼 스테이지별 단계가
+시각화되었으면 한다": any row of a route, its workers' box too, that route's page, Fleet's stage boxes; until its own
+reading comes, the stage boxes the panel's values already draw (its top rule ends in the route's form word, `team` or `solo`, as in the route's bracket, never `staged`), and a route with no stage line its panel box; the
+box's top line the routes popup, the table; a request row the MESSAGES popup).
 
 - QUESTIONS (11-16, the person: "질문은 이전처럼 그냥 붉은색 블록으로 감싸는게 모양은 제일 나아" / "붉은 바운더리
   말이야"): one thin rounded box like the route box's (v4.33.1's question box, restored: no ground is painted), its
@@ -494,21 +496,31 @@ popup; a request row the MESSAGES popup).
   the panel's are plain text), keeps its older bottom row (`PEERS  [e4] · [a3]   PEERS tab ›`: the sessions a link joins to
   this one, messages too, and the way to their tab) whole where the window has no supervision and, where it has, leaves off the
   numbers the top line names (the tab link stays on it where the top line has no room for it), and reads a route staged
-  into a single stage as the panel does (`code(standard) · staged 1/1: execute`, was `code (execute ●)`);
+  into a single stage as the panel does (`code(team·standard) · 1/1: execute`, was `code (execute ●)`);
   Fleet's ROUTES and OVERVIEW tables are unchanged. Short of rows the content rows give way first (the steps
   below) and a zone's rule stays while one row of that zone shows, also in a box that scrolls. Beside the
   native area a route reads, by who set each row (11-17, the person's route row sketch 5):
-  its first row is a state mark and the kind of work with its intensity (`● code(standard)`: the
+  its first row is a state mark and the kind of work with its form and intensity (`● code(team·standard)`: the
   kind word is the one bold word of the route, in the color of its field (11-18: `code` 69, `lab` 214,
   `design` 205, `docs` 180, `research` 38 in 256 colors; the dark counterparts 26, 130, 162, 94, 24 on the light face;
   a route with no such field hue keeps the body color), never dim, in mono, eight colors and `NO_COLOR`
   as the bold body word; the intensity stands in brackets in the same hue at its weight (`quick` dim, `standard` plain,
   `strong`, `thorough`, `adversarial` bold; as dim brackets where no hue is shown) and nothing else goes in them; a
-  direct route's word stands there when the record names no intensity; the route's time stands at the right end of this
+  direct route's word stands there when the record names no intensity; the bracket holds two axes (11-19, the person, in order: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?", "code(unit) 이렇게
+  쓰는건 이상한가?", "근데 강도랑은 좀 다르잖아. 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만 수행하는 건지", "unit, one-shot,
+  staged을 괄호로 넣어야하나 싶은데", "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아", "강도도 표기해 항상", "unit과 one-shot의 의미가 딱 들으면 잘 구분이 되나? staged도 그 framed랑 함께 잘 표현이 되는 단어인가? 전반적으로 전향적 검토가 필요해", "team도 괜찮은데?"): the FORM, read as who makes the
+  work (`unit` one unit called and one thing done, no owner; `solo` the owner alone doing the whole procedure of its kind; `team` the owner and a worker
+  for each stage; English in every language, decided once in the backend and carried as `kind_form`; the command's `--shape solo|staged` is the
+  `solo` and `team` shown here), and after a `·` the
+  INTENSITY, always written, a unit's too (`● code(unit·quick)`, `● code(solo·quick)`, `● lab(team·strong)`); the color and weight of
+  the whole bracket are the intensity's (as above). A record with no intensity reads the form alone, a route with no form (a frame, an older
+  record) its intensity alone, an older unit route that records no field its bare `unit`, a `direct` route none, and a unit a worker called no
+  bracket. Short of cells the `·intensity` tail goes first, then the bracket as before. The stage line never leads with `staged`
+  (`code(team·standard) · 3/6: execute`; the stage box's title `3/6: execute`); the route's time stands at the right end of this
   row, the middle text going first short of cells, then the chain behind and the intensity, the kind word and the time
   staying), the chain of kinds it
-  continues leading it (`frame ✓ → code(standard)`: what is behind dim with `✓`, this one bold;
-  `research ✓ → draft ✓ → code(standard)`), then its title two cells in on at most two rows
+  continues leading it (`frame ✓ → code(team·standard)`: what is behind dim with `✓`, this one bold;
+  `research ✓ → draft ✓ → code(team·standard)`), then its title two cells in on at most two rows
   (the second ending in `…`), then the owner two cells in (the mark, the doer's recorded role as
   a dim label in one column, then harness, model and effort, no tool: `● owner  claude Opus 5.5 xhigh`; 11-18, the person:
   "CTX는 게이지를 포함해서 아래줄로 내리자. 그리고 NOW를 두줄까지는 허용치를 늘려주고 (owner, worker 둘다)": under it, four
@@ -532,7 +544,7 @@ popup; a request row the MESSAGES popup).
   under the owner, two cells in, the stage text (`staged 3/6: execute`, the current stage's name blinking as it did) on its top
   line and no stage row apart: `closed` has four dim borders (the right one in one column whatever the text's widths), `open`
   only the top line and the left side, `none` the stage row and the workers hung by `↳` four cells in (their `CTX` and NOW eight
-  cells in), as before. A route with no workers has no box: its stage text is on its first line (`· staged 3/6: execute`) where the name has room there, and where it does not (the default width among them) its stage row `staged 3/6: execute` stands under the owner (11-18, round 5); a frame route's legs have none either. Where the closed
+  cells in), as before. A route with no workers has no box: its stage text is on its first line (`· 3/6: execute`) where the name has room there, and where it does not (the default width among them) its stage row `staged 3/6: execute` stands under the owner (11-18, round 5); a frame route's legs have none either. Where the closed
   box's text would be under 24 cells wide it is the open one; short of rows its closing line goes first. A frame route has no owner yet: `● frame → ??`, its two legs (`frame`,
   `frame-alt`) hung straight under it two cells in, and, once both are done and the direction
   is asked for, `◑ frame → ?? · waiting for direction` (not blinking); the person's choice
@@ -622,13 +634,21 @@ popup; a request row the MESSAGES popup).
   whole. Under the native area it stands as beside it, as rows are left. The folded strip is unchanged.
 - RESOURCES (11-18, the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): beside the
   native area, the section right above USAGE, its name row `RESOURCES ────` (no `›`: it opens nothing), then for each host (this
-  machine first, then the configured hosts, eight at most) one row, its name, `CPU 34%  MEM 61%` and, at the row's end, the count of the GPUs
-  nothing runs on (`idle GPU 6`, `빈 GPU 6` in Korean), and under it the GPUs a process runs on side by side (`  GPU0 92% 21/24G [3b]  GPU3 58%
-  14/24G [c7]`: no gauge since 11-18 ("게이지는 없애자 ... 가로로 나열"); the use is its number, in Fleet's level color (green, yellow from 50, red
-  from 80); the memory; and the Fleet numbers of the sessions that hold it, empty where the producer does not know them), two cells in and two cells
-  apart, onto the next row where they do not fit and never splitting one GPU's group; a host that could not be reached keeps its name alone, a host with no
-  GPU in use is its one row. Short of cells a GPU's group gives up its memory, then its use, and keeps the session number (every group takes the
-  form that lets the widest stand alone); a host row gives up `MEM`, then `CPU`; if that is still short the name is cut with `…` (to 12 cells at least), and the idle count stays to the last. The values are Fleet's own
+  machine first, then the configured hosts, eight at most) one row, its name and `CPU 34%  MEM 61%`, and under it every GPU of the host in its number's order side by side (`  GPU0 92% 21/24G [3b]  GPU1 0% 0/24G  GPU3 58%
+  14/24G [c7]`: no gauge of the use since 11-18 ("게이지는 없애자 ... 가로로 나열"); the use is its number, in Fleet's level color (green, yellow from 50, red
+  from 80); the memory; and the Fleet numbers of the sessions that hold it, empty where the producer does not know them; a GPU nothing runs on
+  is the same group with the sample's own values and no session number, the whole of it `dim`, the use too and not in a level's color, since 11-19:
+  "빈 GPU도 일관성있게 표시해줘. 그냥 0% 0/48GB 이런식으로 해놔. 컬러만 좀 어둡게 하면 되잖아. 0%에"; the host row has no count of them any more), two cells in and two cells
+  apart, one grid for the whole section since 11-19 ("그리고 GPU 표시를 행과 열 간격을 맞춰."): every group of every host the same width (the label left-aligned to the longest label, the use and the memory right-aligned to the widest, the session numbers left-aligned after them and blank where a GPU has none, the last group of a row not padded behind), the same number of groups on every row, one form for all groups (memory, then use go together), and the host rows aligned the same way (the name column as wide as the longest name, each stat's value right-aligned; MEM then CPU are given up for the section before a name is cut), onto the next row where they do not fit and never splitting one GPU's group; a host that could not be reached keeps its name alone, a host with no
+  GPU is its one row. A memory gauge stands right before the memory number since 11-19 (the person, on v4.59.6's panel: "가로로 길어지면 RESOURCE에
+  게이지도 넣어주면 좋고"; `GPU0  93% ━━━━━━━━─ 21/24G [3b]`) and only where it costs no row: the rows come first, the gauge is what the width leaves. It is
+  Fleet's VRAM gauge (the memory ratio's fill by `render_gpu._gauge_segs`, the level color by `_resource_level_key`; a GPU nothing runs on has all
+  of it `dim`, an unknown memory is Fleet's empty track), drawn by the producing side at each width 4 to 10 (`gauge4` … `gauge10`, as a route's
+  context gauge is) and picked, never refilled, by the panel; the same width for every group of the section, the widest 4 to 10 the room allows.
+  It stands only where the rows are as many as without it and it has 4 cells at least; the groups to a row may be fewer than they would be (a
+  width for three where every host has two GPUs gives each row two and the rest to the gauge; the count that gives the widest gauge with as
+  many rows wins). Not in the forms without the memory, not on the host rows; where it cannot stand the section is as it was without it. Short of cells a GPU's group gives up its memory, then its use, and keeps the session number (every group takes the
+  form that lets the widest stand alone); a host row gives up `MEM`, then `CPU`; if that is still short the name is cut with `…` (to 12 cells at least). The values are Fleet's own
   compute-host sample (`compute_hosts.collect`, the sample its RESOURCES view draws): a probe costs the servers an SSH read each, so the
   resident producer takes it only while a side panel that draws the section is open (the host's projection request carries `side`;
   `panel_projection` then touches `.resources-wanted`, at most every 20 seconds, and the producer reads no host once it is 90 seconds old),
@@ -1014,8 +1034,8 @@ past the host's 60 KB leaves its oldest rows off at a group's start (a date, a d
 its first row (`… 이전 N줄`, dim). ↑↓ move the row stood on (the chosen tint, reversed where there is no hue), PgUp/PgDn a page of rows;
 Enter on a prompt or NOW row reads that part of the conversation in the popup (`timeline.passage`, drawn as the
 harness draws it; a part that cannot be read is one dim line in words from the layer's reason) and Enter again is
-back on that row (keys `Enter 목록으로 돌아가기`); on a route, question or message row Enter opens that
-section's popup (the route unfolded). No key or press goes to the native window and the window never
+back on that row (keys `Enter 목록으로 돌아가기`); on a route row Enter opens that route's page (11-19), on a
+question or message row that section's popup. No key or press goes to the native window and the window never
 moves. Keys row: `↑↓ · Enter 그 대목 읽기 · ←→ 구획 · …`. The folded strip and a window too small for the panel's NOW row
 reach it as every popup is reached: `Ctrl+]`, then ←→.
 The question popup answers this session's own questions; another session's wait is answered in
@@ -1132,7 +1152,8 @@ place (its one row always paints the session; it carries no Git or job row), so 
 values show once and the row is the shell's line. A native screen too short for the whole
 record (the bottom layout's ten native rows) shows only its first rows, running
 to the screen's last line; those rows are the recorded ones and are blanked
-too. A screen without that input box, such
+too. A session with a name carries it in the input box's upper border (rule glyphs around one blank-set-off piece
+of text, at either end or between); that is still the input box. A screen without that input box, such
 as the Ctrl+O transcript, keeps every row. Claude keeps as many rows as the
 callback's output has, and at least one while a statusline is set; the one row
 leaves two rows under the input box, this row and Claude's own mode row, at

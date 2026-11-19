@@ -513,13 +513,13 @@ const opt={routes:[route],model:{route_label:'route 1 ⠏1',route_count:1,route_
 const v=draw({...opt,height:60});
 const L=lines(v);
 // 11-17 (route row 5, the two-row session lines): a worker's `execute · Edit` stage row is gone, so the stage's name stands
-// only on the owner's stage line `staged 3/6: execute`: in the color Fleet gives the stage `execute` (its 3rd, running:
+// only on the owner's stage line `3/6: execute`: in the color Fleet gives the stage `execute` (its 3rd, running:
 // index 2, lit), no kind word. 11-18: with workers the default `worker_box` draws that line as the top line of the box the
-// workers sit in (`┌ staged 3/6: execute ──┐`, two cells in); `worker_box: none` draws it as its own row, four cells in.
+// workers sit in (`┌ 3/6: execute ──┐`, two cells in); `worker_box: none` draws it as its own row, four cells in.
 const stageRow=(vv,name)=>vv.rows.find(r=>new RegExp('^│ │ {3}┌ \\S* ?\\d/\\d+: '+name).test(str(r)));
 assert(!v.rows.some(r=>/│ +execute · Edit/.test(str(r))),'the worker no longer has a stage row\n'+L.join('\n'));
-const kind=v.rows.find(r=>/^│ │ {3}┌ staged 3\/6: execute/.test(str(r)));assert(kind,L.join('\n'));
-const flat=draw({...opt,height:60,configuration:{worker_box:'none'}}),flatKind=flat.rows.find(r=>/^│ │ {5}staged 3\/6: execute/.test(str(r)));
+const kind=v.rows.find(r=>/^│ │ {3}┌ 3\/6: execute/.test(str(r)));assert(kind,L.join('\n'));
+const flat=draw({...opt,height:60,configuration:{worker_box:'none'}}),flatKind=flat.rows.find(r=>/^│ │ {5}3\/6: execute/.test(str(r)));
 assert(flatKind&&!lines(flat).some(l=>/[┌└]/.test(l.slice(4))),lines(flat).join('\n'));
 assert.equal(flatKind.find(p=>p.text==='execute').foreground,150);
 const stageName=kind.find(p=>p.text==='execute');assert.equal(stageName.foreground,150);assert.equal(stageName.bold,true,'lit like Fleet\'s running stage');
@@ -530,7 +530,7 @@ const f=stageRow(failed,'execute').find(p=>p.text==='execute');assert.equal(f.fo
 const allDone=stages.map(s=>({...s,mark:'✓',current:false}));   // nothing running: the line stands on the last stage, finished
 // (11-18, review C2: a worker's box is titled by the stage the worker runs; with no worker running the stage text is on the route's first line.)
 const done=draw({...opt,height:60,routes:[{...route,stages:allDone,workers_live:[]}]});
-const d=done.rows.find(r=>/^│ │ ● code · staged 6\/6: report/.test(str(r))).find(p=>p.text==='report');assert.equal(d.foreground,147);assert.equal(d.dim,true);
+const d=done.rows.find(r=>/^│ │ ● code · 6\/6: report/.test(str(r))).find(p=>p.text==='report');assert.equal(d.foreground,147);assert.equal(d.dim,true);
 // No key sent (an older backend): the body color as before.
 const old=draw({...opt,height:60,routes:[{...route,stages:stages.map(s=>({...s,key:undefined}))}]});
 assert.equal(stageRow(old,'execute').find(p=>p.text==='execute').foreground,253);
@@ -540,8 +540,8 @@ for(const o of [{theme:'mono'},{model:{...opt.model,colors:8}},{model:{...opt.mo
   assert(nm&&!(nm.foreground&&nm.foreground!==253)&&nm.bold!==true&&nm.dim!==true,JSON.stringify([o,nm]));
 }
 // The folded one-row form (a bottom-layout row) keeps its name color.
-const one=draw({...opt,side:false,width:100,height:14}),oneRow=one.rows.find(r=>/staged/.test(str(r)));assert(oneRow,lines(one).join('\n'));
-assert(str(oneRow).includes('code · staged 3/6: execute'),str(oneRow));   // (the bottom layout's kind cell, 11-17: `code · staged 3/6: execute`)
+const one=draw({...opt,side:false,width:100,height:14}),oneRow=one.rows.find(r=>/3\/6: execute/.test(str(r)));assert(oneRow,lines(one).join('\n'));
+assert(str(oneRow).includes('code · 3/6: execute'),str(oneRow));   // (the bottom layout's kind cell, 11-17: `code · 3/6: execute`)
 assert(oneRow.filter(p=>p.text==='execute').every(p=>p.foreground===253||p.foreground===undefined||p.foreground===null),JSON.stringify(oneRow));
 """)
 

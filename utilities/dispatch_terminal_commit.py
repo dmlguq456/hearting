@@ -24,6 +24,7 @@ import artifact_lifecycle
 import route_identity
 import route_lineage
 from route_plan import is_depth0_leg
+from route_form import serial_attempt_route
 import dispatch_contract
 import dispatch_lock_order
 from dispatch_attempt_policy import verdict_pass
@@ -611,7 +612,7 @@ def _row_epoch(stamp) -> Optional[float]:
 
 def _completion_cost(request, route, *, now=None) -> dict[str, Any]:
     """Elapsed time and session tokens of this route's registered attempts (the owner, its
-    workers and their retries), for the summary's cost line.
+    workers and their retries), for the summary's cost line. A continued unit turn counts its own attempt only.
 
     Elapsed runs from the first registry row of those attempts to this seal. Tokens are
     the counts each session wrote into its exact attempt log -- the rows Fleet reads,
@@ -626,6 +627,12 @@ def _completion_cost(request, route, *, now=None) -> dict[str, Any]:
             request.owner_attempt_id, str(route.get("route_id") or ""), str(route.get("route_hash") or ""))
         latest: dict[str, Mapping[str, Any]] = {}
         started = []
+        records = list(records)
+        if any(record.completion_metadata().get("attempt_id") == request.owner_attempt_id
+               and record.completion_metadata().get("continues_attempt_id") for record in records):
+            # A unit route's continued turn is its own attempt: count that turn, not every turn before it.
+            records = [record for record in records
+                       if record.completion_metadata().get("attempt_id") == request.owner_attempt_id]
         for record in records:
             metadata = record.completion_metadata()
             attempt = metadata.get("attempt_id")
@@ -747,7 +754,7 @@ def validate_owner_route(*, jobs: Path, route_file: Path, owner_attempt_id: str,
             # `route-identity-unverified: quick-owner-tuple`.
             named = next((n for n in route.get("nodes") or [] if isinstance(n, dict)
                           and n.get("id") == meta.get("route_node")), None)
-            if (route.get("effective_intensity") != "quick"
+            if (not serial_attempt_route(route)
                     or not (meta.get("worker_type") == "owner" or (
                         is_depth0_leg(named) and meta.get("worker_type") == named.get("worker_type")))
                     or meta.get("dispatch_depth") != "1" or meta.get("registered_worker") != "1"
@@ -2196,10 +2203,12 @@ def owner_workflow_gaps(jobs, metadata, route):
 def _completion_owner_choice(jobs, status, metadata, *, executing=False,
                              selected_registry_rows=None):
     import route_parent_close
+    import unit_continue
     from route_authority import decide_continuation
     return decide_continuation(action="completion-owner", status=status, metadata=metadata,
         facts={"closing": route_parent_close.row_requested(
-            metadata, jobs, registry_rows=selected_registry_rows), "executing": executing})
+            metadata, jobs, registry_rows=selected_registry_rows), "executing": executing,
+            "continued": unit_continue.continued_by_later_turn(jobs, metadata)})
 
 
 def owner_workflow_continuation(jobs, owner_attempt_id, route_file):
@@ -2252,7 +2261,7 @@ def _historical_request(jobs, status, metadata, *, selected_registry_rows=None, 
     digest = route_identity.route_hash(route)
     if (route.get("route_hash") != digest or route.get("route_id") != route_identity.route_id_from_hash(digest)
             or (owner and (owner.route_id != route["route_id"] or owner.route_hash != digest))
-            or (not owner and (route.get("effective_intensity") != "quick"
+            or (not owner and (not serial_attempt_route(route)
                 or meta.get("route_id") != route["route_id"] or meta.get("route_hash") != digest))
             or fields[1] not in {"open", "running", "done"} or meta.get("attempt_id") != metadata["attempt_id"]
             or meta.get("registered_worker") != "1" or meta.get("dispatch_depth") != "1"

@@ -47,6 +47,7 @@ import route_format
 import route_identity as ROUTE_IDENTITY
 import route_lineage as ROUTE_LINEAGE
 import route_plan as ROUTE_PLAN
+import route_form as ROUTE_FORM
 import dispatch_runtime_support as RUNTIME_SUPPORT
 import dispatch_terminal_commit
 import model_profile as PROFILE
@@ -988,7 +989,7 @@ def _compose_unit_arguments(registry, unit, *, capability, capability_mode, shap
     given = [("--capability", capability, (None, TOPO.UNIT_CAPABILITY)),
              ("--capability-mode", capability_mode, (None, "default")),
              ("--shape", shape, (None, "solo")),
-             ("--intensity", intensity, (None, "quick")),
+             ("--intensity", intensity, (None, *ROUTE_FORM.FORM_INTENSITIES["unit"])),
              ("--graph", graph, (None,)), ("--route-plan", route_plan, (None,)),
              ("--signal", signals or None, (None,)), ("--execution-scope", execution_scope, (None,))]
     for flag, value, allowed in given:
@@ -1112,12 +1113,9 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     requested = intensity or SHAPE_INTENSITY[shape]
     if requested not in ORDER:
         raise ValueError("invalid intensity")
-    if shape == "direct" and requested != "direct":
-        raise ValueError("compose-shape-intensity-mismatch:direct (allowed: direct)")
-    if shape == "solo" and requested != "quick":
-        raise ValueError("compose-shape-intensity-mismatch:solo (allowed: quick)")
-    if shape == "staged" and ORDER[requested] < ORDER["standard"]:
-        raise ValueError("compose-shape-intensity-mismatch:staged (allowed: standard,strong,thorough,adversarial)")
+    mismatch = ROUTE_FORM.intensity_mismatch(shape, requested)
+    if mismatch is not None:
+        raise ValueError(mismatch)
     cwd = str(Path(cwd).resolve(strict=True))
     artifact_root = str(Path(artifact_root).resolve())
     # The campaign is the agent's proposal for the work stream (CONVENTIONS
@@ -1488,13 +1486,17 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         raise ValueError(f"invalid transport: {transport!r}")
     inferred="standard" if signals else ("direct" if set(predicates)==known_pred else "quick")
     effective=max((requested,inferred),key=ORDER.get)
-    if capability==TOPO.UNIT_CAPABILITY and effective!="quick":
-        raise ValueError(f"compose-unit-conflict:{effective} (a unit route is quick)")
-    resume_recipe = composed and RESOURCE_RESUME.recipe_selected(recipe) and effective == "quick"
-    if composed and effective in ("direct","quick") and not resume_recipe:
+    unit_intensities=ROUTE_FORM.FORM_INTENSITIES["unit"]
+    if capability==TOPO.UNIT_CAPABILITY and effective not in unit_intensities:
+        raise ValueError(f"compose-unit-conflict:{effective} (a unit route is {','.join(unit_intensities)})")
+    # The route form this request builds; every form-dependent step below reads it, never `effective`.
+    form=ROUTE_FORM.form_of(capability,effective,shape)
+    serial_attempt=ROUTE_FORM.serial_attempt_form(form)
+    resume_recipe = composed and RESOURCE_RESUME.recipe_selected(recipe) and form == "solo"
+    if composed and not ROUTE_FORM.staged_form(form) and not resume_recipe:
         raise ValueError("composed routes require a standard+ effective intensity")
     registered_headless_candidates=None
-    if effective=="direct":
+    if form=="direct":
         transport="interactive"
         if inline_reason is None: inline_reason="atomic-direct"
         owner_model_profile=None
@@ -1508,7 +1510,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         # flag); label them so the record never claims the caller asserted them.
         predicate_source="compose-default" if route_origin=="compose" else "caller"
         selection_basis=[{"axis":"direct-predicate","signal":p,"source":predicate_source} for p in predicates]
-    elif effective=="quick" and capability==TOPO.UNIT_CAPABILITY:
+    elif form=="unit":
         # One depth-0 leg and no owner: the leg is the whole route. Its tuple comes from the recipe
         # template and the unit head (`unit_leg_node`), not from a table of node ids.
         if transport not in (None, "headless"):
@@ -1522,7 +1524,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         TOPO._validate_unit_ref(recipe, nodes[0], registry)
         gates=list(recipe["completion_gates"])
         selection_basis=[]
-    elif effective=="quick":
+    elif form=="solo":
         if transport not in (None, "headless"):
             raise ValueError(f"invalid quick transport: {transport!r}")
         if frameless:
@@ -1609,15 +1611,15 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
             node.pop("fallback_hops", None)
         selection_basis=[{"axis":"promotion","signal":s,"source":"caller"} for s in signals]
     _validate_output_scopes(nodes)
-    if effective != "direct" and inline_reason is not None:
+    if form != "direct" and inline_reason is not None:
         raise ValueError("inline_reason only applies to direct")
-    if effective=="direct" and inline_reason not in registry["inline_reasons"]:
+    if form=="direct" and inline_reason not in registry["inline_reasons"]:
         raise ValueError("structured inline_reason required")
     evidence=_validate_tracking_evidence(tracking, tracked_gate_evidence)
     checked_dispatch=None
-    if effective not in ("direct","quick") and _single_owner_nodes(nodes):
+    if ROUTE_FORM.staged_form(form) and _single_owner_nodes(nodes):
         registered_headless_candidates = _validate_registered_headless_evidence(registered_headless_evidence)
-    elif effective not in ("direct","quick"):
+    elif ROUTE_FORM.staged_form(form):
         parent_dispatch_depth=_evidence_parent_dispatch_depth(
             nodes, recipe["standard_plus"]["owner_dispatch_depth"])
         checked_dispatch=_validate_dispatch_evidence(
@@ -1643,7 +1645,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         # Quick's one-shot is the owner process, so there is one selection.
         # Semantic owner stages in standard+ remain independently selected.
         for node in nodes:
-            if _owner_node(node, effective):
+            if _owner_node(node, effective, form):
                 node["model_profile"] = resolved_owner_profile
                 node["profile_explicit"] = True
                 node["profile_demand"] = owner_demand
@@ -1660,7 +1662,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
     legacy_nodes = not composed or _versioned_subgraph(registry, recipe)
     _seal_profile_demands(nodes, profile_demands, explicit_profiles, legacy=legacy_nodes)
     for node in nodes:
-        if _owner_node(node, effective) and node["model_profile"] != owner_model_profile:
+        if _owner_node(node, effective, form) and node["model_profile"] != owner_model_profile:
             raise ValueError("owner-node-profile-selection-conflict:" + node["id"])
     dispatch_defaults_digest,dispatch_allocation,owner_harness_policy=_seal_dispatch_defaults(
         nodes, capability, owner_model_profile
@@ -1696,9 +1698,9 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
       "persona_independence_contract_version":1,
       "profile_demands":profile_demands,"explicit_profiles":explicit_profiles,
       "owner_profile_demand":owner_demand,"owner_profile_selection":owner_profile_selection,
-      "execution_topology":("resource+verification" if resume_recipe else "inline" if effective=="direct" else recipe["quick"]["topology"] if effective=="quick" else recipe["topology_class"]),
-      "owner_dispatch_depth":0 if effective=="direct" else (recipe["quick"]["owner_dispatch_depth"] if effective=="quick" else recipe["standard_plus"]["owner_dispatch_depth"]),
-      "max_dispatch_depth":recipe["quick"]["max_dispatch_depth"] if effective=="quick" else (0 if effective=="direct" else recipe["standard_plus"]["max_dispatch_depth"]),
+      "execution_topology":("resource+verification" if resume_recipe else "inline" if form=="direct" else recipe["quick"]["topology"] if serial_attempt else recipe["topology_class"]),
+      "owner_dispatch_depth":0 if form=="direct" else (recipe["quick"]["owner_dispatch_depth"] if serial_attempt else recipe["standard_plus"]["owner_dispatch_depth"]),
+      "max_dispatch_depth":recipe["quick"]["max_dispatch_depth"] if serial_attempt else (0 if form=="direct" else recipe["standard_plus"]["max_dispatch_depth"]),
       "tracking":tracking,"tracked_gate_evidence":evidence,"spec_touch":spec_touch,
       "artifact_storage_contract_version":2,
       "cwd":str(cwd),"artifact_root":str(artifact),"source_commit":_git_commit(cwd),
@@ -1717,27 +1719,27 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
                    "route_origin":route_origin,"shape":shape or shape_for_intensity(effective)},
       "continuation_budget":continuation_budget,
       "nodes":nodes,"parallel_groups":_realized_parallel_groups(nodes),
-      "conditional_extensions":_realize_conditional_extensions(recipe, effective),
+      "conditional_extensions":_realize_conditional_extensions(recipe, form),
       "completion_gates":gates,
       # The portable recipe owns whether this capability has a frame layer.
       # Quick must not extend it to capabilities outside the five recipes.
       "human_gates":(sorted(set(recipe["human_gates"])|{"frame-review"})
-                     if effective=="quick" and _recipe_has_frame(recipe) else recipe["human_gates"]),
+                     if serial_attempt and _recipe_has_frame(recipe) else recipe["human_gates"]),
       # Quick binds the frame gate at `one-shot`'s entry: that is quick's only
       # fence point, and without it quick runs with no check at all. Only
       # `direct` (which has no owner and no worker) still binds nothing.
       "human_gate_bindings":json.loads(json.dumps(
-          _quick_gate_bindings(recipe) if effective=="quick"
-          else recipe["human_gate_bindings"] if effective!="direct" else [])),
+          _quick_gate_bindings(recipe) if serial_attempt
+          else recipe["human_gate_bindings"] if form!="direct" else [])),
       "workflow_contract":_workflow_contract(
           registry, nodes,
-          _quick_gate_bindings(recipe) if effective=="quick"
-          else recipe["human_gate_bindings"] if effective!="direct" else []),
+          _quick_gate_bindings(recipe) if serial_attempt
+          else recipe["human_gate_bindings"] if form!="direct" else []),
       "resume_retry_boundaries":recipe["resume_retry_boundaries"],
       "dispatch_evidence":checked_dispatch,
       "dispatch_contract_version":DISPATCH_CONTRACT_VERSION,
       "registered_headless_candidates":registered_headless_candidates,
-      "registered_headless_policy":"serial-attempt" if effective=="quick" else None,
+      "registered_headless_policy":"serial-attempt" if serial_attempt else None,
       "unit_catalog_digest":unit_catalog_digest(),
       "validation_basis":validation_basis,
       "launch_compatibility_tuple":{
@@ -2309,6 +2311,15 @@ def main():
             given=found
         frame_path = resolve_route_argument(given, jobs)
         frame_raw = json.loads(frame_path.read_text()) if Path(frame_path).is_file() else None
+        if isinstance(frame_raw,dict) and frame_raw.get("capability")=="unit":
+            # A unit route has no owner to answer: the text is the route's next turn (work_start.correct_unit_route).
+            from work_start import correct_unit_route
+            code,result=correct_unit_route(verify_route(frame_raw),frame_path,jobs,
+                                           a.message_file.read_text() if a.message_file else None,a.request_id)
+            print(json.dumps(result,ensure_ascii=False))
+            from start_receipt import print_next_line
+            print_next_line(result)
+            return code
         if ROUTE_PLAN.is_framed_route(frame_raw):
             from work_start import _framed_cycle
             _first = {}

@@ -195,8 +195,6 @@ with a bounded timeout.
 
 ## Native Plugin Hook Surface
 
-Write-denying hook gates are retired; no write preflight or core-read marker is required.
-
 When changing the plugin:
 
 1. Keep it under `adapters/opencode/plugins/` as adapter-owned JS/TS.

@@ -21,7 +21,7 @@ def evidence_text(value):
     return " · ".join(part.strip() for part in re.split(r"\s*·\s*", text) if part.strip() not in {"", "·"})
 
 
-def route_evidence(visibility):
+def route_evidence(visibility, unit=False):
     """Translate reader codes only; quoted evidence is never a verdict."""
     codes = visibility.get("codes")
     if not isinstance(codes, dict) or codes.get("schema") != "route_visibility_codes_v1":
@@ -31,6 +31,8 @@ def route_evidence(visibility):
     stages = codes.get("stages") or []
     shape = codes.get("shape") or "unknown"
     shape = shape if shape in {"direct", "solo", "staged", "framed"} else "unknown"
+    if unit:
+        shape = "unit"          # (11-19: a unit route's recorded shape is `solo`, but its form is `unit`)
     summary = [text("shape_" + shape)]
     tests = [row for row in stages if len(row) == 4 and row[1] == "test"]
     test_state = "pass" if tests and all(row[2] == "done" and row[3] == "1" for row in tests) else "recorded" if tests else "none"
@@ -128,9 +130,17 @@ def route_kind(row):
         shown["legs"] = row["legs"]
     # 11-17 (route row 5): the kind's own intensity word and the chain of kinds the route continues (name and state).
     intensity = sanitize_title(str(row.get("intensity") or ""))[:32]
+    # 11-19 (the person, in order: "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" / "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" /
+    # "강도도 표기해 항상" / "unit과 one-shot의 의미가 딱 들으면 잘 구분이 되나? staged도 그 framed랑 함께 잘 표현이 되는 단어인가? 전반적으로 전향적
+    # 검토가 필요해" / "team도 괜찮은데?"): the intensity of every route is sent, a unit route's too; and the route's FORM (`unit`, `solo`, `team`:
+    # who makes the work; `palette.route_form`, decided here once), which the panel draws in the bracket before the intensity (`code(team·standard)`).
     unit_route = str(row.get("capability") or "") == "unit"
-    if intensity and not unit_route:          # (a unit route's `quick` is not a choice: the first line has no bracket)
+    if intensity:
         shown["intensity"] = intensity
+    from .palette import route_form
+    form = route_form(row.get("capability"), row.get("shape"), row.get("field"))
+    if form:
+        shown["kind_form"] = form
     chain = [{"name": sanitize_title(str(leg[0]))[:24], "state": sanitize_title(str(leg[1]))[:12]}
              for leg in (row.get("chain") or ())[:6]
              if isinstance(leg, (list, tuple)) and len(leg) >= 2 and sanitize_title(str(leg[0]))]
@@ -804,34 +814,52 @@ def usage_rows(harness, values):
 # 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): a host sample older than this is
 # not drawn (the producer takes a new one at most once a minute, and only while a side panel draws it: `human_wait_state.RESOURCE_SAMPLE_S`).
 RESOURCES_MAX_AGE = 150.0
+# The widths of the memory gauge a GPU's group may take (11-19): the panel picks one of these, 4 to 10 cells.
+GAUGE_MIN, GAUGE_MAX = 4, 10
 
 
 def resource_rows(value, now):
     """The RESOURCES section's hosts, one dict each, its values painted as ``(text, key)`` parts: the host, its CPU and memory
-    use, one entry per GPU a process runs on (the percent in its level's color, ``21/24G``, and the numbers of the
-    sessions that hold it: none where it does not know them) and the count of the GPUs nothing runs on. Fleet's host sample
-    as the shared producer kept it; nothing is read here. A sample older than ``RESOURCES_MAX_AGE`` gives no rows."""
+    use and one entry per GPU in its number's order (the percent, ``21/24G``, and the numbers of the sessions that hold it:
+    none where it does not know them). A GPU a process runs on has its percent in its level's color; one nothing runs on is
+    shown the same way with the sample's own values, all of it ``dim`` and with no session numbers (11-19, the person: "빈 GPU도
+    일관성있게 표시해줘. 그냥 0% 0/48GB 이런식으로 해놔. 컬러만 좀 어둡게 하면 되잖아. 0%에"). Fleet's host sample as the shared
+    producer kept it; nothing is read here. A sample older than ``RESOURCES_MAX_AGE`` gives no rows.
+
+    11-19 (the person, on v4.59.6's panel: "가로로 길어지면 RESOURCE에 게이지도 넣어주면 좋고"): each GPU also carries its memory
+    gauge drawn at every width the panel may give it (``gauge4`` … ``gauge10``, the keys the panel picks one of; it never draws a
+    fill of its own). It is Fleet's VRAM gauge: the fill is ``_gauge_segs`` over the memory ratio and the fill's color
+    ``_resource_level_key(ratio, True)``, so it reads the same as Fleet's ``VRAM ━━━━━─ 21/24GB``. A GPU nothing runs on has all of
+    it ``dim``; an unknown memory is Fleet's unknown gauge (the empty track, ``dim``) at the same width."""
     if not isinstance(value, dict) or not isinstance(value.get("observed_at"), (int, float)) or now - value["observed_at"] > RESOURCES_MAX_AGE:
         return []
+    from .render_gpu import _gauge_segs, _resource_level_key
     percent = lambda x: "%d%%" % round(x)  # noqa: E731
+
+    def vram_gauge(used, total, busy, cells):
+        ratio = 100.0 * used / total if used is not None and total else None
+        key = _resource_level_key(ratio, True) if busy else "dim"
+        (filled, _), (empty, _) = _gauge_segs(ratio, cells, track=cells)
+        return [part for part in ((filled, key), (empty, "dim")) if part[0]]
     rows = []
     for host in value.get("hosts") or ():
         gpus = []
         for gpu in host["gpus"]:
-            if not gpu["busy"]:
-                continue
+            busy = bool(gpu["busy"])
             util, used, total = gpu["util"], gpu["used"], gpu["total"]
             row = {"label": [("GPU%d" % gpu["i"], "dim")]}
             if util is not None:
-                # 11-18: no gauge (the section is laid out side by side); the use is its number, in its level's color.
-                row["pct"] = [(percent(util), _level(util))]
+                # 11-18: the use is its number, in its level's color (the gauge, 11-19, is the memory's).
+                row["pct"] = [(percent(util), _level(util) if busy else "dim")]
+            for cells in range(GAUGE_MIN, GAUGE_MAX + 1):
+                row["gauge%d" % cells] = vram_gauge(used, total, busy, cells)
             if used is not None and total:
                 row["mem"] = [("%d/%dG" % (round(used), round(total)), "dim")]
-            users = [("[" + str(tag).strip("[]") + "]", "loc_repo") for tag in gpu["users"]]
+            users = [("[" + str(tag).strip("[]") + "]", "loc_repo") for tag in gpu["users"]] if busy else []
             if users:
                 row["users"] = [part for i, one in enumerate(users) for part in ((one,) if not i else ((" ", "dim"), one))]
             gpus.append(row)
-        row = {"host": [(host["name"], "loc_repo")], "gpus": gpus, "idle": sum(1 for gpu in host["gpus"] if not gpu["busy"])}
+        row = {"host": [(host["name"], "loc_repo")], "gpus": gpus}
         stats = []
         for word, number in (("CPU", host.get("cpu")), ("MEM", host.get("mem"))):
             if number is not None:
@@ -879,7 +907,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         routes.append({**route_row(row, cells=route_gauge_cells(columns)), "id": clean(row.get("id")), "title": clean(row.get("title")),
                        "state": clean(row.get("state")), "state_label": state_label(row.get("state")), "stage": clean(row.get("worker_stage")),
                        "stages": stages, "stage_more": row.get("stage_more", 0),
-                       "visibility": route_evidence(visibility),
+                       "visibility": route_evidence(visibility, unit=str(row.get("capability") or "") == "unit"),
                        "reason": clean(reason), "outcome": clean(row.get("outcome")),
                        "owner": owner_text, "owner_line": "" if runs_itself else owner_text,
                        # Spec E9 rule 24: the route's kind (its sealed topology) and, when a
@@ -924,9 +952,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         # 11-15 (panel polish 1): the action under a question to answer here.
         "answer_action",
         # 11-17 (route row 5): a frame route whose two legs are done waits for the person's direction.
-        "direction_wait",
-        # 11-18: the RESOURCES section's count of the GPUs nothing runs on (`idle GPU 6`).
-        "resource_idle_gpus")}
+        "direction_wait")}
     # Fixed words are English in every language (spec rule 3).
     labels.update(settings="Settings", routes="route", context="context", route_line="route line", worker_box="worker box",
                   rule_motion="rule motion")
