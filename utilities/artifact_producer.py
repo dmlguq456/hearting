@@ -174,7 +174,7 @@ from artifact_producer_history import (  # noqa: F401
     _control_file_key, _control_keys, _control_keys_settled, _CONTROL_MEMO_SETTLE_NS,
     _deliver_pending, _flush_campaign_pending_locked, _flush_cycle_pending_locked, _HAND_ACTOR,
     _history_actor, _history_by, _history_deliver_locked, _history_file_ref, _history_id,
-    _history_module, _HISTORY_TOKEN, _keep_manifest_before_leaving, _last_known_path,
+    _history_module, _HISTORY_TOKEN, _last_known_path,
     _locator_suffix, _merge_pending,
     _observe_control_changes, _observe_root_controls, _preserve_current_manifest,
     _QUIET_HISTORY_SECONDS, _read_control_memo, _read_history_quiet, _read_manifest_raw,

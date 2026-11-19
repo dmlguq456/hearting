@@ -909,9 +909,9 @@ def move(source, target, *, cycle_id, source_campaign, campaign, attach_logs=(),
                 if original_manifest is not None:
                     # The source campaign's close may read this manifest from the preserved copy once the
                     # folder is gone from it: keep the copy before the folder is published elsewhere.
-                    P._keep_manifest_before_leaving(
+                    P._preserve_current_manifest(
                         source, P.read_cycle_record(source, item["cycle_id"]) or {}, source / item["source"],
-                        found=original_manifest)
+                        found=original_manifest, match_record=True)
                 if original_manifest is not None and prepared is None:
                     prepared = P._next_document(original_manifest[1], P.artifact_identity.IdAllocator())
                     prepared = relocate_document(target, prepared, P.read_cycle_record(target, item["cycle_id"])["relocation"])

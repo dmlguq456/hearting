@@ -604,41 +604,30 @@ def _observe_root_controls(root: Path, scan: _LayoutScan, *, now: Optional[float
         _write_history_quiet(root, still_quiet)
 
 
-def _keep_manifest_before_leaving(root: Path, record: Mapping[str, Any], directory: Path,
-                                  found: Any = None, digest: Optional[str] = None) -> None:
-    """A closed cycle's folder is about to leave its campaign (or has just left it): keep its manifest first.
+def _preserve_current_manifest(root: Path, record: Mapping[str, Any], directory: Path, *,
+                               found: Any = None, digest: Optional[str] = None,
+                               match_record: bool = False) -> None:
+    """Keep a closed cycle's manifest as it is now, before its folder moves or goes or its manifest is replaced.
 
-    The one place that leaves evidence behind a folder that moves or goes.  A closed campaign's close
-    event binds each member to the bytes of the manifest it was closed with, and reads them back from the
-    preserved copy or, failing that, from the cycle folder inside that campaign; once the folder is
-    elsewhere only the copy is left.  The folder's manifest bytes are kept when its document is the very
-    one the record names, so a later read of the old campaign finds what it needs.  Nothing is overwritten
-    (a copy already there must hold the same bytes) and nothing is raised: what cannot be kept is met
-    again, as it is today, where the manifest is replaced.  `found` is the `_read_manifest_raw` result and
-    `digest` the document's `manifest_digest`, when the caller already read and hashed them (a reconcile
-    does both before it takes the admission lock)."""
+    The one place that leaves evidence behind a folder (a cycle closed before copies existed has none
+    yet).  A closed campaign's close event binds each member to the bytes of the manifest it was closed
+    with, and reads them back from the preserved copy or, failing that, from the cycle folder inside that
+    campaign; once the folder is elsewhere only the copy is left.  With `match_record` the bytes are kept
+    only when the folder's document is the very one the record names (a folder that has left already, or a
+    move: what the record does not name is not the close's evidence).  Nothing is overwritten (a copy
+    already there must hold the same bytes) and nothing is raised: what cannot be kept is met again, as
+    it is today, where the manifest is replaced.  `found` is the `_read_manifest_raw` result and `digest`
+    the document's `manifest_digest`, when the caller already read and hashed them (a reconcile does both
+    before it takes the admission lock; a move reads them once for the whole move)."""
     if not _closed_record(record):
         return
     found = found if found is not None else _read_manifest_raw(directory)
     if found is None:
         return
     raw, document = found
-    if record.get("manifest_digest") != (digest or artifact_manifest.manifest_digest(document)):
+    if match_record and record.get("manifest_digest") != (digest or artifact_manifest.manifest_digest(document)):
         return
     try:
         artifact_lifecycle.preserve_manifest_snapshot(root, record["cycle_id"], raw)
-    except artifact_lifecycle.LifecycleError:
-        pass
-
-
-def _preserve_current_manifest(root: Path, record: Mapping[str, Any], directory: Path) -> None:
-    """Keep the manifest as it is now (a cycle closed before copies existed has none yet)."""
-    if not _closed_record(record):
-        return
-    found = _read_manifest_raw(directory)
-    if found is None:
-        return
-    try:
-        artifact_lifecycle.preserve_manifest_snapshot(root, record["cycle_id"], found[0])
     except artifact_lifecycle.LifecycleError:
         pass
