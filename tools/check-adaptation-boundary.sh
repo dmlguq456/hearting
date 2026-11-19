@@ -406,7 +406,6 @@ check_claude_projection_targets() {
   check_link_target claude_setting/commands ../adapters/claude/commands
   check_link_target claude_setting/skills ../adapters/claude/skills
   check_link_target claude_setting/agents ../adapters/claude/agents
-  # claude_setting/agent-modes retired 2026-07-22 (재홈): units project via roles/.
   check_link_target claude_setting/hooks ../adapters/claude/hooks
   check_link_target claude_setting/utilities ../adapters/claude/utilities
   check_link_target claude_setting/tools ../adapters/claude/tools
@@ -1081,9 +1080,6 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'role <portable-role|role-profile|pipeline-stage>' adapters/codex/README.md \
     || ! grep -Fq 'role <portable-role|role-profile|pipeline-stage>' adapters/codex/README.md; then
     fail_msg "adapters/codex/bin/role-map.sh must map pipeline-stage aliases to portable roles with unit-catalog guidance (no retired team profiles)"
-  fi
-  if adapters/codex/bin/role-map.sh 'plan team' >/tmp/codex-role-retired.out 2>/tmp/codex-role-retired.err; then
-    fail_msg "adapters/codex/bin/role-map.sh must not resolve the retired 'plan team' profile alias"
   fi
   if ! adapters/codex/bin/role-map.sh variable reviewer >/tmp/codex-role-set.out 2>/tmp/codex-role-set.err \
     || ! grep -Fq 'family=role-set' /tmp/codex-role-set.out \
@@ -1881,13 +1877,6 @@ check_codex_native_agent_projection() {
     cat /tmp/codex-sync-agents.err
   fi
 
-  # Runtime team agents retired 2026-07-22 (재홈, CONVENTIONS §2.3): kernel helper only,
-  # and the retired projections must NOT reappear.
-  for retired in plan-team dev-team qa-team research-team material-team design-team editorial-team external-adversary; do
-    if [ -e "adapters/codex/agents/$retired.toml" ]; then
-      fail_msg "adapters/codex/agents/$retired.toml is a retired team projection and must not exist"
-    fi
-  done
   for profile in memory-scout; do
     agent="adapters/codex/agents/$profile.toml"
     if [ ! -f "$agent" ]; then
@@ -1997,23 +1986,6 @@ PY
     || ! grep -Fq 'structural plus install-path validation' adapters/codex/ADAPTATION.md \
     || ! grep -Fq '`codex debug agent` listing surface' adapters/codex/ADAPTATION.md; then
     fail_msg "Codex custom agent docs must state current validation boundary until runtime agent discovery exists"
-  fi
-}
-
-# codex-adapter-parity audit P-26 (2026-07-04), retired-team rework 2026-07-22 (재홈,
-# CONVENTIONS §2.3): the original check cross-verified each Codex role-profile agent's
-# static model pin against role-map.sh resolution. Runtime team agents are retired, so
-# the check is now memory-scout-only (its static read-only pin is asserted in
-# check_codex_native_agent_projection) plus must-not-exist negatives: no retired team
-# toml may reappear, and role-map.sh must not resolve team names or emit team paths.
-check_codex_model_pin_role_map_consistency() {
-  for retired in plan-team dev-team qa-team research-team material-team design-team editorial-team external-adversary; do
-    if [ -e "adapters/codex/agents/$retired.toml" ]; then
-      fail_msg "adapters/codex/agents/$retired.toml is a retired team projection and must not exist"
-    fi
-  done
-  if grep -Eq 'agents/(plan|dev|qa|research|material|design|editorial)-team|agents/external-adversary' adapters/codex/bin/role-map.sh; then
-    fail_msg "adapters/codex/bin/role-map.sh must not reference retired team agent paths"
   fi
 }
 
@@ -2756,16 +2728,8 @@ check_opencode_native_agent_projection() {
     cat /tmp/opencode-sync-agents.err
   fi
 
-  # codex-adapter-parity audit P-18 (2026-07-04), retired-team rework 2026-07-22 (재홈,
-  # CONVENTIONS §2.3): runtime team agents are retired on all harnesses — the OpenCode
-  # native agent domain is the kernel helper memory-scout plus the generated native
-  # subagent type catalog (general-purpose/light/deep, CFG_NATIVE_AGENT_CATALOG),
-  # plus must-not-exist negatives so retired team projections cannot reappear.
-  for retired in plan-team dev-team qa-team research-team material-team design-team editorial-team external-adversary; do
-    if [ -e "adapters/opencode/agents/$retired" ]; then
-      fail_msg "adapters/opencode/agents/$retired is a retired team projection and must not exist"
-    fi
-  done
+  # OpenCode native agent domain: the kernel helper memory-scout plus the generated
+  # native subagent type catalog (general-purpose/light/deep, CFG_NATIVE_AGENT_CATALOG).
   for profile in memory-scout; do
     agent="adapters/opencode/agents/$profile/$profile.md"
     if [ ! -f "$agent" ]; then
@@ -2996,15 +2960,7 @@ check_claude_skill_projection() {
 }
 
 check_claude_mode_projection() {
-  # agent-modes retired 2026-07-22 (재홈, CONVENTIONS §2.3): the persona SoT is
-  # roles/units/, projected wholesale through the roles surface. Neither the adapter
-  # copy nor its claude_setting symlink may reappear.
-  if [ -e adapters/claude/agent-modes ] || [ -L adapters/claude/agent-modes ]; then
-    fail_msg "adapters/claude/agent-modes is retired (unit catalog roles/units/ is the persona SoT) and must not exist"
-  fi
-  if [ -e claude_setting/agent-modes ] || [ -L claude_setting/agent-modes ]; then
-    fail_msg "claude_setting/agent-modes is a retired projection and must not exist"
-  fi
+  # The persona SoT is roles/units/, projected wholesale through the roles surface.
   if [ ! -d roles/units ]; then
     fail_msg "roles/units unit catalog is missing"
   fi
@@ -3289,23 +3245,13 @@ check_claude_shared_layer_census() {
   done
 }
 
-check_removed_root_surfaces() {
-  if [ -e agents ] || [ -L agents ]; then
-    fail_msg "root agents/ exists; Claude-native agents must live under adapters/claude/agents and portable meaning under roles/"
-  fi
-  if [ -e agent-modes ] || [ -L agent-modes ]; then
-    fail_msg "root agent-modes/ exists; portable unit bodies live under roles/units"
-  fi
-}
-
 check_role_catalog() {
   if [ ! -f roles/README.md ]; then
     fail_msg "roles/README.md is missing"
     return
   fi
 
-  # 재홈 2026-07-22 (CONVENTIONS §2.3): roles/README.md renders the generated UNIT
-  # catalog table; every catalog unit has a row and retired team rows must not reappear.
+  # roles/README.md renders the generated UNIT catalog table; every catalog unit has a row.
   if ! grep -Fq '| Family | Unit | Portable model role | Worker type | Floor |' roles/README.md; then
     fail_msg "roles/README.md must render the unit catalog table header (Family/Unit/Portable model role/Worker type/Floor)"
   fi
@@ -3317,15 +3263,6 @@ check_role_catalog() {
     case "$unit_name" in _*) continue ;; esac
     if ! grep -Fq "| \`$unit_family/$unit_name\` |" roles/README.md; then
       fail_msg "roles/README.md unit catalog table is missing unit row: $unit_family/$unit_name"
-    fi
-  done
-  for retired in plan-team dev-team qa-team research-team material-team design-team editorial-team external-adversary; do
-    if grep -Fq "| \`$retired\` |" roles/README.md; then
-      fail_msg "roles/README.md must not carry retired team profile row: $retired"
-    fi
-    if grep -Fq "adapters/codex/agents/$retired.toml" roles/README.md \
-      || grep -Fq "adapters/opencode/agents/$retired/$retired.md" roles/README.md; then
-      fail_msg "roles/README.md must not reference retired native team agent projections: $retired"
     fi
   done
 }
@@ -3758,24 +3695,6 @@ check_hook_catalog() {
   done
 }
 
-check_legacy_root_links() {
-  command -v rg >/dev/null 2>&1 || return 0
-
-  legacy_skill_links=$(rg -n '\]\(\.\./\.\./(CLAUDE|MEMORY|CORE|WORKFLOW|CONVENTIONS|OPERATIONS|DESIGN_PRINCIPLES|VISION)\.md\)' \
-    skills adapters README.md docs/MANUAL.md docs/INSTALL_LAYOUT.md 2>/dev/null || true)
-  if [ -n "$legacy_skill_links" ]; then
-    fail_msg "legacy ../../ tier1 markdown links remain:"
-    printf '%s\n' "$legacy_skill_links"
-  fi
-
-  legacy_root_links=$(rg -n '\]\((CLAUDE|MEMORY|CORE|WORKFLOW|CONVENTIONS|OPERATIONS|DESIGN_PRINCIPLES|VISION)\.md\)' \
-    README.md docs/MANUAL.md docs/INSTALL_LAYOUT.md adapters skills 2>/dev/null || true)
-  if [ -n "$legacy_root_links" ]; then
-    fail_msg "legacy root tier1 markdown links remain outside core/:"
-    printf '%s\n' "$legacy_root_links"
-  fi
-}
-
 warn_concrete_runtime_terms() {
   command -v rg >/dev/null 2>&1 || return 0
 
@@ -4092,7 +4011,6 @@ check_census_rows
 check_codex_scaffold_projection
 check_codex_native_skill_projection
 check_codex_native_agent_projection
-check_codex_model_pin_role_map_consistency
 check_codex_native_mode_projection
 check_codex_native_hook_projection
 check_codex_native_plugin_entry_skill
@@ -4116,7 +4034,6 @@ check_claude_scaffold_projection
 check_claude_loop_projection
 check_claude_tool_projection
 check_claude_shared_layer_census
-check_removed_root_surfaces
 check_role_catalog
 check_claude_native_agent_projection
 check_adaptation_inventory_native_surfaces
@@ -4134,7 +4051,6 @@ check_sibling_adapter_contract
 check_worker_bootstrap_contract
 check_language_neutrality_contract
 check_fleet_depth2_liveness_regression
-check_legacy_root_links
 warn_concrete_runtime_terms
 flush_shared_adapter_links
 

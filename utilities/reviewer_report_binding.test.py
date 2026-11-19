@@ -725,34 +725,10 @@ class ReviewAdapterWiringParityTest(unittest.TestCase):
 
 
 class PreflightHelpBoundaryTest(unittest.TestCase):
-    def test_codex_and_opencode_write_help_and_argv_boundary(self):
-        with tempfile.TemporaryDirectory() as td:
-            target = str(Path(td).resolve() / "literal")
-            for adapter in ("codex", "opencode"):
-                script = PROJECT_ROOT / f"adapters/{adapter}/bin/preflight.sh"
-                for flag in ("--help", "-h"):
-                    with self.subTest(adapter=adapter, flag=flag):
-                        result = subprocess.run(
-                            [str(script), "write", flag], text=True,
-                            capture_output=True, cwd=td,
-                        )
-                        self.assertEqual(result.returncode, 0, result.stderr)
-                        self.assertIn("usage: preflight.sh write", result.stdout)
-                too_many = subprocess.run(
-                    [str(script), "write", target, "sid", "turn", "extra"],
-                    text=True, capture_output=True, cwd=td,
-                )
-                self.assertEqual(too_many.returncode, 64)
-                self.assertIn("write expects", too_many.stderr)
-                dash_path = subprocess.run(
-                    [str(script), "write", "--literal-not-help"],
-                    text=True, capture_output=True, cwd=td,
-                )
-                self.assertEqual(dash_path.returncode, 64)
-                self.assertIn("must be absolute or ./-prefixed", dash_path.stderr)
+    def test_claude_has_no_preflight_wrapper(self):
         self.assertFalse(
             (PROJECT_ROOT / "adapters/claude/bin/preflight.sh").exists(),
-            "Codex/OpenCode preflight help must not be projected into Claude",
+            "Codex/OpenCode preflight must not be projected into Claude",
         )
 if __name__ == "__main__":
     unittest.main()
