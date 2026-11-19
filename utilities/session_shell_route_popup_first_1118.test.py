@@ -229,11 +229,25 @@ const measure=async(label,press_=opened)=>{
       const full=await until(s=>paged(s)&&popupHas('FLEET_R2')(s)&&!staleWords(s),'Fleet\'s page at '+w,cfg.delay*1000+20000);
       c.full_ms=Date.now()-t0;c.full_title=title(full.s);frames['row_page_'+w+'_page']=plain(full.s);
       c.full_keys=popupHas('Enter 표로 돌아가기')(full.s);
+      // the page's stage boxes (Fleet's own drawing: a narrow page cuts a name, `plan-che…`), inside the page's `║` frame
+      const tops=plain(full.s).filter(l=>/║.*┌─ (plan|execute|impl-r|test|report)/.test(l));
+      c.full_boxes=tops.flatMap(l=>[...l.matchAll(/┌─ (\S+)/g)].map(m=>m[1])).filter(n=>!/^(frame|leg)$/.test(n));
+      c.full_marks={done:[...tops.join('')].filter(x=>x==='✓').length,active:[...tops.join('')].filter(x=>x==='●').length};
+      c.full_no_record=popupHas(cfg.noRecord)(full.s);
       if(!staged)continue;
       // (c) Enter: the table, the route unfolded; (d) Enter: the page again.
-      await key('\r',0);const tab=await until(s=>!paged(s)&&!!unfolded(s)&&popupHas('FLEET_R2')(s),'the table at '+w);
-      // (a narrow table cuts the name; the unfolded route's own lines say it whole)
+      await key('\r',0);const tab=await until(s=>!paged(s)&&!!unfolded(s)&&popupHas('FLEET_R')(s),'the table at '+w);
+      // (a narrow table cuts the name: `FLEET_R…`)
       c.table_unfolded=plain(tab.s).join('\n');c.table_paged=paged(tab.s);frames['row_page_'+w+'_table']=plain(tab.s);
+      if(w===120){
+        // (the limit: a page left for the table and closed opens at its stage boxes again, then Fleet's page after the delay)
+        await close();control('vm-delay',cfg.delay);
+        const tp=await at('PANEL_R2');await press(tp.x+2,tp.y,0);
+        const lim=await until(s=>!!box(s)&&boxTops(s).length>0,'the stage boxes again at '+w);
+        c.limit={boxes:boxNames(lim.s).length,paged:paged(lim.s),fleet:popupHas('FLEET_R')(lim.s)};frames['row_page_'+w+'_limit']=plain(lim.s);
+        await until(s=>paged(s)&&popupHas('FLEET_R2')(s)&&!staleWords(s),'Fleet\'s page again at '+w,cfg.delay*1000+20000);
+        await key('\r',0);await until(s=>!paged(s)&&!!unfolded(s),'the table again at '+w);
+      }
       await key('\r',0);const again=await until(s=>paged(s)&&popupHas('FLEET_R2')(s),'the page again at '+w);c.again_paged=paged(again.s);
       // (e) Closed and pressed again: the page read last at once, with the words that it is not this reading's.
       await close();control('vm-delay',cfg.delay);
@@ -515,6 +529,26 @@ async function resize(c,r){cols=c;rows=r;term.resize(c,r);child.resize(c,r);awai
 STAGES = ('plan', 'plan-check', 'execute', 'impl-review', 'test', 'report')
 
 
+def stage_values(i, n):
+    """The values a staged route's stage carries (the producer's `_panel_stage` and Fleet's route read the same record)."""
+    return {'name': n, 'st': 'done' if i < 2 else 'active' if i == 2 else 'pending', 'verdict': 'PASS' if i < 2 else '',
+            'when': '%dm' % (30 - 10 * i) if i < 3 else '', 'unit': 'dev/backend' if i == 2 else '', 'out': 'artifacts/%s.md' % n if i < 2 else ''}
+
+
+def route_nodes(rid):
+    """Fleet's own node shape for a staged route (`live._node_groups`): a frame leg done, then the code leg running, its
+    detail the six stages (`live._node_detail`: `todo` is a stage not begun)."""
+    detail = [{'n': n, 'st': {'pending': 'todo'}.get(v['st'], v['st']), 'verdict': v['verdict'] or {'active': 'running', 'pending': 'pending'}[v['st']],
+               'who': None, 'when': v['when'] or '·', 'rounds': [], 'rounds_note': '', 'unit': v['unit'] or '·', 'gate': '',
+               'out': v['out'] or '·', 'says': ''} for n, v in ((n, stage_values(i, n)) for i, n in enumerate(STAGES))]
+    return [{'kind': 'frame', 'n': 'frame', 'st': 'done', 'verdict': '1/1', 'lines': [], 'loops': [],
+             'detail': [{'n': 'frame', 'st': 'done', 'verdict': 'PASS', 'who': None, 'when': 'done 40m ago', 'rounds': [],
+                         'rounds_note': '', 'unit': '·', 'gate': '', 'out': '·', 'says': ''}],
+             'title': [['frame', 'head']]},
+            {'kind': 'leg', 'n': 'leg 2 · code dev', 'st': 'active', 'verdict': '2/6', 'lines': [[['owner  ', 'dim'], ['claude', 'hb_claude']]],
+             'loops': [], 'detail': detail, 'title': [['leg 2 · code dev', 'head']]}]
+
+
 def route_row(rid, title, state='working', staged=False):
     row = {'id': rid, 'title': title, 'state': state, 'worker_stage': 'one-shot', 'shape': 'one-shot-owner',
            'stages': [{'name': 'one-shot', 'st': 'failed' if state == 'dead' else 'active'}], 'harness': 'claude',
@@ -522,7 +556,7 @@ def route_row(rid, title, state='working', staged=False):
     if staged:  # the producer's staged route (what a real route's row carries), for the pictures of the first screen
         row.update(shape='staged', worker_stage='execute', capability='autopilot-code', mode='dev', intensity='standard',
                    chain=[{'name': 'frame', 'state': 'done'}, {'name': 'code', 'state': 'active'}],
-                   stages=[{'name': n, 'st': 'done' if i < 2 else 'active' if i == 2 else 'pending'} for i, n in enumerate(STAGES)])
+                   stages=[stage_values(i, n) for i, n in enumerate(STAGES)])
     return row
 
 
@@ -532,10 +566,8 @@ def fleet_route(rid, title, state='working', staged=False):
            'mode': 'dev', 'intensity': 'quick', 'stages': [{'name': 'one-shot', 'st': 'failed' if state == 'dead' else 'active'}],
            'worker_stage': 'one-shot'}
     if staged:
-        row.update(intensity='standard', worker_stage='execute', stages=[
-            {'name': n, 'st': 'done' if i < 2 else 'active' if i == 2 else 'pending', 'verdict': 'PASS' if i < 2 else '',
-             'when': '%dm' % (30 - 10 * i) if i < 3 else '', 'unit': 'dev/backend' if i == 2 else '', 'out': 'artifacts/%s.md' % n if i < 2 else ''}
-            for i, n in enumerate(STAGES)])
+        row.update(intensity='standard', worker_stage='execute', legs=[['frame', 'done', None], ['code', 'active', None]],
+                   stages=[stage_values(i, n) for i, n in enumerate(STAGES)])
     return row
 
 
@@ -585,6 +617,7 @@ class RoutePopupFirstTest(unittest.TestCase):
         cls.driver = cls.root / 'driver.cjs'; cls.driver.write_text(DRIVER)
         catalog = json.loads((ROOT / 'tools/i18n/messages.json').read_text())['messages']
         cls.unreadable = catalog['fleet.output.unreadable']['ko']
+        cls.no_record = catalog['fleet.route.no_stage_record']['ko']
         cls.count = 0
 
     def run_case(self, harness, scenario, routes, delay=3, dead=None, staged=False, now=False):
@@ -613,6 +646,8 @@ class RoutePopupFirstTest(unittest.TestCase):
         vm = case / 'vm.json'
         vm.write_text(json.dumps({'repos': [{'id': 'project', 'name': 'project'}], 'system': {},
             'routes': [fleet_route(rid(n), 'FLEET_R%d 제목' % n, states[n - 1], staged) for n in range(1, routes + 1)],
+            # a staged route's page is drawn from Fleet's nodes: its leg band and the stage boxes
+            'nodes': {rid(n): route_nodes(rid(n)) for n in range(1, routes + 1)} if staged else {},
             'sessions': [{'tag': 'e9', 'repo_id': 'project', 'harness': harness, 'model': 'Opus 5.5', 'effort': 'high', 'context': 46,
                           'window': 200000, 'state': 'working', 'title': '이 창', 'now': '그리는 중', 'age': '23m'}]}, ensure_ascii=False))
         backend = case / 'backend'
@@ -623,7 +658,7 @@ class RoutePopupFirstTest(unittest.TestCase):
                   'entry': str(ROOT / 'utilities/session-shell/entry.py'), 'launcher': str(self.launcher),
                   'backend': str(backend), 'diagnostic': str(case / 'display-errors'), 'cache': str(target), 'vm': str(vm),
                   'project': str(project), 'result': str(case / 'result.json'), 'control': str(control),
-                  'scenario': scenario, 'routes': routes, 'delay': delay, 'unreadable': self.unreadable}
+                  'scenario': scenario, 'routes': routes, 'delay': delay, 'unreadable': self.unreadable, 'noRecord': self.no_record}
         (case / 'config.json').write_text(json.dumps(config))
         env = dict(self.env, LOOP_CONFIG=str(case / 'config.json'))
         child = subprocess.Popen([self.node, str(self.driver)], env=env, cwd=project, stdout=subprocess.PIPE,
@@ -864,8 +899,18 @@ class RoutePopupFirstTest(unittest.TestCase):
             self.assertGreaterEqual(w['full_ms'], 800, w)
             self.assertNotIn('읽은 내용', w['full_title'], w)
             self.assertTrue(w['full_keys'], w)
+            # (the page shows Fleet's stage boxes inside its frame, not the words that the route has no stage record)
+            self.assertFalse(w['full_no_record'], w)
+            for name in STAGES:
+                self.assertTrue(any(name.startswith(box.rstrip('…')) and len(box.rstrip('…')) >= 4 for box in w['full_boxes']), (name, w))
+            self.assertIn('execute', w['full_boxes'], w)
+            self.assertEqual(len(w['full_boxes']), 6, w)
+            self.assertEqual(w['full_marks'], {'done': 2, 'active': 1}, w)
+            if width == '120':  # the page's limit: closed from the table, a press on the row opens the stage boxes first
+                self.assertGreaterEqual(w['limit']['boxes'], 3, w)
+                self.assertFalse(w['limit']['paged'] or w['limit']['fleet'], w)
             # (c) Enter: the table with the route unfolded and no frame; (d) Enter: the page again.
-            self.assertIn('FLEET_R2', w['table_unfolded'], w)
+            self.assertIn('FLEET_R', w['table_unfolded'], w)
             self.assertIn('▶', w['table_unfolded'], w)
             self.assertFalse(w['table_paged'], w)
             self.assertTrue(w['again_paged'], w)
