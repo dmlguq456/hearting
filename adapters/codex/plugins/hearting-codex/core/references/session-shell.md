@@ -63,9 +63,10 @@ without `⚠`, as a notice that leaves the person nothing to do), never over ano
 session's content from the head goes with it, and nothing else on the screen changes.
 A popup stands over the window: the panel under it keeps its notice slot.
 The host asks the PTY owner for a successor only at a safe moment: idle, an
-empty composer, no open form or answerable question, no popup, settings,
+empty composer, no open form, no popup, settings,
 Fleet explorer or panel focus, and no delivery, held bytes, paste, drag or
-action worker. Keys that reached native since the last submitted turn leave the
+action worker. A question waiting on the panel does not hold it (the new host draws the
+QUESTIONS box again and the same keys answer it); one being answered does, by the panel focus or a popup. Keys that reached native since the last submitted turn leave the
 composer unproven (an erased draft, a form answered with Enter, a local command such
 as `/model` whose menu opened and closed, history-scroll keys, a turn stopped without
 a stop callback) until the native has painted after them and a reading at least two
@@ -1138,7 +1139,8 @@ place (its one row always paints the session; it carries no Git or job row), so 
 values show once and the row is the shell's line. A native screen too short for the whole
 record (the bottom layout's ten native rows) shows only its first rows, running
 to the screen's last line; those rows are the recorded ones and are blanked
-too. A screen without that input box, such
+too. A session with a name carries it in the input box's upper border (rule glyphs around one blank-set-off piece
+of text, at either end or between); that is still the input box. A screen without that input box, such
 as the Ctrl+O transcript, keeps every row. Claude keeps as many rows as the
 callback's output has, and at least one while a statusline is set; the one row
 leaves two rows under the input box, this row and Claude's own mode row, at
