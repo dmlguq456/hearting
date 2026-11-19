@@ -231,6 +231,55 @@ class ClosedCampaignOtherWaysTest(ClosedCampaignFixture):
         self.assertFalse(self.copies().exists() and any(self.copies().iterdir()))
 
 
+class ClosedCampaignRerunTest(ClosedCampaignFixture):
+    """The reported half-moved state (the folder under the new campaign, its binding the new one's, the
+    record, manifest and lists the old one's), with the preserved copy put there by hand or not: the same
+    `cycle-move` typed again finishes it, and so does any command that looks the root over."""
+
+    def reported_state(self, close, hand_copy):
+        self.build(close)
+        old = self.folder()
+        moved = self.campaign_json(self.new_id).parent / old.name
+        shutil.move(str(old), str(moved))
+        (moved / ".cycle.json").write_bytes(LOC.cycle_binding_bytes(
+            self.new_id, self.cycle_id, started_on=P.read_cycle_record(self.root, self.cycle_id)["started_on"]))
+        if hand_copy:  # what the person on site did to read the old campaign again
+            P.artifact_lifecycle.preserve_manifest_snapshot(
+                self.root, self.cycle_id, (moved / "manifest.json").read_bytes())
+        self.assertEqual(P.read_cycle_record(self.root, self.cycle_id)["campaign_id"], self.old_id)
+
+    def rerun_case(self, close, hand_copy):
+        self.reported_state(close, hand_copy)
+        result = P.cycle_move(self.root, self.cycle_id, campaign=self.new_id)
+        self.assertEqual(result["status"], "moved", result)
+        self.assert_moved(close)
+        # typed once more, nothing is left to do
+        self.assertEqual(P.cycle_move(self.root, self.cycle_id, campaign=self.new_id)["status"], "unchanged")
+
+    def command_case(self, close, hand_copy, command):
+        self.reported_state(close, hand_copy)
+        command(self)
+        self.assert_moved(close)
+
+    def third_campaign_case(self, close, hand_copy):
+        third = self.finished("third-key", "third")
+        self.reported_state(close, hand_copy)
+        result = P.cycle_move(self.root, self.cycle_id, campaign=third["campaign_id"])
+        self.assertEqual(result["status"], "moved", result)
+        self.new_id = third["campaign_id"]
+        self.assert_moved(close)
+        self.assertNotIn(self.cycle_id, json.loads(self.campaign_json(self.other["campaign_id"]).read_text())["cycles"])
+
+
+def _recover(test):
+    P.recover(test.root)
+
+
+def _begin(test):
+    route, route_file = test.route(slug="after", campaign_key="destination-key")
+    P.begin(test.root, route_file=route_file, capability="autopilot-code", intensity="direct")
+
+
 def _case(close, way):
     def test(self):
         self.run_case(close, way)
@@ -242,6 +291,18 @@ for _close in EVIDENCE_CLOSES:
             (lambda close: lambda self: self.delete_case(close))(_close))
     setattr(ClosedCampaignOtherWaysTest, "test_hand_deleted_with_copy__%s" % _close.replace("-", "_"),
             (lambda close: lambda self: self.hand_delete_case(close))(_close))
+
+for _close in EVIDENCE_CLOSES:
+    for _copy in (False, True):
+        _tag = "%s__%s" % (_close.replace("-", "_"), "hand_copy" if _copy else "no_copy")
+        setattr(ClosedCampaignRerunTest, "test_same_cycle_move_again__" + _tag,
+                (lambda c, h: lambda self: self.rerun_case(c, h))(_close, _copy))
+        setattr(ClosedCampaignRerunTest, "test_recover__" + _tag,
+                (lambda c, h: lambda self: self.command_case(c, h, _recover))(_close, _copy))
+        setattr(ClosedCampaignRerunTest, "test_begin__" + _tag,
+                (lambda c, h: lambda self: self.command_case(c, h, _begin))(_close, _copy))
+        setattr(ClosedCampaignRerunTest, "test_other_target_after_adopting__" + _tag,
+                (lambda c, h: lambda self: self.third_campaign_case(c, h))(_close, _copy))
 
 for _close in CLOSES:
     for _way in WAYS:

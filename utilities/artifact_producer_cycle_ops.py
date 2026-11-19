@@ -579,6 +579,25 @@ def _retarget_index_paths(root: Path, old_prefix: str, new_prefix: str) -> None:
         artifact_admission._write_index(root, replace(index, cycles=cycles))
 
 
+def _folder_found_elsewhere(root: Path, record: Mapping[str, Any]) -> Optional[Tuple[Path, Optional[Path]]]:
+    """Where the cycle's folder is, when that is not where its record says (the admission lock is held).
+
+    Read from the folders alone, as a reconcile reads them (a folder seen twice, or none, answers `None`).
+    Returns the folder and the folder of the campaign the record still names."""
+    cycle_id = record["cycle_id"]
+    scan = _scan_layout(root)
+    folder = scan.cycles.get(cycle_id)
+    if folder is None or cycle_id in scan.duplicates:
+        return None
+    import artifact_request
+    anchor = artifact_request.scope_anchor(folder)
+    expected = anchor.name if anchor is not None else folder.name
+    if record.get("campaign_id") == scan.folder_campaign[cycle_id] and not (
+            isinstance(record.get("locator"), str) and record["locator"] != expected):
+        return None
+    return folder, scan.campaigns.get(record["campaign_id"])
+
+
 def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional[str] = None, parent: Optional[str] = None,
                no_parent: bool = False, reason: Optional[str] = None, now: Optional[float] = None,
                target_artifact_root: Optional[Path] = None, source_campaign: Optional[str] = None,
@@ -611,6 +630,20 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
             raise ProducerError("cycle-unknown", cycle_id)
         if record.get("deleted_at"):
             raise ProducerError("cycle-unknown", f"{cycle_id}: deleted")
+        # A folder that already sits somewhere else than the record says (an earlier run stopped after the
+        # folder moved, or it was moved by hand) is accepted where it is first, by the one procedure the
+        # next reconcile uses; the move asked for then goes on from there, as from any other place.  The
+        # folders are read before anything reads a campaign, as a reconcile does.
+        adopted_from: Optional[str] = None
+        moved_to = _folder_found_elsewhere(root, record)
+        if moved_to is not None:
+            adopted_from = record["campaign_id"]
+            record, stale = _adopt_location_locked(
+                root, record, moved_to[0], command="cycle-move", stamp=stamp, reason=reason, now=now,
+                by="human", old_campaign_folder=moved_to[1])
+            artifact_locator.update_indexes(
+                root, list(dict.fromkeys(stale + [adopted_from, record["campaign_id"]])))
+            _flush_cycle_pending_locked(root, cycle_id)
         old_campaign_id = record["campaign_id"]
         new_parent: Any = _UNSET
         if no_parent:
@@ -656,18 +689,24 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
             _fsync_dir(target_dir)
             _fsync_dir(source.parent)
         if destination == source and new_parent is _UNSET:
-            return {"status": "unchanged", "cycle_id": cycle_id, "campaign_id": old_campaign_id,
-                    "cycle_dir": str(source)}
-        written, stale = _adopt_location_locked(
-            root, record, destination, command="cycle-move", stamp=stamp, reason=reason, now=now,
-            by="human", parent=new_parent, old_campaign_folder=source.parent)
-        stale = list(dict.fromkeys(stale + [old_campaign_id, written["campaign_id"]]))
+            if adopted_from is None:
+                return {"status": "unchanged", "cycle_id": cycle_id, "campaign_id": old_campaign_id,
+                        "cycle_dir": str(source)}
+            written = record  # the folder was already where it was asked to be; accepting it was the move
+        else:
+            written, moved_stale = _adopt_location_locked(
+                root, record, destination, command="cycle-move", stamp=stamp, reason=reason, now=now,
+                by="human", parent=new_parent, old_campaign_folder=source.parent)
+            stale += moved_stale
+        stale = list(dict.fromkeys(stale + [old_campaign_id, written["campaign_id"]]
+                                   + ([adopted_from] if adopted_from else [])))
         artifact_locator.update_indexes(root, stale)
         _flush_cycle_pending_locked(root, cycle_id)
     finally:
         artifact_admission._release_lock(root, lock_fd)
-    if old_campaign_id != written["campaign_id"]:
-        _drop_group_membership(root, old_campaign_id, [cycle_id, *member_ids])
+    for left in dict.fromkeys(item for item in (adopted_from, old_campaign_id)
+                              if item and item != written["campaign_id"]):
+        _drop_group_membership(root, left, [cycle_id, *member_ids])
     return {"status": "moved", "cycle_id": cycle_id, "campaign_id": written["campaign_id"],
             "parent_cycle_id": written.get("parent_cycle_id"), "cycle_dir": str(destination)}
 
