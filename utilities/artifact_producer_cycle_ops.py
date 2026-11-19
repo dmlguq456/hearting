@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import stat
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
@@ -54,6 +55,17 @@ from artifact_producer_manifest import (
 from artifact_producer_refresh import (
     REFRESH_ADMISSION_WAIT_SECONDS, refresh_cycle,
 )
+
+
+def _request_entrance_refresh(root: Path) -> None:
+    """The entrance is drawn again after a write that changes what it shows (what `finalize` does).
+
+    Best effort and without waiting: the entrance never changes or fails the command that asked."""
+    try:
+        import artifact_entrance  # lazy: a cycle operation never depends on the entrance
+        artifact_entrance.request_refresh(Path(root))
+    except Exception as exc:  # noqa: BLE001
+        print(f"artifact_entrance skipped error={type(exc).__name__}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +186,9 @@ def cycle_mark(root: Path, cycle_id: str, *, discard: bool = False, superseded_b
     if len(chosen) != 1:
         raise ProducerError("request-invalid", "cycle-mark takes exactly one of --discard, --superseded-by, --clear, --primary")
     if primary is not None:
-        return _mark_primary(root, cycle_id, primary, reason=reason, now=now)
+        marked = _mark_primary(root, cycle_id, primary, reason=reason, now=now)
+        _request_entrance_refresh(root)  # the entrance names the cycle's primary document
+        return marked
     stamp = _command_stamp()
     lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
     try:
@@ -713,6 +727,7 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
         artifact_admission._release_lock(root, lock_fd)
     if old_campaign_id != written["campaign_id"]:
         _drop_group_membership(root, old_campaign_id, [cycle_id, *member_ids])
+    _request_entrance_refresh(root)
     return {"status": "moved", "cycle_id": cycle_id, "campaign_id": written["campaign_id"],
             "parent_cycle_id": written.get("parent_cycle_id"), "cycle_dir": str(destination)}
 
@@ -898,6 +913,7 @@ def delete_cycle(root: Path, cycle_id: str, *, reason: Optional[str] = None, now
         artifact_admission._release_lock(root, lock_fd)
     for cid in campaigns:
         _drop_group_membership(root, cid, deleted_ids)
+    _request_entrance_refresh(root)
     if already_gone:
         return {"status": "already-deleted", "cycle_id": cycle_id}
     done = {"status": "deleted", "cycle_id": cycle_id, "campaign_id": campaign_id}
@@ -963,6 +979,7 @@ def delete_campaign(root: Path, campaign: str, *, reason: Optional[str] = None,
         _flush_campaign_pending_locked(root, campaign_id)
     finally:
         artifact_admission._release_lock(root, lock_fd)
+    _request_entrance_refresh(root)
     done = {"status": "deleted", "campaign_id": campaign_id, "cycle_ids": gone}
     return dict(done, reparented=reparented) if reparented else done
 
