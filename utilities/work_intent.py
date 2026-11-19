@@ -1285,7 +1285,9 @@ def completion_line(summary: str, t=None) -> str | None:
         intent_prefix = prefix(lang, "completion.intent", intent=probe, original="")
         original_prefix = prefix(lang, "completion.intent_original", original=probe)
         result_prefix = prefix(lang, "completion.result", result=probe)
-        cost_prefix = prefix(lang, "completion.cost", elapsed=probe, tokens=other)
+        cost_template = module.text("completion.cost", lang, elapsed=probe, tokens=other)
+        cost_prefix = cost_template.split(probe, 1)[0]
+        cost_between = cost_template.split(probe, 1)[1].split(other, 1)[0]
         intent = next((ln[len(intent_prefix):] for ln in lines if ln.startswith(intent_prefix)), "")
         result = next((ln[len(result_prefix):] for ln in lines if ln.startswith(result_prefix)), "")
         cost = next((ln[len(cost_prefix):] for ln in lines if ln.startswith(cost_prefix)), "")
@@ -1296,7 +1298,7 @@ def completion_line(summary: str, t=None) -> str | None:
         result = re.sub(r"\s*\((?:아래|below)\)", "", result).strip()
         if not name or not result:
             return None
-        elapsed = cost.split(" · ", 1)[0].strip()
+        elapsed = cost.split(cost_between, 1)[0].strip()
         if not elapsed or elapsed == module.text("completion.cost_unknown", lang):
             elapsed = ""
         elif t.lang == "ko":

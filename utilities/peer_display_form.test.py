@@ -616,7 +616,8 @@ class RuntimeLines(unittest.TestCase):
         work = self.record(children=[{"attempt_id": "att-1"}])
         gate = {"delivery_id": "d", "receipt": {"kind": "human-gate"}}
         failure = self.record(children=[{"attempt_id": "att-2"}])
-        with mock.patch.object(sweep, "_followup", side_effect=lambda root, record: (
+        with mock.patch("work_intent.ui_translator", return_value=self.t("ko")), \
+                mock.patch.object(sweep, "_followup", side_effect=lambda root, record: (
                 "Owner finished; no harvest.\n" + self.KO if record is work else "no summary here")), \
                 mock.patch("human_wait_state.message_answer_body", return_value="네, 그렇게 하세요\n그리고 하나 더") as body:
             line = sweep.delivery_display_text([(Path("/x"), [work, answer])])
@@ -632,8 +633,74 @@ class RuntimeLines(unittest.TestCase):
         self.assertTrue(body.called)
 
 
-class QuestionAnswerForm(DisplayFixture):
-    """The question-answer notice end to end through the producer's own text builders."""
+class OldFormsStillWork(DisplayFixture):
+    """Mixed versions: texts already sent in an older form are received exactly as before, and a
+    receiver whose code predates the short forms is never sent one."""
 
-    def test_the_answer_prompt_is_one_line_for_the_window_and_the_whole_text_for_the_agent(self):
-        from fixtures.message_questions import MessageQuestionHarness  # noqa: F401  (existence of the fixture)
+    def test_a_text_sent_before_with_the_decorated_trailer_is_received_and_settled(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                recipient = {"harness": harness, "session_id": "old-" + harness}
+                with mock.patch.object(pm, "peer_trailer", side_effect=old_decorated_trailer):
+                    text, ref = pm.prepare_peer_message("이미 보낸 본문 " + harness, self.sender, recipient, defer=True)
+                self.assertIn(" ; pane=- ; sid=" + self.sender["session_id"], text)
+                self.assertEqual(pm.parse_peer_trailer(text, recipient, include_ref=True)["transfer_ref"], ref)
+                self.assertEqual(pm.receive_peer_message(text, recipient), 0)
+                self.assertEqual(pm._read_pending(ref)["state"], "received")
+                self.assertEqual(pm.receiver_guidance(text, recipient), pm._ordinary_receiver_guidance())
+
+    def test_a_runtime_text_sent_before_with_the_decorated_trailer_is_received_and_settled(self):
+        recipient = {"harness": "claude", "session_id": "old-runtime"}
+        sender = {"harness": "runtime", "session_id": None, "name": "Hearting runtime"}
+        duty_id = "registered-batch-" + "c" * 32
+        refs = [duty_id, "att-old", "delivery-old"]
+        producer = {"schema": pm._RUNTIME_PRODUCER_SCHEMA, "duty_id": duty_id, "jobs": str(self.state / "jobs.log"),
+                    "attempt_id": refs[1], "carrier": "codex-native-queue", "delivery_id": refs[2],
+                    "receipt_digest": "e" * 64, "recipient": recipient, "route_id": "rt", "route_node": "execute"}
+        (self.state / "jobs.log").touch()
+        body = ("Hearting notice about work you started (a paused route resumed, a remote run ended). "
+                "Act only where a line's required_action asks for it.\nHEARTING_RECEIPT_V1 delivery-old " + "e" * 64)
+        with mock.patch.object(pm, "peer_trailer", side_effect=old_decorated_trailer):
+            text, ref = pm.prepare_peer_message(body, sender, recipient, defer=True, refs=refs,
+                                                producer_binding=producer, receipt="native-pending")
+        self.assertIn("(runtime-from: runtime [?] Hearting runtime ; pane=- ; sid=- ; ref=" + ref + ")", text)
+        self.assertEqual(pm.parse_peer_trailer(text, recipient, include_ref=True)["source"], "runtime-completion")
+        self.assertEqual(pm.prompt_origin(text, "claude", recipient["session_id"])["kind"], "runtime-completion")
+        self.assertEqual(pm.receive_peer_message(text, recipient), 0)
+        self.assertEqual(pm._read_pending(ref)["state"], "received")
+
+    def test_a_receiver_that_predates_the_short_forms_cannot_read_them_so_it_is_not_sent_them(self):
+        recipient = {"harness": "codex", "session_id": "old-receiver"}
+        # no sign: the old-form text goes out, and every published receiver reads it
+        text, ref = pm.prepare_peer_message("본문", self.sender, recipient, defer=True)
+        self.assertEqual(pm.pasted_text(pm._read_pending(ref)), text)
+        checked = 0
+        for tag in OLD_RELEASES:
+            source = release_source(tag, "utilities/peer-message.py")
+            if source is None:
+                continue
+            scope = {"__file__": str(ROOT / "utilities/peer-message.py"), "__name__": "pinned_" + tag.replace(".", "_")}
+            exec(compile(source, "peer-message@" + tag, "exec"), scope)
+            self.assertEqual(scope["parse_peer_trailer"](text, recipient, include_ref=True)["transfer_ref"], ref, tag)
+            # the short form is exactly what such a receiver would take for a person's input
+            pm.note_display_ready(recipient)
+            sent, ref2 = pm.prepare_peer_message("본문 " + tag, self.sender, recipient, defer=True)
+            shown = pm.pasted_text(pm._read_pending(ref2))
+            self.assertNotEqual(shown, sent)
+            self.assertIsNone(scope["parse_peer_trailer"](shown, recipient, include_ref=True))
+            os.unlink(pm._display_ready_path(recipient))
+            checked += 1
+        if not checked:
+            self.skipTest("no published release is available in this clone")
+
+    def test_the_sign_is_read_from_the_exact_session_only(self):
+        pm.note_display_ready({"harness": "claude", "session_id": "sign-a"})
+        for other in ({"harness": "codex", "session_id": "sign-a"}, {"harness": "claude", "session_id": "sign-b"},
+                      {"harness": "claude", "session_id": None}, {"harness": "runtime", "session_id": "sign-a"},
+                      {"harness": "claude", "session_id": "../x"}):
+            self.assertFalse(pm.receiver_reads_display(other), other)
+        self.assertTrue(pm.receiver_reads_display({"harness": "claude", "session_id": "sign-a"}))
+
+
+if __name__ == "__main__":
+    unittest.main()
