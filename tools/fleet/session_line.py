@@ -913,14 +913,13 @@ def route_tree(row, jobs, owner, doer, get, live, now, state=None, called=None, 
 
 
 def _worker_role(route):
-    """``frame``, ``owner`` or ``worker``: the role word of Fleet's route body line for its live doer
-    (``_worker_segments``: a frame/frame-alternative leg reads ``frame``; a solo route's owner, which runs
-    its one node itself, reads ``owner`` even where the attempt is not the one Fleet named as the owner)."""
+    """``frame`` or ``worker``: the role word of Fleet's route body line for its live stage worker
+    (``_worker_segments``: a frame/frame-alternative leg reads ``frame``)."""
     worker = route.get("worker") if isinstance(route, dict) else None
     label = worker[0] if isinstance(worker, (list, tuple)) and worker else None
     if isinstance(label, (list, tuple)):
         label = label[0] if label else None
-    return label if label in ("frame", "owner") else "worker"
+    return "frame" if label == "frame" else "worker"
 
 
 def route_details(snapshot, panels, routes=None, now=None):

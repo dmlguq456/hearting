@@ -15,7 +15,6 @@ from pathlib import Path
 
 import artifact_locator as ARTIFACT_LOCATOR
 import route_identity as ROUTE_IDENTITY
-import route_form as ROUTE_FORM
 import route_plan as ROUTE_PLAN
 import route_authority as ROUTE_AUTHORITY
 import owner_write_advisory as OWNER_WRITE_ADVISORY
@@ -603,9 +602,7 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
     t = UI_TEXT.translator()
     gates = ",".join(sorted({row["gate"] for row in route.get("human_gate_bindings") or []})) or t("route.none")
     card = (
-        # (11-19: a unit route seals `--shape solo`, but the person reads its form: `unit(quick)`, the word Fleet shows beside it.)
-        t("route.card.header", capability=route['capability'],
-          shape="unit" if ROUTE_FORM.route_form(route) == "unit" else shape,
+        t("route.card.header", capability=route['capability'], shape=shape,
           intensity=route['effective_intensity'], graph=graph, route_id=route['route_id'], gates=gates)
         + f"\n  cwd {route['cwd']} · slug {route.get('slug', '-')}\n"
         + _compose_field_line(route)

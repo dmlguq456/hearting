@@ -7,8 +7,7 @@ The person: "그 라우트 눌렀을때 여전히 좀 느리긴하고, 그 대�
   * The panel's `routePageFirst` draws that frame for a unit, a solo and a team route from the values the panel holds. The two drawings are one in every cell but the value
     cells (the border, the title, the names and the arrows stand where the reading puts them), at 80 and 120 columns, with one, three and six stages (six wrap to two rows).
   * The popup of a route's page keeps its top edge where the tallest popup's would be and grows downward only; a table and the other popups stay centered.
-  * The form reads from the picture: the head's last word is the form (`unit`, `solo`, `team`), a dim line under it says how the form works (in the configured language,
-    broken between words), a unit's stage box is titled by the unit's role, a solo's by `owner`; a route with no form has no line.
+  * No word changes (the person: "시안만 그려봐.." / "함부로 바꾸지 말고"): the head, the stage boxes' titles and every value are Fleet's own for every form.
 Everything is synthetic; no real session, account or terminal is touched.
 """
 import os, sys  # noqa: E401
@@ -57,9 +56,10 @@ LABELS = r"(by|time|rounds|gate|out|unit|says)"
 
 
 def mask(rows):
-    """The frame's rows with the cells a value can stand in blanked: a box's value after its label, the leg band's owner line."""
+    """The frame's rows with the cells a value can stand in blanked: a box's value after its label, the leg band's owner line, a team route's head word."""
     out = []
     for row in rows:
+        row = re.sub(r"^(╔═ .*) · [\w-]+ ═+╗$", r"\1 · WORD", row)       # (a team route's first screen says `team` where the reading says `staged`, as it always did)
         row = re.sub(r"│ " + LABELS + r"([^│]*)│",
                      lambda m: "│ " + m.group(1) + m.group(2)[:7 - len(m.group(1))] + " " * (len(m.group(2)) - (7 - len(m.group(1)))) + "│", row)
         row = re.sub(r"│ owner  ([^│]*)│", lambda m: "│ owner  " + " " * len(m.group(1)) + "│", row)
@@ -226,59 +226,23 @@ class RoutePressPage(unittest.TestCase):
                                 filled = [row for row in frame[top + 1:bottom] if re.search(r"│ (by|time|rounds|gate|out|unit|says) ", row)]
                                 self.assertEqual(bottom - top - 1, len(filled), "an empty row in a box:\n" + "\n".join(frame[top:bottom + 1]))
 
-    def test_the_form_reads_from_the_picture(self):
-        notes = {"ko": {"unit": "unit: 작업자 하나가 한 가지 일만 하고 보고서를 돌려줍니다. 파일은 고치지 않습니다.", "solo": "solo: owner 하나가 처음부터 끝까지 혼자 합니다.",
-                        "team": "team: owner가 단계마다 작업자에게 맡깁니다."},
-                 "en": {"unit": "unit: one worker does one job and hands back a report. It changes no file.", "solo": "solo: one owner does the whole job alone.",
-                        "team": "team: the owner hands each stage to a worker."}}
-        for language in ("ko", "en"):
-            for form in FORMS:
-                for window in (80, 120):
-                    with self.subTest(language=language, form=form, window=window):
-                        first, read, _tops = self.picture(form, 1, window, language=language)
-                        for rows in (first, read):
-                            self.assertRegex(rows[0], r"^╔═ .* · %s ═+╗$" % form)
-                            self.assertNotIn("staged", rows[0])
-                            self.assertNotIn("one-shot-owner", rows[0])
-                            # the dim line under the head: the whole sentence, broken between words only
-                            lines = []
-                            for row in rows[1:3]:
-                                m = re.fullmatch(r"║  (.+?) +║", row)
-                                if m and not row.startswith("║  ┌"):
-                                    lines.append(m.group(1))
-                            self.assertEqual(" ".join(lines), notes[language][form], rows[:4])
-                            self.assertTrue(lines[0].startswith(form + ":"), lines)
-        # (the unit's line wraps at 80 columns; its words stay whole)
-        first, _read, _tops = self.picture("unit", 1, 80)
-        self.assertTrue(re.fullmatch(r"║  파일은 고치지 않습니다\. +║", first[2]), first[:4])
-        # unit: the box is the unit's role, the band has no owner line; solo: the box is the owner itself; team: the stage names
-        first, read, _tops = self.picture("unit", 1, 120)
-        for rows in (first, read):
-            self.assertTrue(any("┌─ code-review " in row for row in rows), rows)
-            self.assertFalse(any("┌─ unit " in row for row in rows), rows)
-            self.assertFalse(any(re.search(r"│ owner  ", row) for row in rows), rows)
-        first, read, _tops = self.picture("solo", 1, 120)
-        for rows in (first, read):
-            self.assertTrue(any("┌─ owner " in row for row in rows), rows)
-            self.assertFalse(any("one-shot" in row for row in frame_of(rows)), rows)
-        first, read, _tops = self.picture("team", 6, 120)
-        for rows in (first, read):
-            for name in NAMES:
-                self.assertTrue(any("┌─ %s " % name in row for row in rows), (name, rows))
-            self.assertFalse(any("┌─ owner " in row for row in rows))
+    def test_no_word_of_fleets_frame_changes_for_any_form(self):
+        words = {"unit": ("one-shot-owner", "unit"), "solo": ("one-shot-owner", "one-shot"), "team": ("staged", "plan")}
+        for form, (shape, title) in words.items():
+            for window in (80, 120):
+                with self.subTest(form=form, window=window):
+                    first, read, _tops = self.picture(form, 1 if form != "team" else 3, window)
+                    self.assertRegex(read[0], r"^╔═ project/ › \[e9\] › ")
+                    self.assertRegex(first[0], r"^╔═ project/ › \[e9\] › ")
+                    if window == 120:      # (at 80 columns Fleet's head is cut at the rule, as before)
+                        self.assertRegex(read[0], r" · %s ═+╗$" % shape)
+                        self.assertRegex(first[0], r" · (%s|team) ═+╗$" % shape)    # (a team route's first screen has always said `team`)
+                    for rows in (first, read):
+                        self.assertTrue(any("┌─ %s " % title in row for row in rows), rows)
+                        self.assertFalse(any(re.search(r"(unit|solo|team): ", row) for row in rows), rows)       # no line about the form
+                        self.assertRegex(rows[1], r"^║  ┌─ leg ")                                                 # the band follows the head at once
 
-    def test_a_route_with_no_form_has_no_line_and_the_panel_without_a_band_keeps_its_box(self):
-        from fleet.explorer import pages
-        from fleet.explorer.grid import CellGrid
-        from fleet.explorer.view_model import ExplorerViewModel
-        vm, _panel = build("team", 3)
-        vm["routes"][0].update(capability="frame", shape="framed")
-        held = ExplorerViewModel.from_mapping(vm)
-        grid = CellGrid(112, 60)
-        pages.draw_route_detail(grid, held, held.routes[0], 0, 110, 0, fit=True)
-        rows = ["".join(cell[0] for cell in cells).rstrip() for cells in grid.cells]
-        self.assertTrue(re.fullmatch(r"╔═ .*  23m · 2 legs ═+╗", rows[0]), rows[0])   # (no word: a frame has no form)
-        self.assertRegex(rows[1], r"^║  ┌─ leg ")                                       # (and no line: the band follows the head at once)
+    def test_the_panel_without_a_band_keeps_its_box(self):
         # (an older backend's row has no band: the first screen is the panel's route box, `null` here)
         vm, panel = build("team", 3)
         for route in panel:
@@ -307,15 +271,6 @@ class RoutePressPage(unittest.TestCase):
         whole = "\n".join("".join(cell[0] for cell in cells).rstrip() for cells in grid.cells)
         self.assertLess(whole.index("why:"), whole.index("PROGRESS"))
         self.assertLess(whole.index("PROGRESS"), whole.index("╔═"))
-
-    def test_a_solo_routes_owner_reads_owner_wherever_fleet_marks_its_doer_a_worker(self):
-        from fleet import session_line
-        solo = {"worker": ["owner", [["claude", "hb_claude"]], []], "doer": {"harness": "claude", "worker": True}}
-        self.assertEqual(session_line.route_doer(solo, [], None, None)["role"], "owner")
-        staged = {"worker": ["worker", [["claude", "hb_claude"]], []], "doer": {"harness": "claude", "worker": True}}
-        self.assertEqual(session_line.route_doer(staged, [], None, None)["role"], "worker")
-        frame = {"worker": ["frame", [["claude", "hb_claude"]], []], "doer": {"harness": "claude", "worker": True}}
-        self.assertEqual(session_line.route_doer(frame, [], None, None)["role"], "frame")
 
 
 if __name__ == "__main__":

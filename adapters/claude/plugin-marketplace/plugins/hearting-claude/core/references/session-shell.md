@@ -442,8 +442,7 @@ under the native area `route 2`; 11-17: the title counts the routes alone, `ROUT
 stand, and the `PEER REQUEST` word is gone from it, the requests being a zone of the box, below). Nothing opens in place: a press on a
 head or on any row of its section opens its popup (11-19, the person: "라우트를 눌렀을때 fleet에서 처럼 스테이지별 단계가
 시각화되었으면 한다": any row of a route, its workers' box too, that route's page, Fleet's stage boxes; until its own
-reading comes, Fleet's page frame drawn from the panel's values in the same cells (`routePageFirst`: the legs' band, the stage boxes, the frame ending under the last box; its top rule ends in the route's
-form word, `unit`, `solo` or `team`, as in the route's bracket, never `staged`, with the form's one dim line under it; the popup's top edge stays put (`fixedTop`) so the reading moves nothing but the bottom edge), and a route the panel holds no leg band for its panel box; the
+reading comes, Fleet's page frame drawn from the panel's values in the same cells (`routePageFirst`, for every form: the legs' band, the stage boxes, the frame ending under the last box; no word of Fleet's frame is changed; the popup's top edge stays put (`fixedTop`) so the reading moves nothing but the bottom edge), and a route the panel holds no leg band for its panel box; the
 box's top line the routes popup, the table; a request row the MESSAGES popup).
 
 - QUESTIONS (11-16, the person: "질문은 이전처럼 그냥 붉은색 블록으로 감싸는게 모양은 제일 나아" / "붉은 바운더리

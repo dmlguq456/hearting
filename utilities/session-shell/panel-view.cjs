@@ -2544,17 +2544,8 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
     put(x,y,'┌'+'─'.repeat(Math.max(0,w-2))+'┐',key);put(x,y+h-1,'└'+'─'.repeat(Math.max(0,w-2))+'┘',key);
     for(let i=1;i<h-1;i++){put(x,y+i,'│',key);put(x+w-1,y+i,'│',key);}
   };
-  // The form: the route's `kind_form` (`unit`, `solo`, `team`; `palette.route_form` is the only place that decides it); the form's words and the stage titles below follow it.
   const form=String(route.kind_form||'').trim();
-  const TITLE='one-shot';
-  const stageTitle=s=>{
-    const name=clean(s.name||'·');
-    if(form==='solo'&&name===TITLE)return 'owner';
-    // (the stage's own unit; the route's `unit_word` (its worker node's, the same name) where the panel holds none for the stage)
-    const own=clean(s.unit||'').split(' · ')[0].trim().split('/').pop(),role=own&&own!=='·'?own:clean(route.unit_word||'').trim();
-    if(form==='unit'&&name==='unit'&&role)return role;
-    return name;
-  };
+  const stageTitle=s=>clean(s.name||'·');
   const stat=s=>s.mark==='✓'?'done':s.mark==='●'?'active':s.mark==='✕'?'failed':'todo';
   const use=columns-2,right=Math.min(columns-1,use);
   // The top rule: `╔═ <title>  <age> · N legs · <form> ═══╗`: the title in the body color, the rest dim. The route's form closes it, else the shape's own word where it names one.
@@ -2563,17 +2554,16 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
   const chain=Array.isArray(route.chain)?route.chain:[];
   const trailer=gated?'  '+(clean(route.age).trim()||'·')+' · '+chain.filter(l=>l&&String(l.name)!=='frame').length+' leg · human gate answered'
     :'  '+(clean(route.age).trim()||'·')+' · '+legs+' leg'+(legs===1?'':'s');
-  const word=form||stageLeadOf(route);
-  const headParts=[[' ',null],[clean(route.title||route.id||'·'),'loc_repo'],[trailer,'dim'],...(word?[[' · '+word,'dim']]:[]),[' ',null]];
+  // The word that closes the head: the one the reading draws (the route's shape) for a unit or solo route; a team route's first screen keeps its form word and a route with no form its shape's lead word, as before.
+  const word=form==='team'?'team':form?clean(route.shape||'').trim():stageLeadOf(route);
+  const repo=clean(route.head_repo).trim(),tag=clean(route.session_tag).trim();
+  const headParts=[[' ',null],...(repo?[[repo,'dim'],[' › ','dim']]:[]),...(tag?[['[','dim'],[tag,'loc_repo'],[']','dim'],[' › ','dim']]:[]),
+    [clean(route.title||route.id||'·'),'loc_repo'],[trailer,'dim'],...(word?[[' · '+word,'dim']]:[]),[' ',null]];
   const titleStart=2,titleEnd=Math.min(right-1,titleStart+headParts.reduce((n,[t])=>n+size(t),0));
   for(let xx=1;xx<right;xx++)if(xx<titleStart||xx>=titleEnd)put(xx,0,'═','dim');
   put(0,0,'╔','dim');put(right,0,'╗','dim');
   segs(titleStart,0,headParts,right-1);
-  // One dim line under the head says how this form works (none for a route with no form); it breaks between words.
-  const wrap=(text,room)=>{const rows=[];let row='';for(const w of clean(text).split(/\s+/).filter(Boolean)){const trial=row?row+' '+w:w;if(row&&size(trial)>room){rows.push(row);row=w;}else row=trial;}return row?[...rows,row]:rows;};
-  const note=form&&clean(route.form_note).trim()?wrap(route.form_note,Math.max(1,use-6)):[];
-  note.forEach((row,k)=>put(3,1+k,row,'dim',right-1));
-  const bandY=1+note.length,BAND_H=4,gap=4,LW=7;
+  const bandY=1,BAND_H=4,gap=4,LW=7;
   const found=bands.findIndex(b=>b.st==='active');
   const selected=found>=0?found:bands.length-1;
   const room=use-6,bandW=Math.min(44,Math.floor((room-gap*(bands.length-1))/bands.length));

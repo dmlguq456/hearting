@@ -141,8 +141,6 @@ def route_kind(row):
     form = route_form(row.get("capability"), row.get("shape"), row.get("field"))
     if form:
         shown["kind_form"] = form
-        # The one line that says how this form works (the page's frame carries it under its head; text in the person's language).
-        shown["form_note"] = ui_text("fleet.route.form_" + form)
     chain = [{"name": sanitize_title(str(leg[0]))[:24], "state": sanitize_title(str(leg[1]))[:12]}
              for leg in (row.get("chain") or ())[:6]
              if isinstance(leg, (list, tuple)) and len(leg) >= 2 and sanitize_title(str(leg[0]))]
@@ -922,6 +920,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         routes.append({**route_row(row, cells=route_gauge_cells(columns)), "id": clean(row.get("id")), "title": clean(row.get("title")),
                        "state": clean(row.get("state")), "state_label": state_label(row.get("state")), "stage": clean(row.get("worker_stage")),
                        "stages": stages, "stage_more": row.get("stage_more", 0), "bands": route_bands(row.get("bands")),
+                       "head_repo": clean(row.get("head_repo")), "session_tag": clean(row.get("session_tag")),
                        "visibility": route_evidence(visibility, unit=str(row.get("capability") or "") == "unit"),
                        "reason": clean(reason), "outcome": clean(row.get("outcome")),
                        "owner": owner_text, "owner_line": "" if runs_itself else owner_text,

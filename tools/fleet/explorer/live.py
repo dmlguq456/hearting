@@ -4033,6 +4033,10 @@ def _panel_route_record(route, route_nodes):
         if isinstance(codes, dict) and codes.get("schema") == "route_visibility_codes_v1":
             row["visibility"]["codes"] = codes
     row["bands"] = _panel_bands((route_nodes or {}).get(route.get("id")) or ())
+    # The head of the route page's frame names the repository and the session as Fleet's page does (`repo/ › [tag] ›`).
+    from .tables import repo_rule_label
+    row["head_repo"] = repo_rule_label(route.get("repo"))[:80]
+    row["session_tag"] = str(route.get("session_tag") or "")[:16]
     return row
 
 

@@ -3,7 +3,6 @@
 from collections.abc import Mapping
 import math
 from ..config import ui_text
-from ..palette import route_form
 from .grid import cell_width
 from .grid import clip_cells as clip
 from .tables import repo_rule_label
@@ -819,7 +818,7 @@ def _stage_box(grid, x, y, w, h, index, stage):
         right = [(" %s " % mark, key if status != "todo" else "dim")] + (
             [] if narrow else [(verdict_text + " ", "soft" if status != "todo" else "dim")])
     rw = _width(right)
-    name = str(stage.get("title") or stage.get("n"))
+    name = str(stage.get("n"))
     if gate:
         title = [(" ◑ ", "steward"),
                  (clip(name, w - 8 - rw), ("p", 1, 0) if lit else "tag_steward_dim"), (" ", None)]
@@ -1066,7 +1065,7 @@ def _current_leg(grid, x, y, stages, room):
     if stage.get("st") == "active" and not getattr(grid, "beat", 1):
         name_style = (hue, 0, 1)
     limit = x0 + max(0, room)
-    x = grid.put(x, y, clip(str(stage.get("title") or stage.get("n") or stage.get("name")), max(0, room)),
+    x = grid.put(x, y, clip(str(stage.get("n") or stage.get("name")), max(0, room)),
                  name_style, limit=limit)
     if stage.get("st") != "active":
         mark, key = _STATE_MARK.get(stage.get("st"), ("·", "dim"))
@@ -1145,45 +1144,6 @@ def route_band_shows_title(grid, vm, route, x, use):
     return x + 2 + _width(_route_band_head(route) + [(title, None)]) <= right - 1
 
 
-def route_form_word(route):
-    """The word that closes a route frame's head: the route's form (``unit``, ``solo``, ``team``; ``palette.route_form`` is the one
-    place that decides it), else the shape's own word where it names one (``staged`` and the owner-alone shapes say nothing)."""
-    form = route_form(route.get("capability"), route.get("shape"), route.get("field"))
-    if form:
-        return form
-    shape = str(route.get("shape") or "")
-    return "" if shape.startswith("staged") or shape in ("", "unknown", "framed", "one-shot-owner") else shape
-
-
-def _wrap_words(text, width):
-    """``text`` in rows of at most ``width`` cells, broken between words (a word is never cut)."""
-    rows, row = [], ""
-    for word in str(text).split():
-        trial = word if not row else row + " " + word
-        if row and cell_width(trial) > width:
-            rows.append(row)
-            row = word
-        else:
-            row = trial
-    return rows + [row] if row else rows
-
-
-def _stage_titles(form, stages):
-    """Each stage with the title its box wears: a solo route's one node is the owner itself, a unit route's is the unit's role."""
-    out = []
-    for stage in stages:
-        item = dict(stage) if hasattr(stage, "keys") else stage
-        if isinstance(item, dict) and "group" not in item:
-            name = str(item.get("n") or "")
-            role = str(item.get("unit") or "").split(" · ")[0].strip().rsplit("/", 1)[-1]
-            if form == "solo" and name == "one-shot":
-                item["title"] = "owner"
-            elif form == "unit" and name == "unit" and role and role != "·":
-                item["title"] = role
-        out.append(item)
-    return out
-
-
 def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, fit=False):
     """Route frame, node band and the picked node's panel from row y to bottom.
 
@@ -1195,7 +1155,6 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, fit=F
     ident = str(route.get("id") or "")
     nodes = tuple((vm.nodes or {}).get(ident, ()))
     frame_key = ("c", 0, 1)
-    form = route_form(route.get("capability"), route.get("shape"), route.get("field"))
 
     def frame_sides(bottom):
         for xx in range(x + 1, right):
@@ -1217,7 +1176,7 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, fit=F
                  "dim", limit=right)
         grid.mark_moved()
         return bottom + 1
-    head = _route_band_head(route) if not fit else [(" ", None)]
+    head = _route_band_head(route)
     leg_count = sum(1 for item in route.get("legs") or () if str(item[0]) != "frame")
     if route.get("detail_trailer") is not None:
         # The source states how long the route ran and what its record holds; nothing is derived.
@@ -1228,9 +1187,8 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, fit=F
         count = len(route.get("legs") or ())
         trailer = f"  {route.get('age') or '·'} · {count} leg{'s' if count != 1 else ''}"
     head += [(str(route.get("detail_title") or route.get("title") or "·"), "head"), (trailer, "dim")]
-    word = route_form_word(route)
-    if word:
-        head.append((" · " + word, "dim"))
+    if route.get("shape"):
+        head.append((" · " + str(route["shape"]), "dim"))
     title_start = x + 2
     title_parts = head + [(" ", None)]
     title_end = min(right - 1, title_start + _width(title_parts))
@@ -1238,11 +1196,6 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, fit=F
         if xx < title_start or xx >= title_end:
             grid.put(xx, y, "═", frame_key)
     _segs(grid, title_start, y, title_parts, right - 1)
-    # One dim line under the head says how this form works (none for a route with no form); it breaks between words.
-    note = _wrap_words(ui_text("fleet.route.form_" + form), max(1, use - 6)) if form else []
-    for k, row in enumerate(note):
-        grid.put(x + 3, y + 1 + k, row, "dim", limit=right - 1)
-
     got = ""
     if state is not None and hasattr(state, "opened_for"):
         got = str(state.opened_for("ui:node", "") or "")
@@ -1250,7 +1203,7 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, fit=F
         selected = min(int(got.split(":")[-1]), len(nodes) - 1)
     else:
         selected = next((i for i, node in enumerate(nodes) if node.get("st") == "active"), len(nodes) - 1)
-    band_y = y + 1 + len(note)
+    band_y = y + 1
     room = use - 6
     width = min(_BAND_W, (room - _BAND_GAP * (len(nodes) - 1)) // len(nodes))
     centre = x + 3 + width // 2
@@ -1283,7 +1236,7 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, fit=F
               [(clip(str(node.get("n")), max(4, name_room)), name_key), (" ", None)], tail_x)
         _segs(grid, tail_x, band_y, tail)
         node_lines = [list(item) for item in (node.get("lines") or ())]
-        detail = _stage_titles(form, [dict(item) if hasattr(item, "keys") else item for item in (node.get("detail") or ())])
+        detail = [dict(item) if hasattr(item, "keys") else item for item in (node.get("detail") or ())]
         band_lines = ([None] if node.get("kind") == "leg" and detail else []) + node_lines
         for k, parts in enumerate(band_lines[:_BAND_H - 2]):
             if parts is None:
@@ -1324,7 +1277,7 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, fit=F
             grid.put(xx, panel_y, "─", style)
     _segs(grid, tx, panel_y, title, panel_right - 1)
     grid.put(centre, panel_y, "┴", ("v", 0, 0))
-    stages = _stage_titles(form, [dict(item) if hasattr(item, "keys") else item for item in (node.get("detail") or ())])
+    stages = [dict(item) if hasattr(item, "keys") else item for item in (node.get("detail") or ())]
     stage_room = panel_right - panel_left - 4
     flow = len(_flow_steps(stages))
     if flow < 3:

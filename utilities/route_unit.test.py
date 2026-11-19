@@ -204,18 +204,9 @@ class UnitComposeTest(F.FramedBase):
                 self.sealed(route)
 
     def test_the_card_shows_the_unit_route(self):
-        route = self.unit("qa/code-review")
-        card = R.compose_card(route, include_decisions=False)
+        card = R.compose_card(self.unit("qa/code-review"), include_decisions=False)
         self.assertIn("unit", card)
         self.assertIn("\n  field code (preset)\n", card)
-        # 11-19: the line a person reads names the route's form (`unit(quick)`, as Fleet's bracket does), never the sealed `solo`; what is sealed does not change
-        self.assertIn(" · unit(quick) ", card.splitlines()[0])
-        self.assertNotIn("solo(", card.splitlines()[0])
-        self.assertEqual(route["selection"]["shape"], "solo")
-
-    def test_the_card_of_a_solo_route_keeps_its_own_word(self):
-        card = R.compose_card(self.unit(None, capability="autopilot-code", shape="solo"), include_decisions=False)
-        self.assertIn(" · solo(quick) ", card.splitlines()[0])
 
 
 class UnitCliTest(F.FramedBase):
