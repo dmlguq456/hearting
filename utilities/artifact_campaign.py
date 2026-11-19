@@ -667,11 +667,57 @@ def _open_refusal_detail(pending):
             "then rerun campaign-status")
 
 
+def _bindings_detail(root, ids, directories):
+    """Which listed cycle has no folder and which folder is not listed, and what settles it."""
+    missing = sorted(set(ids) - set(directories))
+    unlisted = sorted(set(directories) - set(ids))
+    parts = []
+    if missing:
+        parts.append(f"folder-missing={', '.join(missing[:10])}" + (f" +{len(missing) - 10} more" if len(missing) > 10 else ""))
+    if unlisted:
+        parts.append(f"folder-not-listed={', '.join(unlisted[:10])}" + (f" +{len(unlisted) - 10} more" if len(unlisted) > 10 else ""))
+    if missing:
+        producer = Path(__file__).with_name("artifact_producer.py")
+        parts.append(
+            "next=campaign-close records a vanished folder as gone by itself, but only while nothing under "
+            "campaigns/ of this artifact root (any campaign) is a symbolic link, a folder it cannot read, a folder "
+            "that names no cycle or campaign, an id seen twice, or an old cycles/ layout; with one of those it "
+            "refuses as here, so settle that first and run campaign-close again. If it still refuses, "
+            "`python3 " + str(producer) + " delete --artifact-root " + str(root) + " --cycle <cycle id above>` "
+            "records that one cycle as deleted for good: it stays deleted even if its folder comes back, so if "
+            "the folder may only be out of sight for now (a share not mounted), look for the folder before deleting")
+    return " ".join(parts)
+
+
+def _in_its_place(root, campaign_dir, directory, record, cid):
+    """Whether this cycle's folder is where it must be: `<campaign>/<locator>` (`cycles/<id>` for the
+    oldest layout), as ever. A leg of a framed request is a cycle too, but its folder is inside its
+    frame's: for a cycle carrying a request binding, and only when the old place does not match, the
+    folder's own shape (`<frame>/_internal/executions/<id>`) names the frame and `artifact_request`
+    checks that frame's marker. Nothing is looked up or healed here: the close and `status` read."""
+    plain = (campaign_dir / str(record["locator"]) if record.get("locator")
+             else campaign_dir / "cycles" / cid)
+    if directory == plain:
+        return True
+    if not record.get("request_binding"):
+        return False
+    import artifact_request
+    anchor = artifact_request.scope_anchor(directory)
+    if anchor is None:
+        return False
+    try:
+        return artifact_request.execution_dir(root, record, anchor=anchor) == directory
+    except (ValueError, OSError, KeyError, locator.LocatorError):
+        return False
+
+
 def _cycle_rows(root, path, campaign, reads=None):
     ids = campaign.get("cycles")
     if (not isinstance(ids, list) or not ids or not all(isinstance(cid, str) for cid in ids)
             or len(set(ids)) != len(ids)):
-        raise CampaignError("campaign-membership-invalid")
+        shape = ("not-a-list" if not isinstance(ids, list) else "empty" if not ids
+                 else "non-string-id" if not all(isinstance(cid, str) for cid in ids) else "duplicate-id")
+        raise CampaignError("campaign-membership-invalid", f"campaign.json cycles is {shape}")
     _validate_runlog(root, path, campaign, ids)
     records = root / ".runtime/artifact-producer/v1/cycles"
     if reads is not None:
@@ -679,21 +725,43 @@ def _cycle_rows(root, path, campaign, reads=None):
     else:
         root_id = lifecycle.read_root_identity(root)
     if root_id is None:
-        raise CampaignError("root-identity-missing")
+        raise CampaignError("root-identity-missing", "the artifact root carries no readable root identity")
     if admission.load_index(root).artifact_root_id != root_id.artifact_root_id:
-        raise CampaignError("campaign-index-root-mismatch")
+        raise CampaignError("campaign-index-root-mismatch",
+                            "the producer index belongs to another artifact root than this one")
     # A campaign list alone cannot hide an open member or an unregistered tree.
     # Detached records (see `is_member_record`) are reported, never counted.
     member_records, detached = campaign_records(root, campaign["campaign_id"], reads=reads)
     members = {record.get("cycle_id") for record in member_records}
-    if members != set(ids):
+    detached_ids = {record.get("cycle_id") for record in detached}
+    # The list is read as it is, never rewritten: an id whose record is detached is left out of what is
+    # compared and closed over. (The close that wrote it back changed what everything else read.)
+    listed = [cid for cid in ids if cid not in detached_ids]
+    if members != set(listed) or not listed:
+        unrecorded = sorted(set(listed) - members)
+        unlisted = sorted(members - set(listed))
+        if unrecorded or unlisted:
+            # No command settles these: the producer record is missing, or a live cycle is not listed.
+            next_step = ("a-listed-id-has-no-producer-record-or-a-member-is-not-listed: "
+                         "no command settles it, report it to the owner of this root")
+        else:
+            # Every listed id is detached: nothing is left for a close to account for, and a close needs
+            # at least one member. A cycle begun in the campaign is that member; the campaign can also stay.
+            next_step = ("every-listed-cycle-is-detached: the campaign has no member cycle to close over; "
+                         "begin a cycle in it and finish that one, or leave the campaign as it is "
+                         "(deleting the campaign removes its folder with any files kept in it)")
         raise CampaignError("campaign-membership-drift", {
             "campaign_id": campaign["campaign_id"],
             "listed_cycle_ids": sorted(ids),
             "producer_cycle_ids": sorted(members),
-            "next_step": "reconcile-campaign-membership-with-producer-records",
+            "detached_listed_cycle_ids": sorted(set(ids) & detached_ids),
+            "unrecorded_listed_cycle_ids": unrecorded,
+            "unlisted_member_cycle_ids": unlisted,
+            "next_step": next_step,
         })
+    ids = listed
     directories = {}
+    skipped = set()
     for entry, layout in locator.iter_cycle_dirs(path.parent):
         _safe(path.parent, entry)
         if _exact_cycle_control(root, path.parent, entry, ".cycle.json"):
@@ -712,11 +780,19 @@ def _cycle_rows(root, path, campaign, reads=None):
         if not isinstance(binding, dict) or binding.get("campaign_id") != campaign["campaign_id"]:
             raise CampaignError("campaign-cycle-binding-mismatch", entry)
         cid = binding.get("cycle_id")
-        if not isinstance(cid, str) or cid in directories:
+        if cid in detached_ids:
+            # A detached cycle (abandoned, no-lineage, deleted, moved) may keep its folder and
+            # files; the folder is the person's, never a member the close has to account for.
+            # Two folders naming the same detached id are still a duplicate.
+            if cid in skipped:
+                raise CampaignError("campaign-cycle-binding-duplicate", entry)
+            skipped.add(cid)
+            continue
+        if not isinstance(cid, str) or cid in directories or cid in skipped:
             raise CampaignError("campaign-cycle-binding-duplicate", entry)
         directories[cid] = entry
     if set(directories) != set(ids):
-        raise CampaignError("campaign-cycle-bindings-incomplete")
+        raise CampaignError("campaign-cycle-bindings-incomplete", _bindings_detail(root, ids, directories))
     rows = []
     pending_open = []
     for cid in sorted(ids):
@@ -725,9 +801,7 @@ def _cycle_rows(root, path, campaign, reads=None):
         record, _ = read_json(root, records / (cid + ".json"), reads=reads)
         directory = directories[cid]
         _safe(path.parent, directory)
-        expected_directory = (path.parent / str(record["locator"]) if record.get("locator")
-                              else path.parent / "cycles" / cid)
-        if directory != expected_directory:
+        if not _in_its_place(root, path.parent, directory, record, cid):
             raise CampaignError("campaign-cycle-locator-invalid", cid)
         if (record.get("state") not in {"sealed", "superseded"} or not record.get("sealed_on")
                 or not _exact_cycle_control(root, path.parent, directory, "manifest.json")):
