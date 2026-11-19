@@ -1019,6 +1019,8 @@ def refresh_owner_runtime_permissions(args) -> None:
             **vars(projection_args),
             permission_mode=context.get("permission_mode_requested") or "config",
             agent_home=context.get("agent_home") or str(ROOT),
+            # A replacement owner's sealed allow list, as the launcher resolved it, holds every turn.
+            carried_allowed_tools=context.get("carried_allowed_tools"),
             _launch_permission_projection=state,
         )
         posture = adapter.resolve_permission_posture(permission_args)
