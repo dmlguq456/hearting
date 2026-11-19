@@ -1,9 +1,11 @@
 """11-18 (round 3 of PR #1715): the panel's RESOURCES section and the repository name on a request line, from the producer to the panel.
 
   * RESOURCES stands above USAGE: one row for each host (`host-a  CPU 34%  MEM 61%`), under it every GPU of the host in its number's order
-    side by side (`GPU0 92% 21/24G [3b]  GPU1 0% 0/24G  GPU3 58% 14/24G [c7]`: no gauge, the use in its level's color, the number of the
+    side by side (`GPU0 92% 21/24G [3b]  GPU1 0% 0/24G  GPU3 58% 14/24G [c7]`: the use in its level's color, the number of the
     session that holds it, left out where it is not known; a GPU nothing runs on has the same group with the sample's values, all of it
     dim and no session number; 11-19), onto the next row where they do not fit and never splitting one GPU's group. The values are the compute-host sample the shared producer keeps; the panel reads the cache only.
+    Where the width has room left after that and the rows would not be more, each group also has Fleet's memory gauge before its memory number
+    (`GPU0 93% ━━━━━━━━─ 21/24G [3b]`; 11-19).
     Short of rows it gives way before everything else, so the other sections and the route box stand as they do without it.
   * A request line names the other session's repository after its number (`[c2] other-repo`), not for a session of the window's
     own repository and not where Fleet does not know it; the title goes before the repository name does.
@@ -34,6 +36,10 @@ const level=pct=>pct>=80?'lvl_r':pct>=50?'lvl_y':'lvl_g';
 const gpu=(i,pct,mem,users)=>({label:[D('GPU'+i)],pct:[{text:pct+'%',...STYLES[level(pct)]}],mem:[D(mem)],...(users?{users:[P(users)]}:{})});
 const host=(name,cpu,mem,gpus)=>({host:[P(name)],stats:[[D('CPU '),P(cpu+'%')],[D('MEM '),P(mem+'%')]],gpus});
 const idleGpu=(i,mem)=>({label:[D('GPU'+i)],pct:[D('0%')],mem:[D(mem)]});
+// The backend's memory gauge at every width it may be given (11-19): `gauge4` … `gauge10`; the fill and the color are the backend's (here a stand-in).
+const withGauge=(g,ratio,busy)=>{const out={...g};for(let n=4;n<=10;n++){const filled=ratio>0?Math.min(n-1,Math.max(1,Math.round(ratio*n/100))):0;
+ const key=busy?'lvl_g':'dim';out['gauge'+n]=[...(filled?[{text:'━'.repeat(filled),...STYLES[key]}]:[]),D('─'.repeat(n-filled))];}return out;};
+const gaugeHost=h=>({...h,gpus:h.gpus.map(g=>withGauge(g,g.users?88:0,!!g.users))});
 const A=host('host-a',34,61,[gpu(0,92,'21/24G','[3b]'),gpu(3,58,'14/24G','[c7]')]);
 const B=host('host-b',12,40,[gpu(1,71,'18/24G','[d4]')]);
 const usage=[{harness:'claude',parts:[P('5h 12%')]},{harness:'codex',parts:[P('5h 3%')]},{harness:'opencode',parts:[]}];
@@ -67,7 +73,7 @@ const wide=plain(render(60,50,{resources:[A,B]})),w=wide.findIndex(s=>/^│ RESO
 assert.deepEqual(wide.slice(w+1,w+4).map(s=>s.slice(2,-2).trimEnd()),['host-a  CPU 34%  MEM 61%','  GPU0 92% 21/24G [3b]  GPU3 58% 14/24G [c7]','host-b  CPU 12%  MEM 40%'],wide.join('\n'));
 const coloured=render(60,50,{resources:[A,B]}).rows.flat().filter(p=>/^\d+%$/.test(p.text)&&['92%','58%','71%'].includes(p.text));
 assert.deepEqual(coloured.map(p=>[p.text,p.foreground]),[['92%',217],['58%',186],['71%',186]]);
-assert(!render(60,50,{resources:[A,B]}).rows.flat().some(p=>/[━─]{2}/.test(p.text)&&p.foreground===114),'no gauge');
+assert(!render(60,50,{resources:[A,B]}).rows.flat().some(p=>/[━─]{2}/.test(p.text)&&p.foreground===114),'no gauge drawn for a sample without one');
 assert(rows.every(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0)===44),'every row keeps the width');
 // A session that is not known leaves its number cell empty; a GPU whose use is not known keeps its memory (in the column of the others').
 const odd=plain(render(44,50,{resources:[host('host-a',34,61,[gpu(0,92,'21/24G',null),{label:[D('GPU1')],mem:[D('3/24G')]}])]}));
@@ -157,6 +163,55 @@ assert.deepEqual(at(18),['  GPU0 [3b]','  GPU3 [c7]']);                // 14 ins
 // A GPU whose session is not known keeps its use and memory.
 const unknown=plain(render(24,50,{resources:[host('host-a',34,61,[gpu(0,92,'21/24G',null)])]})).filter(s=>/GPU0/.test(s))[0].slice(2,-2).trimEnd();
 assert.equal(unknown,'  GPU0 92% 21/24G');
+""")
+
+    def test_the_memory_gauge_stands_only_where_the_rows_are_as_many_and_otherwise_the_picture_is_what_it_was(self):
+        # 11-19 (the person, on v4.59.6's panel: "가로로 길어지면 RESOURCE에 게이지도 넣어주면 좋고"): rows first, the gauge only with what the width leaves.
+        self.node(r"""
+const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
+const two=host('host-a',34,61,[gpu(0,92,'21/24G','[3b]'),idleGpu(1,'0/24G')]),one=host('host-b',12,40,[idleGpu(0,'0/48G')]);
+const eight=host('host-c',20,30,[gpu(0,92,'21/24G','[3b]'),idleGpu(1,'0/24G'),idleGpu(2,'0/24G'),gpu(3,58,'14/24G','[c7]'),idleGpu(4,'0/24G'),idleGpu(5,'0/24G'),idleGpu(6,'0/24G'),idleGpu(7,'0/24G')]);
+const four=host('host-d',5,10,[0,1,2,3].map(i=>idleGpu(i,'0/48G')));
+const body=(w,hosts)=>{const v=render(w,60,{resources:hosts}),rows=plain(v),at=rows.findIndex(s=>/^│ RESOURCES/.test(s)),us=rows.findIndex(s=>/^│ USAGE/.test(s));
+ assert(rows.every(s=>cells(s)===w),w+'\n'+rows.join('\n'));return rows.slice(at+1,us).map(s=>s.slice(2,-2).trimEnd());};
+const gpuRows=b=>b.filter(s=>/^  GPU\d/.test(s));
+let gauged=0,plainOnes=0;
+for(const [a,b] of [[[two,one],0],[[eight,four],0]].map(([x])=>[x,x.map(gaugeHost)])){
+ for(let w=28;w<=100;w++){
+  const without=body(w,a),withIt=body(w,b);
+  // (1) The rows are as many as without the gauge, and every other row (the host rows, the sections around) is the same.
+  assert.equal(withIt.length,without.length,w+'\n'+withIt.join('\n'));
+  assert.deepEqual(withIt.filter(s=>!/^  GPU\d/.test(s)),without.filter(s=>!/^  GPU\d/.test(s)),w);
+  const drawn=withIt.some(s=>/[━─]/.test(s));
+  if(drawn){
+   gauged++;
+   // The gauge is 4 cells at least, the same on every group, and stands right before the memory number.
+   const runs=withIt.flatMap(s=>s.match(/[━─]+/g)||[]);
+   assert(runs.length>0&&runs.every(r=>r.length===runs[0].length&&r.length>=4&&r.length<=10),w+'\n'+withIt.join('\n'));
+   assert(gpuRows(withIt).every(s=>!/\d%\s+\d+\/\d+G/.test(s)),w);
+   assert(gpuRows(withIt).every(s=>/[━─]+ +\d+\/\d+G/.test(s)),w+'\n'+withIt.join('\n'));
+  }else{
+   // (2) Where it cannot stand with the rows as they are, the picture is what it was without it, character for character.
+   plainOnes++;
+   assert.deepEqual(withIt,without,w+'\n'+withIt.join('\n'));
+  }
+ }
+}
+assert(gauged>0&&plainOnes>0,gauged+' '+plainOnes);
+// The picture: hosts of two GPUs and one, 58 wide (54 inside: two groups of 25 do not fit three-abreast, the third stands where nothing is);
+// the gauge is 4 cells, as the widest the 27 cells of a group allow; the width of the gauge is the same for every group.
+assert.deepEqual(body(58,[two,one].map(gaugeHost)),['host-a  CPU 34%  MEM 61%','  GPU0 92% ━━━─ 21/24G [3b]  GPU1  0% ────  0/24G','host-b  CPU 12%  MEM 40%','  GPU0  0% ────  0/48G']);
+assert.deepEqual(body(51,[two,one].map(gaugeHost)),body(51,[two,one]));
+// A host of eight GPUs where five stand abreast and a host of four: four to a row keeps the rows (2 and 1), so the gauge has the room of four groups.
+assert.equal(gpuRows(body(90,[eight,four].map(gaugeHost))).length,gpuRows(body(90,[eight,four])).length);
+// (3) The gauge of a GPU nothing runs on is dim all through; a working GPU's fill has its level's color and the rest is dim.
+const parts=render(64,60,{resources:[two,one].map(gaugeHost)}).rows.filter(r=>r.some(p=>/^GPU\d$/.test(p.text))).flat().filter(p=>/^[━─]+$/.test(p.text));
+assert(parts.length>0);
+const idleParts=parts.filter(p=>/^─+$/.test(p.text)&&p.dim),filled=parts.filter(p=>/━/.test(p.text));
+assert.equal(filled.length,1);assert.equal(filled[0].foreground,114);assert(!filled[0].dim);
+assert.equal(idleParts.length,parts.length-1);
+// A sample that carries no gauge draws no gauge, whatever the width.
+assert(!body(100,[two,one]).some(s=>/[━─]/.test(s)));
 """)
 
     def test_a_host_row_gives_way_mem_then_cpu_then_the_name_is_cut(self):
@@ -317,6 +372,16 @@ class ResourcesBackendTest(unittest.TestCase):
         self.assertNotIn("users", a["gpus"][3])
         self.assertEqual([item[0][0] for item in a["stats"]], ["CPU ", "MEM "])
         self.assertEqual(rows[1]["stats"], [])
+        # 11-19: each GPU's memory gauge at every width 4..10 is Fleet's VRAM gauge (its fill function and its level key); a GPU nothing
+        # runs on has it all dim; the widths are the ones the panel picks from.
+        from fleet.render_gpu import _gauge_segs, _resource_level_key
+        self.assertEqual(sorted(k for k in a["gpus"][0] if k.startswith("gauge")), sorted("gauge%d" % n for n in range(4, 11)))
+        for cells in range(4, 11):
+            filled, empty = _gauge_segs(100.0 * 21 / 24, cells, track=cells)
+            self.assertEqual(a["gpus"][0]["gauge%d" % cells], [(filled[0], _resource_level_key(100.0 * 21 / 24, True)), (empty[0], "dim")])
+            self.assertEqual(a["gpus"][1]["gauge%d" % cells], [("\u2500" * cells, "dim")])
+            self.assertTrue(all(len("".join(t for t, _k in a["gpus"][i]["gauge%d" % cells])) == cells for i in range(4)))
+        self.assertEqual(a["gpus"][3]["gauge10"][0][1], _resource_level_key(100.0 * 14 / 24, True))
         self.assertEqual(resource_rows(cached["resources"], 1000.0 + RESOURCES_MAX_AGE + 1), [])
         self.assertEqual(resource_rows({}, 0), [])
 

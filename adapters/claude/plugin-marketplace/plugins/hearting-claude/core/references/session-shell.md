@@ -624,12 +624,19 @@ popup; a request row the MESSAGES popup).
 - RESOURCES (11-18, the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): beside the
   native area, the section right above USAGE, its name row `RESOURCES ────` (no `›`: it opens nothing), then for each host (this
   machine first, then the configured hosts, eight at most) one row, its name and `CPU 34%  MEM 61%`, and under it every GPU of the host in its number's order side by side (`  GPU0 92% 21/24G [3b]  GPU1 0% 0/24G  GPU3 58%
-  14/24G [c7]`: no gauge since 11-18 ("게이지는 없애자 ... 가로로 나열"); the use is its number, in Fleet's level color (green, yellow from 50, red
+  14/24G [c7]`: no gauge of the use since 11-18 ("게이지는 없애자 ... 가로로 나열"); the use is its number, in Fleet's level color (green, yellow from 50, red
   from 80); the memory; and the Fleet numbers of the sessions that hold it, empty where the producer does not know them; a GPU nothing runs on
   is the same group with the sample's own values and no session number, the whole of it `dim`, the use too and not in a level's color, since 11-19:
   "빈 GPU도 일관성있게 표시해줘. 그냥 0% 0/48GB 이런식으로 해놔. 컬러만 좀 어둡게 하면 되잖아. 0%에"; the host row has no count of them any more), two cells in and two cells
   apart, one grid for the whole section since 11-19 ("그리고 GPU 표시를 행과 열 간격을 맞춰."): every group of every host the same width (the label left-aligned to the longest label, the use and the memory right-aligned to the widest, the session numbers left-aligned after them and blank where a GPU has none, the last group of a row not padded behind), the same number of groups on every row, one form for all groups (memory, then use go together), and the host rows aligned the same way (the name column as wide as the longest name, each stat's value right-aligned; MEM then CPU are given up for the section before a name is cut), onto the next row where they do not fit and never splitting one GPU's group; a host that could not be reached keeps its name alone, a host with no
-  GPU is its one row. Short of cells a GPU's group gives up its memory, then its use, and keeps the session number (every group takes the
+  GPU is its one row. A memory gauge stands right before the memory number since 11-19 (the person, on v4.59.6's panel: "가로로 길어지면 RESOURCE에
+  게이지도 넣어주면 좋고"; `GPU0  93% ━━━━━━━━─ 21/24G [3b]`) and only where it costs no row: the rows come first, the gauge is what the width leaves. It is
+  Fleet's VRAM gauge (the memory ratio's fill by `render_gpu._gauge_segs`, the level color by `_resource_level_key`; a GPU nothing runs on has all
+  of it `dim`, an unknown memory is Fleet's empty track), drawn by the producing side at each width 4 to 10 (`gauge4` … `gauge10`, as a route's
+  context gauge is) and picked, never refilled, by the panel; the same width for every group of the section, the widest 4 to 10 the room allows.
+  It stands only where the rows are as many as without it and it has 4 cells at least; the groups to a row may be fewer than they would be (a
+  width for three where every host has two GPUs gives each row two and the rest to the gauge; the count that gives the widest gauge with as
+  many rows wins). Not in the forms without the memory, not on the host rows; where it cannot stand the section is as it was without it. Short of cells a GPU's group gives up its memory, then its use, and keeps the session number (every group takes the
   form that lets the widest stand alone); a host row gives up `MEM`, then `CPU`; if that is still short the name is cut with `…` (to 12 cells at least). The values are Fleet's own
   compute-host sample (`compute_hosts.collect`, the sample its RESOURCES view draws): a probe costs the servers an SSH read each, so the
   resident producer takes it only while a side panel that draws the section is open (the host's projection request carries `side`;
