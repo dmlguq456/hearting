@@ -782,7 +782,7 @@ def route_cache_value(old: dict | None, harness: str, sid: str, now: float) -> d
     dispatch registry is touched, so only the display sees it.
     """
     value = dict(old) if isinstance(old, dict) else {
-        "schema_version": 3, "route_row_form": 1, "items": [], "by_session": {}, "total": 0, "older": 0, "complete": True,
+        "schema_version": 3, "items": [], "by_session": {}, "total": 0, "older": 0, "complete": True,
         "route_status": {}, "route_sessions": {}}
     key = harness + "\0" + sid
     row = {"id": "rt-0123456789abcdef", "title": ROUTE_TITLE, "state": "working", "worker_stage": "inline",

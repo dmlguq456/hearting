@@ -241,7 +241,7 @@ class WaitBlinkPtyTest(unittest.TestCase):
         cache = Path(self.env['XDG_STATE_HOME']) / 'hearting/human-waits'
         key = harness + '\0' + SID
         target = cache / 'projection.json'
-        value = {'schema_version': 3, 'route_row_form': 1, 'items': [], 'by_session': {}, 'total': 0, 'older': 0, 'complete': True,
+        value = {'schema_version': 3, 'items': [], 'by_session': {}, 'total': 0, 'older': 0, 'complete': True,
                  'route_panels': {}, 'route_status': {}, 'route_sessions': {}, 'observed_at': time.time()}
         value['route_panels'][key] = [{'id': 'rt-b000000000001116', 'title': '패널 손질 일곱', 'state': 'idle',
                                        'worker_stage': 'one-shot', 'shape': 'one-shot-owner',

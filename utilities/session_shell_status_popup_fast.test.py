@@ -461,7 +461,7 @@ class PtyTest(unittest.TestCase):
         key = 'claude\0' + SID
         target = Path(self.env['XDG_STATE_HOME']) / 'hearting/human-waits/projection.json'
         value = json.loads(target.read_text()) if target.exists() else {
-            'schema_version': 3, 'route_row_form': 1, 'items': [], 'by_session': {}, 'total': 0, 'older': 0, 'complete': True,
+            'schema_version': 3, 'items': [], 'by_session': {}, 'total': 0, 'older': 0, 'complete': True,
             'route_panels': {}, 'route_status': {}, 'route_sessions': {}}
         value.update(observed_at=time.time())
         value['route_panels'][key] = [route_row('rt-b000000000000001', '현황 팝업 구현')]

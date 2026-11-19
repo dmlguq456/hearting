@@ -629,7 +629,7 @@ class SessionShellPTYTest(unittest.TestCase):
         cache=Path(self.env['XDG_STATE_HOME'])/'hearting/human-waits'
         cache.mkdir(mode=0o700,parents=True,exist_ok=True);cache.chmod(0o700)
         key='claude\0'+sid;now=time.time()
-        (cache/'projection.json').write_text(json.dumps({'schema_version':3,'route_row_form':1,'observed_at':now,'items':[],
+        (cache/'projection.json').write_text(json.dumps({'schema_version':3,'observed_at':now,'items':[],
             'by_session':{},'total':0,'older':0,'complete':True,'route_panels':{key:[]},'route_status':{key:''},'route_sessions':{key:now}}))
         (cache/'projection.json').chmod(0o600)
         backend=sys.executable;barrier=None

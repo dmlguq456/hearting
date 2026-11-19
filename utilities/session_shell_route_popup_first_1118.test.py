@@ -642,7 +642,7 @@ class RoutePopupFirstTest(unittest.TestCase):
         sid = SIDS[harness]
         key = harness + '\0' + sid
         target = Path(self.env['XDG_STATE_HOME']) / 'hearting/human-waits/projection.json'
-        value = {'schema_version': 3, 'route_row_form': 1, 'items': [], 'by_session': {}, 'total': 0, 'older': 0, 'complete': True,
+        value = {'schema_version': 3, 'items': [], 'by_session': {}, 'total': 0, 'older': 0, 'complete': True,
                  'route_panels': {}, 'route_status': {}, 'route_sessions': {}}
         value.update(observed_at=time.time())
         # The failed route (the third, unless said) is the one the popup unfolds when no route is pressed.
