@@ -1319,9 +1319,7 @@ A legacy hash collision is diagnostic
 
 **SD-91 current Codex override:** the projected Codex Stop bridge silently reads
 only enough payload to clear one exact interaction marker. It reads no registry,
-starts no subprocess or SessionEnd work, and emits no continuation. This
-supersedes older `native-Stop` and ordinary interactive park wording in this
-section; those shapes are migration history only.
+starts no subprocess or SessionEnd work, and emits no continuation.
 
 SD-92 completion binds to the calling `CODEX_THREAD_ID`.
 The interactive launcher and gateway are retired. Native queue
