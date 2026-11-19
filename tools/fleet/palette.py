@@ -180,16 +180,18 @@ def kind_word_key(field):
 
 def route_form(capability, shape, field=None):
     """The word for HOW a route in the dispatch zone runs, the one place that decides it (the panel carries it as ``kind_form``,
-    Fleet's tables call it; to rename a form, change it here). The forms read as who makes the work: ``unit`` (a unit route: one
-    unit called, no owner; its field recorded), ``solo`` (shape ``one-shot-owner``/``solo``: the owner alone does the whole
-    procedure), ``team`` (shape ``staged``/``staged+resource``: the owner and a worker for each stage). English in every
-    language; ``direct`` is the zone that has no bracket. Any other shape (a frame, an older record) has none: ``""``."""
+    Fleet's tables and the panel's first popup page read it; to rename a form, change it here). ``shape`` is the route's
+    ``execution_topology`` (never ``selection.shape``: ``compose --shape solo --signal …`` seals a team node under a ``solo``
+    selection, and its topology says ``staged``). The forms read as who makes the work: ``unit`` (a unit route: one unit called, no
+    owner; its field recorded), ``solo`` (``one-shot-owner``/``solo``: the owner alone does the whole procedure), ``team``
+    (``staged``, ``staged+resource``, ``transactional-owner``, ``map-reduce``: the owner and a worker for each stage). English in
+    every language; ``direct`` is the zone that has no bracket. Any other shape (a frame, an older record) has none: ``""``."""
     if str(capability or "").strip() == "unit":
         return "unit" if str(field or "").strip() in ROUTE_FIELDS else ""
     shape = str(shape or "").strip()
     if shape in ("one-shot-owner", "solo"):
         return "solo"
-    return "team" if shape in ("staged", "staged+resource") else ""
+    return "team" if shape in ("staged", "staged+resource", "transactional-owner", "map-reduce") else ""
 
 
 def kind_intensity_key(field, word):
