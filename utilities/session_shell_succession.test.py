@@ -153,6 +153,20 @@ def vm(harness,sid,kind):
     open(os.path.join(os.environ['SUCC_DIR'],'popup-vm'),'a').write(kind+'\n')
     return ExplorerViewModel.from_mapping({{'routes':[],'sessions':[],'repos':[],'system':{{}}}})
 m._popup_view_model=vm
+# A question this session registered and has not answered (a `question` file in the fixture folder
+# keeps it on the panel); an answer sent from the panel is written to `answers`, not sent anywhere.
+projection=m.panel_projection
+def with_question(*args,**kwargs):
+    value=projection(*args,**kwargs)
+    if os.path.exists(os.path.join(os.environ['SUCC_DIR'],'question')):
+        value['questions']=[{{'id':'owned-question','revision':'0'*64,'answerable':True,
+            'questions':[{{'id':'q','question':'Pending demo question','choices':['Yes','No']}}]}}]
+    return value
+m.panel_projection=with_question
+def answer(binding,request):
+    open(os.path.join(os.environ['SUCC_DIR'],'answers'),'a').write(repr((request.get('question_id'),request.get('answers'),request.get('decision')))+'\n')
+    return {{'ok':False,'reason':'ANSWER_SEEN'}}
+m._block_answer=answer
 raise SystemExit(m._backend())
 """
 
@@ -627,6 +641,54 @@ class SessionShellSuccessionTest(unittest.TestCase):
         self.switched(window, first['host_pid'])  # no other event: the stop of that prompt releases it
         self.assertEqual((window.root/'native-read').read_bytes().count(b'draft\r'), 1)
         self.assert_keeps_native(window, native)
+
+    def test_a_pending_question_does_not_hold_the_hand_over_and_is_still_answerable_after_it(self):
+        # A question left open for days must not keep the window on an old release. The new host draws
+        # the QUESTIONS box again from the next projection, and the same keys answer it.
+        window = self.window()
+        first = window.wait_binding(); self.settle(window)
+        (window.root/'question').write_text('1')
+        window.until('Pending demo question', 60); window.pump(.5)
+        self.assertTrue(window.status().get('empty'))
+        native = process_row(window.native_pid())
+        window.point('rel-b')
+        second = self.switched(window, first['host_pid'])
+        self.assertNotEqual(second['host_pid'], first['host_pid'])
+        self.assertEqual(second['native_pid'], first['native_pid'])
+        # The new host's own paint, not the old one's: the box is on the screen it restored.
+        window.pump(1.5)
+        lines = window.screen()['lines']
+        self.assertTrue(any('QUESTIONS' in row for row in lines), lines)
+        self.assertTrue(any('Pending demo question' in row for row in lines), lines)
+        read_before = (window.root/'native-read').read_bytes()
+        window.type(b'\x1d1\r')
+        end = time.monotonic()+15
+        while not (window.root/'answers').exists() and time.monotonic() < end:
+            window.pump(.1)
+        self.assertEqual((window.root/'answers').read_text().count('owned-question'), 1,
+                         (window.root/'answers').read_text() if (window.root/'answers').exists() else 'no answer reached the backend')
+        window.pump(.5)
+        self.assertEqual((window.root/'native-read').read_bytes(), read_before, 'the answer keys stay out of the native')
+        # The fixture's backend refuses the answer (it only records it), so the editor may stay open:
+        # one more Ctrl+] hands the keys back to the native.
+        if window.status()['focused']:
+            window.type(b'\x1d'); window.pump(.3)
+        self.assertFalse(window.status()['focused'])
+        self.assert_keeps_native(window, native)
+
+    def test_an_answer_in_progress_still_defers_the_hand_over(self):
+        # The person is inside the question editor (the panel has the keys): the hand-over waits.
+        window = self.window()
+        first = window.wait_binding(); self.settle(window)
+        (window.root/'question').write_text('1')
+        window.until('Pending demo question', 60); window.pump(.5)
+        window.type(b'\x1d'); window.pump(.3)
+        self.assertTrue(window.status()['focused'])
+        window.point('rel-b'); window.pump(2.0)
+        self.assertEqual(window.binding()['host_pid'], first['host_pid'])
+        self.assertEqual(window.spawns(), [])
+        window.type(b'\x1d'); window.pump(.3)
+        self.switched(window, first['host_pid'])
 
     def test_an_open_form_defers_the_hand_over_until_it_is_gone(self):
         window = self.window()
