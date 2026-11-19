@@ -25,7 +25,7 @@ When `--mode` is omitted, infer it from multilingual intent rather than a fixed 
 
 Report the inference in one line and continue. Confirm it in Step 0 only when genuinely ambiguous.
 
-`survey` mode has been removed. For academic, technology, or market research, run `/autopilot-research --mode academic|technology|market`; autopilot-draft discovers the resulting `research/{topic}/` artifacts.
+For academic, technology, or market research, run `/autopilot-research --mode academic|technology|market`; autopilot-draft discovers the resulting `research/{topic}/` artifacts.
 
 ## Implicit input discovery
 

@@ -2,7 +2,6 @@
 
 > A one-page long-range vision memo, not a formal PRD. Promote it through `autopilot-spec` after the direction is agreed.
 > Evidence: `research/hermes-agent/` under the artifact root, which benchmarks Hermes Agent, plus the `07_security.md` checklist.
-> Written 2026-06-15.
 
 ## One Sentence
 

@@ -105,7 +105,7 @@ full masking.
 
 The always-loaded `adapters/opencode/AGENTS.md` keeps purpose, judgment, where
 to look, and the instruction to follow the next action the runtime prints.
-The command detail it used to carry lives here. `preflight.sh` below means
+The command detail lives here. `preflight.sh` below means
 `AGENT_HOME="$AGENT_HOME" bash "$AGENT_HOME/adapters/opencode/bin/preflight.sh"`;
 no shim is installed at the harness root. Export `AGENT_HOME` to the installed
 root for release behavior, or to a checkout/worktree to use that tree as the
@@ -316,8 +316,6 @@ using `opencode_setting/opencode-commands` as the projection source. Do not
 expose `adapters/claude/commands/` as OpenCode-native commands.
 
 ## Native Guard Plugin Projection
-
-Write-denying hook gates are retired; no write preflight or core-read marker is required.
 
 ```bash
 node --check adapters/opencode/plugins/hearting-guards.js
