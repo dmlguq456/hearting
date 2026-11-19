@@ -5634,6 +5634,31 @@ class SourceLineageVerdictTest(unittest.TestCase):
     verdict=R.source_lineage_verdict(root,base)
     self.assertEqual(verdict.kind,"diverged")
 
+ def test_a_sealed_commit_merged_in_through_another_parent_is_a_descendant(self):
+  # The work tree's head moved on through a merge whose first parent is another line: the sealed commit is an
+  # ancestor of HEAD but not on its first-parent line. It only moved forward, so it is not `diverged`.
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   root,git,base=self._repo(tmp)
+   git("checkout","-q","--orphan","trunk"); git("rm","-rqf",".")
+   (root/"t").write_text("t"); git("add","."); git("commit","-q","-m","trunk")
+   git("merge","--no-ff","--allow-unrelated-histories","-q","-m","merge the work",base)
+   head=subprocess.run(["git","-C",str(root),"rev-parse","HEAD"],capture_output=True,text=True).stdout.strip()
+   first_parent=subprocess.run(["git","-C",str(root),"rev-list","--first-parent","HEAD"],capture_output=True,text=True).stdout.split()
+   self.assertNotIn(base,first_parent,"fixture must reach the sealed commit only through the second parent")
+   verdict=R.source_lineage_verdict(root,base)
+   self.assertEqual((verdict.kind,verdict.distance),("descendant",2))
+   self.assertEqual(verdict.commits[0],head)
+   self.assertNotIn(base,verdict.commits)
+   self.assertEqual(verdict.branch,"trunk")
+  with tempfile.TemporaryDirectory() as tmp:
+   root,git,base=self._repo(tmp)
+   with self.subTest("an unrelated head stays diverged"):
+    git("checkout","-q","--orphan","trunk"); git("rm","-rqf",".")
+    (root/"t").write_text("t"); git("add","."); git("commit","-q","-m","trunk")
+    verdict=R.source_lineage_verdict(root,base)
+    self.assertEqual((verdict.kind,verdict.distance),("diverged",None))
+
  def test_a_sd156_3_merge_in_progress_is_unverifiable(self):
   import subprocess
   with tempfile.TemporaryDirectory() as tmp:

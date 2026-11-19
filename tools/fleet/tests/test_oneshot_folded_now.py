@@ -3,7 +3,7 @@
 The progress cell of a route with one stage was only ``one-shot ●``; it now carries the open
 tool's allow-listed summary (``● python3 tools/run-tests.py``), cut by whole values (a path
 gives way to its file name, then the tool name stands alone), and the right-hand ``>_ tool``
-cell is not drawn a second time. Nothing observed keeps ``one-shot ●``; a route with a stage list
+cell is not drawn a second time. Nothing observed keeps ``solo ●`` (11-19: was ``one-shot ●``); a route with a stage list
 keeps its stage line.
 """
 import os, sys  # noqa: E401
@@ -79,7 +79,7 @@ class OneStepFoldedNowTest(unittest.TestCase):
     def test_nothing_observed_keeps_the_stage_and_a_staged_row_is_unchanged(self):
         for width in (120, 150):
             rows = _rows(self.jobs(), width)
-            self.assertIn("one-shot ●", rows["t-idle"])
+            self.assertIn("solo ●", rows["t-idle"])      # (11-19: the one-shot node is drawn by the form's name; the node id is the record's)
             self.assertNotIn("● python3", rows["t-stage"])
             # (A route with a stage list reads the one stage line, whatever its shape; this record names none: the position and the stage.)
             self.assertIn("2/3: execute", rows["t-stage"])

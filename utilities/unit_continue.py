@@ -112,6 +112,20 @@ def chain(rows, route_id, node) -> list:
     return sorted(turns, key=lambda item: turn_of(item[2]))      # stable: registry order within a turn
 
 
+def continued_by_later_turn(jobs, meta) -> bool:
+    """Whether a later turn of this unit route has taken over from this attempt (a row names it as `continues_attempt_id`).
+
+    A turn so taken over has nothing left to settle: its closure record was set aside when the next turn
+    reopened the route, and the route's end (and its closure) is the last turn's. Only a unit leg's row can
+    be continued, so every other row answers False without reading the registry."""
+    attempt, route_id = meta.get("attempt_id"), meta.get("route_id")
+    if meta.get("capability") != "unit" or not attempt or not route_id or not jobs:
+        return False
+    from dispatch_registry_cache import registry_view
+    return any(record.completion_metadata().get("continues_attempt_id") == attempt
+               for record in registry_view(Path(jobs)).route_alias_candidates(route_id))
+
+
 def superseded_count(path) -> int:
     """How many closure records of this route were set aside (each reopening sets one aside)."""
     route_file = Path(path)

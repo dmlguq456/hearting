@@ -127,17 +127,91 @@ class UnitRouteWords(unittest.TestCase):
                                                         "legs": (("unit", "active", None),)}, card=False)
         return "".join(c[0] for c in grid.cells[0]).rstrip()
 
-    def test_the_progress_cell_leads_with_the_field_and_has_no_bracket(self):
-        self.assertEqual(self.cell(self.unit(field="code"), 40), "code")
-        self.assertEqual(self.cell(self.unit(field="docs"), 10), "docs")
-        self.assertEqual(self.cell(self.unit(field="research", worker_unit="research/research-survey"), 40), "research")
-        self.assertEqual(self.cell(self.unit(field="code", state="done"), 40), "code")   # (the `success · title` line is the one left as it was)
-        self.assertEqual(self.cell(self.unit(field="plan"), 40), "plan")
-        # An older unit route records no field: `unit`, still with no bracket and no unit name.
+    def test_the_progress_cell_leads_with_the_field_and_the_unit_bracket(self):
+        # 11-19: `code(unit·quick)` (before: `code`, no bracket): the form and the record's intensity, as every route's bracket reads.
+        self.assertEqual(self.cell(self.unit(field="code"), 40), "code(unit·quick)")
+        self.assertEqual(self.cell(self.unit(field="docs"), 20), "docs(unit·quick)")
+        self.assertEqual(self.cell(self.unit(field="research", worker_unit="research/research-survey"), 40), "research(unit·quick)")
+        self.assertEqual(self.cell(self.unit(field="code", state="done"), 40), "code(unit·quick)")   # (the `success · title` line is the one left as it was)
+        self.assertEqual(self.cell(self.unit(field="plan"), 40), "plan(unit·quick)")
+        self.assertEqual(self.cell(self.unit(field="code"), 14), "code(unit)")                       # the intensity goes first
+        self.assertEqual(self.cell(self.unit(field="code", intensity="strong"), 40), "code(unit·strong)")   # (a unit's intensity is a record's value too)
+        self.assertEqual(self.cell({k: v for k, v in self.unit(field="code").items() if k != "intensity"}, 40), "code(unit)")
+        # An older unit route records no field: `unit`, still with no bracket (never `unit(unit)`) and no unit name.
         self.assertEqual(self.cell(self.unit(), 40), "unit")
-        # A route with an owner keeps its bracket.
-        self.assertEqual(self.cell({**self.unit(), "capability": "code", "worker_unit": "dev/backend"}, 40), "code(quick)")
-        self.assertEqual(tables._kind_cell(self.unit(field="code")), [("code", "kind_code")])
+        # A route with an owner keeps its intensity bracket.
+        self.assertEqual(self.cell({**self.unit(), "capability": "code", "worker_unit": "dev/backend"}, 40), "code(solo·quick)")
+        # the whole bracket follows the intensity's color and weight (quick: the field's hue, dim; strong: bold); no field hue: dim
+        self.assertEqual(tables._kind_cell(self.unit(field="code")), [("code", "kind_code"), ("(unit·quick)", "kindq_code")])
+        self.assertEqual(tables._kind_cell(self.unit(field="code", intensity="strong")), [("code", "kind_code"), ("(unit·strong)", "kindb_code")])
+        self.assertEqual(tables._kind_cell(self.unit(field="plan")), [("plan", "grp"), ("(unit·quick)", "dim")])
+        self.assertEqual(tables._kind_cell(self.unit(field="code"), bracket=False), [("code", "kind_code")])
+        self.assertEqual(tables._kind_cell(self.unit()), [("unit", "grp")])
+
+    def test_the_popups_form_word_reads_the_same_unit_solo_team_and_frame(self):
+        # 11-19 (the person: "team도 괜찮은데?"): the popup's `shape` text is the bracket's word: `unit` / `solo` / `team` / `frame`
+        # (en; ko `유닛` / `단독` / `팀` / `frame`), a unit route's recorded shape `solo` notwithstanding
+        from fleet import palette
+        codes = lambda shape: {"codes": {"schema": "route_visibility_codes_v1", "shape": shape, "stages": [],
+                                         "verification": {"review": "none", "ci": "none", "gate": "none"}}}
+        for lang, words in (("English", ("solo", "team", "frame", "unit")), ("한국어", ("단독", "팀", "frame", "유닛"))):
+            with patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
+                got = [session_panel.route_evidence(codes(shape), unit=unit)["summary"].split(" · ")[0]
+                       for shape, unit in (("solo", False), ("staged", False), ("framed", False), ("solo", True))]
+            self.assertEqual(tuple(got), words, lang)
+        # the form word itself is decided in one place
+        self.assertEqual([palette.route_form("code", shape) for shape in ("one-shot-owner", "solo", "staged", "staged+resource", "framed", "map-reduce", "transactional-owner", "unknown", "")],
+                         ["solo", "solo", "team", "team", "", "team", "team", "", ""])
+        self.assertEqual((palette.route_form("unit", "solo", "code"), palette.route_form("unit", "solo", "")), ("unit", ""))
+
+    def test_a_one_step_rail_draws_the_one_shot_node_by_the_forms_name(self):
+        # 11-19: the node id `one-shot` is the record's; the Fleet rail draws it as `solo`
+        self.assertEqual(tables._stage_items([{"name": "one-shot", "st": "active"}])[0][0][0][0], "solo")
+        self.assertEqual(tables._stage_items([{"name": "execute", "st": "active"}])[0][0][0][0], "execute")
+
+    def fleet_row(self, capability, topology, selection_shape, field="docs", intensity="standard"):
+        """The Fleet row of a route built from a record whose `execution_topology` and `selection.shape` are given."""
+        rid, repo, now = "rt-form", "/synthetic/repo", 1_000_000.0
+        view = {"nodes": [{"id": "execute", "state": "active", "depends_on": [], "unit": "dev/backend", "worker_type": "stage"},
+                          {"id": "report", "state": "todo", "depends_on": ["execute"], "unit": "dev/backend", "worker_type": "stage"}],
+                "capability": capability, "field": field, "execution_topology": topology, "effective_intensity": intensity,
+                "cwd": repo, "slug": "a route"}
+        record = {"route_id": rid, "capability": capability, "field": field, "execution_topology": topology,
+                  "selection": {"shape": selection_shape}, "effective_intensity": intensity, "owner_attempt_id": "att-f1", "result": None,
+                  "slug": "a route"}
+        job = {"key": "route-form", "depth": 1, "dispatch_depth": 1, "route_node": "execute", "worker_type": "owner",
+               "liveness": "working", "harness": "claude", "model": "opus", "resolved_model": None, "effort": "xhigh",
+               "route_id": rid, "attempt_id": "att-f1", "elapsed_min": 3}
+        session = {"harness": "claude", "session_id": "sid-f", "session_tag": "f1", "cwd": repo, "liveness": "idle",
+                   "is_child": False, "title": "owner"}
+        with patch.object(live, "_collect_routes", return_value={rid: {"view": view, "record": record, "jobs": [job],
+                                                                       "sessions": [session]}}):
+            rows, index = live._session_records({"sessions": [session]}, now, lambda _cwd: "repo")
+            routes, _nodes = live._route_records({"resources": []}, rows, index, lambda _cwd: "repo", now)
+        return routes[0]
+
+    def test_every_staged_topology_reads_team_and_the_form_is_read_from_the_topology_not_the_selection(self):
+        # 11-19 (correction 4): `transactional-owner` (refine, spec, ship) and `map-reduce` (research) are team forms too: their first line
+        # reads `docs(team·standard)` / `research(team·standard)`, not `docs(standard)`. The form is read from the route's
+        # `execution_topology` (the Fleet row's `shape`), never from `selection.shape`: `compose --shape solo --signal …` seals a team
+        # node under a `solo` selection, and its topology says `staged`.
+        for capability, field, topology, word in (("autopilot-refine", "docs", "transactional-owner", "refine"),
+                                                  ("autopilot-research", "research", "map-reduce", "research"),
+                                                  ("autopilot-code", "code", "staged", "code")):
+            route = self.fleet_row(capability, topology, "staged", field)
+            self.assertEqual(route["shape"], topology)
+            self.assertEqual(tables._kind_cell(route), [(word, "kind_" + field), ("(team·standard)", "kinds_" + field)], topology)
+            shown = session_panel.route_kind({**route, "capability": route["capability"]})
+            self.assertEqual((shown["kind_form"], shown["intensity"]), ("team", "standard"), topology)
+        # (the selection says solo, the topology staged: team)
+        sealed = self.fleet_row("autopilot-code", "staged", "solo", "code")
+        self.assertEqual(tables._kind_cell(sealed)[1][0], "(team·standard)")
+        self.assertEqual(session_panel.route_kind(sealed)["kind_form"], "team")
+        # a frame and an older record keep no word
+        for shape in ("framed", "", "unknown"):
+            self.assertNotIn("kind_form", session_panel.route_kind({"capability": "code", "shape": shape, "intensity": "standard"}), shape)
+            self.assertEqual(tables._kind_cell({"capability": "code", "field": "code", "shape": shape, "intensity": "standard"})[1:],
+                             [("(standard)", "kinds_code")], shape)
 
     def test_the_panel_row_names_the_unit_and_the_field(self):
         row = {"capability": "unit", "worker_unit": "qa/code-review", "marker": "working", "field": "code",
@@ -146,9 +220,18 @@ class UnitRouteWords(unittest.TestCase):
         self.assertEqual((shown["kind_word"], shown["kind_field"], shown["unit_word"], shown["unit_route"]),
                          ("code", "code", "code-review", True))
         kind = session_panel.route_kind({**row, "chain": [["unit", "active"]]})
-        self.assertNotIn("intensity", kind)             # (a unit route's `quick` is no choice: no bracket)
+        self.assertEqual((kind["intensity"], kind["kind_form"]), ("quick", "unit"))   # (11-19: the intensity of a unit route is sent too, and its form)
         self.assertNotIn("chain", kind)                 # (and it is nobody's leg)
-        self.assertEqual(session_panel.route_kind({**row, "capability": "code"})["intensity"], "quick")
+        owned = session_panel.route_kind({**row, "capability": "code", "shape": "staged"})
+        self.assertEqual((owned["intensity"], owned["kind_form"]), ("quick", "team"))
+        self.assertEqual(session_panel.route_kind({**row, "capability": "code", "shape": "one-shot-owner"})["kind_form"], "solo")
+        self.assertEqual(session_panel.route_kind({**row, "capability": "code", "shape": "solo"})["kind_form"], "solo")
+        self.assertEqual(session_panel.route_kind({**row, "capability": "code", "shape": "staged+resource"})["kind_form"], "team")
+        for shape in ("framed", "direct", ""):      # (no form: the intensity bracket as before)
+            self.assertNotIn("kind_form", session_panel.route_kind({**row, "capability": "code", "shape": shape}), shape)
+        for shape in ("map-reduce", "transactional-owner"):       # (11-19, correction 4: these are team forms too)
+            self.assertEqual(session_panel.route_kind({**row, "capability": "code", "shape": shape})["kind_form"], "team", shape)
+        self.assertNotIn("kind_form", session_panel.route_kind({**row, "field": ""}))   # (an older unit route: no form, no bracket)
         plan = session_panel.route_row({**row, "field": "plan"})
         self.assertEqual(plan["kind_word"], "plan")
         self.assertNotIn("kind_field", plan)
@@ -185,7 +268,7 @@ class UnitRouteWords(unittest.TestCase):
         opened = draw(vm, NavState(view="ROUTES", title="ROUTES", folds=(("ropen:ROUTES", rid),)), 180, 60)
         pane = ["".join(cell[0] for cell in row[34:]) for row in opened.cells]
         kind = next(line for line in pane if "└ kind" in line)
-        self.assertIn("└ kind code", kind)
+        self.assertIn("└ kind code(unit·quick)", kind)
         self.assertNotIn("owner", kind)                                                      # no owner on a unit route
         self.assertTrue(any("└ unit · qa/code-review" in line for line in pane), pane[:14])
         self.assertFalse(any("└ worker" in line for line in pane))

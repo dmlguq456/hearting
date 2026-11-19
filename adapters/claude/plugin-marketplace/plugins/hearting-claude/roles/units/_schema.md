@@ -63,10 +63,7 @@ bootstrap:                    # OPTIONAL runtime bootstrap material; absent = no
 ## Body
 
 The irreducible domain persona at the declared floor. English canonical (localization is
-a projection concern). Reference `_shared/*` fragments — do not restate them. Merge, per
-unit, the three legacy sources: `roles/modes/<f>/<m>.md` (EN), the
-`adapters/claude/agent-modes/<f>/<m>.md` divergent copy (KO), and any load-bearing blocks
-from the retired team agent file. Nothing load-bearing drops silently → `_NOTES.md`.
+a projection concern). Reference `_shared/*` fragments — do not restate them.
 
 The `stance:` text is carried by the runtime into the worker prompt, just before the body.
 
@@ -89,7 +86,7 @@ units not yet moved keep the single-body form.
 
 ## Floor guidance (from the investigation gradient)
 
-- `near-zero`: material/*, qa/test, design/verifier, research/fact-check — kernel +
+- `near-zero`: material/{browser-fetch,pdf-extract,web-image-search}, qa/test, design/verifier, research/fact-check — kernel +
   worker-type + stance + I/O carry almost everything; keep THICK tool fragments.
 - `low`: dev/*, editorial/*, qa/data-curate.
 - `moderate`: qa/code-review, qa/plan-review, qa/security-review (confidence bar = 8;

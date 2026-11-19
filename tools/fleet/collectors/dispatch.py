@@ -5274,8 +5274,9 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         quick_groups.setdefault(key, []).append(job)
         violations = []
         # (a unit leg a worker called hangs below that worker for the older job list through `parent_slug`, which is no
-        # owner link: it is not held to the owner-child shape)
-        if not job.caller_attempt_id and (job.dispatch_depth != 1 or job.parent_slug):
+        # owner link: that one is not held to the owner-child shape; its depth still is: `caller_attempt_receipt` writes the
+        # field only on a depth-1 unit leg, so a called row at another depth is a wrong row)
+        if job.dispatch_depth != 1 or (job.parent_slug and not job.caller_attempt_id):
             violations.append("quick-shape")
         if (
             job.execution_surface != "registered-headless"

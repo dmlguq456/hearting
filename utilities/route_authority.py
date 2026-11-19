@@ -416,7 +416,9 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
             "The exact independent review process has ended and its lease is released." if live else "")
     if action == "completion-owner":
         from dispatch_attempt_policy import verdict_pass
-        applicable = not facts.get("closing") and metadata.get("workflow_completion") == "runtime-v1"
+        # A unit turn a later turn continued has nothing left to settle: the route's end is the last turn's.
+        applicable = (not facts.get("closing") and not facts.get("continued")
+                      and metadata.get("workflow_completion") == "runtime-v1")
         applicable = applicable and (status in {"open", "running"} if facts.get("executing") else
             metadata.get("dispatch_depth") == "1" and status == "done" and verdict_pass(metadata))
         return ContinuationDecision(bool(applicable), "applicable" if applicable else "not-applicable")
