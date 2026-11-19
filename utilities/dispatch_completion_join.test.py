@@ -4858,6 +4858,29 @@ class NextLegReceiptTest(unittest.TestCase):
         self.assertEqual(text, JOIN.completion_followup_text(receipt, jobs=str(jobs)))
 
 
+    def test_a_notice_line_failure_never_loses_the_sealed_summary(self):
+        import dispatch_terminal_commit as DTC
+        import work_intent
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        route_file = root / "rt-owner.json"
+        route_file.write_text(json.dumps({"route_id": "rt-owner", "artifact_root": str(root)}))
+        jobs = root / "jobs.log"
+        jobs.write_text(row("done", "owner", "parent", "task", process_metadata={
+            "dispatch_depth": "1", "worker_type": "owner", "workflow_completion": "runtime-v1",
+            "owner_route_file": str(route_file)}))
+        slot = DTC.terminal_slot(root, "rt-owner", "owner")
+        slot.mkdir(parents=True)
+        summary = "[Completion summary] unit · route rt-owner\nResult: Done"
+        (slot / work_intent.SUMMARY_NAME).write_text(summary + "\n")
+        receipt = {"children": [{"attempt_id": "owner", "required_action": "advance-completed"}]}
+        for error in (OSError("store unreadable"), ValueError("bad row")):
+            with self.subTest(type(error).__name__), \
+                    mock.patch("unit_continue.notice_lines", side_effect=error):
+                text = JOIN.completion_followup_text(receipt, jobs=str(jobs))
+            self.assertIn("\n" + summary, text)
+
+
 class MaterializePendingDeliveryTest(unittest.TestCase):
     """SD-111 P2 round 2 C-1: carrier-independent idempotent materializer.
 

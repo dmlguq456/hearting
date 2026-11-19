@@ -460,6 +460,8 @@ class CorrectUnitRouteTest(unittest.TestCase):
         from start_receipt import next_line
         line = next_line(receipt)
         self.assertIn("already ran as that turn", line)
+        self.assertIn("its result is (or will be) delivered by that turn's end notice", line)
+        self.assertNotIn("delivered then", line)
         self.assertIn("send a different text or pass a new --request-id", line)
         self.assertNotIn("route is complete", line)
 
@@ -473,6 +475,33 @@ class CorrectUnitRouteTest(unittest.TestCase):
         self.assertEqual(UC.entries(self.jobs, "rt-abc"), [])
         self.assertNotIn("retained", receipt)
 
+    def test_a_same_text_while_its_turn_still_runs_is_not_already_asked(self):
+        self.call("fixed, look again")           # kept; nothing started yet
+        turn2 = UC.attempt_id_for("rt-abc", NODE, UC.entries(self.jobs, "rt-abc")[0]["id"])
+        self.rows[turn2] = ("running", meta("att-2", 2, continues_attempt_id=FIRST))
+        (code, receipt), start = self.call("fixed, look again")
+        start.assert_called_once()
+        self.assertEqual((code, receipt["duplicate"]), (0, True))
+        self.assertNotEqual(receipt["state"], "already-asked")
+
+    def test_an_end_still_waiting_for_its_closing_mark_is_taken_not_refused(self):
+        import dispatch_attempt_policy as policy
+        self.rows = {FIRST: ("done", meta(classifier_source=policy.DEFERRED_COMPLETION_SOURCE))}
+        (code, receipt), start = self.call("ask")
+        start.assert_called_once()
+        self.assertEqual((code, receipt["retained"]), (0, True))
+        self.assertNotEqual(receipt.get("reason"), "unit-continue-last-turn-no-verdict")
+
+    def test_a_killed_or_cancelled_last_turn_says_to_compose_again_and_keeps_no_text(self):
+        for status in ("killed", "cancelled"):
+            with self.subTest(status):
+                self.rows = {FIRST: (status, meta(failure_class="blocked"))}
+                with mock.patch.object(self.W, "_compose_again", return_value="compose --unit x"):
+                    (code, receipt), start = self.call("ask")
+                start.assert_not_called()
+                self.assertEqual((code, receipt["reason"]), (69, "unit-continue-last-turn-no-verdict"))
+                self.assertEqual(UC.entries(self.jobs, "rt-abc"), [])
+
     def test_the_turn_that_started_is_named_in_the_receipt(self):
         def start(route, path, jobs, **kw):
             self.rows[UC.attempt_id_for("rt-abc", NODE, UC.entries(jobs, "rt-abc")[0]["id"])] = (
@@ -483,6 +512,62 @@ class CorrectUnitRouteTest(unittest.TestCase):
             code, receipt = self.W.correct_unit_route(self.route, self.dir.name + "/rt.json", self.jobs, "ask")
         self.assertEqual((code, receipt["retained"], receipt["turn"], receipt["session"]), (0, False, 2, "resumed"))
         self.assertEqual(receipt["continues_attempt_id"], FIRST)
+
+
+class ContinuedTurnTest(unittest.TestCase):
+    """A turn a later turn continued has nothing left to settle: the route's end is the last turn's."""
+
+    TURN2 = "att-" + "2" * 32
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.jobs = Path(self.dir.name) / "jobs.log"
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def write(self, *rows):
+        lines = []
+        for attempt, extra in rows:
+            fields = {"attempt_schema_version": "2", "attempt_id": attempt, "route_id": "rt-abc", "capability": "unit",
+                      "route_node": NODE, "dispatch_depth": "1", "workflow_completion": "runtime-v1", **extra}
+            lines.append("2026-11-19T00:00:00Z\tdone\t/repo\t/wt\tslug\t"
+                         + ",".join(f"{k}={v}" for k, v in fields.items()))
+        self.jobs.write_text("\n".join(lines) + "\n")
+
+    def test_only_the_turn_a_later_row_continues_is_continued(self):
+        self.write((FIRST, {}), (self.TURN2, {"continues_attempt_id": FIRST, "turn": "2"}))
+        self.assertTrue(UC.continued_by_later_turn(self.jobs, meta(FIRST)))
+        self.assertFalse(UC.continued_by_later_turn(self.jobs, meta(self.TURN2)))
+
+    def test_a_first_turn_nothing_continued_and_other_routes_and_capabilities_are_not(self):
+        self.write((FIRST, {}), (self.TURN2, {"continues_attempt_id": FIRST, "turn": "2"}))
+        self.assertFalse(UC.continued_by_later_turn(self.jobs, meta(FIRST, route_id="rt-other")))
+        self.assertFalse(UC.continued_by_later_turn(self.jobs, meta(FIRST, capability="autopilot-code")))
+        self.assertFalse(UC.continued_by_later_turn("", meta(FIRST)))
+        self.write((FIRST, {}))
+        self.assertFalse(UC.continued_by_later_turn(self.jobs, meta(FIRST)))
+
+    def test_the_completion_owner_decision_leaves_a_continued_turn_out(self):
+        from route_authority import decide_continuation
+        owner = meta(FIRST, dispatch_depth="1", failure_class="pass")
+        def decide(continued):
+            return decide_continuation(action="completion-owner", status="done", metadata=owner,
+                                       facts={"closing": False, "executing": False, "continued": continued})
+        self.assertTrue(decide(False).allowed)
+        self.assertEqual((decide(True).allowed, decide(True).state), (False, "not-applicable"))
+
+    def test_a_continued_turn_has_nothing_to_settle_and_the_last_turn_still_does(self):
+        import dispatch_terminal_commit as DTC
+        self.write((FIRST, {"failure_class": "pass"}),
+                   (self.TURN2, {"continues_attempt_id": FIRST, "turn": "2", "failure_class": "pass"}))
+        self.assertFalse(DTC._completion_owner_choice(self.jobs, "done", {**meta(FIRST), "dispatch_depth": "1",
+                                                                          "failure_class": "pass"}).allowed)
+        self.assertTrue(DTC._completion_owner_choice(self.jobs, "done", {**meta(self.TURN2), "dispatch_depth": "1",
+                                                                         "failure_class": "pass"}).allowed)
+        self.assertEqual(DTC.owner_completion_state(self.jobs, "done", {**meta(FIRST), "dispatch_depth": "1",
+                                                                        "failure_class": "pass"}).state,
+                         "not-applicable")
 
 
 class RetentionPlumbingTest(unittest.TestCase):

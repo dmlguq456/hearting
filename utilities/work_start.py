@@ -3044,7 +3044,8 @@ def correct_unit_route(route, path, jobs, text, request_id=None, **start_kwargs)
     try:
         require_route_parent(turns[-1][2], jobs, turns[-1][0])
         last_status, last_meta = turns[-1][1], turns[-1][2]
-        if (last_status == "done" and not verdict_pass(last_meta) and deferred_completion(last_meta) != "pending"
+        if (last_status in {"done", "killed", "cancelled"} and not verdict_pass(last_meta)
+                and deferred_completion(last_meta) != "pending"
                 and not terminal_conflict_pending(last_meta)):
             # The last turn ended without a verdict, so the route never closes and a kept text would never start.
             return 69, {"state": "not-admitted", "reason": "unit-continue-last-turn-no-verdict",
@@ -3063,14 +3064,14 @@ def correct_unit_route(route, path, jobs, text, request_id=None, **start_kwargs)
     entry = kept["entry"]
     new_id = UC.attempt_id_for(route["route_id"], leg["id"], entry["id"])
     if kept["duplicate"] and rows.get(new_id, ("",))[0] == "done":
-        # This text already ran as that turn and its result was delivered then. Starting nothing, say so
-        # instead of letting the closed route read back the old result as if it were new.
+        # This text already ran as that turn; its result is (or will be) delivered by that turn's end notice.
+        # Starting nothing, say so instead of letting the closed route read back the old result as if it were new.
         return 0, {"state": "already-asked", "route_id": route["route_id"], "request_id": entry["id"],
                    "duplicate": True, "retained": False, "unit_attempt_id": new_id,
                    **_turn_fields(rows[new_id][1], jobs),
-                   "next_step": "This text already ran as that turn and its result was delivered then; nothing "
-                                "new started. To ask for another turn, send a different text or pass a new "
-                                "--request-id."}
+                   "next_step": "This text already ran as that turn; its result is (or will be) delivered by "
+                                "that turn's end notice, and nothing new started. To ask for another turn, "
+                                "send a different text or pass a new --request-id."}
     receipt = start_work(route, path, jobs, **start_kwargs)
     rows = _rows(jobs)
     started = new_id in rows
