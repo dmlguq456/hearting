@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -466,13 +467,26 @@ def native_receiving_turn(payload: dict[str, Any], thread_id: str) -> dict[str, 
     return {"thread_id": thread_id, "turn_id": turn_id, "status": turn["status"]}
 
 
+# The gate that decides whether a prompt may be a peer or runtime text before the heavier
+# reader is loaded: a trailer-form text, or a display-form one (`— [d4]` last line, `↳ ` first).
+# Same pattern as `peer-message.looks_like_peer_text` (a test keeps them equal).
+_PEER_DISPLAY_TAIL = re.compile(
+    r"(?m)^— (?:\[(?:[0-9a-f]{2}|\?)\]|claude|codex|opencode)(?: [^\n]{1,80})?[ \t]*$")
+_PEER_DISPLAY_LINE = re.compile(r"\A\s*(?:<pasted_content[^>]*>\s*)?↳ ")
+
+
+def looks_like_peer_prompt(text: str) -> bool:
+    return bool(text) and ("peer-from:" in text or "runtime-from:" in text
+                           or _PEER_DISPLAY_LINE.match(text[:300]) is not None
+                           or _PEER_DISPLAY_TAIL.search(text[-400:]) is not None)
+
+
 def peer_notice(payload: dict[str, Any], current_prompt: str, current_cwd: str) -> None:
     """F-100c — the receive side of a herdr steer, harness-neutral: when the prompt
     carries the `(peer-from: <harness> <sid> <name>)` trailer a steward appended, write
     one `notice` peer_message_v1 under THIS session's exact id (the same record the
     Claude hook and the OpenCode plugin write). Fail-soft, bounded, never prints."""
-    if not current_prompt or ("peer-from:" not in current_prompt
-                              and "runtime-from:" not in current_prompt):
+    if not current_prompt or not looks_like_peer_prompt(current_prompt):
         return
     sid = interaction_session_id(payload)
     if not sid:
@@ -613,8 +627,7 @@ def main() -> int:
         receipt_parts = []
     parts = []
     guidance_seen = []
-    if ("peer-from:" in current_prompt or "runtime-from:" in current_prompt
-            or "cross-session-message" in current_prompt):
+    if looks_like_peer_prompt(current_prompt) or "cross-session-message" in current_prompt:
         import importlib.util
         spec = importlib.util.spec_from_file_location("peer_receiver_guidance", ROOT / "utilities/peer-message.py")
         peer = importlib.util.module_from_spec(spec)

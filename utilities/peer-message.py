@@ -120,25 +120,33 @@ def _derived_name_of(harness, session_id, name):
         return False
 
 
-def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=None):
-    """Human display; the bracket token keeps display identity off the legacy path.
+def _clean_display(value):
+    return " ".join("".join(ch if ch.isprintable() and ch not in ");" else " "
+                            for ch in str(value or "")).split())
 
-    ``pane_id`` is accepted for callers that still pass it and is not shown."""
-    def clean(value):
-        return " ".join("".join(ch if ch.isprintable() and ch not in ");" else " "
-                                for ch in str(value or "")).split())
 
-    parts = [clean(harness) or "unknown", peer_alias(harness, session_id)]
-    display_name = clean(name)
+def _sender_display_parts(harness, session_id, name):
+    """``[harness-text, alias, name-or-empty]`` as the trailer and the visible tail show them."""
+    parts = [_clean_display(harness) or "unknown", peer_alias(harness, session_id)]
+    display_name = _clean_display(name)
     if session_id:
         display_name = display_name.replace(str(session_id), parts[1])
     # A harness-derived `<folder>-<xx>` label only repeats the tag (and a dated folder
-    # reads as a date: `[57] 2026-11-57`); the display keeps Fleet's `[xx]` and the pane.
+    # reads as a date: `[57] 2026-11-57`); the display keeps Fleet's `[xx]`.
     # The shape alone is not provenance: a user-set `release-57` stays (Fleet's
     # `nameSource == "derived"` reader decides, as `derived_tag` requires).
     if (parts[1] != "[?]" and display_name.endswith("-" + parts[1][1:-1])
             and _derived_name_of(harness, session_id, display_name)):
         display_name = ""
+    return parts + [display_name]
+
+
+def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=None):
+    """Human display; the bracket token keeps display identity off the legacy path.
+
+    ``pane_id`` is accepted for callers that still pass it and is not shown."""
+    harness_text, alias, display_name = _sender_display_parts(harness, session_id, name)
+    parts = [harness_text, alias]
     if display_name:
         parts.append(display_name)
     # `pane=` and `sid=` were decoration only: no receiver reads them (see
@@ -146,6 +154,270 @@ def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=N
     suffix = f" ; ref={transfer_ref}" if transfer_ref else ""
     tag = "runtime-from" if harness == "runtime" else "peer-from"
     return "(%s: %s%s)" % (tag, " ".join(parts), suffix)
+
+
+# ---------------------------------------------------------------------------
+# Display forms. What the person reads in the receiving window is a short text;
+# everything the agent needs (the sealed sender and reply address, ref, receipts,
+# question numbers, required actions) reaches it through the hook/plugin context
+# that already carries guidance. The sender seals both texts in one transfer
+# record (`display`); the receiver finds that record from the fingerprint of the
+# text it was given and then judges the sealed (old-form) text exactly as before:
+# same body digest, same recipient tuple, same sender checks.
+#
+#   peer      body + blank line + `— [d4]` (or `— [d4] <user-set name>`)
+#   runtime   one `↳ …` line built by the producer
+#
+# A sender uses a display form only when the receiving session has already shown
+# that its code reads it (`note_display_ready`); otherwise the old form is sent
+# (the trailer without the decoration), so a window whose code predates this form
+# keeps working.
+# ---------------------------------------------------------------------------
+_DISPLAY_FORM = 2
+_DISPLAY_AGENT_MAX_CHARS = 12000
+_DISPLAY_NAME_MAX = 60
+_DISPLAY_LINE_MAX = 400
+_DISPLAY_HARNESSES = ("claude", "codex", "opencode")
+_DISPLAY_TAIL_RE = re.compile(
+    r"(?m)^— (?:\[(?:[0-9a-f]{2}|\?)\]|claude|codex|opencode)(?: [^\n]{1,%d})?[ \t]*$" % (_DISPLAY_NAME_MAX + 20))
+_DISPLAY_LINE_RE = re.compile(r"\A\s*(?:<pasted_content[^>]*>\s*)?↳ ")
+_DISPLAY_DELAY_PREFIX_RE = re.compile(
+    r"\A\[지연 전달 — 원래 보낸 시각 \d{4}-\d{2}-\d{2} \d{2}:\d{2}, 약 [1-9]\d*시간 지연\] \(ref [0-9a-f]{8}\)\n")
+_TRANSFER_REF_RE = re.compile(r"[0-9a-f]{32}")
+
+
+def looks_like_display_text(text):
+    """Cheap gate for a receiver: could this prompt be a form-2 text? (Not an authority.)"""
+    if not isinstance(text, str) or not text:
+        return False
+    return bool(_DISPLAY_LINE_RE.match(text[:300]) or _DISPLAY_TAIL_RE.search(text[-400:]))
+
+
+def looks_like_peer_text(text):
+    """A trailer-form or display-form peer/runtime text: the one gate every receiver uses."""
+    if not isinstance(text, str) or not text:
+        return False
+    return "peer-from:" in text or "runtime-from:" in text or looks_like_display_text(text)
+
+
+def display_tail(harness, session_id, name=None):
+    """`— [d4]` / `— [d4] <name>`; `— <harness>` when Fleet has no tag. None for a sender
+    that is not one of the three harnesses (the runtime's `↳` line is built by its producer)."""
+    if harness not in _DISPLAY_HARNESSES:
+        return None
+    _harness_text, alias, display_name = _sender_display_parts(harness, session_id, name)
+    shown = alias if alias != "[?]" else harness
+    if display_name:
+        shown += " " + display_name[:_DISPLAY_NAME_MAX].strip()
+    return "— " + shown
+
+
+def _display_root(state_root=None):
+    return Path(state_root or peer_state_root()) / "peer-messages" / "display"
+
+
+def _display_ready_path(recipient):
+    sid = usable_session_id((recipient or {}).get("session_id"))
+    harness = (recipient or {}).get("harness")
+    if sid is None or harness not in _DISPLAY_HARNESSES:
+        return None
+    return peer_state_root() / "peer-messages" / "display-ready" / harness / sid
+
+
+def note_display_ready(recipient):
+    """Record, once per day, that this session's receiving code reads the display forms.
+
+    Called by the code that receives for the session (each hook/plugin boundary that already
+    asks for its peer context). A session whose code predates the display forms never writes
+    it, so a sender sees no sign and keeps the old form. Best effort: never raises."""
+    try:
+        path = _display_ready_path(recipient)
+        if path is None:
+            return
+        try:
+            if time.time() - path.stat().st_mtime < 86400:
+                return
+        except FileNotFoundError:
+            pass
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}")
+        tmp.write_text(f"{_DISPLAY_FORM}\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, ValueError):
+        pass
+
+
+def receiver_reads_display(recipient):
+    """True when the exact recipient session has shown that its code reads the display forms."""
+    try:
+        path = _display_ready_path(recipient)
+        return path is not None and path.read_text(encoding="utf-8").strip() == str(_DISPLAY_FORM)
+    except (OSError, ValueError):
+        return False
+
+
+def _display_entry(kind, old_text, trailer, sender, line=None):
+    """The `display` entry sealed with a transfer, or None when no display form applies."""
+    if kind == "peer":
+        tail = display_tail(sender.get("harness"), sender.get("session_id"), sender.get("name"))
+        if tail is None or not old_text.endswith("\n\n" + trailer):
+            return None
+        visible = old_text[:len(old_text) - len(trailer)] + tail
+        return {"form": _DISPLAY_FORM, "kind": "peer",
+                "sha256": hashlib.sha256(visible.encode("utf-8")).hexdigest(),
+                "tail": tail, "agent": trailer}
+    if (kind == "runtime" and isinstance(line, str) and line.startswith("↳ ")
+            and "\n" not in line and len(line) <= _DISPLAY_LINE_MAX
+            and all(ch.isprintable() for ch in line)
+            and len(old_text) <= _DISPLAY_AGENT_MAX_CHARS):
+        return {"form": _DISPLAY_FORM, "kind": "runtime",
+                "sha256": hashlib.sha256(line.encode("utf-8")).hexdigest(),
+                "line": line, "agent": old_text}
+    return None
+
+
+def _publish_display_pointer(entry, ref):
+    """`<peer-messages>/display/<fingerprint>/<ref>`: a derived hint a receiver re-validates
+    against the sealed transfer, so a stray or forged one proves nothing."""
+    root = _display_root()
+    if root.parent.is_symlink() or root.is_symlink():
+        raise ValueError("peer-display-directory-symlink")
+    directory = root / entry["sha256"]
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(directory / ref, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    os.close(fd)
+
+
+def _display_variants(text):
+    variants = list(_arrived_body_variants(text))
+    for value in list(variants):
+        match = _DISPLAY_DELAY_PREFIX_RE.match(value)
+        if match:
+            rest = value[match.end():]
+            variants.extend((rest, rest.rstrip(), rest.strip()))
+    return list(dict.fromkeys(variants))
+
+
+def _display_old_text(variant, entry, transfer):
+    """The sealed text the visible ``variant`` stands for, or None when it does not match."""
+    if (not isinstance(entry, dict) or entry.get("form") != _DISPLAY_FORM
+            or entry.get("kind") not in ("peer", "runtime")
+            or entry.get("sha256") != hashlib.sha256(variant.encode("utf-8")).hexdigest()
+            or not isinstance(entry.get("agent"), str)):
+        return None
+    if entry["kind"] == "peer":
+        tail = entry.get("tail")
+        if not isinstance(tail, str) or not tail or not variant.endswith(tail):
+            return None
+        old_text = variant[:len(variant) - len(tail)] + entry["agent"]
+    else:
+        if entry.get("line") != variant:
+            return None
+        old_text = entry["agent"]
+    if (not isinstance(transfer, dict)
+            or hashlib.sha256(old_text.encode("utf-8")).hexdigest() != transfer.get("body_sha256")):
+        return None
+    return old_text
+
+
+def _display_resolve(text, recipient):
+    """``{ref, old_text, entry, transfer}`` for a form-2 ``text`` that this recipient was sent.
+
+    The fingerprint finds candidate transfers; each is re-read, its sealed old-form text is
+    rebuilt and must hash to the sealed ``body_sha256``, and that text must be attributed to
+    this recipient by the very check an old-form message goes through. Several sealed
+    messages may carry the same visible text (an identical resend): the oldest one not yet
+    received is taken, else the newest received one, so a repeat is never lost and a re-read
+    of an already received prompt finds the same record."""
+    if (not isinstance(text, str) or not looks_like_display_text(text)
+            or not _valid_transfer_endpoint(recipient)):
+        return None
+    root = _display_root()
+    found = []
+    for variant in _display_variants(text):
+        digest = hashlib.sha256(variant.encode("utf-8")).hexdigest()
+        try:
+            names = os.listdir(root / digest)
+        except OSError:
+            continue
+        for ref in names:
+            if not _TRANSFER_REF_RE.fullmatch(ref):
+                continue
+            try:
+                transfer = _read_transfer_record(ref)
+                old_text = _display_old_text(
+                    variant, transfer.get("display") if isinstance(transfer, dict) else None, transfer)
+                if old_text is None:
+                    continue
+                parsed = _parse_peer_trailer_core(old_text, recipient, include_ref=True)
+                if not parsed or parsed.get("transfer_ref") != ref:
+                    continue
+                pending = _read_pending(ref)
+            except UnsupportedPendingSchema:
+                continue
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                continue
+            received = isinstance(pending, dict) and pending.get("state") == "received"
+            created = (pending or {}).get("created")
+            created = float(created) if type(created) in (int, float) else 0.0
+            found.append(((1, -created) if received else (0, created), ref, old_text, transfer))
+    if not found:
+        return None
+    _order, ref, old_text, transfer = min(found, key=lambda item: item[0])
+    return {"ref": ref, "old_text": old_text, "entry": transfer["display"], "transfer": transfer}
+
+
+def expand_display_text(text, recipient):
+    """The sealed old-form text for a form-2 ``text`` sent to ``recipient``, else ``text`` itself."""
+    try:
+        resolved = _display_resolve(text, recipient)
+    except UnsupportedPendingSchema:
+        return text
+    return resolved["old_text"] if resolved else text
+
+
+def _display_agent_block(resolved):
+    """What only the agent receives next to a form-2 text: the sealed sender, reply
+    address, ref and receipt lines the person's window no longer shows."""
+    entry, transfer = resolved["entry"], resolved["transfer"]
+    if entry["kind"] == "runtime":
+        return ("Hearting delivery (the person sees only the one `↳` line above); the full text:\n"
+                + entry["agent"])
+    sender = transfer.get("from") or {}
+    reply = ""
+    if (sender.get("harness") in _DISPLAY_HARNESSES and usable_session_id(sender.get("session_id"))):
+        reply = (" Reply with `hearting run peer-steward prompt %s:%s --body-file <file>`."
+                 % (sender["harness"], sender["session_id"]))
+    return ("Sender of the message above (the person sees only `%s`): %s.%s"
+            % (entry["tail"], entry["agent"], reply))
+
+
+def pasted_text(row):
+    """The text a carrier that types into the recipient's input should send for ``row``.
+
+    The visible form when the row was sealed with one and it still matches its seal, else the
+    sealed text itself (so a carrier that does not call this, or a row it cannot rebuild,
+    behaves exactly as before)."""
+    text = row.get("text") if isinstance(row, dict) else None
+    shown = row.get("display") if isinstance(row, dict) else None
+    if (not isinstance(text, str) or not isinstance(shown, dict) or shown.get("form") != _DISPLAY_FORM
+            or row.get("no_trailer")):
+        return text
+    try:
+        entry = (_read_transfer_record(row["ref"]) or {}).get("display")
+        if not isinstance(entry, dict) or entry.get("sha256") != shown.get("sha256"):
+            return text
+        if entry["kind"] == "runtime":
+            visible = entry["line"]
+        else:
+            if not text.endswith(entry["agent"]):
+                return text
+            visible = text[:len(text) - len(entry["agent"])] + entry["tail"]
+        if hashlib.sha256(visible.encode("utf-8")).hexdigest() != entry["sha256"]:
+            return text
+        return visible
+    except (OSError, ValueError, KeyError, TypeError):
+        return text
 
 
 def _transfer_path(ref):
@@ -435,7 +707,7 @@ def _reference_access_evidence_valid(evidence, recipient):
 
 def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
                           reference_evidence=None, refs=(), producer_binding=None, handoff=None,
-                          request=None):
+                          request=None, display=None):
     """Seal a transmission intent before delivery (the receiver may run immediately).
 
     This immutable record shares the ledger's local write trust boundary; it is
@@ -506,6 +778,19 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
     record = {"schema_version": 1, "message_id": ref, "from": dict(sender),
               "to": dict(recipient), "body_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
               "refs": list(refs)}
+    display_entry = None
+    if display is not None and include_trailer and trailer is not None:
+        # The visible text is sealed beside the old-form text. The pointer is published first:
+        # one without a transfer proves nothing, a transfer without it would strand the text.
+        display_entry = _display_entry(
+            display.get("kind"), text, trailer, sender, line=display.get("line"))
+        try:
+            if display_entry is not None:
+                _publish_display_pointer(display_entry, ref)
+        except (OSError, ValueError):
+            display_entry = None
+    if display_entry is not None:
+        record["display"] = display_entry
     if handoff is not None:
         record["handoff"] = handoff
     if producer_binding is not None:
@@ -2299,8 +2584,12 @@ def pending_messages(recipient, *, deadline=None):
 def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), receipt="target-form-open",
                          with_trailer=True, reference_evidence=None, first_input_process=None,
                          producer_binding=None, handoff=None, original_target=None, server=None,
-                         prepared=None, namespace=None, request=None):
+                         prepared=None, namespace=None, request=None, display_line=None):
     """A retry reuses a pending intent; ordinary sends need no preparation lock.
+
+    A display form (see the block above ``_transfer_path``) is sealed only for a recipient
+    session that has shown its code reads it: a peer message always, a runtime message when
+    its producer supplies ``display_line``.
 
     ``prepared`` (a list) receives the authoritative sealed row, stored or reused, so a
     caller can keep its courier even when a later read of that row fails.
@@ -2311,6 +2600,13 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
     endpoints_verified = (_valid_transfer_sender(sender, producer_binding, recipient, list(refs))
                           and (_valid_transfer_endpoint(recipient)
                                or _valid_pane_bound_endpoint(recipient)))
+    display = None
+    if (with_trailer and handoff is None and _valid_transfer_endpoint(recipient)
+            and receiver_reads_display(recipient)):
+        if producer_binding is None and sender.get("harness") in _DISPLAY_HARNESSES:
+            display = {"kind": "peer"}
+        elif producer_binding is not None and display_line:
+            display = {"kind": "runtime", "line": display_line}
     body_hash = hashlib.sha256(body.rstrip("\n").encode("utf-8")).hexdigest()
     request_seal = dict(request["seal"]) if request is not None else None
     address_namespace = None
@@ -2449,7 +2745,7 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         return found or _prepare_peer_message(body, sender, recipient, include_trailer=with_trailer,
                                               reference_evidence=reference_evidence, refs=refs,
                                               producer_binding=producer_binding, handoff=handoff,
-                                              request=request)
+                                              request=request, display=display)
     key_parts = [[e.get("harness"), e.get("session_id"),
                   e.get("name") if e.get("session_id") is None else None, e.get("pane_id")]
                  for e in (sender, recipient)]
@@ -2482,7 +2778,7 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         text, ref = _prepare_peer_message(body, sender, recipient, include_trailer=with_trailer,
                                           reference_evidence=reference_evidence, refs=refs,
                                           producer_binding=producer_binding, handoff=handoff,
-                                          request=request)
+                                          request=request, display=display)
         if len(text.encode("utf-8")) > _PENDING_BYTES:
             raise ValueError("peer-pending-body-oversized")
         pending = {"schema_version": 2 if _unresolved_target(recipient) else 1,
@@ -2510,6 +2806,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         transfer = _read_transfer_record(ref)
         if transfer and transfer.get("body_ref") is not None:
             pending["body_ref"] = transfer["body_ref"]
+        if transfer and isinstance(transfer.get("display"), dict):
+            pending["display"] = {key: transfer["display"][key] for key in ("form", "kind", "sha256")}
         _save_pending(pending)
         if prepared is not None:
             prepared.append(pending)
@@ -3015,7 +3313,7 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit
     try:
         result = send_at_least_once(resolve_queue_socket(),
             thread_id=recipient["session_id"], client_message_id="delivery-peer-" + ref,
-            message=row["text"], timeout=timeout, allow_restart=start_interrupted is True,
+            message=pasted_text(row), timeout=timeout, allow_restart=start_interrupted is True,
             retry_ambiguous=False, allow_add=row["state"] == "pending", require_message_match=True,
             before_add=before_add, steer=steer, owned_queue_only_restart=True,
             observe_turn=True, steer_turn_id=steer_turn, before_steer=before_steer)
@@ -3107,7 +3405,13 @@ def usable_session_id(value):
 
 
 def _arrived_body_digests(text, transfer_ref=None):
-    """Digests the sealed body may have once it arrives: a runtime's input surface can add or
+    """Digests the sealed body may have once it arrives (see ``_arrived_body_variants``)."""
+    return {hashlib.sha256(v.encode("utf-8")).hexdigest()
+            for v in _arrived_body_variants(text, transfer_ref)}
+
+
+def _arrived_body_variants(text, transfer_ref=None):
+    """Texts the sealed body may have once it arrives: a runtime's input surface can add or
     trim whitespace or wrap a Claude paste; the inner message must remain exact."""
     variants = [text, text.rstrip(), text.strip()]
     wrapped = re.fullmatch(
@@ -3127,10 +3431,17 @@ def _arrived_body_digests(text, transfer_ref=None):
             if match:
                 body = value[match.end():]
                 variants.extend((body, body.rstrip(), body.strip()))
-    return {hashlib.sha256(v.encode("utf-8")).hexdigest() for v in variants}
+    return variants
 
 
 def parse_peer_trailer(text, recipient=None, *, include_ref=False):
+    """``_parse_peer_trailer_core`` of the text the sender sealed: a visible form-2 text
+    (``expand_display_text``) is read through its sealed record, any other text as it is."""
+    return _parse_peer_trailer_core(expand_display_text(text, recipient), recipient,
+                                    include_ref=include_ref)
+
+
+def _parse_peer_trailer_core(text, recipient=None, *, include_ref=False):
     """→ {harness, session_id, name} for the LAST trailer in ``text``, else ``None``.
 
     New aliases require a sealed transfer and the actual recipient tuple. A
@@ -4066,7 +4377,17 @@ def receiver_guidance(text="", recipient=None, *, cwd=None):
 
     This is a read-only hint. ``accept_handoff`` repeats the same receiver check
     while holding its existing pending lock before it records any acceptance.
+
+    For a form-2 text the sealed sender, reply address and ref (a runtime text: its whole
+    sealed text) lead the guidance: this is the agent-only path for what the window omits.
     """
+    try:
+        resolved = _display_resolve(text, recipient)
+    except UnsupportedPendingSchema:
+        resolved = None
+    if resolved is not None:
+        inner = receiver_guidance(resolved["old_text"], recipient, cwd=cwd)
+        return "\n\n".join(part for part in (_display_agent_block(resolved), inner) if part)
     current_origin = parse_peer_trailer(text, recipient, include_ref=True)
     if isinstance(current_origin, dict) and current_origin.get("source") == "runtime-completion":
         return ""
@@ -4287,6 +4608,8 @@ def receive_peer_message(text, recipient, project="", *, summary_text=""):
 
 def _receive_peer_message(text, recipient, project="", *, summary_text=""):
     """Actual receiver observation; rendering a callback is never this boundary."""
+    # A form-2 text is judged as the sealed old-form text it stands for.
+    text = expand_display_text(text, recipient)
     # A SID-less first-turn message is bound only after the native callback can
     # prove that the same foreground process admitted it. Pane reuse alone is
     # never enough, including when an old row has no readable process proof.
@@ -4585,6 +4908,7 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
     """
     if not _valid_transfer_endpoint(recipient):
         return
+    note_display_ready(recipient)  # this code reads the display forms (once a day per session)
     stream = sys.stdout if stream is None else stream
     claims, warnings, context = [], [], []
 
@@ -4763,6 +5087,8 @@ def cmd_context(args):
 
 def cmd_pending(args):
     recipient = {"harness": args.to_harness, "session_id": args.to_session_id}
+    if _valid_transfer_endpoint(recipient):
+        note_display_ready(recipient)  # the receiving plugin's code reads the display forms
     received_ref = getattr(args, "received", None)
     claim_ref = getattr(args, "claim", None)
     queued_ref = getattr(args, "queued", None)
