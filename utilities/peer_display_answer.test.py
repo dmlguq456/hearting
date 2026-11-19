@@ -69,6 +69,30 @@ class QuestionAnswerLine(unittest.TestCase):
                 self.f.consume(signal, shown)
                 self.assertEqual(before, len([r for r in self.f.peer._iter_records() if r.get("transfer_ref") == ref]))
 
+    def test_the_same_short_answer_to_a_second_question_is_one_line_again(self):
+        # A visible line is a record's key only while that record waits: once the first "네" is
+        # received, the same line for the next question is a display form again, and its arrival
+        # settles that question (not the earlier, received record).
+        self.f.display = True
+        first, first_envelope = self.f.ask("claude", "same-line", text="첫 질문")
+        self.f.submit(first_envelope, "네")
+        calls, ref1, _row1 = self.f.courier(first)
+        self.assertEqual(calls, ["↳ 질문에 답함: 네"])
+        self.f.consume(first, calls[0])
+        self.assertEqual(self.source(first)["completion"]["action_id"], "fixture-action")
+        self.assertEqual(self.f.peer._read_pending(ref1)["state"], "received")
+        second, second_envelope = self.f.ask("claude", "same-line", text="둘째 질문")
+        self.f.submit(second_envelope, "네")
+        calls, ref2, _row2 = self.f.courier(second)
+        self.assertEqual(calls, ["↳ 질문에 답함: 네"])
+        self.assertNotEqual(ref1, ref2)
+        self.assertEqual(self.f.peer._read_pending(ref2)["state"], "queued")
+        recipient = {"harness": "claude", "session_id": "same-line"}
+        self.assertEqual(self.f.peer._display_resolve(calls[0], recipient)["ref"], ref2)   # the waiting one
+        self.f.consume(second, calls[0])
+        self.assertEqual(self.source(second)["completion"]["action_id"], "fixture-action")
+        self.assertEqual(self.f.peer._read_pending(ref2)["state"], "received")
+
     def test_codex_keeps_the_full_text_and_settles_as_before(self):
         self.f.display = True
         signal, envelope = self.f.ask("codex", "line-codex")

@@ -1638,8 +1638,8 @@ def _answer_line(body: str, t) -> str:
 def delivery_display_text(batches: list[tuple[Path, list[dict]]]) -> str | None:
     """What the person's window shows for the delivery ``delivery_context(batches)`` renders.
 
-    One ``↳`` line per record: a question answer (``↳ 질문에 답함: <답>``) or a finished
-    runtime-v1 work (``↳ 작업 끝: <작업> — <결과> (<걸린 시간>)``, every word read back from
+    One ``↳`` line per record (equal lines of different records: one line ending `` ×N``): a
+    question answer (``↳ 질문에 답함: <답>``) or a finished runtime-v1 work (``↳ 작업 끝: <작업> — <결과> (<걸린 시간>)``, every word read back from
     the work's own completion summary). The agent still receives ``delivery_context``'s whole
     text beside it. ``None`` when any record has no such short form (a human gate, a
     supervision or run notice, a completion without a summary): the whole delivery then goes
@@ -1649,11 +1649,12 @@ def delivery_display_text(batches: list[tuple[Path, list[dict]]]) -> str | None:
         import work_intent
         from dispatch_registry_cache import registry_read_scope
         t = work_intent.ui_translator()
-        answers: list[str] = []
-        works: list[str] = []
+        answers: list[tuple[tuple, str]] = []
+        works: list[tuple[tuple, str]] = []
         with registry_read_scope():
             for root, records in batches:
                 for record in records:
+                    ident = (str(root), str(record.get("delivery_id")))
                     receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
                     if is_human_gate_record(record) or receipt.get("kind") == "supervision":
                         return None
@@ -1661,14 +1662,20 @@ def delivery_display_text(batches: list[tuple[Path, list[dict]]]) -> str | None:
                         if "answer_binding" not in receipt:
                             return None
                         body = waits.message_answer_body(receipt["answer_binding"])
-                        answers.append(t("delivery_line.answered", answer=_answer_line(body, t)))
+                        answers.append((ident, t("delivery_line.answered", answer=_answer_line(body, t))))
                         continue
                     lines = [work_intent.completion_line(summary, t)
                              for summary in work_intent.split_completion_summaries(_followup(root, record))]
                     if not lines or any(line is None for line in lines):
                         return None
-                    works.extend(lines)
-        shown = list(dict.fromkeys(answers + works))
+                    works.extend((ident, line) for line in lines)
+        # The same record listed twice is one line; different records with the same line (two
+        # questions both answered "네") stay visible as `<line> ×N`, so the person sees every one.
+        owners: dict[str, list[tuple]] = {}
+        for ident, line in answers + works:
+            if ident not in owners.setdefault(line, []):
+                owners[line].append(ident)
+        shown = [line + (f" ×{len(idents)}" if len(idents) > 1 else "") for line, idents in owners.items()]
         return "\n".join(shown) if 0 < len(shown) <= 12 else None
     except Exception:  # noqa: BLE001 -- a delivery with no short form is sent in full
         return None

@@ -31,6 +31,7 @@ def module(name, path):
 
 
 pm = module("display_peer_message", "utilities/peer-message.py")
+fleet_peers = module("display_fleet_peers", "tools/fleet/collectors/peer_messages.py")
 fixture_processes = module("display_fixture_processes", "tools/fixture_processes.py")
 
 
@@ -420,6 +421,29 @@ class RuntimeDisplayForms(DisplayFixture):
                            and r.get("delivery", {}).get("status") == "received"]
                 self.assertEqual(len(notices), 1)
 
+    def test_two_unreceived_runtime_records_with_the_same_line_the_second_is_the_full_text(self):
+        recipient = {"harness": "claude", "session_id": "runtime-same-line"}
+        line = "↳ 질문에 답함: 네"
+        text1, ref1, producer1, shown1 = self.runtime_prompt(recipient, line, body="[notice] 첫 질문 " + "q" * 5)
+        text2, ref2, producer2, shown2 = self.runtime_prompt(recipient, line, body="[notice] 둘째 질문 " + "r" * 5)
+        self.assertEqual(shown1, line)
+        self.assertEqual(shown2, text2)                       # the second keeps the full text
+        self.assertNotIn("display", pm._read_transfer_record(ref2))
+        self.assertNotIn("display", pm._read_pending(ref2))
+        self.assertIn("display", pm._read_pending(ref1))
+        # each arrival is its own record and the agent's context is that record's text
+        for shown, ref, text in ((shown2, ref2, text2), (shown1, ref1, text1)):
+            resolved = pm._display_resolve(shown, recipient)
+            self.assertEqual((resolved or {"ref": ref})["ref"], ref)
+            self.assertEqual(pm.receive_peer_message(shown, recipient), 0)
+            self.assertEqual(pm._read_pending(ref)["state"], "received")
+            self.assertIn(text, pm.receiver_guidance(shown, recipient) if shown == line else text)
+            if shown == line:
+                self.assertIn("ref=" + ref, pm.receiver_guidance(shown, recipient))
+        # the first line is received: the same line is a display form again
+        text3, ref3, _p3, shown3 = self.runtime_prompt(recipient, line, body="[notice] 셋째 질문 " + "s" * 5)
+        self.assertEqual(shown3, line)
+
     def test_a_runtime_line_without_the_receivers_sign_is_the_old_text(self):
         recipient = {"harness": "claude", "session_id": "runtime-unsigned"}
         sender = {"harness": "runtime", "session_id": None, "name": "Hearting runtime"}
@@ -554,16 +578,63 @@ process.stdout.write(JSON.stringify(result));
             self.assertIn(needed, guidance.stdout)
 
     def test_the_receiving_code_leaves_the_sign_the_sender_looks_for(self):
-        for harness in ("claude", "codex", "opencode"):
-            recipient = {"harness": harness, "session_id": "sign-" + harness}
-            self.assertFalse(pm.receiver_reads_display(recipient))
-            pm.emit_peer_context(recipient, None)
-            self.assertTrue(pm.receiver_reads_display(recipient), harness)
-        pm.cmd_pending(SimpleNamespace(to_harness="opencode", to_session_id="sign-pending", received=None,
-                                       claim=None, queued=None, resuming=None, reserve=None,
-                                       begin_write=None, release_reservation=None, claim_pid=None, claim_start=None))
-        self.assertTrue(pm.receiver_reads_display({"harness": "opencode", "session_id": "sign-pending"}))
+        # a hook script is the release's own file; the OpenCode plugin says its gate reads the forms
+        with mock.patch.dict(os.environ, {"HEARTING_PEER_DISPLAY_GATE": "2"}):
+            for harness in ("claude", "codex", "opencode"):
+                recipient = {"harness": harness, "session_id": "sign-" + harness}
+                self.assertFalse(pm.receiver_reads_display(recipient))
+                pm.emit_peer_context(recipient, None)
+                self.assertTrue(pm.receiver_reads_display(recipient), harness)
+            pm.cmd_pending(SimpleNamespace(to_harness="opencode", to_session_id="sign-pending", received=None,
+                                           claim=None, queued=None, resuming=None, reserve=None,
+                                           begin_write=None, release_reservation=None, claim_pid=None, claim_start=None))
+            self.assertTrue(pm.receiver_reads_display({"harness": "opencode", "session_id": "sign-pending"}))
 
+    def test_a_plugin_that_does_not_say_its_gate_reads_the_forms_leaves_no_sign(self):
+        """`AGENT_HOME` may name a `current` link: a plugin loaded before the forms existed (old gate)
+        can run beside a release whose Python is new. Only a plugin that says so leaves the sign."""
+        os.environ.pop("HEARTING_PEER_DISPLAY_GATE", None)
+        for harness, expected in (("claude", True), ("codex", True), ("opencode", False)):
+            recipient = {"harness": harness, "session_id": "unsaid-" + harness}
+            pm.emit_peer_context(recipient, None)
+            self.assertEqual(pm.receiver_reads_display(recipient), expected, harness)
+        pending = SimpleNamespace(to_harness="opencode", to_session_id="unsaid-pending", received=None,
+                                  claim=None, queued=None, resuming=None, reserve=None,
+                                  begin_write=None, release_reservation=None, claim_pid=None, claim_start=None)
+        pm.cmd_pending(pending)
+        self.assertFalse(pm.receiver_reads_display({"harness": "opencode", "session_id": "unsaid-pending"}))
+        # so the sender keeps the old form for that window
+        recipient = {"harness": "opencode", "session_id": "unsaid-pending"}
+        _text, ref = pm.prepare_peer_message("옛 플러그인", self.sender, recipient, defer=True)
+        self.assertIn("(peer-from:", pm.pasted_text(pm._read_pending(ref)))
+        with mock.patch.dict(os.environ, {"HEARTING_PEER_DISPLAY_GATE": "1"}):
+            pm.cmd_pending(pending)
+        self.assertFalse(pm.receiver_reads_display(recipient))          # only the form-2 declaration counts
+
+    def test_the_plugin_says_so_on_every_command_that_leaves_the_sign_and_not_on_receive(self):
+        js = r'''
+const fs = require('fs'), vm = require('vm'), path = require('path');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const source = fs.readFileSync(input.root + '/adapters/opencode/plugins/hearting-guards.js', 'utf8');
+const fn = source.slice(source.indexOf('function spawnPeerNotice('), source.indexOf('\nfunction pendingPeerProcessIdentity('));
+const seen = {};
+const child = () => ({on: () => {}, unref: () => {}, kill: () => {}, stdin: {end: () => {}}, stdout: {on: () => {}}});
+const context = {path, root: input.root, process: {env: {}}, seen, setTimeout, clearTimeout, Promise,
+  spawnSync: (exe, args, options) => { (seen[args[1]] = seen[args[1]] || []).push(options.env.HEARTING_PEER_DISPLAY_GATE || null); return {status: 1}; },
+  spawn: (exe, args, options) => { (seen[args[1]] = seen[args[1]] || []).push(options.env.HEARTING_PEER_DISPLAY_GATE || null); return child(); }};
+vm.runInNewContext(fn + `
+spawnPeerNotice("s", "본문\\n\\n— [d4]", "/tmp");
+pendingPeerCommand("s"); pendingPeerTransition("s", []);
+pendingPeerSpawn("s", [], 5); peerToolContextAsync("s", 5, 5);`, context);
+setTimeout(() => process.stdout.write(JSON.stringify(seen)), 100);
+'''
+        proc = subprocess.run(["node", "-e", js], input=json.dumps({"root": str(ROOT)}),
+                              capture_output=True, text=True, timeout=20)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        seen = json.loads(proc.stdout)
+        self.assertEqual(seen.get("receive"), [None])                       # receiving a text leaves no sign
+        self.assertEqual(seen.get("pending"), ["2", "2", "2"])
+        self.assertEqual(seen.get("context"), ["2"])
 
 
 class RuntimeLines(unittest.TestCase):
@@ -631,6 +702,265 @@ class RuntimeLines(unittest.TestCase):
                 self.assertIsNone(sweep.delivery_display_text([(Path("/x"), batch)]), batch)
             self.assertIsNone(sweep.delivery_display_text([]))
         self.assertTrue(body.called)
+
+    def test_equal_lines_of_different_records_are_counted_and_one_record_listed_twice_is_one_line(self):
+        sweep = self.sweep
+
+        def answer(delivery_id):
+            return {"delivery_id": delivery_id, "receipt": {"kind": "notice", "subject": "Question answer",
+                    "text": "x", "answer_binding": {"request_id": "S4:" + "a" * 64}}}
+        first, second = answer("delivery-1"), answer("delivery-2")
+        with mock.patch("work_intent.ui_translator", return_value=self.t("ko")), \
+                mock.patch("human_wait_state.message_answer_body", return_value="네"):
+            self.assertEqual(sweep.delivery_display_text([(Path("/x"), [first, second])]), "↳ 질문에 답함: 네 ×2")
+            self.assertEqual(sweep.delivery_display_text([(Path("/x"), [first, answer("delivery-3"), second])]),
+                             "↳ 질문에 답함: 네 ×3")
+            # the same record twice (here and in another batch of the same root) is still one line
+            self.assertEqual(sweep.delivery_display_text([(Path("/x"), [first]), (Path("/x"), [first])]),
+                             "↳ 질문에 답함: 네")
+            self.assertEqual(sweep.delivery_display_text([(Path("/x"), [first, first])]), "↳ 질문에 답함: 네")
+            # the same delivery id under another root is another record
+            self.assertEqual(sweep.delivery_display_text([(Path("/x"), [first]), (Path("/y"), [first])]),
+                             "↳ 질문에 답함: 네 ×2")
+        # a work line shared by two finished works counts the same way, after the answers
+        work1, work2 = {"delivery_id": "delivery-w1", "receipt": {}}, {"delivery_id": "delivery-w2", "receipt": {}}
+        with mock.patch("work_intent.ui_translator", return_value=self.t("ko")), \
+                mock.patch.object(sweep, "_followup", return_value="Owner finished; no harvest.\n" + self.KO), \
+                mock.patch("human_wait_state.message_answer_body", return_value="네"):
+            lines = sweep.delivery_display_text([(Path("/x"), [work1, first, work2])]).split("\n")
+            self.assertEqual(len(lines), 2)
+            self.assertEqual(lines[0], "↳ 질문에 답함: 네")
+            self.assertTrue(lines[1].startswith("↳ 작업 끝: ") and lines[1].endswith(" ×2"))
+
+
+class SameVisibleText(DisplayFixture):
+    """One visible text can be sealed for several messages (two untagged senders of one harness
+    send the same body; two questions get the same short answer). A recipient holds at most one
+    unreceived message per visible text, so the arrival and the agent's guidance name one record."""
+
+    S1 = {"harness": "claude", "session_id": "0100000a-0000-7000-8000-0000000000a1"}
+    S2 = {"harness": "claude", "session_id": "0100000a-0000-7000-8000-0000000000a2"}
+    S3 = {"harness": "claude", "session_id": "0100000a-0000-7000-8000-0000000000a3"}
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(pm, "peer_alias", return_value="[?]")  # no Fleet tag: `— claude`
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        pm.note_display_ready(self.recipient)
+
+    def seal(self, sender, body="작업 끝났습니다"):
+        text, ref = pm.prepare_peer_message(body, sender, self.recipient, defer=True)
+        row = pm._read_pending(ref)
+        return text, ref, row, pm.pasted_text(row)
+
+    def pointers(self, shown):
+        digest = hashlib.sha256(shown.encode("utf-8")).hexdigest()
+        try:
+            return sorted(os.listdir(pm._display_root() / digest))
+        except OSError:
+            return []
+
+    def arrive(self, shown, expected_ref, expected_sender):
+        """One arrival as a hook sees it: receive, then the agent's guidance; both name one record."""
+        resolved = pm._display_resolve(shown, self.recipient)
+        picked_by_receive = (resolved or {}).get("ref")
+        self.assertEqual(pm.receive_peer_message(shown, self.recipient), 0)
+        trailer = pm.parse_peer_trailer(shown, self.recipient, include_ref=True)
+        self.assertEqual((trailer["transfer_ref"], trailer["session_id"]),
+                         (expected_ref, expected_sender["session_id"]))
+        self.assertEqual(pm._read_pending(expected_ref)["state"], "received")
+        guidance = pm.receiver_guidance(shown, self.recipient)
+        if "peer-from:" in shown:     # the old form carries its sender in the text itself
+            self.assertIn("ref=" + expected_ref, shown)
+        else:                          # the display form: the agent-only block names the sender and ref
+            self.assertIn("%s:%s" % (expected_sender["harness"], expected_sender["session_id"]), guidance)
+            self.assertIn("ref=" + expected_ref, guidance)
+        after = pm._display_resolve(shown, self.recipient)
+        self.assertEqual((after or {}).get("ref") or expected_ref, expected_ref)
+        if resolved is not None:
+            self.assertEqual(picked_by_receive, expected_ref)   # the record the receive took is the guided one
+            self.assertEqual(after["ref"], expected_ref)
+        return guidance
+
+    def test_a_second_unreceived_message_with_the_same_visible_text_is_sealed_in_the_old_form(self):
+        text1, ref1, row1, shown1 = self.seal(self.S1)
+        text2, ref2, row2, shown2 = self.seal(self.S2)
+        self.assertEqual(shown1, "작업 끝났습니다\n\n— claude")
+        self.assertIn("display", pm._read_transfer_record(ref1))
+        self.assertIn("display", row1)
+        # the second is the old form: its ref shows, no display seal, no pointer, row and transfer agree
+        self.assertEqual(shown2, text2)
+        self.assertIn("ref=" + ref2, shown2)
+        self.assertNotIn("display", pm._read_transfer_record(ref2))
+        self.assertNotIn("display", row2)
+        self.assertEqual(self.pointers(shown1), [ref1])
+        # each arrival binds its own record and the agent is told to answer its own sender
+        guidance2 = self.arrive(shown2, ref2, self.S2)
+        self.assertNotIn(self.S1["session_id"], guidance2)
+        guidance1 = self.arrive(shown1, ref1, self.S1)
+        self.assertNotIn(self.S2["session_id"], guidance1)
+
+    def test_the_arrival_order_does_not_matter(self):
+        _t1, ref1, _r1, shown1 = self.seal(self.S1)
+        _t2, ref2, _r2, shown2 = self.seal(self.S2)
+        self.arrive(shown1, ref1, self.S1)
+        self.assertEqual(pm._read_pending(ref2)["state"], "pending")
+        self.arrive(shown2, ref2, self.S2)
+
+    def test_once_the_first_is_received_the_same_text_is_sealed_in_the_display_form_again(self):
+        _t1, ref1, _r1, shown1 = self.seal(self.S1)
+        _t2, ref2, row2, shown2 = self.seal(self.S2)
+        self.assertEqual(shown2, _t2)
+        self.arrive(shown1, ref1, self.S1)
+        _t3, ref3, row3, shown3 = self.seal(self.S3)
+        self.assertEqual(shown3, shown1)             # an overlap once does not make the text long for good
+        self.assertIn("display", row3)
+        # ... but with that third still unreceived a fourth is old-form again
+        _t4, ref4, row4, shown4 = self.seal(self.S1)
+        self.assertEqual(shown4, _t4)
+        self.assertNotIn("display", row4)
+        self.assertNotEqual(len({ref1, ref2, ref3, ref4}), 1)
+
+    def test_a_person_pasting_a_received_text_again_takes_the_waiting_record_once(self):
+        """Supervisor judgement, kept: the visible text is the only key, so a text pasted again
+        while a new record with the same visible text waits is that record's arrival."""
+        _t1, ref1, _r1, shown1 = self.seal(self.S1)
+        self.arrive(shown1, ref1, self.S1)
+        _t2, ref2, _r2, shown2 = self.seal(self.S2)          # same visible text, sealed after the first was received
+        self.assertEqual(shown2, shown1)
+        self.assertEqual(pm._read_pending(ref2)["state"], "pending")
+        # the person pastes the first message's text again
+        self.assertEqual(pm._display_resolve(shown1, self.recipient)["ref"], ref2)
+        self.assertEqual(pm.receive_peer_message(shown1, self.recipient), 0)
+        self.assertEqual(pm._read_pending(ref2)["state"], "received")   # the record it stands for, this recipient's own
+        def received_notices(ref):
+            return [r for r in pm._iter_records() if r.get("transfer_ref") == ref
+                    and r.get("delivery", {}).get("status") == "received"]
+        self.assertEqual(len(received_notices(ref2)), 1)
+        # closed once: the courier's own later arrival of that text and a third paste write nothing new
+        for _again in range(2):
+            self.assertEqual(pm.receive_peer_message(shown2, self.recipient), 0)
+        self.assertEqual(len(received_notices(ref2)), 1)
+        self.assertEqual(len(received_notices(ref1)), 1)
+
+    def test_a_message_that_never_arrives_does_not_keep_the_text_long_for_good(self):
+        _t1, ref1, row1, shown1 = self.seal(self.S1)
+        # a row received and then dropped by the history window (a week on) is not waiting
+        received = pm._read_pending(ref1)
+        os.unlink(pm._pending_path(ref1))
+        old = time.time() - 8 * 86400
+        os.utime(pm._transfer_path(ref1), (old, old))
+        self.assertIsNone(pm._read_pending(ref1))
+        _t2, ref2, row2, shown2 = self.seal(self.S2)
+        self.assertEqual(shown2, shown1)
+        self.assertIn("display", row2)
+        # and the old record cannot take the new one's arrival
+        self.assertEqual(pm._display_resolve(shown2, self.recipient)["ref"], ref2)
+        # while a row-less transfer that is still young is a send not yet received: it holds the text
+        _t3, ref3, row3, shown3 = self.seal(self.S1, body="다른 글")
+        os.unlink(pm._pending_path(ref3))
+        _t4, ref4, row4, shown4 = self.seal(self.S2, body="다른 글")
+        self.assertEqual(shown4, _t4)
+        self.assertNotIn("display", row4)
+        self.assertIsNotNone(received)
+
+    def test_a_seal_that_finds_the_text_lock_busy_takes_the_old_form(self):
+        _t1, ref1, _r1, shown1 = self.seal(self.S1)
+        self.arrive(shown1, ref1, self.S1)
+        digest = hashlib.sha256(shown1.encode("utf-8")).hexdigest()
+        with pm.pending_lock(pm._display_seal_key(digest, self.recipient)):
+            _t2, ref2, row2, shown2 = self.seal(self.S2)     # another seal of this text is in flight
+        self.assertEqual(shown2, _t2)
+        self.assertNotIn("display", row2)
+        self.assertEqual(self.pointers(shown1), [ref1])
+        _t3, ref3, row3, shown3 = self.seal(self.S1)   # lock released: the display form again
+        self.assertEqual(shown3, shown1)
+        self.assertIn("display", row3)
+
+    def test_the_visible_text_of_another_recipient_is_independent(self):
+        other = {"harness": "claude", "session_id": "recipient-other"}
+        pm.note_display_ready(other)
+        _t1, ref1, _r1, shown1 = self.seal(self.S1)
+        text2, ref2 = pm.prepare_peer_message("작업 끝났습니다", self.S2, other, defer=True)
+        self.assertEqual(pm.pasted_text(pm._read_pending(ref2)), shown1)    # not blocked by a message for another session
+
+    def test_a_delayed_delivery_prefix_binds_only_to_the_record_it_names(self):
+        _t1, ref1, _r1, shown1 = self.seal(self.S1)
+        self.arrive(shown1, ref1, self.S1)
+        _t2, ref2, _r2, shown2 = self.seal(self.S2)
+        self.assertEqual(shown2, shown1)
+
+        def delayed(ref):
+            return "[지연 전달 — 원래 보낸 시각 2026-11-19 10:00, 약 2시간 지연] (ref %s)\n%s" % (ref[:8], shown1)
+        # the prefix names the received first record: it binds that one, though the second waits
+        self.assertEqual(pm._display_resolve(delayed(ref1), self.recipient)["ref"], ref1)
+        self.assertEqual(pm._display_resolve(delayed(ref2), self.recipient)["ref"], ref2)
+        # a prefix that names no candidate binds nothing, as the old form's prefix check does
+        other8 = "0" * 8 if not ref1.startswith("0" * 8) and not ref2.startswith("0" * 8) else "f" * 8
+        stray = "[지연 전달 — 원래 보낸 시각 2026-11-19 10:00, 약 2시간 지연] (ref %s)\n%s" % (other8, shown1)
+        self.assertIsNone(pm._display_resolve(stray, self.recipient))
+        self.assertEqual(pm.expand_display_text(stray, self.recipient), stray)
+        self.assertIsNone((pm.parse_peer_trailer(stray, self.recipient) or {}).get("session_id"))
+        self.assertEqual(pm._read_pending(ref2)["state"], "pending")
+
+    def test_crlf_and_collapsed_blank_lines_are_not_bound_as_the_old_form_does_not(self):
+        body = "첫 줄\n\n셋째 줄"
+        text, ref, row, shown = self.seal(self.S1, body=body)
+        self.assertIsNotNone(pm._display_resolve(shown, self.recipient))
+        for name, changed in (("crlf", shown.replace("\n", "\r\n")),
+                              ("collapsed-blank-line", shown.replace("\n\n", "\n"))):
+            with self.subTest(changed=name):
+                self.assertNotEqual(changed, shown)
+                self.assertIsNone(pm._display_resolve(changed, self.recipient))
+                self.assertEqual(pm.expand_display_text(changed, self.recipient), changed)
+                self.assertIsNone((pm.parse_peer_trailer(changed, self.recipient) or {}).get("session_id"))
+                # the old form falls the same way for the same change
+                old_changed = text.replace("\n", "\r\n") if name == "crlf" else text.replace("\n\n", "\n")
+                self.assertIsNone((pm.parse_peer_trailer(old_changed, self.recipient) or {}).get("session_id"))
+        self.assertEqual(pm._read_pending(ref)["state"], "pending")
+
+
+class CodexQueueResend(DisplayFixture):
+    """The Codex queue compares what it sent with what it sends again: the text must not change
+    between attempts because a sealed record could not be read this time."""
+
+    def test_an_unreadable_sealed_record_stops_the_attempt_instead_of_changing_the_text(self):
+        import codex_queue_delivery
+        import codex_queue_dispatch
+        recipient = {"harness": "codex", "session_id": "queue-resend"}
+        pm.note_display_ready(recipient)
+        sender = {"harness": "claude", "session_id": "0100000a-0000-7000-8000-0000000000b1"}
+        text, ref = pm.prepare_peer_message("큐 재시도", sender, recipient, defer=True)
+        row = pm._read_pending(ref)
+        visible = pm.pasted_text(row)
+        self.assertNotEqual(visible, text)
+        self.assertEqual(pm.pasted_text(row, strict=True), visible)
+        real = pm._read_transfer_record
+
+        def unreadable_for_the_text(*args, **kwargs):
+            import inspect
+            if any(frame.function == "pasted_text" for frame in inspect.stack()[:8]):
+                raise OSError("transient read failure")
+            return real(*args, **kwargs)
+        with mock.patch.object(pm, "_read_transfer_record", side_effect=unreadable_for_the_text):
+            self.assertEqual(pm.pasted_text(row), text)                     # a plain carrier keeps the sealed text
+            with self.assertRaises(ValueError):
+                pm.pasted_text(row, strict=True)
+            with mock.patch.object(codex_queue_delivery, "send_at_least_once") as send, \
+                    mock.patch.object(codex_queue_dispatch, "resolve_queue_socket", return_value="unused"):
+                outcome = pm._deliver_pending_codex_row(ref, timeout=1, start_interrupted=False)
+        send.assert_not_called()                        # nothing was handed over under a changed text
+        self.assertEqual(outcome["status"], "unverified")
+        self.assertIn("peer-display-unreadable", outcome["reason"])
+        after = pm._read_pending(ref)
+        self.assertEqual((after["state"], after.get("rpc_claim")), ("pending", None))   # retried by the next pass
+        # read again, the same visible text goes out
+        with mock.patch.object(codex_queue_delivery, "send_at_least_once",
+                               return_value={"status": "queued", "queued_submission_id": "q1"}) as send, \
+                mock.patch.object(codex_queue_dispatch, "resolve_queue_socket", return_value="unused"):
+            pm._deliver_pending_codex_row(ref, timeout=1, start_interrupted=False)
+        self.assertEqual(send.call_args.kwargs["message"], visible)
 
 
 class OldFormsStillWork(DisplayFixture):
@@ -700,6 +1030,51 @@ class OldFormsStillWork(DisplayFixture):
                       {"harness": "claude", "session_id": "../x"}):
             self.assertFalse(pm.receiver_reads_display(other), other)
         self.assertTrue(pm.receiver_reads_display({"harness": "claude", "session_id": "sign-a"}))
+    def test_a_sign_older_than_two_days_is_not_believed_and_one_a_day_old_is_renewed(self):
+        recipient = {"harness": "opencode", "session_id": "sign-age"}
+        pm.note_display_ready(recipient)
+        path = pm._display_ready_path(recipient)
+        self.assertTrue(pm.receiver_reads_display(recipient))
+        for age_days, believed in ((0.5, True), (1.9, True), (2.1, False), (30, False)):
+            old = time.time() - age_days * 86400
+            os.utime(path, (old, old))
+            self.assertEqual(pm.receiver_reads_display(recipient), believed, age_days)
+        # a session whose code went back is sent the old form once its sign has gone stale
+        text, ref = pm.prepare_peer_message("되돌린 세션", self.sender, recipient, defer=True)
+        self.assertIn("(peer-from:", pm.pasted_text(pm._read_pending(ref)))
+        self.assertNotIn("display", pm._read_transfer_record(ref))
+        # the receiving code renews the sign at most once a day
+        old = time.time() - 0.5 * 86400
+        os.utime(path, (old, old))
+        pm.note_display_ready(recipient)
+        self.assertAlmostEqual(path.stat().st_mtime, old, delta=2)
+        old = time.time() - 1.5 * 86400
+        os.utime(path, (old, old))
+        pm.note_display_ready(recipient)
+        self.assertGreater(path.stat().st_mtime, time.time() - 60)
+        self.assertTrue(pm.receiver_reads_display(recipient))
+
+    def test_the_hint_and_sign_folders_are_dot_named_and_no_ledger_scanner_reads_them(self):
+        recipient = {"harness": "claude", "session_id": "dot-folders"}
+        pm.note_display_ready(recipient)
+        text, ref = pm.prepare_peer_message("점 폴더", self.sender, recipient, defer=True)
+        self.assertIn("display", pm._read_transfer_record(ref))
+        base = pm.peer_state_root() / "peer-messages"
+        self.assertEqual(pm._display_root(), base / ".display")
+        self.assertEqual(pm._display_ready_path(recipient).parents[1], base / ".display-ready")
+        self.assertEqual(sorted(p.name for p in base.iterdir() if "display" in p.name), [".display", ".display-ready"])
+        # a ledger-looking file inside either folder, and a real month file for contrast
+        record = json.dumps({"ts": "2026-11-19T00:00:00Z", "kind": "notice", "transfer_ref": "d" * 32})
+        for folder in (".display", ".display-ready"):
+            (base / folder / "stray.jsonl").write_text(record + "\n", encoding="utf-8")
+        month = base / "2026-11"
+        month.mkdir()
+        (month / "peer.jsonl").write_text(record.replace("d" * 32, "e" * 32) + "\n", encoding="utf-8")
+        self.assertEqual([r["transfer_ref"] for r in pm._iter_records() if r.get("transfer_ref") in ("d" * 32, "e" * 32)],
+                         ["e" * 32])
+        diagnostics, status = [], {"checked_roots": 0, "failed_roots": 0}
+        paths = fleet_peers._ledger_paths([str(pm.peer_state_root())], diagnostics, status)
+        self.assertEqual([os.path.relpath(p, base) for p in paths], ["2026-11/peer.jsonl"])
 
 
 if __name__ == "__main__":
