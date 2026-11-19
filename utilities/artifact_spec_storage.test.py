@@ -311,6 +311,28 @@ class LogicalRevisionReaderTest(unittest.TestCase):
         self.assertEqual(row['date'], '2026-11-10')
         self.assertEqual(storage.revision_created_on(self.root, self.ref, self.old), '2026-11-10T09:00:00Z')
 
+    def test_a_row_carries_the_first_heading_and_the_date_without_reopening_the_file_or_header(self):
+        from unittest import mock
+        self.indirect()
+        self._stamp(self.old, '2026-11-10T09:00:00Z')
+        self._stamp(self.new, '2026-11-18T09:00:00Z')
+        with mock.patch.object(storage, 'revision_created_on', side_effect=AssertionError('reopened')):
+            (row,) = storage.entrance_snapshot(self.root)['rows']
+        self.assertEqual((row['h1'], row['date']), ('Earlier exact PRD', '2026-11-10'))
+        self.assertEqual(storage._first_h1(b'---\ntitle: x\n---\n\n# After front matter\n'), 'After front matter')
+        self.assertEqual(storage._first_h1(b'no heading\n## sub\n'), '')
+        seen, live = [], [True]
+        def hook(event, args):
+            if live[0] and event == 'open' and isinstance(args[0], str):
+                seen.append(os.path.basename(args[0]))
+        sys.addaudithook(hook)
+        try:
+            storage.entrance_snapshot(self.root)
+        finally:
+            live[0] = False
+        self.assertEqual(seen.count('topic') + seen.count('prd.md'), 2)  # one no-follow walk to the one PRD
+        self.assertEqual(seen.count('revision.json'), 3)  # inventory, the latest header, the source header: once each
+
     def test_topic_date_falls_back_to_the_latest_revision_when_the_storing_header_has_no_date(self):
         self.indirect()
         self._stamp(self.new, '2026-11-18T09:00:00Z')

@@ -382,6 +382,10 @@
    "en": "spec",
    "ko": "spec"
   },
+  "entrance.spec_contents": {
+   "en": "Contents",
+   "ko": "목차"
+  },
   "entrance.spec_note": {
    "en": "How this repo works now. {count} topics; each change edits the same document.",
    "ko": "이 repo가 지금 어떻게 동작하는지. 주제 {count}개, 고칠 때마다 같은 문서를 고칩니다."
@@ -2221,6 +2225,10 @@
   "open.ambiguous": {
    "en": "Several artifacts match; add more words to narrow it.",
    "ko": "여러 문서가 맞습니다. 낱말을 더 넣어 좁혀 주세요."
+  },
+  "open.no_line": {
+   "en": "There is no line {number}. The entrance has lines 1 to {last}.",
+   "ko": "{number}번 줄이 없습니다. 지금 입구는 1번부터 {last}번까지입니다."
   },
   "open.not_found": {
    "en": "No artifact matches {query}.",

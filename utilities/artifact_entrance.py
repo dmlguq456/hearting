@@ -104,6 +104,8 @@ ROW_SOURCES: Tuple[Callable[[Path], Iterable[Mapping]], ...] = (_daily_journals,
 _DATE_FULL = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 ENTRANCE_NAMES = store.ENTRANCE_NAMES
+DERIVED_KINDS = ("spec-rest", "all-campaigns", "recent-routes")  # lines that open a derived chapter
+ENTRANCE_FIRST = ("README.md", "index.html")  # the entrance proper, written after its chapters
 FIRST_RECORD_REL = ".runtime/artifact-entrance.json"
 
 _STATUS_NAMES = tuple(unicodedata.normalize("NFC", name).casefold()
@@ -139,6 +141,7 @@ def _fallback_translator(message: str, /, **fields: Any) -> str:
         "entrance.records_note": "Reports left by routes. Not usually opened.",
         "entrance.all_spec": "All spec topics",
         "entrance.spec_rest": "{count} more",
+        "entrance.spec_contents": "Contents",
         "entrance.more": "+{count} more",
         "entrance.cycles": "routes {count}",
         "entrance.latest": "latest {date}",
@@ -158,6 +161,7 @@ def _fallback_translator(message: str, /, **fields: Any) -> str:
         "reports.entrance": "Entrance: {path}",
         "open.not_found": "No artifact matches {query}.",
         "open.ambiguous": "Several artifacts match; add more words to narrow it.",
+        "open.no_line": "There is no line {number}. The entrance has lines 1 to {last}.",
         "install.entrance": ("Results land in each project's `.agent_reports/`; "
                              "open its `README.md` or run `hearting reports`."),
         "completion.entrance": "Artifact list: {path}",
@@ -553,9 +557,11 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
     recent.sort(key=lambda row: (_desc(row.get("at") or row["date"]), row["cycle_id"] or row["doc_path"], row["doc_path"]))
     snapshot["recent"] = recent[:recent_limit]
     topics.sort(key=lambda row: (_desc(row["date"]), row.get("component") or "", row["doc_path"]))
-    for row in topics:  # `all-spec.*` shows every topic, so every title is read
-        if row.get("component"):
-            row["title"] = _spec_title(root, row)
+    with_components = {row.get("reference_id") for row in topics if row.get("component")}
+    for row in topics:  # titles come from the PRD bytes the spec reader already verified
+        row["role"] = "contents" if not row.get("component") and row.get("reference_id") in with_components \
+            else "topic"
+        _topic_title(row)
     snapshot["topics"] = topics
     snapshot["campaigns"] = [dict(row) for row in snapshot["all_campaigns"][:campaign_limit]]
     return snapshot
@@ -564,15 +570,18 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
 _SPEC_TAIL = re.compile(r" — [^—]*\bPRD\b[^—]*$")
 
 
-def _spec_title(root: Path, row: Dict[str, Any]) -> str:
-    """The topic's first H1 without its trailing ` — …PRD…` part; the component name otherwise."""
-    component = row["title"]
-    try:
-        found = _markdown_title(_read_head(root, root / row["doc_path"]))
-    except Exception:  # noqa: BLE001 - a title never blocks the entrance
-        found = None
-    title = _SPEC_TAIL.sub("", found).strip() if found else ""
-    return " ".join(title.split()) or component
+def _topic_title(row: Dict[str, Any]) -> None:
+    """Set the line's title from the PRD's first H1 (already read with the PRD).
+
+    A topic drops the H1's trailing ` — …PRD…` part and falls back to the component name,
+    or to the reference's title for a reference without components.  A reference's top
+    contents `prd.md` keeps its H1 as written; without one the renderer says "Contents"."""
+    h1 = row.get("h1") or ""
+    if row["role"] == "contents":
+        row["title"] = h1
+        return
+    title = _SPEC_TAIL.sub("", h1).strip()
+    row["title"] = " ".join(title.split()) or row["title"]
 
 
 def _document_path(root: Path, doc: str, *, placed: bool = False,
@@ -640,6 +649,8 @@ def _source_row(root: Path, raw: Any) -> Optional[Dict[str, Any]]:
         row.update({key: raw.get(key) for key in ('artifact_root_id', 'repository_id', 'campaign_id',
             'cycle_id', 'cycle_path', 'artifact_id', 'artifact_revision_id', 'reference_id', 'component',
             'revision_id', 'source_revision_id', 'source_path', 'logical_locator', 'status', 'coverage', 'digest')})
+        h1 = raw.get('h1')
+        row['h1'] = " ".join(_nfc(h1).split()) if isinstance(h1, str) else ""
     if kind == "journal-entry":
         from artifact_journal import is_well_formed
         if not (is_well_formed(raw.get("artifact_id", ""), "artifact")
@@ -705,7 +716,9 @@ class _Desc:
 
 
 def recent_rows(root: Path, limit: int = RECENT_LIMIT) -> List[Dict[str, Any]]:
-    """The numbered list `hearting reports` and `hearting open` share with the entrance."""
+    """Recent records (cycle reports, journal entries, campaign documents), newest first, at most `limit`.
+
+    Not the entrance's numbered lines (`entrance_sections` owns those)."""
     return scan(root, recent_limit=limit)["recent"]
 
 
@@ -726,6 +739,11 @@ def all_campaigns(root: Path) -> List[Dict[str, Any]]:
 
 def _md_text(value: str) -> str:
     return re.sub(r"([\\`*_\[\]])", r"\\\1", _nfc(value))
+
+
+def _md_summary(value: str) -> str:
+    """A model-written summary line: Markdown specials and `<`, `>`, `&` show as typed."""
+    return _md_text(value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
 def _md_href(path: str) -> str:
@@ -770,17 +788,17 @@ def _row_status(row, t):
 
 def _markdown_recent(snapshot: Dict[str, Any], t) -> List[str]:
     lines: List[str] = []
-    for number, row in enumerate(snapshot["recent"], start=1):
+    for row in snapshot["recent"]:
         suffix = f"  ({t('entrance.more', count=_count(row['extra']))})" if row["extra"] else ""
         where = f"  — `{_md_href(row['cycle_path'])}`" if row["cycle_path"] else ""
-        lines.append(f"{number}. {row['date']}  [{_md_text(row['title'])}](<{_record_md_href(row)}>)"
+        lines.append(f"- {row['date']}  [{_md_text(row['title'])}](<{_record_md_href(row)}>)"
                      f"{where}{suffix}")
         if row["kind"] in ("journal-entry", "campaign-document"):
             links = [f"[{t('entrance.open_record')}](<{_record_md_href(row)}>)"]
             links += [f"[{t('entrance.open_result')}](<{item['href']}>)" for item in _result_links(row)]
             lines.append("   " + " · ".join(links) + " · " + _md_text(_row_status(row, t)))
         if row["summary"]:
-            lines.append(f"   {_md_text(row['summary'])}")
+            lines.append(f"   {_md_summary(row['summary'])}")
     if not lines:
         lines.append(t("entrance.empty"))
     if _partial_sources(snapshot):
@@ -788,8 +806,14 @@ def _markdown_recent(snapshot: Dict[str, Any], t) -> List[str]:
     return lines
 
 
-def _spec_components(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return [row for row in (snapshot.get("topics") or []) if row.get("component")]
+def _spec_topics(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every spec topic: each component's PRD, and the top `prd.md` of a reference without components."""
+    return [row for row in (snapshot.get("topics") or []) if row.get("role") == "topic"]
+
+
+def _spec_contents(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The top `prd.md` of a reference that has components: a table of contents, not a topic."""
+    return [row for row in (snapshot.get("topics") or []) if row.get("role") == "contents"]
 
 
 def entrance_sections(snapshot: Dict[str, Any], t) -> List[Dict[str, Any]]:
@@ -807,7 +831,7 @@ def entrance_sections(snapshot: Dict[str, Any], t) -> List[Dict[str, Any]]:
                 "directory": directory, "number": None}
 
     sections: List[Dict[str, Any]] = []
-    components = _spec_components(snapshot)
+    components = _spec_topics(snapshot)
     if components:
         lines = [line("spec", row["title"], _record_md_href(row), _record_href(row), row["doc_path"],
                       date=row["date"], row=row) for row in components[:ENTRANCE_SPEC_LINES]]
@@ -822,9 +846,10 @@ def entrance_sections(snapshot: Dict[str, Any], t) -> List[Dict[str, Any]]:
              for row in snapshot["campaigns"][:ENTRANCE_CAMPAIGN_LINES]]
     if not lines:
         lines.append(line("text", t("entrance.empty"), None, None, None))
-    lines.append(line("all-campaigns", t("entrance.all_campaigns_line",
-                                         count=_count(len(snapshot["all_campaigns"]))),
-                      "all-campaigns.md", "all-campaigns.html", "all-campaigns.html"))
+    else:
+        lines.append(line("all-campaigns", t("entrance.all_campaigns_line",
+                                             count=_count(len(snapshot["all_campaigns"]))),
+                          "all-campaigns.md", "all-campaigns.html", "all-campaigns.html"))
     sections.append({"key": "campaigns", "title": t("entrance.section_campaigns"),
                      "note": t("entrance.campaigns_note"), "lines": lines})
     sections.append({"key": "records", "title": t("entrance.section_records"), "note": "", "lines": [
@@ -861,7 +886,7 @@ def render_markdown(snapshot: Dict[str, Any], t) -> str:
             when = f"{item['date']}  " if item["date"] else ""
             lines.append(f"{item['number']}. {when}[{_md_text(item['title'])}](<{item['md']}>)")
             if item["summary"]:
-                lines.append(f"   {_md_text(item['summary'])}")
+                lines.append(f"   {_md_summary(item['summary'])}")
             if item["note"]:
                 lines.append(f"   {_md_text(item['note'])}")
         if section["key"] == "records" and _partial_sources(snapshot):
@@ -898,8 +923,11 @@ def render_all_markdown(snapshot: Dict[str, Any], t) -> str:
 
 
 def render_spec_markdown(snapshot: Dict[str, Any], t) -> str:
-    components = _spec_components(snapshot)
+    components = _spec_topics(snapshot)
     lines = [MARKER, f"# {t('entrance.all_spec')}", "", f"[{t('entrance.back')}](<README.md>)", ""]
+    for row in _spec_contents(snapshot):
+        lines.extend([f"{row['date']}  [{_md_text(row['title'] or t('entrance.spec_contents'))}]"
+                      f"(<{_record_md_href(row)}>)", ""])
     for row in components:
         lines.append(f"- {row['date']}  [{_md_text(row['title'])}](<{_record_md_href(row)}>)")
     if not components:
@@ -997,16 +1025,20 @@ def render_html(snapshot: Dict[str, Any], t) -> str:
 
 def render_recent_html(snapshot: Dict[str, Any], t) -> str:
     body = [f"<h1>{_escape(t('entrance.recent_routes'))}</h1>",
-            f'<p><a href="index.html">{_escape(t("entrance.back"))}</a></p>', "<ol>"]
+            f'<p><a href="index.html">{_escape(t("entrance.back"))}</a></p>', "<ul>"]
     body.extend(_html_recent_items(snapshot, t))
-    body.extend(["</ol>", f'<p class="note">{_escape(t("entrance.rewrite"))}</p>'])
+    body.extend(["</ul>", f'<p class="note">{_escape(t("entrance.rewrite"))}</p>'])
     return _html_page(t("entrance.recent_routes"), getattr(t, "lang", "en"), body)
 
 
 def render_spec_html(snapshot: Dict[str, Any], t) -> str:
-    components = _spec_components(snapshot)
+    components = _spec_topics(snapshot)
     body = [f"<h1>{_escape(t('entrance.all_spec'))}</h1>",
-            f'<p><a href="index.html">{_escape(t("entrance.back"))}</a></p>', "<ul>"]
+            f'<p><a href="index.html">{_escape(t("entrance.back"))}</a></p>']
+    for row in _spec_contents(snapshot):
+        body.append(f'<p><span class="meta">{_escape(row["date"])}</span> '
+                    f'<a href="{_record_href(row)}">{_escape(row["title"] or t("entrance.spec_contents"))}</a></p>')
+    body.append("<ul>")
     for row in components:
         body.append(f'<li><span class="meta">{_escape(row["date"])}</span> '
                     f'<a href="{_record_href(row)}">{_escape(row["title"])}</a></li>')
@@ -1186,7 +1218,10 @@ def _refresh_and_snapshot(root: Path, cycle_id: Optional[str] = None):
     written: List[str] = []
     foreign: List[str] = []
     created: List[str] = []
-    for name in ENTRANCE_NAMES:
+    # The chapters the entrance points at are written first and the two entrance files
+    # last, so a write that fails part-way never leaves an entrance pointing at a chapter
+    # that does not exist.
+    for name in (*(n for n in ENTRANCE_NAMES if n not in ENTRANCE_FIRST), *ENTRANCE_FIRST):
         if name not in payloads:
             continue
         path = root / name
@@ -1306,9 +1341,9 @@ def _command_reports(root: Path) -> int:
     result, snapshot = _refresh_and_snapshot(root)
     t = _translator()
     sections = entrance_sections(snapshot, t) if snapshot else []
-    if _partial_sources(snapshot):
+    if snapshot and _partial_sources(snapshot):
         print(t("entrance.partial"))
-    if not any(item["kind"] in ("spec", "campaign") for section in sections for item in section["lines"]):
+    if not sections:
         print(t("reports.empty"))
     for section in sections:
         print(section["title"])
@@ -1320,7 +1355,10 @@ def _command_reports(root: Path) -> int:
                 continue
             when = f"{item['date']}  " if item["date"] else ""
             print(f"{item['number']}. {when}{item['title']}")
-            print(f"   {item['target']}")
+            # a terminal reads the `.md` chapter; `index.html` links the `.html` one
+            print(f"   {item['md'] if item['kind'] in DERIVED_KINDS else item['target']}")
+            if item["summary"]:
+                print(f"   {item['summary']}")
             if item["note"]:
                 print(f"   {item['note']}")
     print(t("reports.entrance", path=str(root / "README.md")))
@@ -1349,7 +1387,10 @@ def _command_open(root: Path, args: Sequence[str]) -> int:
                 for item in section["lines"] if item["number"] is not None]
     line: Optional[Dict[str, Any]] = None
     chosen: Optional[Dict[str, Any]] = None
-    if len(args) == 1 and args[0].isdigit() and 1 <= int(args[0]) <= len(numbered):
+    if len(args) == 1 and args[0].isascii() and args[0].isdigit():
+        if not 1 <= int(args[0]) <= len(numbered):  # a number is a line, never a search word
+            print(t("open.no_line", number=args[0], last=len(numbered)), file=sys.stderr)
+            return 1
         line = numbered[int(args[0]) - 1]
         chosen = line["row"] or {"doc_path": line["target"], "kind": line["kind"]}
     if chosen is None:

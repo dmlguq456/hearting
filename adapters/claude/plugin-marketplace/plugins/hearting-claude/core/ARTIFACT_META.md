@@ -270,7 +270,7 @@ shows.
 
 Eight files directly under the artifact root, written by `utilities/artifact_entrance.py`:
 `README.md` and `index.html` (the entrance), `all-campaigns.md` / `all-campaigns.html`
-(every campaign), `all-spec.md` / `all-spec.html` (every spec topic) and
+(every campaign), `all-spec.md` / `all-spec.html` (every spec topic, plus the contents line below) and
 `recent-route-reports.md` / `recent-route-reports.html` (the recent route reports). They are a derived reading surface, not canonical records: admission,
 census and residue never take them as input, and deleting them is safe — the next publish
 recreates them. They are classified `C-RT` in `core/CORE.md` §3.
@@ -290,9 +290,15 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   the "recent route reports" line carries one line saying the page is not usually opened;
   none of these lines is numbered. `all-spec.*` lists every spec topic in the entrance's
   form and order (date, linked title) with a link back to the entrance, or "No documents
-  yet." when there is none. The recent
-  route reports page lists the 20 most recent user-facing documents (date, title,
-  one-line summary, "+N more"), with a link back to the entrance. Every link is a
+  yet." when there is none. A spec topic is a component's `prd.md`, or the top `prd.md`
+  of a reference that has no component folder (titled by its first heading, else the
+  reference's title). The top `prd.md` of a reference with components is a table of
+  contents, not a topic: it is not counted in "N topics" or "N more" and only
+  `all-spec.*` shows it, as one line above the topics (its first heading, else
+  "Contents"; the day follows the topic rule). The recent
+  route reports page lists the 20 most recent user-facing documents as a bulleted list
+  (date, title, one-line summary, "+N more"; no numbers, which belong to the entrance's
+  lines), with a link back to the entrance. Every link is a
   relative path; there is no absolute path, host name, user name, script or external
   resource in any file.
 - **Reading rule.** A document row marked `audience: "user"` is user-facing; a row without
@@ -303,14 +309,20 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   no full scan and no cache.
 - **Row sources.** Rows come from sealed cycles today; a source of rows that are not cycle
   folders plugs in through `artifact_entrance.ROW_SOURCES`, and its rows join the same
-  list. The spec topic rows (`canonical-topic`) go to the spec section; every other row
-  goes to the recent route reports page.
-- **Commands.** `hearting reports` prints the entrance's numbered lines in the terminal and
+  list. The spec topic rows (`canonical-topic`) go to the spec section (a reference's
+  contents `prd.md` only to `all-spec.*`); every other row goes to the recent route
+  reports page.
+- **Commands.** `hearting reports` prints the entrance's numbered lines in the terminal
+  (campaign summaries included; the derived chapters are named by their `.md` file) and
   `hearting open <number|words>` opens that line (a spec topic, a campaign folder, a page)
-  or, with no argument, the browser entrance. Words search the route reports and the spec
+  or, with no argument, the browser entrance. A lone number that is not an entrance line
+  prints one line on stderr and exits 1; it is never searched as a word. Words search the route reports and the spec
   topics; when several match, the list is printed without numbers and the words are to be
   narrowed. Both names are reserved by the one launcher (`tools/install/harness.sh`) in
   every runtime and are not installer subcommands.
+- **Write order.** The chapters the entrance points at are written first and `README.md`
+  and `index.html` last, so an interrupted publish never leaves an entrance pointing at a
+  chapter that was not written.
 - **Ownership.** Each file starts with `<!-- hearting:artifact-entrance v1 -->` (an HTML
   file keeps `<!DOCTYPE html>` above it). A same-named file without that marker, or a
   symbolic link at that name, is never overwritten, followed, or moved — it stays its

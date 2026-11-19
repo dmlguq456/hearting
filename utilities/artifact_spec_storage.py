@@ -377,12 +377,53 @@ def revision_created_on(root, reference_id, revision_id):
             snapshot.close()
 
 
+def _first_h1(data):
+    """The first `# ` heading in the first 16 KiB of already-read bytes (front matter skipped)."""
+    lines = data[:16 * 1024].decode('utf-8', 'replace').splitlines()
+    start = 0
+    if lines and lines[0].strip() == '---':
+        for at in range(1, len(lines)):
+            if lines[at].strip() == '---':
+                start = at + 1
+                break
+    for line in lines[start:]:
+        stripped = line.strip()
+        if stripped.startswith('# '):
+            return stripped[2:].strip()
+    return ''
+
+
+def _read_topic_files(root, reference_id, revision_id, paths):
+    """`read_files` plus each source revision's `created_on`, from the headers that same
+    snapshot already read while verifying the files (no second open)."""
+    snapshot = None
+    try:
+        snapshot = _Snapshot(root, reference_id, revision_id)
+        snapshot.roster()
+        snapshot.header(revision_id)
+        files = {name: snapshot.file(name) for name in sorted(paths)}
+        created = {}
+        for provider, (record, _, _) in snapshot.headers.items():
+            value = record.get('created_on')
+            created[provider] = value if isinstance(value, str) else None
+        return files, created
+    except StorageError:
+        raise
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError) as error:
+        raise StorageError(str(error)) from error
+    finally:
+        if snapshot is not None:
+            snapshot.close()
+
+
 def entrance_snapshot(root, *, limit=300):
     """Canonical topics from existing reference/component/revision identities.
 
     A topic's date is the `created_on` of the revision that physically stores its
     PRD (`source_revision_id`), so an unchanged component keeps the day it was last
-    changed; when that header cannot be read the latest revision's date is used."""
+    changed; when that header cannot be read the latest revision's date is used.
+    Each row also carries `h1`, the PRD's first heading, taken from the bytes this
+    one snapshot already verified, so nothing is opened a second time."""
     root = Path(root).resolve()
     rows, errors = [], []
     root_fd = shared_fd = None
@@ -431,20 +472,20 @@ def entrance_snapshot(root, *, limit=300):
                              and not row['path'].startswith('_internal/'))]
                 if len(rows) + len(paths) > limit:
                     paths = paths[:limit-len(rows)]; coverage = 'partial'
-                files, _ = read_files(root, reference, revision, paths=paths)
+                files, headers = _read_topic_files(root, reference, revision, paths)
                 stored_on = {}
                 for logical, file in files.items():
                     component = logical.split('/')[0] if '/' in logical else None
                     source = file.source_revision_id
                     if source not in stored_on:
                         stored_on[source] = (inventory.get('created_on') if source == revision
-                                             else revision_created_on(root, reference, source))
+                                             else headers.get(source))
                     date = str(stored_on[source] or inventory.get('created_on') or '')[:10]
                     if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date):
                         date = str(inventory.get('created_on') or '')[:10]
                     if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date): date = ''
                     rows.append({'kind': 'canonical-topic', 'title': component or record.get('title') or record.get('key') or reference,
-                        'date': date, 'summary': '', 'doc_path': file.path.relative_to(root).as_posix(),
+                        'date': date, 'summary': '', 'h1': _first_h1(file.data), 'doc_path': file.path.relative_to(root).as_posix(),
                         'artifact_root_id': owner.artifact_root_id if owner else None,
                         'repository_id': owner.repository_id if owner else None,
                         'campaign_id': None, 'cycle_id': None, 'cycle_path': None,
