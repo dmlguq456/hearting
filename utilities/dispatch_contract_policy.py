@@ -235,7 +235,9 @@ def headless_attempt_policy(
     if int(node.get("dispatch_depth", -1)) != dispatch_depth:
         raise DispatchContractError("route-dispatch-depth-mismatch", str(node.get("dispatch_depth")))
 
-    if serial_attempt_route(route):
+    if serial_attempt_route(route) and int(node.get("dispatch_depth", -1)) == 1:
+        # The policy follows the node: a depth-1 node of a serial-attempt route (the owner, a frame leg,
+        # a unit leg) takes the candidate-list rules; a depth-2 node takes the checked-chain rules below.
         # Quick is a THREE-node route now (`frame`, `frame-alternative`,
         # `one-shot`), so the shape check is a per-node-id table rather than a
         # pin to a single id. Depth 1 and "no parent slug" still hold for all
