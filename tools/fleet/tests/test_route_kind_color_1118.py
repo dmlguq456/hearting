@@ -96,21 +96,21 @@ class KindCell(unittest.TestCase):
             for intensity, weight in (("quick", "kindq_"), ("standard", "kinds_"), ("strong", "kindb_"), ("thorough", "kindb_"), ("adversarial", "kindb_")):
                 got = tables._kind_cell({"capability": "word", "field": field, "shape": "staged", "intensity": intensity})
                 # 11-19: the bracket holds the form and the intensity (`staged·quick`); its color and weight follow the intensity
-                self.assertEqual(got, [("word", "kind_" + field), ("(staged·%s)" % intensity, weight + field)])
+                self.assertEqual(got, [("word", "kind_" + field), ("(team·%s)" % intensity, weight + field)])
         self.assertEqual(tables._kind_cell({"capability": "spec", "field": "plan", "shape": "staged", "intensity": "strong"}),
-                         [("spec", "grp"), ("(staged·strong)", "dim")])
+                         [("spec", "grp"), ("(team·strong)", "dim")])
         # An older route (no field) with a field's own name as its kind.
         self.assertEqual(tables._kind_cell({"capability": "lab", "shape": "one-shot-owner", "intensity": "quick"}),
-                         [("lab", "kind_lab"), ("(one-shot·quick)", "kindq_lab")])
+                         [("lab", "kind_lab"), ("(solo·quick)", "kindq_lab")])
         self.assertEqual(tables._kind_cell({"capability": "draft", "shape": "staged", "intensity": "quick"}),
-                         [("draft", "grp"), ("(staged·quick)", "dim")])
+                         [("draft", "grp"), ("(team·quick)", "dim")])
         # No intensity in the record: the form alone; a shape with no form keeps its intensity bracket alone; the form alone is plain.
-        self.assertEqual(tables._kind_cell({"capability": "code", "field": "code", "shape": "staged"}), [("code", "kind_code"), ("(staged)", "kinds_code")])
+        self.assertEqual(tables._kind_cell({"capability": "code", "field": "code", "shape": "staged"}), [("code", "kind_code"), ("(team)", "kinds_code")])
         self.assertEqual(tables._kind_cell({"capability": "code", "field": "code", "shape": "map-reduce", "intensity": "strong"}),
                          [("code", "kind_code"), ("(strong)", "kindb_code")])
         # `staged+resource` is staged; the tail folds first and the colour stays that of the intensity
         self.assertEqual(tables._kind_cell({"capability": "lab", "field": "lab", "shape": "staged+resource", "intensity": "thorough"}, tail=False),
-                         [("lab", "kind_lab"), ("(staged)", "kindb_lab")])
+                         [("lab", "kind_lab"), ("(team)", "kindb_lab")])
         self.assertEqual(tables._kind_cell({"capability": "lab", "field": "lab", "shape": "staged", "intensity": "strong"}, bracket=False),
                          [("lab", "kind_lab")])
 
@@ -130,9 +130,9 @@ class KindCell(unittest.TestCase):
                  "stages": [{"name": "one-shot", "st": "active"}], "legs": (("one-shot", "active", None),), "tree_label": "lab",
                  "title": "t", "age": "2m", "repo": "hearting"}
         tables._draw_route_progress(grid, 0, 60, 0, route, card=False)
-        keys = {grid.cells[0][x][0]: grid.cells[0][x][1] for x in range(60)}
-        self.assertEqual(keys["l"], "kind_lab", keys)
-        self.assertEqual(keys["q"], "kindq_lab", keys)        # `(quick)`
+        keys = {grid.cells[0][x][0]: grid.cells[0][x][1] for x in reversed(range(60))}      # (first cell of each glyph)
+        self.assertEqual(grid.cells[0][0][1], "kind_lab", keys)                       # `lab`
+        self.assertEqual(keys["("], "kindq_lab", keys)                                # `(solo·quick)`: the whole bracket, the intensity's weight
 
     def test_curses_gets_a_pair_for_each_hue_above_the_tint_pairs_and_the_words_read_as_before_under_256_colors(self):
         self.assertGreaterEqual(render._KIND_PAIR_START, render._TINT_PAIR_START + len(render._TINT_LVL) * len(palette._HUE_PALETTE))

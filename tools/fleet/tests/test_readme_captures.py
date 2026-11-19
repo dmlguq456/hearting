@@ -86,8 +86,8 @@ class ReadmeDemoRows(unittest.TestCase):
         self.assertIn("codex", text["overview"])
         self.assertIn("opencode", text["overview"])
         self.assertIn("answer needed", text["overview"])
-        # Spec E9 rule 24, 11-17 (route row 5): a staged route reads its kind and place (`code(staged·standard) · 2/4: execute`).
-        self.assertRegex(text["overview"], r"code\(staged(?:·\w+)?\) · \d+/\d+: execute")      # (11-19: the bracket says `staged`)
+        # Spec E9 rule 24, 11-17 (route row 5): a staged route reads its kind and place (`code(team·standard) · 2/4: execute`).
+        self.assertRegex(text["overview"], r"code\(team(?:·\w+)?\) · \d+/\d+: execute")      # (11-19: the bracket says `team`)
         self.assertIn("◑ to answer 1", text["questions"])
         self.assertIn("GPU", text["resources"])
         # The session page's MESSAGES (the note it sent [e8]) and the session it is linked with.
@@ -102,7 +102,7 @@ class ReadmeDemoRows(unittest.TestCase):
         # PEERS lists the newest link of each kind: the request [4f] sent [b2] stands as a PEER REQUEST link.
         self.assertRegex(text["peers"], r"\[4f\] claude +→ +\[b2\] codex +PEER REQUEST")
         self.assertIn("Test run for [4f]", text["overview"])
-        self.assertRegex(text["routes"], r"Rate limiting +code\(staged(?:·\w+)?\) · 2/4: execute")
+        self.assertRegex(text["routes"], r"Rate limiting +code\(team(?:·\w+)?\) · 2/4: execute")
         self.assertIn("leg 1 · code dev", text["routes"])
         for name in ("overview", "peers", "routes"):
             self.assertNotIn("more below", text[name], name)

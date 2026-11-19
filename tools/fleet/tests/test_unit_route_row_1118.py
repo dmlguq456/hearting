@@ -140,13 +140,34 @@ class UnitRouteWords(unittest.TestCase):
         # An older unit route records no field: `unit`, still with no bracket (never `unit(unit)`) and no unit name.
         self.assertEqual(self.cell(self.unit(), 40), "unit")
         # A route with an owner keeps its intensity bracket.
-        self.assertEqual(self.cell({**self.unit(), "capability": "code", "worker_unit": "dev/backend"}, 40), "code(one-shot·quick)")
+        self.assertEqual(self.cell({**self.unit(), "capability": "code", "worker_unit": "dev/backend"}, 40), "code(solo·quick)")
         # the whole bracket follows the intensity's color and weight (quick: the field's hue, dim; strong: bold); no field hue: dim
         self.assertEqual(tables._kind_cell(self.unit(field="code")), [("code", "kind_code"), ("(unit·quick)", "kindq_code")])
         self.assertEqual(tables._kind_cell(self.unit(field="code", intensity="strong")), [("code", "kind_code"), ("(unit·strong)", "kindb_code")])
         self.assertEqual(tables._kind_cell(self.unit(field="plan")), [("plan", "grp"), ("(unit·quick)", "dim")])
         self.assertEqual(tables._kind_cell(self.unit(field="code"), bracket=False), [("code", "kind_code")])
         self.assertEqual(tables._kind_cell(self.unit()), [("unit", "grp")])
+
+    def test_the_popups_form_word_reads_the_same_unit_solo_team_and_frame(self):
+        # 11-19 (the person: "team도 괜찮은데?"): the popup's `shape` text is the bracket's word: `unit` / `solo` / `team` / `frame`
+        # (en; ko `유닛` / `단독` / `팀` / `frame`), a unit route's recorded shape `solo` notwithstanding
+        from fleet import palette
+        codes = lambda shape: {"codes": {"schema": "route_visibility_codes_v1", "shape": shape, "stages": [],
+                                         "verification": {"review": "none", "ci": "none", "gate": "none"}}}
+        for lang, words in (("English", ("solo", "team", "frame", "unit")), ("한국어", ("단독", "팀", "frame", "유닛"))):
+            with patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
+                got = [session_panel.route_evidence(codes(shape), unit=unit)["summary"].split(" · ")[0]
+                       for shape, unit in (("solo", False), ("staged", False), ("framed", False), ("solo", True))]
+            self.assertEqual(tuple(got), words, lang)
+        # the form word itself is decided in one place
+        self.assertEqual([palette.route_form("code", shape) for shape in ("one-shot-owner", "solo", "staged", "staged+resource", "framed", "map-reduce")],
+                         ["solo", "solo", "team", "team", "", ""])
+        self.assertEqual((palette.route_form("unit", "solo", "code"), palette.route_form("unit", "solo", "")), ("unit", ""))
+
+    def test_a_one_step_rail_draws_the_one_shot_node_by_the_forms_name(self):
+        # 11-19: the node id `one-shot` is the record's; the Fleet rail draws it as `solo`
+        self.assertEqual(tables._stage_items([{"name": "one-shot", "st": "active"}])[0][0][0][0], "solo")
+        self.assertEqual(tables._stage_items([{"name": "execute", "st": "active"}])[0][0][0][0], "execute")
 
     def test_the_panel_row_names_the_unit_and_the_field(self):
         row = {"capability": "unit", "worker_unit": "qa/code-review", "marker": "working", "field": "code",
@@ -158,9 +179,10 @@ class UnitRouteWords(unittest.TestCase):
         self.assertEqual((kind["intensity"], kind["kind_form"]), ("quick", "unit"))   # (11-19: the intensity of a unit route is sent too, and its form)
         self.assertNotIn("chain", kind)                 # (and it is nobody's leg)
         owned = session_panel.route_kind({**row, "capability": "code", "shape": "staged"})
-        self.assertEqual((owned["intensity"], owned["kind_form"]), ("quick", "staged"))
-        self.assertEqual(session_panel.route_kind({**row, "capability": "code", "shape": "one-shot-owner"})["kind_form"], "one-shot")
-        self.assertEqual(session_panel.route_kind({**row, "capability": "code", "shape": "staged+resource"})["kind_form"], "staged")
+        self.assertEqual((owned["intensity"], owned["kind_form"]), ("quick", "team"))
+        self.assertEqual(session_panel.route_kind({**row, "capability": "code", "shape": "one-shot-owner"})["kind_form"], "solo")
+        self.assertEqual(session_panel.route_kind({**row, "capability": "code", "shape": "solo"})["kind_form"], "solo")
+        self.assertEqual(session_panel.route_kind({**row, "capability": "code", "shape": "staged+resource"})["kind_form"], "team")
         for shape in ("framed", "direct", "", "map-reduce", "transactional-owner"):      # (no form: the intensity bracket as before)
             self.assertNotIn("kind_form", session_panel.route_kind({**row, "capability": "code", "shape": shape}), shape)
         self.assertNotIn("kind_form", session_panel.route_kind({**row, "field": ""}))   # (an older unit route: no form, no bracket)

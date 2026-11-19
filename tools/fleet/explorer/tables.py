@@ -901,7 +901,7 @@ TOOL_TARGET_W = 40          # ``>_ python3 · tools/run-tests.py --sel…`` on a
 
 
 def _route_rail_text(route):
-    """The stage rail's plain words, to size it before drawing (``one-shot ●``)."""
+    """The stage rail's plain words, to size it before drawing (``solo ●``)."""
     stages = route.get("stages") or ()
     current = next((stage for stage in stages if stage.get("st") in ("active", "failed")), None)
     if len(stages) <= 1:
@@ -914,7 +914,7 @@ def route_now_texts(route):
     the open tool's allow-listed summary, widest first and each a whole value
     (``python3 tools/run-tests.py``, ``python3 run-tests.py``, ``python3``); a path gives way
     to its file name, then the tool name stands alone. Empty for a staged or chained route,
-    or when nothing open is observed (the row keeps ``one-shot ●``)."""
+    or when nothing open is observed (the row keeps ``solo ●``)."""
     doer = route.get("doer")
     stages = route.get("stages") or ()
     if (not isinstance(doer, Mapping) or not doer.get("tool") or len(stages) != 1
@@ -933,7 +933,7 @@ def route_now_texts(route):
 
 
 def _draw_route_now(grid, x, end, y, route, texts):
-    """``one-shot ● python3 tools/run-tests.py  3m · +1 agent`` in a one-step route's progress
+    """``solo ● python3 tools/run-tests.py  3m · +1 agent`` in a one-step route's progress
     cell: its stage word and mark first (spec E9 rule 24: the kind word stays, as on the
     shell panel's third row), then the widest summary that fits, with the tool's time and
     agent count when they fit too (the agent count goes first). False when not even the
@@ -1105,7 +1105,7 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
                    repo_w=None, title_below=True):
     """One route on one line, in the session row's columns:
 
-    ``⠏ [e9]    claude Opus 5.5 med   ━━──────── 25%  PR #1505 보정  one-shot ●   >_ Bash   1h 27m``
+    ``⠏ [e9]    claude Opus 5.5 med   ━━──────── 25%  PR #1505 보정  solo ●   >_ Bash   1h 27m``
 
     marker and ID, MODEL (harness model effort of who works now), CONTEXT, TITLE (the project
     name ahead of it on a list that is not grouped by project), the stage rail with any
@@ -1295,11 +1295,13 @@ def _is_unit_route(route):
 
 
 def _kind_cell(route, bracket=True, tail=True):
-    """``code(staged·standard)``: the kind word (bold) and, in brackets, the route's FORM and its INTENSITY after a ``·``, always
-    both (``code(unit·quick)``, ``code(one-shot·quick)``, ``lab(staged·strong)``); only the form where the record names no intensity.
+    """``code(team·standard)``: the kind word (bold) and, in brackets, the route's FORM and its INTENSITY after a ``·``, always
+    both (``code(unit·quick)``, ``code(solo·quick)``, ``lab(team·strong)``); only the form where the record names no intensity.
     11-19 (the person, in order: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?", "code(unit) 이렇게 쓰는건 이상한가?", "근데
     강도랑은 좀 다르잖아. 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만 수행하는 건지", "unit, one-shot, staged을
-    괄호로 넣어야하나 싶은데", "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아", "강도도 표기해 항상"): two axes, the
+    괄호로 넣어야하나 싶은데", "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아", "강도도 표기해 항상", "unit과 one-shot의
+    의미가 딱 들으면 잘 구분이 되나? staged도 그 framed랑 함께 잘 표현이 되는 단어인가? 전반적으로 전향적 검토가 필요해", "team도 괜찮은데?";
+    the forms read as who makes the work, ``unit`` / ``solo`` / ``team``): two axes, the
     form (``palette.route_form``) is how the route runs and the intensity is a separate axis over all three forms. The whole bracket's
     color and weight follow the intensity (``kind_intensity_key``), a dim bracket where the route has no field hue. A route of another
     shape (a frame, an older record) keeps its intensity bracket alone; an older unit route that records no field keeps ``unit``
@@ -1345,10 +1347,9 @@ def _stage_word(route):
 
 
 def _staged_cells(route, earlier, stages, at, lit):
-    """``frame ✓ → code(staged·standard) · 3/6: execute``, widest first; short of cells the earlier legs go, then the intensity
-    (``code(staged) · 3/6: execute``), then the bracket, then the kind, then the shape word, then the position; the stage stays.
-    The stage line's shape word is left out while the bracket says it (the bracket's form is ``staged``); once the bracket is
-    gone it comes back (``staged 3/6: execute``)."""
+    """``frame ✓ → code(team·standard) · 3/6: execute``, widest first; short of cells the earlier legs go, then the intensity
+    (``code(team) · 3/6: execute``), then the bracket, then the kind, then another shape's own word, then the position; the stage
+    stays. The word ``staged`` is never written before the position."""
     kind, formal, bare = _kind_cell(route), _kind_cell(route, tail=False), _kind_cell(route, bracket=False)
     position = f"{at + 1}/{len(stages)}"
     stage = _blinking_stage(stages, at, lit)
@@ -1359,11 +1360,10 @@ def _staged_cells(route, earlier, stages, at, lit):
         if word:
             out += ([(" · ", "dim")] if kind_cell else []) + [(word + ": ", "dim")]
         return out + stage
-    word = (_stage_word(route) + " " if _stage_word(route) else "") + position
-    said = _stage_word(route) == route_form(route.get("capability"), route.get("shape"), route.get("field"))
-    lead = position if said else word
-    cells = [build(earlier, kind, lead)] if earlier else []
-    return cells + [build([], kind, lead), build([], formal, lead), build([], bare, word), build([], [], word),
+    # (the word `staged` is never written before the position: 11-19, the form `team` stands in the bracket)
+    word = (_stage_word(route) + " " if _stage_word(route) not in ("", "staged") else "") + position
+    cells = [build(earlier, kind, word)] if earlier else []
+    return cells + [build([], kind, word), build([], formal, word), build([], bare, word), build([], [], word),
                     build([], [], position), build([], [], "")]
 
 
@@ -1432,7 +1432,7 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
         after.extend([("  resume ", "dim"), (str(route["resume"]), "g_idle")])
     elif route.get("loops"):
         after.append(("  " + str(route["loops"]), "dim"))
-    # 11-17 (route row 5): a route its owner does alone has no stage line: `code(one-shot·quick)`, after the chain it continues; the
+    # 11-17 (route row 5): a route its owner does alone has no stage line: `code(solo·quick)`, after the chain it continues; the
     # row's own mark (the spinner in front) is what moves.
     if (str(route.get("shape") or "") == "one-shot-owner" and len(stages) <= 1 and not route.get("resume")
             and _kind_cell(route)):
@@ -1447,7 +1447,7 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
         if card:
             _put_route_card(grid, cursor, end, y, route)
         return
-    # Spec E9 rule 24, 11-17 (route row 5): a route that runs a worker per stage reads `code(staged·standard) · 3/7: execute`
+    # Spec E9 rule 24, 11-17 (route row 5): a route that runs a worker per stage reads `code(team·standard) · 3/7: execute`
     # (the shell panel's route lines, in one row); the chain of kinds it continues leads it (`frame ✓ → code(standard) · …`).
     # The kind is the one bold word, the stage's name the one thing that blinks. Short of cells see `_staged_cells`.
     # Any route with a stage list reads so, whatever its shape (`map-reduce 2/3: analyze`; no word when none is named).
@@ -1537,7 +1537,8 @@ def _stage_items(stages, lit=True):
             name_key = bright_hues[index % len(bright_hues)]
         else:
             name_key = dim_hues[index % len(dim_hues)]
-        parts = [(str(stage.get("name", "·")), name_key)]
+        # (11-19: the one-shot node is drawn by the form's name, `solo`; the node id itself is the record's)
+        parts = [({"one-shot": "solo"}.get(str(stage.get("name", "·")), str(stage.get("name", "·"))), name_key)]
         if int(stage.get("r") or 1) > 1:
             live = status in ("active", "failed")
             parts.append((f" R{stage['r']}", "g_idle" if live and stage.get("r", 1) >= 3 else "dim"))

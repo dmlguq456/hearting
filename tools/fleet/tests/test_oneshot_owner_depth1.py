@@ -95,7 +95,7 @@ class OneShotOwnerTests(unittest.TestCase):
         self.assertIn("[s1]", line)
         self.assertIn("codex Opus 5.5 high", line)
         # 11-17 (route row 5): a route its owner does alone reads its kind and intensity, no stage word.
-        self.assertIn("code(one-shot·quick)", line)        # (11-19: the form leads the intensity)
+        self.assertIn("code(solo·quick)", line)        # (11-19: the form leads the intensity)
         self.assertNotIn("one-shot ", line)               # (the form is in the bracket, never a stage word of its own)
         page = draw(vm, NavState(view="ROUTES", scope="-"), 150, 40).text_rows()
         index = next(i for i, row in enumerate(page) if "Fixture solo" in row)
@@ -158,7 +158,7 @@ console.log(JSON.stringify(out));'''
             rows = [(lines[i - 1], line, lines[i + 1]) for i, line in enumerate(lines)
                     if 0 < i < len(lines) - 2 and "│ │ " in line and "Fixture solo route" in line]
             # 11-18: the route's time (`5m`) is at the end of its first line and nowhere on the owner's row.
-            self.assertTrue(any("● code(one-shot·quick)" in kind and "5m" in kind and "owner" in who and "codex" in who and "5m" not in who
+            self.assertTrue(any("● code(solo·quick)" in kind and "5m" in kind and "owner" in who and "codex" in who and "5m" not in who
                                 and "5m" not in title and "CTX" not in who for kind, title, who in rows), side)
             # The staged route: its owner first, its live worker in the box under its stage text (11-18).
             self.assertIn("owner  claude Opus 5.5 high", side)

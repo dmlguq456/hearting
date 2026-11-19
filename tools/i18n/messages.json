@@ -1999,16 +1999,20 @@
    "ko": "직접"
   },
   "fleet.session_panel.shape_framed": {
-   "en": "framed",
-   "ko": "분담형"
+   "en": "frame",
+   "ko": "frame"
   },
   "fleet.session_panel.shape_solo": {
    "en": "solo",
    "ko": "단독"
   },
   "fleet.session_panel.shape_staged": {
-   "en": "staged",
-   "ko": "단계형"
+   "en": "team",
+   "ko": "팀"
+  },
+  "fleet.session_panel.shape_unit": {
+   "en": "unit",
+   "ko": "유닛"
   },
   "fleet.session_panel.shape_unknown": {
    "en": "Shape ?",

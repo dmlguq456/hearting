@@ -1060,10 +1060,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // gives) is left out of the line; a real intensity (`quick`) stays.
     // 11-19 (the person, in order: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?" / "code(unit) 이렇게 쓰는건 이상한가?" / "근데 강도랑은 좀
     // 다르잖아. 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만 수행하는 건지" / "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" /
-    // "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" / "강도도 표기해 항상"): two axes. The bracket of a route in the `dispatch`
-    // zone holds its FORM (`kind_form`, the backend's one word for it: `unit` one unit called, `one-shot` one session doing the whole
-    // procedure, `staged` the procedure split in stages with a worker each; English in every language) and its INTENSITY after a `·`
-    // (`code(staged·standard)`), always, whatever the form. Colour and weight follow the intensity (`kind{q,s,b}_<field>`; no field: a dim
+    // "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" / "강도도 표기해 항상" / "unit과 one-shot의 의미가 딱 들으면 잘 구분이 되나?
+    // staged도 그 framed랑 함께 잘 표현이 되는 단어인가? 전반적으로 전향적 검토가 필요해" / "team도 괜찮은데?"): two axes. The bracket of a route in
+    // the `dispatch` zone holds its FORM (`kind_form`, the backend's one word for it, read as who makes the work: `unit` one unit called, `solo` the
+    // owner alone doing the whole procedure, `team` the owner and a worker for each stage; English in every language; `direct` has no bracket)
+    // and its INTENSITY after a `·` (`code(team·standard)`), always, whatever the form. (The commands still say `--shape solo|staged`: `staged` is `team`.)
+    // Colour and weight follow the intensity (`kind{q,s,b}_<field>`; no field: a dim
     // bracket), also when the tail is folded away. A route of another shape (a frame, an older record) keeps its intensity bracket alone, an
     // older unit route that records no field keeps its bare `unit`, a `direct` route has no form, and a unit a worker called (`called`)
     // is a row under its caller's with no bracket.
@@ -1077,29 +1079,29 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const kindHead=(r,tail=true)=>{const word=clean(r.kind_word||'').trim(),b=bracketWord(r,tail);
       const field=kindField(r,word);
       return word?[kindText(word,field),...(b?[bracket(b,field,intensityOf(r))]:[])]:[];};
-    // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(staged·standard) · 3/7: execute` (the stage word that
-    // the bracket's form already says is left out there), a route with no stage line reads `lab(one-shot·quick)`; the intensity goes
-    // first short of cells (`code(staged) · 3/7: execute`), then the kind, then `staged 3/7: execute`, then `3/7: execute`.
+    // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(team·standard) · 3/7: execute` (`staged` is never written before the position), a route with no stage line reads `lab(solo·quick)`; the intensity goes
+    // first short of cells (`code(team) · 3/7: execute`), then the kind, then `staged 3/7: execute`, then `3/7: execute`.
     function kindCell(r){
       const cell=shapeCell(r),head=kindHead(r),bare=kindHead(r,false);
       if(!head.length)return cell&&{...cell,kind:cell.full,bare:cell.full};
       if(!cell)return {full:[],short:[],kind:head,bare};
-      const rest=stageLead(r)===stageWord(String(r.shape||''))?cell.full:cell.short;
+      const rest=cell.full;
       return {...cell,kind:[...head,text(' · ','dim'),...rest],bare:[...bare,text(' · ','dim'),...rest]};
     }
     // 11-17 (route row 5): every route with a stage list reads its stage line, whatever its shape: the shape's own word
     // (`staged`, `map-reduce`, `transactional-owner`; none when the record names none), the position, the stage's name.
     // A frame route has no stage line (its legs hang under it), and a route its owner does alone (one stage) has none.
     const stageWord=shape=>/^staged/.test(shape)?'staged':/^(|unknown|framed|one-shot-owner)$/.test(shape)?'':shape;
-    // The word before a stage line's position, but not where the bracket of the route's first line already says it (`code(staged·standard) · 3/6: execute`).
-    const stageLead=r=>{const word=stageWord(String(r.shape||''));return word&&word===formOf(r)?'':word;};
+    // The word before a stage line's position: never `staged` (the route's form is `team` in the bracket, or the line has no bracket; 11-19:
+    // `code(team·standard) · 3/6: execute`), another shape's own word (`map-reduce`) as before.
+    const stageLead=r=>{const word=stageWord(String(r.shape||''));return word==='staged'?'':word;};
     const stageLined=r=>{const shape=String(r.shape||''),n=Array.isArray(r.stages)?r.stages.length:0;
       return !framed(r)&&(/^staged/.test(shape)?n>0:n>1);};
     function shapeCell(r){
       const shape=String(r.shape||''),stages=Array.isArray(r.stages)?r.stages:[];
       const current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
       if(stageLined(r)){
-        const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length,word=stageWord(shape);
+        const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length,word=stageLead(r);
         const stage=stageCell(stages[at],'loc_repo');
         return {full:[text((word?word+' ':'')+position+': ','dim'),...stage],short:[text(position+': ','dim'),...stage]};
       }

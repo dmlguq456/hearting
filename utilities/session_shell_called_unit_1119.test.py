@@ -56,10 +56,10 @@ class CalledUnitPanelTest(unittest.TestCase):
     def test_a_called_unit_stands_under_the_worker_row_in_its_box_two_cells_in_with_its_time_at_the_right_edge(self):
         self.node(r"""
 assert.deepEqual(only(R),[
- '● code(standard) · staged 3/6    40m',
+ '● code(standard) · 3/6           40m',
  '  rate limiting',
  '  ● owner  claude Opus 5.5 xhigh',
- '  ┌ staged 3/6: execute ───────────┐',
+ '  ┌ 3/6: execute ──────────────────┐',
  '  │ ⠋ worker claude Sonnet 5.5     │',
  '  │   CTX 22% · 12m                │',
  '  │   ⠋ code-review Opus 5.5    3m │',
@@ -155,7 +155,7 @@ for(const width of [130,100,80,60]){
 const wide=only(R,130,{side:false});
 assert(/│ code-review claude Opus 5.5 xhigh +│/.test(wide[1]),wide.join('\n'));
 assert(/│ web-lookup codex GPT-5.5 high +│/.test(wide[3]),wide.join('\n'));
-// The unit's field stands in the kind cell where the route's own reads `code(standard) · staged 3/6: execute`.
+// The unit's field stands in the kind cell where the route's own reads `code(standard) · 3/6: execute`.
 assert(/│ code +\d+m$/.test(wide[1]),wide.join('\n'));
 // Narrower: the name stays in the cell with as much of the model as it holds (the effort, then the harness, give way).
 const mid=only(R,100,{side:false});
@@ -231,16 +231,16 @@ for(const [name,routes,unit] of combos){
 }
 """)
 
-    def test_the_stage_box_title_does_not_lead_with_staged_where_the_bracket_says_it(self):
-        # 11-19: a route whose bracket holds the form `staged` (`code(staged·standard)`) has a stage box titled `3/6: execute`, not `staged 3/6: execute`;
-        # a route with no form (an older record) keeps the word
+    def test_the_stage_box_title_never_leads_with_staged(self):
+        # 11-19: the stage box title never leads with `staged`: `3/6: execute`, with the form `team` in the bracket (`code(team·standard)`) or
+        # with no form (an older record) alike
         self.node(r"""
-const formal={...R,kind_form:'staged'};
+const formal={...R,kind_form:'team'};
 const rows=only(formal);
-assert(/^● code\(staged·standard\)/.test(rows[0])&&rows.some(s=>/┌ 3\/6: execute ─+┐/.test(s))&&!rows.some(s=>/staged 3\/6/.test(s)),rows.join('\n'));
-assert(only(R).some(s=>/┌ staged 3\/6: execute ─+┐/.test(s)));
-const solo1={...solo(),kind_form:'one-shot'};
-assert(/^● code\(one-shot·quick\)/.test(only(solo1)[0]),only(solo1).join('\n'));
+assert(/^● code\(team·standard\)/.test(rows[0])&&rows.some(s=>/┌ 3\/6: execute ─+┐/.test(s))&&!rows.some(s=>/staged/.test(s)),rows.join('\n'));
+assert(only(R).some(s=>/┌ 3\/6: execute ─+┐/.test(s))&&!only(R).some(s=>/staged/.test(s)));
+const solo1={...solo(),kind_form:'solo'};
+assert(/^● code\(solo·quick\)/.test(only(solo1)[0]),only(solo1).join('\n'));
 """)
 
     def test_the_three_harness_panels_draw_the_same_rows(self):

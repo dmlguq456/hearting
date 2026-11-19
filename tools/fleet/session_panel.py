@@ -21,7 +21,7 @@ def evidence_text(value):
     return " · ".join(part.strip() for part in re.split(r"\s*·\s*", text) if part.strip() not in {"", "·"})
 
 
-def route_evidence(visibility):
+def route_evidence(visibility, unit=False):
     """Translate reader codes only; quoted evidence is never a verdict."""
     codes = visibility.get("codes")
     if not isinstance(codes, dict) or codes.get("schema") != "route_visibility_codes_v1":
@@ -31,6 +31,8 @@ def route_evidence(visibility):
     stages = codes.get("stages") or []
     shape = codes.get("shape") or "unknown"
     shape = shape if shape in {"direct", "solo", "staged", "framed"} else "unknown"
+    if unit:
+        shape = "unit"          # (11-19: a unit route's recorded shape is `solo`, but its form is `unit`)
     summary = [text("shape_" + shape)]
     tests = [row for row in stages if len(row) == 4 and row[1] == "test"]
     test_state = "pass" if tests and all(row[2] == "done" and row[3] == "1" for row in tests) else "recorded" if tests else "none"
@@ -128,9 +130,10 @@ def route_kind(row):
         shown["legs"] = row["legs"]
     # 11-17 (route row 5): the kind's own intensity word and the chain of kinds the route continues (name and state).
     intensity = sanitize_title(str(row.get("intensity") or ""))[:32]
-    # 11-19 (the person: "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" / "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" /
-    # "강도도 표기해 항상"): the intensity of every route is sent, a unit route's too; and the route's FORM (`unit`, `one-shot`, `staged`:
-    # `palette.route_form`, decided here once), which the panel draws in the bracket before the intensity (`code(staged·standard)`).
+    # 11-19 (the person, in order: "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" / "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" /
+    # "강도도 표기해 항상" / "unit과 one-shot의 의미가 딱 들으면 잘 구분이 되나? staged도 그 framed랑 함께 잘 표현이 되는 단어인가? 전반적으로 전향적
+    # 검토가 필요해" / "team도 괜찮은데?"): the intensity of every route is sent, a unit route's too; and the route's FORM (`unit`, `solo`, `team`:
+    # who makes the work; `palette.route_form`, decided here once), which the panel draws in the bracket before the intensity (`code(team·standard)`).
     unit_route = str(row.get("capability") or "") == "unit"
     if intensity:
         shown["intensity"] = intensity
@@ -904,7 +907,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         routes.append({**route_row(row, cells=route_gauge_cells(columns)), "id": clean(row.get("id")), "title": clean(row.get("title")),
                        "state": clean(row.get("state")), "state_label": state_label(row.get("state")), "stage": clean(row.get("worker_stage")),
                        "stages": stages, "stage_more": row.get("stage_more", 0),
-                       "visibility": route_evidence(visibility),
+                       "visibility": route_evidence(visibility, unit=str(row.get("capability") or "") == "unit"),
                        "reason": clean(reason), "outcome": clean(row.get("outcome")),
                        "owner": owner_text, "owner_line": "" if runs_itself else owner_text,
                        # Spec E9 rule 24: the route's kind (its sealed topology) and, when a

@@ -495,11 +495,11 @@ popup; a request row the MESSAGES popup).
   the panel's are plain text), keeps its older bottom row (`PEERS  [e4] · [a3]   PEERS tab ›`: the sessions a link joins to
   this one, messages too, and the way to their tab) whole where the window has no supervision and, where it has, leaves off the
   numbers the top line names (the tab link stays on it where the top line has no room for it), and reads a route staged
-  into a single stage as the panel does (`code(staged·standard) · 1/1: execute`, was `code (execute ●)`);
+  into a single stage as the panel does (`code(team·standard) · 1/1: execute`, was `code (execute ●)`);
   Fleet's ROUTES and OVERVIEW tables are unchanged. Short of rows the content rows give way first (the steps
   below) and a zone's rule stays while one row of that zone shows, also in a box that scrolls. Beside the
   native area a route reads, by who set each row (11-17, the person's route row sketch 5):
-  its first row is a state mark and the kind of work with its form and intensity (`● code(staged·standard)`: the
+  its first row is a state mark and the kind of work with its form and intensity (`● code(team·standard)`: the
   kind word is the one bold word of the route, in the color of its field (11-18: `code` 69, `lab` 214,
   `design` 205, `docs` 180, `research` 38 in 256 colors; the dark counterparts 26, 130, 162, 94, 24 on the light face;
   a route with no such field hue keeps the body color), never dim, in mono, eight colors and `NO_COLOR`
@@ -507,18 +507,19 @@ popup; a request row the MESSAGES popup).
   `strong`, `thorough`, `adversarial` bold; as dim brackets where no hue is shown) and nothing else goes in them; a
   direct route's word stands there when the record names no intensity; the bracket holds two axes (11-19, the person, in order: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?", "code(unit) 이렇게
   쓰는건 이상한가?", "근데 강도랑은 좀 다르잖아. 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만 수행하는 건지", "unit, one-shot,
-  staged을 괄호로 넣어야하나 싶은데", "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아", "강도도 표기해 항상"): the FORM, how the
-  route runs (`unit` one unit called and one thing done; `one-shot` one session doing the whole procedure of its kind; `staged` the procedure
-  split in stages with a worker each; English in every language, decided once in the backend and carried as `kind_form`), and after a `·` the
-  INTENSITY, always written, a unit's too (`● code(unit·quick)`, `● code(one-shot·quick)`, `● lab(staged·strong)`); the color and weight of
+  staged을 괄호로 넣어야하나 싶은데", "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아", "강도도 표기해 항상", "unit과 one-shot의 의미가 딱 들으면 잘 구분이 되나? staged도 그 framed랑 함께 잘 표현이 되는 단어인가? 전반적으로 전향적 검토가 필요해", "team도 괜찮은데?"): the FORM, read as who makes the
+  work (`unit` one unit called and one thing done, no owner; `solo` the owner alone doing the whole procedure of its kind; `team` the owner and a worker
+  for each stage; English in every language, decided once in the backend and carried as `kind_form`; the command's `--shape solo|staged` is the
+  `solo` and `team` shown here), and after a `·` the
+  INTENSITY, always written, a unit's too (`● code(unit·quick)`, `● code(solo·quick)`, `● lab(team·strong)`); the color and weight of
   the whole bracket are the intensity's (as above). A record with no intensity reads the form alone, a route with no form (a frame, an older
   record) its intensity alone, an older unit route that records no field its bare `unit`, a `direct` route none, and a unit a worker called no
-  bracket. Short of cells the `·intensity` tail goes first, then the bracket as before. The stage line leaves out its leading `staged` where
-  the bracket says it (`code(staged·standard) · 3/6: execute`; the stage box's title `3/6: execute`); the route's time stands at the right end of this
+  bracket. Short of cells the `·intensity` tail goes first, then the bracket as before. The stage line never leads with `staged`
+  (`code(team·standard) · 3/6: execute`; the stage box's title `3/6: execute`); the route's time stands at the right end of this
   row, the middle text going first short of cells, then the chain behind and the intensity, the kind word and the time
   staying), the chain of kinds it
-  continues leading it (`frame ✓ → code(staged·standard)`: what is behind dim with `✓`, this one bold;
-  `research ✓ → draft ✓ → code(staged·standard)`), then its title two cells in on at most two rows
+  continues leading it (`frame ✓ → code(team·standard)`: what is behind dim with `✓`, this one bold;
+  `research ✓ → draft ✓ → code(team·standard)`), then its title two cells in on at most two rows
   (the second ending in `…`), then the owner two cells in (the mark, the doer's recorded role as
   a dim label in one column, then harness, model and effort, no tool: `● owner  claude Opus 5.5 xhigh`; 11-18, the person:
   "CTX는 게이지를 포함해서 아래줄로 내리자. 그리고 NOW를 두줄까지는 허용치를 늘려주고 (owner, worker 둘다)": under it, four

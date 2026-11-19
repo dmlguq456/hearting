@@ -613,7 +613,7 @@ assert(roomy.some(x=>/│ │   ⠋ claude Opus 5\.5 +│/.test(x))&&roomy.some(
 const kinded=view.render({width:40,height:30,side:true,model:{routes:[{...one,kind_word:'code'}],route_count:1,messages:[]},sid:'s',
  configuration:{},expandedKeys:[],questions:()=>[]}).rows.map(x=>x.map(p=>p.text).join(''));
 const ki=kinded.findIndex(x=>/│ │   ⠋ claude Opus 5\.5 +│/.test(x));
-assert(ki>2&&/^│ │ ● code(?: · staged \d+\/\d+)? +47m │ │$/.test(kinded[ki-2])&&kinded[ki-1].includes('│   one step')&&/│ │     CTX 24% +│ │/.test(kinded[ki+1])&&kinded[ki+2].includes('│     running the tests'),kinded.join('\n'));
+assert(ki>2&&/^│ │ ● code(?: · \d+\/\d+(?:: [\w-]+)?)? +47m │ │$/.test(kinded[ki-2])&&kinded[ki-1].includes('│   one step')&&/│ │     CTX 24% +│ │/.test(kinded[ki+1])&&kinded[ki+2].includes('│     running the tests'),kinded.join('\n'));
 // Narrower the CTX row stays on its own row (the word `CTX` and the percent), and the NOW keeps its row; no tool, no time.
 assert(narrow.some(x=>/│ │   ⠋ claude Opus 5\.5 +│/.test(x))&&narrow.some(x=>/│ │     CTX 24% +│ │/.test(x))&&narrow.some(x=>/│ │     running the tests +│/.test(x)),narrow.join('\n'));
 '''
@@ -647,7 +647,7 @@ const r64=box(draw(four,64,50)),ctxRows=rows=>rows.filter(s=>/^│ │     CTX /
 assert.deepEqual(r64.filter(s=>/│ │   [⠋●] /.test(s)).map(s=>s.slice(4,-4).trimEnd()),whoWant,r64.join('\n'));
 assert.deepEqual(ctxRows(r64),['    CTX ━━─── 38%','    CTX ━──── 12%'],r64.join('\n'));
 assert.deepEqual(ctxRows(box(r50)),['    CTX ━━─── 38%','    CTX ━──── 12%'],r50.join('\n'));
-assert(!r64.some(s=>/ · \d/.test(s)),'a session with no time of its own shows none\n'+r64.join('\n'));
+assert(!r64.some(s=>/ · \d+h? ?\d*m\b/.test(s)),'a session with no time of its own shows none\n'+r64.join('\n'));
 // An unrecorded role leaves no column; nothing is made up.
 const unnamed=box(draw([one,{...stg,role:undefined}],48,50));
 assert(unnamed.some(s=>s.startsWith('│ │   ⠋ claude Sonnet 5.5 high'))&&!unnamed.join('').includes('worker'),unnamed.join('\n'));
@@ -658,25 +658,25 @@ assert(r32.some(s=>s.startsWith('│ │   ⠋ worker Sonnet 5.5'))&&r32.some(s=
 // the NOW is a row of its own, only where the session has one (none: no row, never an empty one).
 assert(!box(r50).some(s=>/[━]/.test(s)&&/│ │   [⠋●] /.test(s)),r50.join('\n'));
 const waitAt=box(r50).findIndex(s=>s.includes('● owner'));
-assert(!/CTX/.test(box(r50)[waitAt])&&!/CTX/.test(box(r50)[waitAt+1])&&box(r50)[waitAt-2].includes('staged 4/7: host-run'),'an unknown context draws no CTX\n'+r50.join('\n'));
+assert(!/CTX/.test(box(r50)[waitAt])&&!/CTX/.test(box(r50)[waitAt+1])&&box(r50)[waitAt-2].includes('4/7: host-run'),'an unknown context draws no CTX\n'+r50.join('\n'));
 assert(!box(draw([one,{...frame,elapsed:''}],48,50)).some(s=>/^│ │ +│ │$/.test(s)),'no empty row');
 const noNow=box(draw([{...frame,paint:{...frame.paint,now:''}}],48,50));
-assert(box(draw([frame],48,50)).some(s=>/^│ │     framing +│ │$/.test(s))&&!noNow.some(s=>/^│ │     \S/.test(s)&&!s.includes('staged'))&&!noNow.some(s=>/^│ │ +│ │$/.test(s)),'a session with no NOW has no NOW row\n'+noNow.join('\n'));
+assert(box(draw([frame],48,50)).some(s=>/^│ │     framing +│ │$/.test(s))&&!noNow.some(s=>/^│ │     \S/.test(s)&&!/\d\/\d/.test(s))&&!noNow.some(s=>/^│ │ +│ │$/.test(s)),'a session with no NOW has no NOW row\n'+noNow.join('\n'));
 // The order: the kind word, what, who, its CTX row, its NOW, then the stage line.
 const at=box(r50).findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
-assert(/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(box(r50)[at-2])&&box(r50)[at-1].includes('│ │   셸 상태·표시 고치기')&&/^│ │     CTX ━━─── 38% +│ │$/.test(box(r50)[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(box(r50)[at+2]),r50.join('\n'));
-assert(box(r50).some((s,i)=>s.includes('worker claude Sonnet 5.5 high')&&/^│ │     CTX ━──── 12% +│ │$/.test(box(r50)[i+1])&&/^│ │     editing peer-message\.py +│ │$/.test(box(r50)[i+2])&&!/^│ │     staged/.test(box(r50)[i+3])&&box(r50).some(t=>t.includes('● code · staged 3/7: execute'))),r50.join('\n'));   // (the stage is on the first line)
-// (b) Fleet's kind word leads the first line (bold, in the body color) and, with it, the stage (`code · staged 3/7: execute`: where the
-// width allows, no stage row stands apart); the mode and intensity stay in the opened KIND. A route with no stage line (one-shot) has none: its NOW ends it.
-for(const want of ['│ │ ● code ','│ │ ● frame ','│ │ ● code · staged 3/7: execute','│ │ ● code · staged 4/7: host-run','│ │ ● frame · staged 1/3: frame'])
+assert(/^│ │ ● code(?: · \d+\/\d+(?:: [\w-]+)?)? +41m │ │$/.test(box(r50)[at-2])&&box(r50)[at-1].includes('│ │   셸 상태·표시 고치기')&&/^│ │     CTX ━━─── 38% +│ │$/.test(box(r50)[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(box(r50)[at+2]),r50.join('\n'));
+assert(box(r50).some((s,i)=>s.includes('worker claude Sonnet 5.5 high')&&/^│ │     CTX ━──── 12% +│ │$/.test(box(r50)[i+1])&&/^│ │     editing peer-message\.py +│ │$/.test(box(r50)[i+2])&&!/^│ │     staged/.test(box(r50)[i+3])&&box(r50).some(t=>t.includes('● code · 3/7: execute'))),r50.join('\n'));   // (the stage is on the first line)
+// (b) Fleet's kind word leads the first line (bold, in the body color) and, with it, the stage (`code · 3/7: execute`: where the
+// width allows, no stage row stands apart); the mode and intensity stay in the opened KIND. A route with no stage line (solo) has none: its NOW ends it.
+for(const want of ['│ │ ● code ','│ │ ● frame ','│ │ ● code · 3/7: execute','│ │ ● code · 4/7: host-run','│ │ ● frame · 1/3: frame'])
  assert(r50.some(s=>s.includes(want)),want+'\n'+r50.join('\n'));
 assert(!r50.join('').includes('(dev')&&!r50.some(s=>/one-shot/.test(s)),r50.join('\n'));
 const r80=draw(four,80,50).join('\n');
-assert(r80.includes('⠋ owner claude Opus 5.5 xhigh')&&r80.includes('CTX ━━─── 38%')&&!r80.includes('CTX ━━─── 38% · 41m')&&r80.includes('editing host.cjs')&&!r80.includes('· Edit')&&r80.includes('staged 3/7: execute · owner Opus 5.5'),r80);
-// The bottom layout's kind column: the kind leads it (`code · staged 3/7: execute`) and goes first, before the tool.
+assert(r80.includes('⠋ owner claude Opus 5.5 xhigh')&&r80.includes('CTX ━━─── 38%')&&!r80.includes('CTX ━━─── 38% · 41m')&&r80.includes('editing host.cjs')&&!r80.includes('· Edit')&&r80.includes('3/7: execute · owner Opus 5.5'),r80);
+// The bottom layout's kind column: the kind leads it (`code · 3/7: execute`) and goes first, before the tool.
 const kindAt=w=>draw([one,stg,wait,{...failed,role:'owner',kind_word:'code'}],w,20,{side:false}).find(s=>s.startsWith('│ │ ')&&s.includes('세션 간'));
-assert(/│ code · staged 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(140))&&!kindAt(140).includes('>_'),kindAt(140));   // (11-18: no command column)
-assert(/│ code · staged 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(100))&&!kindAt(90).includes('code ·')&&/│ staged 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(90)),kindAt(90)+'\n'+kindAt(100));
+assert(/│ code · 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(140))&&!kindAt(140).includes('>_'),kindAt(140));   // (11-18: no command column)
+assert(/│ code · 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(100))&&/│ code · 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(90))&&!kindAt(84).includes('code ·')&&/│ 3\/7: execute +(\d+h )?\d+m │ │$/.test(kindAt(84)),kindAt(84)+'\n'+kindAt(100));   // (11-19: with no `staged ` the kind stays to 87 cells)
 // (c) A title takes two rows at most, the second ending in `…`; short of rows, one.
 const long={...one,id:'l',title:'아주 긴 route 이름 — 셸 패널의 접힌 route 줄에서 이름이 세 줄을 넘으면 둘째 줄 끝에 줄임 표시가 붙는지 확인하는 이름'};
 const lr=box(draw([one,long],40,50)),li=lr.findIndex(s=>s.includes('아주 긴'));
@@ -689,13 +689,14 @@ assert(flat.length>0&&flat.every(s=>!/owner|worker|code/.test(s))&&!r30.some(s=>
 // (the percent at the right edge, and no time: a session with no time of its own has none; the routes' times stand on their first lines),
 // then the stage line, then the one-row form.
 const r44=box(draw(nine,40,50));
-assert(!r44.some(s=>s.includes('━'))&&r44.filter(s=>/│ │   [⠋●] (owner|worker) .* \d+% │ │$/.test(s)).length===6&&!r44.some(s=>/│ │   [⠋●] .* \d+m │ │$/.test(s))&&r44.filter(s=>/^│ │ ● code(?: · staged \d+\/\d+)? +(\d+h )?\d+m │ │$/.test(s)).length===9&&!r44.some(s=>/^│ │ +staged/.test(s)),r44.join('\n'));   // (11-18: the stage text is on the first line, never a row apart)
+assert(!r44.some(s=>s.includes('━'))&&r44.filter(s=>/│ │   [⠋●] (owner|worker) .* \d+% │ │$/.test(s)).length===6&&!r44.some(s=>/│ │   [⠋●] .* \d+m │ │$/.test(s))&&r44.filter(s=>/^│ │ ● code(?: · \d+\/\d+(?:: [\w-]+)?)? +(\d+h )?\d+m │ │$/.test(s)).length===9&&!r44.some(s=>/^│ │ +staged/.test(s)),r44.join('\n'));   // (11-18: the stage text is on the first line, never a row apart)
 for(let h=16;h<=80;h++){
- const rows=box(draw(nine,40,h)),nows=rows.filter(s=>/│ │     editing /.test(s)).length,stages=rows.filter(s=>/│ │ .*staged \d/.test(s)).length;
+ const rows=box(draw(nine,40,h)),nows=rows.filter(s=>/│ │     editing /.test(s)).length,stages=rows.filter(s=>/│ │ .*\d\/\d/.test(s)).length;
  // (11-18, round 5: a stage name the first line has no room for stands on a stage row under the owner, the first of the steps after the NOW rows to go.)
- const apart=rows.filter(s=>/^│ │ {4,5}staged \d/.test(s)).length;
+ const apart=rows.filter(s=>/^│ │ {4,5}\d/.test(s)).length;
  const second=rows.some(s=>/^│ │   \d +│ │$/.test(s));
- if(nows)assert(stages===12&&apart===6,h+' the NOW rows go before the stage line\n'+rows.join('\n'));
+ // (11-19: with no `staged ` the stage's name fits on the first line at this width: its six first lines carry the stage, none stands on a row apart)
+ if(nows)assert(stages===6&&apart===0,h+' the NOW rows go before the stage line\n'+rows.join('\n'));
  if(second)assert(nows===6,h+' a title keeps its second row only while the NOW rows stand\n'+rows.join('\n'));
 }
 '''
@@ -707,7 +708,7 @@ for(let h=16;h<=80;h++){
         # stage's workers in a box): beside the native area a route's rows are its kind and time (first line), its title, its owner
         # (two cells in, no branch: mark, role, harness, model, effort), the owner's CTX row (`CTX`, the gauge, the percent; no time),
         # the owner's NOW (four in; none, no row) and the stage box: the workers running now stand in one box under the owner whose
-        # top line is the stage text (`┌ staged 3/7: execute ──┐`, the stage row apart is not drawn), each worker's who row, its CTX
+        # top line is the stage text (`┌ 3/7: execute ──┐`, the stage row apart is not drawn), each worker's who row, its CTX
         # row with its own time (`CTX ━━ 22% · 12m`) and its NOW two cells inside the box's side. The open tool and the stage name are
         # not drawn on a worker, nor the tool on the owner. The title takes its rows whole. An older backend's row (no
         # `workers_live`) keeps its one doer.
@@ -726,18 +727,18 @@ const box=rows=>{const a=rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s));return ro
 const col=(row,word)=>[...row.slice(0,row.indexOf(word))].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 // No worker: the kind / title / owner (who only) / its CTX row / its NOW; no stage box, no `↳`, no time on the owner.
 let b=box(draw([solo],40,60)),at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
-assert(at>0&&/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(b[at-2])&&/^│ │   셸 상태·표시 고치기 +│ │$/.test(b[at-1])&&/^│ │     CTX ━━━─+ 38% +│ │$/.test(b[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(b[at+2])&&b.length===at+4,b.join('\n'));
+assert(at>0&&/^│ │ ● code(?: · \d+\/\d+(?:: [\w-]+)?)? +41m │ │$/.test(b[at-2])&&/^│ │   셸 상태·표시 고치기 +│ │$/.test(b[at-1])&&/^│ │     CTX ━━━─+ 38% +│ │$/.test(b[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(b[at+2])&&b.length===at+4,b.join('\n'));
 assert.equal(col(b[at+1],'CTX'),col(b[at],'owner'));assert.equal(col(b[at+2],'editing'),col(b[at],'owner'));
 assert(!/[└├]─|╭─ [⠋●]|↳|Edit /.test(b.join('\n'))&&!b.some(s=>/^│ │ +│/.test(s))&&!b[at-1].includes('41m')&&!/CTX|━|41m/.test(b[at]),b.join('\n'));
 // Where the row has room nothing joins the owner's rows: its CTX row has no time (the route's stands on the first line).
 b=box(draw([solo],64,60));at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
-assert(at>0&&/^│ │     CTX ━━━─+ 38% +│ │$/.test(b[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(b[at+2])&&!/41m/.test(b[at]+b[at+1])&&/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(b[at-2]),b.join('\n'));
+assert(at>0&&/^│ │     CTX ━━━─+ 38% +│ │$/.test(b[at+1])&&/^│ │     editing host\.cjs +│ │$/.test(b[at+2])&&!/41m/.test(b[at]+b[at+1])&&/^│ │ ● code(?: · \d+\/\d+(?:: [\w-]+)?)? +41m │ │$/.test(b[at-2]),b.join('\n'));
 // One worker: the kind, the title and the owner's rows (no guide), its CTX row and NOW, then the stage box two cells in: the stage text on its top
 // line, the worker's who, its CTX row with its own time and its NOW (here on two rows, wrapped between words) inside the box's side. The
 // owner stands as a dim `●`.
 b=box(draw([one],40,60));at=b.findIndex(s=>s.includes('● owner  claude Opus 5.5 xhigh'));
-for(const [i,want] of [[-2,/^│ │ ● code(?: · staged \d+\/\d+)? +(\d+h )?\d+m │ │$/],[-1,/^│ │   속도 3단계 +│ │$/],[1,/^│ │     CTX ━━━━─+ 52% +│ │$/],[2,/^│ │     waiting for the worker +│ │$/],
- [3,/^│ │   ┌ staged 3\/7: execute ─+┐ │ │$/],[4,/^│ │   │ ⠋ worker claude Sonnet 5\.5 +│ │ │$/],[5,/^│ │   │   CTX ━━─+ 22% · 12m +│ │ │$/],[6,/^│ │   │   editing +│ │ │$/],[7,/^│ │   │   utilities\/panel\.py +│ │ │$/],
+for(const [i,want] of [[-2,/^│ │ ● code(?: · \d+\/\d+(?:: [\w-]+)?)? +(\d+h )?\d+m │ │$/],[-1,/^│ │   속도 3단계 +│ │$/],[1,/^│ │     CTX ━━━━─+ 52% +│ │$/],[2,/^│ │     waiting for the worker +│ │$/],
+ [3,/^│ │   ┌ 3\/7: execute ─+┐ │ │$/],[4,/^│ │   │ ⠋ worker claude Sonnet 5\.5 +│ │ │$/],[5,/^│ │   │   CTX ━━─+ 22% · 12m +│ │ │$/],[6,/^│ │   │   editing +│ │ │$/],[7,/^│ │   │   utilities\/panel\.py +│ │ │$/],
  [8,/^│ │   └─+┘ │ │$/],[9,/^│ ╰─+╯ │$/]])
  assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
 // Spec rule 57 (c): the box's corner stands under the owner's mark, the worker's mark two cells in, its CTX row and NOW under its role word.
@@ -778,13 +779,13 @@ assert(b.some(s=>s.includes('│ │   ⠋ claude Opus 5.5 xhigh'))&&b.some(s=>/
 // own time ends its first row (no CTX row of only a time) where it has one (56 cells).
 const noCtx=[{...one,owner_paint:{harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh')},workers_live:[{...worker('claude','Sonnet 5.5','high','22%','━━'),paint:{glyph:P('⠋'),harness:P('claude'),model_text:P('Sonnet 5.5')}}]}];
 b=box(draw(noCtx,56,60));at=b.findIndex(s=>s.includes('● owner'));
-assert(!b.join('').includes('CTX')&&/^│ │   ● owner  claude Opus 5\.5 xhigh +│ │$/.test(b[at])&&/^│ │   ┌ staged 3\/7: execute ─+┐ │ │$/.test(b[at+1])&&b.some(s=>/^│ │   │ ⠋ worker claude Sonnet 5\.5 +12m +│ │ │$/.test(s))&&!b.some(s=>/^│ │   │   12m +│ │ │$/.test(s))&&!b.some(s=>/owner.*2h/.test(s)&&!/code/.test(s)),b.join('\n'));
+assert(!b.join('').includes('CTX')&&/^│ │   ● owner  claude Opus 5\.5 xhigh +│ │$/.test(b[at])&&/^│ │   ┌ 3\/7: execute ─+┐ │ │$/.test(b[at+1])&&b.some(s=>/^│ │   │ ⠋ worker claude Sonnet 5\.5 +12m +│ │ │$/.test(s))&&!b.some(s=>/^│ │   │   12m +│ │ │$/.test(s))&&!b.some(s=>/owner.*2h/.test(s)&&!/code/.test(s)),b.join('\n'));
 // A session with no NOW has no NOW row (none empty): the owner's CTX row, then the stage box straight under it.
 b=box(draw([{...one,owner_paint:{...one.owner_paint,now:''}}],40,60));at=b.findIndex(s=>s.includes('● owner'));
-assert(/^│ │     CTX /.test(b[at+1])&&/^│ │   ┌ staged 3\/7: execute /.test(b[at+2])&&!b.some(s=>/^│ │ +│ │$/.test(s)),b.join('\n'));
+assert(/^│ │     CTX /.test(b[at+1])&&/^│ │   ┌ 3\/7: execute /.test(b[at+2])&&!b.some(s=>/^│ │ +│ │$/.test(s)),b.join('\n'));
 // A title on two rows: both rows the title's; the time on the first line, never on the owner's rows, its CTX row and NOW under it.
 b=box(draw([{...solo,title:'아주 긴 route 이름이 두 줄로 넘어가는 경우의 시간 자리 확인'}],40,60));at=b.findIndex(s=>s.includes('아주 긴'));
-assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(b[at-1])&&b[at+2].includes('⠋ owner')&&b[at+3].includes('CTX ━')&&b[at+4].includes('editing host.cjs'),b.join('\n'));
+assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&/^│ │ ● code(?: · \d+\/\d+(?:: [\w-]+)?)? +41m │ │$/.test(b[at-1])&&b[at+2].includes('⠋ owner')&&b[at+3].includes('CTX ━')&&b[at+4].includes('editing host.cjs'),b.join('\n'));
 b=box(draw([{...solo,title:'아주 긴 route 이름이 두 줄로 넘어가는 경우의 시간 자리 확인'}],64,60));at=b.findIndex(s=>s.includes('아주 긴'));
 assert(!b[at].includes('41m')&&!b[at+1].includes('41m')&&b[at+2].includes('⠋ owner')&&!b[at+2].includes('CTX')&&b[at+3].includes('CTX ━━━')&&!b[at+3].includes('41m'),b.join('\n'));
 // Hangul in the owner's title and the worker's NOW: every line keeps its cells, in each form of the box.
@@ -811,9 +812,9 @@ assert(box(draw([{...one,workers_live:[worker('opencode','deepseek-v4.1-flash','
 // The same worker in the `none` form hangs by a `↳` four cells in under the stage row, its CTX row and NOW eight in (no box is drawn).
 const flat=view.render({width:40,height:60,side:true,fill:true,model:{...head,routes:[one],route_count:1},state:'working',configuration:{worker_box:'none'},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
 b=box(flat);at=b.findIndex(s=>s.includes('● owner'));
-for(const [i,want] of [[3,/^│ │     staged 3\/7: execute +│ │$/],[4,/^│ │     ↳ ⠋ worker claude Sonnet 5\.5 +│ │$/],[5,/^│ │         CTX ━━─+ 22% · 12m +│ │$/],[6,/^│ │         editing +│ │$/],[7,/^│ │         utilities\/panel\.py +│ │$/],[8,/^│ ╰─+╯ │$/]])
+for(const [i,want] of [[3,/^│ │     3\/7: execute +│ │$/],[4,/^│ │     ↳ ⠋ worker claude Sonnet 5\.5 +│ │$/],[5,/^│ │         CTX ━━─+ 22% · 12m +│ │$/],[6,/^│ │         editing +│ │$/],[7,/^│ │         utilities\/panel\.py +│ │$/],[8,/^│ ╰─+╯ │$/]])
  assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
-assert.equal(col(b[at+3],'staged'),col(b[at+2],'waiting'));assert.equal(col(b[at+4],'↳'),col(b[at+2],'waiting'));assert.equal(col(b[at+6],'editing'),col(b[at+4],'worker'));
+assert.equal(col(b[at+3],'3/7'),col(b[at+2],'waiting'));assert.equal(col(b[at+4],'↳'),col(b[at+2],'waiting'));assert.equal(col(b[at+6],'editing'),col(b[at+4],'worker'));
 // An older backend's row: one doer, its who row, its CTX row (no time: the route's is on the first line), its NOW, the stage row; no `↳`, no box.
 const older={...one,owner_paint:undefined,workers_live:undefined};
 b=box(draw([older],60,60));
@@ -858,7 +859,7 @@ for(const none of [false,true])for(let width=32;width<=48;width++){
   assert(!rows.some(s=>/^│ │ +[⠋●] (owner|frame|worker) .* (\d+h )?\d+m +(│ )?│ │$/.test(s)&&/owner/.test(s)),'an owner shows no time of its own\n'+where);
   // (c) The owner's NOW stands four cells in, under its CTX row. A worker stands in the stage box two cells in (its mark, then its CTX
   // row and NOW inside the box's side), or, in the `none` form, hangs four cells in by a `↳`, its NOW eight in. The stage text is
-  // the top line of the box (`┌ staged 3/7: execute`) or, in the `none` form and where the workers went, a row four in.
+  // the top line of the box (`┌ 3/7: execute`) or, in the `none` form and where the workers went, a row four in.
   for(const s of rows.filter(s=>/^│ │ +(owner|solo) step/.test(s)))assert(/^│ │ {5}(owner|solo) step/.test(s),where);
   for(const s of rows.filter(s=>/^│ │ +(staged )?\d+\/\d+: /.test(s)))assert(/^│ │ {5}(staged )?\d+\/\d+: /.test(s),where);
   if(none){
@@ -880,13 +881,13 @@ for(const none of [false,true])for(let width=32;width<=48;width++){
 // At 40 cells, the picture of rule 57 (the stage box closed): the owner's who, its CTX row two cells further in with no time, its NOW,
 // then the stage box with the worker's who, CTX row (with its own time) and NOW; every right `│` of the box in one column.
 const b=draw([one],40,60),at=b.findIndex(s=>s.includes('● owner'));
-for(const [i,want] of [[-3,/^│ │ ● code · staged 3\/7 +2h 10m │ │$/],[-2,/^│ │   한글 제목 — 속도 3단계의 남은 +│ │$/],[-1,/^│ │   재계산 +│ │$/],[0,/^│ │   ● owner  claude Opus 5\.5 xhigh +│ │$/],[1,/^│ │     CTX ━━━━──── 52% +│ │$/],[2,/^│ │     owner step +│ │$/],
- [3,/^│ │   ┌ staged 3\/7: execute ─+┐ │ │$/],[4,/^│ │   │ ⠋ worker claude Sonnet 5\.5 +│ │ │$/],[5,/^│ │   │   CTX ━━─+ 22% · 12m +│ │ │$/],[6,/^│ │   │   worker step +│ │ │$/],[7,/^│ │   └─+┘ │ │$/],[8,/^│ ╰─+╯ │$/]])
+for(const [i,want] of [[-3,/^│ │ ● code · 3\/7 +2h 10m │ │$/],[-2,/^│ │   한글 제목 — 속도 3단계의 남은 +│ │$/],[-1,/^│ │   재계산 +│ │$/],[0,/^│ │   ● owner  claude Opus 5\.5 xhigh +│ │$/],[1,/^│ │     CTX ━━━━──── 52% +│ │$/],[2,/^│ │     owner step +│ │$/],
+ [3,/^│ │   ┌ 3\/7: execute ─+┐ │ │$/],[4,/^│ │   │ ⠋ worker claude Sonnet 5\.5 +│ │ │$/],[5,/^│ │   │   CTX ━━─+ 22% · 12m +│ │ │$/],[6,/^│ │   │   worker step +│ │ │$/],[7,/^│ │   └─+┘ │ │$/],[8,/^│ ╰─+╯ │$/]])
  assert(want.test(b[at+i]),i+'\n'+b.join('\n'));
 // The `none` form is the older one: the stage row four cells in, the worker hanging by a `↳` four cells in, its CTX row and NOW eight in.
 const old=draw([one],40,60).length&&view.render({width:40,height:60,side:true,fill:true,model:{...head,routes:[one],route_count:1},state:'working',configuration:{worker_box:'none'},questions:()=>[]}).rows.map(text);
 const oat=old.findIndex(s=>s.includes('● owner'));
-for(const [i,want] of [[1,/^│ │     CTX ━━━━──── 52% +│ │$/],[2,/^│ │     owner step +│ │$/],[3,/^│ │     staged 3\/7: execute +│ │$/],[4,/^│ │     ↳ ⠋ worker claude Sonnet 5\.5 +│ │$/],[5,/^│ │         CTX ━━─+ 22% · 12m +│ │$/],[6,/^│ │         worker step +│ │$/],[7,/^│ ╰─+╯ │$/]])
+for(const [i,want] of [[1,/^│ │     CTX ━━━━──── 52% +│ │$/],[2,/^│ │     owner step +│ │$/],[3,/^│ │     3\/7: execute +│ │$/],[4,/^│ │     ↳ ⠋ worker claude Sonnet 5\.5 +│ │$/],[5,/^│ │         CTX ━━─+ 22% · 12m +│ │$/],[6,/^│ │         worker step +│ │$/],[7,/^│ ╰─+╯ │$/]])
  assert(want.test(old[oat+i]),i+'\n'+old.join('\n'));
 // With room, the owner's CTX row has no time and `CTX ━━ 22% · 12m` stands under the worker's who.
 const wide=draw([one],72,60);
@@ -989,7 +990,7 @@ for(const width of [36,44]){
     def test_the_worker_box_is_closed_open_or_none_as_the_setting_says(self):
         # 11-18 (the person: "박스 여부는 내가 골라가면서 볼 수 있게 그냥 옵션에 좀 넣어줘"): `worker_box` is `closed` (the default and what
         # an unknown value reads as), `open` or `none`. A route with workers and a stage line puts the workers of the stage in a box
-        # under the owner, the stage text on its top line (`┌ staged 3/7: execute ──┐`): closed it has all four borders, open the top
+        # under the owner, the stage text on its top line (`┌ 3/7: execute ──┐`): closed it has all four borders, open the top
         # line and the left side only, `none` the stage row and the `↳` indent as before. The closed box's right line stands in one
         # column for every row whatever its text (Hangul two cells, ASCII one); where its text would be under 24 cells wide it is open.
         script = self.FIXTURE + r"""
@@ -1008,7 +1009,7 @@ for(const width of [38,40,44,52,60]){
  const closed=part(plain(width,{})),where=width+'\n'+closed.join('\n');
  // The default is `closed`, and so is a value the setting does not know.
  assert.deepEqual(plain(width,{worker_box:'bogus'}),plain(width,{}),where);assert.deepEqual(plain(width,{worker_box:'closed'}),plain(width,{}),where);
- assert(/^│ │   ┌ staged 3\/7: execute ─+┐ │ │$/.test(closed[0])&&/^│ │   └─+┘ │ │$/.test(closed.at(-1)),where);
+ assert(/^│ │   ┌ 3\/7: execute ─+┐ │ │$/.test(closed[0])&&/^│ │   └─+┘ │ │$/.test(closed.at(-1)),where);
  // Every row of the box (the top, the workers' rows with Hangul and ASCII, the bottom) puts its right line in the one column.
  assert.equal(closed.filter(s=>/^│ │   │ [⠋●] worker/.test(s)).length,3,where);
  for(const s of closed.slice(1))assert(/^│ │   [│└]/.test(s),where);
@@ -1017,28 +1018,28 @@ for(const width of [38,40,44,52,60]){
  // `open` has the top line and the left side, no right line and no bottom line; its text starts where the closed box's does, and has the
  // room of the right line besides.
  const open=part(plain(width,{worker_box:'open'})),owhere=width+' open\n'+open.join('\n');
- assert(/^│ │   ┌ staged 3\/7: execute ─+ │ │$/.test(open[0])&&!open.some(s=>/[┐┘└]/.test(s))&&open.slice(1).every(s=>/^│ │   │ /.test(s)),owhere);
+ assert(/^│ │   ┌ 3\/7: execute ─+ │ │$/.test(open[0])&&!open.some(s=>/[┐┘└]/.test(s))&&open.slice(1).every(s=>/^│ │   │ /.test(s)),owhere);
  // `none` is the older form: the stage row four cells in, the workers hanging by `↳`, no border line at all.
  const flat=part(plain(width,{worker_box:'none'})),nwhere=width+' none\n'+flat.join('\n');
- assert(/^│ │ {5}staged 3\/7: execute +│ │$/.test(flat[0])&&flat.filter(s=>/^│ │ {5}↳ [⠋●] worker/.test(s)).length===3&&!flat.some(s=>/[┌┐└┘]|^│ │   │/.test(s)),nwhere);
+ assert(/^│ │ {5}3\/7: execute +│ │$/.test(flat[0])&&flat.filter(s=>/^│ │ {5}↳ [⠋●] worker/.test(s)).length===3&&!flat.some(s=>/[┌┐└┘]|^│ │   │/.test(s)),nwhere);
 }
 // Where the text inside would be under 24 cells wide (here under 38 cells in all) the closed box gives way to the open one.
 for(const width of [32,34,36]){const rows=plain(width,{}),box=part(rows);
  assert(/^│ │   ┌ /.test(box[0])&&!box.some(s=>/[┐┘└]/.test(s))&&box.slice(1).every(s=>/^│ │   │ /.test(s)),width+'\n'+rows.join('\n'));
  for(const s of rows)assert.equal(cells(s),width,s);}
-// A route with no workers draws no box. Its stage text is on the first line, `staged 3/7: execute` where the width has room for it (the
-// name goes first short of cells, then the whole text); where the name is not on the first line the stage row `staged 3/7: execute` stands
+// A route with no workers draws no box. Its stage text is on the first line, `3/7: execute` where the width has room for it (the
+// name goes first short of cells, then the whole text); where the name is not on the first line the stage row `3/7: execute` stands
 // under the owner (11-18, round 5), and where it is, none does.
-for(const [width,first,apart] of [[40,/^│ │ ● code · staged 3\/7 +2h 10m │ │$/,true],[52,/^│ │ ● code · staged 3\/7: execute +2h 10m │ │$/,false],[32,/^│ │ ● code +2h 10m │ │$/,true]]){
+for(const [width,first,apart] of [[40,/^│ │ ● code · 3\/7: execute +2h 10m │ │$/,false],[36,/^│ │ ● code · 3\/7: execute +2h 10m │ │$/,false],[52,/^│ │ ● code · 3\/7: execute +2h 10m │ │$/,false],[32,/^│ │ ● code · 3\/7 +2h 10m │ │$/,true]]){
  const rows=view.render({width,height:80,side:true,fill:true,model:{...head,routes:[{...route,workers_live:[]}],route_count:1},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
- const lines=rows.filter(s=>/^│ │ {5}staged 3\/7: execute +│ │$/.test(s));
+ const lines=rows.filter(s=>/^│ │ {5}3\/7: execute +│ │$/.test(s));
  assert(rows.some(s=>first.test(s))&&!rows.some(s=>/^│ │ +[┌│└]/.test(s))&&lines.length===(apart?1:0),width+'\n'+rows.join('\n'));}
 // Several stages at once (review C2): the workers stand in the box of their own stage, each box titled with that stage's position and name.
 {const parallel={...route,stages:[...seven(2).slice(0,2),{name:'eval-asr',mark:'●',current:true},{name:'eval-sep',mark:'●',current:true},...seven(2).slice(4)],
   workers_live:[worker('claude','Sonnet 5.5','22%','ASR step',{stage:'eval-asr'}),worker('opencode','glm-5.2','9%','SEP step',{stage:'eval-sep'}),worker('codex','gpt-5.5','34%','ASR two',{stage:'eval-asr'})]};
  for(const configuration of [{},{worker_box:'open'},{worker_box:'none'}]){
   const rows=view.render({width:44,height:80,side:true,fill:true,model:{...head,routes:[parallel],route_count:1},state:'working',configuration,questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join('')),where=JSON.stringify(configuration)+'\n'+rows.join('\n');
-  const asr=rows.findIndex(s=>s.includes('staged 3/7: eval-asr')),sep=rows.findIndex(s=>s.includes('staged 4/7: eval-sep'));
+  const asr=rows.findIndex(s=>s.includes('3/7: eval-asr')),sep=rows.findIndex(s=>s.includes('4/7: eval-sep'));
   assert(asr>0&&sep>asr,where);
   const between=(a,b)=>rows.slice(a,b).filter(s=>/worker/.test(s)).map(s=>s.replace(/[^\w. -]/g,' ').replace(/\s+/g,' ').trim());
   assert(between(asr,sep).length===2&&between(asr,sep)[0].includes('claude Sonnet 5.5')&&between(asr,sep)[1].includes('codex gpt-5.5'),where);
@@ -1064,7 +1065,7 @@ for(const configuration of [{},{worker_box:'none'}])for(const width of [34,40,52
  const rows=plain([route([timed,untimed])],width,configuration),where=width+' '+JSON.stringify(configuration)+'\n'+rows.join('\n');
  const at=rows.findIndex(s=>/● owner/.test(s)),first=rows.findIndex(s=>/● code/.test(s));
  // The route's time ends its first line and stands nowhere else but the workers' own.
- assert(/^│ │ ● code(?: · staged \d+\/\d+)? +2h 10m │ │$/.test(rows[first])&&rows.filter(s=>s.includes('2h 10m')).length===1,where);
+ assert(/^│ │ ● code(?: · \d+\/\d+(?:: [\w-]+)?)? +2h 10m │ │$/.test(rows[first])&&rows.filter(s=>s.includes('2h 10m')).length===1,where);
  // The owner: its who row and its CTX row, no time.
  assert(/^│ │   ● owner /.test(rows[at])&&/^│ │ {5}CTX /.test(rows[at+1])&&!/\d+[hm]\b/.test(rows[at]+rows[at+1].replace(/^│ │ +CTX [━─ ]*\d+% /,'')),where);
  // The worker with its own time: `CTX ━━ 34% · 12m` (the gauge may go before the time in a narrow box); the one with none: the percent alone.
@@ -1084,22 +1085,25 @@ for(let width=32;width<=72;width++){
 
     def test_a_bottom_route_row_names_its_kind_and_has_no_command_column(self):
         # Spec E9 rule 34 (d), 11-17 (route row 5): after model and context, the side layout's and Fleet's words: the kind with
-        # its intensity (`lab(quick)`, `code(standard) · staged 3/7: execute`), a failed `staged 2/3: execute ✕`; short of
+        # its intensity (`lab(quick)`, `code(standard) · 3/7: execute`), a failed `2/3: execute ✕`; short of
         # cells the kind word goes, then `staged`, then the whole column. 11-18: the command column (`>_ Edit`) is gone.
         script = self.FIXTURE + r'''
 const four=[{...oneShot,kind_word:'lab',intensity:'quick'},{...staged,kind_word:'code',intensity:'standard'},waiting,failed];
 const row=(rows,title)=>rows.find(s=>s.startsWith('│ │ ')&&s.includes(title));
 const r140=draw(four,140,20,{side:false});
-for(const [title,kind] of [['셸 상태','lab(quick)'],['세션 간','code(standard) · staged 3/7: execute'],['새 판으로','staged 4/7: host-run'],['PG-50','staged 2/3: execute ✕']]){
+for(const [title,kind] of [['셸 상태','lab(quick)'],['세션 간','code(standard) · 3/7: execute'],['새 판으로','4/7: host-run'],['PG-50','2/3: execute ✕']]){
  const s=row(r140,title);assert(s&&s.includes('│ '+kind),title+'\n'+r140.join('\n'));
  assert(s.indexOf('claude')<s.indexOf(kind),s);
  for(const s of r140)assert.equal(cells(s),140,s);
 }
 assert(!r140.some(s=>/execute ✕ 2\/3/.test(s))&&!r140.some(s=>s.includes('>_')),r140.join('\n'));
-// 100 cells: the kind word goes first (its intensity with it); the stage and its mark stay.
+// 100 cells (11-19: `staged ` is no longer written before the position, so the kind still stands here): the kind and the stage stay, no command.
 const r100=draw(four,100,20,{side:false});
-assert(row(r100,'세션 간').includes('│ staged 3/7: execute')&&!r100.join('').includes('code(')&&!r100.join('').includes('lab(')&&!r100.join('').includes('>_'),r100.join('\n'));
-// 80 cells: the `staged` word goes next; the stage and its mark stay.
+assert(row(r100,'세션 간').includes('│ code(standard) · 3/7: execute')&&!r100.join('').includes('>_'),r100.join('\n'));
+// 90 cells: the kind word goes first (its bracket with it); the stage and its mark stay.
+const r90=draw(four,90,20,{side:false});
+assert(row(r90,'세션 간').includes('│ 3/7: execute')&&!r90.join('').includes('code(')&&!r90.join('').includes('lab(')&&!r90.join('').includes('>_'),r90.join('\n'));
+// 80 cells: the stage and its mark stay (`staged` is never written).
 const r80=draw(four,80,20,{side:false});
 assert(row(r80,'세션 간').includes('│ 3/7: execute')&&row(r80,'PG-50').includes('│ 2/3: execute ✕')&&!r80.join('').includes('staged'),r80.join('\n'));
 // Narrower still the whole column goes; the earlier columns stay.
@@ -1121,11 +1125,11 @@ for(let width=56;width<=140;width+=2)for(const s of draw(four,width,20,{side:fal
         script = self.FIXTURE + r'''
 const unit={...oneShot,id:'u',title:'PR 독립 검토',kind_word:'code',kind_field:'code',kind_form:'unit',intensity:'quick',unit_route:true,unit_word:'code-review',role:'worker',elapsed:'17m',
  stages:[],paint:{...oneShot.paint,model_text:P('Opus 5.5'),ctx:P('14%'),gauge_row:[P('━───── 14%')]}};
-const own={...oneShot,kind_word:'code',kind_form:'one-shot',intensity:'quick',role:'owner',owner_paint:oneShot.paint};
+const own={...oneShot,kind_word:'code',kind_form:'solo',intensity:'quick',role:'owner',owner_paint:oneShot.paint};
 const first=(rows,re)=>rows.find(s=>s.startsWith('│ │ ')&&re.test(s));
 const w44=draw([unit,own],44,60);
 assert(first(w44,/● code\(unit·quick\) +17m │ │$/),w44.join('\n'));
-assert(first(w44,/● code\(one-shot·quick\)/),w44.join('\n'));            // the route with an owner reads its form and intensity too
+assert(first(w44,/● code\(solo·quick\)/),w44.join('\n'));            // the route with an owner reads its form and intensity too
 assert(w44.filter(s=>/unit/.test(s)).length===1,w44.join('\n'));          // the `(unit·quick)` of the first line is the one `unit` word
 const w32=draw([unit],32,60);
 assert(first(w32,/● code\(unit·quick\) +17m │ │$/),w32.join('\n'));
@@ -1157,7 +1161,7 @@ assert(bottom.some(s=>/code-review claude Opus 5\.5 xhigh .*│ code\(unit·quic
     def test_the_bracket_holds_the_form_and_the_intensity_and_the_whole_bracket_follows_the_intensitys_color_and_weight(self):
         # 11-19 (the person: "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" / "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" /
         # "강도도 표기해 항상"): the bracket of a route in the dispatch zone holds the backend's form word (`kind_form`) and its intensity after a `·`,
-        # always (`code(staged·standard)`); a route with no intensity reads the form alone; one with no form (a frame, an older record) its
+        # always (`code(team·standard)`); a route with no intensity reads the form alone; one with no form (a frame, an older record) its
         # intensity alone; an older unit route its bare `unit`; a called unit's row has none. The whole bracket wears the intensity's color and
         # weight (a dim one where the route has no field hue), also where the tail is folded away. The stage line does not lead with `staged` again.
         script = self.FIXTURE + r'''
@@ -1169,57 +1173,57 @@ const texts=rows=>rows.map(r=>r.map(p=>p.text).join(''));
 const find=(rows,t)=>rows.flat().filter(p=>p.text===t);
 const own0={...oneShot,role:'owner',owner_paint:oneShot.paint};
 const unit={...own0,id:'u',kind_word:'code',kind_field:'code',kind_form:'unit',intensity:'quick',unit_route:true,unit_word:'code-review',role:'worker',elapsed:'17m',stages:[]};
-const quick={...own0,id:'q',kind_word:'code',kind_field:'code',kind_form:'one-shot',intensity:'quick'};
-const std={...staged,id:'s',kind_word:'code',kind_field:'code',kind_form:'staged',intensity:'standard',role:'owner',chain:[{name:'frame',state:'done'},{name:'code',state:'active'}]};
-const strong={...staged,id:'l',kind_word:'lab',kind_field:'lab',kind_form:'staged',intensity:'strong',role:'owner'};
-const none={...staged,id:'n',kind_word:'code',kind_field:'code',kind_form:'staged',intensity:'',role:'owner'};
+const quick={...own0,id:'q',kind_word:'code',kind_field:'code',kind_form:'solo',intensity:'quick'};
+const std={...staged,id:'s',kind_word:'code',kind_field:'code',kind_form:'team',intensity:'standard',role:'owner',chain:[{name:'frame',state:'done'},{name:'code',state:'active'}]};
+const strong={...staged,id:'l',kind_word:'lab',kind_field:'lab',kind_form:'team',intensity:'strong',role:'owner'};
+const none={...staged,id:'n',kind_word:'code',kind_field:'code',kind_form:'team',intensity:'',role:'owner'};
 const old={...unit,kind_word:'unit',kind_field:undefined,kind_form:undefined,id:'o'};
 const all=[unit,quick,std,old,strong,none];
 for(const [width,side] of [[44,true],[36,true],[28,true],[160,false],[130,false]]){
   const rows=rendered(all,width,side),text=texts(rows),tag=width+(side?' side':' bottom')+'\n'+text.join('\n');
   const has=re=>text.some(s=>re.test(s));
   if(width>=36||!side){
-    assert(has(/code\(unit·quick\)/)&&has(/code\(one-shot·quick\)/)&&has(/lab\(staged·strong\)/)&&has(/code\(staged\)/),tag);
-    assert(side||has(/code\(staged·standard\)/),tag);              // (beside the native area the chain and the stage take the room: the tail folds)
-    assert(!has(/staged \d\/\d/)&&has(/ \d\/\d: /),tag);                 // (the stage line does not lead with `staged` where the bracket says it)
+    assert(has(/code\(unit·quick\)/)&&has(/code\(solo·quick\)/)&&has(/lab\(team·strong\)/)&&has(/code\(team\)/),tag);
+    assert(side||has(/code\(team·standard\)/),tag);              // (beside the native area the chain and the stage take the room: the tail folds)
+    assert(!has(/staged/)&&has(/ \d\/\d: /),tag);                 // (the stage line never leads with `staged`)
     assert(!has(/unit\(/)&&!has(/\(quick\)|\(standard\)|\(strong\)/),tag);
   }
   assert(has(/(● |│ )unit(?![(·])/),tag);                                  // (the older unit route: bare `unit`)
   // color: the whole bracket follows the intensity (quick dim, standard plain, strong bold) in the field's hue
   const key=(t,fg,dim,bold)=>find(rows,t).forEach(p=>assert(p.foreground===fg&&!!p.dim===dim&&!!p.bold===bold&&p.role==='kind',tag+JSON.stringify(p)));
-  if(width>=36||!side){key('(unit·quick)',69,true,false);key('(one-shot·quick)',69,true,false);if(!side)key('(staged·standard)',69,false,false);key('(staged·strong)',214,false,true);}
+  if(width>=36||!side){key('(unit·quick)',69,true,false);key('(solo·quick)',69,true,false);if(!side)key('(team·standard)',69,false,false);key('(team·strong)',214,false,true);}
 }
 // the tail folds first, the colour stays that of the intensity; the form goes after the chain
 const row28=texts(rendered([std],28)).find(s=>/● frame|● code/.test(s));
-assert(/● code\(staged\)/.test(row28)||/● frame ✓ → code\(staged\)/.test(row28),row28);
-for(const [routes,word,fg,dim,bold] of [[[unit],'(unit)',69,true,false],[[strong],'(staged)',214,false,true]]){
+assert(/● code\(team\)/.test(row28)||/● frame ✓ → code\(team\)/.test(row28),row28);
+for(const [routes,word,fg,dim,bold] of [[[unit],'(unit)',69,true,false],[[strong],'(team)',214,false,true]]){
   const got=[22,24,26,28,30,32,34,36].flatMap(w=>find(rendered(routes,w),word));
   assert(got.length&&got.every(p=>p.foreground===fg&&!!p.dim===dim&&!!p.bold===bold),word+JSON.stringify(got));}
 // as the width narrows the bracket only ever loses its tail, then itself (never the other way round)
-const stateOf=s=>/code\(staged·standard\)/.test(s)?0:/code\(staged\)/.test(s)?1:/● code/.test(s)||/→ code/.test(s)?2:3;
+const stateOf=s=>/code\(team·standard\)/.test(s)?0:/code\(team\)/.test(s)?1:/● code/.test(s)||/→ code/.test(s)?2:3;
 let last=0;
 for(let w=60;w>=20;w--){const line=texts(rendered([std],w)).find(s=>/● (frame|code)/.test(s));if(!line)continue;const st=stateOf(line);assert(st>=last,w+' '+line);last=st;}
 assert(last>=1);
-// beneath the native area the kind column folds the intensity first, then the kind, and `staged` comes back with the bracket gone
-const kindState=line=>/code\(staged·standard\) · \d\/\d: /.test(line)?0:/code\(staged\) · \d\/\d: /.test(line)?1:/\bstaged \d\/\d: /.test(line)?2:/ \d\/\d: /.test(line)?3:-1;
+// beneath the native area the kind column folds the intensity first, then the bracket (`code · 3/6: execute`), then the kind; `staged` is never written
+const kindState=line=>/code\(team·standard\) · \d\/\d: /.test(line)?0:/code\(team\) · \d\/\d: /.test(line)?1:/code · \d\/\d: /.test(line)?2:/ \d\/\d: /.test(line)?3:-1;
 const seen=[];
 for(let w=170;w>=60;w--){const line=texts(rendered([{...std,chain:undefined},quick],w,false)).find(s=>/\d\/\d: /.test(s));if(line)seen.push(kindState(line));}
-assert(seen.every(v=>v>=0)&&seen.every((v,i)=>i===0||v>=seen[i-1])&&seen.includes(0)&&seen.includes(1)&&seen.includes(2),JSON.stringify(seen));
+assert(seen.every(v=>v>=0)&&seen.every((v,i)=>i===0||v>=seen[i-1])&&seen.includes(0)&&seen.includes(1),JSON.stringify(seen));
 // mono / NO_COLOR / under 256 colors: dim brackets, the same text
 for(const extra of [{no_color:true},{colors:16}]){
   const rows=rendered([unit,std],44,true,extra);
   assert(texts(rows).some(s=>/code\(unit·quick\)/.test(s)),JSON.stringify(extra));
   assert(find(rows,'(unit·quick)').every(p=>p.dim===true&&!p.foreground),JSON.stringify(extra));
-  assert(find(rows,'(staged·standard)').every(p=>!p.foreground),JSON.stringify(extra));
+  assert(find(rows,'(team·standard)').every(p=>!p.foreground),JSON.stringify(extra));
 }
 // a unit a worker called (under the route): no bracket on its row
-const caller={...staged,id:'c',kind_word:'code',kind_field:'code',kind_form:'staged',intensity:'standard',role:'owner',workers_live:[{kind:'working',role:'worker',stage:'execute',elapsed:'12m',
+const caller={...staged,id:'c',kind_word:'code',kind_field:'code',kind_form:'team',intensity:'standard',role:'owner',workers_live:[{kind:'working',role:'worker',stage:'execute',elapsed:'12m',
  paint:{glyph:P('⠸'),harness:P('claude'),model_text:P('Sonnet 5.5')},called:[{kind:'working',unit_word:'code-review',elapsed:'3m',title:'review',kind_word:'code',kind_field:'code',
  paint:{glyph:P('⠸'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh')}}]}]};
 const under=texts(rendered([caller],130,false));
 assert(under.some(s=>/code-review/.test(s))&&!under.some(s=>/code-review.*\((unit|quick|one-shot)/.test(s)),under.join('\n'));
 // a `direct` route has no form; a route with no form keeps its intensity bracket
-const direct=texts(rendered([{...own0,kind_word:'code',kind_field:'code',kind_form:'one-shot',intensity:'quick',zone:'direct',shape:'direct'}],44));
+const direct=texts(rendered([{...own0,kind_word:'code',kind_field:'code',kind_form:'solo',intensity:'quick',zone:'direct',shape:'direct'}],44));
 assert(!direct.some(s=>/one-shot/.test(s)),direct.join('\n'));
 const plain=texts(rendered([{...own0,kind_word:'code',kind_field:'code',intensity:'standard'}],44));
 assert(plain.some(s=>/● code\(standard\)/.test(s)),plain.join('\n'));
@@ -1746,12 +1750,12 @@ const draw=(routes,width,height,{side=true,open=[]}={})=>view.render({width,heig
 const rows=draw([oneShot,staged,failed],40,76),all=rows.join('\n');
 for(const s of rows)assert.equal(cells(s),40,s);
 // (11-17: the open tool is not on the owner's row; 11-18: nor its context, which is the row under it: `CTX`, the gauge and the percent.)
-for(const want of ['│ │   ⠋ claude Opus 5.5 xhigh ','│ │     CTX ━━─── 38% ','│ │   ⠋ claude Sonnet 5.5 high ','│ │     CTX ━──── 12% ','│ │     staged 3/7: execute ','│ │     staged 2/3: execute ✕ '])
+for(const want of ['│ │   ⠋ claude Opus 5.5 xhigh ','│ │     CTX ━━─── 38% ','│ │   ⠋ claude Sonnet 5.5 high ','│ │     CTX ━──── 12% ','│ │     3/7: execute ','│ │     2/3: execute ✕ '])
  assert(all.includes(want),want+'\n'+all);
 assert(!/· Edit|>_/.test(all),'no tool on a side row\n'+all);
 // An owner shows no time wherever the row has room: the route's own stands at the right end of its first line (a route with a kind word).
 const roomy=draw([{...oneShot,kind_word:'code'},staged,failed],52,76);
-assert(roomy.some(s=>/^│ │ ● code(?: · staged \d+\/\d+)? +41m │ │$/.test(s))&&roomy.some(s=>s.includes('│ │   ⠋ claude Opus 5.5 xhigh '))&&roomy.some(s=>/^│ │     CTX ━━─── 38% +│ │$/.test(s))&&!roomy.some(s=>/· \d+m/.test(s)),'the owner takes no time where the row has room\n'+roomy.join('\n'));
+assert(roomy.some(s=>/^│ │ ● code(?: · \d+\/\d+(?:: [\w-]+)?)? +41m │ │$/.test(s))&&roomy.some(s=>s.includes('│ │   ⠋ claude Opus 5.5 xhigh '))&&roomy.some(s=>/^│ │     CTX ━━─── 38% +│ │$/.test(s))&&!roomy.some(s=>/· \d+m/.test(s)),'the owner takes no time where the row has room\n'+roomy.join('\n'));
 // No model name, version or path is cut apart, and nothing opens in place under a route.
 for(const s of rows)assert(!/\((Opus|Sonnet) *│|│ +5\.5|utilities\/sessio( |$)|sessio *│/.test(s),s+'\n'+all);
 for(const gone of ['OWNER','DOER','KIND','┆','impl-review','lines ›'])assert(!all.includes(gone),gone+'\n'+all);
@@ -1767,7 +1771,7 @@ assert.deepEqual(rows.slice(title,title+6).map(s=>s.slice(2,-1).trimEnd()),['TIT
  '       줄 다듬기','NOW    검토 결과 3건을 기다리는','       중이며 CI 결과를 확인하고','       있음 ›'],all);
 // With room the whole values stand on one row each.
 const wide=draw([oneShot,staged,failed],140,76,{side:false}).join('\n');
-for(const want of ['PG-50 휠 입력','staged 2/3: execute ✕','54m','staged 3/7: execute','claude Opus 5.5 xhigh'])assert(wide.includes(want),want+'\n'+wide);
+for(const want of ['PG-50 휠 입력','2/3: execute ✕','54m','3/7: execute','claude Opus 5.5 xhigh'])assert(wide.includes(want),want+'\n'+wide);
 assert(!wide.includes('>_'),'no command column\n'+wide);   // 11-18
 """
         self.node(script, "panel-view.cjs")
@@ -2175,7 +2179,7 @@ for(const [height,rowsOf] of [[46,{QUESTIONS:2,MESSAGES:8,MEM:4}],[20,{QUESTIONS
  // working first, the border counting the rest.
  const box=sec.ROUTE.rows,routeRows=box.filter(s=>/^│ │ [⠏⠋✕✓] /.test(s));
  // (Each route keeps its time too: these routes carry no owner, and a route does not lose its time for that.)
- if(height===46)assert(routeRows.length===4&&box.filter(s=>/│ │   staged 2\/2: execute/.test(s)).length===1&&['23m','54m','14m','31m'].every(m=>box.filter(s=>new RegExp('│ │ .*'+m+' +│ │$').test(s)).length===1)&&box.at(-1).startsWith('│ ╰─')&&!/[↑↓]\d/.test(box.at(-1)),label);
+ if(height===46)assert(routeRows.length===4&&box.filter(s=>/│ │   2\/2: execute/.test(s)).length===1&&['23m','54m','14m','31m'].every(m=>box.filter(s=>new RegExp('│ │ .*'+m+' +│ │$').test(s)).length===1)&&box.at(-1).startsWith('│ ╰─')&&!/[↑↓]\d/.test(box.at(-1)),label);
  else assert(routeRows.length>=1&&routeRows.length<4&&/↓\d+ ─╯/.test(box.at(-1))&&routeRows[0].includes('질문 팝업'),label);
  // Press actions: the question's head and rows open it; every head and row of MESSAGES its popup;
  // the box's top line the route popup and a route's rows the popup with that route unfolded; MEM opens nothing.
