@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 import math
 from ..config import ui_text
+from ..palette import route_form
 from .grid import cell_width
 from .grid import clip_cells as clip
 from .tables import repo_rule_label
@@ -582,6 +583,8 @@ def _peers_line(grid, vm, tag, x, y, right):
 
 
 def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
+    """A route's page. ``whole`` (the shell popup, a reader that scrolls) draws the frame first, to its content, then the route row,
+    then what the page says about the route; Fleet's own screen keeps its order (the summary, the route row, the frame to the window)."""
     route = next((item for item in vm.routes if str(item.get("id")) == ident), None)
     if route is None:
         return
@@ -589,6 +592,12 @@ def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
     summary = (system.get("task_summary", {}).get("by_route", {}).get(ident)
                if hasattr(system, "get") and hasattr(system.get("task_summary"), "get") else None)
     y = 3
+    if whole:
+        y = draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y, state, fit=True) + 1
+        # (The units a worker of this route called are not drawn on the route page: it reads as it did before the call.)
+        y = _draw_route_subset(grid, vm, ({key: value for key, value in route.items() if key != "called"},), x, y, bottom,
+                               opened=ident, no_repo_group=True, view_key="route:" + ident, state=state)
+        y += 1
     if isinstance(summary, Mapping):
         for name, key in (("TODO", "lvl_y"), ("DOING", "g_spin_dim"), ("DONE", "done")):
             values = tuple(summary.get(name.casefold()) or ())
@@ -597,6 +606,8 @@ def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
                      "soft" if values else "dim", limit=right)
             y += 1
     y = _route_visibility_lines(grid, route.get("visibility"), x, right, y, bottom, whole)
+    if whole:
+        return
     # (The units a worker of this route called are not drawn on the route page: it reads as it did before the call.)
     y = _draw_route_subset(grid, vm, ({key: value for key, value in route.items() if key != "called"},), x, y, bottom,
                            opened=ident, no_repo_group=True, view_key="route:" + ident, state=state)
@@ -750,44 +761,9 @@ def _rounds_lines(rounds, room):
     return lines
 
 
-def _stage_box(grid, x, y, w, h, index, stage):
-    hue = _STAGE_HUE[index % 5]
-    status = stage.get("st") if stage.get("st") in _STATE_MARK else "todo"
-    verdict_text = str(stage.get("verdict") or status)
+def _stage_lines(stage, status, room):
+    """The value lines of a stage's box (``by``, ``time``, the gate's questions, rounds, ``gate``, ``out``, ``unit``, ``says``)."""
     gate = stage.get("kind") == "gate"
-    lit = status != "active" or bool(getattr(grid, "beat", 1))
-    if gate:
-        line = ("p", 0, 1)
-    elif status == "active":
-        line = (hue, 0, 1)
-    elif status == "failed":
-        line = ("r", 0, 0)
-    else:
-        line = ("d", 0, 1)
-    narrow = w < 34
-    if status == "active":
-        right = [(" ", None), ("●", "work" if lit else "g_work_off"),
-                 (" " if narrow else " " + verdict_text + " ", "soft")]
-    elif gate:
-        right = [(" ✓ ", "done")] + ([] if narrow else [(verdict_text + " ", "soft")])
-    else:
-        mark, key = _STATE_MARK[status]
-        right = [(" %s " % mark, key if status != "todo" else "dim")] + (
-            [] if narrow else [(verdict_text + " ", "soft" if status != "todo" else "dim")])
-    rw = _width(right)
-    name = str(stage.get("n"))
-    if gate:
-        title = [(" ◑ ", "steward"),
-                 (clip(name, w - 8 - rw), ("p", 1, 0) if lit else "tag_steward_dim"), (" ", None)]
-    else:
-        title = [(" ", None), (clip(name, w - 6 - rw),
-                               (hue, 1, 0) if status != "todo" and lit else (hue, 0, 1)),
-                 (" ", None)]
-    _outline(grid, x, y, w, h, line)
-    grid.mark_moved()
-    _segs(grid, x + 2, y, title)
-    _segs(grid, x + w - 1 - rw, y, right)
-    room = w - 4 - _LW
     lines = []
     who = stage.get("who")
     if who:
@@ -815,6 +791,47 @@ def _stage_box(grid, x, y, w, h, index, stage):
     lines.append([_lab("unit"), (clip(str(stage.get("unit") or ""), room), "dim")])
     if stage.get("says"):
         lines.append([_lab("says"), (clip(stage["says"], room), "now_sub")])
+    return lines
+
+
+def _stage_box(grid, x, y, w, h, index, stage):
+    hue = _STAGE_HUE[index % 5]
+    status = stage.get("st") if stage.get("st") in _STATE_MARK else "todo"
+    verdict_text = str(stage.get("verdict") or status)
+    gate = stage.get("kind") == "gate"
+    lit = status != "active" or bool(getattr(grid, "beat", 1))
+    if gate:
+        line = ("p", 0, 1)
+    elif status == "active":
+        line = (hue, 0, 1)
+    elif status == "failed":
+        line = ("r", 0, 0)
+    else:
+        line = ("d", 0, 1)
+    narrow = w < 34
+    if status == "active":
+        right = [(" ", None), ("●", "work" if lit else "g_work_off"),
+                 (" " if narrow else " " + verdict_text + " ", "soft")]
+    elif gate:
+        right = [(" ✓ ", "done")] + ([] if narrow else [(verdict_text + " ", "soft")])
+    else:
+        mark, key = _STATE_MARK[status]
+        right = [(" %s " % mark, key if status != "todo" else "dim")] + (
+            [] if narrow else [(verdict_text + " ", "soft" if status != "todo" else "dim")])
+    rw = _width(right)
+    name = str(stage.get("title") or stage.get("n"))
+    if gate:
+        title = [(" ◑ ", "steward"),
+                 (clip(name, w - 8 - rw), ("p", 1, 0) if lit else "tag_steward_dim"), (" ", None)]
+    else:
+        title = [(" ", None), (clip(name, w - 6 - rw),
+                               (hue, 1, 0) if status != "todo" and lit else (hue, 0, 1)),
+                 (" ", None)]
+    _outline(grid, x, y, w, h, line)
+    grid.mark_moved()
+    _segs(grid, x + 2, y, title)
+    _segs(grid, x + w - 1 - rw, y, right)
+    lines = _stage_lines(stage, status, w - 4 - _LW)
     for k, parts in enumerate(lines[:h - 2]):
         _segs(grid, x + 2, y + 1 + k, parts, x + w - 1)
 
@@ -854,7 +871,7 @@ def _stage_status(stage):
             "todo" if all(value == "todo" for value in states) else "done")
 
 
-def _stage_grid(grid, x0, y, stages, room, bottom, loops=()):
+def _stage_grid(grid, x0, y, stages, room, bottom, loops=(), natural=False):
     gap = 4
     graph_known = any(stage.get("graph_known") for stage in stages)
     steps = _flow_steps(stages)
@@ -873,6 +890,13 @@ def _stage_grid(grid, x0, y, stages, room, bottom, loops=()):
     if avail - (nrows - 1) < 6 * nrows:
         pitch_gap = 0
     h = max(4, min(max(10, 3 * max(units) - 1), (avail - pitch_gap * (nrows - 1)) // nrows))
+    if natural:
+        # A box as tall as its own value lines (a popup has no window's height to fill); a 2-way group stacks two such boxes.
+        pitch_gap = 1
+        leaves = [item for stage in stages for item in (stage["group"] if "group" in stage else (stage,))]
+        box = max(4, 2 + max(len(_stage_lines(item, item.get("st") if item.get("st") in _STATE_MARK else "todo",
+                                              w - 4 - _LW)) for item in leaves))
+        h = max(units) * (box + 1) - 1
     pos = [None] * len(stages)
     step_at, step_of, mids_of = [], {}, {}
     for number, step in enumerate(steps):
@@ -1042,7 +1066,7 @@ def _current_leg(grid, x, y, stages, room):
     if stage.get("st") == "active" and not getattr(grid, "beat", 1):
         name_style = (hue, 0, 1)
     limit = x0 + max(0, room)
-    x = grid.put(x, y, clip(str(stage.get("n") or stage.get("name")), max(0, room)),
+    x = grid.put(x, y, clip(str(stage.get("title") or stage.get("n") or stage.get("name")), max(0, room)),
                  name_style, limit=limit)
     if stage.get("st") != "active":
         mark, key = _STATE_MARK.get(stage.get("st"), ("·", "dim"))
@@ -1121,20 +1145,71 @@ def route_band_shows_title(grid, vm, route, x, use):
     return x + 2 + _width(_route_band_head(route) + [(title, None)]) <= right - 1
 
 
-def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
-    """Route frame, node band and the picked node's panel from row y to bottom."""
+def route_form_word(route):
+    """The word that closes a route frame's head: the route's form (``unit``, ``solo``, ``team``; ``palette.route_form`` is the one
+    place that decides it), else the shape's own word where it names one (``staged`` and the owner-alone shapes say nothing)."""
+    form = route_form(route.get("capability"), route.get("shape"), route.get("field"))
+    if form:
+        return form
+    shape = str(route.get("shape") or "")
+    return "" if shape.startswith("staged") or shape in ("", "unknown", "framed", "one-shot-owner") else shape
+
+
+def _wrap_words(text, width):
+    """``text`` in rows of at most ``width`` cells, broken between words (a word is never cut)."""
+    rows, row = [], ""
+    for word in str(text).split():
+        trial = word if not row else row + " " + word
+        if row and cell_width(trial) > width:
+            rows.append(row)
+            row = word
+        else:
+            row = trial
+    return rows + [row] if row else rows
+
+
+def _stage_titles(form, stages):
+    """Each stage with the title its box wears: a solo route's one node is the owner itself, a unit route's is the unit's role."""
+    out = []
+    for stage in stages:
+        item = dict(stage) if hasattr(stage, "keys") else stage
+        if isinstance(item, dict) and "group" not in item:
+            name = str(item.get("n") or "")
+            role = str(item.get("unit") or "").split(" · ")[0].strip().rsplit("/", 1)[-1]
+            if form == "solo" and name == "one-shot":
+                item["title"] = "owner"
+            elif form == "unit" and name == "unit" and role and role != "·":
+                item["title"] = role
+        out.append(item)
+    return out
+
+
+def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, fit=False):
+    """Route frame, node band and the picked node's panel from row y to bottom.
+
+    ``fit`` (the shell popup, which scrolls) lays the frame to its content: the stage boxes are as tall as their value lines and
+    the frame ends one row under the last of them (and under the owner's raw strip, where there is one), ``bottom`` unused.
+    Returns the row under the frame."""
     right = min(grid.cols - 1, x + use)
     bottom = max(y, grid.rows - 5) if bottom is None else bottom
     ident = str(route.get("id") or "")
     nodes = tuple((vm.nodes or {}).get(ident, ()))
     frame_key = ("c", 0, 1)
-    for xx in range(x + 1, right):
-        grid.put(xx, bottom, "═", frame_key)
-    for yy in range(y + 1, bottom):
-        grid.put(x, yy, "║", frame_key)
-        grid.put(right, yy, "║", frame_key)
-    for (xx, yy), glyph in (((x, y), "╔"), ((right, y), "╗"), ((x, bottom), "╚"), ((right, bottom), "╝")):
-        grid.put(xx, yy, glyph, frame_key)
+    form = route_form(route.get("capability"), route.get("shape"), route.get("field"))
+
+    def frame_sides(bottom):
+        for xx in range(x + 1, right):
+            grid.put(xx, bottom, "═", frame_key)
+        for yy in range(y + 1, bottom):
+            grid.put(x, yy, "║", frame_key)
+            grid.put(right, yy, "║", frame_key)
+        for (xx, yy), glyph in (((x, y), "╔"), ((right, y), "╗"), ((x, bottom), "╚"), ((right, bottom), "╝")):
+            grid.put(xx, yy, glyph, frame_key)
+
+    if fit:
+        bottom = y + 3 if not nodes else bottom
+    if not fit or not nodes:
+        frame_sides(bottom)
     if not nodes:
         for xx in range(x + 1, right):
             grid.put(xx, y, "═", frame_key)
@@ -1142,7 +1217,7 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
                  "dim", limit=right)
         grid.mark_moved()
         return bottom + 1
-    head = _route_band_head(route)
+    head = _route_band_head(route) if not fit else [(" ", None)]
     leg_count = sum(1 for item in route.get("legs") or () if str(item[0]) != "frame")
     if route.get("detail_trailer") is not None:
         # The source states how long the route ran and what its record holds; nothing is derived.
@@ -1153,8 +1228,9 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
         count = len(route.get("legs") or ())
         trailer = f"  {route.get('age') or '·'} · {count} leg{'s' if count != 1 else ''}"
     head += [(str(route.get("detail_title") or route.get("title") or "·"), "head"), (trailer, "dim")]
-    if route.get("shape"):
-        head.append((" · " + str(route["shape"]), "dim"))
+    word = route_form_word(route)
+    if word:
+        head.append((" · " + word, "dim"))
     title_start = x + 2
     title_parts = head + [(" ", None)]
     title_end = min(right - 1, title_start + _width(title_parts))
@@ -1162,6 +1238,10 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
         if xx < title_start or xx >= title_end:
             grid.put(xx, y, "═", frame_key)
     _segs(grid, title_start, y, title_parts, right - 1)
+    # One dim line under the head says how this form works (none for a route with no form); it breaks between words.
+    note = _wrap_words(ui_text("fleet.route.form_" + form), max(1, use - 6)) if form else []
+    for k, row in enumerate(note):
+        grid.put(x + 3, y + 1 + k, row, "dim", limit=right - 1)
 
     got = ""
     if state is not None and hasattr(state, "opened_for"):
@@ -1170,7 +1250,7 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
         selected = min(int(got.split(":")[-1]), len(nodes) - 1)
     else:
         selected = next((i for i, node in enumerate(nodes) if node.get("st") == "active"), len(nodes) - 1)
-    band_y = y + 1
+    band_y = y + 1 + len(note)
     room = use - 6
     width = min(_BAND_W, (room - _BAND_GAP * (len(nodes) - 1)) // len(nodes))
     centre = x + 3 + width // 2
@@ -1203,7 +1283,7 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
               [(clip(str(node.get("n")), max(4, name_room)), name_key), (" ", None)], tail_x)
         _segs(grid, tail_x, band_y, tail)
         node_lines = [list(item) for item in (node.get("lines") or ())]
-        detail = [dict(item) if hasattr(item, "keys") else item for item in (node.get("detail") or ())]
+        detail = _stage_titles(form, [dict(item) if hasattr(item, "keys") else item for item in (node.get("detail") or ())])
         band_lines = ([None] if node.get("kind") == "leg" and detail else []) + node_lines
         for k, parts in enumerate(band_lines[:_BAND_H - 2]):
             if parts is None:
@@ -1227,29 +1307,24 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
     after = route["detail_after"] if "detail_after" in route else _route_after(route, nodes)
     if after:
         # A note that outruns the frame is cut at the frame's right rail.
-        grid.put(band_end + 3, y + 2, str(after), "dim", limit=right)
+        grid.put(band_end + 3, band_y + 1, str(after), "dim", limit=right)
 
     node = nodes[selected]
     panel_left, panel_right = x + 2, right - 2
-    panel_y = y + _BAND_H + 2
+    panel_y = band_y + _BAND_H + 1
     style = ("d", 0, 0)
-    for yy in range(panel_y + 1, bottom):
-        grid.put(panel_left, yy, "│", style)
-        grid.put(panel_right, yy, "│", style)
-    grid.put(panel_left, panel_y, "┌", style)
-    grid.put(panel_right, panel_y, "┐", style)
-    grid.put(panel_left, bottom, "╧", ("c", 0, 1))
-    grid.put(panel_right, bottom, "╧", ("c", 0, 1))
     title = [(" ", None)] + [tuple(item) for item in (node.get("title") or ())] + [(" ", None)]
     tw = _width(title)
     tx = panel_left + 2 if panel_left + 2 + tw < centre - 1 else centre + 2
     title_end = min(panel_right - 1, tx + tw)
+    grid.put(panel_left, panel_y, "┌", style)
+    grid.put(panel_right, panel_y, "┐", style)
     for xx in range(panel_left + 1, panel_right):
         if xx != centre and (xx < tx or xx >= title_end):
             grid.put(xx, panel_y, "─", style)
     _segs(grid, tx, panel_y, title, panel_right - 1)
     grid.put(centre, panel_y, "┴", ("v", 0, 0))
-    stages = [dict(item) if hasattr(item, "keys") else item for item in (node.get("detail") or ())]
+    stages = _stage_titles(form, [dict(item) if hasattr(item, "keys") else item for item in (node.get("detail") or ())])
     stage_room = panel_right - panel_left - 4
     flow = len(_flow_steps(stages))
     if flow < 3:
@@ -1259,21 +1334,36 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
     raw_lines = (tuple(attempts.get("lines", ()))
                  if str(attempts.get("route") or "") == ident
                  and node.get("kind") in ("leg", "frame") else ())
+    layout, head_parts = [], []
     if raw_lines:
+        from .transcript import dialogue_rows
+        layout = dialogue_rows(raw_lines, max(1, (panel_right - 2) - (panel_left + 2) - 3), "claude")
+        head_parts = [("owner raw", "soft"),
+                      (" · attempt-view " + str((vm.attempts or {}).get("att", "·")), "dim")]
+    if raw_lines and not fit:
         per = min(flow, max(3, min(6, (stage_room + 4) // 40)))
         need = ((flow - 1) // per + 1) * 4
         raw_rows = min(_RAW_ROWS, stage_bottom - panel_y - 3 - need)
         if raw_rows >= 2:
-            from .transcript import dialogue_rows
-            layout = dialogue_rows(raw_lines, max(1, (panel_right - 2) - (panel_left + 2) - 3), "claude")
-            head_parts = [("owner raw", "soft"),
-                          (" · attempt-view " + str((vm.attempts or {}).get("att", "·")), "dim")]
             _scroll_strip(grid, state, panel_left + 2, panel_right - 2, stage_bottom - raw_rows - 2,
                           head_parts, layout, raw_rows, "rawoff")
             stage_bottom -= raw_rows + 2
+    end = panel_y + 1
     if stages:
-        _stage_grid(grid, panel_left + 2, panel_y + 1, stages, stage_room, stage_bottom,
-                    tuple(tuple(item) for item in (node.get("loops") or ())))
+        end = _stage_grid(grid, panel_left + 2, panel_y + 1, stages, stage_room, stage_bottom,
+                          tuple(tuple(item) for item in (node.get("loops") or ())), natural=fit)
+    if raw_lines and fit and layout:
+        raw_rows = min(_RAW_ROWS, len(layout))
+        _scroll_strip(grid, state, panel_left + 2, panel_right - 2, end + 1, head_parts, layout, raw_rows, "rawoff")
+        end += raw_rows + 3
+    if fit:
+        bottom = end + 1
+        frame_sides(bottom)
+    for yy in range(panel_y + 1, bottom):
+        grid.put(panel_left, yy, "│", style)
+        grid.put(panel_right, yy, "│", style)
+    grid.put(panel_left, bottom, "╧", ("c", 0, 1))
+    grid.put(panel_right, bottom, "╧", ("c", 0, 1))
     grid.mark_moved()
     return bottom + 1
 

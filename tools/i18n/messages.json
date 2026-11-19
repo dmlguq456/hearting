@@ -1238,6 +1238,18 @@
    "en": "stopped after restart",
    "ko": "재시작 뒤 멈춤"
   },
+  "fleet.route.form_solo": {
+   "en": "solo: one owner does the whole job alone.",
+   "ko": "solo: owner 하나가 처음부터 끝까지 혼자 합니다."
+  },
+  "fleet.route.form_team": {
+   "en": "team: the owner hands each stage to a worker.",
+   "ko": "team: owner가 단계마다 작업자에게 맡깁니다."
+  },
+  "fleet.route.form_unit": {
+   "en": "unit: one worker does one job and hands back a report. It changes no file.",
+   "ko": "unit: 작업자 하나가 한 가지 일만 하고 보고서를 돌려줍니다. 파일은 고치지 않습니다."
+  },
   "fleet.route.no_stage_record": {
    "en": "could not read this route's stage record (no route record)",
    "ko": "이 route의 stage 기록을 읽지 못했습니다 (route 기록 없음)"

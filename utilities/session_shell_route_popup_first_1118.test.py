@@ -11,9 +11,10 @@ popup stands at once from what the host already holds, and its own reading repla
    that fails or is cut at 12 s changes the words (`다시 읽지 못함`) and leaves the rows; the next success removes them.
 4. Where the table is replaced, a person who scrolled keeps the route at the top of the window; one who pressed or
    Tabbed to a route sees it come into view.
-5. (11-19) A press on a route's row opens that route's page, not the table: the first screen is the stage boxes the panel's
-   own values draw (`panelView.routePageFirst`), then Fleet's page; Enter goes to the table and back; a press on the
-   section's head opens the table. A route with no stage line keeps the panel's box as its first screen.
+5. (11-19) A press on a route's row opens that route's page, not the table: the first screen is the page's frame the panel's
+   own values draw (`panelView.routePageFirst`; `session_shell_route_press_page_1119.test.py` holds it to Fleet's cells), then Fleet's
+   page; Enter goes to the table and back; a press on the section's head opens the table. A route the panel holds no leg band
+   for keeps the panel's box as its first screen.
 
 The collection is given a synthetic delay (as a long `collect_all` is); the host runs in a private PTY. Nothing here
 reaches a real account, session, artifact root or terminal.
@@ -568,8 +569,12 @@ def route_row(rid, title, state='working', staged=False):
            'model': 'Opus 5.5', 'effort': 'high'}
     if staged:  # the producer's staged route (what a real route's row carries), for the pictures of the first screen
         row.update(shape='staged', kind_form='team', worker_stage='execute', capability='autopilot-code', mode='dev', intensity='standard',
-                   chain=[{'name': 'frame', 'state': 'done'}, {'name': 'code', 'state': 'active'}],
-                   stages=[stage_values(i, n) for i, n in enumerate(STAGES)])
+                   chain=[{'name': 'frame', 'state': 'done'}, {'name': 'code', 'state': 'active'}], legs=2, age='23m',
+                   stages=[stage_values(i, n) for i, n in enumerate(STAGES)],
+                   # (11-19: the page's leg band as Fleet draws it, which the first screen's frame is drawn from)
+                   bands=[{'n': 'leg 2 · code dev', 'st': 'active', 'verdict': '2/6', 'kind': 'leg',
+                           'lines': [[['owner  ', 'dim'], ['claude', 'hb_claude'], [' Opus 5.5 high · 23m', 'soft']]],
+                           'title': [['leg 2 · code dev', 'head'], ['  rt-a0000000 · owner ', 'dim'], ['claude', 'hb_claude']]}])
     return row
 
 
@@ -899,7 +904,7 @@ class RoutePopupFirstTest(unittest.TestCase):
             # (the boxes' own marks), no Fleet row, the words that it is not this reading's, the page's key line.
             self.assertLess(w['first_ms'], 1000, w)
             self.assertFalse(w['first_has_fleet'], w)
-            self.assertFalse(w['first_paged'], w)
+            self.assertTrue(w['first_paged'], w)          # (11-19: the page's own frame stands from the first moment; the title's words say it is not this reading's)
             self.assertTrue(w['first_rule'], w)
             # (a window shows the boxes its rows hold: the first row of them at least, in order)
             self.assertGreaterEqual(w['first_boxes'], 3, w)
@@ -929,7 +934,7 @@ class RoutePopupFirstTest(unittest.TestCase):
             self.assertEqual(w['full_marks'], {'done': 2, 'active': 1}, w)
             if width == '120':  # the page's limit: closed from the table, a press on the row opens the stage boxes first
                 self.assertGreaterEqual(w['limit']['boxes'], 3, w)
-                self.assertFalse(w['limit']['paged'] or w['limit']['fleet'], w)
+                self.assertFalse(w['limit']['fleet'], w)
             # (c) Enter: the table with the route unfolded and no frame; (d) Enter: the page again.
             self.assertIn('FLEET_R', w['table_unfolded'], w)
             self.assertNotIn('staged', w['table_unfolded'], w)
@@ -988,7 +993,8 @@ const stage=(n,i)=>({name:n,state:i<2?'done':i===2?'active':'pending',mark:i<2?'
   ...(i<2?{verdict:'PASS',when:'30m',out:'artifacts/'+n+'.md',unit:'qa/'+n,gate:true}:{}),...(i===2?{harness:'claude',model:'Opus 5.5',unit:'dev/backend',when:'4m',gate:true}:{}),
   ...(i===3?{gate:'code-plan'}:{})});
 const route=(id,extra={})=>({id,title:'제목 '+id,kind:'working',state:'working',elapsed:'23m',shape:'staged',kind_form:'team',stages:names.map(stage),
-  chain:[{name:'frame',state:'done'},{name:'code',state:'active'}],...extra});
+  chain:[{name:'frame',state:'done'},{name:'code',state:'active'}],age:'23m',legs:2,
+  bands:[{n:'leg 2 · code dev',st:'active',verdict:'2/6',kind:'leg',lines:[[['owner  ','dim'],['claude','hb_claude']]],title:[['leg 2 · code dev','head']]}],...extra});
 const model={styles:{dim:{dim:true},stg2_on:{foreground:150,bold:true}},routes:[route('r1'),route('r2',{shape:'one-shot-owner',stages:[{name:'one-shot',mark:'●'}]})]};
 const text=r=>r.map(p=>p.text).join('');
 function measure(s){return [...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);}
@@ -1010,9 +1016,9 @@ for(const columns of [192,116,76]){
   const vroom=w-4-7;
   const shown=(n,i)=>clip(n,Math.max(0,w-6-rightOf(w,stage(n,i))));
   // (i) every stage box once, at most `per` boxes to a row, arrows between boxes and rows.
-  const found=lines.flatMap(l=>[...l.matchAll(/┌─ (\S+) /g)].map(m=>m[1])).filter(n=>n!=='frame'&&n!=='code');
+  const found=lines.flatMap(l=>[...l.matchAll(/┌─ (\S+) /g)].map(m=>m[1])).filter(n=>!/^(frame|code|leg)$/.test(n));
   assert.deepEqual([...found].sort(),names.map(shown).sort(),'six stages at '+columns);   // (a snake: an odd row reads leftward)
-  for(const l of lines.filter(l=>/┌─ \S+ /.test(l)&&!/┌─ (frame|code) /.test(l)))assert([...l.matchAll(/┌─ \S+ /g)].length<=per,'row of '+l);
+  for(const l of lines.filter(l=>/┌─ \S+ /.test(l)&&!/┌─ (frame|code|leg) /.test(l)))assert([...l.matchAll(/┌─ \S+ /g)].length<=per,'row of '+l);
   assert(lines.some(l=>l.includes('▶')),'▶');assert(lines.some(l=>l.includes('▼')),'▼');assert(lines.some(l=>l.includes('◀')),'◀');
   // (ii) a value is in its own stage's box; a stage with none has an empty place (`·`, as Fleet's `out`/`unit`).
   const at=(n,i)=>lines.findIndex(l=>l.includes('┌─ '+shown(n,i)+' '));
@@ -1032,8 +1038,8 @@ for(const columns of [192,116,76]){
   assert(done.includes(v1)&&done.includes(v2)&&done.includes('30m'),done);
   if(vroom<'artifacts/plan-check.md'.length)assert(v1.endsWith('…')&&done.includes(v1+' │'),'a cut value: '+done);
   assert(running.includes('claude')&&running.includes(clip('dev/backend',vroom))&&running.includes('4m'),running);
-  // (a value fills at most up to one cell before the right edge: no line of a box that has a value touches it)
-  for(const l of [...boxOf('plan',0),...boxOf('plan-check',1),...boxOf('execute',2)].slice(1,-1))assert(!/[^ ]│$/.test(l),'a value on the edge: '+l);
+  // (a value fills at most up to one cell before the right edge: no line of a box that has a value touches it; the `by` line is Fleet's, cut at the edge where harness and model overrun)
+  for(const l of [...boxOf('plan',0),...boxOf('plan-check',1),...boxOf('execute',2)].slice(1,-1))assert(/^│ by /.test(l)||!/[^ ]│$/.test(l),'a value on the edge: '+l);
   const outLine=boxOf('test',4).find(l=>l.includes('out')),unitLine=boxOf('test',4).find(l=>l.includes('unit')),timeLine=boxOf('test',4).find(l=>l.includes('time'));
   // (an empty `out`/`unit` is `·`, as Fleet fills it)
   assert(/^│ out +· +│$/.test(outLine)&&/^│ unit +· +│$/.test(unitLine),outLine+unitLine);
@@ -1071,20 +1077,22 @@ for(const columns of [40,46,47,50,55]){
   const ls=view.routePageFirst({model,id:'r1',columns}).rows.map(text);
   let tops=0;
   ls.forEach((l,i)=>{for(const m of l.matchAll(/┌─/g)){const left=m.index,right=l.indexOf('┐',left);if(right<0)continue;tops++;
-    for(let j=i+1;j<ls.length&&!/└/.test(ls[j].slice(left,left+1));j++)assert.equal(ls[j][right],'│','the right rail at '+columns+' row '+j+': '+ls[j]);}});
+    for(let j=i+1;j<ls.length&&!/└/.test(ls[j].slice(left,left+1));j++)assert(ls[j][right]==='│'||ls[j][right]==='╧','the right rail at '+columns+' row '+j+': '+ls[j]);}});   // (the frame's own panel ends in `╧` on the bottom rule)
   assert(tops>0,'a box at '+columns);
 }
-// (viii) no stage line: the owner alone, a unit's route, no stages, an unknown route.
-assert.equal(view.routePageFirst({model,id:'r2',columns:100}),null);
-assert.equal(view.routePageFirst({model:{routes:[route('u',{unit_route:true})]},id:'u',columns:100}),null);
-assert.equal(view.routePageFirst({model:{routes:[route('z',{stages:[]})]},id:'z',columns:100}),null);
+// (viii) 11-19: every form draws the frame (the owner alone, a unit's route, no stages: the band and an empty panel); only a route the panel holds no leg band for, or an unknown route, is `null`.
+assert(view.routePageFirst({model,id:'r2',columns:100}));
+assert(view.routePageFirst({model:{routes:[route('u',{unit_route:true})]},id:'u',columns:100}));
+assert(view.routePageFirst({model:{routes:[route('z',{stages:[]})]},id:'z',columns:100}));
+assert.equal(view.routePageFirst({model:{routes:[route('n',{bands:[]})]},id:'n',columns:100}),null);
+assert.equal(view.routePageFirst({model:{routes:[route('n',{bands:undefined})]},id:'n',columns:100}),null);
 assert.equal(view.routePageFirst({model,id:'nope',columns:100}),null);
 // (ix) a name with control characters is cleaned.
 const dirty=view.routePageFirst({model:{routes:[route('d',{title:'a\x1b[31mb',stages:names.map((n,i)=>stage(n+'\x07',i))})]},id:'d',columns:100});
 assert(dirty.rows.every(r=>!/[\x00-\x1f\x7f-\x9f]/.test(text(r))));
 // stages beyond the sixteen the panel carries: `+N`, at the boxes' left cell.
 const more=view.routePageFirst({model:{routes:[route('m',{stage_more:3})]},id:'m',columns:100});
-assert(more.rows.map(text).some(l=>l.trim()==='+3'));
+assert(more.rows.map(text).some(l=>/│ +\+3 +│/.test(l)));     // (11-19: in the blank row under the boxes, inside the frame)
 console.log('ok');
 """
         result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell')], capture_output=True, text=True, timeout=120)
