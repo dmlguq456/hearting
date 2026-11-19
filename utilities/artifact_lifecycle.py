@@ -31,6 +31,7 @@ import artifact_identity
 import artifact_index
 import artifact_locator
 import artifact_manifest
+import route_form
 import artifact_directory_bundle
 
 
@@ -940,7 +941,7 @@ _fill_terminal_evidence = _derive_terminal_evidence
 def finalize_direct_quick(artifact_root: Path, request: DirectQuickRequest) -> Decision:
     route_module = _load_capability_route()
     route = request.route
-    if route.get("effective_intensity") not in {"direct", "quick"}:
+    if route_form.staged_form(route_form.route_form(route)):
         return Decision("reject", (_violation("d9-intensity-not-direct-or-quick"),))
     publication_check = validate_publication(request.publication)
     if not publication_check.ok:

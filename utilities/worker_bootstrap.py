@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from parent_next_directive import entrypoint
+from route_form import one_shot_owner
 
 WORKER_TYPES = ("owner", "stage", "review", "support", "frame")
 UNIT_REF_RE = re.compile(r"^[a-z-]+/[a-z-]+$")
@@ -602,7 +603,7 @@ def resolve_node_scope(
         outputs = tuple((node or {}).get("outputs", []))
         write_scope = tuple((node or {}).get("write_scope", []))
         if (route.get("capability") == "autopilot-code"
-                and route.get("effective_intensity") == "quick" and node_id == "one-shot"
+                and one_shot_owner(route) and node_id == "one-shot"
                 and (node or {}).get("kind") == "capability-owner"
                 and (node or {}).get("unit") == "_kernel/owner"
                 and set(write_scope) == {"source-scoped", "plans/<cycle>/**"}):
@@ -629,7 +630,7 @@ def resolve_node_scope(
     outputs = tuple((node or {}).get("outputs", []))
     write_scope = tuple((node or {}).get("write_scope", []))
     if (route.get("capability") == "autopilot-code"
-            and route.get("effective_intensity") == "quick"
+            and one_shot_owner(route)
             and node_id == "one-shot" and (node or {}).get("kind") == "capability-owner"
             and (node or {}).get("unit") == "_kernel/owner"
             and set(write_scope) == {"source-scoped", "plans/<cycle>/**"}):

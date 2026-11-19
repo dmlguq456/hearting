@@ -68,7 +68,7 @@ a substitute plan or checklist:
 - `pipeline_summary.md` at the plan root before completion;
 - `dev_logs/` and `test_logs/` for implementation and verification evidence.
 
-Internal artifacts belong under `_internal/`, including plan reviews, dev reviews, test reviews, retry notes, raw command logs, and model/team deliberation notes.
+Internal artifacts belong under `_internal/`, including plan reviews, dev reviews, test reviews, retry notes, raw command logs, and model/stage deliberation notes.
 
 ## Artifact Producer Lifecycle
 

@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from dispatch_contract import CANONICAL_PARENT_TRANSPORTS
+from route_form import serial_attempt_form
 
 from capability_route_base import (
     BROKER_FIELDS, CODEX_COMMAND_STATES, DISPATCH_CONTRACT_VERSION,
@@ -392,11 +393,14 @@ def _workflow_contract(registry, nodes, human_gate_bindings):
     }
 
 
-def _realize_conditional_extensions(recipe, effective_intensity):
-    """Seal owner postconditions without turning them into dispatch nodes."""
+def _realize_conditional_extensions(recipe, form):
+    """Seal owner postconditions without turning them into dispatch nodes.
+
+    `form` is the route form (`route_plan.form_of`): the postcondition anchors on the inline node of a
+    direct route and on the `one-shot` node of a one-shot owner or unit route."""
     rows = json.loads(json.dumps(recipe.get("conditional_extensions", [])))
-    terminal = "inline" if effective_intensity == "direct" else (
-        "one-shot" if effective_intensity == "quick" else None
+    terminal = "inline" if form == "direct" else (
+        "one-shot" if serial_attempt_form(form) else None
     )
     if terminal is not None:
         for row in rows:

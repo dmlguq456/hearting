@@ -69,7 +69,7 @@ uninstall removes only it.
 
 The always-loaded `adapters/codex/AGENTS.md` keeps purpose, judgment, where
 to look, and the instruction to follow the next action the runtime prints.
-The command detail it used to carry lives here; command output stays
+The command detail lives here; command output stays
 authoritative for current support.
 
 If the memory prompt hook is unavailable, record `recall` or `skip` with
@@ -399,8 +399,6 @@ entrypoints are represented by Codex-native Skills and the installable
 
 ## Native Hook Projection
 
-Write-denying hook gates are retired; no write preflight or core-read marker is required.
-
 Fleet reads structured rollout question evidence. Blocking `request_user_input`
 calls remain pending until their matching output or turn boundary. Async
 `request_user_input_async` calls retain only call/turn identity, time and
@@ -515,7 +513,7 @@ Claude Code-specific files remain valid as implementation references, not as Cod
 When porting a behavior, copy the underlying invariant from `CORE.md`, `WORKFLOW.md`, `CONVENTIONS.md`, or `OPERATIONS.md`; then map it to Codex's tool, approval, and session model.
 # Material-route boundary
 
-Hook write gates are retired except the two kept core write gates and the route presence gate (`core/HOOKS.md`). Spec-read observations, design checks, memory and session signals remain available.
+Hook write gates: the two core write gates and the route presence gate (`core/HOOKS.md`). Spec-read observations, design checks, memory and session signals remain available.
 
 Resource-runner startup requires a sealed route, exact detached resource node,
 and smoke attestation before launch state or a child process exists. Installing

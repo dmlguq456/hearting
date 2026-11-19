@@ -4820,7 +4820,6 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--attempt-id", action="append", default=[])
     value.add_argument("--interval", type=float, default=2.0)
     value.add_argument("--timeout", type=float, default=3600.0)
-    value.add_argument("--liveness-command", help="Compatibility input; only shared exact process evidence decides readiness")
     value.add_argument("--recover-receiptless", action="store_true",
                        help="run bounded exact-proof recovery while joining owned children")
     return value
@@ -4844,7 +4843,6 @@ def main(argv: list[str] | None = None) -> int:
         }
         print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
         return 69
-    liveness = [args.liveness_command] if args.liveness_command else None
     try:
         if bool(args.parent_attempt_id) == bool(args.parent_session_id):
             raise JoinContractError("parent-identity-ambiguous")
@@ -4859,7 +4857,6 @@ def main(argv: list[str] | None = None) -> int:
                 recover_receiptless=args.recover_receiptless,
                 interval=args.interval,
                 timeout=args.timeout,
-                liveness_command=liveness,
                 registry_append_only=True,
             )
         else:
@@ -4872,7 +4869,6 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 interval=args.interval,
                 timeout=args.timeout,
-                liveness_command=liveness,
                 registry_append_only=True,
             )
     except JoinContractError as exc:
