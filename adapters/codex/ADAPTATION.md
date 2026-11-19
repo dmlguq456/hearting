@@ -732,9 +732,9 @@ adjacent identity checks. PID or PGID reuse is never signalled, same-slug
 retries stay untouched, and completion markers or typed terminal handoffs
 retain precedence.
 
-The shared terminal inspector normalizes Codex `turn.completed` and Claude
-stream-json `result` events into the same three-line handoff contract. Codex
-liveness and harvest accept either registered harness while keeping runtime
+The shared terminal inspector normalizes Codex `turn.completed`, Claude
+stream-json `result` and OpenCode step-finish/`result` events into the same three-line handoff contract. Codex
+liveness and harvest accept any registered harness while keeping runtime
 native subagents, Claude subagents, and agent-team sessions outside this parity
 claim.
 

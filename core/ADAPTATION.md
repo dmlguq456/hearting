@@ -519,8 +519,8 @@ application.
   is replied to, the request fails, or its originating turn is interrupted.
   A new turn or a completion message alone does not answer an async question.
 - Child runtime does not select the parent carrier: Codex parents use the native
-  queue for every child harness, while Claude parents keep their existing
-  runtime carrier. Model-owned parking (a Stop that waits for a child) remains
+  queue for every child harness, while Claude and OpenCode parents keep their existing
+  runtime carriers. Model-owned parking (a Stop that waits for a child) remains
   retired. The in-turn carrier of §7.4 only hands in records that already exist
   and continues a turn at most once for a received, unmet next action.
   Native queue behavior is checked against installed Codex; undocumented runtime

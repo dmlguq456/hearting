@@ -96,7 +96,7 @@ The runtime adds the node's declared scope and the absolute paths of inputs comp
 After registering every separable child in the current batch, end the turn with
 `runtime_wait: registered-children`. The adapter supervisor waits outside the model
 until every exact `parent_attempt_id` child is closed or ready for typed harvest, then
-resumes the same Codex thread or Claude session once with a bounded receipt. Do not
+resumes the same Codex thread, Claude session or OpenCode session once with a bounded receipt. Do not
 call liveness, inspect raw child output, or do parallel work while parked.
 
 Obey the launch receipt: `parent_next=end-turn` yields; `parent_next=bounded-wait`
@@ -276,7 +276,7 @@ and every `standard+` intensity, the direction gate already ran (owner-execution
 and `frame-alternative`, both `top` (a pin with a profile or an explicit profile wins; a
 route made from a proposal via `--route-plan`, or as a `solo` or `staged` compose, has no frame nodes) — as its own
 bootstrap layer, after route binding and producer begin but before owner launch. There is no third frame leg
-at any intensity; `strong+` widening applies only to plan and implementation review
+at any intensity; `strong+` widening applies only to plan, plan-check and implementation review
 (above), never to frame. See `core/WORKFLOW.md` for the full depth-0 procedure.
 
 Depth-0 joined both legs, interviewed the user, released `frame-review`, and rendered
