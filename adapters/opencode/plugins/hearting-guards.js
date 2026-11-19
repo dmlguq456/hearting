@@ -2693,7 +2693,7 @@ function appendContext(output, text) {
 // own `notice` peer_message_v1 under its exact session id (same record the Claude
 // hook and the Codex hook write). Detached, fail-soft, never blocks the turn.
 function spawnPeerNotice(sid, prompt, cwd) {
-  if (!sid || !prompt || (!prompt.includes("peer-from:") && !prompt.includes("runtime-from:"))) return
+  if (!sid || !prompt || !looksLikePeerPrompt(prompt)) return
   const tool = path.join(root, "utilities", "peer-message.py")
   const args = [tool, "receive",
     "--from-project", path.basename(cwd || ""),
@@ -2712,6 +2712,22 @@ function spawnPeerNotice(sid, prompt, cwd) {
   } catch {}
 }
 
+// A trailer-form text, or a display-form one (`— [d4]` as the last line, `↳ ` first). The same
+// gate as `peer-message.looks_like_peer_text`; a test keeps the two equal.
+const PEER_DISPLAY_TAIL = /^— (?:\[(?:[0-9a-f]{2}|\?)\]|claude|codex|opencode)(?: [^\n]{1,80})?[ \t]*$/m
+const PEER_DISPLAY_LINE = /^\s*(?:<pasted_content[^>]*>\s*)?↳ /
+function looksLikePeerPrompt(prompt) {
+  return typeof prompt === "string" && prompt !== ""
+    && (prompt.includes("peer-from:") || prompt.includes("runtime-from:")
+      || PEER_DISPLAY_LINE.test(prompt.slice(0, 300)) || PEER_DISPLAY_TAIL.test(prompt.slice(-400)))
+}
+
+// The `pending` and `context` commands below pass `HEARTING_PEER_DISPLAY_GATE: "2"`: this plugin's
+// own gate (above) reads the display forms, and only then does the Python side leave the sign a
+// sender looks for. `AGENT_HOME` may name a `current` link, so a plugin loaded before the forms
+// existed (its gate cannot read them) can run beside a release whose Python would otherwise leave
+// it. Receiving a text (`spawnPeerNotice`) leaves no sign.
+//
 // Pending transport uses the current plugin client and exact callback SID. It
 // never touches the TUI draft or system-transform output. Acceptance is queued;
 // only persisted exact text followed by a completed assistant turn acknowledges.
@@ -2719,7 +2735,7 @@ function pendingPeerCommand(sid, options = []) {
   if (!sid) return null
   const result = spawnSync("python3", [path.join(root, "utilities", "peer-message.py"),
     "pending", "--to-harness", "opencode", "--to-session-id", sid, ...options], {
-    cwd: root, env: { ...process.env, AGENT_HOME: root }, encoding: "utf8", timeout: 1500,
+    cwd: root, env: { ...process.env, AGENT_HOME: root, HEARTING_PEER_DISPLAY_GATE: "2" }, encoding: "utf8", timeout: 1500,
   })
   if (result.status !== 0) return null
   try { return JSON.parse(result.stdout || "null") } catch { return null }
@@ -2729,7 +2745,7 @@ function pendingPeerTransition(sid, options) {
   if (!sid) return false
   const result = spawnSync("python3", [path.join(root, "utilities", "peer-message.py"),
     "pending", "--to-harness", "opencode", "--to-session-id", sid, ...options], {
-    cwd: root, env: { ...process.env, AGENT_HOME: root }, encoding: "utf8", timeout: 1500,
+    cwd: root, env: { ...process.env, AGENT_HOME: root, HEARTING_PEER_DISPLAY_GATE: "2" }, encoding: "utf8", timeout: 1500,
   })
   return result.status === 0
 }
@@ -2749,7 +2765,7 @@ function pendingPeerSpawn(sid, options, timeoutMs) {
     try {
       child = spawn("python3", [path.join(root, "utilities", "peer-message.py"),
         "pending", "--to-harness", "opencode", "--to-session-id", sid, ...options], {
-        cwd: root, env: { ...process.env, AGENT_HOME: root }, stdio: ["ignore", "pipe", "ignore"],
+        cwd: root, env: { ...process.env, AGENT_HOME: root, HEARTING_PEER_DISPLAY_GATE: "2" }, stdio: ["ignore", "pipe", "ignore"],
       })
     } catch { finish(null); return }
     child.on("error", () => finish(null))
@@ -2804,7 +2820,7 @@ function peerToolContextAsync(sid, timeoutMs = 2500, drainMs = 1000) {
       child = spawn("python3", [path.join(root, "utilities", "peer-message.py"),
         "context", "--to-harness", "opencode", "--to-session-id", sid,
         "--event", "PostToolUse", "--native-delivery"], {
-        cwd: root, env: { ...process.env, AGENT_HOME: root }, stdio: ["ignore", "pipe", "ignore"],
+        cwd: root, env: { ...process.env, AGENT_HOME: root, HEARTING_PEER_DISPLAY_GATE: "2" }, stdio: ["ignore", "pipe", "ignore"],
       })
     } catch { finish(); return }
     child.on("error", () => finish())
@@ -3791,7 +3807,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     if (prompt) promptBySession.set(sid, prompt)
     peerGuidanceBySession.delete(sid)
     // Actual peer receipt is observed after persistence, not callback rendering.
-    if (prompt && eventSid && (prompt.includes("peer-from:") || prompt.includes("runtime-from:"))) {
+    if (prompt && eventSid && looksLikePeerPrompt(prompt)) {
       const guidance = spawnSync(
         "python3",
         ["-c", "import importlib.util, json, sys; s=importlib.util.spec_from_file_location('peer', 'utilities/peer-message.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); d=json.load(sys.stdin); print(m.receiver_guidance_once(d.get('prompt', ''), d.get('recipient'), cwd=d.get('cwd')))"],

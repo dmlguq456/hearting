@@ -5655,7 +5655,8 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
     import dispatch_pending_delivery as pending
     from dispatch_seat_handover import _effective, lineage_effect_lock
     from dispatch_session_sweep import (
-        IDENTITY_KEY, STORAGE_KEY, addressed_records, delivery_context, is_human_gate_record,
+        IDENTITY_KEY, STORAGE_KEY, addressed_records, delivery_context, delivery_display_text,
+        is_human_gate_record,
     )
     spec = importlib.util.spec_from_file_location(
         "_retained_rewake", _UTILITIES_DIR.parent / "hooks/dispatch-owner-rewake.py")
@@ -6035,6 +6036,8 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
             if continued:
                 member_context[index][CONTINUED_KEY] = continued
         message = delivery_context([(jobs.parent, member_context)])
+        # The person's window gets a short line when every record has one; the agent keeps `message`.
+        display_line = delivery_display_text([(jobs.parent, member_context)])
         from dispatch_recipient_receipt import claimed_send_current
         if not all(claimed_send_current(jobs.parent, storage_recipient, member,
                 claim_owner, recipient_harness, recipient_sid, jobs=jobs)
@@ -6104,7 +6107,8 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
                                 pending_member["delivery_id"], claim_owner=claim_owner)
                         return
             code = cmd_prompt(args, expected_recipient=(recipient_harness, recipient_sid),
-                              on_prepared=bind_transfer, producer_binding=producer_binding)
+                              on_prepared=bind_transfer, producer_binding=producer_binding,
+                              **({"display_line": display_line} if display_line else {}))
         current = [pending.read(jobs.parent, storage_recipient, member["delivery_id"])
                    for member in transfer_members]
         if current and all(item and item.get("state") == "acked" for item in current):
@@ -6751,7 +6755,7 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     import dispatch_pending_delivery as pending
     from dispatch_notice_state import keep_claim
     from dispatch_seat_handover import record_recipient_binding
-    from dispatch_session_sweep import STORAGE_KEY, IDENTITY_KEY, delivery_context
+    from dispatch_session_sweep import STORAGE_KEY, IDENTITY_KEY, delivery_context, delivery_display_text
     from dispatch_recipient_receipt import claimed_send_current, release_unsubmitted_claim
     from peer_read_context import PeerReadContext
     import session_notice
@@ -7134,6 +7138,7 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
         if not claimed:
             return
         body = delivery_context([(root, [entry[5] for entry in claimed])])
+        display_line = None if folded else delivery_display_text([(root, [entry[5] for entry in claimed])])
         if folded:
             body += ("\n\nfolded run notices (parent completion already received):\n"
                      + "\n".join(f"- {line}" for line in folded))
@@ -7178,7 +7183,8 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                 except (OSError, ValueError, KeyError, TypeError, RuntimeError):
                     return
             code = cmd_prompt(args, expected_recipient=(harness, recipient_sid),
-                              on_prepared=bind_transfer, producer_binding=producer)
+                              on_prepared=bind_transfer, producer_binding=producer,
+                              **({"display_line": display_line} if display_line else {}))
             submitted = code in {0, 3}
     finally:
         globals()["_HERDR_SESSION"] = old_server
@@ -8094,7 +8100,8 @@ def _codex_shell_start_gate(binding):
 
 def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
                        expected_recipient=None, on_prepared=None, producer_binding=None, handoff=None,
-                       binding=None, pane=None, native_owner=None, sender_row=None, request=None):
+                       binding=None, pane=None, native_owner=None, sender_row=None, request=None,
+                       display_line=None):
     """Native-session address using the existing sealed message and carrier.
 
     Delivery never types into a window: a shell attachment takes it through its host
@@ -8120,7 +8127,7 @@ def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
             reference_evidence=reference_evidence,
             producer_binding=producer_binding, handoff=handoff,
             original_target=args.target, server=_HERDR_SESSION or "default", prepared=prepared,
-            namespace=_PEER_NAMESPACE, request=request)
+            namespace=_PEER_NAMESPACE, request=request, display_line=display_line)
         if on_prepared is not None:
             on_prepared(ref)
     except (OSError, ValueError):
@@ -8247,7 +8254,7 @@ def _prompt_unresolved(args, body, reason, *, from_identity, from_name, from_har
 
 
 def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_binding=None,
-               handoff=None, resolved_recipient=None, sender=None, request=None):
+               handoff=None, resolved_recipient=None, sender=None, request=None, display_line=None):
     """Seal a peer message and route it through the recipient's native carrier.
 
     ``sender`` is the observed predecessor identity for a supervisor-issued
@@ -8338,7 +8345,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         native_owner=native_owner, from_identity=from_identity, from_name=from_name,
         expected_recipient=expected_recipient, on_prepared=on_prepared,
         producer_binding=producer_binding, handoff=handoff, sender_row=sender_row,
-        request=request)
+        request=request, display_line=display_line)
 
 
 def cmd_request(args):

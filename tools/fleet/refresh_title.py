@@ -193,10 +193,25 @@ def _user_text(text):
     return text
 
 
+# A display-form peer or runtime text (`— [d4]` as the last line, `↳ ` first) is another
+# session's or the runtime's, never the person's (same shapes as `peer-message.looks_like_display_text`).
+_DISPLAY_TAIL_LINE = r"— (?:\[(?:[0-9a-f]{2}|\?)\]|claude|codex|opencode)(?: [^\n]{1,80})?[ \t]*"
+_DISPLAY_TAIL = re.compile(r"(?m)^" + _DISPLAY_TAIL_LINE + r"$")
+_DISPLAY_RUNTIME_LINE = re.compile(r"\A\s*(?:<pasted_content[^>]*>\s*)?↳ ")
+
+
+def _display_form_text(text):
+    if not text:
+        return False
+    if _DISPLAY_RUNTIME_LINE.match(text[:300]):
+        return True
+    return re.fullmatch(_DISPLAY_TAIL_LINE, text.rstrip().rsplit("\n", 1)[-1]) is not None
+
+
 def _human_language_text(text):
     text = _user_text(text)
     if (_codex_bootstrap_user_text(text) or _worker_envelope(text)
-            or "(peer-from:" in text
+            or "(peer-from:" in text or _display_form_text(text)
             or text.lstrip().startswith(("[notice]",
                                         "Hearting notice about work you started",
                                         "Hearting human gate awaiting your decision",
@@ -2216,13 +2231,15 @@ def _minor_peer_delta(delta):
     text = delta.strip()
     if len(text) > 2048:
         return False
-    trailers = list(re.finditer(r"\n+\(peer-from:[^\n]+;\s*ref=[0-9a-f]{8,64}\)", text))
+    trailers = list(re.finditer(
+        r"\n+(?:\(peer-from:[^\n]+;\s*ref=[0-9a-f]{8,64}\)|" + _DISPLAY_TAIL_LINE + r"(?=\n|\Z))", text))
     if not 1 <= len(trailers) <= 8:
         return False
     cursor = 0
     for trailer in trailers:
         body = text[cursor:trailer.start()].strip()
-        if not body or len(body) > 80 or len(body.splitlines()) != 1 or "(peer-from:" in body:
+        if (not body or len(body) > 80 or len(body.splitlines()) != 1 or "(peer-from:" in body
+                or _DISPLAY_TAIL.search(body)):
             return False
         cursor = trailer.end()
     return not text[cursor:].strip()

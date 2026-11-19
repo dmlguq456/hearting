@@ -113,8 +113,8 @@ class AliasReceive(unittest.TestCase):
 
     def test_exact_body_recipient_and_transfer_record(self):
         text, ref = self.prepare()
-        self.assertIn(" ; sid=" + self.sender["session_id"], text)
-        self.assertIn(" ; pane=- ;", text)
+        self.assertNotIn("sid=", text)
+        self.assertNotIn("pane=", text)
         self.assertEqual(self.parse(text), self.sender["session_id"])
         self.assertIsNone(self.parse(text + "변조"))
         self.assertIsNone(self.parse(text.replace("실제", "다른")))
@@ -132,17 +132,18 @@ class AliasReceive(unittest.TestCase):
         for harness in ("claude", "codex", "opencode"):
             sender = dict(self.sender, harness=harness, pane_id="w:sender")
             text, ref = self.prepare(sender=sender)
-            self.assertIn(" ; pane=w:sender ; sid=" + sender["session_id"], text)
+            self.assertNotIn("pane=", text)
+            self.assertNotIn(sender["session_id"], text)
             self.assertEqual(self.parse(text), sender["session_id"])
             self.assertEqual(pm.parse_peer_trailer(text)["name"], sender["name"])
             for changed in (text.replace(" ; ref=" + ref, ""),
-                            text.replace("pane=w:sender", "pane=w:recipient"),
-                            text.replace("sid=" + sender["session_id"], "sid=other-session"),
+                            text.replace(" ; ref=", " ; pane=w:recipient ; sid=other-session ; ref="),
                             text.replace("동명", "다른 이름")):
                 self.assertIsNone(self.parse(changed), changed)
         unknown = pm.peer_trailer("runtime", None, "Hearting runtime")
         self.assertIn("[?]", unknown)
-        self.assertIn("pane=- ; sid=-", unknown)
+        self.assertNotIn("pane=", unknown)
+        self.assertNotIn("sid=", unknown)
         self.assertIsNone(pm.parse_peer_trailer(unknown)["session_id"])
 
     def test_trailer_control_characters_cannot_create_another_sender(self):

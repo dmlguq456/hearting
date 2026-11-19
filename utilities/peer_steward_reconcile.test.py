@@ -1176,6 +1176,34 @@ class PeerHistoryCleanupTest(IsolatedCase):
         self.assertTrue(old_pending.exists())
         self.assertTrue(transfer.exists())
 
+    def test_a_dropped_row_takes_its_fingerprint_hint_and_an_emptied_folder_with_it(self):
+        peer_message = peer_steward.peer_message
+        pending_dir = peer_message._pending_dir()
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        shared, alone, kept_digest = "1" * 64, "2" * 64, "3" * 64
+        old_a, old_b, young, no_summary, pending = ("a" * 32, "b" * 32, "c" * 32, "d" * 32, "e" * 32)
+        hints = {(shared, old_a), (shared, young), (alone, old_b), (kept_digest, no_summary),
+                 (kept_digest, pending)}
+        for digest, ref in hints:
+            (peer_message._display_root() / digest).mkdir(parents=True, exist_ok=True)
+            (peer_message._display_root() / digest / ref).touch()
+        for ref, state, age, digest in ((old_a, "received", 8, shared), (old_b, "received", 8, alone),
+                                        (young, "received", 1, shared), (no_summary, "received", 8, None),
+                                        (pending, "pending", 30, kept_digest)):
+            row = self._row(ref, state, now - age * 86400)
+            if digest is not None:
+                row["display"] = {"form": 2, "kind": "peer", "sha256": digest}
+            (pending_dir / (ref + ".json")).write_text(json.dumps(row))
+        result = peer_steward._prune_received_peer_history(now=now)
+        self.assertEqual(result["removed"], 3)
+        root = peer_message._display_root()
+        self.assertFalse((root / shared / old_a).exists())       # its own hint goes
+        self.assertTrue((root / shared / young).exists())        # another row's hint on the same text stays
+        self.assertFalse((root / alone).exists())                # an emptied folder is removed
+        self.assertTrue((root / kept_digest / no_summary).exists())   # no fingerprint in the summary: nothing guessed
+        self.assertTrue((root / kept_digest / pending).exists())      # a row that is not dropped keeps its hint
+
     def test_queued_and_native_pending_rows_are_not_closed_by_the_seven_day_window(self):
         # #1576 review follow-up F9: the 7-day window closes only received rows. A row
         # accepted by a native carrier but never received (`claude-pty-continue-submitted`,

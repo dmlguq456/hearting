@@ -67,6 +67,8 @@ class MessageQuestionFixture:
             ("notice\0question-answer:" + signal["id"]).encode()).hexdigest()
         return pending.read(self.root, signal["session_id"], delivery)
 
+    display = False   # True: the receiver has shown it reads the short forms, the producer's line is sealed
+
     def prepare(self, signal):
         """The existing courier's real claim, body rendering, sealing and pending path."""
         record = self.record(signal)
@@ -87,9 +89,14 @@ class MessageQuestionFixture:
                     "records": [{"duty_id": duty["id"], "storage_sid": storage,
                                  "delivery_id": record["delivery_id"],
                                  "receipt_digest": record["receipt_digest"]}]}
+        display_line = None
+        if self.display:
+            self.peer.note_display_ready(recipient)
+            display_line = sweep.delivery_display_text([(self.root, [view])])
         text, ref = self.peer.prepare_peer_message(body,
             {"harness": "runtime", "session_id": None, "name": "Hearting runtime"}, recipient,
-            defer=True, refs=[duty["id"], record["delivery_id"]], producer_binding=producer)
+            defer=True, refs=[duty["id"], record["delivery_id"]], producer_binding=producer,
+            display_line=display_line)
         store.update(duty["id"], observation={"transfer_ref": ref, "transfer_bindings": {ref: producer}})
         return text, ref, recipient
 
@@ -111,6 +118,8 @@ class MessageQuestionFixture:
         inventory = {"result": {"agents": [{"agent": harness, "agent_session": {"value": sid},
                                               "pane_id": pane}]}}
         store = obligations.ObligationStore(self.root)
+        if self.display:
+            self.peer.note_display_ready({"harness": harness, "session_id": sid})
         calls = []
         def native_prompt(target, text, **kwargs):
             calls.append(text)
@@ -148,7 +157,7 @@ class MessageQuestionFixture:
                 claimant={"pid": claim.get("pid"), "start": claim.get("start")})
             if not begun:
                 return {"ok": False, "reason": "peer-claim-changed", "not_started": True}
-            native_prompt(None, row["text"])
+            native_prompt(None, self.peer.pasted_text(row))   # what the host's payload carries
             return {"ok": True}
 
         with contextlib.ExitStack() as patches:

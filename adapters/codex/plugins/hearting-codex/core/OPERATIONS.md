@@ -3578,6 +3578,8 @@ receipt. Both exit 0: queued is normal acceptance, not a failure to resend;
 a refusal, unresolved address or identity mismatch exits non-zero.
 `hearting run peer-steward prompt <name-or-pane> --body-file <file>` is
 the send path; reply text addressed to another session reaches nobody.
+The person reads that message in the receiving window: write a few lines, keep
+the detail in a file and give its path.
 
 **Peer requests.** A request for work is `peer-steward.py request <address> --body-file
 <file>` (a new `--rev` label supersedes the revision; `request <rq-id> --cancel` withdraws

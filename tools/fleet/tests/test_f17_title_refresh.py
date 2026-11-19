@@ -577,6 +577,22 @@ class StormGuardTest(_ConfigHomeMixin, unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual((len(probes), len(spawns)), (1, 1))
 
+    def test_the_short_forms_are_never_the_persons_input_and_tiny_ones_skip_the_probe(self):
+        # three shapes another session or the runtime puts in a window: the trailer without its
+        # decoration, a peer body with only the Fleet tag, and the runtime's one `↳` line
+        for text in ("확인했습니다\n\n— [81]", "확인했습니다\n\n— [81] 릴리즈 점검", "확인했습니다\n\n— codex",
+                     "↳ 질문에 답함: 네", "↳ 작업 끝: 설계 — 완료 (3분)\n↳ 질문에 답함: 네",
+                     "확인했습니다\n\n(peer-from: codex [81] ; ref=0123456789abcdef)"):
+            self.assertEqual(rt._human_language_text(text), "", text)
+        for text in ("사람이 쓴 글 — 줄표가 들어간다", "글\n— [zz]", "— 시작하는 글\n계속", "그냥 입력"):
+            self.assertEqual(rt._human_language_text(text), text, text)
+        tail = "ACK\n\n— [81]\nReceived\n\n— [82] 이름"
+        self.assertTrue(rt._minor_peer_delta(tail))
+        self.assertTrue(rt._minor_peer_delta("ACK\n\n(peer-from: codex [81] ; ref=0123456789abcdef)\nOK\n\n— [81]"))
+        for not_minor in ("Short user request\nACK\n\n— [81]", "ACK\n\n— [81]\n사람이 이어 쓴 말",
+                          "한 줄\n둘째 줄\n\n— [81]", "ACK\n\n— [81]\n— [82]"):
+            self.assertFalse(rt._minor_peer_delta(not_minor), not_minor)
+
     def test_periodic_worker_skips_two_tiny_peer_updates_but_refreshes_new_work(self):
         offset = os.path.getsize(self.transcript)
         titles.write("peer-worker", "GPU Work", now=time.time(), offset=offset,
