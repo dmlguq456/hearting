@@ -27,6 +27,18 @@ spec = importlib.util.spec_from_file_location("tidy_producer_fixture", Path(__fi
 F = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(F)
 
+HERE = Path(__file__).resolve().parent
+# The frame/leg fixture and the request-folder helpers come from the suites that already build them
+# through the real begin/finalize code; nothing about a member cycle is written by hand here.
+spec = importlib.util.spec_from_file_location("tidy_framed_fixture", HERE / "framed_start.test.py")
+S = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = S
+spec.loader.exec_module(S)
+spec = importlib.util.spec_from_file_location("tidy_request_fixture", HERE / "artifact_request.test.py")
+Q = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = Q
+spec.loader.exec_module(Q)
+
 OLD_NEXT_STEP = "reconcile-campaign-membership-with-producer-records"
 
 
@@ -320,6 +332,137 @@ class EntranceFollowsCycleWrites(TidyBase):
         with mock.patch("artifact_entrance.request_refresh") as refresh:
             self.assertEqual(P.delete_campaign(self.root, again["campaign_id"])["status"], "deleted")
         refresh.assert_called_once()
+
+
+class MemberCycleClose(S.SourceRepoStartBase):
+    """A frame folder holds its legs' cycles at `<frame>/_internal/executions/<id>`, all closed."""
+
+    selected = Q.RequestFolderTest.selected
+    cycle = Q.RequestFolderTest.cycle
+    next_execution = Q.RequestFolderTest.next_execution
+    begin_route = Q.RequestFolderTest.begin_route
+
+    def two_closed_legs(self):
+        leg, path, _ = self.selected([S.CODE_STAGED, S.CODE_STAGED])
+        first = self.cycle(leg)
+        first_dir = P.cycle_dir(self.root, first["campaign_id"], first["cycle_id"])
+        self.write_output({"cycle_dir": str(first_dir)}, "plans/final_report.md", b"first\n")
+        self.close(leg, path)
+        P.finalize(self.root, cycle_id=first["cycle_id"])
+        route, route_path, second = self.next_execution(1, first)
+        self.write_output(second, "plans/final_report.md", b"second\n")
+        self.close(route, route_path)
+        P.finalize(self.root, cycle_id=second["cycle_id"], state="completed")
+        frame = self.cycle(self.route)
+        self.campaign_path = P.campaign_dir(self.root, frame["campaign_id"]) / "campaign.json"
+        return frame, first, second
+
+    def refusal(self):
+        status = C.status(self.root, self.campaign_path)
+        self.assertFalse(status["closable"], status)
+        return status["close_refusal"]
+
+    def test_closed_legs_inside_a_frame_let_the_campaign_close(self):
+        frame, first, second = self.two_closed_legs()
+        # Both legs are sealed, nothing is open, and each lives at the place artifact_request records.
+        for leg in (first, second):
+            record = P.read_cycle_record(self.root, leg["cycle_id"])
+            self.assertEqual(Path(P.cycle_dir(self.root, record["campaign_id"], record["cycle_id"])).parts[-3:-1],
+                             ("_internal", "executions"))
+            self.assertNotEqual(record["locator"], leg["cycle_id"])
+        status = C.status(self.root, self.campaign_path)
+        self.assertTrue(status["closable"], status)
+        closed = C.close(self.root, self.campaign_path, reason="tidy")
+        self.assertEqual(closed["status"], "satisfied")
+        event = json.loads((self.campaign_path.parent / "campaign.events" / "000001.json").read_text())
+        rows = {row["cycle_id"]: row for row in event["payload"]["snapshot"]["cycles"]}
+        # One row per cycle, the frame and both legs, each bound to its own manifest.
+        self.assertEqual(set(rows), {frame["cycle_id"], first["cycle_id"], second["cycle_id"]})
+        self.assertTrue(all(row["manifest_digest"] for row in rows.values()))
+
+    def test_a_closed_campaign_with_member_cycles_reads_back_satisfied(self):
+        frame, first, second = self.two_closed_legs()
+        C.close(self.root, self.campaign_path, reason="tidy")
+        raw = (self.campaign_path.parent / "campaign.events" / "000001.json").read_bytes()
+        self.assertEqual(C.status(self.root, self.campaign_path)["state"], "satisfied")
+        self.assertEqual(C.close(self.root, self.campaign_path, reason="again")["status"], "satisfied")
+        folded = C.campaign_state(self.root, self.campaign_path)
+        self.assertEqual((folded.state, folded.last_sequence), ("satisfied", 1))
+        self.assertEqual((self.campaign_path.parent / "campaign.events" / "000001.json").read_bytes(), raw)
+        # A renamed root binds each row to a surviving manifest; the legs' manifests are found without
+        # the preserved snapshots too, because the campaign folder walk reaches them.
+        for cycle in (frame, first, second):
+            shutil.rmtree(self.root / C.lifecycle.MANIFEST_SNAPSHOT_REL / cycle["cycle_id"], ignore_errors=True)
+        target = Path(self.source_tmp.name) / "renamed-root"
+        shutil.move(str(self.root), str(target))
+        folded = C.campaign_state(target, target / self.campaign_path.relative_to(self.root))
+        self.assertEqual((folded.state, folded.last_sequence), ("satisfied", 1))
+
+    def test_reopen_then_close_again_with_member_cycles(self):
+        self.two_closed_legs()
+        C.close(self.root, self.campaign_path, reason="tidy")
+        self.assertEqual(C.reopen(self.root, self.campaign_path, reason="more work")["status"], "active")
+        self.assertTrue(C.status(self.root, self.campaign_path)["closable"])
+        self.assertEqual(C.close(self.root, self.campaign_path, reason="tidy again")["status"], "satisfied")
+        self.assertEqual(C.status(self.root, self.campaign_path)["state"], "satisfied")
+
+    def test_a_leg_folder_pulled_out_of_its_frame_is_still_refused(self):
+        frame, first, second = self.two_closed_legs()
+        leg_dir = P.cycle_dir(self.root, first["campaign_id"], first["cycle_id"])
+        out = leg_dir.parents[3] / leg_dir.name
+        leg_dir.rename(out)
+        refusal = self.refusal()
+        self.assertEqual(refusal["reason"], "campaign-cycle-locator-invalid", refusal)
+        self.assertEqual(refusal["detail"], first["cycle_id"])
+        # Only that leg is named; the other leg, still in its frame, is read as in place. (The close's
+        # own reconcile then treats a hand-moved folder as any cycle's: it adopts the new place.)
+        self.assertNotIn(second["cycle_id"], str(refusal))
+
+    def test_a_leg_folder_under_some_other_cycle_is_still_refused(self):
+        frame, first, second = self.two_closed_legs()
+        leg_dir = P.cycle_dir(self.root, second["campaign_id"], second["cycle_id"])
+        other = P.cycle_dir(self.root, first["campaign_id"], first["cycle_id"]) / "_internal/executions" / second["cycle_id"]
+        other.parent.mkdir(parents=True, exist_ok=True)
+        leg_dir.rename(other)
+        before = (other / "manifest.json").read_bytes()
+        status = C.status(self.root, self.campaign_path)
+        self.assertFalse(status["closable"], status)
+        # What the close's own reconcile then does with a folder at no known place is the existing
+        # "vanished" handling, the same as for any cycle; the folder and its manifest stay as they are.
+        try:
+            C.close(self.root, self.campaign_path, reason="tidy")
+        except C.CampaignError:
+            pass
+        self.assertEqual((other / "manifest.json").read_bytes(), before)
+
+    def test_a_renamed_frame_folder_is_followed_for_its_legs(self):
+        frame, first, second = self.two_closed_legs()
+        frame_dir = P.cycle_dir(self.root, frame["campaign_id"], frame["cycle_id"])
+        frame_dir.rename(frame_dir.with_name("2026-11-19_renamed-request"))
+        P.reconcile_root(self.root)
+        self.assertTrue(C.status(self.root, self.campaign_path)["closable"])
+        self.assertEqual(C.close(self.root, self.campaign_path, reason="tidy")["status"], "satisfied")
+
+    def test_a_leg_moved_out_by_cycle_move_is_read_as_before(self):
+        # `cycle-move <leg>` makes the leg a folder of its own in the target campaign, keeping its
+        # request binding; that place was accepted before and still is. Pulling it out by hand is not.
+        frame, first, second = self.two_closed_legs()
+        other = Q.RequestFolderTest.target_campaign(self)
+        P.cycle_move(self.root, first["cycle_id"], campaign=other["campaign_id"], reason="one leg elsewhere")
+        target_path = P.campaign_dir(self.root, other["campaign_id"]) / "campaign.json"
+        self.assertTrue(P.read_cycle_record(self.root, first["cycle_id"]).get("request_binding"))
+        status = C.status(self.root, target_path)
+        self.assertNotEqual((status.get("close_refusal") or {}).get("reason"), "campaign-cycle-locator-invalid", status)
+
+    def test_a_plain_cycle_keeps_the_old_check(self):
+        # No request binding: only `<campaign>/<locator>` (or `cycles/<id>`) is the place, as before.
+        campaign = Path("/c")
+        record = {"locator": "2026-11-19_elsewhere", "cycle_id": "cyc_" + "a" * 32}
+        self.assertTrue(C._in_its_place(self.root, campaign, campaign / "2026-11-19_elsewhere", record, record["cycle_id"]))
+        self.assertFalse(C._in_its_place(self.root, campaign, campaign / "frame" / "_internal" / "executions" / record["cycle_id"],
+                                         record, record["cycle_id"]))
+        bare = {"cycle_id": "cyc_" + "b" * 32}
+        self.assertTrue(C._in_its_place(self.root, campaign, campaign / "cycles" / bare["cycle_id"], bare, bare["cycle_id"]))
 
 
 if __name__ == "__main__":

@@ -682,6 +682,24 @@ def _bindings_detail(root, ids, directories):
     return " ".join(parts)
 
 
+def _in_its_place(root, campaign_dir, directory, record, cid):
+    """Whether this cycle's folder is where it must be: `<campaign>/<locator>` (`cycles/<id>` for the
+    oldest layout), as ever. A leg of a framed request is a cycle too, but its folder is inside its
+    frame's, which `artifact_request` knows; the leg's `locator` names the frame, so only for a cycle
+    carrying a request binding, and only when the old place does not match, that place is read there."""
+    plain = (campaign_dir / str(record["locator"]) if record.get("locator")
+             else campaign_dir / "cycles" / cid)
+    if directory == plain:
+        return True
+    if not record.get("request_binding"):
+        return False
+    import artifact_request
+    try:
+        return artifact_request.execution_dir(root, record) == directory
+    except (ValueError, OSError, locator.LocatorError):
+        return False
+
+
 def _cycle_rows(root, path, campaign, reads=None):
     ids = campaign.get("cycles")
     if (not isinstance(ids, list) or not ids or not all(isinstance(cid, str) for cid in ids)
@@ -761,9 +779,7 @@ def _cycle_rows(root, path, campaign, reads=None):
         record, _ = read_json(root, records / (cid + ".json"), reads=reads)
         directory = directories[cid]
         _safe(path.parent, directory)
-        expected_directory = (path.parent / str(record["locator"]) if record.get("locator")
-                              else path.parent / "cycles" / cid)
-        if directory != expected_directory:
+        if not _in_its_place(root, path.parent, directory, record, cid):
             raise CampaignError("campaign-cycle-locator-invalid", cid)
         if (record.get("state") not in {"sealed", "superseded"} or not record.get("sealed_on")
                 or not _exact_cycle_control(root, path.parent, directory, "manifest.json")):
