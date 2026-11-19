@@ -1116,6 +1116,27 @@ for(let width=56;width<=140;width+=2)for(const s of draw(four,width,20,{side:fal
         self.node(script, "panel-view.cjs")
 
 
+    def test_a_solo_route_at_standard_reads_code_solo_standard_while_its_review_runs_and_while_it_is_fixed(self):
+        # 11-19 (route form 3b-1, the middle cell): one owner makes the work and starts its review. The panel draws it
+        # with the words it already has (the form `solo` and the intensity `standard` in the bracket, the stage line's
+        # `1/2: impl-review` / `2/2: one-shot` -- the unit name on the worker line and the work order are the next piece);
+        # it never writes `staged`, throws, or leaves a row empty, at the widths the panel is drawn in.
+        script = self.FIXTURE + r'''
+const cell=state=>({...oneShot,id:'s1',title:'공유 계약 고치기',kind_word:'code',kind_field:'code',kind_form:'solo',intensity:'standard',
+ role:'owner',elapsed:'58m',shape:'one-shot-owner',owner_paint:oneShot.paint,
+ stages:state==='review'?[{name:'impl-review',mark:'●',current:true,harness:'claude',model:'Opus 5.5',elapsed:'6m'},{name:'one-shot',mark:'',elapsed:'41m'}]
+  :[{name:'impl-review',mark:'✓',verdict:'FAIL',harness:'claude',model:'Opus 5.5',elapsed:'9m'},{name:'one-shot',mark:'●',current:true,elapsed:'44m'}]});
+for(const state of ['review','fix'])for(const width of [100,74,44,36,28]){
+ const rows=draw([cell(state)],width,28,{side:width<=44}),text=rows.join('\n');
+ for(const row of rows)assert.equal(cells(row),width,state+' '+width+'\n'+text);
+ assert(!/staged|undefined|\bNaN\b/.test(text),state+' '+width+'\n'+text);
+ if(width!==74)assert(/code\(solo(·standard)?\)/.test(text),state+' '+width+'\n'+text);   // (the bottom row drops its kind word below 90 cells, as every route's does)
+ if(width===44||width===36)assert(/● code\(solo·standard\)/.test(text),state+' '+width+'\n'+text);
+ if(width===28)assert(/● code\(solo\)/.test(text),state+' '+width+'\n'+text);   // narrower the intensity goes first
+}
+'''
+        self.node(script, "panel-view.cjs")
+
     def test_a_unit_route_leads_with_its_field_and_its_worker_line_names_the_unit(self):
         # 11-18 (the person: "Unit에서는 무슨 작업인지가 안보이잖아"): a unit route (one worker called with no owner) reads its
         # field on the first line and, in the bracket, its form and the record's intensity `(unit·quick)` (11-19; before: `code` with no

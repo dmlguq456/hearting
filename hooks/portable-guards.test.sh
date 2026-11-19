@@ -3717,6 +3717,20 @@ out=$(printf '%s' '{"tool_name":"Skill","tool_input":{"skill":"code-execute"}}' 
 [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"additionalContext"' && ! printf '%s' "$out" | grep -q 'permissionDecision' \
   && ok "SDR hook mode reminds without deny" \
   || bad "SDR hook mode should remind only (rc=$rc) [$out]"
+# (ix) the owner of a `solo` route at standard (the middle cell) makes the work itself: its route file holds a depth-1
+# `one-shot` owner node, so it is no conductor and the reminder stays silent; a team route's owner is reminded as before
+mkdir -p "$TMP/sdr-routes"
+printf '%s' '{"nodes":[{"id":"impl-review","unit":"qa/code-review","dispatch_depth":2},{"id":"one-shot","unit":"_kernel/owner","dispatch_depth":1}]}' > "$TMP/sdr-routes/cell.json"
+printf '%s' '{"nodes":[{"id":"plan","unit":"code/plan","dispatch_depth":2},{"id":"report","unit":"_kernel/owner","dispatch_depth":1}]}' > "$TMP/sdr-routes/team.json"
+out=$(AGENT_ROUTE_FILE="$TMP/sdr-routes/cell.json" "$SDR" --skill code-execute --dispatch-depth 1 --intensity standard 2>&1); rc=$?
+[ "$rc" -eq 0 ] && [ -z "$out" ] && ok "SDR no-ops for the owner of a solo route at standard (it makes the work)" \
+  || bad "SDR should no-op for the middle cell's owner [$out] rc=$rc"
+out=$(AGENT_ROUTE_FILE="$TMP/sdr-routes/team.json" "$SDR" --skill code-execute --dispatch-depth 1 --intensity standard 2>/dev/null); rc=$?
+[ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'dispatch-depth-1 conductor' \
+  && ok "SDR still reminds a team route's owner" || bad "SDR should remind a team owner [$out] rc=$rc"
+out=$(AGENT_ROUTE_FILE="$TMP/sdr-routes/missing.json" "$SDR" --skill code-execute --dispatch-depth 1 --intensity standard 2>/dev/null); rc=$?
+[ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'dispatch-depth-1 conductor' \
+  && ok "SDR reminds when the route file cannot be read" || bad "SDR should remind when the route is unreadable [$out] rc=$rc"
 
 echo "== §5.10 main-session lifecycle predicates: harness markers only =="
 # A runtime injects CLAUDE_CODE_CHILD_SESSION into every child process an ordinary

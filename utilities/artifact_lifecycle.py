@@ -941,7 +941,9 @@ _fill_terminal_evidence = _derive_terminal_evidence
 def finalize_direct_quick(artifact_root: Path, request: DirectQuickRequest) -> Decision:
     route_module = _load_capability_route()
     route = request.route
-    if route_form.staged_form(route_form.route_form(route)):
+    # Only a route one process finishes alone closes here. The middle cell `solo·standard` is not one: it
+    # ends on the marker of the review it starts, which this route-only close does not wait for.
+    if not route_form.alone_without_stages(route):
         return Decision("reject", (_violation("d9-intensity-not-direct-or-quick"),))
     publication_check = validate_publication(request.publication)
     if not publication_check.ok:

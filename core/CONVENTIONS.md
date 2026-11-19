@@ -42,7 +42,7 @@ interactive sessions, including peers and steward sessions; dispatch depth 1 own
 the capability pipeline; dispatch depth 2
 serves bounded review, perspective, and pipeline-stage nodes. Direct stays inline
 at dispatch depth 0. Quick is semantically one registered-headless one-shot
-conductor at dispatch depth 1 and opens no child node. Its transport/schema
+conductor at dispatch depth 1 and opens no child node. A `solo` route at `standard` (where the kind declares a one-shot review) keeps that one owner, which makes the work itself; its only child is the route's declared review node at dispatch depth 2. The owner starts the route's declared review node with the command its task gives, and cannot close that review itself. Its transport/schema
 compatibility identity remains `worker_type=owner`, `unit=_kernel/owner`,
 `owner_model_profile`, and `one-shot-owner`; those names do not make it a
 standard+ capability owner. Standard+ fallback attempts retain their node's
@@ -100,7 +100,7 @@ Track rules:
 
 Intensity resolves in this order: explicit `--intensity`, capability default, then request shape in `WORKFLOW §1.1`. Rigor then maps deterministically: direct to none/light, quick to quick, standard or strong to standard, thorough to thorough, and adversarial to adversarial.
 
-For frame proposals, shape constrains the effective intensity: `direct` uses `direct`, `solo` uses `quick`, and `staged` uses `standard` or higher. A conflicting known intensity in a proposal is normalized to the shape default and recorded for review; unknown values remain invalid. A person-entered CLI mismatch is refused with the allowed values.
+Shape and intensity are separate, but not every pair exists. Allowed pairs: `direct` with `direct`; `solo` with `quick`, or with `standard` where the kind declares a one-shot review (`one_shot_review` in `capabilities/topologies.json`; code does); `staged` with `standard` or higher. An omitted intensity takes the shape's default: `direct` for `direct`, `quick` for `solo`, `standard` for `staged`. A promotion signal raises the intensity, not the shape: `--shape solo` with a signal is `solo` at `standard` where the kind declares that review, and otherwise stays the staged route it sealed before. A frame proposal whose known intensity its shape does not allow keeps the highest allowed intensity at or below the proposed one, and the change is recorded for review; unknown values remain invalid. A person-entered CLI mismatch is refused with the allowed values.
 
 An external adversary is required only when an adversarial graph actually selects that pass. The adapter must prove that a different reviewer, engine, or harness ran. If an explicitly requested adversarial pass is unavailable, fail loudly; if routing auto-escalated, fall back to thorough and report it. Runtime wrapper names are not portable semantics.
 
@@ -225,7 +225,8 @@ reason=unannotated-existing-stage. Existing sealed routes retain their original
 bytes/hash. New ad-hoc stages provide either an explicit profile or demand inputs.
 
 The unannotated quick owner=balanced-deep and standard+ owner=deep are compatibility
-defaults, used only when neither an explicit profile nor an owner demand is supplied. A complete owner demand
+defaults (the middle cell's owner, which makes the work itself, defaults to the `balanced`
+its recipe declares), used only when neither an explicit profile nor an owner demand is supplied. A complete owner demand
 selects its model through the same resolver as a stage; intensity does not impose
 a second profile floor. Compile and verification recompute this one selection,
 and quick's one-shot process carries its owner's selection. Registered-profile

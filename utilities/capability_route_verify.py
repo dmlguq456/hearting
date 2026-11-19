@@ -13,14 +13,16 @@ from hearting_gates import note_same_work_drift
 import artifact_locator as ARTIFACT_LOCATOR
 import route_format
 from route_plan import is_depth0_leg
-from route_form import route_form, serial_attempt_route, staged_form
+from route_form import (
+    one_shot_owner, one_shot_review_route, route_form, serial_attempt_route, staged_form, starts_depth2_nodes,
+)
 import model_profile as PROFILE
 import resource_resume as RESOURCE_RESUME
 from dispatch_contract import EXECUTION_SURFACES, FALLBACK_HOPS, agent_home_equivalent
 
 from capability_route_base import (
     _validate_output_scopes, _validate_registered_headless_evidence, _verify_selection_pins,
-    DEFAULTS, DISPATCH_EVIDENCE_SCOPE_VERSION, ROOT, route_hash, TOPO, TRACKING,
+    DEFAULTS, DISPATCH_EVIDENCE_SCOPE_VERSION, FALLBACK_ORDER, ROOT, route_hash, TOPO, TRACKING,
     VALID_AFFINITY,
 )
 
@@ -38,7 +40,7 @@ from capability_route_nodes import (
     _expected_nodes_under_frame_policy, _frame_node, _frameless_recipe, _load_sd160_snapshots,
     _no_model_node, _one_leg_frame_recipe, _owner_node, _quick_frame_diversity,
     _quick_gate_bindings, _recipe_has_frame, _resolve_owner_profile, _verify_profile_contract,
-    unit_leg_node, SD160_REGISTRY_DIGEST, SD160_UNIT_CATALOG_DIGEST, unit_catalog_digest,
+    one_shot_owner_default, one_shot_review_declared, one_shot_review_node, unit_leg_node, SD160_REGISTRY_DIGEST, SD160_UNIT_CATALOG_DIGEST, unit_catalog_digest,
 )
 
 from capability_route_compose import (
@@ -445,7 +447,8 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         decided=((route.get("selection") or {}).get("route_origin")=="compose"
                  and (route.get("selection") or {}).get("shape") in DECIDED_SHAPES
                  and not any(_frame_node(n) for n in route.get("nodes",[])))
-        if (route.get("route_plan") is not None or decided) and serial_attempt_route(route):
+        if ((route.get("route_plan") is not None or decided or one_shot_review_route(route))
+                and serial_attempt_route(route)):
             # A leg of a plan, or a decided compose shape; a route sealed with its frame pair keeps it.
             route_recipe=_frameless_recipe(route_recipe)
         if (route.get("capability")==ROUTE_FRAME_CAPABILITY
@@ -590,7 +593,8 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     form=route_form(route)
     selected_owner, _ = _resolve_owner_profile(
         effective, registry, route.get("owner_profile_demand"),
-        (route.get("explicit_profiles") or {}).get("__owner__"))
+        (route.get("explicit_profiles") or {}).get("__owner__"),
+        owner_default=one_shot_owner_default(route_recipe, effective, form == "solo"))
     if route.get("owner_model_profile") != selected_owner:
         raise ValueError("owner_model_profile differs from the portable owner selection")
     # The owner's own node (quick `one-shot`) must carry the profile the route
@@ -772,16 +776,23 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             raise ValueError("unit node axes mismatch")
     elif form=="solo":
         resume_recipe = RESOURCE_RESUME.route_selected(route)
+        # The middle cell `solo·standard`: one owner (A) that starts its kind's declared review (B). A
+        # `solo` form above quick is accepted only as exactly that.
+        review_cell = effective != "quick"
+        if review_cell and not (one_shot_review_declared(route_recipe) and one_shot_review_route(route)
+                                and selection.get("shape") == "solo"):
+            raise ValueError("quick route shape mismatch")
         if (
             route.get("owner_dispatch_depth") != 1
-            or route.get("max_dispatch_depth") != 1
+            or route.get("max_dispatch_depth") != (2 if review_cell else 1)
             or selection.get("transport") != "headless"
             or selection.get("inline_reason") is not None
             # `serial-attempt` is a per-(route_id, route_node) attempt budget,
             # so it stays true unchanged with three nodes. `max_dispatch_depth`
             # stays 1 because the frame legs are depth 1 as well.
             or route.get("registered_headless_policy") != "serial-attempt"
-            or len(route.get("nodes",[])) != (2 if resume_recipe else 3 if _recipe_has_frame(route_recipe) else 1)
+            or len(route.get("nodes",[])) != (2 if resume_recipe or review_cell
+                                               else 3 if _recipe_has_frame(route_recipe) else 1)
         ):
             raise ValueError("quick route shape mismatch")
         candidates=_validate_registered_headless_evidence({
@@ -813,9 +824,23 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             or node.get("registered_worker") is not True
             or node.get("fallback_hops")
             or sorted(node.get("depends_on") or []) !=
-               (["resume-run"] if resume_recipe else ["frame","frame-alternative"] if _recipe_has_frame(route_recipe) else [])
+               (["resume-run"] if resume_recipe
+                else [one_shot_review_node(route_recipe)["id"]] if review_cell
+                else ["frame","frame-alternative"] if _recipe_has_frame(route_recipe) else [])
         ):
             raise ValueError("quick node axes mismatch")
+        if review_cell:
+            # The review node is the recipe's borrowed node; only the sealed profile choice and the harness
+            # policy are the route's own, and its chain is the checked evidence's (checked below).
+            review=next((n for n in route["nodes"] if n.get("id")!="one-shot"), None)
+            expected_review=one_shot_review_node(route_recipe)
+            own=("model_profile","profile_demand","profile_selection","profile_explicit",
+                 "harness_policy","harness_affinity","fallback_hops")
+            if (review is None
+                    or {k: v for k, v in review.items() if k not in own}
+                    != {k: v for k, v in expected_review.items() if k not in own}
+                    or route["nodes"][0] is not review):
+                raise ValueError("one-shot review node differs from the declared recipe")
         frame_legs=[n for n in route["nodes"] if _frame_node(n)]
         if sorted(n.get("id") for n in frame_legs) != (
                 ["frame","frame-alternative"] if _recipe_has_frame(route_recipe) else []):
@@ -846,8 +871,11 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
                 or route["nodes"][0].get("fallback_hops")
                 or route.get("selection",{}).get("transport") != "headless"):
             raise ValueError("owner-only registered-headless evidence mismatch")
-    elif staged_form(form):
-        if route.get("registered_headless_candidates") is not None:
+    elif starts_depth2_nodes(route) or staged_form(form):
+        # B: the owner starts depth-2 nodes. A team route has no owner candidates (nested evidence cannot
+        # stand in for owner readiness); the middle cell (A and B) keeps its owner candidates, checked in
+        # its own branch above, beside the evidence of the review it starts.
+        if route.get("registered_headless_candidates") is not None and not one_shot_owner(route):
             raise ValueError("nested route cannot substitute owner-only readiness")
         if route.get("selection",{}).get("transport") != "headless":
             raise ValueError("standard+ routes require checked headless transport")
@@ -862,9 +890,15 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             checked_dispatch, contract_version, parent_dispatch_depth,
             expected_worktree=route.get("cwd"),
             require_scope=scope_version == DISPATCH_EVIDENCE_SCOPE_VERSION)
+        declared_hops=(route_recipe["one_shot_review"]["fallback_hops"]
+                       if one_shot_review_route(route) and one_shot_review_declared(route_recipe) else None)
+        # The middle cell's review declares its hops (no `inline`: a maker cannot close its own review).
+        hops=None if declared_hops is None else [hop for hop in FALLBACK_ORDER if hop in declared_hops]
+        wanted=(expected_chain if hops is None
+                else [row for row in expected_chain if row["fallback_hop"] in hops])
         for node in route.get("nodes",[]):
             if node.get("dispatch_depth")==2:
-                chain=_verify_fallback_chain(node, contract_version)
-                if chain != expected_chain:
+                chain=_verify_fallback_chain(node, contract_version, hops)
+                if chain != wanted:
                     raise ValueError(f"dispatch-depth-2 node {node.get('id')} fallback differs from checked evidence")
     return route

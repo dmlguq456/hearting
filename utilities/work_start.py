@@ -38,6 +38,7 @@ from execution_access import ExecutionAccessError, prepare_task_request
 import owner_write_advisory as OWNER_WRITE_ADVISORY
 import route_plan as RP
 import resource_resume as RESOURCE_RESUME
+import route_form
 import frame_repository
 import unit_continue as UC
 try:  # ends a detached child with the test that started it; no-op outside tests
@@ -3182,6 +3183,16 @@ def _compose_again(route) -> str:
         task.write_text(str((route.get("work_request") or {}).get("text") or ""), encoding="utf-8")
     selection = route.get("selection") if isinstance(route.get("selection"), dict) else {}
     shape = selection.get("shape") or ("direct" if route.get("effective_intensity") == "direct" else "staged")
+    # The form is read from the nodes, not the recorded word: `compose --shape solo --signal ...` sealed a
+    # team route (word `solo`, team nodes) before the middle cell existed, and that route is built again as
+    # `staged` at its own intensity. The middle cell (one owner that starts its review) keeps `solo` and
+    # carries `standard` back, so a rest never turns "no end without a review" into a `solo·quick`.
+    sealed_intensity = route.get("effective_intensity")
+    unit = bool(unit_leg(route))
+    middle_cell = route_form.one_shot_review_route(route)
+    if (shape == "solo" and not unit and sealed_intensity not in (None, "quick", "direct")
+            and not route_form.one_shot_owner(route)):
+        shape = "staged"
     # A framed compose names no capability: the shape is the route.
     named = [] if shape == "framed" else ["--capability", route["capability"],
                                           "--capability-mode", str(route.get("capability_mode") or "default")]
@@ -3197,7 +3208,7 @@ def _compose_again(route) -> str:
         argv += ["--graph", "resume-run,run-verify"]
     elif shape == "staged" and ((route.get("composed_recipe") or {}).get("compose") or {}).get("graph"):
         argv += ["--graph", ",".join(route["composed_recipe"]["compose"]["graph"])]
-    if shape == "staged" and route.get("effective_intensity"):
+    if (shape == "staged" or middle_cell) and route.get("effective_intensity"):
         argv += ["--intensity", route["effective_intensity"]]
     elif shape == "framed":
         basis = {row.get("axis"): row for row in (route.get("selection") or {}).get("selection_basis", [])}
