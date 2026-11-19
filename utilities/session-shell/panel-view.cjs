@@ -1001,7 +1001,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const requestList=Array.isArray(model.requests)?model.requests.filter(q=>q&&typeof q.id==='string'):[];
     const elapsedWidth=Math.max(0,...listed.map(r=>measure(r.elapsed||'')));
     const columnWidth=(pick)=>Math.max(0,...listed.map(r=>size(pick(r))));
-    const owner=r=>{const p=leadPaint(r);return [p.harness,p.model_text&&text(' '),p.model_text,p.effort&&text(' '),p.effort].filter(Boolean);};
+    // Under the route (`side:false`) a unit route's worker is its unit: the unit's short name leads the doer column, dim as a role word.
+    // The column is as wide as the routes' harness, model and effort. A unit's name is counted only where every route of the box is a
+    // unit route (so no other route's row changes); beside any other route the name stands in the column's cells if they hold it
+    // (bottomLayout, doerCell), never in the title's.
+    const owner=(r,named=true)=>{const p=leadPaint(r),u=named&&r.unit_route===true?clean(r.unit_word||'').trim():'';
+      return [...(u?[text(u,'dim'),text(' ')]:[]),p.harness,p.model_text&&text(' '),p.model_text,p.effort&&text(' '),p.effort].filter(Boolean);};
     // A route whose record names its kind: its stage stands in the kind column, never as
     // the older `execute ✕ 2/3` step text (that stays for a record that names no kind).
     const shaped=r=>{const shape=String(r.shape||'');return shape==='one-shot-owner'||!!shape&&shape!=='unknown'&&(!/^staged/.test(shape)||Array.isArray(r.stages)&&r.stages.length>0);};
@@ -1040,7 +1045,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     // 11-17 (route zones): in the `direct` zone the zone's own name says it, so `(direct)` (the word the record or its shape
     // gives) is left out of the line; a real intensity (`quick`) stays.
+    // A unit route's intensity is not a choice (it is always `quick`), so its first line has no bracket.
     const intensityOf=r=>{
+      if(r.unit_route===true)return '';
       const word=intensityRaw(r);
       return r.zone==='direct'&&(/^direct$/i.test(word)||word===clean(r.shape||'').trim())?'':word;
     };
@@ -1075,27 +1082,53 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // the stage word alone; the title keeps ten cells (or its whole width) through both. Short of that the rows keep the
     // earlier columns (title, owner, context, then the stage). 11-18: the command column (`>_ Bash`) is gone, as it is
     // beside the native area: a route reads its harness, model and context number, and its NOW on the row under it.
-    let bottomPlan;
     const planBottom=(ow,gw)=>{
       const kinds=listed.map(kindCell);
       const widths=Object.fromEntries(['kind','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
       const longest=columnWidth(x=>titleOf(x,'')),avail=inner-(2+3+ow+3+gw+1+elapsedWidth);
-      for(const level of widths.kind>widths.full?['kind','full','short']:['full','short']){
+      const order=widths.kind>widths.full?['kind','full','short']:['full','short'];
+      for(const level of order){
         if(!widths[level])break;
         const room=avail-(3+widths[level]);
-        if(room>=Math.min(longest,10))return {level,width:widths[level],title:Math.min(longest,room),kinds};
+        if(room>=Math.min(longest,10))return {level,width:widths[level],title:Math.min(longest,room),kinds,top:level===order[0]};
       }
       return {level:''};
+    };
+    // The bottom rows' columns are one set for the box. The doer column is as wide as the routes' harness, model and effort (a
+    // unit's name counted only where every route of the box is a unit route). Where a unit route is drawn among other routes its
+    // name stands in front of its doer cell when the column holds it (see doerCell), and the column is widened to the whole named
+    // cell only where that changes nothing else in the box: the same stage form, the same title width (so beside a stage cell with
+    // room to spare), and only from the richest stage form the box can have (the first of the order), so a width that widens it
+    // widens it at every wider width; widened or not, every row's columns stand at the same cells and no row lends another its cells.
+    let bottomSet;
+    const bottomLayout=()=>{
+      if(bottomSet)return bottomSet;
+      const gw=columnWidth(x=>leadPaint(x).gauge5||[]),named=columnWidth(x=>doerCell(x,Infinity)),
+        base=listed.every(y=>y.unit_route===true)?named:columnWidth(x=>owner(x,false)),plan=planBottom(base,gw);
+      if(named>base&&plan.level&&plan.top){const wide=planBottom(named,gw);if(wide.level===plan.level&&wide.title===plan.title)return bottomSet={ow:named,gw,plan:wide};}
+      return bottomSet={ow:base,gw,plan};
+    };
+    // A unit route's doer cell in a column `width` wide: its name, then as much of the effort, harness and model as the column holds,
+    // in the order the narrow worker line gives them up (effort, then harness, then model; the name stays last). A column that
+    // holds not even the name gets the cell with no name.
+    const doerCell=(r,width)=>{
+      const unit=r.unit_route===true?clean(r.unit_word||'').trim():'',p=leadPaint(r);
+      if(!unit)return owner(r);
+      const H=p.harness?[p.harness]:[],M=p.model_text?[p.model_text]:[],F=p.effort?[p.effort]:[],keep=M.length?M:H;
+      for(const parts of [[H,M,F],[H,M],[[],keep,[]],[[],[],[]]]){
+        const rest=parts.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x),row=[text(unit,'dim'),...(rest.length?[text(' '),...rest]:[])];
+        if(size(row)<=width)return row;
+      }
+      return owner(r,false);
     };
     function folded(r){
       // 11-18: beside the native area the one-row form is the leader's; under it the row reads the owner, whose NOW stands under it.
       const p=side?r.paint||{}:leadPaint(r),lead=[routeGlyph(r,p.harness),text(' ')];
       if(!side){
-        const ow=columnWidth(owner),gw=columnWidth(x=>leadPaint(x).gauge5||[]);
-        const plan=bottomPlan||(bottomPlan=planBottom(ow,gw));
+        const {ow,gw,plan}=bottomLayout(),doer=doerCell(r,ow);
         if(plan.level){
           const kind=plan.kinds[listed.indexOf(r)],cell=kind?kind[plan.level]:[],name=cut(titleOf(r),plan.title);
-          const parts=[...lead,...name,pad(plan.title-size(name)),text(' │ '),...owner(r),pad(ow-size(owner(r))),text(' │ '),
+          const parts=[...lead,...name,pad(plan.title-size(name)),text(' │ '),...doer,pad(ow-size(doer)),text(' │ '),
             ...(p.gauge5||[]),pad(gw-size(p.gauge5||[])),text(' │ '),...cell];
           const end=r.elapsed?[text(' '),text(r.elapsed)]:[],left=cut(parts,inner-size(end));
           return [...left,pad(inner-size(left)-size(end)),...end];
@@ -1103,7 +1136,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         // The title gives way first, but keeps half of what the stage column would take.
         const avail=inner-(2+3+ow+3+gw+3+1+elapsedWidth),titleWidth=Math.min(columnWidth(x=>titleOf(x,'')),Math.max(6,avail-columnWidth(third),Math.floor(avail/2)));
         const name=cut(titleOf(r),titleWidth);
-        const base=[...lead,...name,pad(titleWidth-size(name)),text(' │ '),...owner(r),pad(ow-size(owner(r))),text(' │ '),
+        const base=[...lead,...name,pad(titleWidth-size(name)),text(' │ '),...doer,pad(ow-size(doer)),text(' │ '),
           ...(p.gauge5||[]),pad(gw-size(p.gauge5||[]))];
         // The elapsed time keeps the right edge; the stage gives way first, whole (spec rule 30 (d)).
         const end=r.elapsed?[text(' '),text(r.elapsed)]:[],whole=[...base,text(' │ '),...third(r)];
@@ -1184,25 +1217,32 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const treeOf=r=>side&&Array.isArray(r.workers_live);
     const leadPaint=r=>r.owner_paint&&typeof r.owner_paint==='object'?r.owner_paint:(r.paint||{});
     // A frame route has no owner yet: its two legs hang straight under the route (11-17, route row 5).
-    const leadRole=r=>framed(r)&&treeOf(r)?'':r.owner_paint&&typeof r.owner_paint==='object'?'owner':r.role;
+    // A unit route (one worker called with no owner) has no `owner` or `worker` role: the unit's short name stands in the
+    // role word's place (same dim color, same column), and goes whole when the row has no room for it.
+    const unitRoute=r=>r.unit_route===true;
+    const unitName=r=>unitRoute(r)?clean(r.unit_word||'').trim():'';
+    const leadRole=r=>unitRoute(r)?unitName(r):framed(r)&&treeOf(r)?'':r.owner_paint&&typeof r.owner_paint==='object'?'owner':r.role;
     const workersOf=r=>treeOf(r)?r.workers_live.filter(w=>w&&typeof w==='object').slice(0,8):[];
     // The one-row form's percent and time columns, shared by owners and their workers (rule 48 (c)).
     const allWorkers=listed.flatMap(r=>workersOf(r));
     const ctxWidth=Math.max(0,...listed.map(r=>leadPaint(r).ctx?size([leadPaint(r).ctx]):0),...allWorkers.map(w=>w.paint?.ctx?size([w.paint.ctx]):0));
     const timeWidth=Math.max(0,...allWorkers.map(w=>measure(w.elapsed||'')));   // (an owner has no time of its own: the route's stands on its first line)
     const ROLE=new Set(['owner','frame','frame-alt','worker']);
+    let unitLabel='';      // the unit's short name on the route being drawn (a unit route's role word)
+    const roled=role=>ROLE.has(role)||(!!unitLabel&&role===unitLabel);
     // A frame leg is `frame`, its alternative `frame-alt`; any other stage worker is `worker`.
-    const workerRole=w=>w.role==='frame'?(/alt/.test(String(w.stage||''))?'frame-alt':'frame'):'worker';
+    const workerRole=w=>unitLabel?unitLabel:w.role==='frame'?(/alt/.test(String(w.stage||''))?'frame-alt':'frame'):'worker';
     // The role column's width is the route's own (11-17: a frame route's `frame-alt` does not widen another route's rows).
     let roleWidth=0;
-    const setRoles=r=>{roleWidth=side?Math.max(0,ROLE.has(leadRole(r))?measure(leadRole(r)):0,...workersOf(r).map(w=>measure(workerRole(w)))):0;};
-    const roleCell=role=>roleWidth?[text((ROLE.has(role)?role:'').padEnd(roleWidth),'dim'),text(' ')]:[];
+    const setRoles=r=>{unitLabel=unitName(r);roleWidth=side?Math.max(0,roled(leadRole(r))?measure(leadRole(r)):0,...workersOf(r).map(w=>unitRoute(r)&&!unitLabel?0:measure(workerRole(w)))):0;};
+    const roleCell=role=>roleWidth?[text((roled(role)?role:'').padEnd(roleWidth),'dim'),text(' ')]:[];
     const rolePart=r=>roleCell(leadRole(r));
     const spaced=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
     // The owner's own mark: it spins while it does the work itself, stands as a dim `●` while its workers run, and keeps the
     // route's state mark when nothing runs.
     const ownerGlyph=(r,supervising)=>live(r)?(supervising?text('●','dim'):{...routeGlyph(r,leadPaint(r).harness)}):routeGlyph(r);
-    const ownerLead=(r,supervising)=>[text('  '),ownerGlyph(r,supervising),text(' '),...rolePart(r)];
+    const withBare=(lead,bare)=>{lead.bare=bare;return lead;};   // (`bare`: the same lead without its role word, for a unit's name that does not fit)
+    const ownerLead=(r,supervising)=>{const mark=ownerGlyph(r,supervising);return withBare([text('  '),mark,text(' '),...rolePart(r)],[text('  '),mark,text(' ')]);};
     // 11-17 (the person: "라우트 내부의 CTX는 하네스, 모델 옆에 붙이고 게이지는 없애자 ... 대신 NOW를 아래줄에"): a session's
     // first line is its mark, role, harness, model, effort and, beside them, `CTX 40% · 42m` with no gauge. Short of cells the
     // time goes first, then the word `CTX` (the number stays), then the effort, then the harness; the role and the model stay.
@@ -1216,12 +1256,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     function whoOf(lead,p,role,room=inner){
       const value=x=>x?[x]:[];
       const H=value(p.harness),M=value(p.model_text),F=value(p.effort),C=value(p.ctx),keep=M.length?M:H;
-      if(!ROLE.has(role)&&!H.length&&!M.length&&!F.length)return null;   // (a session whose values are not known: its CTX row leads with its mark instead)
-      for(const parts of [[H,M,F],[H,M],[[],keep,[]]]){
-        const row=[...lead,...spaced(parts)];
+      if(!roled(role)&&!H.length&&!M.length&&!F.length)return null;   // (a session whose values are not known: its CTX row leads with its mark instead)
+      // A unit's name (in the role word's place) is the last word to stay: the effort goes first, then the harness, then the model, and
+      // the name stands alone. Only where the name itself has no room does it go, whole (never cut in the middle), and the row is drawn
+      // as a row with no name is.
+      const named=!!unitLabel&&!!lead.bare,leads=named?[lead,lead.bare]:[lead];
+      for(const head of leads)for(const parts of [[H,M,F],[H,M],[[],keep,[]],...(named&&head===lead?[[[],[],[]]]:[])]){
+        const row=[...head,...spaced(parts)];
         if(size(row)<=room)return row;
+        // The name alone needs no space after it.
+        if(named&&head===lead&&!parts.some(x=>x.length)&&size(row)-1<=room)return row.slice(0,-1);
       }
-      return cut(lead,room);
+      return cut(leads.at(-1),room);
     }
     // The CTX row at `gap` cells in: the gauge (the backend's `gauge_row`, at the panel's width), else the five-cell one, else the
     // number alone; the session's own time after it when it has one.
@@ -1261,25 +1307,31 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const sessionRowsOf=u=>[...(keepCtxLine?(u.who?[u.who,...(u.ctx?[u.ctx]:[])]:[u.ctx||u.one]):[u.one||u.who]),...(keepNow?(nowTwo?u.now2:u.now1):[])];
     // The one-row form (an owner's, and since spec rule 48 (c) its workers' too, two cells in):
     // who, then the percent and the time at the right in columns shared by every route and worker.
-    function foldRow(lead,p,role,E){
+    function foldRow(lead0,p,role0,E){
       const value=x=>x?[x]:[];
       const M=value(p.model_text),H=value(p.harness),K=M.length?M:H,F=value(p.effort),C=value(p.ctx);
-      const build=(h,m,f,withContext,e)=>{
+      let lead=lead0,role=role0;
+      const build=(h,m,f,withContext,e,alone)=>{
         const c=withContext&&ctxWidth>0;
         const left=spaced([h,m,f]);
         const right=[...(c?[pad(ctxWidth-size(C)),...C]:[]),...(e&&timeWidth?[...(c?[text(' ')]:[]),pad(timeWidth-size(E)),...E]:[])];
-        const body=[...lead,...left];
-        if(!ROLE.has(role)&&!left.length&&!(c&&size(C))&&!(e&&E.length))return {row:body,empty:true};
+        const body=[...(alone?lead.slice(0,-1):lead),...left];   // (a name alone needs no space after it)
+        if(!roled(role)&&!left.length&&!(c&&size(C))&&!(e&&E.length))return {row:body,empty:true};
         return {row:right.length?[...body,pad(inner-size(body)-size(right)),...right]:body,width:size(body)+(right.length?1+size(right):0)};
       };
       const drops=routeLine==='model'?[[H,M,F,1,1],[H,M,[],1,1],[[],K,[],1,1],[[],K,[],1,0],[[],K,[],0,0]]:
         [[H,M,F,1,1],[H,M,[],1,1],[[],K,[],1,1],[[],K,[],0,1],[[],K,[],0,0]];
-      for(const pick of drops){
-        if(!E.length&&pick[4]&&!pick[3])continue;   // (no time of its own: a row that gave its percent up for a time column would show neither)
-        const got=build(...pick);
-        if(got.empty)return null;
-        if(got.width>inner)continue;
-        return got.row;
+      // A unit's name (in the role word's place) goes whole, never cut, where no form of the row has room for it.
+      // The name stays after the model has gone (the unit's name alone), as in `whoOf`.
+      for(const [head,word] of unitLabel&&lead0.bare?[[lead0,role0],[lead0.bare,'']]:[[lead0,role0]]){
+        lead=head;role=word;
+        for(const pick of head===lead0&&unitLabel&&lead0.bare?[...drops,[[],[],[],0,0,1]]:drops){
+          if(!E.length&&pick[4]&&!pick[3])continue;   // (no time of its own: a row that gave its percent up for a time column would show neither)
+          const got=build(...pick);
+          if(got.empty)return null;
+          if(got.width>inner)continue;
+          return got.row;
+        }
       }
       return null;
     }
@@ -1292,10 +1344,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     function workerBlock(w,base,boxed=false){
       const p=w.paint||{},role=workerRole(w),glyph=routeGlyph({paint:p,kind:w.kind},p.harness),E=w.elapsed?[text(w.elapsed)]:[];
       const gap=boxed?2:base+4;
-      const lead=boxed?[glyph,text(' '),...roleCell(role)]:[text(' '.repeat(base)),text('↳ ','dim'),glyph,text(' '),...roleCell(role)];
+      const bare=boxed?[glyph,text(' ')]:[text(' '.repeat(base)),text('↳ ','dim'),glyph,text(' ')];
+      const lead=withBare([...bare,...roleCell(role)],bare);
       // A model name longer than the line itself is cut with `…` rather than left out.
       let who=whoOf(lead,p,role)||cut(lead,inner);
-      if(size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner);
+      if(!unitLabel&&size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner);
       // No CTX value, so no CTX row to carry its time: the time ends its first row, at the right edge (the effort, then the harness, give
       // way to it; where even the model does not leave it room the row keeps its values and has no time).
       const stamp=!p.ctx&&w.elapsed?clean(w.elapsed):'';

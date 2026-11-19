@@ -37,6 +37,21 @@ class SmallFixesTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
+    def test_a_reading_of_another_day_says_its_day_in_the_stale_words(self):
+        # `as read at 18:30` today; `as read at 11-17 18:30` for a reading of another day; no time known: the words after ` · `.
+        self.node(r"""
+const src=fs.readFileSync(path.join(shell,'host.cjs'),'utf8'),a=src.indexOf('function staleWords('),b=src.indexOf('function tableRows(');
+assert(a>=0&&b>a);
+const ctx={label:(key,fallback)=>fallback};vm.createContext(ctx);vm.runInContext(src.slice(a,b)+'\nthis.words=staleWords;',ctx);
+const two=n=>String(n).padStart(2,'0');
+const now=new Date(),today=new Date(now.getFullYear(),now.getMonth(),now.getDate(),0,5);
+assert.equal(ctx.words({at:today.getTime()/1000}),'as read at 00:05 · reading again');
+const earlier=new Date(now.getFullYear(),now.getMonth(),now.getDate()-1,18,30);
+assert.equal(ctx.words({at:earlier.getTime()/1000,failed:true}),'as read at '+two(earlier.getMonth()+1)+'-'+two(earlier.getDate())+' 18:30 · could not read again');
+assert.equal(ctx.words({at:0}),'reading again');
+assert.equal(ctx.words({at:0,failed:true}),'could not read again');
+""")
+
     def test_the_question_popups_key_line_breaks_between_pieces_and_keeps_the_closing_key(self):
         # `↑↓ choose · Enter send · t text · Tab next · ←→ section · Esc/Ctrl+] back` is 73 cells: in the 72-cell
         # popup it was cut at `bac`. Every window width 20-200, both languages, every kind of question.

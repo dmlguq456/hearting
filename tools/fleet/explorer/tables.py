@@ -5,7 +5,7 @@ from .live import current_route_counts, route_marker_state, unknown_kind, unknow
 from .grid import CellGrid, cell_width
 from .style import recede_key
 from ..config import ui_text
-from ..palette import harness_spin, kind_intensity_key, kind_word_key, route_field
+from ..palette import ROUTE_FIELDS, harness_spin, kind_intensity_key, kind_word_key, route_field
 
 X = 34
 GAP = 3
@@ -1217,10 +1217,22 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
 _PLAIN_WEIGHT = {"g_work": "grp_live", "stg3_on": "g_idle", "eff_xhigh": "fam_fable"}
 
 
+def _is_unit_route(route):
+    return str(route.get("capability") or "").strip() == "unit"
+
+
 def _kind_cell(route):
-    """``code(standard)``: the kind word (bold) and its intensity in dim brackets; nothing else goes in the brackets."""
+    """``code(standard)``: the kind word (bold) and its intensity in dim brackets; nothing else goes in the brackets.
+    A unit route (one worker, no owner) reads its field alone, ``code``: what the work is, not how it is run (the unit's
+    name stands on the worker's row) and no bracket, its intensity being no choice. An older one that records no field
+    keeps ``unit``."""
     kind = str(route.get("capability") or "").strip()
     intensity = str(route.get("intensity") or "").strip()
+    unit = _is_unit_route(route)
+    if unit:
+        intensity = ""
+        recorded = str(route.get("field") or "").strip()
+        kind = recorded if recorded in ROUTE_FIELDS else kind
     if route.get("shape") == "direct" and intensity.casefold() in ("", "direct"):
         intensity = ""               # the `direct` zone's own name says it (11-17, route zones)
     if not kind:
@@ -1739,6 +1751,10 @@ def draw_routes(grid, vm, state, x=34, y=3):
                      "adversarial": "adv"}
             suffix = "·".join(short.get(value, value) for value in
                               (route.get("mode"), route.get("intensity")) if value)
+            unit_route = _is_unit_route(route)
+            if unit_route:
+                # A unit route has no owner and no mode: its kind line is the first row's word, its field (`code`).
+                kind_parts, suffix = _kind_cell(route) or kind_parts, ""
             if suffix:
                 # The whole bracket (a mode word may stand in it: `(dev·q)`) takes the field's hue at its intensity's weight.
                 kind_parts.append(("(" + suffix + ")", kind_intensity_key(field, suffix) or "dim"))
@@ -1753,7 +1769,8 @@ def draw_routes(grid, vm, state, x=34, y=3):
             grid.add_hit(y, x, right, action)
             cursor = grid.put(x + cols["title"], y, "└ kind ", "dim", limit=right)
             # The unfolded owner is whole (harness, model, effort, profile), wrapped if need be.
-            cursor, y = _put_wrapped(grid, cursor, y, kind_parts + [("  owner ", "dim")] + _owner_parts(route),
+            owner_words = [] if unit_route else [("  owner ", "dim")] + _owner_parts(route)
+            cursor, y = _put_wrapped(grid, cursor, y, kind_parts + owner_words,
                                      right, x + cols["title"] + 2, next_row)
             # The folded row shows the live doer's context; the owner's own stays here (on a
             # line of its own when the kind line has no room left for it).
@@ -1822,6 +1839,8 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 not slim or context_x - (x + cols["prog"]) >= 10)
             worker_progress_end = context_x - gap if inline_context and slim else progress_end
             label = str(worker[0]) if worker else "worker"
+            if unit_route and label == "worker":
+                label = "unit"             # a unit route has no owner: its worker is the unit (`unit · qa/code-review`)
             unit = route.get("worker_unit")
             route_end = x + cols["kind"] - gap
             route_start = x + cols["title"]

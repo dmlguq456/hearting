@@ -36,6 +36,7 @@ SHOW_FRAMES = False
 FAKE_NATIVE = r"""
 import json,os,select,socket,sys,time,tty
 harness,sid=sys.argv[1],sys.argv[2]
+ctl=sys.argv[3] if len(sys.argv)>3 else ''   # the case's control directory: a `native-start` file there makes the native say `start` again
 def event(kind):
     raw=open('/proc/self/stat').read();start=raw.rsplit(') ',1)[1].split()[19]
     req={'op':'event','event':kind,'harness':harness,'sid':sid,'pid':os.getpid(),'start':start,
@@ -51,7 +52,10 @@ if harness!='claude':print('\x1b[?1000h\x1b[?1006h',end='',flush=True)
 screen()
 while True:
     wait=max(0,later[0][0]-time.monotonic()) if later else None
+    if ctl:wait=0.1 if wait is None else min(wait,0.1)
     ready,_,_=select.select([0],[],[],wait)
+    if ctl and os.path.exists(ctl+'/native-start'):
+        os.unlink(ctl+'/native-start');event('start')      # an auto-compact, `/clear` or `/resume` while a popup stands
     while later and later[0][0]<=time.monotonic():seen.append(later.pop(0)[1]);screen()
     if not ready:continue
     data=os.read(0,65536)
@@ -90,15 +94,28 @@ from fleet import session_tags
 OWN={sid!r}
 session_tags.assigned_tag=lambda harness,sid:'e9' if sid==OWN else None
 C={control!r}
+LOGGED=[]
+SERVED=[]
 def number(name):
     try:return float(open(C+'/'+name).read())
     except (OSError,ValueError):return 0.0
 def vm(harness,sid,kind):
+    if not LOGGED:
+        LOGGED.append(1);open(C+'/spawns','a').write('%d\n'%os.getpid())     # one line for each process that collects
+    open(C+'/collections','a').write('1\n')                                     # one line for each collection
     time.sleep(number('vm-delay'))
     while os.path.exists({vm!r}+'.hang'):time.sleep(0.2)
     from fleet.explorer.view_model import ExplorerViewModel
     return ExplorerViewModel.from_mapping(json.load(open({vm!r})))
 m._popup_view_model=vm
+_real_time=time.time
+time.time=lambda:_real_time()-number('clock-back')                              # a collection's time, `clock-back` seconds in the past
+_popup=m._panel_popup
+def popup(binding,request):
+    if not SERVED:
+        SERVED.append(1);open(C+'/backends','a').write('%d\n'%os.getpid())      # one line for each process that serves a popup (held or one-shot, any kind)
+    return _popup(binding,request)
+m._panel_popup=popup
 m.session_questions=lambda harness,sid,**_kw:[]
 m._request_views=lambda harness,sid,now,errors=None:([],[])
 raise SystemExit(m._backend())
@@ -112,7 +129,7 @@ let cols=160,rows=40;
 const term=new Terminal({cols,rows,allowProposedApi:true,scrollback:0});
 term.loadAddon(new Unicode11Addon());term.unicode.activeVersion='11';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-const child=pty.spawn(cfg.python,[cfg.entry,cfg.harness,cfg.python,cfg.fake,cfg.harness,cfg.sid],{cols,rows,cwd:cfg.project,
+const child=pty.spawn(cfg.python,[cfg.entry,cfg.harness,cfg.python,cfg.fake,cfg.harness,cfg.sid,cfg.control],{cols,rows,cwd:cfg.project,
   env:{...process.env,TERM:'xterm-256color',NODE_OPTIONS:'--require '+cfg.launcher}});
 child.onData(d=>term.write(d));
 const flush=()=>new Promise(r=>term.write('',r));
@@ -198,7 +215,7 @@ const measure=async(label,press_=opened)=>{
     r=await until(s=>!!box(s),'the popup after ROUTE again');await sleep(400);const s1=await screen();
     checks.again_kind=kind(s1);checks.again_reading=reading(s1);checks.again_title=title(s1);frames.reopen_again=plain(s1);
     // The reading under way when it was opened again is dropped, the next one is cut at 12 s too.
-    r=await until(failedRead,'the words that the reading failed',32000);
+    r=await until(failedRead,'the words that the reading failed',40000);
     checks.failed_kind=kind(r.s);checks.failed_title=title(r.s);frames.reopen_failed=plain(r.s);
     fs.unlinkSync(cfg.vm+'.hang');
   }
@@ -222,6 +239,156 @@ const measure=async(label,press_=opened)=>{
     for(let i=0;i<6&&!title(await screen()).includes('ROUTE');i++)await key('\x1b[C',300);
     const r=await until(s=>title(s).includes('ROUTE')&&reading(s)||staleWords(s),'the routes popup at 60 columns');
     checks.title=title(r.s);checks.kind=kind(r.s);frames.narrow=plain(r.s);
+  }
+  if(['keys','held_dies','refresh_reopen','reread_fails'].includes(sc)){
+    const lines=f=>fs.existsSync(cfg.control+'/'+f)?fs.readFileSync(cfg.control+'/'+f,'utf8').split('\n').filter(Boolean):[];
+    const spawned=()=>lines('spawns').map(Number),collections=()=>lines('collections').length;
+    const isAlive=pid=>{try{process.kill(pid,0);return true;}catch{return false;}};
+    const live=()=>spawned().filter(isAlive).length;
+    const unfoldedNow=s=>unfolded(s).match(/FLEET_R\d+/)?.[0]||'';
+    // What the page of a route draws that its table does not: the stage frame.
+    const paged=s=>popupHas('║')(s);
+    const rename=n=>{const cache=JSON.parse(fs.readFileSync(cfg.cache,'utf8'));cache.observed_at=Date.now()/1000;cache.route_panels[cfg.key][0].title='PANEL_R1 RENAMED'+n;write(cfg.cache,JSON.stringify(cache));};
+    control('vm-delay',cfg.delay);
+    if(sc==='keys'){
+      // The table is collected once; the keys that follow draw from that collection, in the one backend held while the popup stands.
+      await opened();await until(filled,'the filled table',cfg.delay*1000+20000);
+      checks.opened={spawned:spawned().length,collections:collections(),live:live()};
+      const first=unfoldedNow(await screen());checks.first_open=first;
+      const steps=[];
+      // (One route has none to step to; its page is the key.)
+      for(const want of cfg.routes>1?['FLEET_R'+(Number(first.slice(7))+1),first]:[]){
+        const t0=Date.now();await key(want===first?'\x1b[A':'\x1b[B',0);const r=await until(s=>unfoldedNow(s)===want,'the unfolded route '+want);
+        steps.push({want,ms:Date.now()-t0,at:r.ms});
+      }
+      checks.down_up=steps;frames.keys_unfolded=plain(await screen());
+      const t1=Date.now();await key('\r',0);const page=await until(paged,'the route page');checks.page_ms=Date.now()-t1;frames.keys_page=plain(page.s);
+      const t2=Date.now();await key('\r',0);await until(s=>!paged(s)&&!!unfoldedNow(s),'the table again');checks.back_ms=Date.now()-t2;
+      checks.after_keys={spawned:spawned().length,collections:collections(),live:live(),title:title(await screen())};
+      await close();await sleep(1500);checks.closed_live=live();
+    }
+    if(sc==='held_dies'){
+      await opened();await until(filled,'the filled table',cfg.delay*1000+20000);
+      const held=spawned();checks.held=held.length;
+      for(const pid of held)try{process.kill(pid,'SIGKILL');}catch{}
+      await sleep(300);
+      const first=unfoldedNow(await screen());
+      const t0=Date.now();await key('\x1b[B',0);const r=await until(s=>unfoldedNow(s)!==first&&!!unfoldedNow(s),'the next route unfolded by a backend of its own',cfg.delay*1000+12000);
+      checks.dies={ms:Date.now()-t0,failed:failedRead(r.s),title:title(r.s),spawned:spawned().length,collections:collections()};
+      // The backend that came for it is held in turn: the next key starts nothing and collects nothing.
+      const before=spawned().length;await key('\x1b[A',0);await until(s=>unfoldedNow(s)===first,'the first route again',cfg.delay*1000+12000);
+      checks.after={new_processes:spawned().length-before,collections:collections()};
+      await close();await sleep(1500);checks.closed_live=live();
+    }
+    if(sc==='refresh_reopen'){
+      // The panel's route values change under the popup: the reading it starts is kept under the new values, so a popup
+      // opened again after it comes with that table (Fleet's), not the panel's box.
+      await opened();await until(filled,'the filled table',cfg.delay*1000+20000);
+      rename(1);await until(has('R1 RENAMED1'),'the panel renamed');
+      control('vm-delay',0);
+      await sleep(1500);
+      await close();await opened();
+      const r=await until(either,'a first content');checks.reopen={kind:kind(r.s),title:title(r.s)};frames.reopen=plain(r.s);
+    }
+    if(sc==='reread_fails'){
+      await opened();await until(filled,'the filled table',cfg.delay*1000+20000);
+      control('vm-delay',0);fs.writeFileSync(cfg.vm+'.hang','');rename(1);
+      await until(has('R1 RENAMED1'),'the panel renamed');
+      const r=await until(failedRead,'the words that the reread failed',20000);checks.failed={title:title(r.s),rows:popupHas('FLEET_R')(r.s)};frames.reread_failed=plain(r.s);
+      fs.unlinkSync(cfg.vm+'.hang');rename(2);
+      const ok=await until(s=>filled(s)&&popupHas('FLEET_R')(s),'the words gone after a read that succeeded',20000);checks.recovered={title:title(ok.s)};frames.reread_recovered=plain(ok.s);
+    }
+  }
+  if(['session_start','now_start','switch_now','aged','page_scroll'].includes(sc)){
+    const lines=f=>fs.existsSync(cfg.control+'/'+f)?fs.readFileSync(cfg.control+'/'+f,'utf8').split('\n').filter(Boolean):[];
+    const isAlive=pid=>{try{process.kill(pid,0);return true;}catch{return false;}};
+    // Every process that served a popup, and how many of them are still running.
+    const procs=()=>lines('backends').map(Number),alive=()=>procs().filter(isAlive).length,collected=()=>lines('collections').length;
+    const spawned=()=>lines('spawns').map(Number),live=()=>spawned().filter(isAlive).length;
+    const unfoldedNow=s=>unfolded(s).match(/FLEET_R\d+/)?.[0]||'';
+    const paged=s=>popupHas('║')(s);
+    // The native says `start` again (what an auto-compact, `/clear` or `/resume` does) with the popup standing.
+    const nativeStart=async()=>{control('native-start','1');await until(s=>!box(s),'the popup closed by the start');await sleep(1500);};
+    // ←→ until the popup is `name`'s.
+    const toKind=async name=>{for(let i=0;i<6&&!title(await screen()).includes(name);i++)await key(i<3?'\x1b[C':'\x1b[D',400);
+      await until(s=>title(s).includes(name),'the '+name+' popup');};
+    control('vm-delay',cfg.delay);
+    if(sc==='session_start'){
+      await opened();await until(filled,'the filled table',cfg.delay*1000+20000);
+      checks.before={alive:alive()};
+      await nativeStart();
+      checks.after={alive:alive(),live:live()};
+    }
+    if(sc==='now_start'){
+      await opened();await until(filled,'the filled table',cfg.delay*1000+20000);
+      await toKind('NOW');await sleep(1000);
+      checks.before={alive:alive(),title:title(await screen())};
+      await nativeStart();
+      checks.after={alive:alive()};
+    }
+    if(sc==='switch_now'){
+      // The routes collection is still under way when the person goes to NOW: its backend ends (no late answer is drawn into NOW's
+      // popup), NOW's is the one held; back at the routes the NOW one ends in turn, and a start ends the one standing.
+      await opened();await until(either,'a first content');
+      // (Its backend has started its collection: the move ends a process that is there.)
+      for(let i=0;i<100&&!spawned().length;i++)await sleep(50);
+      checks.collecting={spawned:spawned().length};
+      await toKind('NOW');await sleep(1000);
+      checks.on_now={alive:alive(),procs:procs().length,title:title(await screen())};
+      await sleep(cfg.delay*1000+1500);
+      const late=await screen();checks.late={title:title(late),fleet:popupHas('FLEET_R')(late)};
+      control('vm-delay',0);
+      await toKind('ROUTE');await until(filled,'the filled table again',cfg.delay*1000+20000);
+      checks.back={alive:alive(),procs:procs().length};
+      await nativeStart();
+      checks.after_start={alive:alive()};
+    }
+    if(sc==='aged'){
+      // A collection older than a minute (its time is put back two minutes): the key that follows must not draw it unmarked.
+      control('clock-back',120);
+      await opened();await until(filled,'the filled table',cfg.delay*1000+20000);
+      checks.opened={collections:collected()};
+      control('clock-back',0);control('vm-delay',1);
+      const first=unfoldedNow(await screen());
+      const t0=Date.now();let unmarked=0;
+      child.write('\x1b[B');
+      let r;
+      for(;;){
+        const before=collected();const s=await screen();const after=collected();
+        // A frame of the next route, drawn from the old collection with nothing saying so.
+        if(unfoldedNow(s)&&unfoldedNow(s)!==first&&!staleWords(s)&&before===1&&after===1)unmarked++;
+        if(unfoldedNow(s)&&unfoldedNow(s)!==first){r={s,ms:Date.now()-t0};break;}
+        if(Date.now()-t0>20000)throw Error('never the next route\n'+s.join('\n'));
+        await sleep(10);
+      }
+      checks.first={ms:r.ms,title:title(r.s),collections:collected(),words:staleWords(r.s)};
+      const until_settled=Date.now()+8000;
+      for(;;){
+        const before=collected();const s=await screen();
+        if(unfoldedNow(s)&&unfoldedNow(s)!==first&&!staleWords(s)&&before===1)unmarked++;
+        if(!staleWords(s)&&collected()>=2&&unfoldedNow(s))break;
+        if(Date.now()>until_settled){checks.settle_timeout=true;break;}
+        await sleep(25);
+      }
+      await sleep(300);
+      checks.settled={title:title(await screen()),collections:collected()};
+      checks.unmarked=unmarked;
+      const second=unfoldedNow(await screen());
+      const t1=Date.now();await key('\x1b[B',0);const n=await until(s=>unfoldedNow(s)&&unfoldedNow(s)!==second,'the route after');
+      checks.next={ms:Date.now()-t1,title:title(n.s),collections:collected()};
+    }
+    if(sc==='page_scroll'){
+      // Enter pressed on a route while the collection is still under way (the window is lower than the page): the page opens at its top.
+      await resize(120,16);
+      await opened();await until(either,'a first content');
+      for(let i=0;i<8;i++)await key('\x1b[B',60);await key('\r',100);
+      await until(paged,'the page',cfg.delay*1000+20000);await sleep(cfg.delay*1000+1500);
+      const s1=await screen();checks.page_top=plain(s1).slice(0,4);checks.page_foot=(plain(s1).find(l=>/\d+\/\d+ ·/.test(l))||'').match(/\d+\/\d+/)?.[0]||'';frames.page_pressed=plain(s1);checks.page_title=title(s1);
+      // The same page, asked when nothing is under way (back to the table, then Enter).
+      await key('\r',500);await until(s=>!paged(s)&&filled(s),'the table again');
+      await key('\r',500);await until(paged,'the page again');await sleep(600);
+      const s2=await screen();checks.calm_page_top=plain(s2).slice(0,4);checks.calm_foot=(plain(s2).find(l=>/\d+\/\d+ ·/.test(l))||'').match(/\d+\/\d+/)?.[0]||'';frames.page_calm=plain(s2);
+    }
   }
   fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));
 }catch(error){console.error(error.stack);process.exitCode=1;}
@@ -306,7 +473,7 @@ class RoutePopupFirstTest(unittest.TestCase):
         cls.unreadable = catalog['fleet.output.unreadable']['ko']
         cls.count = 0
 
-    def run_case(self, harness, scenario, routes, delay=3, dead=None, staged=False):
+    def run_case(self, harness, scenario, routes, delay=3, dead=None, staged=False, now=False):
         """One private PTY run; returns what the driver read (its `frames` and `checks`)."""
         type(self).count += 1
         case = self.root / ('%s-%s-%d' % (harness, scenario, type(self).count)); case.mkdir(mode=0o700)
@@ -324,6 +491,11 @@ class RoutePopupFirstTest(unittest.TestCase):
         value['route_panels'][key] = [route_row(rid(n), 'PANEL_R%d 제목' % n, states[n - 1], staged) for n in range(1, routes + 1)]
         value['route_status'][key] = 'route %d' % routes; value['route_sessions'][key] = time.time() + 3600
         target.write_text(json.dumps(value)); target.chmod(0o600)
+        if now:  # the panel's NOW row (a fresh summary in this session's title record), so ←→ reaches the NOW popup
+            sys.path.insert(0, str(ROOT / 'tools'))
+            with mock.patch.dict(os.environ, self.env, clear=True):
+                from fleet import titles
+                titles.write(sid, '이 창 제목', summary='그리는 중이다', harness=harness, source='refresher')
         vm = case / 'vm.json'
         vm.write_text(json.dumps({'repos': [{'id': 'project', 'name': 'project'}], 'system': {},
             'routes': [fleet_route(rid(n), 'FLEET_R%d 제목' % n, states[n - 1], staged) for n in range(1, routes + 1)],
@@ -450,6 +622,104 @@ class RoutePopupFirstTest(unittest.TestCase):
         self.assertIn('FLEET_R9', cc['table_unfolded'], cc)
         for checks in (ca, cb, cc):
             self.assertFalse(checks['table_stale'], checks)
+
+    def test_route_keys_and_the_page_draw_from_the_held_collection_and_its_backend_ends_with_the_popup(self):
+        """The popup's ↑↓ and its Enter page draw from the collection the table was read from, in the one backend held while
+        the popup stands: no process of their own, no second collection, and nothing left behind when it closes."""
+        for routes in (1, 5):
+            c = self.run_case('claude', 'keys', routes, staged=True)['checks']
+            # The main assertions do not move with the machine's load: one backend, one collection, none left.
+            self.assertEqual(c['opened']['spawned'], 1, c)
+            self.assertEqual(c['after_keys']['spawned'], 1, c)
+            self.assertEqual(c['opened']['collections'], 1, c)
+            self.assertEqual(c['after_keys']['collections'], 1, c)
+            self.assertEqual(c['closed_live'], 0, c)
+            self.assertNotIn('읽은 내용', c['after_keys']['title'], c)
+            print(json.dumps({'event': 'route-popup-keys-pty', 'routes': routes, 'steps_ms': c['down_up'], 'page_ms': c['page_ms'],
+                              'back_ms': c['back_ms']}), flush=True)
+            # The request's own bar: the key and the page are drawn within a second (this includes the PTY's own drawing).
+            for step in c['down_up']:
+                self.assertLess(step['ms'], 1000, c)
+            self.assertLess(c['page_ms'], 1000, c)
+
+    def test_a_held_backend_that_dies_is_replaced_by_the_next_key_without_the_words(self):
+        c = self.run_case('claude', 'held_dies', 5, staged=True)['checks']
+        self.assertEqual(c['held'], 1, c)
+        self.assertFalse(c['dies']['failed'], c)
+        self.assertNotIn('읽지 못함', c['dies']['title'], c)
+        # The key was read by a backend of its own (it collects: the one that died took its collection with it).
+        self.assertEqual(c['dies']['spawned'], 2, c)
+        self.assertEqual(c['dies']['collections'], 2, c)
+        # That backend is the one held from then on: the next key starts nothing and collects nothing.
+        self.assertEqual(c['after']['new_processes'], 0, c)
+        self.assertEqual(c['after']['collections'], 2, c)
+        self.assertEqual(c['closed_live'], 0, c)
+
+    def test_a_popup_opened_again_after_the_panels_route_values_changed_under_it_comes_with_fleets_table(self):
+        # Review of #1730 (a): the reading that the changed values started was kept under the values before them, so the
+        # popup opened again after it was the panel's box. The key is in place before the reading starts now.
+        c = self.run_case('claude', 'refresh_reopen', 5, delay=1)['checks']
+        self.assertEqual(c['reopen']['kind'], 'fleet', c)
+        self.assertIn('에 읽은 내용', c['reopen']['title'], c)
+
+    def test_a_table_read_before_that_could_not_be_read_again_says_so_and_the_next_success_takes_it_away(self):
+        c = self.run_case('claude', 'reread_fails', 5, delay=1)['checks']
+        self.assertIn('다시 읽지 못함', c['failed']['title'], c)
+        self.assertTrue(c['failed']['rows'], c)       # the rows stay
+        self.assertNotIn('읽지 못함', c['recovered']['title'], c)
+        self.assertNotIn('읽은 내용', c['recovered']['title'], c)
+
+    def test_a_session_start_while_the_routes_popup_stands_ends_its_held_backend(self):
+        # Review of #1735: `start`/`select` (a native auto-compact, `/clear`, `/resume`) closed the popup but left its held
+        # backend (and the collection it holds) running until the window ended.
+        c = self.run_case('claude', 'session_start', 5, delay=1, staged=True)['checks']
+        self.assertEqual(c['before']['alive'], 1, c)
+        self.assertEqual(c['after']['alive'], 0, c)
+        self.assertEqual(c['after']['live'], 0, c)
+
+    def test_a_session_start_while_the_now_popup_stands_ends_its_held_backend(self):
+        c = self.run_case('claude', 'now_start', 5, delay=1, staged=True, now=True)['checks']
+        self.assertIn('NOW', c['before']['title'], c)
+        self.assertEqual(c['before']['alive'], 1, c)
+        self.assertEqual(c['after']['alive'], 0, c)
+
+    def test_moving_between_now_and_routes_swaps_the_held_backend_and_draws_no_late_answer(self):
+        c = self.run_case('claude', 'switch_now', 5, delay=3, staged=True, now=True)['checks']
+        # The routes collection under way ends with the move to NOW; NOW's backend is the one running.
+        self.assertEqual(c['collecting']['spawned'], 1, c)
+        self.assertEqual(c['on_now']['alive'], 1, c)
+        self.assertEqual(c['on_now']['procs'], 2, c)
+        self.assertIn('NOW', c['on_now']['title'], c)
+        # Its collection's late answer is not drawn into NOW's popup.
+        self.assertIn('NOW', c['late']['title'], c)
+        self.assertFalse(c['late']['fleet'], c)
+        # Back at the routes the NOW backend ends and the routes one is the one running; a start ends it.
+        self.assertEqual(c['back']['alive'], 1, c)
+        self.assertEqual(c['after_start']['alive'], 0, c)
+
+    def test_a_key_after_the_collection_is_older_than_a_minute_says_so_or_collects(self):
+        # Review of #1735: a held collection a person left for over a minute was drawn again by the next key with nothing
+        # saying it was not new. It is drawn at once with the words, and read again behind them.
+        c = self.run_case('claude', 'aged', 5, delay=1, staged=True)['checks']
+        self.assertEqual(c['opened']['collections'], 1, c)
+        self.assertEqual(c['unmarked'], 0, c)
+        self.assertLess(c['first']['ms'], 1000, c)
+        self.assertIn('다시 읽는 중', c['first']['title'], c)
+        self.assertNotIn('settle_timeout', c)
+        self.assertEqual(c['settled']['collections'], 2, c)
+        self.assertNotIn('읽은 내용', c['settled']['title'], c)
+        # The collection is new now: the next key draws from it, with no more reading.
+        self.assertEqual(c['next']['collections'], 2, c)
+        self.assertLess(c['next']['ms'], 1000, c)
+        self.assertNotIn('읽은 내용', c['next']['title'], c)
+
+    def test_a_page_entered_while_the_table_is_collecting_opens_at_its_top(self):
+        r = self.run_case('claude', 'page_scroll', 20, delay=3, dead=2, staged=True)
+        c = r['checks']
+        # The page of the route, with its head, from its first line (`1/N`), as when nothing was under way.
+        self.assertTrue(c['calm_foot'].startswith('1/'), c)
+        self.assertEqual(c['page_foot'], c['calm_foot'], c)
+        self.assertEqual(c['page_top'], c['calm_page_top'], r['frames'])
 
     def test_a_narrow_popup_cuts_the_words_at_the_end_of_the_title(self):
         c = self.run_case('claude', 'narrow', 5)['checks']

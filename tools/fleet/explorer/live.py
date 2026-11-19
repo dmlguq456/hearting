@@ -17,6 +17,7 @@ from .view_model import ExplorerViewModel
 from ..config import ui_text
 from ..display import codex_credits
 from ..model import current_attempt_rank
+from ..palette import ROUTE_FIELDS
 from .. import route_visibility
 
 HARNESSES = ("claude", "codex", "opencode")
@@ -768,13 +769,63 @@ def _chain_leg_name(node):
     return "frame" if capability == "route-frame" else _short_capability(capability) or "·"
 
 
+def _is_unit_node(node):
+    return _chain_leg_name(node) == "unit"
+
+
+def _chain_links(node, earlier, frames):
+    """Whether ``earlier`` is tied to ``node`` by what the routes themselves recorded: the route it
+    continues (``source_route_id``), a leg of the same approved plan (``route_plan``) or the frame that
+    opened that plan, or the next step of a declared ``--plan``. One tie needs no record: a route opened
+    right after a frame route (``frames``) belongs to that frame, since a frame that ends with nothing to
+    choose leaves the next route to be composed by hand. A route that only sits in the same session or
+    campaign is not otherwise tied. A unit route is nobody's leg and has no legs of its own."""
+    if _is_unit_node(node) or _is_unit_node(earlier):
+        return False
+    plan, before = node.get("route_plan"), earlier.get("route_plan")
+    if node.get("source_route_id") and node["source_route_id"] == earlier.get("route_id"):
+        return True
+    if node.get("planned") and earlier.get("planned"):
+        return True
+    if isinstance(plan, Mapping) and isinstance(before, Mapping):
+        return (plan.get("decision") == before.get("decision") and plan.get("digest") == before.get("digest")
+                and (_num(before.get("index")) or 0) < (_num(plan.get("index")) or 0))
+    frame = frames.get(node.get("route_id"))
+    return earlier.get("capability") == "route-frame" and frame is not None and earlier.get("route_id") == frame
+
+
 def _chain_legs(nodes, rid, own, status, progress):
     """``[[leg, status, progress], ...]``: the frame that opened the route, the latest finished leg
-    of every other capability since it, and the route's own leg."""
+    of every other capability since it, and the route's own leg. Only routes tied to this one by a
+    recorded relation (``_chain_links``) are legs; the others are not part of its work."""
     index = _chain_position(nodes, rid)
     if index is None:
         return [[own, status, progress]] if own else []
-    before = nodes[:index]
+    # ``frames[route]``: the frame a route belongs to without anyone having recorded it. A plan leg's is the
+    # frame that opened its plan (the nearest frame before the plan's first leg, so a frame opened between two
+    # legs is not theirs); any other route's is the route right before it when that is a frame route (unit
+    # routes between are skipped; a frame or unit route has none: frame -> frame needs a record).
+    frames, plan_frame = {}, {}
+    for i, node in enumerate(nodes[:index + 1]):
+        plan = node.get("route_plan")
+        if isinstance(plan, Mapping):
+            key = (plan.get("decision"), plan.get("digest"))
+            if key not in plan_frame:
+                plan_frame[key] = next((nodes[j].get("route_id") for j in range(i - 1, -1, -1)
+                                        if nodes[j].get("capability") == "route-frame"), None)
+            frames[node.get("route_id")] = plan_frame[key]
+        elif node.get("capability") != "route-frame" and not _is_unit_node(node):
+            before = next((nodes[j] for j in range(i - 1, -1, -1) if not _is_unit_node(nodes[j])), None)
+            if before is not None and before.get("capability") == "route-frame":
+                frames[node.get("route_id")] = before.get("route_id")
+    tied, pending = {index}, [index]
+    while pending:
+        later = pending.pop()
+        for i in range(later):
+            if i not in tied and _chain_links(nodes[later], nodes[i], frames):
+                tied.add(i)
+                pending.append(i)
+    before = [nodes[i] for i in sorted(tied) if i != index]
     frame = next((i for i in range(len(before) - 1, -1, -1)
                   if before[i].get("capability") == "route-frame"), None)
     legs = []
@@ -1101,6 +1152,12 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             capability, record,
             _text(view.get("execution_topology")) or _text(record.get("execution_topology")))
         short = "frame" if framed_route else _short_capability(capability)
+        if short == "unit":
+            # A unit route's kind word is what its work is (its field), not how it is run; one that records none keeps `unit`.
+            recorded = _text(view.get("field")) or _text(record.get("field"))
+            short_label = recorded if recorded in ROUTE_FIELDS else short
+        else:
+            short_label = short
         cwd = _text(view.get("cwd")) or _text(record.get("cwd")) or _text(_get(owner, "cwd"))
         repo = (session_row or {}).get("repo") or _repo_of(resolver, cwd)
         owner_state = (session_row or {}).get("state")
@@ -1247,7 +1304,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "result_at": _num(_get(result, "at")),
             "worker": worker, "age": age, "legs": legs,
             "stages": stages, "resume": resume, "activity": "running" if running else "ended",
-            "loops": None, "worktree": worktree, "tree_label": short,
+            "loops": None, "worktree": worktree, "tree_label": short_label,
             "harness": owner_harness, "model": owner_model, "effort": owner_effort,
             "mode": mode,
             "intensity": intensity,
@@ -1385,6 +1442,8 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
         return []
     detail = _parallel_stage_details(view_nodes, now)
     short, mode = route.get("capability"), route.get("mode")
+    unit_route = short == "unit"         # no owner and no mode: its leg band names neither
+    mode = None if unit_route else mode
     name = f"leg {len(legs) or 1} · {short or '·'}{' ' + mode if mode else ''}"
     frame_nodes = [node for node in view_nodes if _is_frame_leg(node)]
     if frame_nodes and (short == "frame" or route.get("shape") == FRAME_ROUTE_SHAPE):
@@ -1419,8 +1478,9 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
         owner_line.append([" · " + route["age"], "dim"])
     return [{
         "kind": "leg", "n": name, "st": leg_status, "verdict": f"{done}/{len(view_nodes)}",
-        "lines": [owner_line], "detail": detail,
-        "title": [[name, "head"]] + _route_title_line(rid, route, route.get("resume")), "loops": [],
+        "lines": [] if unit_route else [owner_line], "detail": detail,
+        "title": [[name, "head"]] + _route_title_line(rid, route, route.get("resume"), "worker" if unit_route else "owner"),
+        "loops": [],
     }]
 
 

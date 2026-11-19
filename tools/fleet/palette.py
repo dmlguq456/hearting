@@ -125,6 +125,8 @@ for _h, _hue_ch in _NAME_HUE.items():
 # brackets the same hue stepped by weight: `kindq_<field>` dim (quick), `kinds_<field>` plain (standard), `kindb_<field>`
 # bold (strong, thorough, adversarial). Only the five fields below have a hue; any other route keeps the body color.
 KIND_FIELDS = ("code", "lab", "design", "docs", "research")
+# The fields a route may record (the five above hold a hue; the rest read in the body color): a unit route's first word.
+ROUTE_FIELDS = ("code", "docs", "research", "lab", "design", "plan", "admin", "other")
 for _f in KIND_FIELDS:
     _HUE_OF["kind_" + _f] = ("k" + _f, _A_B)
     _HUE_OF["kindq_" + _f] = ("k" + _f, _A_D)

@@ -33,7 +33,7 @@ function fixture(delivery){
   fleetView:undefined,paste:false,relay:false,dragging:false,heldBytes:0,sessionDetails:false,keyTail:'',actionLines:[],
   table:null,popupWatch:[],activated:true,ended:false,succeeding:false,expanded:true,
   panelHits:[{row:0,left:30,right:38,action:'settings'}],geometry:()=>({side:true,panelColumn:93}),panelRow:()=>0,height:()=>30,panelColumns:()=>40,
-  terminal:{modes:{mouseTrackingMode:'none'}},nowStop(){},queueLayout(){},queueDisplay(){},rebuildDisplay(){},observeInput(){},openFleet(){},
+  terminal:{modes:{mouseTrackingMode:'none'}},heldStop(){},queueLayout(){},queueDisplay(){},rebuildDisplay(){},observeInput(){},openFleet(){},
   // The press targets stand for the placement on screen (#1586 review follow-up 5); a hand fold choice.
   layoutQueued:false,panelHitsPlacement:'shown',placement:()=>'shown',foldByHand(){},
   source:(op,value)=>{saved.push({op,value});return Promise.resolve({ok:true,settings:value.settings});},
@@ -1108,6 +1108,140 @@ assert(!r64.join('').includes('lab(')&&!r64.join('').includes('3/7')&&/claude Op
 // At every width a route never reads the older `execute ✕ 2/3`, and no row carries a command.
 for(let width=56;width<=140;width+=2)for(const s of draw(four,width,20,{side:false}).filter(s=>s.startsWith('│ │ ')))
  assert(!/>_|execute ✕ \d/.test(s)&&cells(s)===width,width+' '+s);
+'''
+        self.node(script, "panel-view.cjs")
+
+
+    def test_a_unit_route_leads_with_its_field_and_its_worker_line_names_the_unit(self):
+        # 11-18 (the person: "Unit에서는 무슨 작업인지가 안보이잖아"): a unit route (one worker called with no owner) reads its
+        # field alone on the first line (`code`, no bracket: its intensity is no choice) and the unit's short name stands in the
+        # role word's place on its worker line; a route with an owner keeps `owner` and its bracket. An older route that records
+        # no field keeps `unit`. The name goes whole, never cut, where the row has no room for it.
+        script = self.FIXTURE + r'''
+const unit={...oneShot,id:'u',title:'PR 독립 검토',kind_word:'code',kind_field:'code',unit_route:true,unit_word:'code-review',role:'worker',elapsed:'17m',
+ stages:[],paint:{...oneShot.paint,model_text:P('Opus 5.5'),ctx:P('14%'),gauge_row:[P('━───── 14%')]}};
+const own={...oneShot,kind_word:'code',intensity:'quick',role:'owner',owner_paint:oneShot.paint};
+const first=(rows,re)=>rows.find(s=>s.startsWith('│ │ ')&&re.test(s));
+const w44=draw([unit,own],44,60);
+assert(first(w44,/● code +17m │ │$/),w44.join('\n'));
+assert(first(w44,/● code\(quick\)/),w44.join('\n'));                      // the route with an owner keeps its bracket
+assert(!w44.some(s=>/unit/.test(s)),w44.join('\n'));                      // no `unit` word on a unit route's lines
+const w32=draw([unit],32,60);
+assert(first(w32,/● code +17m │ │$/),w32.join('\n'));
+// The worker line: the unit's name where a role word stands, then harness, model, effort; the owner route keeps `owner`.
+assert(w44.some(s=>/⠋ code-review claude Opus 5\.5/.test(s)),w44.join('\n'));
+assert(w44.some(s=>/⠋ owner claude/.test(s)),w44.join('\n'));
+assert(!w44.some(s=>/worker/.test(s)),w44.join('\n'));
+// A name too long for the row goes whole, not cut: the row is the bare harness and model.
+const longName={...unit,unit_word:'research-survey-with-a-very-long-name'};
+const w26=draw([longName],26,60);
+assert(!w26.some(s=>/research-s/.test(s))&&w26.some(s=>/⠋ .*Opus 5\.5/.test(s)),w26.join('\n'));
+// An older route that records no field keeps `unit`, with no bracket and no name on the first line.
+const old=draw([{...unit,kind_word:'unit',kind_field:undefined}],44,60);
+assert(first(old,/● unit +17m │ │$/)&&old.some(s=>/⠋ code-review claude/.test(s)),old.join('\n'));
+// Another field: `docs` / `research` read as themselves (only five hues, the rest the body color).
+for(const field of ['docs','research','plan'])assert(first(draw([{...unit,kind_word:field,kind_field:field==='plan'?undefined:field}],44,60),new RegExp('● '+field+' +17m')),field);
+// An ended route's first line reads the same; its `success · title` line is the one it had.
+const ended=draw([{...unit,kind:'done',state:'done',outcome:'success'}],44,60);
+assert(first(ended,/ code +17m/)&&ended.some(s=>/success · PR 독립 검토/.test(s)),ended.join('\n'));
+// The bottom layout: the kind cell is the field, the unit's name leads the doer column.
+const bottom=draw([unit],140,20,{side:false});
+assert(bottom.some(s=>/code-review claude Opus 5\.5 xhigh .*│ code/.test(s)&&!/unit/.test(s)),bottom.join('\n'));
+'''
+        self.node(script, "panel-view.cjs")
+
+
+    def test_a_unit_routes_narrow_worker_line_gives_up_its_values_and_keeps_its_name_last(self):
+        # 11-19 (independent review of #1736): the effort goes first, then the harness, then the model, and the unit's name is the last
+        # word on the line; a narrower line never shows a word a wider one lacks. Only a name with no room goes (whole), and the line is
+        # then drawn as one with no name is. Under the route, a unit route among other routes keeps every row's columns at the same cells and costs no other route a word.
+        script = self.FIXTURE + r'''
+const unit={...oneShot,id:'u',title:'PR 독립 검토',kind_word:'code',kind_field:'code',unit_route:true,unit_word:'code-review',role:'worker',elapsed:'17m',
+ stages:[],paint:{...oneShot.paint,model_text:P('Opus 5.5'),ctx:P('14%'),gauge_row:[P('━───── 14%')]}};
+const words=rows=>{const row=rows.find(s=>/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(s)&&s.includes('code-review'));return row?row.replace(/[│╭╮╰╯─]/g,' ').trim().split(/\s+/).filter(w=>!/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●]$/.test(w)):null;};
+for(const rows of [60,22]){
+  let wider=null;
+  for(let width=60;width>=23;width--){   // (below 23 even the name has no room: it goes whole, see the long name below)
+    const got=words(draw([unit],width,rows));
+    assert(got&&got.includes('code-review'),'name stays at '+width+'x'+rows+': '+JSON.stringify(got));
+    if(wider)for(const w of got)assert(wider.includes(w),'width '+width+'x'+rows+' shows `'+w+'` that '+(width+1)+' lacks: '+JSON.stringify(got)+' / '+JSON.stringify(wider));
+    wider=got;
+  }
+}
+// The order the values go in, at the widths where each form stands.
+const seen=new Set();
+for(let width=60;width>=23;width--){const got=words(draw([unit],width,60));seen.add(got.filter(w=>w!=='code-review').join(' '));}
+for(const form of ['claude Opus 5.5 xhigh','claude Opus 5.5','Opus 5.5',''])assert(seen.has(form),'a form is missing: `'+form+'`: '+[...seen].join(' | '));
+// A name with no room goes whole, and the line is then the bare harness and model as before.
+const longName={...unit,unit_word:'research-survey-with-a-very-long-name'};
+const narrow=draw([longName],26,60);
+assert(!narrow.some(s=>/research-s/.test(s))&&narrow.some(s=>/⠋ .*Opus 5\.5/.test(s)),narrow.join('\n'));
+// Under the route (`side:false`), a unit route among other routes: its doer cell never borrows from its own title, so every route row
+// of the box has its columns at the same cells; the cell folds like the narrow worker line (effort, harness, model) with the name
+// last, and stands whole where the box has room to spare; no other route's row loses a word or a letter of its title for it.
+const own={...oneShot,id:'o',title:'Fix the governor cap',kind_word:'code',intensity:'quick',role:'owner',owner_paint:oneShot.paint};
+const stagedRoute={...staged,kind_word:'code',intensity:'standard'};
+const rowsOf=(routes,width)=>draw(routes,width,20,{side:false}).filter(s=>/^│ │ [⠋●✓] /.test(s));
+const barsOf=row=>{const out=[];let at=0;for(const c of row){if(c==='│')out.push(at);at+=cells(c);}return out.slice(2);};   // cells, not characters (Korean titles)
+const wordsOf=row=>row.replace(/[│╭╮╰╯─]/g,' ').trim().split(/\s+/);
+const doerOf=row=>row.split('│')[3].trim();
+const noName={...unit,unit_word:''};   // the same route as the main branch draws it: no name in front of its doer cell
+for(const [label,mixed,rest] of [['owner+unit',[own,unit],[own]],['owner+unit+staged',[own,unit,stagedRoute],[own,stagedRoute]]]){
+  let wider=null;
+  for(let width=200;width>=40;width--){
+    const rows=rowsOf(mixed,width),without=rowsOf(rest,width),plain=rowsOf(mixed.map(r=>r===unit?noName:r),width);
+    assert.equal(rows.length,mixed.length,label+' '+width);
+    // 1. one set of columns: the title│doer and the doer│gauge bars stand at the same cells on every route row.
+    // (Widths 48 and 49 of the box with a staged route are left out: the staged row's own doer cell is clipped there by the row's
+    // end, on main as well, before this change; it is not a unit route's doing.)
+    if(!(rest.length>1&&width>=48&&width<=49))for(const k of [0,1])assert.equal(new Set(rows.map(row=>barsOf(row)[k])).size,1,label+' bar '+k+' at '+width+'\n'+rows.join('\n'));
+    // 2. the unit route costs the other routes nothing: their words and their title letters are what they are without it.
+    const others=mixed.map((r,i)=>r===unit?null:rows[i]).filter(Boolean);
+    others.forEach((row,i)=>assert.deepEqual(wordsOf(row),wordsOf(without[i]),label+' '+width+'\n'+rows.join('\n')+'\n--\n'+without.join('\n')));
+    // 3. the unit route's title is whole wherever the title is whole with no name in front of its doer cell (the main branch's row).
+    const at=mixed.indexOf(unit);
+    if(plain[at].includes('PR 독립 검토'))assert(rows[at].includes('PR 독립 검토'),label+' title cut at '+width+'\n'+rows.join('\n'));
+    // 4. the name shows at every width where the column holds it (the column is 21 cells wide in these boxes; below 49 cells the doer
+    // column is no longer drawn), and a narrower row never shows a word a wider one lacks.
+    if(width>=49){
+      const cell=doerOf(rows[at]),got=cell.split(/\s+/);
+      assert(got.includes('code-review'),label+' name missing at '+width+'\n'+rows.join('\n'));
+      if(wider)for(const w of got)assert(wider.includes(w),label+' width '+width+' shows `'+w+'` that '+(width+1)+' lacks: `'+cell+'`');
+      wider=got;
+    }
+  }
+  // 5. the whole cell (`code-review claude Opus 5.5 xhigh`) shows from some width on and at every width above it, 200 included.
+  const full=[];for(let width=49;width<=200;width++)full.push(doerOf(rowsOf(mixed,width)[mixed.indexOf(unit)])==='code-review claude Opus 5.5 xhigh');
+  const first=full.indexOf(true);
+  assert(first>=0&&first+49<=140&&full.slice(first).every(Boolean),label+' whole cell from '+(first+49)+': '+full.map(x=>x?1:0).join(''));
+  assert.equal(doerOf(rowsOf(mixed,60)[mixed.indexOf(unit)]),'code-review Opus 5.5','shared column of 21 cells: the effort and the harness go, the name stays');
+}
+// 11-19 (follow-up to the #1736 close check): a box whose titles are all short, with a staged route whose stage cell has two forms (the kind
+// with its stage word, then the stage word alone). The whole unit cell shows from some width on and at every width above it, 200 included,
+// whether the unit cell is the widest of the box (`code-review claude Opus 5.5 xhigh`) or a shorter one (`fact-verify codex gpt-5.5 high`);
+// the two bars stand at the same cells on every route row all the way.
+const shortOwn={...own,title:'Fix cap'},shortStaged={...stagedRoute,title:'단계 1'},shortUnit={...unit,title:'PR 검토'};
+const factUnit={...shortUnit,unit_word:'fact-verify',paint:{...unit.paint,harness:P('codex'),model_text:P('gpt-5.5'),effort:P('high')}};
+for(const [label,u,whole] of [['short titles',shortUnit,'code-review claude Opus 5.5 xhigh'],['short titles, a shorter unit cell',factUnit,'fact-verify codex gpt-5.5 high']]){
+  const box=[shortOwn,u,shortStaged],shown=[];
+  for(let width=60;width<=200;width++){
+    const rows=rowsOf(box,width);
+    assert.equal(rows.length,3,label+' '+width);
+    for(const k of [0,1])assert.equal(new Set(rows.map(row=>barsOf(row)[k])).size,1,label+' bar '+k+' at '+width+'\n'+rows.join('\n'));
+    shown.push(doerOf(rows[1])===whole);
+  }
+  const first=shown.indexOf(true);
+  assert(first>=0&&first+60<=115&&shown.slice(first).every(Boolean),label+' whole cell from '+(first+60)+': '+shown.map(x=>x?1:0).join(''));
+}
+// A unit route that records no harness: the doer column is as wide as the cell drawn (one blank between the name and the model, none left
+// over after the cell), alone in its box and beside another route.
+const noHarness={...unit,paint:{...unit.paint,harness:undefined}};
+for(const [label,box,at] of [['alone',[noHarness],0],['beside an owner',[own,noHarness],1]])
+  for(const width of [120,140,200]){
+    const rows=rowsOf(box,width);
+    assert.equal(rows[at].split('│')[3],' code-review Opus 5.5 xhigh ',label+' '+width+'\n'+rows.join('\n'));
+    assert.equal(new Set(rows.map(row=>barsOf(row)[1])).size,1,label+' bars at '+width+'\n'+rows.join('\n'));
+  }
 '''
         self.node(script, "panel-view.cjs")
 
