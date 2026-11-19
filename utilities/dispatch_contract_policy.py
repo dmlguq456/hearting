@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from route_authority import depth1_supported_harnesses, route_in_force
 from route_plan import is_depth0_leg
+from route_form import serial_attempt_route
 
 from dispatch_contract_base import (
     ATTEMPT_SCHEMA_VERSION, DispatchContractError, EXECUTION_SURFACES, FALLBACK_HOPS,
@@ -234,7 +235,7 @@ def headless_attempt_policy(
     if int(node.get("dispatch_depth", -1)) != dispatch_depth:
         raise DispatchContractError("route-dispatch-depth-mismatch", str(node.get("dispatch_depth")))
 
-    if route.get("effective_intensity") == "quick":
+    if serial_attempt_route(route):
         # Quick is a THREE-node route now (`frame`, `frame-alternative`,
         # `one-shot`), so the shape check is a per-node-id table rather than a
         # pin to a single id. Depth 1 and "no parent slug" still hold for all

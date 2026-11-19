@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 
 import route_identity as ROUTE_IDENTITY
+import route_form as ROUTE_FORM
 import dispatch_terminal_commit
 from dispatch_contract import (
     DispatchContractError, owner_operation_fence, verdict_pass, attempt_process_quiescence,
@@ -177,7 +178,7 @@ def _owner_terminal_observation(route,node,*,jobs=None,registry_rows=None,
         # A one-shot owner sealed by `route_*` fields alone (its supervisor closed the row
         # before the marker writer ran) has no lifecycle binding; the quick node-bound
         # contract that `dispatch_terminal_commit.validate_owner_route` enforces stands in.
-        node_bound=(binding is None and route.get("effective_intensity")=="quick"
+        node_bound=(binding is None and ROUTE_FORM.one_shot_owner(route)
                     and not any(k in meta for k in ("owner_route_file","owner_route_id","owner_route_hash"))
                     and Path(meta.get("route_file","")).resolve()==canonical_route_path(route["artifact_root"],route["route_id"]))
         if not ((binding is not None and binding.route_id==route["route_id"] and binding.route_hash==route["route_hash"])
