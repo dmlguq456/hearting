@@ -76,6 +76,7 @@ $HOME/hearting/                                       # canonical linked maintai
 $HOME/agent_setting/                                  # legacy linked checkout fallback
 $HOME/.claude/              # Claude Code runtime home, mostly runtime-owned
 $HOME/.codex/               # Codex runtime home, mostly runtime-owned
+$HOME/.config/opencode/     # OpenCode global config home
 ```
 
 General-user installation uses a checksum-verified managed release. Maintainer

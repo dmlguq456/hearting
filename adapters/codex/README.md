@@ -21,9 +21,9 @@ capability/stage contract. It does not explicitly read the full adapter
 target project's `AGENTS.md`; no verified per-worker disable switch is claimed,
 so this is prompt isolation with a documented physical-masking fallback.
 
-Registered-headless child attempts are exact-parent bound across both Codex and
-Claude Code. Codex liveness/harvest normalize Codex `turn.completed` and Claude
-stream-json `result` envelopes, while parent-death reconciliation uses only
+Registered-headless child attempts are exact-parent bound across Codex, Claude
+Code and OpenCode. Codex liveness/harvest normalize Codex `turn.completed`, Claude
+stream-json `result` and OpenCode terminal envelopes, while parent-death reconciliation uses only
 sealed attempt and PID/start/PGID evidence; runtime-native subagents are a
 separate surface.
 
@@ -132,7 +132,7 @@ Check `preflight.sh headless [--check] [--require-hook-trust] <worktree>`.
 `preflight.sh dispatch --dry-run|--register|--start [--require-hook-trust]`
 runs the raw wrapper; the route commands reach it with the sealed tuple.
 A direct interactive launch selects completion by the parent runtime: a Codex
-parent uses its native queue and a Claude parent uses Claude resume. Native
+parent uses its native queue, a Claude parent uses Claude resume and an OpenCode parent the `opencode-turn` carrier. Native
 queue delivery does not force Stop/PreToolUse trust. Keep the parent
 conversational; a wait is never an in-model `sleep`/liveness loop.
 `--allow-unmanaged-parent-poll` stays operator-only. Legacy stamped Stop state
