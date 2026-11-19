@@ -1836,47 +1836,77 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const usageLines=()=>keepQuota&&usageOn?usageData.filter((_u,i)=>keepLine[i]):[];
     // 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"; then, on v4.54.0,
     // "RESOURCE는 세로로 차지하는 공간이 너무 많은데, 이걸 게이지는 없애자 그리고 가로로 나열이 가능하면 가로로 나열을 좀 하자"): RESOURCES stands
-    // right above USAGE. One row for each host: its name, `CPU 34%  MEM 61%` and, at the row's end, the count of the GPUs nothing runs
-    // on (`idle GPU 6`). Under it the GPUs a process runs on, side by side (`GPU0 93% 21/24G [3b]  GPU1 40% 10/48G`), onto the next
-    // row where they do not fit; one GPU's group is never split between rows. No gauge: the use is its number, in the level's color.
-    // The values are the sample the shared producer already took. Short of cells on a host row the values go in this order: MEM,
-    // then CPU, then the name is cut with `…` (12 cells at least), the idle count last (11-18 review: the idle count was first to go); short of cells for one GPU's group the memory goes first, then the use,
-    // and the session's number stays (who holds the GPU is what the section is for). Short of rows it gives way before everything else:
-    // the GPU rows (from the last), the host rows (from the last; the name row goes with the last of them), so USAGE and the sections
-    // above it stand as they did without it.
+    // right above USAGE. One row for each host: its name and `CPU 34%  MEM 61%`. Under it every GPU of the host in its number's order, side by
+    // side (`GPU0  93% 21/24G [3b]  GPU1  40% 10/48G`, `GPU2   0%  0/48G` under them: the grid below), onto the next row where they do not fit; one GPU's group is never split
+    // between rows. No gauge: the use is its number, in the level's color. 11-19 (the person: "빈 GPU도 일관성있게 표시해줘. 그냥 0% 0/48GB
+    // 이런식으로 해놔. 컬러만 좀 어둡게 하면 되잖아. 0%에"): a GPU nothing runs on has the same group with the sample's own values and no session
+    // number, all of it `dim` (the producer paints it so; the host row no longer counts them). The values are the sample the shared producer
+    // already took. Short of cells on a host row the values go in this order: MEM, then CPU, then the name is cut with `…` (12 cells at least);
+    // short of cells for one GPU's group the memory goes first, then the use, and the session's number stays (who holds the GPU is what the
+    // section is for). Short of rows it gives way before everything else: the GPU rows (from the last), the host rows (from the last; the name
+    // row goes with the last of them), so USAGE and the sections above it stand as they did without it.
     const resourceData=Array.isArray(model.resources)?model.resources.filter(h=>h&&typeof h==='object'&&Array.isArray(h.host)).slice(0,8):[];
     let resHosts=resourceData.length,resGpus=Infinity;
-    const resourceHostRow=h=>{
-      const idle=h.idle>0?[[text(t('resource_idle_gpus','idle GPU')+' '+h.idle,'dim')]]:[];
-      const stats=painted(h.stats).filter(x=>Array.isArray(x)&&x.length).map(painted);
-      const name=painted(h.host),least=Math.min(size(name),12);
-      const tailOf=vals=>vals.flatMap(x=>[text('  '),...x]);
-      // Giving way: MEM, then CPU (the last stat first), then the name is cut (12 cells at least), the idle count last.
-      for(let n=stats.length;n>=0;n--){
-        const tail=tailOf([...stats.slice(0,n),...idle]);
-        if(size(name)<=inner-size(tail))return [...name,...tail];
+    // 11-19 (the person: "그리고 GPU 표시를 행과 열 간격을 맞춰."): one grid for the whole section, from every host's values. The host rows: the name
+    // column as wide as the longest name, each stat (`CPU`, `MEM`) a column with its value right-aligned to the widest. The GPU groups: all the same
+    // width, the label left-aligned, the use and the memory right-aligned, the session numbers left-aligned after them (blank where a GPU has none, so
+    // the next group keeps its place; the last group of a row is not padded behind), two cells between groups; every row of every host takes as many
+    // groups as the widest form lets in one row, so a group and its values stand on the same cells row over row. The form of the groups (the memory,
+    // then the use goes) and the stats' columns (MEM, then CPU) are chosen for the section, not per host; a name that must be cut is the step after.
+    const plainOf=parts=>parts.map(p=>String(p.text)).join('');
+    const blank=n=>n>0?[text(' '.repeat(n))]:[];
+    const leftIn=(parts,w)=>[...parts,...blank(w-size(parts))];
+    const rightIn=(parts,w)=>[...blank(w-size(parts)),...parts];
+    const trimEnd=parts=>{const out=[...parts];while(out.length&&/^ *$/.test(String(out.at(-1).text)))out.pop();return out;};
+    const grid=(()=>{
+      const hosts=resourceData.map(h=>({name:painted(h.host),stats:painted(h.stats).filter(x=>Array.isArray(x)&&x.length).map(painted)}));
+      const nameW=Math.max(0,...hosts.map(h=>size(h.name)));
+      const cols=[];
+      for(const h of hosts)for(const st of h.stats){
+        const key=plainOf([st[0]]).trim();let c=cols.find(x=>x.key===key);
+        if(!c){c={key,labelW:0,valueW:0};cols.push(c);}
+        c.labelW=Math.max(c.labelW,size([st[0]]));c.valueW=Math.max(c.valueW,size(st.slice(1)));
       }
-      if(idle.length){const tail=tailOf(idle),room=inner-size(tail);if(room>=least)return [...cut(name,room),...tail];}
-      return cut(name,inner);
+      // The stats kept: the most whose aligned row fits; none left, the names alone (each cut to the row where it is longer).
+      let kept=cols.length;
+      while(kept>0&&nameW+cols.slice(0,kept).reduce((n,c)=>n+2+c.labelW+c.valueW,0)>inner)kept--;
+      const cells=resourceData.flatMap(h=>painted(h.gpus)).map(g=>({label:painted(g.label),pct:painted(g.pct),mem:painted(g.mem),users:painted(g.users)}));
+      const width=k=>Math.max(0,...cells.map(c=>size(c[k])));
+      const w={label:width('label'),pct:width('pct'),mem:width('mem'),users:width('users')};
+      // One form for every group (0 whole; 1 without the memory; 2 without the use too; 3 the label alone): the first that lets the widest stand alone.
+      const parts=f=>[w.label&&'label',f<=1&&w.pct&&'pct',f===0&&w.mem&&'mem',f<=2&&w.users&&'users'].filter(Boolean);
+      const full=f=>parts(f).reduce((n,k)=>n+(n?1:0)+w[k],0);
+      let form=0;while(form<3&&2+full(form)>inner)form++;
+      return {hosts,nameW,cols,kept,w,form,parts:parts(form),perRow:Math.max(1,Math.floor(inner/(full(form)+2)))};
+    })();
+    const resourceHostRow=h=>{
+      const at=resourceData.indexOf(h),{name,stats}=grid.hosts[at];
+      const cells=grid.cols.slice(0,grid.kept).map(c=>{
+        const st=stats.find(x=>plainOf([x[0]]).trim()===c.key);
+        return st?[...leftIn([st[0]],c.labelW),...rightIn(st.slice(1),c.valueW)]:null;
+      });
+      let last=cells.length;while(last>0&&!cells[last-1])last--;
+      if(!last)return cut(name,inner);   // (no stat to give, or none kept: the name alone, cut to the row)
+      return [...leftIn(name,grid.nameW),...cells.slice(0,last).flatMap((x,i)=>[text('  '),...(x||blank(grid.cols[i].labelW+grid.cols[i].valueW))])];
     };
-    // One GPU's group at a form (0 whole; 1 without the memory; 2 without the use too; 3 the label alone).
-    const resourceGpuGroup=(g,form)=>{
-      const sets=[[g.pct,g.mem,g.users],[g.pct,g.users],[g.users],[]];
-      return [...painted(g.label),...sets[form].filter(x=>Array.isArray(x)&&x.length).flatMap(x=>[text(' '),...painted(x)])];
+    // One GPU's group: the same columns for every GPU (see above); `end` leaves a group last on its row without its trailing blanks.
+    const resourceGpuGroup=(g,end)=>{
+      const c={label:painted(g.label),pct:painted(g.pct),mem:painted(g.mem),users:painted(g.users)},{w}=grid;
+      const out=[];
+      for(const k of grid.parts){
+        if(out.length)out.push(text(' '));
+        out.push(...(k==='label'||k==='users'?leftIn(c[k],w[k]):rightIn(c[k],w[k])));
+      }
+      return end?trimEnd(out):out;
     };
-    // The host's GPU rows: groups side by side, two cells in, two cells between; every group in the first form that lets the widest stand alone.
+    // The host's GPU rows: `perRow` groups each (the section's), two cells in, two cells between.
     const resourceGpuRows=h=>{
       const gpus=painted(h.gpus);
-      if(!gpus.length)return [];
-      let form=0;
-      while(form<3&&gpus.some(g=>2+size(resourceGpuGroup(g,form))>inner))form++;
-      const rows=[];let row=[];
-      for(const g of gpus){
-        const group=resourceGpuGroup(g,form);
-        if(row.length&&size(row)+2+size(group)>inner){rows.push(row);row=[];}
-        row=row.length?[...row,text('  '),...group]:[text('  '),...group];
+      const rows=[];
+      for(let i=0;i<gpus.length;i+=grid.perRow){
+        const row=gpus.slice(i,i+grid.perRow).flatMap((g,j,all)=>[text('  '),...resourceGpuGroup(g,j===all.length-1)]);
+        rows.push(row);
       }
-      rows.push(row);
       return rows.map(r=>cut(r,inner));
     };
     const resourceLines=()=>{
