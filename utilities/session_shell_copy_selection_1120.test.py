@@ -15,6 +15,7 @@ outer terminal being a headless one whose OSC 52 is recorded. `--frames` prints 
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
+import base64
 import importlib.util
 import json
 import shutil
@@ -42,6 +43,12 @@ def load(name, path):
 POPUP = load("selection_popup_base", ROOT / "utilities/session_shell_popup.test.py")
 
 LONG = " ".join("w%03d" % i for i in range(26))  # 129 cells: wraps in every layout below
+# A sign-in address as a login screen shows it (fixture text, no account): once the terminal wraps it (URL_WRAPPED), and once
+# the app itself cuts it into rows that each end by themselves (URL_SPLIT, cut after 90 characters).
+URL_WRAPPED = ("https://claude.ai/oauth/authorize?code=true&client_id=FIXTURE-0000-0000&response_type=code&redirect_uri="
+               "https%3A%2F%2Fexample.invalid%2Fcallback&scope=fixture%3Aone+fixture%3Atwo&state=abc123XYZ")
+URL_SPLIT = URL_WRAPPED.replace("/oauth/", "/oauth-split/")
+URL_CUT = 90
 
 # A native that paints a screen of text (an ASCII row, a row with Hangul, a long row that wraps, a row with blanks
 # after its text) and repaints only when something is typed. `osc` makes it write the clipboard itself, and ask to read it.
@@ -49,6 +56,9 @@ FAKE_NATIVE = r"""
 import base64,json,os,select,socket,sys,time,tty
 harness,sid=sys.argv[1],sys.argv[2]
 LONG=%r
+URL1=%r
+URL2A=%r
+URL2B=%r
 def event(kind):
     raw=open('/proc/self/stat').read();start=raw.rsplit(') ',1)[1].split()[19]
     req={'op':'event','event':kind,'harness':harness,'sid':sid,'pid':os.getpid(),'start':start,
@@ -60,7 +70,7 @@ event('start')
 pending='';seen=[]
 def screen():
     print('\x1b[2J\x1b[H'+'READY_'+harness+'\r\n'+'hello world path/to/file.txt\r\n'+'한글 가나다 mixed abc\r\n'+LONG+'\r\n'
-          +'trail'+' '*12+'\r\n'+'last row\r\n'+''.join(s+'\r\n' for s in seen[-3:])+'❯ '+pending.replace('\x1b','^')+'\r\n',end='',flush=True)
+          +'trail'+' '*12+'\r\n'+'last row\r\n'+URL1+'\r\n'+URL2A+'\r\n'+URL2B+'\r\n'+''.join(s+'\r\n' for s in seen[-3:])+'❯ '+pending.replace('\x1b','^')+'\r\n',end='',flush=True)
 if harness!='claude':print('\x1b[?1000h\x1b[?1006h',end='',flush=True)
 screen()
 while True:
@@ -73,11 +83,13 @@ while True:
     while '\r' in pending:
         line,pending=pending.split('\r',1)
         if line=='quit':raise SystemExit
+        if line=='link':
+            print('\x1b]8;;https://example.invalid/link\x1b\\LINKTEXT\x1b]8;;\x1b\\',end='',flush=True)
         if line=='osc':
             print('\x1b]52;c;'+base64.b64encode('from native 한글'.encode()).decode()+'\x07\x1b]52;c;?\x07\x1b]52;;bad base64!\x07',end='',flush=True)
         seen.append('DONE_'+line)
     screen()
-""" % LONG
+""" % (LONG, URL_WRAPPED, URL_SPLIT[:URL_CUT], URL_SPLIT[URL_CUT:])
 
 DRIVER = r"""
 const fs=require('node:fs');
@@ -87,7 +99,8 @@ let cols=cfg.cols,rows=cfg.rows,raw='';
 const term=new Terminal({cols,rows,allowProposedApi:true,scrollback:0});
 term.loadAddon(new Unicode11Addon());term.unicode.activeVersion='11';
 // What the outer terminal is asked to put on the clipboard (the outer terminal here is this headless one).
-const osc=[];term.parser.registerOscHandler(52,d=>{osc.push(d);return true;});
+const osc=[],osc8=[];term.parser.registerOscHandler(52,d=>{osc.push(d);return true;});
+term.parser.registerOscHandler(8,d=>{osc8.push(d);return true;});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const child=pty.spawn(cfg.python,[cfg.entry,cfg.harness,cfg.python,cfg.fake,cfg.harness,cfg.sid],{cols,rows,cwd:cfg.project,
   env:{...process.env,TERM:'xterm-256color',NODE_OPTIONS:'--require '+cfg.launcher}});
@@ -127,6 +140,12 @@ const frames={},checks={};
   const w=await at('world'),f=await at('file'),han=await at('한글'),da=await at('다'),mixed=await at('mixed'),
         long=await at('w000'),trail=await at('trail'),path=await at('path/to');
   const end=(p,n)=>({x:p.x+n,y:p.y});
+  if(cfg.scenario==='osc'){
+    // The native writes the clipboard itself (and asks to read it, and writes a malformed one): what the outer terminal gets.
+    await key('osc\r',500);checks.native_osc=texts();checks.native_osc_raw=osc.slice();
+    await key('link\r',400);checks.osc8=osc8.slice();
+    fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));return;
+  }
   if(cfg.harness!=='claude'){
     // A native that reads the mouse: every report goes to it, nothing is selected or copied.
     await drag(w,end(f,3));await finish(end(f,3));
@@ -170,8 +189,18 @@ const frames={},checks={};
     await drag(w,{x:cfg.reach,y:w.y});await finish({x:cfg.reach,y:w.y});checks.reach=texts();frames.reach=await shot(base);
     checks.popup_after=has('✕ ─╮')(await screen());
   }
+  // A sign-in address the terminal wrapped is one line; one the app cut into rows that each end by themselves is copied as the
+  // rows it is (no blank, and a line break where the app ended a row).
+  osc.length=0;await key('\r',200);
+  const u1=await at(cfg.url1.slice(0,30)),u1end={x:u1.x+cfg.url1.length-cfg.native_cols-1,y:u1.y+1};
+  await drag(u1,u1end);frames.url_drag=await shot(base);await finish(u1end);frames.url_done=await shot(base);checks.url_wrapped=texts();
+  osc.length=0;await key('x',200);
+  const u2=await at(cfg.url2.slice(0,30)),u2end={x:u2.x+cfg.url2.length-cfg.url_cut-1,y:u2.y+1};
+  await drag(u2,u2end);await finish(u2end);frames.url_split=await shot(base);checks.url_split=texts();
   // The native writes the clipboard itself: the write goes on, the read and the malformed one do not.
-  osc.length=0;await key('\r',200);await key('osc\r',500);checks.native_osc=texts();
+  osc.length=0;await key('\r',200);await key('osc\r',500);checks.native_osc=texts();checks.native_osc_raw=osc.slice();
+  // A link the native draws (OSC 8): what reaches the outer terminal (measured, not asserted).
+  await key('link\r',400);checks.osc8=osc8.slice();
   checks.native_esc_after=(await screen()).some(l=>l.includes('NATIVE_ESC_'));
   fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));
 }catch(error){console.error(error.stack);process.exitCode=1;}
@@ -450,10 +479,10 @@ const start=text.indexOf('terminal.parser.registerOscHandler(52,'),code=text.sli
 
     # ---- the real host in a private PTY ----
 
-    def pty(self, harness, layout, position='right', cols=160, rows=40, reach=None, native_cols=114):
+    def pty(self, harness, layout, position='right', cols=160, rows=40, reach=None, native_cols=114, scenario=None):
         self.policy.write_text(json.dumps({'enabled': True, 'layout': layout, 'side_width': 44, 'position': position, 'bottom_rows': 10}))
         self.policy.chmod(0o600)
-        name = '-'.join((harness, layout, position))
+        name = '-'.join((harness, layout, position) + ((scenario,) if scenario else ()))
         case = self.root / name; case.mkdir(mode=0o700)
         project = case / 'project'; project.mkdir()
         sid = {'claude': '00000000-0000-4000-8000-0000000000e1', 'codex': '00000000-0000-4000-8000-0000000000e2'}[harness]
@@ -465,7 +494,8 @@ const start=text.indexOf('terminal.parser.registerOscHandler(52,'),code=text.sli
         config = {'harness': harness, 'sid': sid, 'python': sys.executable, 'fake': str(self.fake),
                   'entry': str(ROOT / 'utilities/session-shell/entry.py'), 'launcher': str(self.launcher),
                   'backend': str(backend), 'diagnostic': str(case / 'display-errors'), 'project': str(project),
-                  'result': str(case / 'result.json'), 'cols': cols, 'rows': rows, 'reach': reach, 'native_cols': native_cols}
+                  'result': str(case / 'result.json'), 'cols': cols, 'rows': rows, 'reach': reach, 'native_cols': native_cols,
+                  'url1': URL_WRAPPED, 'url2': URL_SPLIT, 'url_cut': URL_CUT, 'scenario': scenario}
         (case / 'config.json').write_text(json.dumps(config))
         env = dict(self.env, LOOP_CONFIG=str(case / 'config.json'))
         child = subprocess.Popen([self.node, str(self.driver)], env=env, cwd=project, stdout=subprocess.PIPE,
@@ -499,8 +529,19 @@ const start=text.indexOf('terminal.parser.registerOscHandler(52,'),code=text.sli
         self.assertEqual(checks['line'], ['w000', LONG], 'the second press copies the word, the third the line')
         # The native's own clipboard write goes on; its read and the malformed write do not.
         self.assertEqual(checks['native_osc'], ['from native 한글'])
+        # ...and its bytes go out as the native wrote them (target and data), nothing else.
+        self.assertEqual(checks['native_osc_raw'], ['c;' + base64.b64encode('from native 한글'.encode()).decode()])
+        # A sign-in address the terminal wrapped copies as one line; one the app cut by itself copies as the rows it is.
+        self.assertEqual(checks['url_wrapped'], [URL_WRAPPED])
+        self.assertEqual(checks['url_split'], [URL_SPLIT[:URL_CUT] + '\n' + URL_SPLIT[URL_CUT:]])
         self.assertFalse(checks['native_esc_after'])
         return checks
+
+    def test_a_clipboard_write_by_the_native_reaches_the_outer_terminal_as_it_was_written(self):
+        # The sign-in screen's own copy key writes the clipboard this way. Before 11-20 the shell's terminal copy ended it.
+        checks = self.pty('claude', 'side', scenario='osc')['checks']
+        self.assertEqual(checks['native_osc_raw'], ['c;' + base64.b64encode('from native 한글'.encode()).decode()],
+                         'the write goes out with its target and data; the read and the malformed write do not')
 
     def test_claude_beside_a_panel_on_the_right(self):
         checks = self.selected('claude', 'side', 'right', reach=159)
