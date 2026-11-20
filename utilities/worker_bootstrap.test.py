@@ -1178,9 +1178,16 @@ class NodeScopeTest(unittest.TestCase):
         self.assertEqual(source, ["/task/worktree/**"])
         self.assertIn("approved task", W.node_scope_prompt(scope))
         self.assertEqual(json.dumps(route, sort_keys=True), before)
-        for changed in ({"capability": "autopilot-lab"}, {"effective_intensity": "standard"}):
+        for changed in ({"capability": "autopilot-lab"},):
             narrow = W.resolve_node_scope({**route, **changed}, "one-shot", env)
             self.assertEqual(W._resolved_write_scopes(narrow)[0], ["/primary/cycle/artifacts/plans/<cycle>/**"])
+        # the owner is the one that makes the work (a `one-shot` node), at any intensity: the middle cell's
+        # owner (standard) holds the same wide scope; a team owner (no `one-shot` node) keeps the narrow one
+        wide = W.resolve_node_scope({**route, "effective_intensity": "standard"}, "one-shot", env)
+        self.assertEqual(W._resolved_write_scopes(wide)[0], ["/primary/cycle/artifacts/**"])
+        team = {**route, "effective_intensity": "standard", "nodes": [{**node, "id": "execute"}]}
+        narrow = W.resolve_node_scope(team, "execute", env)
+        self.assertEqual(W._resolved_write_scopes(narrow)[0], ["/primary/cycle/artifacts/plans/<cycle>/**"])
         unbound = W.resolve_node_scope(route, "one-shot", {})
         self.assertIn("do not write durable artifacts", W.node_scope_prompt(unbound))
 

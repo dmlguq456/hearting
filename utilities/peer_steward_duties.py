@@ -639,6 +639,9 @@ def _peer_history_order(name):
 def _prune_received_peer_history(*, now=None, deadline_ns=None, start_after=None):
     """Drop received queue rows past the 7-day history window; transfers stay.
 
+    A dropped row's visible-text fingerprint hint (`.display/<sha256>/<ref>`) goes with it, and
+    the fingerprint folder once empty.
+
     The same walk then removes ``.lock-<ref>`` files whose row no longer exists
     and that were created before the window (`remove_rowless_ref_lock`); no
     other code deletes them. Preparation locks are left alone: a ``prepare-``
@@ -700,6 +703,10 @@ def _prune_received_peer_history(*, now=None, deadline_ns=None, start_after=None
             continue
         rows.discard(name)
         result["removed"] += 1
+        # The row's own summary names its visible-text fingerprint; without one nothing is guessed.
+        shown = row.get("display")
+        if isinstance(shown, dict):
+            peer_message.remove_display_hint(row.get("ref"), shown.get("sha256"))
     if result["removed"]:
         try:
             import dispatch_recipient_inbox as inbox

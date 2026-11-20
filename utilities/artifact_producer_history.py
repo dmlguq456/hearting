@@ -378,6 +378,14 @@ def _read_manifest_raw(directory: Path) -> Optional[Tuple[bytes, Dict[str, Any]]
     return (raw, document) if isinstance(document, dict) else None
 
 
+def _streamed_digest(path: Path) -> Optional[str]:
+    """`sha256:<hex>` of a regular file read a chunk at a time, or None when it cannot be read that way."""
+    try:
+        return artifact_locator.read_sealed_head(path)[0]
+    except (OSError, artifact_locator.NotRegularFile):
+        return None
+
+
 def _observe_control_changes(root: Path, cycle_id: str, *, now: Optional[float] = None,
                              directory: Optional[Path] = None, locator_cache: bool = False,
                              record: Any = _UNSET, stored: Any = _UNSET) -> bool:
@@ -429,8 +437,13 @@ def _observe_control_changes(root: Path, cycle_id: str, *, now: Optional[float] 
             elif path.is_symlink() or not path.is_file():
                 after = None
             elif path.name == "manifest.json":
-                parsed = _read_json(path)
-                after = artifact_manifest.manifest_digest(parsed) if parsed is not None else _digest(path.read_bytes())
+                # The bytes the record names are not parsed (a manifest can be 255 MB): their digest is the answer.
+                streamed = _streamed_digest(path)
+                if streamed is not None and streamed == expected:
+                    after = expected
+                else:
+                    parsed = _read_json(path)
+                    after = artifact_manifest.manifest_digest(parsed) if parsed is not None else _digest(path.read_bytes())
             else:
                 after = _digest(path.read_bytes())
             before = prior.get(rel, expected) if baselines.get(rel, expected) == expected else expected
@@ -604,14 +617,36 @@ def _observe_root_controls(root: Path, scan: _LayoutScan, *, now: Optional[float
         _write_history_quiet(root, still_quiet)
 
 
-def _preserve_current_manifest(root: Path, record: Mapping[str, Any], directory: Path) -> None:
-    """Keep the manifest as it is now (a cycle closed before copies existed has none yet)."""
+def _preserve_current_manifest(root: Path, record: Mapping[str, Any], directory: Path, *,
+                               found: Any = None, digest: Optional[str] = None,
+                               match_record: bool = False) -> bool:
+    """Keep a closed cycle's manifest as it is now, before its folder moves or goes or its manifest is replaced.
+
+    The one place that leaves evidence behind a folder (a cycle closed before copies existed has none
+    yet).  A closed campaign's close event binds each member to the bytes of the manifest it was closed
+    with, and reads them back from the preserved copy or, failing that, from the cycle folder inside that
+    campaign; once the folder is elsewhere only the copy is left.  With `match_record` the bytes are kept
+    only when the folder's document is the very one the record names (a folder that has left already, or a
+    move: what the record does not name is not the close's evidence).  Nothing is overwritten (a copy
+    already there must hold the same bytes) and nothing is raised for that: what cannot be kept is met
+    again, as it is today, where the manifest is replaced.  `found` is the `_read_manifest_raw` result and
+    `digest` the document's `manifest_digest`, when the caller already read and hashed them (a reconcile
+    does both before it takes the admission lock; a move reads them once for the whole move).
+
+    Answers whether what the record names is now kept (or there was nothing to keep): `False` is the
+    folder's bytes not being the recorded document with no copy of that document either, or a copy
+    already there holding other bytes."""
     if not _closed_record(record):
-        return
-    found = _read_manifest_raw(directory)
+        return True
+    found = found if found is not None else _read_manifest_raw(directory)
     if found is None:
-        return
+        return True
+    raw, document = found
+    if match_record and record.get("manifest_digest") != (digest or artifact_manifest.manifest_digest(document)):
+        return artifact_lifecycle.find_manifest_snapshot(
+            root, record["cycle_id"], manifest_digest=record.get("manifest_digest")) is not None
     try:
-        artifact_lifecycle.preserve_manifest_snapshot(root, record["cycle_id"], found[0])
+        artifact_lifecycle.preserve_manifest_snapshot(root, record["cycle_id"], raw)
     except artifact_lifecycle.LifecycleError:
-        pass
+        return False
+    return True

@@ -62,8 +62,8 @@ SHAPES = ("direct", "solo", "staged")
 # evidence before the shape; an omitted shape follows the size, a different one is kept and shown.
 SIZE_SHAPE = {"one-change": "direct", "one-pass": "solo", "multi-stage": "staged"}
 from route_form import (  # noqa: E402,F401
-    FORM_INTENSITIES, INTENSITIES, INTENSITY_SHAPE, SHAPE_INTENSITY, UNIT_CAPABILITY, form_of,
-    intensity_mismatch, one_shot_owner, route_form, serial_attempt_form, serial_attempt_route,
+    FORM_INTENSITIES, INTENSITIES, INTENSITY_SHAPE, SHAPE_INTENSITY, UNIT_CAPABILITY, allowed_intensities,
+    form_of, intensity_mismatch, nearest_allowed, one_shot_owner, route_form, serial_attempt_form, serial_attempt_route,
     shape_for_intensity, staged_form,
 )
 APPROVAL_KEYS = ("full-run", "deploy", "handback", "preview")
@@ -381,6 +381,17 @@ def field_vocabulary() -> tuple:
         return tuple(json.loads((ROOT / "capabilities" / "topologies.json").read_text(encoding="utf-8"))["fields"])
     except (OSError, ValueError, KeyError, TypeError):
         return ()
+def one_shot_review_declared(capability) -> bool:
+    """Whether a recipe of `capability` declares the middle cell's review (`one_shot_review`), so `solo`
+    may carry `standard` for it."""
+    try:
+        recipes = json.loads((ROOT / "capabilities" / "topologies.json").read_text(encoding="utf-8"))["recipes"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return any(isinstance(row, dict) and row.get("capability") == capability and "one_shot_review" in row
+               for row in recipes)
+
+
 MAX_DONE_WHEN = 5
 MAX_PLAN_NOTES = 8
 
@@ -491,10 +502,12 @@ def _normal_leg(raw, index, notes=None):
         field = None
     if intensity is not None and (not isinstance(intensity, str) or not _MODE.fullmatch(intensity)):
         raise ProposalError(f"schema-invalid:legs[{index}].intensity")
-    if intensity in INTENSITIES and intensity not in FORM_INTENSITIES[shape]:
+    allowed = allowed_intensities(shape, one_shot_review_declared(capability))
+    if intensity in INTENSITIES and intensity not in allowed:
         if notes is not None:
             notes.append(f"ignored:legs[{index}].intensity:{intensity}-for-{shape}")
-        intensity = SHAPE_INTENSITY[shape]
+        # The highest intensity the form allows at or below the proposed one, else the form's default.
+        intensity = nearest_allowed(intensity, allowed) or SHAPE_INTENSITY[shape]
     graph = raw.get("graph")
     if graph is not None:
         if shape != "staged":

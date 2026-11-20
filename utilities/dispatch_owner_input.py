@@ -215,6 +215,17 @@ def bound_input_thread(jobs, attempt):
     return None
 
 
+def _owner_waits_on_review(metadata):
+    """Whether this owner parks on the review it starts and is woken again (the middle cell
+    `solo·standard`: A and B), so another turn *is* guaranteed. Read from the route's nodes."""
+    try:
+        route = json.loads(Path(str(metadata.get("route_file") or "")).read_text(encoding="utf-8"))
+        from route_form import one_shot_review_route
+        return one_shot_review_route(route)
+    except (OSError, ValueError, TypeError, ImportError):
+        return False
+
+
 def _public(value, *, live=False, reachable=None, owner_phase=None, metadata=None):
     reachable = live if reachable is None else reachable
     phase = owner_phase or _owner_phase(value["attempt_id"])
@@ -235,7 +246,8 @@ def _public(value, *, live=False, reachable=None, owner_phase=None, metadata=Non
     if timing == "phase-unavailable":
         notice = ("Delivery timing is unknown because the exact owner phase is unavailable. " + notice)
     metadata = metadata or {}
-    one_shot = metadata.get("intensity") == "quick" or metadata.get("route_node") == "one-shot"
+    one_shot = (metadata.get("intensity") == "quick" or metadata.get("route_node") == "one-shot"
+                ) and not _owner_waits_on_review(metadata)
     if one_shot:
         notice += (" This is a one-shot owner: another turn is not guaranteed. "
                    "A next-owner-turn correction may remain undelivered when this turn ends. "

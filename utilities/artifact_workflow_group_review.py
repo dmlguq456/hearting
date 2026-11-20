@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Background review for newly sealed cycles: the title, summary, branches, and kinds.
 
-A sealed cycle that has no metadata yet is judged by one background model call per
+A newly sealed cycle with no judgement record yet is judged by one background model call per
 campaign.  The model owns every semantic decision (an easy title and one-line summary,
 branch and kind tags); this module only selects targets, builds a bounded input, checks
 the response's structure, and writes the metadata through `artifact_meta` (one lock, one
@@ -1054,8 +1054,8 @@ def sweep(root: Path, *, cycles: Sequence[str] = (), since: Optional[str] = None
 def _ensure_title_renewal(root: Path, selection: Selection, campaign_ids: Sequence[str],
                           records: Sequence[Mapping[str, Any]]) -> None:
     """An explicit backfill that renews old titles still asks once for a named campaign whose
-    cycles all have metadata already: its newest sealed cycle is re-judged (metadata only when
-    so the campaign title held only by the old declaration is renewed."""
+    cycles all have metadata already: its newest sealed cycle is re-judged so the campaign
+    title held only by the old declaration is renewed."""
     for campaign_id in campaign_ids:
         if selection.by_campaign.get(campaign_id):
             continue

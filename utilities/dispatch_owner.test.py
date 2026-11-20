@@ -1419,23 +1419,70 @@ class RouteEvidenceOwnerHarnessTest(unittest.TestCase):
         self.assertEqual(env["AGENT_OWNER_ROUTE_ID"], binding.route_id)
         self.assertEqual(env["AGENT_OWNER_ROUTE_HASH"], binding.route_hash)
 
-    def test_quick_forwards_the_route_but_must_not_also_export_the_env(self):
+    def test_a_one_shot_owner_forwards_the_route_but_must_not_also_export_the_env(self):
         """Both signals at once is what the adapters refuse.
 
         The adapters read "env binding present" as "this is a standard+ owner"
         and raise `owner-route-binding-tuple-invalid` if a route file argument
-        comes with it, so quick must pick exactly one channel. v2.109.2 set
-        both and every quick owner died at launch.
+        comes with it, so an owner that makes the work itself must pick exactly one
+        channel. v2.109.2 set both and every quick owner died at launch. The owner is
+        read from the route's nodes, so the middle cell (`solo·standard`, an owner that
+        also starts a review) takes the same channel as quick; a team conductor takes the
+        other. The behaviour is observed, not the source text.
         """
-        source = Path(OWNER.__file__).read_text(encoding="utf-8")
-        body = source.split('if leg_launch or route_data.get("effective_intensity") == "quick":', 1)[1]
-        quick, standard = body.split("else:", 1)
-        self.assertIn('"--route-file", binding.route_file', quick)
-        code = "\n".join(
-            line for line in quick.splitlines() if not line.lstrip().startswith("#")
-        )
-        self.assertNotIn("export_owner_route_env(", code)
-        self.assertIn("export_owner_route_env(child_env, binding)", standard)
+        from unittest import mock
+        from contextlib import redirect_stdout
+        owner = {"id": "one-shot", "unit": "_kernel/owner", "dispatch_depth": 1}
+        review = {"id": "impl-review", "unit": "qa/code-review", "dispatch_depth": 2}
+        routes = {
+            "quick": ({"effective_intensity": "quick", "nodes": [owner]}, "quick", True),
+            "middle cell": ({"effective_intensity": "standard", "nodes": [review, owner]}, "standard", True),
+            "team conductor": ({"effective_intensity": "standard",
+                                "nodes": [{"id": "plan", "unit": "code/plan", "dispatch_depth": 2},
+                                          {"id": "report", "unit": "_kernel/owner", "dispatch_depth": 1,
+                                           "terminal": True}],
+                                "dispatch_evidence": {"tuples": [{"parent_harness": "codex", "child_harness": "codex",
+                                                                  "status": "supported"}]}}, "standard", False),
+        }
+        for label, (extra, intensity, by_argument) in routes.items():
+            with self.subTest(label):
+                path = Path(tempfile.mkdtemp()) / "route.json"
+                path.write_text(json.dumps({
+                    "slug": "probe", "capability": "autopilot-code", "capability_mode": "audit", "cwd": str(ROOT),
+                    "owner_model_profile": "balanced-deep",
+                    "registered_headless_candidates": [{"harness": "codex", "status": "supported"}],
+                    "owner_harness_policy": {"primary": ["codex"], "relief": [], "last_resort": [],
+                                             "promote_relief_below": 0},
+                    "dispatch_allocation": {"strategy": "balanced", "window": 30, "harness_order": ["codex"],
+                                            "usage_gate_used_percent": 90},
+                    **extra}), encoding="utf-8")
+                jobs = path.parent / "jobs.log"; jobs.touch()
+                binding = SimpleNamespace(route_file=str(path), route_id="rt-x", route_hash="sha256:x",
+                                          route_node="one-shot", registry_digest="sha256:r",
+                                          write_scope="source-scoped", completion_gate="quick-complete")
+                launches = []
+                derive = mock.Mock(return_value=binding)
+                validate = mock.Mock(return_value=binding)
+                with mock.patch.object(OWNER.subprocess, "run",
+                                       side_effect=lambda cmd, **kw: (launches.append((cmd, kw.get("env") or {})),
+                                                                      SimpleNamespace(returncode=0))[1]), \
+                     mock.patch.object(OWNER, "_usage", return_value={"claude": "ok", "codex": "ok", "opencode": "ok"}), \
+                     mock.patch.object(OWNER._capacity, "capacity_scores",
+                                       return_value={"claude": 80.0, "codex": 80.0, "opencode": 80.0}), \
+                     mock.patch.object(OWNER, "derive_quick_owner_binding", derive), \
+                     mock.patch.object(OWNER, "validate_owner_route_binding", validate), \
+                     mock.patch("artifact_producer.prepare_route_artifact_env", return_value={}), \
+                     mock.patch.dict(os.environ, _isolated_env({"AGENT_DISPATCH_JOBS": str(jobs)}), clear=True), \
+                     redirect_stdout(io.StringIO()) as out:
+                    rc = OWNER.main(["--dry-run", "--route-evidence", str(path), "--intensity", intensity,
+                                     "--model-profile", "balanced-deep", "--prompt-text", "probe"])
+                self.assertEqual(rc, 0, out.getvalue())
+                (cmd, env), = launches
+                # exactly one channel carries the route: the argument for an owner that makes the work, the env for the rest
+                self.assertEqual("--route-file" in cmd, by_argument)
+                self.assertEqual(derive.called, by_argument)
+                self.assertEqual(validate.called, not by_argument)
+                self.assertEqual("AGENT_OWNER_ROUTE_FILE" in env, not by_argument)
 
     def test_selector_only_option_never_reaches_the_wrapper(self):
         _, _, forwarded, evidence, _ = OWNER._parse([

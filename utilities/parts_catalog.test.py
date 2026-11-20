@@ -164,6 +164,10 @@ def _historical_code_recipe_projection(recipe, case):
     if recipe.get("capability") != "autopilot-code":
         return recipe
     historical = copy.deepcopy(recipe)
+    # The middle cell's declaration (`one_shot_review`, route form 3b-1) is one additive key: it opens `solo` at
+    # `standard` and changes no route this fixture compiles.
+    declared = historical.pop("one_shot_review", None)   # (a composed recipe cut from it does not carry it)
+    case.assertIn(declared, (None, recipe.get("one_shot_review")))
     quick = historical["quick"]
     case.assertEqual(quick["write_scope"], ["source-scoped", "plans/<cycle>/**", "spec/**"])
     case.assertEqual(quick["guard_preconditions"], ["artifact-order-prechecked"])

@@ -1464,7 +1464,8 @@ class FinalizeTest(ProducerTestBase):
         import artifact_entrance
         self.assertEqual(entrance.read_text(encoding="utf-8").splitlines()[0],
                          artifact_entrance.MARKER)
-        self.assertIn("final_report.md", entrance.read_text(encoding="utf-8"))
+        self.assertNotIn("final_report.md", entrance.read_text(encoding="utf-8"))
+        self.assertIn("final_report.md", (self.root / "recent-route-reports.md").read_text(encoding="utf-8"))
 
     def test_re_finalize_of_a_sealed_cycle_refreshes_the_entrance(self):
         self.activate()
@@ -3104,6 +3105,33 @@ class SharedAdmissionTest(ProducerTestBase):
         second = P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec")
         self.assertEqual(second["shared_reference_id"], first["shared_reference_id"])
         self.assertEqual(len(P.list_references(self.root, "spec")), 1)
+
+    def test_a_new_spec_revision_draws_the_entrance_again(self):
+        result = self._sealed_cycle()
+        self.wait_for_entrance()
+        self.assertNotIn("shared/spec/", (self.root / "README.md").read_text(encoding="utf-8"))
+        admitted = P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec")
+        self.assertEqual(admitted["status"], "admitted", admitted)
+        self.wait_for_entrance()
+        prd = (f"shared/spec/{admitted['shared_reference_id']}/revisions/"
+               f"{admitted['shared_reference_revision_id']}/prd.md")
+        for name in ("README.md", "index.html"):
+            self.assertIn(prd, (self.root / name).read_text(encoding="utf-8"), name)
+
+    def test_an_entrance_failure_never_changes_an_admission_and_a_retry_asks_nothing(self):
+        result = self._sealed_cycle()
+        self.wait_for_entrance()
+        stderr = io.StringIO()
+        with mock.patch("artifact_entrance.request_refresh", side_effect=RuntimeError("boom")) as asked, \
+                contextlib.redirect_stderr(stderr):
+            admitted = P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec")
+            again = P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec")
+        self.assertEqual(admitted["status"], "admitted", admitted)
+        self.assertEqual(again["status"], "reused", again)
+        self.assertEqual(asked.call_count, 1)
+        self.assertIn("artifact_entrance skipped error=RuntimeError", stderr.getvalue())
+        reference = json.loads((Path(admitted["revision_dir"]).parent.parent / "reference.json").read_text())
+        self.assertEqual(reference["latest_revision_id"], admitted["shared_reference_revision_id"])
 
     def test_admit_spec_creates_immutable_revision(self):
         result = self._sealed_cycle()

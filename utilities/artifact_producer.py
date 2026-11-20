@@ -174,7 +174,8 @@ from artifact_producer_history import (  # noqa: F401
     _control_file_key, _control_keys, _control_keys_settled, _CONTROL_MEMO_SETTLE_NS,
     _deliver_pending, _flush_campaign_pending_locked, _flush_cycle_pending_locked, _HAND_ACTOR,
     _history_actor, _history_by, _history_deliver_locked, _history_file_ref, _history_id,
-    _history_module, _HISTORY_TOKEN, _last_known_path, _locator_suffix, _merge_pending,
+    _history_module, _HISTORY_TOKEN, _last_known_path,
+    _locator_suffix, _merge_pending,
     _observe_control_changes, _observe_root_controls, _preserve_current_manifest,
     _QUIET_HISTORY_SECONDS, _read_control_memo, _read_history_quiet, _read_manifest_raw,
     _refresh_history_lines, _UNSET, _with_cycle_lines, _with_pending, _write_control_memo,
@@ -2213,6 +2214,13 @@ def _route_cli_context(argv: Sequence[str]):
     return values, context
 
 
+def _typed_root(value: "str | Path") -> Path:
+    """The root as typed. A relative one is the working directory's, made absolute here once, before any
+    command reads it; an absolute one is left exactly as typed."""
+    root = Path(value)
+    return root if root.is_absolute() else Path(os.path.abspath(root))
+
+
 def _checkpoint_cli(args: argparse.Namespace) -> Dict[str, Any]:
     route_file: Optional[Path] = None
     root_value = args.artifact_root or os.environ.get("AGENT_ARTIFACT_ROOT") or ""
@@ -2224,7 +2232,7 @@ def _checkpoint_cli(args: argparse.Namespace) -> Dict[str, Any]:
     cycle_id = args.cycle or (None if args.route else os.environ.get("AGENT_ARTIFACT_CYCLE_ID") or None)
     if not root_value:
         raise ProducerError("checkpoint-target-required", "--artifact-root or $AGENT_ARTIFACT_ROOT")
-    root = Path(root_value)
+    root = _typed_root(root_value)
     if route_file is not None:
         route_file = resolve_route_argument(root, route_file)
     return checkpoint(root, cycle_id=cycle_id, route_file=route_file, trigger=args.trigger)
@@ -2423,7 +2431,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "checkpoint":
             _print(_checkpoint_cli(args))
             return OK
-        root = Path(args.artifact_root)
+        root = _typed_root(args.artifact_root)
         if args.command == "activate":
             w7: Dict[str, Any] = {}
             if args.w7_campaign_id:
@@ -2539,7 +2547,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                               publication=args.publication, allow_open_route=args.allow_open_route,
                               adopt_root_outputs=args.adopt_root_output,
                               abandon_reason=args.abandon_reason,
-                              force_abandon_ignoring_lease=args.force_abandon_ignoring_lease)
+                              force_abandon_ignoring_lease=args.force_abandon_ignoring_lease,
+                              leave_outside=args.state == "abandoned")  # a person's abandon only
             if result.get("warning"):
                 print(result["warning"], file=sys.stderr)
             record = read_cycle_record(root, args.cycle)

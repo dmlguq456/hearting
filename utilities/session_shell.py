@@ -1680,8 +1680,10 @@ def _popup_view_model(harness, sid, kind):
     from fleet.collectors import collect_all
     from fleet.refresh import as_snapshot
     from fleet.explorer import live
+    # The routes popup draws no steward badge; the STATUS popup keeps the collection it had.
     snapshot = as_snapshot(collect_all(usage="cache-only", include_report_verification=False,
-                                       route_sessions=[(harness, sid)]))
+                                       route_sessions=[(harness, sid)],
+                                       **({"route_view": "routes"} if kind == "routes" else {})))
     return live.build_view_model(snapshot)
 
 
@@ -2069,7 +2071,7 @@ def _backend_operation(request: dict) -> dict:
         owner = process(claim.get("pid"))
         if not owner or owner["start"] != claim.get("start"):
             return {"ok": False, "reason": "claimant-unavailable"}
-        text = row.get("text")
+        text = peer.pasted_text(row)
         if (not isinstance(text, str) or not text.strip() or len(text.encode()) > 32768
                 or any(ord(c) < 32 and c not in "\n\t" or ord(c) == 127 for c in text)):
             return {"ok": False, "reason": "unsafe-payload"}

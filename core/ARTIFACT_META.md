@@ -268,19 +268,39 @@ shows.
 
 ### Root `README.md` / `index.html` — the read entrance
 
-Four files directly under the artifact root, written by `utilities/artifact_entrance.py`:
-`README.md` and `index.html` (the entrance) and `all-campaigns.md` / `all-campaigns.html`
-(every campaign). They are a derived reading surface, not canonical records: admission,
+Eight files directly under the artifact root, written by `utilities/artifact_entrance.py`:
+`README.md` and `index.html` (the entrance), `all-campaigns.md` / `all-campaigns.html`
+(every campaign), `all-spec.md` / `all-spec.html` (every spec topic, plus the contents line below) and
+`recent-route-reports.md` / `recent-route-reports.html` (the recent route reports). They are a derived reading surface, not canonical records: admission,
 census and residue never take them as input, and deleting them is safe — the next publish
 recreates them. They are classified `C-RT` in `core/CORE.md` §3.
 
 - **When.** Right after a seal (the first seal and a re-seal refresh alike), and whenever
   `hearting reports` or `hearting open` runs. No other write path touches them.
-- **Content.** The 20 most recent user-facing documents (date, title, one-line summary,
-  "+N more"), the 10 most recent campaigns with their cycle count, latest date and work
-  record count, a link to the full campaign list, the root totals, and a link to the ID
-  index `campaigns/INDEX.md`. Every link is a relative path; there is no absolute path,
-  host name, user name, script or external resource in either file.
+- **Content.** The entrance has three sections, top to bottom: **spec** (the 3 most
+  recently changed spec topics, each with the day it was last changed and its title, and
+  one "N more" line, N being the topics not shown, absent when none is hidden, that opens
+  `all-spec.*`), **campaigns** (the 3 most recent campaigns with date, title and the
+  campaign's one-line summary from `meta.json`, then one "All N campaigns" line, N being
+  every campaign, that opens `all-campaigns.*`) and **records** (a link to the recent
+  route reports page and a link to the ID index `campaigns/INDEX.md`), plus the root
+  totals. The line counts are the constants `ENTRANCE_SPEC_LINES` and
+  `ENTRANCE_CAMPAIGN_LINES` (not settings). Under the spec and campaigns titles one
+  explanatory line says what the section is (the spec line carries the topic count), and
+  the "recent route reports" line carries one line saying the page is not usually opened;
+  none of these lines is numbered. `all-spec.*` lists every spec topic in the entrance's
+  form and order (date, linked title) with a link back to the entrance, or "No documents
+  yet." when there is none. A spec topic is a component's `prd.md`, or the top `prd.md`
+  of a reference that has no component folder (titled by its first heading, else the
+  reference's title). The top `prd.md` of a reference with components is a table of
+  contents, not a topic: it is not counted in "N topics" or "N more" and only
+  `all-spec.*` shows it, as one line above the topics (its first heading, else
+  "Contents"; the day follows the topic rule). The recent
+  route reports page lists the 20 most recent user-facing documents as a bulleted list
+  (date, title, one-line summary, "+N more"; no numbers, which belong to the entrance's
+  lines), with a link back to the entrance. Every link is a
+  relative path; there is no absolute path, host name, user name, script or external
+  resource in any file.
 - **Reading rule.** A document row marked `audience: "user"` is user-facing; a row without
   that key (an older sealed cycle) follows the same name rule described above. The
   representative document per cycle is ranked by name only (`현황.md`/`STATUS.md`, then
@@ -288,16 +308,26 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   manifest `primary`. Manifests are read newest first, up to 300 or 16 MiB each; there is
   no full scan and no cache.
 - **Row sources.** Rows come from sealed cycles today; a source of rows that are not cycle
-  folders plugs in through `artifact_entrance.ROW_SOURCES`, and its rows join the same list.
-- **Commands.** `hearting reports` prints the same numbered list in the terminal and
-  `hearting open <number|words>` opens one result or, with no argument, the browser
-  entrance. Both names are reserved by the one launcher (`tools/install/harness.sh`) in
+  folders plugs in through `artifact_entrance.ROW_SOURCES`, and its rows join the same
+  list. The spec topic rows (`canonical-topic`) go to the spec section (a reference's
+  contents `prd.md` only to `all-spec.*`); every other row goes to the recent route
+  reports page.
+- **Commands.** `hearting reports` prints the entrance's numbered lines in the terminal
+  (campaign summaries included; the derived chapters are named by their `.md` file) and
+  `hearting open <number|words>` opens that line (a spec topic, a campaign folder, a page)
+  or, with no argument, the browser entrance. A lone number that is not an entrance line
+  prints one line on stderr and exits 1; it is never searched as a word. Words search the route reports and the spec
+  topics; when several match, the list is printed without numbers and the words are to be
+  narrowed. Both names are reserved by the one launcher (`tools/install/harness.sh`) in
   every runtime and are not installer subcommands.
+- **Write order.** The chapters the entrance points at are written first and `README.md`
+  and `index.html` last, so an interrupted publish never leaves an entrance pointing at a
+  chapter that was not written.
 - **Ownership.** Each file starts with `<!-- hearting:artifact-entrance v1 -->` (an HTML
   file keeps `<!DOCTYPE html>` above it). A same-named file without that marker, or a
   symbolic link at that name, is never overwritten, followed, or moved — it stays its
-  owner's. Rewriting is byte-deterministic: identical root content and declared language
-  produce identical bytes.
+  owner's; this holds for all eight files. Rewriting is byte-deterministic: identical root
+  content and declared language produce identical bytes.
 - **First record.** When a root first shows a user-facing document, one call with a
   cycle id writes `.runtime/artifact-entrance.json`
   (`{"schema": 1, "first_cycle_id", "first_cycle_path"}`) once; it is never rewritten. A

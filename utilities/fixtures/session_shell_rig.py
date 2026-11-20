@@ -92,7 +92,7 @@ def take(line):
         return (run([os.path.join(root,'hooks','dispatch-session-sweep.py')],line,payload)
                 +run([os.path.join(root,'hooks','peer-message-record.py'),'prompt'],line,payload))
     # The OpenCode plugin's chat.message callback (`spawnPeerNotice`): the same helper and arguments.
-    if 'peer-from:' in line or 'runtime-from:' in line:
+    if 'peer-from:' in line or 'runtime-from:' in line or re.search(r'(?m)^— (?:\[[0-9a-f?]{1,2}\]|claude|codex|opencode)( .*)?$',line) or line.lstrip().startswith('↳ '):
         run([os.path.join(root,'utilities','peer-message.py'),'receive','--from-project',os.path.basename(os.getcwd()),
              '--to-harness','opencode','--to-session-id',sid],line)
     return ''

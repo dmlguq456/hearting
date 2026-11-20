@@ -178,10 +178,12 @@ def _fallback_chain(
         {"ordinal":4,"fallback_hop":"inline","status":"eligible-after-prior-hop-exhaustion","reason_enum":"runtime-unavailable","fleet_visibility":"none"},
     ]
 
-def _verify_fallback_chain(node, contract_version=None):
+def _verify_fallback_chain(node, contract_version=None, hops=None):
+    """Check a node's sealed fallback chain: the full ordered chain, or the declared `hops` of a node that
+    names its own (the middle cell's review has no `inline` hop)."""
     contract_version = contract_version or 1
     chain=node.get("fallback_hops")
-    if not isinstance(chain,list) or [row.get("fallback_hop") for row in chain] != FALLBACK_ORDER:
+    if not isinstance(chain,list) or [row.get("fallback_hop") for row in chain] != (hops or FALLBACK_ORDER):
         raise ValueError(f"dispatch-depth-2 node {node.get('id')} missing ordered dispatch fallback")
     candidates=[candidate for row in chain[:2] for candidate in row.get("candidates",[])]
     if contract_version==DISPATCH_CONTRACT_VERSION:
