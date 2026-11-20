@@ -272,29 +272,26 @@ class SharedCacheFallbackTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 C.capacity_report(now=0.0)
 
-    def test_a_skipped_gauge_is_not_probed_and_says_why(self):
-        # A harness the caller has ruled out is never selected on its headroom, so it is neither probed
-        # nor written to the shared cache; the receipt shows `skipped:<why>`. The rest is read as before.
+    def test_a_skipped_gauge_is_not_read_and_says_why_but_the_cache_writing_gauges_are_always_read(self):
+        # A harness the caller has ruled out is never selected on its headroom: the read-only gauge (claude) is
+        # not read and the receipt shows `skipped:<why>`. The two gauges whose read refreshes the shared usage
+        # cache (codex, opencode) are read whatever is asked, because the next start's limit judgment reads it.
         asked = []
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": "", "HARNESS_CAPACITY_SCORES": ""}), \
                 mock.patch.object(C, "_codex_api_score", side_effect=lambda: asked.append("codex") or 60.0), \
                 mock.patch.object(C, "_opencode_api_score", side_effect=lambda: asked.append("opencode") or 40.0), \
-                mock.patch.object(C, "_claude_capacity_reading", return_value=(70.0, None)), \
+                mock.patch.object(C, "_claude_capacity_reading", side_effect=lambda *a: asked.append("claude") or (70.0, None)), \
                 mock.patch.object(C, "_claude_cache_score", return_value=(None, None)):
-            report = C.capacity_report(now=0.0, skip={"opencode": "limited"})
-            self.assertEqual(asked, ["codex"])
-            self.assertEqual((report["scores"]["opencode"], report["sources"]["opencode"]),
-                             (None, "skipped:limited"))
-            self.assertEqual((report["scores"]["codex"], report["sources"]["codex"]), (60.0, "live"))
-            self.assertEqual(report["scores"]["claude"], 70.0)
-            asked.clear()
-            report = C.capacity_report(now=0.0, skip={"codex": "not-needed", "opencode": "not-needed"})
-            self.assertEqual(asked, [])
-            self.assertEqual(report["sources"]["claude"], "taps")
-            asked.clear()
+            self.assertEqual(C.CACHE_WRITING_GAUGES, {"codex", "opencode"})
             report = C.capacity_report(now=0.0, skip={"claude": "limited"})
             self.assertEqual(sorted(asked), ["codex", "opencode"])
             self.assertEqual((report["scores"]["claude"], report["sources"]["claude"]), (None, "skipped:limited"))
+            self.assertEqual((report["scores"]["codex"], report["sources"]["codex"]), (60.0, "live"))
+            asked.clear()
+            report = C.capacity_report(now=0.0, skip={"claude": "not-needed", "codex": "not-needed", "opencode": "limited"})
+            self.assertEqual(sorted(asked), ["codex", "opencode"])
+            self.assertEqual((report["sources"]["codex"], report["sources"]["opencode"]), ("live", "live"))
+            self.assertEqual(report["sources"]["claude"], "skipped:not-needed")
 
     def test_a_manual_score_stands_over_a_skip_and_a_report_without_skip_is_unchanged(self):
         with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": "opencode:33", "AGENT_DISPATCH_JOBS": ""}), \
@@ -305,6 +302,11 @@ class SharedCacheFallbackTests(unittest.TestCase):
             plain = C.capacity_report(now=0.0)
         self.assertEqual((skipped["scores"]["opencode"], skipped["sources"]["opencode"]), (33.0, "manual"))
         self.assertEqual(skipped, plain)
+        with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": "claude:33", "AGENT_DISPATCH_JOBS": ""}), \
+                mock.patch.object(C, "_codex_api_score", return_value=55.0), \
+                mock.patch.object(C, "_opencode_api_score", return_value=44.0):
+            skipped = C.capacity_report(now=0.0, skip={"claude": "limited"})
+        self.assertEqual((skipped["scores"]["claude"], skipped["sources"]["claude"]), (33.0, "manual"))
 
     def test_the_skipped_harness_could_not_have_changed_the_choice(self):
         # Why the skip is safe: `select` ranks only harnesses whose usage state is not limited, so the

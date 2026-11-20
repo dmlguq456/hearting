@@ -1366,6 +1366,8 @@ def _route_plan_preparation_key(binding):
 # again, so no later place can read standard input a second time. The refusals are one line each and
 # never wait: a terminal, an empty or closed input, a producer that sends nothing for a while, and an
 # input larger than a brief needs all end the command before anything starts.
+# The size limit keeps a brief typed in the command small (it is a few lines, not a document); a task
+# given as a file has no such limit, which is why the refusal points there.
 PROMPT_STDIN_LIMIT = 65536
 PROMPT_STDIN_IDLE_SECONDS = 10.0
 
@@ -1398,7 +1400,8 @@ def prompt_from_stdin():
             raise ValueError(f"compose-prompt-stdin-too-large: standard input is over {PROMPT_STDIN_LIMIT} bytes; "
                              "put the task in a file and pass --prompt-file <file>")
     try:
-        text = b"".join(chunks).decode("utf-8")
+        # A file's `read_text()` turns `\r\n` and `\r` into `\n`; standard input gives the same text.
+        text = b"".join(chunks).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeDecodeError:
         raise ValueError("compose-prompt-stdin-not-utf8: standard input is not UTF-8 text; "
                          "pass --prompt-file <file>") from None

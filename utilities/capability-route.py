@@ -1872,7 +1872,7 @@ def main():
     cp=sub.add_parser("compose",help="preset-free work route: name the shape (and stage subgraph), defaults fill the rest")
     cp.add_argument("--slug",default=None,help="default: named from the task's first line with ASCII words")
     cp.add_argument("--start",action="store_true",help="prepare and start the selected work; the runtime owns frame launches and waiting")
-    cp.add_argument("--prompt-file",type=Path,help="the user's task, stored with the route for frame and owner execution; `-` reads it once from standard input (a pipe or a heredoc), with no file to write first")
+    cp.add_argument("--prompt-file",type=Path,help="the user's task, stored with the route for frame and owner execution; `-` (and `./-`) reads it once from standard input (a pipe or a heredoc), with no file to write first; a file named `-` cannot be given here")
     cp.add_argument("--owner",choices=("claude","codex","opencode"),help="explicit owner runtime; otherwise use normal selection (same as --pin owner=<harness>)")
     cp.add_argument("--pin",action="append",default=[],metavar="TARGET=HARNESS[:MODEL[@EFFORT]]",
                     help="choose the tool (and optionally model and effort) once; the route seals it for the owner, "

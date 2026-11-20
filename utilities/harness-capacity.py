@@ -22,6 +22,11 @@ import urllib.request
 
 HARNESSES = ("claude", "codex", "opencode")
 
+# Gauges whose read writes the shared usage cache (`_codex_api_score`, `_opencode_api_score`). The next
+# start's limit judgment (`gauge_limits`) reads that cache, so a read that is left out is a refresh that
+# is left out. Only a gauge that merely reads (Claude's) may be skipped.
+CACHE_WRITING_GAUGES = frozenset({"codex", "opencode"})
+
 
 def _limited(state: str) -> bool:
     return state == "limited" or state.startswith("limited(")
@@ -387,15 +392,16 @@ def capacity_report(*, stale_after: int = 3600, now: float | None = None,
 
     ``skip`` maps a harness to why its gauge is not read: a caller that has already ruled the
     harness out (its usage state is limited, or the harness is named and eligible so no other is
-    asked) never selects on that gauge, so it is neither probed nor cached. A manual score still
-    stands, and an active limit still reads 0 as before.
+    asked) never selects on that gauge, so it is not read. Only a gauge that merely reads can be
+    skipped (``CACHE_WRITING_GAUGES`` are always read: a read refreshes the cache the next start's
+    limit judgment uses). A manual score still stands, and an active limit still reads 0 as before.
 
     The two networked gauges (codex, opencode) are read side by side: each is its own HTTP call
     with its own timeout, so one start waits for the slower of them, not for both.
     """
     now = time.time() if now is None else now
     manual = _manual_scores()
-    skipped = dict(skip or {})
+    skipped = {name: why for name, why in (skip or {}).items() if name not in CACHE_WRITING_GAUGES}
     scores: dict[str, float | None] = {}
     sources: dict[str, str] = {}
     freshness: dict[str, dict] = {}

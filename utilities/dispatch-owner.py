@@ -648,11 +648,13 @@ def _unread_gauges(states, explicit):
 
     A harness the usage state already reads as limited is never a candidate, so its headroom never
     ranks or gates anything; and when the harness is named and eligible, it is the one used, so no
-    other is ranked. The receipt shows such a gauge as `skipped:<why>` instead of an HTTP reading."""
+    other is ranked. The receipt shows such a gauge as `skipped:<why>` instead of a reading. A gauge
+    whose read refreshes the shared usage cache (codex, opencode) is still read: the next start's
+    limit judgment depends on that refresh."""
     skip = {harness: "limited" for harness, state in states.items() if not _eligible(state)}
     if explicit is not None and _eligible(states.get(explicit, "unknown")):
         skip.update({harness: "not-needed" for harness in states if harness != explicit})
-    return skip
+    return {harness: why for harness, why in skip.items() if harness not in _capacity.CACHE_WRITING_GAUGES}
 
 
 def _resolved_path(value):

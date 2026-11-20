@@ -448,6 +448,23 @@ class UnitCliTest(F.FramedBase):
         self.assertEqual([(n["id"], n["unit"], n["model_profile"], n["write_scope"]) for n in routes["file"]["nodes"]],
                          [(n["id"], n["unit"], n["model_profile"], n["write_scope"]) for n in routes["stdin"]["nodes"]])
 
+    def test_a_brief_with_windows_or_old_mac_line_ends_is_the_same_brief_on_standard_input(self):
+        # A file's text reads `\r\n` and `\r` as `\n`; standard input does the same, so the kept text and the
+        # default slug (named from the text) are the file's, not a second route for the same words.
+        for label, raw in (("crlf", b"Fix parser\r\nand say why\r\n"), ("cr", b"Fix parser\rand say why\r"),
+                           ("bom-crlf", b"\xef\xbb\xbfFix parser\r\nand say why\r\n\r\n")):
+            with self.subTest(form=label):
+                routes = {}
+                for how in ("file", "stdin"):
+                    kwargs = ({"task": raw.decode("utf-8")} if how == "file" else {"stdin_bytes": raw})
+                    done = self.run_cli("--unit", "general/explore", language="en", **kwargs)
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    routes[how] = json.loads(Path(json.loads(done.stdout.strip().splitlines()[-1])["route_file"])
+                                             .read_text(encoding="utf-8"))
+                self.assertEqual(routes["file"]["work_request"]["text"], routes["stdin"]["work_request"]["text"])
+                self.assertNotIn("\r", routes["stdin"]["work_request"]["text"])
+                self.assertEqual(routes["file"]["slug"], routes["stdin"]["slug"])
+
     def test_every_compose_form_that_takes_a_brief_takes_standard_input_the_same_way(self):
         brief = "Review the change in the fixture\n"
         for label, extra in (("solo", ("--shape", "solo", "--capability", "autopilot-code")),
