@@ -1039,7 +1039,8 @@ raise SystemExit(code)
         with mock.patch.dict(os.environ, {"HEARTING_TIDY_TEST_ROOT": str(self.iso.root),
                                          "HEARTING_TIDY_PEER_STEWARD": str(script),
                                          # bounds the helper's wait for a boundary that never comes
-                                         "HEARTING_TIDY_COMPACT_CONFIRM": "1.5"}), \
+                                         "HEARTING_TIDY_COMPACT_CONFIRM": "1.5",
+                                         "HEARTING_TIDY_CONTINUE_WINDOW": "600"}), \
              mock.patch.object(clear, "STEWARD_TIMEOUT_SEC", .75), \
              mock.patch.object(clear.subprocess, "run", side_effect=capture), \
              mock.patch.object(native, "wait_idle", return_value="idle"):
