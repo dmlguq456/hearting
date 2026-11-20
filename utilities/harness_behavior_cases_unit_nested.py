@@ -363,6 +363,15 @@ class EphemeralScenario(unit.UnitRouteScenario):
         """Words that start the compose command inside another process's environment (none: the session's own)."""
         return []
 
+    def compose_shell(self, run):
+        """The command the session types: the brief as a file (a subclass may pipe it in instead)."""
+        return " ".join([
+            *self.caller_env(run),
+            sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"), "compose", "--start",
+            "--unit", self.unit_name, "--ephemeral", "--pin", f"worker={run.harness}",
+            "--prompt-file", str(run.home.root / "brief.md"), "--cwd", str(run.home.workspace),
+            "--slug", "hb-unit-route"])
+
     def side_effects(self, run):
         root = Path(run.home.env["AGENT_ARTIFACT_ROOT"])
         # The model-worker governor's own state is written by whatever worker the session starts (Fleet's title
@@ -387,12 +396,7 @@ class EphemeralScenario(unit.UnitRouteScenario):
             if record["last_kind"] == "tool":
                 return Reply("The unit route runs; I will continue when its result arrives.")
             if unit.START in last and not any(r["reply"].get("shell") for r in earlier):
-                return Reply(shell=" ".join([
-                    *self.caller_env(run),
-                    sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"), "compose", "--start",
-                    "--unit", self.unit_name, "--ephemeral", "--pin", f"worker={run.harness}",
-                    "--prompt-file", str(run.home.root / "brief.md"), "--cwd", str(run.home.workspace),
-                    "--slug", "hb-unit-route"]))
+                return Reply(shell=self.compose_shell(run))
             return Reply("Nothing new.")
         return answer
 
