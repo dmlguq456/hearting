@@ -8,20 +8,27 @@ gets "newer n · proposal n" only when a count is not zero.
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
+import importlib.util
 import io
 import json
+import os
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utilities"))
 import distribution  # noqa: E402
 import fixture_env  # noqa: E402
+import installer  # noqa: E402
 import model_follow  # noqa: E402
 import user_config  # noqa: E402
 
@@ -157,6 +164,115 @@ class ListPlaceUpdateTests(unittest.TestCase):
         lines, elapsed = self.update_in_child()
         self.assertEqual(lines, [])
         self.assertLess(elapsed, 15)
+
+
+class SlowServiceCallerTests(unittest.TestCase):
+    """One slow OpenCode service answer reaches every caller of the catalog read.
+
+    The answer's headers come at once and its body in pieces: each read ends well inside the
+    two seconds a read may take, the whole is longer than the three seconds a survey allows.
+    Only the survey gives up; launch, Fleet and the installer read it to the end, as they did
+    before the survey existed.
+    """
+    PIECES, PAUSE = 6, 0.6
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="mf1s-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.env = fixture_env.build_environment(self.root, ROOT, base={"PATH": ""})
+        patch = mock.patch.dict(os.environ, self.env, clear=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+        config = Path(self.env["XDG_CONFIG_HOME"]) / "opencode" / "agent-config" / "models.conf"
+        config.parent.mkdir(parents=True)
+        text = (ROOT / "adapters" / "opencode" / "config" / "models.conf").read_text()
+        chosen = text.replace("CFG_MODEL_PROFILE_DEEP=balanced-deep:xhigh",
+                              "CFG_MODEL_PROFILE_DEEP=model/p/elm-1:high")
+        self.assertNotEqual(chosen, text)
+        config.write_text(chosen)
+        body = json.dumps({"data": [
+            {"providerID": "p", "id": f"elm-{n}", "enabled": True, "status": "active",
+             "family": "elm", "variants": [{"id": "high"}]} for n in (1, 2)]}).encode()
+        size = -(-len(body) // self.PIECES)
+        parts = [body[i:i + size] for i in range(0, len(body), size)]
+
+        class Slow(BaseHTTPRequestHandler):
+            def do_GET(handler):
+                handler.send_response(200)
+                handler.send_header("Content-Length", str(len(body)))
+                handler.end_headers()
+                handler.wfile.flush()
+                try:
+                    for part in parts:
+                        time.sleep(self.PAUSE)
+                        handler.wfile.write(part)
+                        handler.wfile.flush()
+                except OSError:
+                    pass
+
+            def log_message(handler, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        record = Path(self.env["XDG_STATE_HOME"]) / "opencode" / "service.json"
+        record.parent.mkdir(parents=True)
+        record.write_text(json.dumps({"version": "2.0.32", "url": f"http://127.0.0.1:{server.server_port}"}))
+        record.chmod(0o600)
+        spec = importlib.util.spec_from_file_location(
+            "slow_service_wrapper", ROOT / "adapters" / "opencode" / "bin" / "dispatch-headless.py")
+        self.wrapper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.wrapper)
+
+    def callers(self):
+        from tools.fleet.explorer import model_catalog
+        wrapper = self.wrapper
+
+        def launch():
+            args = SimpleNamespace(worktree=str(self.root), model_profile=None, worker_type="stage")
+            with mock.patch.object(wrapper.opencode_runtime, "model_availability",
+                                   return_value={"automatic_eligible": True, "state": "usable"}):
+                return wrapper._fit_to_catalog(
+                    args, {"model": "elm-2", "variant": "xhigh", "source": "explicit"})
+
+        def fleet():
+            catalog = model_catalog.read_catalog("opencode")
+            return catalog.state, catalog.models
+
+        def install():
+            done = installer.cmd_model(SimpleNamespace(
+                model_command="set", harness="opencode", target="profile/deep",
+                model="p/elm-2@xhigh", dry_run=True))
+            return done["status"], done["exit"]
+
+        def survey():
+            return model_follow.lines([model_follow.survey_harness("opencode")])
+
+        return {"launch": launch, "fleet": fleet, "install": install, "survey": survey}
+
+    def test_only_the_survey_ends_early_and_the_others_read_the_whole_answer(self):
+        callers = self.callers()
+        started = time.monotonic()
+        with ThreadPoolExecutor(max_workers=len(callers)) as pool:
+            futures = {name: pool.submit(call) for name, call in callers.items()}
+            got = {name: future.result(timeout=30) for name, future in futures.items()}
+        self.assertGreater(self.PIECES * self.PAUSE, 3.0)  # longer than a survey waits
+        self.assertEqual(got["survey"], [], "the survey ends quietly")
+        self.assertEqual(got["fleet"], ("available", ("p/elm-1", "p/elm-2")))
+        self.assertEqual((got["launch"]["model"], got["launch"]["variant"]), ("p/elm-2", "high"))
+        self.assertEqual((got["launch"]["model_fit_from"], got["launch"]["variant_fit_from"]),
+                         ("elm-2", "xhigh"))
+        self.assertEqual(got["install"], ("invalid-arguments", 64))
+        self.assertLess(time.monotonic() - started, 20)
+
+    def test_the_same_fixture_answering_promptly_gives_the_survey_its_line(self):
+        self.PAUSE = 0.0
+        lines = self.callers()["survey"]()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("p/elm-1 -> p/elm-2", lines[0])
 
 
 if __name__ == "__main__":

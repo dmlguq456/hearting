@@ -817,7 +817,8 @@ class ListPlaceTests(unittest.TestCase):
 
 
 class ServiceDeadlineTests(unittest.TestCase):
-    """A service that stops answering never holds the survey past a fixed total time."""
+    """A service that stops answering never holds a caller that asked for a total time
+    past it; a caller that did not ask keeps the per-read wait."""
 
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix="fleet-svc-")
@@ -845,10 +846,8 @@ class ServiceDeadlineTests(unittest.TestCase):
         path.chmod(0o600)
 
     def timed(self, seconds=1.0):
-        import opencode_runtime
         started = time.monotonic()
-        with mock.patch.object(opencode_runtime, "SERVICE_READ_SECONDS", seconds):
-            catalog = model_catalog.read_catalog("opencode")
+        catalog = model_catalog.read_catalog("opencode", deadline=seconds)
         return catalog, time.monotonic() - started
 
     def test_a_service_that_accepts_and_never_answers_ends_in_the_total_time(self):
@@ -908,8 +907,8 @@ class ServiceDeadlineTests(unittest.TestCase):
         self.assertEqual((catalog.state, catalog.models), ("unknown", ()))
         self.assertLess(elapsed, 2.5)
 
-    def test_a_prompt_answer_still_reads_and_the_deadline_is_a_few_seconds(self):
-        import opencode_runtime
+    def test_a_prompt_answer_still_reads_and_the_survey_asks_for_a_few_seconds(self):
+        import model_follow
 
         class Prompt(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -924,9 +923,58 @@ class ServiceDeadlineTests(unittest.TestCase):
                 pass
 
         self.serve(Prompt)
-        catalog, _elapsed = self.timed(opencode_runtime.SERVICE_READ_SECONDS)
+        catalog, _elapsed = self.timed(model_follow._SERVICE_SECONDS)
         self.assertEqual((catalog.state, catalog.models), ("available", ("p/m-1",)))
-        self.assertLessEqual(opencode_runtime.SERVICE_READ_SECONDS, 5)
+        self.assertLessEqual(model_follow._SERVICE_SECONDS, 5)
+
+    def test_the_total_time_also_bounds_the_connection_and_leaves_no_descriptor_behind(self):
+        import opencode_runtime
+        waits = []
+        real = socket.create_connection
+
+        def watching(address, timeout=None, *args, **kwargs):
+            waits.append(timeout)
+            return real(address, timeout, *args, **kwargs)
+
+        held = []
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        self.addCleanup(listener.close)
+        self.service(listener.getsockname()[1])
+
+        def accept():
+            while True:
+                try:
+                    held.append(listener.accept()[0])
+                except OSError:
+                    return
+
+        threading.Thread(target=accept, daemon=True).start()
+
+        def open_fds():
+            return len(os.listdir("/proc/self/fd"))
+
+        with mock.patch.object(socket, "create_connection", watching):
+            self.timed(0.5)  # a first round settles lazily opened descriptors
+            for conn in list(held):
+                conn.close()
+            held.clear()
+            before = open_fds()
+            for _ in range(5):
+                self.assertEqual(self.timed(0.5)[0].state, "unknown")
+            deadline = time.monotonic() + 2
+            while len(held) < 5 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(len(held), 5)
+            self.assertEqual(open_fds() - before - len(held), 0)
+        for conn in held:
+            conn.close()
+        self.assertTrue(waits and all(wait <= 0.5 for wait in waits), waits)
+        waits.clear()
+        with mock.patch.object(socket, "create_connection", watching):
+            opencode_runtime.read_model_catalog(directory=self.root)  # asking for no total time
+        self.assertEqual(waits, [2.0])
 
     def test_no_way_exists_to_start_the_service_from_a_read(self):
         starts = [mock.patch.object(subprocess, name) for name in ("Popen", "run", "call", "check_call",

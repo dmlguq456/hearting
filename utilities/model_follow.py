@@ -42,6 +42,9 @@ PRICE_LIMIT = 2.0
 _SETTABLE = frozenset({"low", "medium", "high", "xhigh", "max"})
 _SETTABLE_OPENCODE = _SETTABLE | {"runtime-default"}
 _CLI_TIMEOUT = 3
+# A survey is optional advice, so it alone asks for the OpenCode service read to end as a
+# whole (launch, Fleet and the installer keep the per-read wait).
+_SERVICE_SECONDS = 3.0
 _CLI_NAME = {"claude": "Claude Code", "codex": "Codex"}
 _VERSION = re.compile(r"\d+(?:\.\d+)+")
 
@@ -63,7 +66,9 @@ def _fit(effort, efforts, settable=_SETTABLE):
     The user's effort stays, or moves to the value just below it (the lowest accepted one
     when nothing is below) among the new model's efforts that `hearting model set` can
     store. A model whose listed efforts are all unstorable (`minimal`, `none`), or an
-    effort off the storable set, cannot be written, so it is not a model to follow.
+    effort off the storable set, cannot be written, so it is not a model to follow. The
+    result is also a value the model lists (or `runtime-default`): `hearting model set`
+    refuses `high` for a model that lists only `runtime-default`, so it is not followed.
     """
     if effort is None:
         return None, None
@@ -71,7 +76,23 @@ def _fit(effort, efforts, settable=_SETTABLE):
     if efforts and not observed and effort != "runtime-default":
         return None
     fitted, was = opencode_runtime.fit_variant(effort, observed)
-    return (fitted, was) if fitted in settable else None
+    if fitted not in settable or (efforts and fitted != "runtime-default" and fitted not in efforts):
+        return None
+    return fitted, was
+
+
+def _carry(effort, efforts, settable) -> str | None:
+    """The effort an item `model:effort` of a moving line takes on the new model, or None.
+
+    One rule for the cell and for every line that moves with it: the value the new model
+    accepts, nearest to the old one. An effort `hearting model set` cannot store
+    (`minimal`, `none`) or `runtime-default` stays as written where the model accepts it.
+    """
+    if effort in settable and effort != "runtime-default":
+        fitted = _fit(effort, efforts, settable)
+        return fitted[0] if fitted else None
+    keep = not effort or effort == "runtime-default" or not efforts or effort in efforts
+    return effort if keep else None
 
 
 def successor(rows: Iterable[Mapping], model: str, effort: str | None = None, *,
@@ -157,29 +178,36 @@ def cells(adapter: str, values: Mapping[str, str]) -> list[dict]:
     return found
 
 
-def _swaps(value: str, current: str, replacement: str, efforts, settable) -> dict[str, str]:
-    """`{old item: new item}` for the `model:effort` items of `value` that name `current`."""
+def _swaps(value: str, current: str, replacement: str, efforts, settable) -> dict[str, str] | None:
+    """`{old item: new item}` for the `model:effort` items of `value` that name `current`;
+    None when one of them has no effort the new model accepts."""
     found = {}
     for item in value.split():
         name, sep, effort = item.partition(":")
         if sep and name == current:
-            fitted = _fit(effort, efforts, settable)
-            found[item] = f"{replacement}:{fitted[0] if fitted else effort}"
+            carried = _carry(effort, efforts, settable)
+            if carried is None:
+                return None
+            found[item] = f"{replacement}:{carried}"
     return found
 
 
 def companions(adapter: str, values: Mapping[str, str], current: str, replacement: str,
-               efforts) -> list[dict]:
+               efforts) -> list[dict] | None:
     """The edits other lines need so they follow one cell, never a whole new value.
 
     `{"key", "from", "swap": {old item: new item}}` for a list of `model:effort` items, and
     `{"key", "from", "add": [name]}` for the main-session-only list (a name is only added).
+    Every new item is one the replacement accepts. None when some line cannot move to
+    the replacement that way: a cell whose lines cannot move is not followed at all.
     Two cells can edit the same line; `final_lines()` merges them.
     """
     settable = _settable(adapter)
     found = []
     for key in (CASCADE_KEY, *((OPENCODE_FALLBACK_KEY,) if adapter == "opencode" else ())):
         swap = _swaps(values.get(key, ""), current, replacement, efforts, settable)
+        if swap is None:
+            return None
         if swap:
             found.append({"key": key, "from": values[key], "swap": swap})
     reserved = values.get(model_config.MAIN_SESSION_ONLY_KEY, "").split()
@@ -195,11 +223,14 @@ def final_lines(entries: Iterable[Mapping]) -> dict[str, dict]:
 
     `{key: {"from": value now, "to": final value}}`. A swap changes every item equal to its
     old item once (the first cell in file order wins if two cells map one item differently);
-    an add appends a name that is not there yet, in order. A later step that writes takes
-    `to` as it is and applies nothing else to the line.
+    an add appends a name that is not there yet, in file order. The file order is each
+    entry's `order` (the survey sets it), so entries may come in any order; entries without
+    one count in the order given. Every item of `to` is one its model accepts, because an
+    entry carries only swaps that the survey checked. A later step that writes takes `to`
+    as it is and applies nothing else to the line.
     """
     found: dict[str, dict] = {}
-    for entry in entries:
+    for entry in sorted(entries, key=lambda entry: entry.get("order", 0)):
         for item in entry.get("companions", ()):
             line = found.setdefault(item["key"], {"from": item["from"], "swaps": {}, "adds": []})
             for old, new in item.get("swap", {}).items():
@@ -292,7 +323,7 @@ def _catalog(harness):
     if root not in sys.path:
         sys.path.append(root)
     from tools.fleet.explorer import model_catalog
-    return model_catalog.read_catalog(harness)
+    return model_catalog.read_catalog(harness, deadline=_SERVICE_SECONDS)
 
 
 def survey_harness(harness: str, *, source_root: str | Path | None = None,
@@ -321,20 +352,24 @@ def survey_harness(harness: str, *, source_root: str | Path | None = None,
             return seen["cli"]
 
         entries = []
-        for cell in cells(harness, values):
+        for order, cell in enumerate(cells(harness, values)):
             found = successor(catalog.rows, cell["model"], cell["effort"],
                               installed=lambda: observe()[0], settable=settable)
-            entry = {"harness": harness, "target": cell["target"],
+            entry = {"harness": harness, "target": cell["target"], "order": order,
                      "current": {"model": cell["model"], "effort": cell["effort"]},
                      "successor": None, "kind": found["kind"], "reason": found["reason"],
                      "deprecated": found["deprecated"], "companions": [], "command": None}
             if found["model"]:
                 row = next(r for r in catalog.rows if r["id"] == found["model"])
-                entry["successor"] = {"model": found["model"], "effort": found["effort"],
-                                      "fit_from": found["fit_from"]}
-                entry["companions"] = companions(harness, values, cell["model"], found["model"],
-                                                 row.get("efforts"))
-                entry["command"] = _command(harness, entry)
+                moves = companions(harness, values, cell["model"], found["model"],
+                                   row.get("efforts"))
+                if moves is None:  # its lines cannot move with it: not a cell to follow
+                    entry.update(kind="none", reason="lines-do-not-fit")
+                else:
+                    entry["successor"] = {"model": found["model"], "effort": found["effort"],
+                                          "fit_from": found["fit_from"]}
+                    entry["companions"] = moves
+                    entry["command"] = _command(harness, entry)
             entries.append(entry)
         return {"harness": harness, "status": "ok", "reason": "", "entries": entries,
                 "cli": _cli_note(harness, catalog, entries, observe)}

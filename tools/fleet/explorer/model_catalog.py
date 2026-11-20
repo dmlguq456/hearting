@@ -271,14 +271,18 @@ def _candidates(harness):
     return (cache_home / "opencode" / "models.json",)
 
 
-def read_catalog(harness):
-    """Return one source-qualified catalog; absence and parse failure stay unknown."""
+def read_catalog(harness, *, deadline=None):
+    """Return one source-qualified catalog; absence and parse failure stay unknown.
+
+    ``deadline`` (seconds) ends the OpenCode service read as a whole; only a caller that
+    asks for it (the model-follow survey) gets it, so Fleet reads as before.
+    """
     if harness == "opencode":
         utilities = Path(__file__).resolve().parents[3] / "utilities"
         if str(utilities) not in sys.path:
             sys.path.insert(0, str(utilities))
         import opencode_runtime
-        native = opencode_runtime.read_model_catalog()
+        native = opencode_runtime.read_model_catalog(deadline=deadline)
         if native is not None:
             fields = {key: value for key, value in native.items() if key != "records"}
             return ModelCatalog(harness=harness, rows=_opencode_native_rows(native), **fields)

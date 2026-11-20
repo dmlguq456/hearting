@@ -11,6 +11,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import hashlib
 import inspect
+import json
 import time
 from pathlib import Path
 import tempfile
@@ -21,8 +22,10 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 sys.path.insert(0, str(ROOT / "tools" / "install"))
+import model_config  # noqa: E402
 import model_follow  # noqa: E402
 import model_settings  # noqa: E402
+import opencode_runtime  # noqa: E402
 
 HARNESSES = ("claude", "codex", "opencode")
 
@@ -486,6 +489,27 @@ class StorableEffortTests(unittest.TestCase):
                     for text in model_follow.lines([result]):
                         self.assertNotIn("minimal", text)
 
+    def test_a_printed_command_is_one_the_store_accepts_for_any_list_of_efforts(self):
+        lists = (("runtime-default",), ("runtime-default", "high"), ("high",), ("low", "xhigh"),
+                 ("minimal", "runtime-default"), ("max",))
+        for adapter in HARNESSES:
+            for efforts in lists:
+                with self.subTest(adapter=adapter, efforts=efforts):
+                    result = self.survey(adapter, efforts)
+                    for entry in result["entries"]:
+                        if entry["kind"] == "follow":
+                            self.plan(adapter, entry, efforts)  # raises when the store refuses it
+
+    def test_a_model_that_lists_only_runtime_default_is_not_followed_at_an_explicit_effort(self):
+        result = self.survey("opencode", ("runtime-default",))
+        cells = {e["target"]: e for e in result["entries"]}
+        for target in ("profile/deep", "tier/deep", "tier/balanced-deep"):
+            self.assertEqual((cells[target]["kind"], cells[target]["command"]), ("none", None))
+        rows = [row("m-1"), row("m-2", version=(2,), efforts=("runtime-default",))]
+        for effort, kind in (("high", "none"), ("runtime-default", "follow")):
+            found = model_follow.successor(rows, "m-1", effort, settable=model_follow._SETTABLE_OPENCODE)
+            self.assertEqual(found["kind"], kind, effort)
+
     def test_opencode_runtime_default_stays_a_storable_request(self):
         rows = [row("m-1"), row("m-2", version=(2,), efforts=("minimal",))]
         self.assertEqual(model_follow.successor(rows, "m-1", "runtime-default")["kind"], "none")
@@ -613,6 +637,119 @@ class OneEnvironmentTests(unittest.TestCase):
                                         probe=lambda _h: (None, None))
             self.assertEqual(dict(os.environ), before)
         self.assertEqual(seen, [before])
+
+
+def conf_with(adapter, overrides):
+    """`conf_text(adapter)` with some lines replaced (or appended), values written as given."""
+    kept, seen = [], set()
+    for line in conf_text(adapter).splitlines():
+        key = line.partition("=")[0]
+        if key in overrides:
+            line, seen = f"{key}={overrides[key]}", seen | {key}
+        kept.append(line)
+    kept += [f"{key}={value}" for key, value in overrides.items() if key not in seen]
+    return "\n".join(kept) + "\n"
+
+
+def accepted(item, rows):
+    """True when `model:effort` names an effort its model lists (or `runtime-default`)."""
+    model, _, effort = item.partition(":")
+    listed = next(r for r in rows if r["id"] == model).get("efforts")
+    return effort == "runtime-default" or not listed or effort in listed
+
+
+class LinesMoveWithTheCellTests(unittest.TestCase):
+    """A cell follows only when its model can take every line that moves with it, at
+    efforts it lists; what `final_lines` gives is written as it is, on every harness."""
+
+    ELM = [row("p/elm-1", family="elm"), row("p/elm-2", family="elm", version=(2,), efforts=("high",)),
+           row("p/elm-3", family="elm", version=(3,), efforts=("minimal",))]
+    REPRO = {"CFG_TIER_MINI_MODEL": "p/elm-1", "CFG_TIER_MINI_VARIANT": "runtime-default",
+             "CFG_MODEL_PROFILE_DEEP": "model/p/elm-1:high",
+             "CFG_TIER_DEEP_FAILOVER_CASCADE": '"p/elm-1:high p/elm-1:runtime-default p/elm-1:high"'}
+
+    def survey(self, adapter, rows, text):
+        helper = SurveyTests("run_survey")
+        helper.setUp()
+        self.addCleanup(helper.doCleanups)
+        path = helper.user_file(adapter, text)
+        self.assertEqual(path.read_text(), text)
+        return helper.run_survey(adapter, rows), path
+
+    def write_back(self, path, final):
+        """Write each final value into the (isolated) user file and read the file again."""
+        values = model_config.parse_config(path)
+        lines = []
+        for line in path.read_text().splitlines():
+            key = line.partition("=")[0]
+            lines.append(f'{key}="{final[key]["to"]}"' if key in final else line)
+        path.write_text("\n".join(lines) + "\n")
+        return model_config.parse_config(path), values
+
+    def test_a_cell_whose_main_effort_is_runtime_default_follows_no_further_than_its_lines(self):
+        result, path = self.survey("opencode", self.ELM, conf_with("opencode", self.REPRO))
+        cells = {e["target"]: e for e in result["entries"]}
+        mini = cells["tier/mini"]  # the newest model lists only `minimal`; the cascade says `high`
+        self.assertEqual((mini["kind"], mini["reason"], mini["successor"], mini["companions"],
+                          mini["command"]), ("none", "lines-do-not-fit", None, [], None))
+        self.assertEqual(cells["profile/deep"]["successor"]["model"], "p/elm-2")
+        follows = [e for e in result["entries"] if e["kind"] == "follow"]
+        written, _before = self.write_back(path, model_follow.final_lines(follows))
+        cascade = written[model_follow.CASCADE_KEY].split()
+        self.assertEqual(cascade, ["p/elm-2:high", "p/elm-2:runtime-default", "p/elm-2:high"])
+        self.assertTrue(all(accepted(item, self.ELM) for item in cascade), cascade)
+        self.assertTrue(all(opencode_runtime.variant_support(
+            *item.split(":"), {"p/elm-2": ("high",)}.get(item.split(":")[0])) != "unsupported"
+            for item in cascade))
+        self.assertEqual([t for t in model_follow.lines([result]) if "elm-3" in t], [])
+
+    def test_two_cells_that_pick_different_models_leave_one_accepted_item_whatever_the_order(self):
+        text = conf_with("opencode", {**self.REPRO, "CFG_TIER_DEEP_FAILOVER_CASCADE":
+                                      '"p/elm-1:runtime-default p/elm-1:runtime-default"',
+                                      "CFG_V2_AUTO_FALLBACKS": '"p/elm-1:runtime-default"'})
+        result, path = self.survey("opencode", self.ELM, text)
+        follows = [e for e in result["entries"] if e["kind"] == "follow"]
+        models = {e["target"]: e["successor"]["model"] for e in follows}
+        self.assertEqual((models["tier/mini"], models["profile/deep"]), ("p/elm-3", "p/elm-2"))
+        forward = model_follow.final_lines(follows)
+        self.assertEqual(model_follow.final_lines(follows[::-1]), forward)  # the first cell in the file wins
+        written, _before = self.write_back(path, forward)
+        for key in (model_follow.CASCADE_KEY, model_follow.OPENCODE_FALLBACK_KEY):
+            items = written[key].split()
+            self.assertEqual(set(items), {"p/elm-3:runtime-default"})
+            self.assertTrue(all(accepted(item, self.ELM) for item in items), items)
+
+    def test_a_line_item_the_new_model_does_not_list_stops_the_cell_on_every_harness(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                name = SurveyTests.names(adapter)
+                cascade = f'"{name("deep-1")}:xhigh {name("deep-1")}:minimal"'
+                text = conf_with(adapter, {"CFG_TIER_DEEP_FAILOVER_CASCADE": cascade})
+                rows = lambda efforts: [row(name("deep-1")), row(name("deep-2"), version=(2,), efforts=efforts)]
+                result, path = self.survey(adapter, rows(("high",)), text)
+                for entry in result["entries"]:
+                    if entry["current"]["model"] == name("deep-1"):
+                        self.assertEqual((entry["kind"], entry["reason"], entry["command"]),
+                                         ("none", "lines-do-not-fit", None), entry["target"])
+                self.assertEqual(model_follow.lines([result]), [])
+                result, path = self.survey(adapter, rows(("minimal", "high")), text)
+                follows = [e for e in result["entries"] if e["kind"] == "follow"]
+                self.assertTrue(follows)
+                written, _before = self.write_back(path, model_follow.final_lines(follows))
+                items = written[model_follow.CASCADE_KEY].split()
+                self.assertEqual(items, [f"{name('deep-2')}:high", f"{name('deep-2')}:minimal"])
+
+    def test_the_survey_order_decides_so_entries_may_be_given_in_any_order(self):
+        text = conf_with("codex", {"CFG_TIER_DEEP_FAILOVER_CASCADE": '"deep-1:xhigh light-1:medium"',
+                                   "CFG_MAIN_SESSION_ONLY_MODELS": '"deep-1 light-1"'})
+        rows = [row("deep-1", family="d"), row("deep-2", family="d", version=(2,)),
+                row("light-1", family="l"), row("light-2", family="l", version=(2,))]
+        result, _path = self.survey("codex", rows, text)
+        entries = [e for e in result["entries"] if e["companions"]]
+        self.assertGreater(len({e["order"] for e in entries}), 1)
+        forward = model_follow.final_lines(entries)
+        self.assertEqual(model_follow.final_lines(entries[::-1]), forward)
+        self.assertEqual(forward["CFG_MAIN_SESSION_ONLY_MODELS"]["to"], "deep-1 light-1 deep-2 light-2")
 
 
 class FinalLineTests(unittest.TestCase):
