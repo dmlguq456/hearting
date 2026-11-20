@@ -95,11 +95,11 @@ class ChoiceTest(StatusTest):
         mine = self.route(1, "alpha")
         view = self.read(mine)
         self.assertTrue(view["has_doc"])
-        self.assertEqual((view["campaign"], view["age"], view["word"]), ("alpha", "3h ago", "현황"))
-        self.assertEqual(view["title"], "현황 alpha · 3h ago")
+        self.assertEqual((view["campaign"], view["age"], view["word"]), ("alpha", "3h ago", "STATUS"))   # English whatever the declared language
+        self.assertEqual(view["title"], "STATUS alpha · 3h ago")
         self.assertTrue(view["path"].endswith("2026-11-10_alpha/현황.md"))
         self.assertEqual(self.read()["campaign"], "beta")                       # no route: Fleet's document
-        self.assertEqual(self.read()["title"], "현황 beta · 10m ago")
+        self.assertEqual(self.read()["title"], "STATUS beta · 10m ago")
 
     def test_the_panel_opens_campaign_md_before_the_older_names(self):
         folder = self.campaign("alpha", age=3 * 3600)          # carries a hand written 현황.md
@@ -149,7 +149,7 @@ class ChoiceTest(StatusTest):
         project_status.clear_cache()
         view = self.read(mine)
         self.assertFalse(view["has_doc"])
-        self.assertEqual(view["title"], "현황")
+        self.assertEqual(view["title"], "STATUS")
         self.assertEqual((view["campaign"], view["path"]), ("alpha", ""))
         self.assertEqual(view["slot"], "campaigns/2026-11-10_alpha/현황.md")
         self.assertIn(str(self.root / "campaigns" / "2026-11-10_alpha") + os.sep, view["watch"])
@@ -296,6 +296,127 @@ class PopupTest(StatusTest):
         for width in range(20, 117):
             for row in session_status.popup_rows(view, self.status(), width):
                 self.assertLessEqual(cell_width(text(row)), width, (width, text(row)))
+
+
+# A campaign document in the shape the campaign-document design gives it (fixture titles only).
+CAMPAIGN = """<!-- hearting:campaign-document v1 -->
+# 시안용 캠페인
+
+갱신 2026-11-20 10:00
+
+**한 줄**: 시험용 문서.
+
+## 결정 기다리는 것
+- 질문판에 열린 질문 2개
+- 시안 B로 갈지 정하기
+
+## 하는 중
+- 시험용 작업 가 · 기록 2
+- 시험용 작업 나 · #1801
+- (하루 넘게 움직임 없는 열린 route 4개는 접어 둠)
+
+## 끝난 일
+- 11-19 시험용 끝난 일 하나 · #1790
+- 11-18 시험용 끝난 일 둘 · #1788 · v4.60.1
+
+## 예정
+- 시험용 예정 하나
+"""
+
+
+class GroupsTest(StatusTest):
+    """11-20: the panel's STATUS section reads the document's lists with the button's value."""
+
+    def kinds(self, text_):
+        return [(g["kind"], g["count"], g["items"]) for g in session_status.parse_groups(text_)]
+
+    def test_the_four_lists_of_a_campaign_document_in_the_panels_order(self):
+        groups = session_status.parse_groups(CAMPAIGN)
+        self.assertEqual([g["kind"] for g in groups], ["running", "waiting", "done", "next"])
+        self.assertEqual([g["name"] for g in groups], ["하는 중", "기다리는 것", "최근에 끝난 것", "나중에 할 것"])
+        self.assertEqual([g["count"] for g in groups], [2, 2, 2, 1])
+        # The note in parentheses is no title; a title keeps what the document wrote.
+        self.assertEqual(groups[0]["items"], ["시험용 작업 가 · 기록 2", "시험용 작업 나 · #1801"])
+        self.assertEqual(groups[2]["items"][1], "11-18 시험용 끝난 일 둘 · #1788 · v4.60.1")
+
+    def test_the_wait_list_with_nothing_under_it_is_a_count_of_zero_and_other_empty_lists_are_left_out(self):
+        text_ = "# t\n\n## 결정 기다리는 것\n지금 없음\n\n## 하는 중\n\n## 끝난 일\n- 하나\n"
+        self.assertEqual(self.kinds(text_), [("waiting", 0, []), ("done", 1, ["하나"])])
+
+    def test_both_heading_name_sets_of_the_campaign_document_read_as_the_same_four_groups(self):
+        """The document's maker has not settled the names yet: each name of a pair reads as the same group, whatever the order in the file."""
+        old = ("# t\n\n## 결정 기다리는 것\n- 질문 하나\n\n## 하는 중\n- 일 하나\n\n## 끝난 일\n- 11-19 끝남 하나 · #1790\n\n## 예정\n- 나중 하나\n")
+        new = ("# t\n\n## 하는 중\n- 일 하나\n\n## 기다리는 것\n- 질문 하나\n\n## 최근에 끝난 것\n- 11-19 끝남 하나 · #1790\n\n## 나중에 할 것\n- 나중 하나\n")
+        shuffled = ("# t\n\n## 나중에 할 것\n- 나중 하나\n\n## 최근에 끝난 것\n- 11-19 끝남 하나 · #1790\n\n## 기다리는 것\n- 질문 하나\n\n## 하는 중\n- 일 하나\n")
+        want = [("running", 1, ["일 하나"]), ("waiting", 1, ["질문 하나"]), ("done", 1, ["11-19 끝남 하나 · #1790"]), ("next", 1, ["나중 하나"])]
+        for text_ in (old, new, shuffled):
+            self.assertEqual(self.kinds(text_), want, text_)
+        # A line that is no bullet is a note, not a job; a lone `예정` missing is no group.
+        notes = "# t\n\n## 기다리는 것\n질문판 기준 10:00\n지금 없음.\n\n## 하는 중\n- 일 하나\n6시간 넘게 움직임 없는 열린 일 32개는 접어 둠.\n"
+        self.assertEqual(self.kinds(notes), [("running", 1, ["일 하나"]), ("waiting", 0, [])])
+
+    def test_a_hand_written_page_gives_what_it_can_and_a_page_without_lists_gives_none(self):
+        self.assertEqual(self.kinds(DOC.format(name="x")), [("waiting", 1, ["하나"]), ("next", 1, ["둘"])])
+        self.assertEqual(session_status.parse_groups("# 제목\n\n그냥 글\n\n## 판\n- 항목\n"), [])
+        self.assertEqual(session_status.parse_groups(""), [])
+        # A record of what was decided is no list of work; nested bullets are no title of their own.
+        self.assertEqual(self.kinds("# t\n\n## 결정 기록\n- 지난 결정\n\n## 하는 중\n- 하나\n  - 안쪽\n"), [("running", 1, ["하나"])])
+
+    def test_titles_are_capped_and_terminal_safe(self):
+        body = "# t\n\n## 끝난 일\n" + "".join("- 줄 %d\n" % n for n in range(40)) + "- 긴 줄 " + "가" * 500 + "\n"
+        done = session_status.parse_groups(body)[0]
+        self.assertEqual((done["count"], len(done["items"])), (41, session_status.GROUP_ITEMS))
+        longest = session_status.parse_groups("# t\n\n## 끝난 일\n- 긴 줄 " + "가" * 500 + "\x1b[31m\n")[0]["items"][0]
+        self.assertLessEqual(len(longest), session_status.GROUP_TITLE)
+        self.assertNotIn("\x1b", longest)
+
+    def test_a_heading_is_read_by_how_it_begins_and_a_code_fence_is_no_list(self):
+        """Hand-written pages (the review's counter-examples): a word inside a heading names no list, and a fence holds no heading and no job."""
+        for heading in ("Definition of Done", "Not done yet", "Context: what we are doing", "How to do the release", "CI 기다리는 PR", "Where to look next",
+                        "Backlog (to do later)", "Work done so far"):
+            self.assertEqual(self.kinds("# t\n\n## %s\n- 하나\n- 둘\n" % heading), [], heading)
+        # The words the near spellings begin with still read, in either case, with a word after them.
+        for heading, kind in (("Done", "done"), ("Next steps", "next"), ("To do", "next"), ("TODO", "next"), ("In progress", "running"),
+                              ("Doing now", "running"), ("Waiting on you", "waiting"), ("Decisions needed", "waiting"), ("다음에 할 일", "next")):
+            self.assertEqual(self.kinds("# t\n\n## %s\n- 하나\n" % heading), [(kind, 1, ["하나"])], heading)
+        # A number or a picture before the words is not part of the name (closure review 3), and the counter-examples stay counter-examples behind them.
+        for heading, kind in (("1. 하는 중", "running"), ("2) 결정 필요", "waiting"), ("⏳ 하는 중", "running"), ("🔴 결정 필요", "waiting"),
+                              ("3. ✅ 끝난 일", "done"), ("[예정]", "next"), ("4. Next steps", "next"), ("🔴 In progress", "running")):
+            self.assertEqual(self.kinds("# t\n\n## %s\n- 하나\n" % heading), [(kind, 1, ["하나"])], heading)
+        for heading in ("1. Definition of Done", "⏳ Not done yet", "2) Context: what we are doing", "🔴 How to do the release", "3. CI 기다리는 PR"):
+            self.assertEqual(self.kinds("# t\n\n## %s\n- 하나\n- 둘\n" % heading), [], heading)
+        # A line in a code fence is no job, and a heading in one starts nothing.
+        fenced = "# t\n\n## 하는 중\n- 일 하나\n```\n- code line\n## 끝난 일\n- not a job\n```\n- 일 둘\n"
+        self.assertEqual(self.kinds(fenced), [("running", 2, ["일 하나", "일 둘"])])
+
+    def test_the_comment_marker_line_belongs_to_no_group(self):
+        """The campaign document's first line is an HTML comment marker; it is no heading and no job, whatever follows it."""
+        doc = "<!-- hearting:campaign-document v1 -->\n# t\n\n## 하는 중\n- 일 하나\n"
+        groups = session_status.parse_groups(doc)
+        self.assertEqual([(g["kind"], g["count"], g["items"]) for g in groups], [("running", 1, ["일 하나"])])
+
+    def test_the_value_carries_the_groups_and_every_read_reads_the_document(self):
+        folder2 = self.campaign("beta", body=CAMPAIGN)
+        view = self.read(self.route(2, "beta"))
+        self.assertEqual([g["kind"] for g in view["groups"]], ["running", "waiting", "done", "next"])
+        # Nothing is kept between reads (each read of the value is a process of its own): a changed document shows at the next read.
+        path = folder2 / "현황.md"
+        path.write_text(CAMPAIGN + "- 하나 더\n", encoding="utf-8")
+        os.utime(path, (NOW - 10, NOW - 10))
+        again = self.read(self.route(2, "beta"))
+        self.assertEqual(again["groups"][-1]["count"], 2)
+
+    def test_a_campaign_md_document_is_read_by_name_and_gives_the_groups(self):
+        self.campaign("alpha", body=CAMPAIGN, name="campaign.md")
+        view = self.read(self.route(1, "alpha"))
+        self.assertTrue(view["has_doc"])
+        self.assertTrue(view["path"].endswith("2026-11-10_alpha/campaign.md"), view["path"])
+        self.assertEqual([g["kind"] for g in view["groups"]], ["running", "waiting", "done", "next"])
+
+    def test_no_document_and_a_document_that_cannot_be_read_give_no_groups(self):
+        self.campaign("alpha", doc=False)
+        self.assertEqual(self.read(self.route(1, "alpha"))["groups"], [])
+        self.assertEqual(session_status.read_groups(str(self.root / "nowhere.md")), [])
 
 
 if __name__ == "__main__":

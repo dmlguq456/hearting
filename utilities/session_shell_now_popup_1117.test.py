@@ -60,7 +60,7 @@ for(const c of i.cases){
   const body=c.answer.rows.map((r,k)=>{const p=parts(r);return k===at?p.map(x=>({...x,tint:true})):p;});
   let v,error='';
   try{v=view.popup({cols:c.cols,rows:c.rows,band:0,kind:'table',title:[{text:'NOW · '},{text:c.answer.title}],body,sections:['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES'],
-    labels:['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES'],current:1,model:{styles:{},colors:c.colors,no_color:c.noColor},
+    current:1,model:{styles:{},colors:c.colors,no_color:c.noColor},
     configuration:{theme:c.theme},cellWidth:cells,background:c.background||''});}catch(e){error=String(e&&e.stack||e);}
   if(error){out.push({id:c.id,error});continue;}
   out.push({id:c.id,rows:v.rows.map(r=>({width:r.reduce((n,p)=>n+cells(p.text),0),text:r.map(p=>p.text).join(''),
@@ -200,10 +200,10 @@ console.log(JSON.stringify(out));
     def test_a_now_that_fills_its_last_row_takes_the_mark_as_an_ellipsis_at_its_end(self):
         script = POLISH.HEAD + """
 const m=model({});m.session_title='제목';m.now=process.argv[2];
-const v=view.render({width:40,height:30,side:true,model:m,state:'working',harness:'claude',frame:1000,since:990,brief:undefined,sent:()=>[],cellWidth:cells,
+const v=view.render({width:40,height:24,side:true,model:m,state:'working',harness:'claude',frame:1000,since:990,brief:undefined,sent:()=>[],cellWidth:cells,
  configuration:{side_width:40,rule_motion:'rule',theme:'terminal',position:'right'},folded:false});
 console.log(JSON.stringify(lines(v)));"""
-        def row(now):
+        def row(now):    # (24 rows: the NOW is short of rows in its one-row form at this height, as at the 30 it stood at before 11-20)
             out = subprocess.run([NODE, "-e", script, str(SHELL), now], capture_output=True, text=True, check=True)
             return [line for line in json.loads(out.stdout) if line.startswith("│ NOW") or line.startswith("│        ")]
         full = "가가가가 가가가가 가가가가 가가가가 가가가"      # fills the 32 cells of the NOW's row (a word of 3)
