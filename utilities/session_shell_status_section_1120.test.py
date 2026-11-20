@@ -123,11 +123,11 @@ assert(seen.every(r=>r[2]),JSON.stringify(seen));
 assert(seen[0][1]===true&&seen.some(r=>r[1]===false),JSON.stringify(seen));
 // The SESSION head is gone for every height shorter than the first one that lacks it, within the give-back rule (a height may take it back).
 const firstGone=seen.find(r=>!r[1])[0];assert(firstGone>=24&&firstGone<=34,String(firstGone));
-// A head row of its own is the first row to go (before any content row): at every height 24..34 `separate` shows no more content than the merged form.
-for(const h of [34,30,26,24]){const m=lines(draw({status:doc(GROUPS),height:h})),p=lines(draw({status:doc(GROUPS),height:h,group_head:'separate'}));
-  assert(m.length===h&&p.length===h,h);
-  const content=ls=>ls.filter(l=>/^│ (⠋|◇|✓|·|  ⠋|  ◇|  ✓|  ·|하는|기다|최근|나중|끝난|예정|MODEL|TITLE|NOW|GIT)/.test(l)).length;
-  assert(content(p)<=content(m),h+'\n'+m.join('\n')+'\n'+p.join('\n'));}
+// A head row of its own is the first row to go (before any content row, even the empty ones): wherever the panel is short of rows the `separate` form is the
+// merged form again, row for row, the REPO row keeping its word; with rows to spare it stands.
+for(const h of [44,40,34,30,26,24,20]){const m=lines(draw({status:doc(GROUPS),height:h})),p=lines(draw({status:doc(GROUPS),height:h,group_head:'separate'}));
+  assert.deepEqual(p,m,h+'\n'+p.join('\n'));}
+assert(/^│ REPO ─+ │$/.test(lines(draw({status:doc(GROUPS),group_head:'separate',height:90}))[1]));
 """)
 
     def test_groups_read_in_the_liked_order_each_with_a_head_row_and_its_titles(self):

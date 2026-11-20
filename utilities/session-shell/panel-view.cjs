@@ -777,7 +777,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // the name is cut with `…`; the name and `›` stay to the last. A press anywhere on the row opens the
     // status popup. No artifact root: no button (`status_doc` absent).
     const statusDoc=model.status_doc&&typeof model.status_doc==='object'&&clean(model.status_doc.word).trim()?model.status_doc:null;
-    const topActions=new Map(),withoutButton=new Map(),groupHeads=new Set();
+    const topActions=new Map(),withoutButton=new Map(),groupHeads=new Set(),foldedRepo=new Map();
     const statusButton=whole=>{const arrow=text('›','dim');if(!whole)return [arrow];
       return [text(clean(statusDoc.word).trim(),statusDoc.has_doc===true?'loc_repo':'dim'),text(' '),arrow];};
     // `name` and `count` with the button at the right end of `room` cells, or null without a button.
@@ -817,18 +817,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(sideRepo.length){
         // The name keeps its color; the count (dim) shows whole or not at all.
         // 11-20: the REPO group's head is this row: `REPO   hearting · wt 12 ────` (narrower than 30 cells inside the word stands first, `REPO `,
-        // as the other labels do not); the `separate` form has a head row of its own over it and this row keeps its value alone.
-        const separate=(model.group_head||GROUP_HEAD)==='separate',name=separate?'':'REPO';
-        const word=labelWidth||separate?null:text('REPO ','dim');
-        const room=inner-labelWidth-(word?5:0),count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
-        const withCount=count.length>0&&size(sideRepo)+size(count)<=room;
-        const button=withButton(sideRepo,count,room);
-        const value=withCount?[...sideRepo,...count]:cut(sideRepo,room);
-        const lead=parts=>word?[word,...parts]:labelled(name,parts);
-        const plain=lead(separate?value:[...value,...fillEnd(room-size(value))]);
-        if(separate){groupHeads.add(top.length);top.push(groupHead('REPO'));}
-        if(button){topActions.set(top.length,'popup:STATUS');withoutButton.set(top.length,plain);}
-        top.push(button?lead(button):plain);mark(top.length-1,'head',...(withCount&&!sideGit.length?['git']:[]));
+        // as the other labels do not); the `separate` form has a head row of its own over it and this row keeps its value alone, and where that
+        // head row has gone short of rows this row is the merged form again (`folded`).
+        const count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
+        const repoForm=separate=>{
+          const word=labelWidth||separate?null:text('REPO ','dim'),room=inner-labelWidth-(word?5:0);
+          const withCount=count.length>0&&size(sideRepo)+size(count)<=room;
+          const button=withButton(sideRepo,count,room),value=withCount?[...sideRepo,...count]:cut(sideRepo,room);
+          const lead=parts=>word?[word,...parts]:labelled(separate?'':'REPO',parts);
+          const plain=lead(separate?value:[...value,...fillEnd(room-size(value))]);
+          return {row:button?lead(button):plain,plain,button:!!button,withCount};
+        };
+        const separate=(model.group_head||GROUP_HEAD)==='separate',form=repoForm(separate);
+        if(separate){groupHeads.add(top.length);top.push(groupHead('REPO'));foldedRepo.set(top.length,repoForm(false));}
+        if(form.button){topActions.set(top.length,'popup:STATUS');withoutButton.set(top.length,form.plain);}
+        top.push(form.row);mark(top.length-1,'head',...(form.withCount&&!sideGit.length?['git']:[]));
       }
       // Short of cells the first part (the branch, the model name) gives way so what follows
       // it (the status and a warning, the effort) stays whole.
@@ -1884,7 +1887,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const questionRowsIn=()=>boxedQuestions()?within(questionRows):questionRows();
     const sectionRows=s=>s.name==='QUESTIONS'?questionRowsIn():s.rows(take[s.name]);
     const sectionSize=s=>!kept[s.name]?0:s.box?routeBox():(s.name==='QUESTIONS'&&boxedQuestions()?2:1)+sectionRows(s).length;
-    const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size;
+    const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size-groupHeads.size;
     let keepGroupHeads=true,keepGit=true,keepSpacers=true,keepMetaGap=true,keepRules=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0,keepFootRule=true,keepQuestionBox=true;
     // 11-16 (the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을 USAGE로 해서 넣자"): the
     // panel's bottom is the USAGE section: its name row (the thin rule above the last row, now named), then
@@ -2046,7 +2049,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-16 (the person: "MEM과 가장 하단을 구분하는 줄이 필요"): beside the native area a thin rule (a section
     // head's rule, its color) parts the bottom sections (MESSAGES, MEM) from the last row (5h/7d, the gear and
     // the fold button); short of rows it goes before any content row.
-    const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)
+    const need=()=>core+(keepGroupHeads?groupHeads.size:0)+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)
       +(keepRules?rules.size:0)+(keepOptional?optional.size:0)+SECTIONS.reduce((n,s)=>n+sectionSize(s),0)+footRule()+1;
     const budget=rows;
     // Short of rows (spec rule 34 (b), 11-15): the empty rows, the rule above the last row (11-16) and a
@@ -2139,7 +2142,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     const order=[];
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i))&&(keepGroupHeads||!groupHeads.has(i)))
-      order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i),plain:withoutButton.get(i)});});
+      {const folded=!keepGroupHeads&&foldedRepo.get(i);
+        order.push({parts:folded?folded.row:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i),plain:folded?folded.plain:withoutButton.get(i)});}});
     // The row that carries the status button, and its place in `content` (the button goes once the STATUS section stands).
     // 11-20: beside the native area the STATUS section is the REPO group's: it stands right under the REPO row (a window with no REPO row
     // starts with it); in the bottom layout, which has no group heads, it stays second among the sections.
