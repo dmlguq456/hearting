@@ -989,7 +989,7 @@ def _field_table(module):
 
 
 def _basis_differences(model_config, profile_map, table):
-    """``"codex deep gpt-6-astra"``-style notes for each profile the table's basis names where this
+    """``"<harness> <profile> <model>"`` notes for each profile the table's basis names where this
     install's model differs from the shipped model table; ``[]`` when nothing can be compared."""
     notes = []
     profiles = ((table.get("basis") or {}).get("profiles") or {})
