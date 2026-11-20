@@ -169,6 +169,62 @@ class UnitComposeTest(F.FramedBase):
         self.assertEqual(route["nodes"][0]["model_profile"], "deep")
         self.sealed(route)
 
+    def test_the_refusal_of_an_intensity_says_a_unit_route_has_no_intensity(self):
+        # 11-20: "unit에는 강도를 표시안하는게 맞겠네". An intensity other than the old `quick` is refused in a text that
+        # tells where checking is opened; `quick` (an old command) is accepted and ignored; another flag's text says no `quick`.
+        why = ("a unit route has no intensity: one unit does one job and nothing checks it; to have the work checked open "
+               "--shape solo or staged with --intensity, and to judge more deeply use --profile")
+        for value in ("standard", "strong", "direct"):
+            with self.subTest(intensity=value), self.assertRaises(ValueError) as refused:
+                self.unit("qa/code-review", intensity=value)
+            self.assertEqual(str(refused.exception), f"compose-unit-conflict:--intensity {value} ({why})")
+        with self.assertRaises(ValueError) as refused:
+            self.unit("qa/code-review", shape="staged")
+        self.assertEqual(str(refused.exception), "compose-unit-conflict:--shape staged (--unit is the kind unit: one leg of that unit)")
+        self.assertNotIn("quick", str(refused.exception))
+        # The route an old command opens is the very route the plain `--unit` opens: the same record.
+        plain, old = self.unit("qa/code-review"), self.unit("qa/code-review", intensity="quick")
+        for key in ("capability", "requested_intensity", "effective_intensity", "nodes", "field", "workflow_contract"):
+            self.assertEqual(plain[key], old[key], key)
+        self.assertEqual((plain["requested_intensity"], plain["effective_intensity"]), ("quick", "quick"))
+
+    def test_a_hand_built_unit_request_at_another_intensity_is_refused_without_the_word_quick(self):
+        recipe_args = dict(cwd=R.ROOT, artifact_root=self.root, unit="qa/code-review", field="code", field_source="preset")
+        for intensity in ("standard", "strong"):
+            with self.subTest(intensity=intensity), self.assertRaises(ValueError) as refused:
+                R.compile_route("unit", "default", intensity, **recipe_args)
+            self.assertEqual(str(refused.exception), f"compose-unit-conflict:{intensity} (a unit route has no intensity)")
+
+    def test_the_recorded_value_keeps_every_reader_working(self):
+        # 11-20 (design 3.2, 3.3): the record keeps `quick`, named `UNIT_RECORDED_INTENSITY`, so an old record and a new one
+        # read as the same unit route, and the readers of `effective_intensity` (the round cap, the continuation budget, the
+        # worker's QA) are unchanged. Nothing but the choosable intensities left the table.
+        import review_round_cap as ROUND_CAP
+        import route_form as RF
+        from dispatch_mode_contract import QA_FROM_INTENSITY
+        self.assertEqual(RF.UNIT_RECORDED_INTENSITY, "quick")
+        self.assertEqual(RF.FORM_INTENSITIES["unit"], (RF.UNIT_RECORDED_INTENSITY,))
+        route = self.unit("qa/code-review")
+        for record in (route, {**route, "selection": {k: v for k, v in route["selection"].items() if k != "shape"}}):
+            self.assertEqual(RF.route_form(record), "unit")
+            self.assertTrue(RF.unit_route(record))
+            self.assertTrue(RF.serial_attempt_route(record))
+            self.assertFalse(RF.one_shot_owner(record))
+            self.assertTrue(RF.alone_without_stages(record))
+        self.assertEqual(ROUND_CAP.max_review_rounds(route["effective_intensity"]), 1)
+        self.assertIn(route["effective_intensity"], QA_FROM_INTENSITY)
+        # A unit record is no unit route at any other value (nothing else is read as one).
+        self.assertFalse(RF.unit_route({**route, "effective_intensity": "standard"}))
+        self.assertEqual(RF.form_of("unit", "standard"), "staged")
+
+    def test_the_receipt_has_no_standard_plus_answer_for_a_unit_route(self):
+        # 11-20: "is it standard+" has no answer for a route with no intensity; the others answer as before.
+        unit = {q["name"]: q["answer"] for q in R.compose_observations(self.unit("qa/code-review"))["pre_execution_answers"]}
+        self.assertEqual(unit["standard+"], "해당 없음")
+        solo = self.unit(None, capability="autopilot-code", shape="solo")
+        answers = {q["name"]: q["answer"] for q in R.compose_observations(solo)["pre_execution_answers"]}
+        self.assertEqual(answers["standard+"], "아니오")
+
     def test_top_is_not_available_to_a_unit_leg(self):
         with self.assertRaises(ValueError):
             R.compose_route(**{**dict(capability=None, capability_mode=None, shape=None, graph=None, slug="unit-fixture",

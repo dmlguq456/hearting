@@ -353,8 +353,9 @@ A single read-only unit can also be opened as a route of its own, with no owner:
 `compose --start --unit <family/name> --prompt-file <brief>` (for example
 `qa/code-review`; `stages --capability unit` lists the units). Its one worker starts
 with the brief, and its end closes the route and returns the sealed summary to the
-session that opened it (`core/OPERATIONS.md` §5.10c). This adds a way to start; it
-does not change the choices above.
+session that opened it (`core/OPERATIONS.md` §5.10c). A unit route has no intensity
+(one unit does one job and nothing checks it; `core/CONVENTIONS.md` §1). This adds a
+way to start; it does not change the choices above.
 
 Examples of the same boundary:
 

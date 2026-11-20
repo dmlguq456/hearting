@@ -156,13 +156,16 @@ def bind_worker_contract(h, args, *, profile_type) -> str:
 def dispatch_metadata_prompt(h, args, *, guard_session_id: bool = True) -> str:
     """The prompt's `Dispatch metadata` block, through the artifact context."""
     guard = f"- guard_session_id: {args.attempt_id}\n" if guard_session_id else ""
+    # 11-20: a unit route has no intensity (one unit does one job, nothing checks it), so its worker is
+    # told neither a `qa:` nor an `intensity:` value. The row and the environment keep the recorded `quick`.
+    qa, intensity = ("-", "-") if getattr(args, "capability", None) == "unit" else (args.qa, args.intensity)
     return (
         "Dispatch metadata:\n"
         f"- capability: {args.capability}\n"
         f"- capability_mode: {args.capability_mode}\n"
         f"- worker_mode: {args.worker_mode or '-'}\n"
-        f"- qa: {args.qa}\n"
-        f"- intensity: {args.intensity}\n"
+        f"- qa: {qa}\n"
+        f"- intensity: {intensity}\n"
         f"- dispatch_depth: {args.dispatch_depth}\n"
         f"- worker_type: {args.worker_type}\n"
         f"{guard}"

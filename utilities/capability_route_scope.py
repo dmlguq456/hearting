@@ -438,7 +438,9 @@ def compose_observations(route, t=None):
     answers = [
         (t("route.q.main_capability"), route["capability"]),
         (t("route.q.new_measurement"), t("route.a.lab_declared") if lab_run else t("route.a.depends_on_work")),
-        ("standard+", t("route.a.yes") if route["effective_intensity"] in {"standard", "strong", "thorough", "adversarial"} else t("route.a.no")),
+        # 11-20: a unit route has no intensity, so "is it standard+" has no answer (the record keeps `quick`).
+        ("standard+", t("route.a.not_applicable") if route.get("capability") == TOPO.UNIT_CAPABILITY
+         else t("route.a.yes") if route["effective_intensity"] in {"standard", "strong", "thorough", "adversarial"} else t("route.a.no")),
         (t("route.q.split_stages"), t("route.a.stages_declared", count=len(nodes)) if shape == "staged" else t("route.frame.pending") if shape == "framed" else t("route.a.single_run")),
         (t("route.q.inline_exception"), str(selection.get("inline_reason") or selection.get("selection_basis") or unknown) if shape == "direct" else t("route.a.not_applicable")),
         (t("route.q.delegation_surface"), t("route.a.surface", native=native_label, headless=seen if headless else unknown)),
