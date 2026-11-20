@@ -38,6 +38,7 @@ let cols = process.stdout.columns, rows = process.stdout.rows;
 if (cols < 20 || rows < 8) bypass();
 const nativeDisplay=require('./native-display.cjs');
 const succession=require('./succession.cjs');
+const picking=require('./selection.cjs');
 const {serialize}=succession;
 // A broker that offers hand-over names its channel; without it this host never asks for or takes one.
 const SUCCESSION=process.env.HEARTING_SHELL_SUCCESSION==='1'&&Number(process.env.HEARTING_SHELL_SUCCESSION_FD)>=3;
@@ -150,6 +151,8 @@ function observeForm(){
 let nativeEpoch = 0, lastEnter = -1, submitted = -1, unselected = null, currentDelivery, releasing, heldBytes = 0;
 let expanded = !initialFold.folded, relay = false, paste = false, keyTail = '', cursorVisible = true;
 let screenRevision = 0;
+// The mouse selection in the native area (see `nativePick`) and the last press that began one.
+let pick = null, pressed = null;
 // The screen revision the native had painted when its last native-bound byte arrived, and when
 // (monotonic ms) it arrived. A successor counts from its own start: it knows no earlier key's time.
 let keyRevision = -1, keyAt = performance.now();
@@ -1193,7 +1196,7 @@ function render() {
       const masked=fleetView?0:footerMask.cells.get(y)||0,indent=masked?Math.min(masked,nativeLines[y].match(/^ */)[0].length):0;
       let line=y===notice||y===ownLine?footerLine(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):masked?
         '\x1b[0m'+' '.repeat(indent)+serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,masked)+' '.repeat(masked-indent):
-        serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
+        serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,0,pickMark(y));
       let motion=false;
       if(!fleetView&&geometry().side){
         // The two cells between the native and the panel take the native's own background at
@@ -1354,7 +1357,7 @@ function applyLayout() {
   if(succeeding){layoutDeferred=true;return;}
   if(fleetView){fleetView.child.resize(cols,rows);fleetView.terminal.resize(cols,rows);last=[];schedule();return;}
   refold();wasPinned=pinned();
-  child.resize(nativeColumns(),nativeRows());terminal.resize(nativeColumns(),nativeRows());last=[];footerLast='\0';
+  pick=null;child.resize(nativeColumns(),nativeRows());terminal.resize(nativeColumns(),nativeRows());last=[];footerLast='\0';
   // A table popup is Fleet's table at the popup's width: read again at the new one. Rows laid out at the
   // old width (Fleet's lines above the status document) are not drawn at the new one: the document stands
   // alone until the new read.
@@ -1738,6 +1741,7 @@ mouseInput=require('./panel-mouse.cjs')({
   bytes:inputBytes,
   mouse:(code,x,y,release,raw)=>{
     if(popupMouse(code,x,y,release))return;
+    if(nativePick(code,x,y,release))return;
     if(panelMouse(code,x,y,release))return;
     if(terminal.modes.mouseTrackingMode==='none')return;
     // A left panel moves the native area right; native sees its own columns.
@@ -1773,6 +1777,49 @@ function popupMouse(code,x,y,release){
   }
   return true;
 }
+// 11-20: a native that does not read the mouse (`none`) leaves a drag over its area to the shell, which
+// is what keeps the panel's presses reported to it: the drag selects text, drawn flipped while it goes,
+// and the release copies it to the outer terminal's clipboard (OSC 52) from the shell's own copy of the
+// native screen. Two presses on a cell select its word, three its line. A press that does not drag
+// does what it did before (nothing). A native that reads the mouse gets every report, as before.
+function nativeCell(x,y,clamp){
+  const cx=x-1-geometry().nativeColumn,cy=y-1;
+  if(clamp)return {x:Math.max(0,Math.min(terminal.cols-1,cx)),y:Math.max(0,Math.min(terminal.rows-1,cy))};
+  return cx>=0&&cx<terminal.cols&&cy>=0&&cy<terminal.rows?{x:cx,y:cy}:null;
+}
+function clearPick(){if(pick){pick=null;queueDisplay();}}
+function pickMark(y){return pick?.dragged&&!fleetView?picking.rowSpan(terminal,pick,y):null;}
+function finishPick(cell){
+  if(cell)pick.b=cell;
+  pick.live=false;
+  const single=pick.mode==='cell'&&pick.a.x===pick.b.x&&pick.a.y===pick.b.y;
+  const sequence=pick.dragged&&!single?picking.copySequence(picking.textOf(terminal,pick)):'';
+  if(!sequence)pick=null;else emit(sequence);
+  queueDisplay();
+}
+function nativePick(code,x,y,release){
+  if(fleetView||paste||relay||settings)return false;
+  if(terminal.modes.mouseTrackingMode!=='none'){clearPick();return false;}
+  if((code&0xc0)===64)return false;
+  if(pick?.live){
+    const cell=nativeCell(x,y,true);
+    // A word or a line chosen by presses stays as chosen: the release copies it, motion changes nothing.
+    if(pick.mode!=='cell'&&(release||code>=32)){if(release)finishPick(null);return true;}
+    if(release){finishPick(cell);return true;}
+    if(code>=32){if(cell.x!==pick.b.x||cell.y!==pick.b.y){pick.b=cell;pick.dragged=true;queueDisplay();}return true;}
+    // A press while one is held: its release was lost, so that selection ends here and this one begins.
+    finishPick(null);
+  }
+  if(release||code>=32||(code&3)!==0)return false;
+  const cell=nativeCell(x,y,false);
+  if(!cell)return false;
+  const now=Date.now(),count=picking.clicks(pressed,cell.x,cell.y,now);
+  pressed={...cell,time:now,count};
+  const span=count===2?picking.wordAt(terminal,cell.x,cell.y):count===3?picking.lineAt(terminal,cell.y):null;
+  pick={a:span?span.a:cell,b:span?span.b:cell,mode:span?(count===2?'word':'line'):'cell',live:true,dragged:!!span};
+  if(span)queueDisplay();
+  return true;
+}
 function nativePointer(code,release,raw){
   // A wheel report scrolls; it neither edits the composer nor clicks away
   // the question block. Like a focus report it invalidates the in-flight
@@ -1784,7 +1831,9 @@ function nativePointer(code,release,raw){
   if(currentDelivery){inputOwner.hold(raw);observe(raw);heldBytes+=raw.length;return;}
   observe(raw);child.write(raw);
 }
-function userInput(data){if(data.length){epoch+=data.length;empty=false;mouseInput.feed(data);}}
+// The next input of any kind takes the selection's flipped cells back (a press that starts another
+// makes its own); a key typed while one is being dragged ends it.
+function userInput(data){if(data.length){epoch+=data.length;empty=false;if(pick&&(!pick.live||data[0]!==27||data[1]!==91||data[2]!==60))clearPick();mouseInput.feed(data);}}
 function inputBytes(data) {
   if(!data.length)return;
   while(data.length){
@@ -2054,6 +2103,13 @@ terminal.parser.registerCsiHandler({prefix:'?',final:'l'},p=>{if(p.includes(25))
 for(const [code,rgb] of [[10,'dddd/dddd/dddd'],[11,'1111/1111/1111']])terminal.parser.registerOscHandler(code,text=>{
   if(text==='?'){child.write(`\x1b]${code};rgb:${rgb}\x1b\\`);return true;}return false;
 });
+// 11-20: a clipboard write the native asks for goes on to the outer terminal (the shell holds the
+// native's output, which would otherwise end it here); a read of the clipboard is never passed on.
+terminal.parser.registerOscHandler(52,data=>{
+  const sequence=picking.nativeCopy(data);
+  if(sequence&&!relay&&!ended)emit(sequence);
+  return true;
+});
 
 // ---- the native, the input owner and the backend: the same for a first host and a successor ----
 function adoptNative(paused) {
@@ -2078,7 +2134,7 @@ function startBackend() {
   });
 }
 function wireDisplay() {
-  terminal.onData(data=>child.write(data));terminal.onWriteParsed(()=>{screenRevision++;schedule();});
+  terminal.onData(data=>child.write(data));terminal.onWriteParsed(()=>{screenRevision++;if(pick&&!pick.live)pick=null;schedule();});
   terminal.onTitleChange(title=>{
     try{if(!ended&&!relay)emit(nativeDisplay.titleSequence(title));}catch{rawRelay();}
   });

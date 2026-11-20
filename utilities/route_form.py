@@ -2,7 +2,8 @@
 
 A route's *form* says who makes it -- `direct` (this session, inline), `unit` (one depth-0 leg of a
 read-only unit, no owner), `solo` (one owner process, the `one-shot` node) or `staged`/`framed`
-(stage nodes at depth 2). Its *intensity* says how many independent checks follow. The two are not the
+(stage nodes at depth 2). Its *intensity* says how many independent checks follow; a `unit` route has none
+(one unit does one job and nothing checks it; its record keeps `quick` as `UNIT_RECORDED_INTENSITY`). The two are not the
 same axis, so code that needs "does one owner run this route by itself" asks `one_shot_owner(route)`
 here instead of reading the intensity.
 
@@ -32,14 +33,20 @@ INTENSITY_ORDER = ("direct", "quick", "standard", "strong", "thorough", "adversa
 INTENSITIES = frozenset(INTENSITY_ORDER)
 UNIT_CAPABILITY = "unit"
 DECISION_KIND = "runtime-terminal"  # the framed route's decision terminal (`capability_topology.ROUTE_DECISION_KIND`)
+# A unit route has no intensity: one unit does one job and nothing checks it, so nobody picks a value for it.
+# Its record still carries `quick` (`requested_intensity`, `effective_intensity`) as a compatibility value, because
+# the review-round cap, the continuation budget, the worker's row and Fleet read that field and an old record has it.
+# This is the name of that recorded value; it is what the route is recognized by, never something a person chooses.
+UNIT_RECORDED_INTENSITY = "quick"
 # The one table of "which intensities may a route form carry". The first value is the form's default
-# intensity. `unit` is the kind-`unit` route (one depth-0 leg, no owner); its recorded shape is `solo`.
+# intensity. `unit` is the kind-`unit` route (one depth-0 leg, no owner); its recorded shape is `solo` and it is
+# listed here only for the value its record carries (`UNIT_RECORDED_INTENSITY`), not as an intensity to choose.
 # `framed` is the internal frame route: compose checks no intensity for it, so it reads like `staged`.
 # `solo` carries `standard` and up only where its kind declares a one-shot review (`allowed_intensities`).
 _STAGED = ("standard", "strong", "thorough", "adversarial")
 FORM_INTENSITIES = {
     "direct": ("direct",),
-    "unit": ("quick",),
+    "unit": (UNIT_RECORDED_INTENSITY,),
     "solo": ("quick", *_STAGED),
     "staged": _STAGED,
     "framed": _STAGED,
@@ -84,7 +91,7 @@ def form_of(capability, effective, shape=None, review_declared=False):
     older record with no shape, or one whose shape and intensity disagree) the form follows the
     intensity as it always did. A *sealed* route is read by its nodes (`one_shot_owner`,
     `starts_depth2_nodes`), not by this."""
-    if capability == UNIT_CAPABILITY and effective in FORM_INTENSITIES["unit"]:
+    if capability == UNIT_CAPABILITY and effective == UNIT_RECORDED_INTENSITY:
         return "unit"
     if shape in FORM_INTENSITIES and shape != "unit" and effective in allowed_intensities(shape, review_declared):
         return shape
@@ -155,7 +162,7 @@ def one_shot_owner(route):
 def unit_route(route):
     """Whether this is the unit route: one depth-0 read-only leg and no owner."""
     return (isinstance(route, dict) and route.get("capability") == UNIT_CAPABILITY
-            and route.get("effective_intensity") in FORM_INTENSITIES["unit"])
+            and route.get("effective_intensity") == UNIT_RECORDED_INTENSITY)
 
 
 def serial_attempt_route(route):

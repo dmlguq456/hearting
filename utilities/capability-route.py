@@ -990,13 +990,18 @@ def _compose_unit_arguments(registry, unit, *, capability, capability_mode, shap
     given = [("--capability", capability, (None, TOPO.UNIT_CAPABILITY)),
              ("--capability-mode", capability_mode, (None, "default")),
              ("--shape", shape, (None, "solo")),
-             ("--intensity", intensity, (None, *ROUTE_FORM.FORM_INTENSITIES["unit"])),
+             ("--intensity", intensity, (None, ROUTE_FORM.UNIT_RECORDED_INTENSITY)),   # `quick` is an old command's habit: accepted, ignored
              ("--graph", graph, (None,)), ("--route-plan", route_plan, (None,)),
              ("--signal", signals or None, (None,)), ("--execution-scope", execution_scope, (None,))]
     for flag, value, allowed in given:
         if value not in allowed:
+            if flag == "--intensity":
+                reason = ("a unit route has no intensity: one unit does one job and nothing checks it; to have the work "
+                          "checked open --shape solo or staged with --intensity, and to judge more deeply use --profile")
+            else:
+                reason = "--unit is the kind unit: one leg of that unit"
             raise ValueError(f"compose-unit-conflict:{flag} {value if isinstance(value, str) else ''}".rstrip()
-                             + " (--unit is the kind unit: one quick leg of that unit)")
+                             + f" ({reason})")
     try:
         head = TOPO._unit_frontmatter(unit) if re.fullmatch(r"[a-z-]+/[a-z-]+", unit) else None
     except TOPO.TopologyError:
@@ -1496,9 +1501,8 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         raise ValueError(f"invalid transport: {transport!r}")
     inferred="standard" if signals else ("direct" if set(predicates)==known_pred else "quick")
     effective=max((requested,inferred),key=ORDER.get)
-    unit_intensities=ROUTE_FORM.FORM_INTENSITIES["unit"]
-    if capability==TOPO.UNIT_CAPABILITY and effective not in unit_intensities:
-        raise ValueError(f"compose-unit-conflict:{effective} (a unit route is {','.join(unit_intensities)})")
+    if capability==TOPO.UNIT_CAPABILITY and effective!=ROUTE_FORM.UNIT_RECORDED_INTENSITY:
+        raise ValueError(f"compose-unit-conflict:{effective} (a unit route has no intensity)")
     # The route form this request builds; every form-dependent step below reads it, never `effective`.
     review_declared=one_shot_review_declared(recipe)
     form=ROUTE_FORM.form_of(capability,effective,shape,review_declared)
@@ -1893,7 +1897,7 @@ def main():
     cp.add_argument("--execution-scope", choices=("complete", "report"), default=None,
                     help="optional scope already selected in the existing start confirmation; it is not approval evidence")
     cp.add_argument("--capability",default=None,help="the kind (preset recipe); a direct, solo or staged shape names it, --field, or both; a hint only with --shape framed"); cp.add_argument("--capability-mode",default=None)
-    cp.add_argument("--unit",default=None,metavar="FAMILY/NAME",help="open one read-only unit as a route of its own (the kind unit, quick, no owner); its field is the unit head's `field:`, or name --field; with --start --prompt-file the unit's one worker starts with the brief and its end closes the route")
+    cp.add_argument("--unit",default=None,metavar="FAMILY/NAME",help="open one read-only unit as a route of its own (the kind unit, one leg, no owner, no intensity); its field is the unit head's `field:`, or name --field; with --start --prompt-file the unit's one worker starts with the brief and its end closes the route")
     cp.add_argument("--ephemeral",action="store_true",help="with --unit: leave nothing in the project's artifact folder or campaign records; the route's files stay in a scratch root under the runtime directory and the worker's answer comes back with its completion")
     cp.add_argument("--field",default=None,help="the field of the work (plan, design, code, lab, research, docs, admin, other); alone it opens that field's default recipe, and admin or other also need --capability; a hint only with --shape framed")
     cp.add_argument("--intensity",default=None,help="default by shape: direct/quick/standard; framed defaults to two frame legs, while explicit quick/direct may use one for unprotected work; solo accepts standard and higher where the kind declares a one-shot review; staged accepts standard and higher")

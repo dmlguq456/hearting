@@ -4771,8 +4771,10 @@ def cmd_status(args):
     if args.json:
         print(json.dumps(payload, sort_keys=True, indent=2))
     else:
-        print(f"route      {payload['route_id']} ({payload['capability']}/"
-              f"{payload['capability_mode']} {payload['effective_intensity']})")
+        # 11-20: a unit route has no intensity; `effective_intensity` stays in the record and in `--json`.
+        label = (payload['capability'] if payload['capability'] == "unit"
+                 else f"{payload['capability']}/{payload['capability_mode']} {payload['effective_intensity']}")
+        print(f"route      {payload['route_id']} ({label})")
         print(f"workflow   {payload['workflow_state']} (derived {derived})")
         print(f"owner      {owner.get('attempt_id') or '-'} {owner.get('liveness')} reason={owner.get('reason')}")
         print(f"stage      current={payload['current_stage'] or '-'} "
