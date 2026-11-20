@@ -89,6 +89,71 @@ class Rule(unittest.TestCase):
         with self.assertRaisesRegex(fw.InputError, "different kinds"):
             fw.depth_scores(mixed)
 
+    def run_main(self, data):
+        with tempfile.TemporaryDirectory(prefix="fw-table-") as tmp:
+            path = Path(tmp) / "input.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = fw.main([str(path)])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_harness_that_scores_zero_in_every_comparison_is_refused_naming_field_depth_and_harness(self):
+        data = two_fields()
+        data["fields"]["code"]["depths"]["balanced"] = {"claude": acc(1), "codex": acc(0)}
+        code, out, err = self.run_main(data)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("code: codex: accuracy 0 beside a larger one in every measurement it was compared in (balanced)", err)
+        self.assertNotIn("Traceback", err)
+        # a zero that is only one of several measurements still averages to a score above 0
+        data["fields"]["code"]["depths"]["balanced"] = {"claude": acc(1, 1), "codex": acc(0, 0.5)}
+        self.assertEqual(self.run_main(data)[0], 0)
+        # equal zeros compare as equal
+        data["fields"]["code"]["depths"]["balanced"] = {"claude": acc(0), "codex": acc(0)}
+        self.assertEqual(self.run_main(data)[0], 0)
+
+    def test_depth_mix_and_strength_are_checked_before_they_are_used(self):
+        def with_mix(mix):
+            data = two_fields()
+            data["depth_mix"] = mix
+            return data
+
+        def with_strength(value):
+            data = two_fields()
+            data["fields"]["code"]["strength"] = value
+            return data
+
+        zeros = {depth: 0 for depth in fw.DEPTH_MIX}
+        for data, text in ((with_mix(zeros), "every depth the weight 0"),
+                           (with_mix({"balanced": 0}), "code: claude: `depth_mix` is 0 at every depth it was compared (balanced)"),
+                           (with_mix({"balanced": "x"}), "`depth_mix`.balanced"),
+                           (with_mix({"balanced": -1}), "`depth_mix`.balanced"),
+                           (with_mix([1]), "`depth_mix`"),
+                           (with_strength("high"), "code: `strength` is a number from 0 to 1"),
+                           (with_strength(-1), "code: `strength` is a number from 0 to 1"),
+                           (with_strength(1.5), "code: `strength` is a number from 0 to 1"),
+                           (with_strength(float("nan")), "code: `strength`")):
+            code, out, err = self.run_main(data)
+            self.assertEqual((code, out), (2, ""), data)
+            self.assertIn(text, err)
+            self.assertNotIn("Traceback", err)
+        self.assertEqual(self.run_main(with_strength(0.5))[0], 0)
+        self.assertEqual(self.run_main(with_mix({"balanced": 0.5}))[0], 0)
+
+    def test_a_harness_without_a_value_at_a_depth_is_left_out_of_that_depth(self):
+        # Intended difference from the original calculation, which counted it as 0 at that depth
+        # (code/opencode would come out 0.60 and docs claude/codex 0.90): here nothing is
+        # compared at deep for opencode, so only the depth where all three agree decides.
+        both = {"claude": acc(1), "codex": acc(1)}
+        data = {"fields": {
+            "code": {"depths": {"deep": {**both, "opencode": acc(None)},
+                                "light": {**both, "opencode": acc(1)}}},
+            "docs": {"depths": {"deep": {**both, "opencode": acc(1)}}},
+        }}
+        weights = fw.compute(data)[0]
+        self.assertEqual(weights["code"], {"claude": 1.0, "codex": 1.0, "opencode": 1.0})
+        self.assertEqual(weights["docs"], {"claude": 1.0, "codex": 1.0, "opencode": 1.0})
+
     def test_command_prints_the_weights_block_and_changes_nothing_else(self):
         with tempfile.TemporaryDirectory(prefix="fw-table-") as tmp:
             path = Path(tmp) / "input.json"

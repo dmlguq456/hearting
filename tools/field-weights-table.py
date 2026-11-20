@@ -19,6 +19,17 @@ The i-th value of every harness at one depth is the same measurement, so a measu
 is compared across harnesses only. A value may be `null` (not measured). Which sources
 the numbers came from stays in the work record outside the repository, not in this file.
 
+Accepted input (anything else is refused with exit 2, naming the field, depth and harness):
+`accuracy` is a finite number >= 0, but a harness whose accuracy is 0 beside a larger one in every
+measurement it was compared in for a field is refused (its score would be 0 and the general level
+undefined; no small stand-in is made up); `elo` is a finite number;
+`strength` is a number from 0 to 1; `depth_mix` values are numbers >= 0, and a harness compared at
+depths that all weigh 0 is refused.
+
+One difference from the design's original calculation: a harness with no value to compare at a
+depth is left out of that depth here, where the original counted it as 0 there, so a field with
+such a gap can come out differently from the original.
+
 The rule ("keep some", core/OPERATIONS.md §5.10):
 
 1. Compare only inside one depth, among the harnesses that have a value for that measurement.
@@ -78,15 +89,28 @@ def depth_scores(harnesses):
 
 def field_scores(depths, mix):
     """`{harness: R}` for a field, best = 1, mixed over the depths where the harness was compared."""
-    total, weight = {}, {}
+    total, weight, seen = {}, {}, {}
     for depth, harnesses in depths.items():
         if len(harnesses) < 2:
             continue
-        for harness, score in depth_scores(harnesses).items():
+        try:
+            scores = depth_scores(harnesses)
+        except InputError as exc:
+            raise InputError(f"depth {depth}: {exc}") from None
+        for harness, score in scores.items():
             total[harness] = total.get(harness, 0.0) + mix[depth] * score
             weight[harness] = weight.get(harness, 0.0) + mix[depth]
+            seen.setdefault(harness, []).append(depth)
+    for harness, amount in weight.items():
+        if amount <= 0:
+            raise InputError(f"{harness}: `depth_mix` is 0 at every depth it was compared ({', '.join(seen[harness])})")
     mixed = {harness: total[harness] / weight[harness] for harness in total}
     best = max(mixed.values(), default=0.0)
+    for harness, value in mixed.items():
+        if best > 0 and value == 0:
+            raise InputError(f"{harness}: accuracy 0 beside a larger one in every measurement it was compared "
+                             f"in ({', '.join(seen[harness])}), so its score is 0 and its general level is "
+                             "undefined; the rule refuses a 0 and does not stand in a small number")
     return {harness: value / best for harness, value in mixed.items()} if best > 0 else {}
 
 
@@ -98,10 +122,13 @@ def compute(data):
         for depth in body.get("depths", {}):
             if depth not in mix:
                 raise InputError(f"{field}: unknown depth {depth!r} (known: {', '.join(mix)})")
-        scores = field_scores(body.get("depths", {}), mix)
+        try:
+            scores = field_scores(body.get("depths", {}), mix)
+        except InputError as exc:
+            raise InputError(f"{field}: {exc}") from None
         if scores:
             scored[field] = scores
-            strength[field] = body.get("strength", STRENGTH.get(field))
+            strength[field] = body["strength"] if body.get("strength") is not None else STRENGTH.get(field)
             if strength[field] is None:
                 raise InputError(f"{field}: no default strength; give `strength`")
     general = {}
@@ -121,12 +148,27 @@ def compute(data):
     return weights, detail
 
 
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def validate(data):
     if not isinstance(data, dict) or not isinstance(data.get("fields"), dict):
         raise InputError("the input needs a `fields` object")
+    mix = data.get("depth_mix")
+    if mix is not None:
+        if not isinstance(mix, dict):
+            raise InputError("`depth_mix` is an object of depth -> number >= 0")
+        for depth, value in mix.items():
+            if not (_number(value) and value >= 0):
+                raise InputError(f"`depth_mix`.{depth}: a number >= 0")
+        if sum(dict(DEPTH_MIX, **mix).values()) <= 0:
+            raise InputError("`depth_mix` gives every depth the weight 0")
     for field, body in data["fields"].items():
         if not isinstance(body, dict) or not isinstance(body.get("depths"), dict):
             raise InputError(f"{field}: needs a `depths` object")
+        if body.get("strength") is not None and not (_number(body["strength"]) and 0 <= body["strength"] <= 1):
+            raise InputError(f"{field}: `strength` is a number from 0 to 1")
         for depth, harnesses in body["depths"].items():
             if not isinstance(harnesses, dict):
                 raise InputError(f"{field}.{depth}: needs a harness object")
@@ -136,9 +178,11 @@ def validate(data):
                 for item in items:
                     value = item.get("value") if isinstance(item, dict) else None
                     if not isinstance(item, dict) or item.get("kind") not in KINDS or (
-                            value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)))):
+                            value is not None and not _number(value)):
                         raise InputError(f"{field}.{depth}.{harness}: each value is "
-                                         f"{{\"kind\": accuracy|elo, \"value\": number|null}}")
+                                         f"{{\"kind\": accuracy|elo, \"value\": finite number|null}}")
+                    if item["kind"] == "accuracy" and value is not None and value < 0:
+                        raise InputError(f"{field}.{depth}.{harness}: an accuracy is a number >= 0")
 
 
 def main(argv=None):
@@ -151,7 +195,7 @@ def main(argv=None):
             data = json.load(handle)
         validate(data)
         weights, detail = compute(data)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, ArithmeticError) as exc:
         print(f"field-weights-table: {exc}", file=sys.stderr)
         return 2
     if args.explain:

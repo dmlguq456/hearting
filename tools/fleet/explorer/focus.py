@@ -949,7 +949,7 @@ def _allocation_fields(policy, field_view=None):
             fields.append(["weights:", parts])
             if field_view:
                 from .models import field_line_fragments
-                fields.append(["field:", field_line_fragments(field_view)])
+                fields.append(["field tilt:", field_line_fragments(field_view)])
         affinity = allocation.get("depth_affinity") or {}
         parts = []
         if affinity.get("worker"):
@@ -1172,7 +1172,10 @@ def read_model_config():
                 note = "last resort " + " ".join(bands["last_resort"])
             pools[profile] = [[list(bands.get("primary") or ())], note]
         pools.setdefault("top", None)
-        field_view = _field_view(module, policy, profile_map, model_config)
+        try:
+            field_view = _field_view(module, policy, profile_map, model_config)
+        except Exception:
+            field_view = None          # an unreadable field table leaves only its own line out
         allocation = {"fields": _allocation_fields(policy, field_view),
                       "note": "new dispatch decisions only · running and sealed routes keep their choice"}
         if field_view:
