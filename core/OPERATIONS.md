@@ -1284,9 +1284,11 @@ A legacy hash collision is diagnostic
      integration ref, main automatically runs
      `utilities/worktree-cleanup.py --check --worktree <path>` and then the
      same command with `--apply` when eligible. The state machine blocks the
-     primary worktree, dirty/untracked state, Git operations, locks, unmerged
+     primary worktree, dirty/untracked state, ignored files other than
+     rebuildable caches, Git operations, locks, unmerged
      HEADs absent from a freshly fetched remote default branch, local
-     integration commits not present in that remote tip, and active exact job
+     integration commits not present in that remote tip, a worktree whose
+     owner cannot be established, and active exact job
      PIDs or process cwd. A local integration branch may be behind the remote
      tip; cleanup does not require switching to or updating that branch. If
      remote evidence cannot be refreshed, cleanup blocks instead of trusting a
@@ -1300,6 +1302,26 @@ A legacy hash collision is diagnostic
      ref without remote evidence and records `integration_upstream=local-only`.
      It does not infer local-only from a missing upstream and does not weaken
      clean, merged, inactive-process, lock, or Git-operation gates.
+   - `git worktree remove` deletes ignored files with the folder, so the clean
+     check also reads them (`status --ignored=matching`, which counts a wholly
+     ignored folder as one entry). Only a short fixed list of rebuildable caches
+     does not count: `__pycache__/`, `*.pyc`, `.pytest_cache/`, `.mypy_cache/`
+     and `.ruff_cache/`; names that can hold results (`build/`, `dist/`,
+     `node_modules/`, `.venv/`, checkpoints) are never on it, and nothing
+     selects or extends the list. Any other ignored file blocks with
+     `ignored-files`, `artifact_harvest_required=1`, and the count, total size
+     and largest paths; move or delete them, then run `--check` again. The
+     final recheck before removal reads them again.
+   - The owner check accepts a worktree owned by the running user, or one owned
+     like this repository's shared git directory when the running user can
+     write that directory (network mounts show every file under one foreign
+     uid); any other owner stays `worktree-owner-unknown`. In the process scan,
+     a same-user process whose cwd the kernel refuses to show (login-session
+     processes, the user service manager) is counted as `unreadable_pids=N`
+     instead of making the whole scan unknown; it cannot be placed in or out of
+     the worktree, while registry-known worker PIDs and every readable cwd are
+     still checked, and any other read failure still blocks as
+     `process-scan-unavailable`.
    - Cleanup does not copy or harvest agent artifacts: workers wrote them to
      the canonical root from the start. A stale matching open registry row is
      reconciled to `done,note=cleanup-merged` only after every other safety

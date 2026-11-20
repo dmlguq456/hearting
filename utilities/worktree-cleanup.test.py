@@ -19,6 +19,7 @@ import json
 import sys
 import signal
 import textwrap
+import types
 from unittest import mock
 
 
@@ -261,16 +262,19 @@ class WorktreeCleanupTests(unittest.TestCase):
             CLEANUP.evaluate(path, self.fx.jobs, None)
         self.assertEqual(log.read_text().splitlines(), ["0"])
 
-    def test_private_process_view_preserves_real_unreadable_actor(self):
+    def test_private_process_view_counts_real_unreadable_actor_without_blocking(self):
         path = self.fx.add_worktree('fixture-unreadable')
         with RawProcessTests.actor(self, path, unreadable=True) as process:
             self.assertIn(str(process.pid), self.fx.actors.read_text().splitlines())
             self.assertFalse(CLEANUP.proc_is_gone(Path('/proc') / str(process.pid)))
-            self.assertEqual(CLEANUP.process_snapshot()[0], 'procfs-unknown')
-            result = self.fx.cleanup(path, apply=True)
-            self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-            self.assertIn('process-scan-unavailable', result.stdout)
-            self.assertTrue(path.is_dir())
+            kind, rows, unreadable = CLEANUP.process_snapshot()
+            self.assertEqual((kind, unreadable), ('procfs', 1))
+            self.assertNotIn(process.pid, [pid for pid, _start, _cwd in rows])
+            result = self.fx.cleanup(path)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('process_scan=procfs\n', result.stdout)
+            self.assertIn('unreadable_pids=1', result.stdout)
+            self.assertNotIn('process-scan-unavailable', result.stdout)
             self.assertIsNone(process.poll())
 
     def test_fixture_close_retains_live_actor_diagnostics_on_repeat(self):
@@ -513,6 +517,177 @@ class WorktreeCleanupTests(unittest.TestCase):
         self.assertIn("dirty", result.stdout)
         self.assertTrue(path.exists())
 
+    def ignore(self, *patterns):
+        """Ignore through the shared info/exclude: no tracked file, no dirt."""
+        exclude = self.fx.repo / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(exist_ok=True)
+        with exclude.open("a", encoding="utf-8") as handle:
+            handle.write("\n".join(patterns) + "\n")
+
+    def test_ignored_result_blocks_cleanup_and_reports_it(self):
+        self.ignore("out/", "*.ckpt")
+        path = self.fx.add_worktree("ignored-result")
+        (path / "out").mkdir()
+        (path / "out" / "model.bin").write_bytes(b"m" * 3000)
+        (path / "out" / "log.txt").write_bytes(b"l" * 10)
+        (path / "weights.ckpt").write_bytes(b"w" * 500)
+        status = run(["git", "-C", str(path), "status", "--porcelain=v1"]).stdout
+        self.assertEqual(status, "", "the fixture must look clean to a plain status")
+        for apply in (False, True):
+            result = self.fx.cleanup(path, apply=apply)
+            self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+            self.assertIn("status=blocked", result.stdout)
+            self.assertIn("reasons=ignored-files", result.stdout)
+            self.assertIn("artifact_harvest_required=1", result.stdout)
+            self.assertIn("ignored_files=3\n", result.stdout)
+            self.assertIn("ignored_bytes=3510\n", result.stdout)
+            # largest first; a wholly ignored folder is one entry
+            self.assertLess(result.stdout.index("ignored_path=3010 out/"),
+                            result.stdout.index("ignored_path=500 weights.ckpt"))
+            self.assertTrue((path / "out" / "model.bin").is_file())
+            self.assertTrue((path / "weights.ckpt").is_file())
+        self.assertFalse(self.fx.audit.exists())
+
+    def test_moving_the_ignored_result_away_reopens_the_normal_path(self):
+        self.ignore("out/")
+        path = self.fx.add_worktree("ignored-moved")
+        (path / "out").mkdir()
+        (path / "out" / "model.bin").write_bytes(b"m")
+        self.assertIn("ignored-files", self.fx.cleanup(path).stdout)
+        shutil.move(str(path / "out"), str(self.fx.root / "harvested"))
+        result = self.fx.cleanup(path, apply=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("status=removed", result.stdout)
+        self.assertIn("artifact_harvest_required=0", result.stdout)
+        self.assertFalse(path.exists())
+
+    def test_only_rebuildable_caches_are_removed_with_the_worktree(self):
+        self.ignore("__pycache__/", "*.pyc", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/")
+        path = self.fx.add_worktree("cache-only")
+        for rel in ("pkg/__pycache__/m.cpython-312.pyc", ".pytest_cache/v/cache/x", ".mypy_cache/3.12/m.json",
+                    ".ruff_cache/0.1/z", "loose.pyc"):
+            (path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (path / rel).write_bytes(b"c")
+        checked = self.fx.cleanup(path)
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertIn("status=eligible", checked.stdout)
+        self.assertIn("artifact_harvest_required=0", checked.stdout)
+        applied = self.fx.cleanup(path, apply=True)
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        self.assertFalse(path.exists())
+
+    def test_names_that_can_hold_results_are_not_treated_as_caches(self):
+        self.ignore("build/", "dist/", "node_modules/", ".venv/", "*.ckpt")
+        for name in ("build/a", "dist/a", "node_modules/a/b", ".venv/bin/python", "data/__pycache__/m.ckpt",
+                     "pkg/not-pyc.pyc.bak.ckpt"):
+            with self.subTest(entry=name):
+                path = self.fx.add_worktree("keep-" + str(abs(hash(name)) % 10**8))
+                (path / name).parent.mkdir(parents=True, exist_ok=True)
+                (path / name).write_bytes(b"x")
+                result = self.fx.cleanup(path)
+                self.assertEqual(result.returncode, 3, result.stdout)
+                self.assertIn("ignored-files", result.stdout)
+
+    def test_cache_beside_a_result_still_blocks_and_lists_only_the_result(self):
+        self.ignore("out/", "__pycache__/")
+        path = self.fx.add_worktree("cache-and-result")
+        (path / "__pycache__").mkdir()
+        (path / "__pycache__" / "m.pyc").write_bytes(b"c" * 9999)
+        (path / "out").mkdir()
+        (path / "out" / "r").write_bytes(b"r" * 7)
+        result = self.fx.cleanup(path)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("ignored_files=1\n", result.stdout)
+        self.assertIn("ignored_path=7 out/", result.stdout)
+        self.assertNotIn("__pycache__", result.stdout)
+
+    def test_dirt_and_ignored_results_are_both_reported(self):
+        self.ignore("out/")
+        path = self.fx.add_worktree("dirty-and-ignored")
+        (path / "out").mkdir()
+        (path / "out" / "r").write_bytes(b"r")
+        (path / "untracked.txt").write_text("x\n", encoding="utf-8")
+        result = self.fx.cleanup(path)
+        self.assertIn("reasons=dirty,ignored-files", result.stdout)
+
+    def test_many_ignored_files_count_as_one_folder_and_measure_with_a_bound(self):
+        self.ignore("out/")
+        path = self.fx.add_worktree("many-ignored")
+        (path / "out").mkdir()
+        for i in range(3000):
+            (path / "out" / f"f{i}").write_bytes(b"x")
+        status = run(["git", "-C", str(path), "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                      "--ignored=matching"]).stdout
+        self.assertEqual(status, "!! out/\0")
+        result = self.fx.cleanup(path)
+        self.assertIn("ignored_files=3000\n", result.stdout)
+        self.assertIn("ignored_bytes=3000\n", result.stdout)
+        with mock.patch.object(CLEANUP, "MEASURE_FILE_LIMIT", 10):
+            verdict = CLEANUP.evaluate(path, self.fx.jobs, None)
+        self.assertIn("ignored-files", verdict.reasons)
+        self.assertEqual((verdict.ignored_files, verdict.ignored_truncated), (10, True))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            CLEANUP.emit(verdict, "blocked")
+        self.assertIn("ignored_files=10+\n", output.getvalue())
+
+    def test_ignored_result_made_after_the_check_blocks_the_final_recheck(self):
+        self.ignore("out/")
+        path = self.fx.add_worktree("ignored-late")
+        context = CLEANUP.CleanupPass(path, self.fx.jobs)
+        verdict = CLEANUP.evaluate(path, self.fx.jobs, None, context=context)
+        self.assertTrue(verdict.eligible, verdict.reasons)
+        (path / "out").mkdir()
+        (path / "out" / "r").write_bytes(b"r")
+        checked = context.before_remove(path, self.fx.jobs, None, "remote", verdict)
+        self.assertFalse(checked.eligible)
+        self.assertIn("ignored-files", checked.reasons)
+
+    def test_ignored_cache_only_worktree_like_hearting_own_is_cleaned(self):
+        # Hearting's own working copies hold nothing ignored but __pycache__.
+        (self.fx.repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+        run(["git", "-C", str(self.fx.repo), "add", ".gitignore"])
+        run(["git", "-C", str(self.fx.repo), "commit", "-qm", "ignore"])
+        run(["git", "-C", str(self.fx.repo), "push", "-q", "origin", "main"])
+        path = self.fx.add_worktree("hearting-like", with_commit=True)
+        self.fx.merge_and_push("hearting-like")
+        for i in range(150):
+            (path / f"pkg{i}" / "__pycache__").mkdir(parents=True)
+            (path / f"pkg{i}" / "__pycache__" / "m.cpython-312.pyc").write_bytes(b"c")
+        applied = self.fx.cleanup(path, apply=True)
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        self.assertIn("status=removed", applied.stdout)
+        self.assertFalse(path.exists())
+
+    def test_worktree_owner_known_only_for_self_or_the_shared_git_owner(self):
+        path = self.fx.add_worktree("owner-cases")
+        common = CLEANUP.common_git_dir(path)
+        mine = os.geteuid()
+        self.assertTrue(CLEANUP.owner_is_known(path, common))  # own checkout
+
+        class Common:
+            def __init__(self, uid):
+                self.uid = uid
+
+            def stat(self):
+                return types.SimpleNamespace(st_uid=self.uid)
+
+        # A mount that shows every file under one foreign uid: the checkout and
+        # the shared git directory agree, and this user can write the latter.
+        with mock.patch.object(CLEANUP.os, "geteuid", return_value=mine + 1):
+            self.assertTrue(CLEANUP.owner_is_known(path, common))
+            verdict = CLEANUP.evaluate(path, self.fx.jobs, None)
+            self.assertNotIn("worktree-owner-unknown", verdict.reasons)
+            # Same owner as the git directory, but this user cannot write it.
+            with mock.patch.object(CLEANUP.os, "access", return_value=False):
+                self.assertFalse(CLEANUP.owner_is_known(path, common))
+                verdict = CLEANUP.evaluate(path, self.fx.jobs, None)
+                self.assertIn("worktree-owner-unknown", verdict.reasons)
+            # Someone else's checkout: owner differs from the git directory's.
+            self.assertFalse(CLEANUP.owner_is_known(path, Common(mine + 5)))
+            # An unreadable git directory proves nothing.
+            self.assertFalse(CLEANUP.owner_is_known(path, self.fx.root / "missing"))
+
     def test_unmerged_is_blocked(self):
         path = self.fx.add_worktree("unmerged", with_commit=True)
         result = self.fx.cleanup(path)
@@ -580,9 +755,21 @@ class WorktreeCleanupTests(unittest.TestCase):
                 self.assertFalse(verdict.eligible)
                 self.assertIn(f"git-operation-{operation}", verdict.reasons)
 
+    def test_jobs_must_be_absolute_is_a_usage_error_not_a_traceback(self):
+        path = self.fx.add_worktree("relative-jobs")
+        result = run([str(SCRIPT), "--check", "--worktree", str(path), "--jobs", "4"],
+                     cwd=self.fx.root, check=False)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(len([line for line in result.stderr.splitlines() if "error:" in line]), 1)
+        self.assertIn("--jobs: jobs-must-be-absolute (4)", result.stderr.splitlines()[-1])
+        self.assertTrue(path.is_dir())
+        helped = run([str(SCRIPT), "--help"], check=False)
+        self.assertIn("jobs.log", " ".join(helped.stdout.split()))
+
     def test_unavailable_process_scan_is_still_blocked(self):
         path = self.fx.add_worktree("no-process-scan")
-        with mock.patch.object(CLEANUP, "process_cwds", return_value=("unavailable", [])):
+        with mock.patch.object(CLEANUP, "process_cwds", return_value=("unavailable", [], 0)):
             verdict = CLEANUP.evaluate(path, self.fx.jobs, None)
         self.assertFalse(verdict.eligible)
         self.assertIn("process-scan-unavailable", verdict.reasons)
@@ -862,7 +1049,7 @@ class BatchCleanupTests(unittest.TestCase):
                     elif change == "new-cwd":
                         owned.append(subprocess.Popen(["sleep", "30"], cwd=path))
                     if change == "unknown-proc":
-                        with mock.patch.object(CLEANUP, "process_cwds", return_value=("procfs-unknown", [])):
+                        with mock.patch.object(CLEANUP, "process_cwds", return_value=("procfs-unknown", [], 0)):
                             return original(context, target, *args)
                     return original(context, target, *args)
 
@@ -1039,7 +1226,7 @@ class BatchCleanupTests(unittest.TestCase):
                                              "requests": requests}))
                 self.assertEqual(CLEANUP.registry_duty(self.fx.jobs, path, rows), protected)
 
-    def test_proc_cwd_map_is_lexical_and_unreadable_same_uid_is_unknown(self):
+    def test_proc_cwd_map_is_lexical_and_refused_cwd_is_counted_not_unknown(self):
         entry = self.fx.root / "123456"
         entry.mkdir()
         native_iterdir = Path.iterdir
@@ -1049,12 +1236,50 @@ class BatchCleanupTests(unittest.TestCase):
                 mock.patch.object(CLEANUP, "read_proc_start", return_value="100"), \
                 mock.patch.object(CLEANUP.os, "readlink", return_value=str(self.fx.repo / "sub")), \
                 mock.patch.object(CLEANUP, "normalize", side_effect=AssertionError("no NAS resolve")):
-            kind, rows = CLEANUP.process_snapshot()
-            self.assertEqual((kind, rows[0][2]), ("procfs", self.fx.repo / "sub"))
+            kind, rows, unreadable = CLEANUP.process_snapshot()
+            self.assertEqual((kind, rows[0][2], unreadable), ("procfs", self.fx.repo / "sub", 0))
         with mock.patch.object(Path, "iterdir", entries), \
                 mock.patch.object(CLEANUP, "read_proc_start", return_value="100"), \
-                mock.patch.object(CLEANUP.os, "readlink", side_effect=PermissionError("unknown")):
-            self.assertEqual(CLEANUP.process_snapshot()[0], "procfs-unknown")
+                mock.patch.object(CLEANUP.os, "readlink", side_effect=PermissionError("refused")):
+            self.assertEqual(CLEANUP.process_snapshot(), ("procfs", (), 1))
+
+    def test_other_cwd_failures_are_still_unknown(self):
+        entry = self.fx.root / "123457"
+        entry.mkdir()
+        native_iterdir = Path.iterdir
+        def entries(path):
+            return iter([entry]) if path == Path("/proc") else native_iterdir(path)
+        cases = {
+            "io-error": dict(read_proc_start=["100", "100"], readlink=OSError(5, "io")),
+            "start-time-changed": dict(read_proc_start=["100", "101"], readlink=str(self.fx.repo)),
+            "no-start-time": dict(read_proc_start=[None], readlink=str(self.fx.repo)),
+            "vanishing-cwd": dict(read_proc_start=["100", "100"], readlink=FileNotFoundError("gone")),
+        }
+        for name, case in cases.items():
+            with self.subTest(case=name):
+                readlink = ({"side_effect": case["readlink"]} if isinstance(case["readlink"], Exception)
+                            else {"return_value": case["readlink"]})
+                with mock.patch.object(Path, "iterdir", entries), \
+                        mock.patch.object(CLEANUP, "read_proc_start", side_effect=case["read_proc_start"]), \
+                        mock.patch.object(CLEANUP, "proc_is_gone", return_value=False), \
+                        mock.patch.object(CLEANUP.os, "readlink", **readlink):
+                    kind, rows, unreadable = CLEANUP.process_snapshot()
+                self.assertEqual((kind, unreadable), ("procfs-unknown", 0))
+
+    def test_unreadable_count_does_not_hide_a_readable_holder(self):
+        path = self.fx.add_worktree("readable-beside-unreadable")
+        with RawProcessTests.actor(self, path, unreadable=True):
+            holder = subprocess.Popen(["sleep", "30"], cwd=path)
+            try:
+                time.sleep(0.1)
+                result = self.fx.cleanup(path)
+            finally:
+                holder.terminate()
+                holder.wait(timeout=5)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("active-process", result.stdout)
+        self.assertIn("unreadable_pids=1", result.stdout)
+        self.assertNotIn("process-scan-unavailable", result.stdout)
 
 
 class ProcStatTests(unittest.TestCase):
@@ -1092,7 +1317,7 @@ class ProcStatTests(unittest.TestCase):
                             mock.patch.object(Path, 'iterdir', entries):
                         self.assertEqual(CLEANUP.read_proc_start(999999999), start)
                         self.assertEqual(CLEANUP.proc_is_gone(entry), gone)
-                        self.assertEqual(CLEANUP.process_snapshot(), (kind, ()))
+                        self.assertEqual(CLEANUP.process_snapshot(), (kind, (), 0))
 
 
 class RawProcessTests(unittest.TestCase):
@@ -1147,19 +1372,23 @@ class RawProcessTests(unittest.TestCase):
     def test_raw_cli_keeps_real_live_cwd_holder(self):
         path = self.fx.add_worktree('raw-live')
         with self.actor(path) as process:
-            kind, rows = CLEANUP.process_snapshot()
+            kind, rows, _unreadable = CLEANUP.process_snapshot()
             self.assertIn((process.pid, CLEANUP.read_proc_start(process.pid), path), rows)
             self.assert_kept(path, reason='active-process')
             self.assertIsNone(process.poll())
 
-    def test_raw_cli_keeps_real_unreadable_live_holder(self):
+    def test_real_unreadable_holder_is_counted_by_the_kernels_own_refusal(self):
         path = self.fx.add_worktree('raw-unreadable')
         with self.actor(path, unreadable=True) as process:
+            entry = Path('/proc') / str(process.pid)
             with self.assertRaises(PermissionError):
-                os.readlink(Path('/proc') / str(process.pid) / 'cwd')
-            self.assertFalse(CLEANUP.proc_is_gone(Path('/proc') / str(process.pid)))
-            self.assertEqual(CLEANUP.process_snapshot()[0], 'procfs-unknown')
-            self.assert_kept(path, reason='process-scan-unavailable')
+                os.readlink(entry / 'cwd')
+            self.assertFalse(CLEANUP.proc_is_gone(entry))
+            native_entries = Path.iterdir
+            def entries(value):
+                return iter([entry]) if value == Path('/proc') else native_entries(value)
+            with mock.patch.object(Path, 'iterdir', entries):
+                self.assertEqual(CLEANUP.process_snapshot(), ('procfs', (), 1))
             self.assertIsNone(process.poll())
 
     def test_raw_cli_keeps_live_thread_after_main_thread_exit(self):
@@ -1192,7 +1421,7 @@ class RawProcessTests(unittest.TestCase):
             def entries(value):
                 return iter([entry]) if value == Path('/proc') else native_entries(value)
             with mock.patch.object(Path, 'iterdir', entries), mock.patch.object(os, 'readlink', readlink):
-                self.assertEqual(CLEANUP.process_snapshot(), ('procfs', ()))
+                self.assertEqual(CLEANUP.process_snapshot(), ('procfs', (), 0))
             self.assertEqual(seen, [str(path)])
             self.assertTrue(CLEANUP.proc_is_gone(entry))
 
@@ -1215,7 +1444,7 @@ class RawProcessTests(unittest.TestCase):
             def entries(value):
                 return iter([entry]) if value == Path('/proc') else native_entries(value)
             with mock.patch.object(Path, 'iterdir', entries):
-                self.assertEqual(CLEANUP.process_snapshot(), ('procfs', ()))
+                self.assertEqual(CLEANUP.process_snapshot(), ('procfs', (), 0))
 
 
 class ObservationBoundaryTests(unittest.TestCase):
