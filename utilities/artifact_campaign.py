@@ -735,6 +735,44 @@ def _layout_blockers(root):
         return []
 
 
+def _named_by_records(root, blockers):
+    """For each `not-a-cycle` folder that a cycle record names as its place (its `locator` is the folder's name),
+    one phrase: which record, in which state, and what moving the folder out of campaigns/ does to it.  Said as
+    the scan and the reconcile treat it: only a closed cycle with a published row is taken for gone."""
+    names = {Path(where).name for where, reason in blockers if reason == "not-a-cycle"}
+    if not names:
+        return []
+    named = {}
+    directory = Path(root) / ".runtime/artifact-producer/v1/cycles"
+    try:
+        entries = sorted(directory.glob("[!.]*.json"))
+    except OSError:
+        return []
+    for entry in entries:
+        try:
+            record, _ = read_json(root, entry)
+        except CampaignError:
+            continue
+        if record.get("locator") in names:
+            named.setdefault(record["locator"], []).append(record)
+    phrases = []
+    for where, reason in blockers:
+        if reason != "not-a-cycle":
+            continue
+        for record in named.get(Path(where).name, [])[:3]:
+            state = "deleted" if record.get("deleted_at") else record.get("state")
+            if state in DETACHED_STATES or state == "deleted":
+                effect = ("moving it out of campaigns/ leaves that record exactly as it is: the cycle ended with no "
+                          "output, so nothing is recorded as deleted")
+            elif state in {"sealed", "superseded"}:
+                effect = ("moving it out of campaigns/ would make campaign-close record that cycle as deleted for good")
+            else:
+                effect = "that cycle is not finished, and this is where it works: do not move it"
+            phrases.append(f"named-by={where}: cycle {record.get('cycle_id')} state={state} "
+                           f"campaign={record.get('campaign_id')}, whose locator is this folder's name; {effect}")
+    return phrases
+
+
 def _bindings_detail(root, ids, directories):
     """Which listed cycle has no folder and which folder is not listed, what keeps the close from taking a
     vanished folder for gone (named by its path from the root), and what a person can do about it."""
@@ -751,6 +789,7 @@ def _bindings_detail(root, ids, directories):
             shown = "; ".join(f"{where} ({reason})" for where, reason in blockers[:5])
             more = f" +{len(blockers) - 5} more" if len(blockers) > 5 else ""
             parts.append(f"held-back-by={shown}{more}")
+            parts.extend(_named_by_records(root, blockers[:5]))
             kinds = list(dict.fromkeys(reason.split(" ", 1)[0] for _where, reason in blockers))
             advice = "; ".join(f"{kind}: {_BLOCKER_ADVICE[kind]}" for kind in kinds if kind in _BLOCKER_ADVICE)
             settleable = any(kind != "old-cycles-layout" for kind in kinds)
@@ -1165,6 +1204,8 @@ def status(root, selection):
                 "projection_pending": folded.projection_pending}
     try:
         snapshot = _snapshot(root, path)
+        # The same limit the close ends with, taken without the closure's own few lines.
+        _refuse_unreadable_size(len(canonical(snapshot)) + 1, "campaign.satisfied", {"snapshot": snapshot})
         result = {"status": "active", "state": "active", "campaign_id": record["campaign_id"],
                   "goal": record.get("goal"), "completion_criterion": record.get("completion_criterion"),
                   "cycles": [{**row, "disposition": disposition(row)} for row in snapshot["cycles"]],
@@ -1255,6 +1296,22 @@ def _agent_actor():
     return "agent:%s:%s" % (harness, session), {"harness": harness, "session_id": session}
 
 
+def _refuse_unreadable_size(size, event_type, payload):
+    """What is published is read back by every reader under the one read limit of a record: an event over it
+    would be a close that status, list, export and reopen could not read, so it is refused before anything is
+    written (`size` is exactly the bytes `_publish_event` writes)."""
+    if size <= MAX_JSON:
+        return
+    snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
+    members = len(snapshot.get("cycles") or []) if isinstance(snapshot, dict) else 0
+    raise CampaignError("campaign-event-too-large", {
+        "event_type": event_type, "bytes": size, "read_limit": MAX_JSON, "members": members,
+        "detail": "the closing event holds one row for each cycle of the campaign and is larger than the "
+                  "one record a reader may take; nothing was written and the campaign is still active",
+        "next_step": "the campaign has more cycles than one closing record can hold: leave it open and "
+                     "begin further work under another campaign"})
+
+
 def _new_event(root, path, state, event_type, actor, payload, provenance):
     event = {"stream_id": state.stream_id or identity.IdAllocator().allocate("stream"),
              "stream_sequence": state.last_sequence + 1, "event_type": event_type,
@@ -1266,6 +1323,7 @@ def _new_event(root, path, state, event_type, actor, payload, provenance):
     manifest._v_event_row(event, "$", violations)
     if violations:
         raise CampaignError("campaign-event-invalid", violations[:3])
+    _refuse_unreadable_size(len(canonical(event)) + 1, event_type, payload)
     return event
 
 

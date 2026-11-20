@@ -29,7 +29,7 @@ from artifact_producer_store import (
     _earlier_documents, _folder_cycle_id, _fsync_dir, _json_bytes, _LayoutScan, _read_json,
     _rfc3339, _write_atomic, _write_campaign, _write_campaign_runtime_record,
     _write_cycle_record, campaign_dir, campaign_runtime_record, CONTRACT, cycle_dir,
-    cycle_disposition, is_active, list_cycle_records, ProducerError, read_campaign,
+    cycle_disposition, is_active, list_cycle_records, producer_dir, ProducerError, read_campaign,
     read_campaign_tombstone, read_cycle_record, RELATED_KINDS,
 )
 
@@ -1128,6 +1128,50 @@ def delete_campaign(root: Path, campaign: str, *, reason: Optional[str] = None,
     return dict(done, reparented=reparented) if reparented else done
 
 
+def _is_shell_of_detached_cycle(root: Path, campaign_id: str, name: str, folder: Path,
+                                places: Dict[str, Any]) -> bool:
+    """A folder with no `.cycle.json` and no manifest that is nobody's unknown: the record of a cycle that ended
+    with no output or was deleted (state `abandoned` or `no-lineage`, or `deleted_at`) names it as its own place
+    (this campaign, this folder name), and nothing is in it but empty folders.
+
+    Only a closed cycle with a published row can be taken for gone, and the identity files of a cycle that
+    has a record naming this very place are what this folder lacks: no cycle's work can be what is left here, so
+    it does not keep the scan from saying what is gone.  A folder that holds a file, one named by a record of
+    another campaign or by no detached record stays what it was, a blocker."""
+    if "records" not in places:
+        keys: Dict[Tuple[str, str], str] = {}
+        directory = producer_dir(root) / "cycles"
+        for entry in sorted(directory.iterdir(), key=lambda p: p.name) if directory.is_dir() else []:
+            record = _read_json(entry) if entry.suffix == ".json" and not entry.name.startswith(".") else None
+            if record is None:
+                continue
+            locator = record.get("locator")
+            if (isinstance(locator, str) and isinstance(record.get("campaign_id"), str)
+                    and (record.get("state") in artifact_campaign.DETACHED_STATES or record.get("deleted_at"))):
+                keys[(record["campaign_id"], locator)] = record.get("cycle_id")
+        places["records"] = keys
+    if (campaign_id, name) not in places["records"]:
+        return False
+    return _holds_no_file(folder)
+
+
+def _holds_no_file(folder: Path, *, limit: int = 1000) -> bool:
+    """True when nothing but folders is under `folder` (a link of any kind is something)."""
+    seen = 0
+
+    def unreadable(exc):
+        raise exc
+
+    try:
+        for current, directories, files in os.walk(str(folder), followlinks=False, onerror=unreadable):
+            seen += 1
+            if files or seen > limit or any(os.path.islink(os.path.join(current, name)) for name in directories):
+                return False
+    except OSError:
+        return False
+    return True
+
+
 def _scan_layout(root: Path) -> _LayoutScan:
     """Where every campaign and cycle ID sits, read from the folders alone (a `lstat` and a few small files each).
 
@@ -1135,6 +1179,7 @@ def _scan_layout(root: Path) -> _LayoutScan:
     answer `complete=False`: such a scan can say where something moved to, never that something is gone.
     `scan.blockers` names each entry that did so, with its path from the root and the reason."""
     scan = _LayoutScan({}, {}, {}, set(), True)
+    shells: Dict[str, Any] = {}  # the records that name a folder as their place, read once and only if one is asked
     base = Path(root) / "campaigns"
     try:
         names = sorted(os.listdir(str(base)))
@@ -1193,6 +1238,8 @@ def _scan_layout(root: Path) -> _LayoutScan:
                 continue
             cycle_id = _folder_cycle_id(path)
             if cycle_id is None:
+                if _is_shell_of_detached_cycle(root, campaign_id, child, path, shells):
+                    continue
                 scan.block(root, path, "not-a-cycle")
                 continue
             if cycle_id in scan.cycles or cycle_id in scan.duplicates:

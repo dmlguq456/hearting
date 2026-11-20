@@ -46,6 +46,13 @@ _MAX_LOCATOR_COMPONENTS = 32
 _MAX_LOCATOR_LENGTH = 1024
 _MAX_PAYLOAD_DEPTH = 16
 _MAX_PAYLOAD_BYTES = 64 * 1024
+# A campaign's closing event carries one row for each cycle that belongs to it (about 330 bytes each, and the
+# campaign record's own list of cycle IDs, about 40), so its size follows the member count and no fixed limit can
+# be right for it.  The 64 KiB limit stays what it was for everything else in the event (the record's text, the
+# closure, the identity); the member rows have 1 KiB each, three times what one takes.  The writer and every reader
+# apply this one rule (`_v_event_row`), and the whole event is also bound by the one read limit of a record
+# (`artifact_campaign.MAX_JSON`), which the writer checks before it publishes anything.
+_MEMBER_ROW_ALLOWANCE_BYTES = 1024
 
 # The most a reader parses of one `manifest.json` when it has to read the document itself.  A cycle
 # seals one manifest whatever its file count (about 1.7 KB per file; 150,000 files made 255 MB), so
@@ -983,7 +990,36 @@ def _v_event_actor(value: Any, path: str, violations: List[Violation]) -> None:
     )
 
 
-def _v_event_payload(value: Any, path: str, violations: List[Violation]) -> None:
+def _json_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+
+def _member_lists(row: Any) -> List[Any]:
+    """The lists of a campaign closing event that grow with its members: the cycle rows of the snapshot and the
+    campaign record's list of cycle IDs.  Only that event, and only those two lists."""
+    if not isinstance(row, dict) or row.get("event_type") != "campaign.satisfied":
+        return []
+    payload = row.get("payload")
+    snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("cycles"), list):
+        return []
+    lists = [snapshot["cycles"]]
+    campaign = snapshot.get("campaign")
+    if isinstance(campaign, dict) and isinstance(campaign.get("cycles"), list):
+        lists.append(campaign["cycles"])
+    return lists
+
+
+def _v_event_payload_of(row: Any):
+    members = _member_lists(row)
+
+    def validator(value: Any, path: str, violations: List[Violation]) -> None:
+        _v_event_payload(value, path, violations, members)
+
+    return validator
+
+
+def _v_event_payload(value: Any, path: str, violations: List[Violation], members: Sequence[Any] = ()) -> None:
     if not isinstance(value, dict):
         violations.append(Violation("wrong-type", path, "expected object"))
         return
@@ -996,15 +1032,22 @@ def _v_event_payload(value: Any, path: str, violations: List[Violation]) -> None
     if not _all_keys_str(value):
         violations.append(Violation("wrong-type", path, "all payload keys must be strings"))
     try:
-        size = len(
-            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            .encode("utf-8")
-        )
+        size = _json_size(value)
+        member_size = sum(_json_size(rows) for rows in members)
     except (TypeError, ValueError):
-        size = _MAX_PAYLOAD_BYTES + 1
-    if size > _MAX_PAYLOAD_BYTES:
+        size, member_size = _MAX_PAYLOAD_BYTES + 1, 0
+    if size - member_size > _MAX_PAYLOAD_BYTES:
         violations.append(
-            Violation("oversized-payload", path, "serialized payload exceeds 64 KiB")
+            Violation("oversized-payload", path,
+                      "serialized payload exceeds 64 KiB" + (
+                          " apart from its member rows: the event's own text is what is large"
+                          if members else ""))
+        )
+    if members and member_size > _MEMBER_ROW_ALLOWANCE_BYTES * len(members[0]):
+        violations.append(
+            Violation("oversized-payload", path,
+                      "member rows take {0} bytes for {1} members, more than {2} bytes each".format(
+                          member_size, len(members[0]), _MEMBER_ROW_ALLOWANCE_BYTES))
         )
 
 
@@ -1061,7 +1104,7 @@ def _v_event_row(value: Any, path: str, violations: List[Violation]) -> None:
                            and value["payload"].get("contract") == "artifact-campaign-closure/v2"
                            else _v_provenance),
             "evidence_ids": _v_list_of_str,
-            "payload": _v_event_payload,
+            "payload": _v_event_payload_of(value),
         },
         {
             "supersedes_event_id": _v_typed_id("event"),
