@@ -389,37 +389,11 @@ class GroupsTest(StatusTest):
         fenced = "# t\n\n## 하는 중\n- 일 하나\n```\n- code line\n## 끝난 일\n- not a job\n```\n- 일 둘\n"
         self.assertEqual(self.kinds(fenced), [("running", 2, ["일 하나", "일 둘"])])
 
-    def test_markdown_backslash_escapes_outside_code_spans_show_bare_and_code_spans_stay_as_written(self):
-        """The campaign document escapes ``\\``, ``*``, ``[``, ``]``, ``<``, ``>``, ``&``, a word's ending ``_`` and an unpaired backtick with a backslash and leaves a code span alone.
-        A title shows the mark alone by Markdown's rule (a backslash and an ASCII punctuation mark outside a code span), not by the generator's list; a code span's text is as written."""
-        def titles(*bullets):
-            doc = "<!-- hearting:campaign-document v1 -->\n# t\n\n## 하는 중\n" + "".join("- %s\n" % b for b in bullets)
-            groups = session_status.parse_groups(doc)
-            self.assertEqual([g["kind"] for g in groups], ["running"])      # the comment marker line belongs to no group
-            self.assertEqual(groups[0]["count"], len(bullets))
-            return groups[0]["items"]
-        # What the generator writes (file) and what the panel shows.
-        self.assertEqual(titles(
-            "\\[4c\\]가 넘긴 PR \\*중요\\* 넓이 \\< 32 \\& 좁은 창 \\> 다음 · #1775 · v4.66.0 · 기록 2",
-            "앞\\_ 뒤 \\_밑줄 과 역슬래시 \\\\ 하나 · …",
-            "짝 없는 \\` 백틱 · …"),
-            ["[4c]가 넘긴 PR *중요* 넓이 < 32 & 좁은 창 > 다음 · #1775 · v4.66.0 · 기록 2",
-             "앞_ 뒤 _밑줄 과 역슬래시 \\ 하나 · …",
-             "짝 없는 ` 백틱 · …"])
-        # A code span (one pair of backticks, or a longer pair) keeps its backslashes and its marks as written; the escapes outside it are read.
-        self.assertEqual(titles("`코드 안 \\< 그대로?` 와 \\< 밖", "``두 겹 \\` 안`` 끝 \\*", "`\\\\ 둘` \\\\"),
-                         ["코드 안 \\< 그대로? 와 < 밖", "두 겹 \\` 안 끝 *", "\\\\ 둘 \\"])
-        # A backslash before anything but a punctuation mark (a letter, the end of the line) stays, a pair shows one, and the reading goes pair by pair from the left.
-        self.assertEqual(titles("글자 \\n 와 \\a 끝", "끝의 외 역슬래시 \\", "두 겹 \\\\& 과 \\\\\\& 끝"),
-                         ["글자 \\n 와 \\a 끝", "끝의 외 역슬래시 \\", "두 겹 \\& 과 \\& 끝"])
-        # What `_plain` reads as markup stays markup unless a backslash shielded it.
-        self.assertEqual(titles("링크 [글](http://x) 와 **굵게** 와 __밑줄__ 끝", "\\*\\*아님\\*\\* 과 \\[글\\](http://x)"),
-                         ["링크 글 와 굵게 와 밑줄 끝", "**아님** 과 [글](http://x)"])
-        # The reading is before the control characters go and the cut: an escaped mark next to an ESC or a BEL, and a title cut to its length, show the mark.
-        shown = titles("제어 \x1b[31m빨강\x1b[0m 과 \\<\x07", "\\<" + "가" * (session_status.GROUP_TITLE + 5))
-        self.assertTrue(shown[0].endswith("과 < ") or shown[0].endswith("과 <"), repr(shown[0]))
-        self.assertNotRegex(shown[0], "[\x00-\x1f]")
-        self.assertEqual(shown[1], "<" + "가" * (session_status.GROUP_TITLE - 1))
+    def test_the_comment_marker_line_belongs_to_no_group(self):
+        """The campaign document's first line is an HTML comment marker; it is no heading and no job, whatever follows it."""
+        doc = "<!-- hearting:campaign-document v1 -->\n# t\n\n## 하는 중\n- 일 하나\n"
+        groups = session_status.parse_groups(doc)
+        self.assertEqual([(g["kind"], g["count"], g["items"]) for g in groups], [("running", 1, ["일 하나"])])
 
     def test_the_value_carries_the_groups_and_every_read_reads_the_document(self):
         folder2 = self.campaign("beta", body=CAMPAIGN)

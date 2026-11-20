@@ -186,38 +186,6 @@ _GROUP_WORDS = (
 )
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _BULLET = re.compile(r"^(?:[-*+]|\d+[.)])\s+(.*)$")
-_PUNCT = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
-_LITERAL = 0xE000   # a character shielded from `project_status._plain` is carried as this private-use offset plus its code, and comes back after it
-
-
-def _title_text(raw):
-    """A bullet's text as the panel shows it, read by Markdown's rules: a backslash before an ASCII punctuation mark outside a code span shows
-    that mark alone (the campaign document escapes ``\\``, ``*``, ``[``, ``]``, ``<``, ``>``, ``&``, a word's ending ``_`` and an unpaired
-    backtick this way; the list is Markdown's, not the generator's), a code span (a run of backticks, its text, a run as long) shows its text
-    as written, backslashes too, and any other backslash stays.  What ``project_status._plain`` reads as markup (emphasis, links, backticks)
-    is left alone for the marks shown this way."""
-    raw = re.sub("[\ue000-\ue07f]", "", raw)
-    out, i = [], 0
-    while i < len(raw):
-        char = raw[i]
-        if char == "\\" and raw[i + 1:i + 2] and raw[i + 1] in _PUNCT:
-            out.append(chr(_LITERAL + ord(raw[i + 1])))
-            i += 2
-        elif char == "`":
-            run = len(raw[i:]) - len(raw[i:].lstrip("`"))
-            close = re.search("(?<!`)`{%d}(?!`)" % run, raw[i + run:])
-            if close:
-                out.extend(chr(_LITERAL + ord(c)) if c in _PUNCT else c for c in raw[i + run:i + run + close.start()])
-                i += run + close.end()
-            else:
-                out.append("`" * run)
-                i += run
-        else:
-            out.append(char)
-            i += 1
-    return re.sub("[\ue000-\ue07f]", lambda m: chr(ord(m.group()) - _LITERAL), project_status._plain("".join(out)))
-
-
 _ENGLISH_WORD = re.compile(r"[a-z][a-z ]*")
 
 
@@ -274,7 +242,7 @@ def parse_groups(text):
         bullet = _BULLET.match(raw)
         if not bullet:
             continue
-        title = _title_text(bullet.group(1))
+        title = project_status._plain(bullet.group(1))
         if title and not (title.startswith(("(", "（")) and title.endswith((")", "）"))):
             found[current].append(title)
     groups = []
