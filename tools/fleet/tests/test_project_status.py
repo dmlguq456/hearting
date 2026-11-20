@@ -396,6 +396,17 @@ class GeneratedDocumentTest(unittest.TestCase):
                 self.assertEqual(parsed["line"], shown)
                 self.assertEqual(parsed["decisions"], [shown])
 
+    def test_the_module_loads_by_its_file_path_outside_the_package(self):
+        # experiment_catalog.root_for_cwd loads this file without its package (the experiment guide and the
+        # session card ride on it): the load must work and read escapes the same way.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("standalone_project_status_test", project_status.__file__)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for written, shown in self.ESCAPES:
+            with self.subTest(written=written):
+                self.assertEqual(module._plain(written), shown)
+
     def test_the_generators_own_escapes_come_back_as_the_titles_it_was_given(self):
         sys.path.insert(0, str(ROOT / "utilities"))
         import campaign_document

@@ -24,7 +24,16 @@ _UTILITIES = str(Path(__file__).resolve().parents[3] / 'utilities')
 if _UTILITIES not in sys.path:
     sys.path.insert(0, _UTILITIES)
 import artifact_campaign_documents as campaign_documents
-from .. import mdescape
+try:
+    from .. import mdescape
+except ImportError:
+    # Loaded by its file path outside the ``fleet`` package (``experiment_catalog.root_for_cwd``):
+    # take the shared module from its file too, adding nothing to ``sys.path``.
+    import importlib.util as _importlib_util
+    _spec = _importlib_util.spec_from_file_location(
+        "project_status_mdescape", Path(__file__).resolve().parents[1] / "mdescape.py")
+    mdescape = _importlib_util.module_from_spec(_spec)
+    _spec.loader.exec_module(mdescape)
 
 STATUS_NAMES = campaign_documents.STATUS_NAMES
 RECENT_DAYS = 14
