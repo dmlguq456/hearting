@@ -1126,6 +1126,23 @@ class ObligationStoreTest(unittest.TestCase):
         self.store.update("active-message", state="cancelled")
         self.assertFalse(self.store.has_active())
 
+    def test_has_active_never_makes_its_fast_read_the_pass_snapshot(self):
+        # A fast-only read skips the active index's rebuild checks, so it must not
+        # stand in for the full recovery read a later list of the same pass takes.
+        self.store.create("active-retire", "retire", {}, {"target": "pane"})
+        self.store.begin_read_pass()
+        try:
+            with mock.patch.object(self.store, "_discover", wraps=self.store._discover) as discover:
+                self.assertTrue(self.store.has_active())
+                self.assertIsNone(self.store._active_list_context["records"])
+                self.assertEqual(len(self.store.list()), 1)
+                self.assertFalse(discover.call_args.kwargs["fast_active_only"])
+                # Once the full read is the snapshot, has_active reuses it.
+                self.assertTrue(self.store.has_active(kinds={"retire"}))
+            self.assertEqual(discover.call_count, 2)
+        finally:
+            self.store.end_read_pass()
+
     def test_skip_unchanged_preserves_default_revision_updates(self):
         duty = self.store.create("message-noop", "message", {}, {})
         observation = {"ref": "r" * 32, "reason": "target-identity-changed"}

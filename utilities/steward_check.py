@@ -1185,7 +1185,8 @@ def reconcile_all(store) -> None:
 
     It reads only the role relations and one record per holder, never a store
     listing, so the runner's cold pass keeps its I/O shape; a duty whose holder
-    lost the role retires at its own next due point (`_due`)."""
+    lost the role retires at its own next due point (`_due`). One reading of the
+    session holders serves every holder; each ended one is read again before release."""
     try:
         relations = _relations()
     except Exception:  # noqa: BLE001
@@ -1201,7 +1202,11 @@ def reconcile_all(store) -> None:
     observation = _end_observation()
     for (harness, session_id) in holders:
         try:
-            if _session_liveness(harness, session_id, agents, observation) != "ended":
+            # The shared reading only nominates an ended holder; the release acts on a
+            # fresh reading, as in ``_release_if_window_closed``.
+            if (_session_liveness(harness, session_id, agents, observation) != "ended"
+                    or _session_liveness(harness, session_id, agents,
+                                         _end_observation()) != "ended"):
                 register(harness, session_id, store=store, ensure_runner=False)
             else:
                 module = getattr(_collector(), "_peer_message_module", None)

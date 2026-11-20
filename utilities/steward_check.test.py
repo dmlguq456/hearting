@@ -1386,7 +1386,8 @@ class StewardCheckProcessProofTest(CheckBase):
                                     ("codex", sids["codex-live"]))]
         with mock.patch.object(SC, "_relations", return_value=relations):
             SC.reconcile_all(self.store)
-        self.assertEqual(self.factory.call_count, 1)
+        # One shared reading, and one fresh reading for each of the two ended holders.
+        self.assertEqual(self.factory.call_count, 3)
         self.assertIsNone(self.duty_of("codex", sids["codex-ended"]))
         self.assertIsNone(self.duty_of("opencode", sids["opencode-ended"]))
         self.assertEqual(self.duty_of("codex", sids["codex-live"])["state"], "pending")
@@ -1441,10 +1442,53 @@ class StewardCheckProcessProofTest(CheckBase):
                      for sid in (gone, kept, unsure)]
         with mock.patch.object(SC, "_relations", return_value=relations):
             SC.reconcile_all(self.store)
-        self.assertEqual(self.factory.call_count, 1)
+        # One shared reading, and one fresh reading for the ended holder.
+        self.assertEqual(self.factory.call_count, 2)
         self.assertIsNone(self.duty_of("claude", gone))
         self.assertEqual(self.duty_of("claude", kept)["state"], "pending")
         self.assertEqual(self.duty_of("claude", unsure)["state"], "pending")
+
+    def _readings(self):
+        import recipient_lifetime
+        return {
+            "codex": (self.CODEX_SID, lambda live: _StubObservation(
+                codex={"complete": True, "open": frozenset(live)})),
+            "opencode": (self.OPENCODE_SID, lambda live: _StubObservation(
+                opencode={"complete": True, "visible": frozenset(live), "earliest_start_ms": 5_000})),
+            "claude": (self.CLAUDE_SID, lambda live: _StubObservation(
+                claude=recipient_lifetime.RecipientCensus(
+                    lambda harness, sid: "alive" if sid in live else "ended"))),
+        }
+
+    def test_s11_a_holder_back_after_the_round_reading_keeps_its_duty_for_three_harnesses(self):
+        for harness, (sid, reading) in self._readings().items():
+            with self.subTest(harness=harness):
+                SC.register(harness, sid, now=T0, store=self.store, ensure_runner=False)
+                self.observation = reading({sid})  # what a fresh reading sees now
+                SC.advance(self.duty_of(harness, sid), self.store, now=T0 + INTERVAL,
+                           end_observation=reading(()))
+                self.assertEqual(self.duty_of(harness, sid)["state"], "pending")
+
+    def test_s12_an_unreadable_fresh_reading_releases_nothing_for_three_harnesses(self):
+        for harness, (sid, reading) in self._readings().items():
+            with self.subTest(harness=harness):
+                SC.register(harness, sid, now=T0, store=self.store, ensure_runner=False)
+                self.observation = _StubObservation()  # every table unreadable: unknown
+                SC.advance(self.duty_of(harness, sid), self.store, now=T0 + INTERVAL,
+                           end_observation=reading(()))
+                self.assertEqual(self.duty_of(harness, sid)["state"], "pending")
+
+    def test_s13_reconcile_all_registers_a_holder_a_fresh_reading_shows_live(self):
+        sid = self.CODEX_SID
+        readings = iter([_StubObservation(codex={"complete": True, "open": frozenset()}),
+                         _StubObservation(codex={"complete": True, "open": frozenset([sid])})])
+        self.factory.side_effect = lambda: next(readings)
+        relations = [{"released": False, "origin": {"harness": "codex", "sid": sid},
+                      "holder": {"harness": "codex", "sid": sid}, "targets": [{"name": "w"}]}]
+        with mock.patch.object(SC, "_relations", return_value=relations):
+            SC.reconcile_all(self.store)
+        self.assertEqual(self.factory.call_count, 2)
+        self.assertEqual(self.duty_of("codex", sid)["state"], "pending")
 
 
 HERDR_LOGGER = """#!/bin/sh
@@ -1712,6 +1756,37 @@ class StewardCheckWindowClosedTest(CheckBase):
         seen = [call.args[3] for call in SC._session_liveness.call_args_list]
         self.assertTrue(seen)
         self.assertTrue(all(value is reading for value in seen))
+
+    def _confirmed_clear(self):
+        """Patches for one confirmed same-seat ``/clear`` out of SID, nothing after it."""
+        import dispatch_seat_handover as handover
+        import session_tidy as tidy
+        row = {"harness": HARNESS, "sid": SID, "event": "clear", "ts": T0 - 10}
+        graph = SimpleNamespace(ledger_rows={self.KEY: [row]}, ledger_keys={})
+        return (mock.patch.object(handover, "lineage_graph", return_value=graph),
+                mock.patch.object(handover, "_chain_end", return_value=("successor", "successor")),
+                mock.patch.object(handover, "read_snapshot", return_value=None),
+                mock.patch.object(tidy, "tidy_lineage_edge",
+                                  side_effect=lambda r: (HARNESS, SID, "successor") if r is row else None))
+
+    def test_a_cleared_holder_live_on_a_fresh_reading_keeps_its_role(self):
+        # The round's shared reading nominates the clear release; it acts only when a
+        # fresh reading agrees the holder is not live.
+        shared, fresh = object(), object()
+        answers = {id(shared): "unknown", id(fresh): "live"}
+        SC._end_observation.side_effect = lambda: fresh
+        SC._session_liveness.side_effect = (
+            lambda harness, sid, agents=(), observation=None: answers[id(observation)])
+        first, second, third, fourth = self._confirmed_clear()
+        self.register()
+        with first, second, third, fourth:
+            kept = SC._release_if_window_closed(self.duty(), self.store, HARNESS, SID, T0 + 1, shared)
+            self.released.assert_not_called()
+            answers[id(fresh)] = "unknown"
+            released = SC._release_if_window_closed(self.duty(), self.store, HARNESS, SID, T0 + 1,
+                                                    shared)
+        self.assertEqual((kept, released), (False, True))
+        self.released.assert_called_once_with(HARNESS, SID, reason="cleared")
 
     def test_unresolved_role_release_keeps_the_duty_for_the_next_pass(self):
         self.liveness = "ended"
