@@ -29,6 +29,7 @@ The node's unit, role and worker type are the unit head's. The recipe holds only
 - A name that is not a unit of the catalog is refused with the list (`compose-unit-unknown`).
 - v1 opens read-only units (`read_only: true`). A unit that writes is refused with its reason (`compose-unit-writes`).
 - `--start --prompt-file <brief>` starts the unit's one worker with the brief (see Launch and end). Without `--start` the route is only planned and sealed.
+- The brief may be typed in the same command, with no file written first: `compose --start --unit <family/name> [--ephemeral] --prompt-file - <<'EOF'` followed by the brief and `EOF`. `--prompt-file -` reads standard input once and keeps that text with the route exactly as a file's text is kept (it takes every form `--prompt-file <file>` takes, `--ephemeral` included, and leaves no more behind). Standard input that is empty, closed, a terminal, not UTF-8, larger than 65,536 bytes, or silent for 10 seconds ends the command in one line (`compose-prompt-stdin-empty`, `-terminal`, `-not-utf8`, `-too-large`, `-timeout`) before anything is sealed or started.
 
 ## Field
 

@@ -22,6 +22,7 @@ import harness_behavior_scenarios as hb  # noqa: E402
 import harness_behavior_cases_a as ca  # noqa: E402
 import harness_behavior_cases_b as cb  # noqa: E402
 import harness_behavior_cases_e as ce  # noqa: E402
+import harness_behavior_cases_unit_explore as cx  # noqa: E402
 
 
 def _post(base, path, payload):
@@ -424,6 +425,42 @@ class RegistrationTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         for cls in ce.SCENARIOS:
             self.assertIn(cls.name + "\t", done.stdout)
+
+
+
+class ExploreInOwnerVerdictTest(unittest.TestCase):
+    """`unit-route-explore-in-owner` names the regression it catches (the leg refused as a non-owner start,
+    `owner-route-binding-tuple-invalid`, with no row written) as `fail`, not `inconclusive`."""
+
+    def drive(self, *, base_verdict, rows, requests, bound=True):
+        scenario = cx.ExploreInOwnerScenario()
+        scenario.parent_file, scenario.parent = ("/x/route.json", {"route_hash": "h"}) if bound else ("", {})
+        notes = []
+        run = SimpleNamespace(evidence={}, note=notes.append, main_requests=lambda: requests)
+        scenario.unit_rows = lambda: rows
+        with patch.object(cx.ExploreScenario, "drive", return_value=base_verdict):
+            return scenario.drive(run), notes
+
+    def test_the_refusal_in_the_sessions_tool_output_with_no_row_is_a_fail(self):
+        tool = {"text": "", "last_kind": "tool",
+                "last_text": "capability-route: owner-route-binding-tuple-invalid: route node requires owner"}
+        verdict, notes = self.drive(base_verdict="inconclusive", rows=[], requests=[tool])
+        self.assertEqual(verdict, "fail")
+        self.assertIn("owner-route-binding-tuple-invalid", notes[0])
+
+    def test_no_refusal_in_the_output_stays_inconclusive(self):
+        quiet = {"text": "", "last_kind": "tool", "last_text": "something else"}
+        self.assertEqual(self.drive(base_verdict="inconclusive", rows=[], requests=[quiet])[0], "inconclusive")
+        # The reason named only in a prompt (not in what the tool returned) is not the session's refusal.
+        said = {"text": "owner-route-binding-tuple-invalid", "last_kind": "user", "last_text": "owner-route-binding-tuple-invalid"}
+        self.assertEqual(self.drive(base_verdict="inconclusive", rows=[], requests=[said])[0], "inconclusive")
+
+    def test_a_row_means_the_start_was_not_refused_and_other_verdicts_are_untouched(self):
+        tool = {"text": "", "last_kind": "tool", "last_text": "owner-route-binding-tuple-invalid"}
+        self.assertEqual(self.drive(base_verdict="inconclusive", rows=[{"status": "open"}], requests=[tool])[0], "inconclusive")
+        self.assertEqual(self.drive(base_verdict="pass", rows=[{"status": "done"}], requests=[])[0], "pass")
+        self.assertEqual(self.drive(base_verdict="fail", rows=[], requests=[tool])[0], "fail")
+        self.assertEqual(self.drive(base_verdict="pass", rows=[{"status": "done"}], requests=[], bound=False)[0], "inconclusive")
 
 
 if __name__ == "__main__":
