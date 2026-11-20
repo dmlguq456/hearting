@@ -457,7 +457,7 @@ for(const [opt,body,rose] of [[{},F.dark.body===253?253:253,F.dark.accent],[{lig
   assert(pick(a+3).every(p=>p.role==='accent'),JSON.stringify(pick(a+3)));
 }
 // Folded back to the plain section the letters are red again; the folded strip's `◑답 대기 N` is rose and blinks as before.
-const plain=draw({height:20}),L=inside(plain),i=L.findIndex(l=>/^◑ MESSAGES/.test(l));
+const plain=draw({height:18}),L=inside(plain),i=L.findIndex(l=>/^◑ MESSAGES/.test(l));
 assert(i>0&&plain.rows[i].find(p=>p.text.startsWith('MESSAGES')).role==='accent');
 const strip=view.render({width:140,height:3,side:false,folded:true,model:model(),state:'working',harness:'claude',frame:1,brief,sent:()=>[],cellWidth:cells,configuration:{}});
 assert(strip.rows[0].find(p=>p.text.startsWith('◑'))&&strip.rows[0].find(p=>p.text.startsWith('◑')).role==='accent');

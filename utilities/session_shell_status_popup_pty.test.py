@@ -1,9 +1,9 @@
 """11-15 (design 2): the status button and popup, the waiting blink and the popup's control filter over the real
 host in a private PTY.
 
-The panel's REPO row carries `현황 ›`; a press on the row opens the status popup (the table popup's frame,
-width and keys): its title `현황 <campaign> · <age>`, Fleet's status lines for the project, the document with
-its markdown table aligned, and the sections `현황 · QUESTIONS · ROUTE · MESSAGES` on its bottom line (←→ in
+The panel's REPO row carries `STATUS ›`; a press on the row opens the status popup (the table popup's frame,
+width and keys): its title `STATUS <campaign> · <age>`, Fleet's status lines for the project, the document with
+its markdown table aligned, and the sections `STATUS · QUESTIONS · ROUTE · MESSAGES` on its bottom line (←→ in
 that order). PgDn reads it on. A change to the document (the existing file watch) reads the value and the
 standing popup again; nothing else does: a hundred paints and the projections between them read nothing,
 and the popup opened again from another section uses the rows it read. Without a document the button is
@@ -98,9 +98,9 @@ DOC,FOLDER={doc!r},{folder!r}
 def read(cwd,routes=(),now=None):
     with open({reads!r},'a') as f:f.write(json.dumps([cwd,list(routes)])+'\n')
     if os.path.exists(DOC+'.none'):
-        return {{'word':'현황','has_doc':False,'campaign':'panel-test','age':'','title':'현황','path':'',
+        return {{'word':'STATUS','has_doc':False,'campaign':'panel-test','age':'','title':'STATUS','path':'',
                 'slot':'campaigns/panel-test/현황.md','watch':[FOLDER+'/']}}
-    return {{'word':'현황','has_doc':True,'campaign':'panel-test','age':'3m','title':'현황 panel-test · 3m','path':DOC,
+    return {{'word':'STATUS','has_doc':True,'campaign':'panel-test','age':'3m','title':'STATUS panel-test · 3m','path':DOC,
             'slot':'','watch':[DOC,FOLDER+'/']}}
 session_status.read=read
 raise SystemExit(m._backend())
@@ -140,16 +140,16 @@ const frames={},checks={};
 // (Private, as the shared cache's reader requires.)
 const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.renameSync(file+'.new',file);};
 (async()=>{try{
-  let s=await until(s=>has('READY_'+cfg.harness)(s)&&has('현황 ›')(s)&&has('QUESTIONS')(s),'the panel with its status button');
+  let s=await until(s=>has('READY_'+cfg.harness)(s)&&has('STATUS ›')(s)&&has('QUESTIONS')(s),'the panel with its status button');
   await sleep(600);s=await screen();frames.panel=s;
-  const repo=await at('REPO'),button=await at('현황 ›'),head=await at('QUESTIONS');
+  const repo=await at('REPO'),button=await at('STATUS ›'),head=await at('QUESTIONS');
   checks.button_row=repo&&button&&repo.y===button.y;
   // `›` stands in the column of the section heads' `›`: two cells inside the panel's right line. (11-16: the QUESTIONS
   // section is a thin box now, its `›` beside its name; the column is read from the panel's line on its top row.)
   const qrow=s[head.y],arrowAt=y=>{const c=cellsOf(y);for(let x=cols-1;x>=0;x--)if(c[x]==='›')return x;return -1;};
   const edgeAt=y=>{const c=cellsOf(y);for(let x=cols-1;x>=0;x--)if(c[x]==='│')return x;return -1;};
   checks.arrow_column=[arrowAt(button.y),edgeAt(head.y)-2];
-  checks.button_look=looks(button.y,button.x,button.x+6).filter(c=>c.ch.trim()).map(c=>[c.ch,c.fg,c.dim]);
+  checks.button_look=looks(button.y,button.x,button.x+8).filter(c=>c.ch.trim()).map(c=>[c.ch,c.fg,c.dim]);
   // A hundred paints (the native echoes each key) and two projections (the shared cache changes): no read.
   const before=reads();checks.first_reads=before;
   for(let i=0;i<100;i++){child.write('a');await sleep(15);}
@@ -161,7 +161,7 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.r
   const r0=reads();
   await press(repo.x+2,repo.y,300);
   // (The document stands first and Fleet's lines come above it a moment later: both are waited for.)
-  s=await until(s=>!!box(s)&&box(s).title.includes('현황 panel-test · 3m')&&popupHas('┈')(s)&&popupHas('시험 마무리')(s),'the status popup');frames.popup=s;
+  s=await until(s=>!!box(s)&&box(s).title.includes('STATUS panel-test · 3m')&&popupHas('┈')(s)&&popupHas('시험 마무리')(s),'the status popup');frames.popup=s;
   const b=box(s);checks.title=b.title;checks.foot=b.foot;checks.popup_reads=reads()-r0;
   checks.lines=b.rows.map(l=>l.slice(b.left));
   // PgDn reads it on (its place `i/N` moves), no read.
@@ -173,10 +173,10 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.r
   await key('\x1b[C',400);s=await until(s=>!!box(s)&&box(s).title.includes('QUESTIONS'),'the question popup by →');frames.questions=s;
   checks.question_line=box(s).rows.map(l=>l.slice(box(s).left)).find(l=>l.includes('질문 본문'))||'';
   {const y=box(s).top+box(s).rows.findIndex(l=>l.includes('질문 본문'));checks.question_inverse=looks(y,0,cols).filter(c=>c.inverse).length;}
-  await key('\x1b[D',400);s=await until(s=>!!box(s)&&box(s).title.includes('현황'),'back to the status popup');
+  await key('\x1b[D',400);s=await until(s=>!!box(s)&&box(s).title.includes('STATUS'),'back to the status popup');
   await key('\x1b[D',400);s=await until(s=>!!box(s)&&box(s).title.includes('MESSAGES'),'the MESSAGES popup by ← (round)');frames.messages=s;
   checks.messages=box(s).rows.map(l=>l.slice(box(s).left));
-  await key('\x1b[C',400);s=await until(s=>!!box(s)&&box(s).title.includes('현황'),'the status popup by → (round)');
+  await key('\x1b[C',400);s=await until(s=>!!box(s)&&box(s).title.includes('STATUS'),'the status popup by → (round)');
   await sleep(300);checks.reads_on_moves=reads()-r1;
   // The document changes: the existing watch reads the value and the standing popup again.
   const r2=reads();
@@ -187,7 +187,7 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.r
   // No document: the button dim, and its popup says so.
   fs.writeFileSync(cfg.doc+'.none','');fs.writeFileSync(cfg.folder+'/touch','');
   await sleep(1800);s=await screen();
-  {const p=await at('현황 ›');checks.dim_look=p?looks(p.y,p.x,p.x+6).filter(c=>c.ch.trim()).map(c=>[c.ch,c.fg,c.dim]):null;}
+  {const p=await at('STATUS ›');checks.dim_look=p?looks(p.y,p.x,p.x+8).filter(c=>c.ch.trim()).map(c=>[c.ch,c.fg,c.dim]):null;}
   {const p=await at('REPO');await press(p.x+2,p.y,300);}
   s=await until(s=>!!box(s)&&popupHas(cfg.no_status)(s),'the status popup without a document');frames.nodoc=s;
   checks.nodoc_title=box(s).title;
@@ -342,9 +342,9 @@ class SessionShellStatusPopupTest(unittest.TestCase):
         self.assertTrue(checks['button_row'], panel)
         arrow, heads = checks['arrow_column']
         self.assertEqual(arrow, heads, panel)
-        self.assertEqual([c[0] for c in checks['button_look']], ['현', '황', '›'])
+        self.assertEqual([c[0] for c in checks['button_look']], ['S', 'T', 'A', 'T', 'U', 'S', '›'])
         self.assertEqual(checks['button_look'][0][1:], [253, False], checks['button_look'])
-        self.assertTrue(checks['button_look'][2][2], checks['button_look'])
+        self.assertTrue(checks['button_look'][-1][2], checks['button_look'])
         # The value was read for this session's folder and its routes; a hundred paints and two projections read nothing.
         # (The first projection may come before the routes do: the route list's change reads it again.)
         self.assertTrue(all(read[0] == result['project'] for read in result['reads']), result['reads'])
@@ -353,8 +353,8 @@ class SessionShellStatusPopupTest(unittest.TestCase):
         self.assertEqual(checks['reads_after_paints'], 0, checks)
         # The popup: its title, Fleet's status lines, the document's table aligned, the sections in order.
         self.assertEqual(checks['popup_reads'], 1, checks)
-        self.assertIn('현황 panel-test · 3m', checks['title'])
-        self.assertIn('╰─ 현황 · QUESTIONS · ROUTE · MESSAGES ', checks['foot'])
+        self.assertIn('STATUS panel-test · 3m', checks['title'])
+        self.assertIn('╰─ STATUS · QUESTIONS · ROUTE · MESSAGES ', checks['foot'])
         # (Each row's inside: between the popup's side lines; the panel stands to the right of it.)
         lines = [line.split('│')[1] if line.startswith('│') else line for line in checks['lines']]
         self.assertTrue(any('panel-test: 단추와 팝업' in line for line in lines), lines)
@@ -377,9 +377,9 @@ class SessionShellStatusPopupTest(unittest.TestCase):
         self.assertEqual(checks['question_inverse'], 0)
         # The watch event: the value and the standing popup read again (two reads), the new line shown.
         self.assertEqual(checks['reads_on_change'], 2, checks)
-        # No document: the button dim; its popup says so under `현황`.
+        # No document: the button dim; its popup says so under `STATUS`.
         self.assertTrue(checks['dim_look'] and all(c[2] for c in checks['dim_look']), checks['dim_look'])
-        self.assertIn('╭─ 현황 ', checks['nodoc_title'])
+        self.assertIn('╭─ STATUS ', checks['nodoc_title'])
         # The blink: the question's box lines (11-16: its top line, its walls and its bottom line, not the letters inside)
         # go between 217 and 95 together, once a second (the section head's count, a red that does not blink, keeps
         # 174); every beat writes only blinking cells, a few dozen at most (the box's lines are more cells than the letters
