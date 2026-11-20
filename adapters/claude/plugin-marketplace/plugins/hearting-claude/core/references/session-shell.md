@@ -358,8 +358,8 @@ Then the metadata, one block. Beside the native area the repository and Git rows
 start with dim labels in the label column of `TITLE` and `NOW` (`REPO`, `GIT`;
 narrower than 30 cells inside the labels go first): `REPO   hearting · wt 12`,
 the repository name in its color with no trailing `/` and the worktree count
-dim (none for zero or an unknown count), the status button `현황 ›` (`STATUS ›`, Fleet's
-`fleet.repo.status`) at the row's right end (11-15, design 2: the word in the body color, `›` dim in
+dim (none for zero or an unknown count), the status button `STATUS ›` (11-20: English, the panel's section names are, whatever the
+declared language; it was `현황 ›`) at the row's right end (11-15, design 2: the word in the body color, `›` dim in
 the section heads' `›` column, no ground and no count; short of cells the word goes first, then
 `· wt N` whole, then the name is cut with `…`, the name and `›` staying; the unlabelled head and the
 bottom layout carry it at their first row's right end; no status document: all of it dim, a press
@@ -603,9 +603,12 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
 - STATUS (11-20, the person: "현황이 사용성이 많아 질 수 있는 부분이니까 좀 더 눈에 띄면 좋겠어" / "패널 공간에 현황은 중요하지. 기본적으로 5줄
   이상 써서 보이는것도 중요할것 같다"; the 11-15 button on the REPO row had been the whole of it): the section second from the top, right
   under the REPO row (11-20, below: the section is the REPO group's) beside the native area, and second among the sections in the bottom layout
-  (under the question to answer here, which never gives its place, and above the route box). Its head is
-  `현황 ──── ›` (`STATUS`, Fleet's `fleet.repo.status`; a press on it or on any row opens the status popup, and the REPO row's button is
-  gone while the section stands). Under it the lists of this campaign's status document, in the order of the list the person liked
+  (under the question to answer here, which never gives its place, and above the route box). It is a box of the route
+  box's frame (`boxTop`, `boxRow`, `boxBottom`) in the route box's quiet color, its name and `›` in the top border,
+  `╭─ STATUS ──── › ─╮`, no head row of its own, `╰──╯` under the rows (11-20, the person: "현황은 영어로" / "그리고 박스로 감싸고"; the name is
+  English whatever the declared language, as the panel's other section names are; the groups' names are the document's words and stay Korean;
+  Fleet's explorer keeps its own word, `fleet.repo.status`, which follows the declared language). A press on the top border, on any row inside
+  or on the bottom border opens the status popup, and the REPO row's button is gone while the section stands. Inside, the lists of this campaign's status document, in the order of the list the person liked
   (`STATUS-LIST-SIAN`): `하는 중` (in progress), `기다리는 것` (what waits for the person), `최근에 끝난 것`, `나중에 할 것`; each a head row
   (its name, its count) and its titles under it, two cells in, one row each (`⠋`, `◇`, `✓`, `·`; the waiting count and glyph in the
   caution color). The lists are the document's own top-level bullets under `## 하는 중`, `## 결정 기다리는 것`, `## 끝난 일`, `## 예정`
@@ -613,7 +616,9 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   the backend with the button's value (`session_status.read`'s `groups`, the first 64 KiB, again only when the document's modification
   time or size changed; no new timer, watch or worker). No document, or none with such a heading: no section, and the button stays on
   the REPO row. A `## 결정 기다리는 것` with nothing under it is the count 0. Body rows: `STATUS_MIN` = 5 while rows allow, up to
-  `STATUS_MAX` = 12 (four heads and eight titles, two to a group) where they are plentiful. A title is as the document wrote it (`title · #PR · vX.Y.Z ·
+  `STATUS_MAX` = 12 (four heads and eight titles, two to a group) where they are plentiful (rows inside the box, laid out at its inner width, four cells
+  narrower than the panel's; the box's two borders come on top, so the section takes one row more than its head row did, and the rows that give it, in the order
+  below, are MESSAGES' and MEM's first). A title is as the document wrote it (`title · #PR · vX.Y.Z ·
   기록 N`, a finished one's date first): short of cells the tail goes first, piece by piece from its end (the tail dim), then the title is cut with `…`. Short of rows the groups give their titles up
   from the last: `하는 중`, `기다리는 것`, `최근에 끝난 것`, `나중에 할 것` stand as counts, the neighbouring ones on one row
   (`최근에 끝난 것 4 · 나중에 할 것 3`, the short names `끝난 일 4 · 예정 3` where the full ones do not fit), and the group that waits for the
@@ -1011,7 +1016,7 @@ something in it. A press on a panel section (its head or a row) or on a group of
 the folded strip opens that section's popup, and a new question or a failed
 route never opens one. The popups are six
 kinds over one frame and one set of keys: STATUS (11-15, design 2: the REPO row's button; the table
-popup's frame, width and keys; its title `현황 <campaign> · <age>`, `현황` alone without a document;
+popup's frame, width and keys; its title `STATUS <campaign> · <age>`, `STATUS` alone without a document;
 Fleet's status lines for the project as its project page draws them, an empty row, then the whole
 document's first 64 KiB as Fleet's cards, fences as written and markdown tables aligned,
 `session_status.popup_rows`; without a document Fleet's `fleet.repo.no_status` and where it would
@@ -1028,8 +1033,8 @@ Fleet's `draw_routes` with one route unfolded and Fleet's route page into a grid
 the popup's width and sends the painted cells, Fleet's row tints left out; narrow,
 Fleet's columns leave as Fleet leaves them), NOW (11-17, below), MESSAGES (the requests and messages whole, then
 the peer delivery reading `r`) and MEM (11-20: the records whole, drawn from the panel's own values as MESSAGES' are, no reading). The bottom line lists the sections with
-something in them in the panel's order, `현황 · NOW · QUESTIONS · ROUTE · MESSAGES · MEM` (STATUS by its button's
-word, there while the button or the STATUS section stands; NOW while the panel holds a NOW; `Ctrl+]` still opens what it opened before, never NOW), the current one bright; ←→ (or a press on a name) moves to
+something in them in the panel's order, `STATUS · NOW · QUESTIONS · ROUTE · MESSAGES · MEM` (STATUS in English like the rest,
+there while the button or the STATUS section stands; NOW while the panel holds a NOW; `Ctrl+]` still opens what it opened before, never NOW), the current one bright; ←→ (or a press on a name) moves to
 the next or previous one. A popup row reaches the terminal with every control character (C0, DEL and
 C1) as a space. In a table ↑↓, Tab and Shift+Tab unfold the next or
 previous route (Fleet's `▶`) or read on a row; Enter opens the

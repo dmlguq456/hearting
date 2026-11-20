@@ -1,7 +1,7 @@
 """11-15 (design 2, "현황은 REPO 옆에 버튼을 만드는게 나을거 같은데" / "권장안대로하고"; "대기 중인건 점멸을 시키자" /
 "질문만"; review RV-PR1652-A A5): the panel's status button, the waiting blink and the folded strip at 30-32 cells.
 
-1. `현황 ›` (`STATUS ›`) at the right end of the REPO row: the word in the body color, `›` dim in the section
+1. `STATUS ›` (11-20: English whatever the declared language; it was `현황 ›`) at the right end of the REPO row: the word in the body color, `›` dim in the section
    heads' column, no ground, no count. Short of cells the word goes first, then `· wt N` whole, then the name
    is cut with `…`; the name and `›` stay. The unlabelled head and the bottom layout carry it at the first
    row's end; the folded strip has none. No document: all of it dim. No artifact root: no button. A press on
@@ -56,7 +56,7 @@ class StatusButtonTest(unittest.TestCase):
 const names=['hearting','shell-tools-kit','speech-separation-bench','very-long-project-name-for-tests'];
 let stages=new Set();
 for(const name of names)for(const wt of [true,false])for(let w=24;w<=60;w++){
- const model={repo_side:[p(name,{foreground:116})],...(wt?{}:{worktrees:[]}),status_doc:{word:'현황',has_doc:true}};
+ const model={repo_side:[p(name,{foreground:116})],...(wt?{}:{worktrees:[]}),status_doc:{word:'STATUS',has_doc:true}};
  const v=render({width:w,model}),rows=v.rows.map(str),row=rows[1],tag=w+' '+name+' '+wt+'\n'+rows.join('\n');
  const inner=w-4,label=inner>=30?7:0,value=row.slice(2+(label?7:0),-2);
  assert.equal(cells(row),w,tag);
@@ -66,7 +66,7 @@ for(const name of names)for(const wt of [true,false])for(let w=24;w<=60;w++){
  assert(v.rows[1].every(x=>x.background===undefined),tag);
  if(label)assert(row.startsWith('│ REPO   '),tag);
  // The stage this width shows, and the order: the word goes before the count, the count before the name is cut.
- const word=value.includes('현황 ›'),count=value.includes('· wt 12'),cut=value.includes('…'),whole=value.includes(name);
+ const word=value.includes('STATUS ›'),count=value.includes('· wt 12'),cut=value.includes('…'),whole=value.includes(name);
  assert(whole||cut,tag);
  if(word)assert(!wt||count,tag+' (the word stands only with the count)');
  if(cut)assert(!count&&!word,tag+' (the name is cut last)');
@@ -79,16 +79,16 @@ for(const name of names)for(const wt of [true,false])for(let w=24;w<=60;w++){
 // Each stage is reached somewhere: whole, `›` with the count, `›` alone, the name cut.
 for(const s of ['true,true,false','false,true,false','false,false,false','false,false,true'])assert(stages.has(s),[...stages].join(' | '));
 // The design's 40-cell rows (the name's room 29 cells).
-const at40=name=>str(render({width:40,model:{repo_side:[p(name)],status_doc:{word:'현황',has_doc:true}}}).rows[1]);
+const at40=name=>str(render({width:40,model:{repo_side:[p(name)],status_doc:{word:'STATUS',has_doc:true}}}).rows[1]);
 // (11-20: the REPO row is the REPO group's head, its free cells a thin rule.)
-assert.equal(at40('hearting'),'│ REPO   hearting · wt 12 ───── 현황 › │');
+assert.equal(at40('hearting'),'│ REPO   hearting · wt 12 ─── STATUS › │');
 assert.equal(at40('shell-tools-kit'),'│ REPO   shell-tools-kit · wt 12 ─── › │');
 assert.equal(at40('speech-separation-bench'),'│ REPO   speech-separation-bench ─── › │');
 assert.equal(at40('very-long-project-name-for-tests'),'│ REPO   very-long-project-name-for… › │');
 // The word in the body color (Fleet's `soft`, the panel's `loc_repo`: 253), `›` dim.
-{const v=render({width:54,model:{repo_side:[p('hearting')],status_doc:{word:'현황',has_doc:true}}});
- assert.equal(str(v.rows[1]),'│ REPO   hearting · wt 12 ─────────────────── 현황 › │');
- const w=v.rows[1].find(x=>x.text==='현황');assert(w.foreground===253&&w.dim!==true&&w.bold!==true,JSON.stringify(w));}
+{const v=render({width:54,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true}}});
+ assert.equal(str(v.rows[1]),'│ REPO   hearting · wt 12 ───────────────── STATUS › │');
+ const w=v.rows[1].find(x=>x.text==='STATUS');assert(w.foreground===253&&w.dim!==true&&w.bold!==true,JSON.stringify(w));}
 // English: `STATUS ›`.
 assert.equal(str(render({width:54,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true}}}).rows[1]),'│ REPO   hearting · wt 12 ───────────────── STATUS › │');
 """)
@@ -96,8 +96,8 @@ assert.equal(str(render({width:54,model:{repo_side:[p('hearting')],status_doc:{w
     def test_no_document_dims_the_button_and_no_root_shows_none(self):
         self.node(r"""
 // No document: the whole button dim, and a press still opens the popup.
-{const v=render({width:54,model:{repo_side:[p('hearting')],status_doc:{word:'현황',has_doc:false}}});
- const w=v.rows[1].find(x=>x.text==='현황'),a=v.rows[1].findLast(x=>x.text==='›');
+{const v=render({width:54,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:false}}});
+ const w=v.rows[1].find(x=>x.text==='STATUS'),a=v.rows[1].findLast(x=>x.text==='›');
  assert(w.dim===true&&a.dim===true&&w.foreground!==253,JSON.stringify(v.rows[1]));
  assert(v.hits.some(h=>h.row===1&&h.action==='popup:STATUS'));}
 // No artifact root (no value): the row as before, no button and no press on it.
@@ -105,22 +105,22 @@ for(const status_doc of [undefined,null,{word:'',has_doc:true}]){
  const v=render({width:54,model:{repo_side:[p('hearting')],status_doc}});
  assert.match(str(v.rows[1]),/^│ REPO   hearting · wt 12 ─+ │$/,JSON.stringify(status_doc));
  assert(!v.hits.some(h=>h.row===1),JSON.stringify(status_doc));
- assert(!v.rows.flat().some(x=>x.text==='현황'));}
+ assert(!v.rows.flat().some(x=>x.text==='STATUS'));}
 """)
 
     def test_the_unlabelled_head_the_bottom_layout_and_the_folded_strip(self):
         self.node(r"""
 // Narrower than 30 cells inside (the 32-cell side panel): the first row, unlabelled, the same order.
-{const v=render({width:32,model:{repo_side:[p('hearting')],status_doc:{word:'현황',has_doc:true}}});
- assert.equal(str(v.rows[1]),'│ REPO hearting · wt 12 현황 › │');assert(v.hits.some(h=>h.row===1&&h.action==='popup:STATUS'));}
+{const v=render({width:32,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true}}});
+ assert.equal(str(v.rows[1]),'│ REPO hearting · wt 12 ──── › │');assert(v.hits.some(h=>h.row===1&&h.action==='popup:STATUS'));}
 // The bottom layout: the right end of the first row (`repo │ model │ context`); short of cells the word goes, then the row is cut.
-for(const [w,want] of [[80,/│ hearting │ Opus 5\.5 │ ctx 46% +현황 › │$/],[34,/│ hearting │ Opus 5\.5 │ ctx 4… › │$/]]){
- const v=render({width:w,side:false,height:8,model:{repo:[p('hearting')],context:[p('ctx 46%')],status_doc:{word:'현황',has_doc:true}}});
+for(const [w,want] of [[80,/│ hearting │ Opus 5\.5 │ ctx 46% +STATUS › │$/],[34,/│ hearting │ Opus 5\.5 │ ctx 4… › │$/]]){
+ const v=render({width:w,side:false,height:8,model:{repo:[p('hearting')],context:[p('ctx 46%')],status_doc:{word:'STATUS',has_doc:true}}});
  assert.match(str(v.rows[1]),want,str(v.rows[1]));assert.equal(cells(str(v.rows[1])),w);
  assert(v.hits.some(h=>h.row===1&&h.action==='popup:STATUS'&&h.left===2&&h.right===w-3),JSON.stringify(v.hits));}
 // The folded strip carries no button.
-{const v=render({width:120,folded:true,height:1,model:{repo_side:[p('hearting')],status_doc:{word:'현황',has_doc:true}}});
- assert(!str(v.rows[0]).includes('현황')&&!v.hits.some(h=>h.action==='popup:STATUS'),str(v.rows[0]));}
+{const v=render({width:120,folded:true,height:1,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true}}});
+ assert(!str(v.rows[0]).includes('STATUS')&&!v.hits.some(h=>h.action==='popup:STATUS'),str(v.rows[0]));}
 """)
 
     def test_the_waiting_blink_moves_only_the_waiting_red_cells(self):
@@ -201,12 +201,12 @@ for(const width of [30,31,32,33,40])for(const wait of ['','◑답 대기 1','◑
  }}
 """)
 
-    def test_the_popup_names_status_by_its_word_and_a_request_body_carries_its_tables(self):
+    def test_the_popup_names_status_in_english_and_a_request_body_carries_its_tables(self):
         self.node(r"""
-const v=pv.popup({cols:100,rows:30,kind:'table',title:[p('현황')],body:[[p('x')]],sections:['STATUS','QUESTIONS','ROUTE','MESSAGES'],labels:['현황','QUESTIONS','ROUTE','MESSAGES'],current:0,model:{styles},cellWidth:cells});
-const bottom=v.rows.map(str).find(r=>r.includes('╰─'));assert(bottom.includes('╰─ 현황 · QUESTIONS · ROUTE · MESSAGES '),bottom);
-const at=bottom.indexOf('현황'),left=[...bottom.slice(0,at)].reduce((n,c)=>n+cells(c),0)+v.left;
-const hit=v.hits.find(h=>h.action==='popup:STATUS');assert(hit&&hit.left===left&&hit.right===left+3,JSON.stringify([hit,left]));
+const v=pv.popup({cols:100,rows:30,kind:'table',title:[p('STATUS')],body:[[p('x')]],sections:['STATUS','QUESTIONS','ROUTE','MESSAGES'],current:0,model:{styles},cellWidth:cells});
+const bottom=v.rows.map(str).find(r=>r.includes('╰─'));assert(bottom.includes('╰─ STATUS · QUESTIONS · ROUTE · MESSAGES '),bottom);
+const at=bottom.indexOf('STATUS'),left=[...bottom.slice(0,at)].reduce((n,c)=>n+cells(c),0)+v.left;
+const hit=v.hits.find(h=>h.action==='popup:STATUS');assert(hit&&hit.left===left&&hit.right===left+5,JSON.stringify([hit,left]));
 assert.deepEqual(v.hits.filter(h=>h.action.startsWith('popup:')).map(h=>h.action),['popup:STATUS','popup:QUESTIONS','popup:ROUTE','popup:MESSAGES']);
 // A request body: its lines wrap as before; its drawn table rows stand two cells in, as Fleet drew them.
 const model={styles,requests:[{id:'q1',way:'→',who:'[73]',title:'표 요청',body:['| 이름 | 값 |','|---|--:|','| 가 | 12 |','끝 줄'],
@@ -241,12 +241,12 @@ assert.equal('표 ┈ 현황 · ✓'.replace(rule,' '),'표 ┈ 현황 · ✓');
         with tempfile.TemporaryDirectory(dir="/tmp") as folder:
             doc = Path(folder) / "현황.md"
             doc.write_text("# 현황\n\n| 이름 | 값 |\n|:--|--:|\n| ไท่ย | 🥱 하품 |\n| 표 | 12 |\n")
-            view = {"word": "현황", "has_doc": True, "campaign": "c", "age": "3m", "title": "현황 c · 3m",
+            view = {"word": "STATUS", "has_doc": True, "campaign": "c", "age": "3m", "title": "STATUS c · 3m",
                     "path": str(doc), "slot": "", "watch": [str(doc)]}
             with mock.patch.object(session_status, "read", return_value=view), \
                     mock.patch.object(session_shell, "_popup_view_model", side_effect=RuntimeError("no Fleet here")):
                 result = session_shell._status_popup({"harness": "claude", "sid": "s"}, {"cwd": folder, "routes": []}, 40, 256, False)
-                self.assertTrue(result["ok"] and result["title"] == "현황 c · 3m", result)
+                self.assertTrue(result["ok"] and result["title"] == "STATUS c · 3m", result)
                 self.assertTrue(any("ไท่ย" in run[0] for row in result["rows"] for run in row), result["rows"])
                 for row in result["rows"]:
                     self.assertTrue(all(run[2] == cell_width(run[0]) for run in row), row)

@@ -60,7 +60,7 @@ for(const c of i.cases){
   const body=c.answer.rows.map((r,k)=>{const p=parts(r);return k===at?p.map(x=>({...x,tint:true})):p;});
   let v,error='';
   try{v=view.popup({cols:c.cols,rows:c.rows,band:0,kind:'table',title:[{text:'NOW · '},{text:c.answer.title}],body,sections:['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES'],
-    labels:['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES'],current:1,model:{styles:{},colors:c.colors,no_color:c.noColor},
+    current:1,model:{styles:{},colors:c.colors,no_color:c.noColor},
     configuration:{theme:c.theme},cellWidth:cells,background:c.background||''});}catch(e){error=String(e&&e.stack||e);}
   if(error){out.push({id:c.id,error});continue;}
   out.push({id:c.id,rows:v.rows.map(r=>({width:r.reduce((n,p)=>n+cells(p.text),0),text:r.map(p=>p.text).join(''),

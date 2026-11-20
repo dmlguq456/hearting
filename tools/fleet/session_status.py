@@ -253,6 +253,11 @@ def read_groups(path):
         return []
 
 
+# 11-20 (the person: "현황은 영어로"): the panel's other section names (REPO, GIT, PEERS, SESSION, ROUTE, MESSAGES, MEM) are English whatever
+# language is declared, so this one is too.  Fleet's explorer keeps ``fleet.repo.status`` (there every section name follows the language).
+STATUS_WORD = "STATUS"
+
+
 def _title(word, campaign, age):
     if not (campaign or age):
         return word
@@ -263,7 +268,7 @@ def read(cwd, routes=(), now=None):
     """The panel's status value for a session folder, or ``None`` when its project has no artifact root.
 
     ``routes``: this session's route ids (or its route rows, each with ``id``).  Never raises.
-    Keys: ``word`` (Fleet's ``fleet.repo.status``), ``has_doc``, ``campaign`` (name, '' when not known),
+    Keys: ``word`` (the section's name, ``STATUS``), ``has_doc``, ``campaign`` (name, '' when not known),
     ``age`` (Fleet's age words, '' when none), ``title`` (the popup's title), ``path`` (the document or
     ''), ``slot`` (where a missing document would stand, '' when no campaign is known), ``watch``
     (paths for the panel's file watch), ``groups`` (the document's lists, above; ``[]`` without one)."""
@@ -274,7 +279,7 @@ def read(cwd, routes=(), now=None):
         root = _root(cwd, now)
         if not root:
             return None
-        word = ui_text("fleet.repo.status")
+        word = STATUS_WORD
         folders = _campaign_folders(root, _route_ids(routes), now)
         path, folder = _own_document(folders)
         campaign = _campaign_name(folder) if folder else ""

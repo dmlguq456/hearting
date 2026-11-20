@@ -95,11 +95,11 @@ class ChoiceTest(StatusTest):
         mine = self.route(1, "alpha")
         view = self.read(mine)
         self.assertTrue(view["has_doc"])
-        self.assertEqual((view["campaign"], view["age"], view["word"]), ("alpha", "3h ago", "현황"))
-        self.assertEqual(view["title"], "현황 alpha · 3h ago")
+        self.assertEqual((view["campaign"], view["age"], view["word"]), ("alpha", "3h ago", "STATUS"))   # English whatever the declared language
+        self.assertEqual(view["title"], "STATUS alpha · 3h ago")
         self.assertTrue(view["path"].endswith("2026-11-10_alpha/현황.md"))
         self.assertEqual(self.read()["campaign"], "beta")                       # no route: Fleet's document
-        self.assertEqual(self.read()["title"], "현황 beta · 10m ago")
+        self.assertEqual(self.read()["title"], "STATUS beta · 10m ago")
 
     def test_the_panel_opens_campaign_md_before_the_older_names(self):
         folder = self.campaign("alpha", age=3 * 3600)          # carries a hand written 현황.md
@@ -149,7 +149,7 @@ class ChoiceTest(StatusTest):
         project_status.clear_cache()
         view = self.read(mine)
         self.assertFalse(view["has_doc"])
-        self.assertEqual(view["title"], "현황")
+        self.assertEqual(view["title"], "STATUS")
         self.assertEqual((view["campaign"], view["path"]), ("alpha", ""))
         self.assertEqual(view["slot"], "campaigns/2026-11-10_alpha/현황.md")
         self.assertIn(str(self.root / "campaigns" / "2026-11-10_alpha") + os.sep, view["watch"])

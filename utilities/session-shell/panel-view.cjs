@@ -30,7 +30,7 @@ const WAIT_BLINK=10;
 // 다시 줄이고"): three at most.
 const MESSAGES_MAX=3;
 // 11-20 (the person: "패널 공간에 현황은 중요하지. 기본적으로 5줄 이상 써서 보이는것도 중요할것 같다"): the STATUS section's body
-// (under its head row) keeps STATUS_MIN rows while the rows allow, and takes up to STATUS_MAX where they are plentiful: four
+// (the rows inside its box) keeps STATUS_MIN rows while the rows allow, and takes up to STATUS_MAX where they are plentiful: four
 // group heads and eight titles (two to a group, the waiting ones first). Short of rows MESSAGES and MEM go down first, to one
 // or two rows each, before the STATUS section gives up any of its rows.
 const STATUS_MIN=5,STATUS_MAX=12;
@@ -771,7 +771,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return cut(build(1),room);
     };
     // 11-15 (the person: "현황은 REPO 옆에 버튼을 만드는게 나을거 같은데", design 2 as recommended): the status
-    // button `현황 ›` (`STATUS ›`, Fleet's `fleet.repo.status`) at the right end of the REPO row: the word in
+    // button `STATUS ›` (11-20: English, as the section's other names) at the right end of the REPO row: the word in
     // the body color, `›` dim as a section head's, no ground, no count; no status document: all of it dim
     // (a press still opens it). Short of cells the word goes first (`›` stays), then `· wt N` whole, then
     // the name is cut with `…`; the name and `›` stay to the last. A press anywhere on the row opens the
@@ -1805,7 +1805,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     const memRows=m=>[memLine(m)];
     // STATUS (11-20, the person: "현황이 사용성이 많아 질 수 있는 부분이니까 좀 더 눈에 띄면 좋겠어" / "기본적으로 5줄 이상 써서 보이는것도
-    // 중요할것 같다"; the 11-15 button on the REPO row stands in this head now): the section's head `현황 ──── ›`, then its groups in the
+    // 중요할것 같다"; the 11-15 button on the REPO row stands in this head now): the section is a box (`╭─ STATUS ──── › ─╮`, below), then its groups in the
     // order of the list the person liked (`STATUS-LIST-SIAN`): what is in progress, what waits for the person, what ended lately, what
     // comes later; each a head row (its name and its count) and the titles under it (`⠋`, `◇`, `✓`, `·`). The groups are the
     // campaign document's own (`status_doc.groups`, read by the backend; no document, or none it can read: no section, and the
@@ -1864,13 +1864,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       flush();
       return out;
     };
-    const statusMax=statusRows(STATUS_MAX).length;
+    // The section stands in a box of the route box's frame, so its rows are laid out at the box's inner width.
+    const statusRowsIn=n=>within(()=>statusRows(n));
+    const statusMax=statusRowsIn(STATUS_MAX).length;
     // The sections in order, each with the most rows it takes and its rows at a given count.
     const SECTIONS=[
       {name:'QUESTIONS',on:asked,max:3,head:()=>sectionHead(questionCount?[{...text(questionCount,'g_blocked'),role:'accent'}]:[],summary?.label||'QUESTIONS'),
         rows:()=>questionRows(),action:'question',groups:model.wait?['wait']:[]},
       // Second from the top: what the person looks at most, right under the question to answer here (which never gives its place).
-      {name:'STATUS',on:statusGroups.length>0,max:statusMax,head:()=>sectionHead([],statusWord,[],[[]],true),rows:n=>statusRows(n),action:'popup:STATUS'},
+      {name:'STATUS',on:statusGroups.length>0,max:statusMax,boxed:true,rows:statusRowsIn,action:'popup:STATUS'},
       {name:'ROUTE',on:!!routeTitle,box:true},
       {name:'MESSAGES',on:messageTotal>0,max:MESSAGES_MAX,head:()=>messagesHead(take.MESSAGES),rows:n=>messageRows(n),action:'popup:MESSAGES'},
       // (11-20: the head and every record open the MEM popup, the record pressed first on screen: `popup:MEM:<n>`.)
@@ -1886,7 +1888,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const boxedQuestions=()=>keepQuestionBox&&kept.QUESTIONS&&((keepSent&&sentSource.length>0)||!!summary||(keepGuide&&!!guide));
     const questionRowsIn=()=>boxedQuestions()?within(questionRows):questionRows();
     const sectionRows=s=>s.name==='QUESTIONS'?questionRowsIn():s.rows(take[s.name]);
-    const sectionSize=s=>!kept[s.name]?0:s.box?routeBox():(s.name==='QUESTIONS'&&boxedQuestions()?2:1)+sectionRows(s).length;
+    const sectionSize=s=>!kept[s.name]?0:s.box?routeBox():(s.boxed||s.name==='QUESTIONS'&&boxedQuestions()?2:1)+sectionRows(s).length;
     const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size-groupHeads.size;
     let keepGroupHeads=true,keepGit=true,keepSpacers=true,keepMetaGap=true,keepRules=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0,keepFootRule=true,keepQuestionBox=true;
     // 11-16 (the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을 USAGE로 해서 넣자"): the
@@ -2149,11 +2151,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // starts with it); in the bottom layout, which has no group heads, it stays second among the sections.
     let buttonAt=-1,buttonPlain=null,statusPlaced=false;
     const statusSection=SECTIONS.find(x=>x.name==='STATUS');
+    // 11-20 (the person: "현황은 영어로" / "그리고 박스로 감싸고"): the section is a box of the route box's frame in its quiet color, its name
+    // `STATUS` and `›` in the top border (`╭─ STATUS ──── › ─╮`), no head row of its own; a press on the top border, on any row inside
+    // and on the bottom border opens the status popup.
+    const statusBlock=()=>{
+      const key={key:'plain',role:'route'},action=statusSection.action;
+      return [boxTop([{...text(statusWord,'dim'),role:'title'}],key,{action,note:[text('›','dim')]}),
+        ...sectionRows(statusSection).map(parts=>boxRow({parts,action},key)),boxBottom(key,[],action)];
+    };
     const placeStatus=()=>{
       if(statusPlaced||!side||!kept.STATUS)return;
       statusPlaced=true;
-      add(statusSection.head(),statusSection.action);
-      for(const row of sectionRows(statusSection))add(row,statusSection.action);
+      for(const item of statusBlock())add(item.parts,item.action);
     };
     if(!order.some(item=>item.plain))placeStatus();
     for(const item of order){
@@ -2193,6 +2202,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       // 11-20: the section's head carries the button, so the bottom layout's first row does not.
       if(s.name==='STATUS'&&buttonAt>=0){content[buttonAt]=buttonPlain;for(let i=hits.length-1;i>=0;i--)if(hits[i].row===buttonAt+1&&hits[i].action==='popup:STATUS')hits.splice(i,1);}
+      if(s.boxed){for(const item of statusBlock())add(item.parts,item.action);continue;}
       const into=['MESSAGES','MEM'].includes(s.name)?(parts,action,groups)=>lower.push({parts,action,groups}):add;
       into(s.head(),s.action,s.groups);
       sectionRows(s).forEach((row,i)=>into(row,s.rowAction?s.rowAction(i):s.action));
@@ -2419,7 +2429,7 @@ function popupWidth(cols,kind='text'){
 // frame first (under 8 rows), then its bottom line (3 rows or fewer), so the content keeps rows.
 function popupHeight(space){return space>=8?space-2:space;}
 function popupRoom(rows,band=0){const H=popupHeight(Math.max(1,rows-band));return Math.max(0,H>3?H-2:H-1);}
-function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],labels=sections,current=0,model={},configuration,cellWidth,background=''}){
+function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],current=0,model={},configuration,cellWidth,background=''}){
   const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
   const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
   const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
@@ -2443,8 +2453,8 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],labels
   const close=W>=8?[text(' ','dim'),text('✕','dim'),line(' ─╮')]:[line('╮')];
   const top=[...head,line('─'.repeat(Math.max(0,W-size(head)-size(close)))),...close];
   // The bottom line: the sections, the current one bright.
-  // (11-15: a section's name on the line is its label, `현황` for STATUS; its press opens it by its key.)
-  const named=i=>String(labels[i]??sections[i]);
+  // (11-20: a section's name on the line is its own, `STATUS` in English like the rest; its press opens it by its key.)
+  const named=i=>String(sections[i]);
   const names=sections.flatMap((s,i)=>[...(i?[text(' · ','dim')]:[]),{...text(named(i),i===current?'loc_repo':'dim'),role:i===current?'':'title',bold:i===current}]);
   const listed=names.length&&size(names)+6<=W?[line('╰─ '),...names,line(' ')]:[line('╰─')];
   const bottom=[...listed,line('─'.repeat(Math.max(0,W-size(listed)-1))),line('╯')];

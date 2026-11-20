@@ -42,7 +42,7 @@ const route=i=>({id:'rt-'+i,title:'시험용 작업 '+i,kind:'working',state:'wo
 const G=(kind,name,short,items,count)=>({kind,name,short,items,count:count??items.length});
 const GROUPS=[G('running','하는 중','하는 중',['시험용 작업 가','시험용 작업 나','시험용 작업 다']),G('waiting','기다리는 것','기다림',['시험용 질문 둘','시험용 정하기']),
   G('done','최근에 끝난 것','끝난 일',['시험용 끝남 하나','시험용 끝남 둘','시험용 끝남 셋','시험용 끝남 넷']),G('next','나중에 할 것','예정',['시험용 예정 하나','시험용 예정 둘','시험용 예정 셋'])];
-const doc=groups=>({word:'현황',has_doc:true,...(groups?{groups}:{})});
+const doc=groups=>({word:'STATUS',has_doc:true,...(groups?{groups}:{})});
 function model(o={}){
   return {styles,colors:256,tag:'[e9]',repo_side:[t('hearting','loc_repo')],worktrees:[t('wt 12')],repo:[t('hearting','loc_repo')],git_side:[t('branch'),t(' ✓','lvl_g')],git:[t('branch')],
     selected:[t('Opus 5.5','hb_claude'),t(' xhigh')],context_side:[t('━━━━','lvl_g'),t('────'),t(' 41%')],context:[t('ctx 41%','lvl_g')],quota:[t('5h ','dim'),t('23%','lvl_g')],
@@ -57,9 +57,9 @@ const draw=(o={})=>view.render({width:o.width??44,height:o.height??60,side:o.sid
 const lines=v=>v.rows.map(str);
 const inside=v=>lines(v).map(l=>l.slice(2,-2));
 const headAt=(rows,re)=>rows.findIndex(l=>re.test(l));
-// The section's body: the rows under its head, up to the next group's or section's first row.
-function body(v){const ls=inside(v),a=headAt(ls,/^현황 ─+ ›/);if(a<0)return null;let b=a+1;
-  while(b<ls.length-2&&/^(  \S|하는 중|기다리는 것|기다림|최근에 끝난 것|나중에 할 것|끝난 일|예정)/.test(ls[b]))b++;return {at:a,rows:ls.slice(a+1,b)};}
+// The section's body: the rows inside its box (`╭─ STATUS ──── › ─╮` ... `╰────╯`), the box's sides taken off; `at` is the top border's row, `end` the bottom's.
+function body(v){const ls=inside(v),a=headAt(ls,/^╭─ STATUS ─+ › ─╮$/);if(a<0)return null;let b=a+1;
+  while(b<ls.length&&!/^╰─+╯$/.test(ls[b]))b++;return {at:a,end:b,rows:ls.slice(a+1,b).map(l=>l.replace(/^│ /,'').replace(/ │$/,''))};}
 const count=(v,re)=>inside(v).filter(l=>re.test(l)).length;
 """
 
@@ -73,11 +73,11 @@ class StatusSectionTest(unittest.TestCase):
 
     def test_no_lists_no_section_and_the_button_stays_on_the_repo_row(self):
         self.node(r"""
-for(const status of [undefined,doc(),doc([]),{word:'현황',has_doc:false},{word:'현황',has_doc:true,groups:[{kind:'nonsense',count:2,items:['x']}]}]){
+for(const status of [undefined,doc(),doc([]),{word:'STATUS',has_doc:false},{word:'STATUS',has_doc:true,groups:[{kind:'nonsense',count:2,items:['x']}]}]){
   const v=draw({status}),ls=lines(v);
-  assert(!ls.some(l=>/현황 ─/.test(l)),JSON.stringify(status));
-  // (11-20: the REPO row is the group's head: `REPO   hearting · wt 12 ──── 현황 ›`.)
-  if(status&&status.word){assert(/^│ REPO   hearting · wt 12 ─+ 현황 › │$/.test(ls[1]),ls[1]);assert(v.hits.some(h=>h.row===1&&h.action==='popup:STATUS'));}
+  assert(!ls.some(l=>/STATUS ─/.test(l)),JSON.stringify(status));
+  // (11-20: the REPO row is the group's head: `REPO   hearting · wt 12 ──── STATUS ›`; 11-20 later: the name is English whatever the declared language.)
+  if(status&&status.word){assert(/^│ REPO   hearting · wt 12 ─+ STATUS › │$/.test(ls[1]),ls[1]);assert(v.hits.some(h=>h.row===1&&h.action==='popup:STATUS'));}
   else assert(/^│ REPO   hearting · wt 12 ─+ │$/.test(ls[1]),ls[1]);
 }
 """)
@@ -87,30 +87,69 @@ for(const status of [undefined,doc(),doc([]),{word:'현황',has_doc:false},{word
 const v=draw({status:doc(GROUPS),question:true,peers:true,height:70}),ls=inside(v),all=lines(v);
 // The REPO group: its row is the head (the rule runs to the end, no button), the STATUS section right under it, then GIT and PEERS where they stood.
 assert(/^│ REPO   hearting · wt 12 ─+ │$/.test(all[1])&&!v.hits.some(h=>h.row===1),all[1]);
-const s=headAt(ls,/^현황 ─+ ›$/),g=headAt(ls,/^GIT /),pe=headAt(ls,/^PEERS /),se=headAt(ls,/^SESSION ─+$/),mo=headAt(ls,/^MODEL /);
+const s=headAt(ls,/^╭─ STATUS ─+ › ─╮$/),g=headAt(ls,/^GIT /),pe=headAt(ls,/^PEERS /),se=headAt(ls,/^SESSION ─+$/),mo=headAt(ls,/^MODEL /);
 assert(s===2&&g>s&&pe>g&&se>pe&&mo===se+1,ls.join('\n'));   // (index 0 is the frame's top line, 1 the REPO row)
 // The SESSION group: MODEL, CTX, TITLE, NOW, then QUESTIONS, the route box, MESSAGES, MEM.
 const order=[/^MODEL /,/^CTX /,/^TITLE /,/^NOW /,/^╭─ 1 QUESTIONS/,/^╭─ 2 ROUTE/,/^MESSAGES/,/^MEM ─/].map(re=>headAt(ls,re));
 assert(order.every((y,k)=>y>se&&(!k||y>order[k-1])),order+'\n'+ls.join('\n'));
 // The head and every row of the section open the popup (and only they do); the REPO row, the SESSION head and PEERS open nothing.
 const b=body(v);
-for(let y=b.at;y<=b.at+b.rows.length;y++)assert(v.hits.some(h=>h.row===y&&h.action==='popup:STATUS'),'row '+y);
-assert.equal(v.hits.filter(h=>h.action==='popup:STATUS').length,b.rows.length+1);
+for(let y=b.at;y<=b.end;y++)assert(v.hits.some(h=>h.row===y&&h.action==='popup:STATUS'),'row '+y);
+assert.equal(v.hits.filter(h=>h.action==='popup:STATUS').length,b.rows.length+2);   // the top border, every row inside and the bottom border
 assert(!v.hits.some(h=>[1,g,pe,se].includes(h.row)&&h.action!=='fold'),JSON.stringify(v.hits));
 // The group heads' look: the word in the title role, the rule dim in the messages role (a section head's).
 const seRow=v.rows[se],word=seRow.find(p=>p.text==='SESSION');assert(word&&word.role==='title'&&word.dim===true&&seRow.some(p=>p.role==='messages'),JSON.stringify(seRow));
 const repoRule=v.rows[1].find(p=>/^─+$/.test(p.text));assert(repoRule&&repoRule.role==='messages'&&repoRule.dim===true,JSON.stringify(v.rows[1]));
 // The bottom layout has no group heads (its first row carries the repository and the session together): the section stays second among the sections.
 {const w=draw({status:doc(GROUPS),side:false,width:100,height:14}),ws=lines(w);
- assert(ws.some(l=>/^│ 현황 ─+ › │$/.test(l)),ws.join('\n'));assert(!/현황|REPO|SESSION/.test(ws[1])&&!ws.some(l=>/^│ (REPO|SESSION)/.test(l)),ws.join('\n'));
- assert(body(w)&&body(w).rows.length>=5,ws.join('\n'));}
+ assert(ws.some(l=>/^│ ╭─ STATUS ─+ › ─╮ │$/.test(l)),ws.join('\n'));assert(!/STATUS|REPO|SESSION/.test(ws[1])&&!ws.some(l=>/^│ (REPO|SESSION)/.test(l)),ws.join('\n'));
+ // The box takes one row more than the head row did (its bottom border): the same lines as before, one body row less.
+ assert(body(w)&&body(w).rows.length>=4,ws.join('\n'));}
+""")
+
+    def test_the_section_is_a_box_of_the_route_boxs_frame_named_status_in_english(self):
+        self.node(r"""
+// 11-20 (the person: "현황은 영어로" / "그리고 박스로 감싸고"): `╭─ STATUS ──── › ─╮` over the rows, `╰──╯` under them, the route box's frame in its quiet color.
+const v=draw({status:doc(GROUPS),height:70}),all=lines(v),ls=inside(v),b=body(v);
+assert(b&&/^╭─ STATUS ─+ › ─╮$/.test(ls[b.at])&&/^╰─+╯$/.test(ls[b.end]),ls.join('\n'));
+assert(!all.some(l=>/현황/.test(l)),'no Korean word for the section stands in the panel\n'+all.join('\n'));   // the groups' own names are the document's: they stand, the section's name does not
+assert.equal(b.rows.length,12);assert.equal(b.end-b.at+1,14);                 // inside: the same rows as before (twelve at most); the box costs its two borders
+// No head row over the box and none of the old kind: the REPO row, then the box.
+assert(/^│ REPO /.test(all[1])&&/^│ ╭─ STATUS /.test(all[2]),all.slice(0,4).join('\n'));
+// Every row is exactly the panel's width, in the Korean the section holds, at every width the panel goes to: the cut is made at the box's inner width.
+for(const width of [60,44,36,28,24,20]){const w=draw({status:doc(GROUPS),width,height:70}),rows=lines(w),bb=body(w);
+  assert(rows.every(l=>cells(l)===width),width+'\n'+rows.join('\n'));
+  for(const r of bb.rows)assert(cells(r)===width-8,width+' '+JSON.stringify(r));   // 2 frame cells and 1 space each side, then the box's wall and space each side
+}
+// A title that does not fit is cut with `…` at the box's inner width, in whole letters (a width-2 letter is never split).
+{const w=draw({status:doc([G('running','하는 중','하는 중',['아주긴제목'.repeat(8)])]),width:36,height:70}),r=body(w).rows[1];
+ assert(r.includes('…')&&cells(r)===36-8,r);}
+// The box's lines take the route box's quiet frame color in every color arrangement (terminal, light, mono), and the section opens the popup from its top border,
+// every row inside and its bottom border.
+for(const [theme,background] of [['terminal','dark'],['light','light'],['mono','']]){
+  const w=draw({status:doc(GROUPS),height:70}),st=body(w),pick=(row,ch)=>view.appearance([w.rows[row]],{theme},{background})[0].find(p=>p.text.includes(ch));
+  const rt=inside(w).findIndex(l=>/^╭─ \d+ ROUTE/.test(l));
+  const same=(a,c)=>['foreground','dim','bold','role'].every(k=>a[k]===c[k]);
+  assert(pick(st.at,'╭')&&pick(rt,'╭')&&same(pick(st.at,'╭'),pick(rt,'╭')),theme+JSON.stringify([pick(st.at,'╭'),pick(rt,'╭')]));
+  assert(same(pick(st.end,'╰'),pick(rt,'╭')),theme);
+  assert(same(pick(st.at+1,'│ '),pick(rt,'╭')),theme);
+}
+{const w=draw({status:doc(GROUPS),height:70}),st=body(w);
+ for(let y=st.at;y<=st.end;y++)assert(w.hits.some(h=>h.row===y&&h.action==='popup:STATUS'),'row '+y);}
+// One group alone, and the section's absence: a box of one row, or no box.
+{const w=draw({status:doc([G('running','하는 중','하는 중',['시험용 하나'])]),height:40}),bb=body(w);
+ assert.deepEqual(bb.rows.map(l=>l.trim()),['하는 중 1','⠋ 시험용 하나'],lines(w).join('\n'));}
+// The bottom layout at 100 x 14: the section takes no more lines than the head and four rows did (five): its box is the top border, what the rows allow, the bottom border.
+for(const peers of [true,false]){const w=draw({status:doc(GROUPS),side:false,width:100,height:14,peers}),bb=body(w),ws=lines(w);
+  assert(bb&&bb.end-bb.at+1<=6&&ws.every(l=>cells(l)===100)&&ws.length===14,ws.join('\n'));
+  for(let y=bb.at;y<=bb.end;y++)assert(w.hits.some(h=>h.row===y&&h.action==='popup:STATUS'),'row '+y);}
 """)
 
     def test_the_separate_head_form_a_narrow_panel_and_the_heads_that_fold(self):
         self.node(r"""
 // `separate`: a head row of its own over the REPO row, which keeps its value alone (under the label column).
 {const ls=lines(draw({status:doc(GROUPS),group_head:'separate',height:70}));
- assert(/^│ REPO ─+ │$/.test(ls[1])&&/^│ {8}hearting · wt 12 +│$/.test(ls[2])&&/^│ 현황 ─+ › │$/.test(ls[3]),ls.join('\n'));}
+ assert(/^│ REPO ─+ │$/.test(ls[1])&&/^│ {8}hearting · wt 12 +│$/.test(ls[2])&&/^│ ╭─ STATUS ─+ › ─╮ │$/.test(ls[3]),ls.join('\n'));}
 // Narrower than 30 cells inside the REPO row keeps the word first (`REPO `), as the head of its group.
 for(const width of [32,28,20]){const v=draw({status:doc(GROUPS),width,height:70}),ls=lines(v);
   assert(/^│ REPO hearting/.test(ls[1])&&ls.every(l=>cells(l)===width),width+'\n'+ls.join('\n'));}
