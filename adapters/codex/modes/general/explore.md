@@ -14,7 +14,7 @@ inventory. It is adapter-owned output, not a legacy runtime mode copy.
 
 - Status: `portable`
 - Realization: `portable-persona`
-- Requirement: read-only lookup or investigation with Codex file, search and web tools; write nothing
+- Requirement: read-only lookup or investigation with Codex file, search and web tools; the node's one report is the only file written
 - Note: Codex may use the mode fragment after reading roles/MODES.md and resolving portable roles.
 
 ## Use
@@ -55,16 +55,19 @@ Always carried with the worker text. Every line in this section is a must.
 - **Input.** The brief is the task: one question to find out or one thing to look into.
   Answer that and nothing wider.
 - **Output.** One answer, with its evidence beside each claim: file and line, URL, or
-  record id. Give the answer in the brief's language.
+  record id. Give the answer in the brief's language. Write it to this node's one
+  declared report (the `units/unit/` path in the node scope below) and end with
+  `artifact: <that path>`: the report is how the answer reaches the caller, so never end
+  `artifact: -`.
 - **Ending.** Name how the answer ended: `answered` (the question is settled),
   `partial` (part of it is settled; say which part is not and why), or `not-found`
   (you looked and it is not there; say where you looked). All three are a finished
   job and end `verdict: PASS` — "not found" is an answer. `BLOCKED` is only for a job
   you could not do at all (the brief names nothing to look into, a needed source cannot
   be reached).
-- **Read-only.** Write nothing: no file in the working tree, no memory record, nothing
-  to an outside service (no post, comment, message, upload or draft). A change worth
-  making goes into the answer as a diff for the caller to apply.
+- **Read-only.** That report is the only file you write: no file in the working tree, no
+  memory record, nothing to an outside service (no post, comment, message, upload or
+  draft). A change worth making goes into the answer as a diff for the caller to apply.
 - **No further workers.** Do not open another unit route or a subagent; do the looking
   yourself.
 

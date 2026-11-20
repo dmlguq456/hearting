@@ -359,6 +359,10 @@ class EphemeralScenario(unit.UnitRouteScenario):
     unit_name = "qa/code-review"   # the unit the session opens
     report_head = unit.PASS_HEAD   # the first line of the worker's report
 
+    def caller_env(self, run):
+        """Words that start the compose command inside another process's environment (none: the session's own)."""
+        return []
+
     def side_effects(self, run):
         root = Path(run.home.env["AGENT_ARTIFACT_ROOT"])
         # The model-worker governor's own state is written by whatever worker the session starts (Fleet's title
@@ -384,6 +388,7 @@ class EphemeralScenario(unit.UnitRouteScenario):
                 return Reply("The unit route runs; I will continue when its result arrives.")
             if unit.START in last and not any(r["reply"].get("shell") for r in earlier):
                 return Reply(shell=" ".join([
+                    *self.caller_env(run),
                     sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"), "compose", "--start",
                     "--unit", self.unit_name, "--ephemeral", "--pin", f"worker={run.harness}",
                     "--prompt-file", str(run.home.root / "brief.md"), "--cwd", str(run.home.workspace),

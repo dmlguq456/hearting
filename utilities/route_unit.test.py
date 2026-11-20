@@ -173,8 +173,19 @@ class UnitComposeTest(F.FramedBase):
         self.assertIn("## 지킬 것", text)
         self.assertIn("## 참고", text)
         must, advice = text.split("## 지킬 것")[1].split("## 참고")
+        flat = " ".join(must.split())
         for word in ("answered", "partial", "not-found", "verdict: PASS", "BLOCKED", "Read-only", "No further workers"):
-            self.assertIn(word, must, word)
+            self.assertIn(word, flat, word)
+        # The answer reaches the caller only through the node's report, so the text says to write it there and that
+        # it is the one file written (not "write nothing"); the adapters' mode-map requirement says the same.
+        for phrase in ("Write it to this node's one declared report", "never end `artifact: -`",
+                       "That report is the only file you write"):
+            self.assertIn(phrase, flat, phrase)
+        self.assertNotIn("Write nothing", flat)
+        for harness in ("codex", "opencode"):
+            mode_map = (UNITS.parent.parent / "adapters" / harness / "bin" / "mode-map.sh").read_text(encoding="utf-8")
+            self.assertIn("the node's one report is the only file written", mode_map)
+            self.assertNotIn("write nothing", mode_map)
         self.assertIn("`tools/memory/recall.sh \"<query>\" --no-touch`", advice)
         self.assertIn("`mem show <id> --no-touch`", advice)
         # Nothing here says Hearting runs a session's subagent calls: that is a later piece.

@@ -143,7 +143,7 @@ _HINTS = {
     "frame-artifact-scope-missing": "launch frames through their route: compose --start (or the receipt's resume_command) "
                                     "binds each leg's cycle itself (OPERATIONS §5.10b)",
     "route-node-unknown": "--route-node must name an id present in the sealed route's nodes list",
-    "route-node-worker-type-forbidden": "--route-node selects a frame node's own profile and role; only --worker-type frame may use it",
+    "route-node-worker-type-forbidden": "--route-node selects a route leg's own profile and role; only --worker-type frame, review or support may use it",
     "forbidden-flag": "model, reasoning, effort, variant and completion-delivery are sealed by the profile and route; remove the flag. "
                       "To choose a tool or model, seal it once at compose time: capability-route.py compose --pin <owner|frame|worker>=<harness>[:<model>[@<effort>]]",
     "explicit-jobs-outside-parent-registry": "drop --jobs: an interactive Claude parent's completion hook trusts only the inherited "
@@ -1173,10 +1173,12 @@ def main(argv):
         child_env = {
             key: value for key, value in os.environ.items() if not _MODEL_ENV.fullmatch(key)
         }
-        if values["--worker-type"] in {"review", "frame"}:
-            # A direct reviewer is deliberately route-free.  The selector may
-            # itself run inside a route-owned owner, so inherited route
-            # variables must not silently bind the child to that owner/node.
+        if values["--worker-type"] in {"review", "frame"} | _ROUTE_NODE_WORKER_TYPES:
+            # A direct reviewer is deliberately route-free, and a route leg that is
+            # not the owner (a frame, a unit's support leg) never carries its
+            # caller's route binding.  The selector may itself run inside a
+            # route-owned owner, so inherited route variables must not silently
+            # bind the child to that owner/node.
             for key in (
                 "AGENT_OWNER_ROUTE_FILE", "AGENT_OWNER_ROUTE_ID",
                 "AGENT_OWNER_ROUTE_HASH", "AGENT_ROUTE_FILE",

@@ -246,6 +246,8 @@ def parse_launch(payload: object) -> Launch | None:
     }
     if any(expected not in fields.get(key, []) for key, expected in required_memberships.items()):
         return None
+    # Deliberately not `_row_is_depth1_waited`: a support leg counts only with its route and node, which the start
+    # output does not name, so the registry sweep (`_session_owner_rows`) arms it; this shortcut only saves latency.
     if not _worker_type_is_depth1(fields.get("worker_type", [])):
         return None
     attempt_id = _single(fields, "attempt_id")

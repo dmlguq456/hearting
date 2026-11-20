@@ -52,7 +52,7 @@ case "$family" in
   general)
     status=portable
     realization=portable-persona
-    requirement="read-only lookup or investigation with OpenCode file, search and web tools; write nothing"
+    requirement="read-only lookup or investigation with OpenCode file, search and web tools; the node's one report is the only file written"
     ;;
   material)
     status=tool-contract

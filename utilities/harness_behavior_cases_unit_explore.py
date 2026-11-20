@@ -14,10 +14,17 @@
     instruction carries the unit's text, that the route's field is ``other``, and how long the
     start took (the session's prompt to the worker's first model request, and the worker's last
     answer to the notice). Synthetic data stays under the fixture root.
+
+``unit-route-explore-in-owner``
+    The same, with the compose command run inside the environment a standard staged owner holds (the
+    route variables `AGENT_OWNER_ROUTE_*` and `AGENT_ROUTE_*` of a real sealed standard route). A route
+    leg never carries its caller's route binding, so the start is not refused as a non-owner start
+    (`owner-route-binding-tuple-invalid`).
 """
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -25,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harness_behavior_cases_unit_route as unit  # noqa: E402
 from harness_behavior_cases_unit_nested import EphemeralScenario  # noqa: E402
+from harness_behavior_cases_e import _base  # noqa: E402
 
 QUESTION = "SCENARIO-UNIT-WORK: where does the fixture README say what the fixture is for? Answer with the file and line."
 
@@ -52,6 +60,10 @@ class ExploreScenario(EphemeralScenario):
             ev["instruction_carries_unit"] = {word: word in instruction for word in
                                               ("general/explore", "answered", "not-found", "No further workers")}
             ev["instruction_has_question"] = QUESTION.split(": ", 1)[1] in instruction
+            # The leg is told its report is the one file it writes, and not how to start another worker.
+            flat = " ".join(instruction.split())
+            ev["instruction_report_only"] = ("That report is the only file you write" in flat
+                                              and "Starting another worker" not in flat)
         notice = [r for r in unit.resting_session_requests(run) if "Answer:" in r["text"] and r["last_kind"] != "tool"]
         if workers and notice:
             ev["answer_seconds"] = round(notice[0]["at"] - workers[-1]["at"], 1)   # the worker's last request to the notice
@@ -69,6 +81,7 @@ class ExploreScenario(EphemeralScenario):
               and ev["registry_unit"]["worker_type"] == "support" and ev["registry_unit"]["model_profile"] == "light"
               and ev["registry_unit"]["workflow_completion"] == "runtime-v1"
               and ev.get("instruction_has_question") and all(ev["instruction_carries_unit"].values())
+              and ev.get("instruction_report_only")
               and ev["route_field"] == ("other", "preset")
               and ev["route_node"] and ev["route_node"][0][:3] == ("general/explore", "support", "light")
               and row.get("status") == "done")
@@ -86,4 +99,47 @@ class ExploreScenario(EphemeralScenario):
         return json.loads(found[0].read_text(encoding="utf-8")) if found else None
 
 
-SCENARIOS = [ExploreScenario]
+class ExploreInOwnerScenario(ExploreScenario):
+    name = "unit-route-explore-in-owner"
+    summary = ("A lookup unit route opened from inside a standard staged owner's environment (its route variables "
+               "set): the leg starts without them, answers, and the answer comes back as in `unit-route-explore`.")
+
+    def prepare(self, run):
+        super().prepare(run)
+        env = run.home.env
+        task = run.home.root / "task-parent.md"
+        task.write_text("SCENARIO-PARENT-ROUTE: a standard route the lookup is opened from.\n", encoding="utf-8")
+        done = subprocess.run(
+            [sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"), "compose",
+             "--shape", "staged", "--intensity", "standard", "--capability", "autopilot-code",
+             "--capability-mode", "dev", "--pin", f"owner={run.harness}", "--prompt-file", str(task),
+             "--cwd", str(run.home.workspace), "--artifact-root", env["AGENT_ARTIFACT_ROOT"], "--unassigned",
+             "--slug", "hb-parent-route"],
+            env=env, cwd=str(run.home.workspace), text=True, capture_output=True, timeout=300,
+            stdin=subprocess.DEVNULL)
+        routes = sorted(p for p in (Path(env["AGENT_ARTIFACT_ROOT"]) / ".runtime" / "routes").glob("rt-*.json")
+                        if not p.name.endswith(".outcome.json") and ".superseded" not in p.name)
+        run.evidence["parent_route_compose"] = {"exit": done.returncode, "stderr_tail": done.stderr[-400:]}
+        self.parent = json.loads(routes[0].read_text(encoding="utf-8")) if routes else {}
+        self.parent_file = str(routes[0]) if routes else ""
+
+    def caller_env(self, run):
+        """What a standard owner's shell holds: the route it was bound to, by file, id and hash, and its node."""
+        if not self.parent_file:
+            return []
+        node = (self.parent.get("nodes") or [{}])[-1].get("id") or "report"
+        values = {"AGENT_OWNER_ROUTE_FILE": self.parent_file, "AGENT_OWNER_ROUTE_ID": self.parent.get("route_id", ""),
+                  "AGENT_OWNER_ROUTE_HASH": self.parent.get("route_hash", ""), "AGENT_ROUTE_FILE": self.parent_file,
+                  "AGENT_ROUTE_ID": self.parent.get("route_id", ""), "AGENT_ROUTE_NODE": node}
+        return ["env", *(f"{key}={value}" for key, value in values.items())]
+
+    def drive(self, run):
+        run.evidence["parent_route_bound"] = bool(self.parent_file and self.parent.get("route_hash"))
+        verdict = super().drive(run)
+        if verdict == "pass" and not run.evidence["parent_route_bound"]:
+            run.note("the parent standard route was not sealed, so no owner environment was carried")
+            return "inconclusive"
+        return verdict
+
+
+SCENARIOS = [ExploreScenario, ExploreInOwnerScenario]
