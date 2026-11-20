@@ -3340,11 +3340,18 @@ def _workflow_gate_detail(binding, item):
         if not isinstance(question, dict):
             continue
         options = question.get("options") if isinstance(question.get("options"), list) else []
-        choices = [{"value": option["label"], "label": option["label"],
-                    **({"means": option["means"]} if isinstance(option.get("means"), str)
-                       else {})}
-                   for option in options if isinstance(option, dict)
-                   and isinstance(option.get("label"), str)]
+        choices = []
+        for option in options:
+            if not (isinstance(option, dict) and isinstance(option.get("label"), str)):
+                continue
+            choice = {"value": option["label"], "label": option["label"]}
+            # The card's own words, then the one line the runtime reads from the proposal's structure.
+            means = " ".join(part for part in (
+                option["means"] if isinstance(option.get("means"), str) else "",
+                FI.route_scope_note(interview, question.get("id"), option["label"])) if part)
+            if means or isinstance(option.get("means"), str):
+                choice["means"] = means
+            choices.append(choice)
         entry = {"id": question["id"], "question": question["question"], "choices": choices,
                  # The existing frame answer validator accepts off-menu notes.
                  "is_other": True}
