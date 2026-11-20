@@ -404,9 +404,9 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
             ({"design": {"codex": 1.2}}, "harness_weights.design.codex must be a number"),
             ({"design": {"codex": True}}, "harness_weights.design.codex must be a number"),
             ({"design": {"gemini": 0.5}}, "harness_weights.design names an unknown harness"),
-            ({"gemini": 0.5}, "harness_weights names an unknown harness"),
-            ({"painting": 0.5}, "harness_weights names an unknown harness"),
-            ({"painting": {"codex": 0.5}}, "harness_weights names an unknown harness"),
+            ({"gemini": 0.5}, "harness_weights names an unknown harness or field"),
+            ({"painting": 0.5}, "harness_weights names an unknown harness or field"),
+            ({"painting": {"codex": 0.5}}, "harness_weights names an unknown harness or field"),
         ]
         for weights, fragment in cases:
             errors = D.validate(self._balanced(weights), capmap)
@@ -433,9 +433,13 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
         # a block sets only the cells it names; the rest keep the default row
         got = row(self._balanced({"design": {"codex": 1.0, "claude": 0.8}}), "design")
         self.assertEqual(got, {"claude": 0.8, "codex": 1.0, "opencode": 0.85})
-        # a number sets all three cells; 1.0 makes the field neutral, so no row at all
-        self.assertEqual(row(self._balanced({"docs": 0.7}), "docs"), {"claude": 0.7, "codex": 0.7, "opencode": 0.7})
+        # a number sets all three cells, and equal cells cancel in the share: no row at all, whatever the number
+        self.assertIsNone(row(self._balanced({"docs": 0.7}), "docs"))
         self.assertIsNone(row(self._balanced({"docs": 1.0}), "docs"))
+        self.assertIsNone(row(self._balanced({"design": {"claude": 0.5, "codex": 0.5, "opencode": 0.5}}), "design"))
+        # one cell off the others keeps the whole row
+        self.assertEqual(row(self._balanced({"design": {"claude": 0.5, "codex": 0.5}}), "design"),
+                         {"claude": 0.5, "codex": 0.5, "opencode": 0.85})
         # admin/other have no default row (1.0) until the user gives them one
         self.assertIsNone(row(self._balanced(), "admin"))
         self.assertEqual(row(self._balanced({"admin": {"codex": 0.5}}), "admin"),
@@ -445,6 +449,40 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
                          {"claude": 0.95, "codex": 0.85, "opencode": 1.0})
         self.assertIsNone(row(self._balanced(), None))
         self.assertIsNone(D.query_field_weights(self._balanced(), "code", None))
+
+    def test_a_row_equal_across_the_enabled_harnesses_is_neutral_too(self):
+        # `research` is claude 0.9 / codex 1.0 / opencode 1.0: with claude disabled the choosable
+        # cells are equal and the row cancels; a differing enabled cell keeps it.
+        config = self._balanced()
+        config["harnesses"]["enabled"] = ["codex", "opencode"]
+        self.assertIsNone(D.query_field_weights(config, "research", self.TABLE))
+        config["harnesses"]["enabled"] = ["claude", "codex"]
+        self.assertEqual(D.query_field_weights(config, "research", self.TABLE),
+                         {"claude": 0.9, "codex": 1.0, "opencode": 1.0})
+
+    def test_the_validator_reads_field_names_from_the_registry_it_was_given(self):
+        import tempfile
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        config = self._balanced({"painting": 0.5})
+        self.assertTrue(any("unknown harness or field" in e for e in D.validate(config, capmap)))
+        registry = json.loads(Path(D.default_topology_path()).read_text(encoding="utf-8"))
+        registry["fields"] = list(registry["fields"]) + ["painting"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "topologies.json"
+            path.write_text(json.dumps(registry), encoding="utf-8")
+            self.assertEqual(D.validate(config, capmap, str(path)), [])
+            cfg = Path(tmp) / "defaults.yaml"
+            cfg.write_text("schema_version: 3\nharnesses:\n  enabled: [claude, codex, opencode]\n"
+                           "profiles:\n"
+                           + "".join(f"  {n}:\n    primary: [claude, codex]\n    relief: [opencode]\n"
+                                     "    last_resort: []\n    promote_relief_below: 35\n"
+                                     for n in ("deep", "balanced-deep", "light", "mini"))
+                           + "allocation:\n  strategy: balanced\n  window: 30\n  harness_weights:\n"
+                           "    painting: 0.5\ncapabilities:\n", encoding="utf-8")
+            loaded, _warnings = D.load_validated(str(cfg), str(path))
+            self.assertEqual(loaded["allocation"]["harness_weights"], {"painting": 0.5})
+            with self.assertRaises(D.DefaultsConfigError):
+                D.load_validated(str(cfg), D.default_topology_path())
 
     def test_only_the_balanced_strategy_reads_a_field_row(self):
         for strategy in ("capacity-aware", "least-recent-attempts"):

@@ -1423,6 +1423,41 @@ class TestRoute(unittest.TestCase):
   with dispatch_defaults_config(DD_CONFIG_A):
    legacy=self._standard()
   self.assertNotIn("field_weights",legacy["dispatch_allocation"])
+ def test_a_number_override_or_equal_cells_seal_no_row_and_one_odd_cell_seals_it(self):
+  # `docs: 0.5` puts the same factor on every cell; it cancels in the share, so the route is
+  # byte-identical to one sealed without any field override (only the user file's own digest differs).
+  def seal(extra):
+   with dispatch_defaults_config(self._shipped_config(self.SHIPPED_WEIGHTS+extra)):
+    return self._standard()
+  base=seal("")
+  for extra in ("    code: 0.5\n","    code: 1.0\n","    code:\n      claude: 0.7\n      codex: 0.7\n      opencode: 0.7\n"):
+   route=seal(extra)
+   self.assertNotIn("field_weights",route["dispatch_allocation"],extra)
+   self.assertEqual(route["dispatch_allocation"],{k:v for k,v in base["dispatch_allocation"].items() if k!="field_weights"},extra)
+  odd=seal("    code:\n      claude: 0.7\n      codex: 0.7\n      opencode: 0.8\n")
+  self.assertEqual(odd["dispatch_allocation"]["field_weights"],{"claude":0.7,"codex":0.7,"opencode":0.8})
+ def test_a_continuation_receipt_names_the_row_the_choice_multiplies_though_the_route_lost_the_field(self):
+  import dispatch_allocation as DA, dispatch_allocation_receipt as REC
+  with dispatch_defaults_config(self._shipped_config()):
+   source=self._standard()
+  first=source["nodes"][0]["id"]
+  cont=R.build_continuation_route(source,resume_from_node=first,requested_boundary=first,
+                                  reason="review-fixture",artifact_root=source["artifact_root"])
+  self.assertIsNone(cont.get("field"))  # the continuation does not carry the field (route bytes stay)
+  self.assertEqual(cont["dispatch_allocation"]["field_weights"],source["dispatch_allocation"]["field_weights"])
+  tails={}
+  for label,route in (("source",source),("continuation",cont)):
+   with tempfile.TemporaryDirectory() as home:
+    jobs=Path(home)/"jobs.log"; jobs.write_text("")
+    REC.record_allocation_receipt(route_id=route["route_id"],route_node="execute",route_hash=route["route_hash"],
+     dispatch_depth=2,writer="stage-dispatch-fallback.py",child_harness="claude",
+     allocation=route["dispatch_allocation"],rank=["claude","codex"],field=route.get("field"),
+     attempt_id="att-x",jobs=jobs)
+    line=REC.format_row(REC.read_rows(jobs=jobs)[0])
+   tails[label]=line[line.index("field="):]
+  used=REC._fmt_map(DA.effective_harness_weights(cont["dispatch_allocation"]),digits=3)
+  self.assertEqual(tails["source"],"field=code w="+used)
+  self.assertEqual(tails["continuation"],"field=- w="+used)
  def test_a_route_sealed_before_field_weights_existed_verifies_and_reads_neutral(self):
   import dispatch_allocation as DA
   with dispatch_defaults_config(self._shipped_config()):

@@ -302,8 +302,10 @@ def load_topology_capabilities(topology_path):
     return capmap
 
 
-def validate(config, capmap):
-    """Return a list of error strings; empty list means valid."""
+def validate(config, capmap, topology_path=None):
+    """Return a list of error strings; empty list means valid.
+
+    `topology_path` is the registry the field names come from (default: the installed one)."""
     errors = []
     if not isinstance(config, dict):
         return ["config root must be a mapping"]
@@ -474,7 +476,7 @@ def validate(config, capmap):
                         "(inline {a: 1} mappings are not supported by this parser)"
                     )
                 else:
-                    fields = field_vocabulary()
+                    fields = field_vocabulary(topology_path)
                     for name, value in weights.items():
                         if name in fields:
                             # A field name overrides that field's row of the registry's
@@ -490,7 +492,7 @@ def validate(config, capmap):
                                         "must be a number above 0 and at most 1"
                                     )
                         elif name not in DISPATCHABLE_HARNESSES:
-                            errors.append(f"allocation.harness_weights names an unknown harness: {name!r}")
+                            errors.append(f"allocation.harness_weights names an unknown harness or field: {name!r}")
                         elif not _valid_weight(value):
                             errors.append(
                                 f"allocation.harness_weights.{name} must be a number above 0 and at most 1"
@@ -793,7 +795,7 @@ def load_validated(config_path, topology_path):
         text = f.read()
     config = parse_yaml_subset(text)
     capmap = load_topology_capabilities(topology_path)
-    errors = validate(config, capmap)
+    errors = validate(config, capmap, topology_path)
     if errors:
         raise DefaultsConfigError("; ".join(errors))
     warnings = policy_warnings(config)
@@ -931,7 +933,10 @@ def query_field_weights(config, field, table):
 
     `table` is the registry's `field_harness_weights`. A number override sets
     all three cells; a block sets the cells it names. Returns None for no
-    field or a row that is all 1.0, so a neutral route seals no key at all. Only
+    field or a row whose cells are all equal (across the enabled harnesses),
+    because the same factor on every cell cancels in the share and cannot change
+    the choice: a neutral route seals no key at all, so a number override only
+    ever switches its field's row off. Only
     the `balanced` strategy reads field rows (like `harness_weights`), so any
     other strategy, or a config with no allocation block, gets None too.
     """
@@ -950,7 +955,8 @@ def query_field_weights(config, field, table):
         row.update({name: float(override[name]) for name in HARNESS_ORDER if name in override})
     elif override is not None and not isinstance(override, bool):
         row = {name: float(override) for name in HARNESS_ORDER}
-    return None if all(value == 1.0 for value in row.values()) else row
+    enabled = [name for name in HARNESS_ORDER if name in query_owners(config)] or list(HARNESS_ORDER)
+    return None if len({row[name] for name in enabled}) == 1 else row
 
 
 def query_allocation(config):

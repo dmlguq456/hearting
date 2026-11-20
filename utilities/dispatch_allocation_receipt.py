@@ -232,13 +232,15 @@ def read_rows(*, route_id=None, since=None, agent_home=None, jobs=None) -> list[
 
 def _field_segment(row: dict) -> str:
     """`field=<f> w=<weights>`: the field and the per-harness weight the choice
-    multiplied by (user harness_weights x the field's row); `field=-` without one."""
+    multiplied by (user harness_weights x the field's row). `field=-` only when no row was
+    multiplied; a continuation route keeps the sealed row but not the field name, so the row
+    decides: `field=- w=...`."""
     field = row.get("field")
-    if not field:
+    if not field and not row.get("field_weights"):
         return "field=-"
     weights = effective_harness_weights(
         {"harness_weights": row.get("harness_weights"), "field_weights": row.get("field_weights")})
-    return f"field={field} w={_fmt_map(weights, digits=3)}"
+    return f"field={field or '-'} w={_fmt_map(weights, digits=3)}"
 
 
 def _fmt_map(values, *, digits=1) -> str:

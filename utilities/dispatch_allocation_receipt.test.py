@@ -143,6 +143,12 @@ class AllocationReceiptTest(unittest.TestCase):
         self.assertTrue(self.receipt.format_row(row).endswith(" field=-"))
         old_row = {k: v for k, v in row.items() if k not in ("field", "field_weights")}
         self.assertTrue(self.receipt.format_row(old_row).endswith(" field=-"))
+        # a continuation route keeps the sealed row but not the field name: the line still says
+        # what the choice multiplied (`field=- w=...`), not "no row"
+        kept = {**row, "field_weights": {"claude": 0.95, "codex": 0.85, "opencode": 1.0},
+                "harness_weights": {"opencode": 0.4, "codex": 0.7}}
+        self.assertTrue(self.receipt.format_row(kept).endswith(
+            " field=- w=claude:0.95|codex:0.595|opencode:0.4"), self.receipt.format_row(kept))
 
     def test_an_observed_affinity_names_its_source_and_a_sealed_one_adds_nothing(self):
         observed = self.receipt.record_allocation_receipt(

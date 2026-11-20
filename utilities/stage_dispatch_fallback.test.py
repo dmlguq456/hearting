@@ -3234,6 +3234,30 @@ class FallbackTest(unittest.TestCase):
                                "harness_weights":{"opencode":0.3},
                                "field_weights":{"claude":0.95,"codex":0.85,"opencode":1.0}}})
   self.assertEqual(ranked[-1],"opencode")
+ def test_the_field_row_multiplies_once_and_the_receipt_prints_that_one_product(self):
+  # Equal headroom, claude 6 and codex 5 recent attempts, claude 0.95 vs codex 0.85: one product
+  # leaves claude's share a hair above codex's, so the lighter-used codex still leads; multiplying
+  # the row a second time (0.9025 vs 0.7225) would hand the lead to claude. The receipt's `w=`
+  # is the same single product.
+  import dispatch_allocation_receipt as REC
+  row={"claude":0.95,"codex":0.85,"opencode":1.0}
+  node=self._depth_affinity_node(2)
+  node["harness_policy"]={"primary":["claude","codex"],"relief":[],"last_resort":[],"promote_relief_below":0}
+  route=self._depth_affinity_route(["claude","codex"],affinity=False)
+  route["field"]="code"
+  route["dispatch_allocation"]["field_weights"]=row
+  with mock.patch.object(F,"_usage_states",return_value={"claude":"ok","codex":"ok","opencode":"ok"}), \
+       mock.patch.object(F,"attempt_counts",return_value={"claude":6,"codex":5,"opencode":0}), \
+       mock.patch.object(F.CAPACITY,"capacity_scores",return_value={"claude":80,"codex":80,"opencode":80}):
+   _hops,context=F.ordered_fallback_hops(route,node,self.jobs)
+  self.assertEqual(context["rank"],["codex","claude"])
+  args=SimpleNamespace(action="dry-run",slug="once",jobs=self.jobs)
+  with mock.patch.dict(os.environ,{"AGENT_HOME":str(ROOT),"AGENT_DISPATCH_JOBS":str(self.jobs)}):
+   receipt=F._persist_allocation_receipt(args,route,node,context,{"child_harness":context["rank"][0]},
+                                         attempt_id="att-once",fallback_hop="cross-harness-headless")
+  ledger=[json.loads(line) for line in Path(receipt["path"]).read_text(encoding="utf-8").splitlines() if line.strip()]
+  self.assertTrue(REC.format_row(ledger[0]).endswith("field=code w=claude:0.95|codex:0.85|opencode:1.0"),
+                  REC.format_row(ledger[0]))
  def test_a_field_row_cannot_cross_the_gate_a_limit_a_band_or_a_pin(self):
   row={"claude":1.0,"codex":0.2,"opencode":0.2}
   # gate: claude has 5% headroom left, so the ungated peers stay ahead of it whatever the row says
