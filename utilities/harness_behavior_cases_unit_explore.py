@@ -15,6 +15,10 @@
     start took (the session's prompt to the worker's first model request, and the worker's last
     answer to the notice). Synthetic data stays under the fixture root.
 
+``unit-route-explore-stdin``
+    The same, with the brief typed in the command itself (`--prompt-file - <<'EOF'`): no brief file exists,
+    and the worker's first instruction still carries the question.
+
 ``unit-route-explore-in-owner``
     The same, with the compose command run inside the environment a standard staged owner holds (the
     route variables `AGENT_OWNER_ROUTE_*` and `AGENT_ROUTE_*` of a real sealed standard route). A route
@@ -100,6 +104,20 @@ class ExploreScenario(EphemeralScenario):
         return json.loads(found[0].read_text(encoding="utf-8")) if found else None
 
 
+class ExploreStdinScenario(ExploreScenario):
+    name = "unit-route-explore-stdin"
+    summary = ("A lookup unit route whose brief is typed in the same command (`--prompt-file - <<'EOF'`), with no brief file "
+               "written first: the same one worker starts with that text and its answer comes back as in `unit-route-explore`.")
+
+    def prepare(self, run):
+        EphemeralScenario.prepare(self, run)       # and no brief file is written: the heredoc is all there is
+
+    def compose_shell(self, run):
+        # The brief file is never given to the command: the heredoc is the only place the question is.
+        command = super().compose_shell(run).replace(str(run.home.root / "brief.md"), "-")
+        return f"{command} <<'EOF'\n{QUESTION}\nEOF"
+
+
 class ExploreInOwnerScenario(ExploreScenario):
     name = "unit-route-explore-in-owner"
     summary = ("A lookup unit route opened from inside a standard staged owner's environment (its route variables "
@@ -149,4 +167,4 @@ class ExploreInOwnerScenario(ExploreScenario):
         return verdict
 
 
-SCENARIOS = [ExploreScenario, ExploreInOwnerScenario]
+SCENARIOS = [ExploreScenario, ExploreStdinScenario, ExploreInOwnerScenario]
