@@ -670,6 +670,37 @@ class UnitPromptTest(UnitLegBase):
         self.assertLess(len(worker_bootstrap.unit_safety_prompt("review").encode()), 2048)
         self.assertLess(len(prompt), 15_000)   # the unit's own text grew on main; the first instruction stays one short block
 
+    def test_a_lookup_leg_is_not_told_how_to_start_another_worker_and_other_legs_are_unchanged(self):
+        # `general/explore` says "no further workers" and `roles/worker-types/support.md` says a support worker
+        # dispatches none, so its first instruction omits the paragraph that teaches a unit worker how; the
+        # others' instruction keeps it exactly where it was (right after the safety lines).
+        import worker_bootstrap as wb
+        call = wb.unit_call_prompt(R.ROOT) + "\n"
+        prompts = {}
+        for unit, worker_type, role in (("general/explore", "support", "fast tool worker"),
+                                        ("qa/code-review", "review", "fast reviewer")):
+            route, path = self.unit_route(unit=unit)
+            adapter = self.adapter()
+            args = argparse.Namespace(
+                capability="unit", capability_mode="default", worker_mode=unit, qa="quick",
+                intensity="quick", dispatch_depth=1, worker_type=worker_type, attempt_id="att-x",
+                assigned_contract="unit", route_node="unit", route_file=str(path), route_id=route["route_id"],
+                owner_route_binding=None, model_role=role, model_profile="light", resolved_model_settings={},
+                parent_slug=None, parent_session_id=None, capability_owner="unit", owner_harness="claude",
+                worktree=route["cwd"], artifact_root=route["artifact_root"], unit=unit, runtime_dir="",
+                raw_data_dir="", parent_attempt_id=None, route_hash=route["route_hash"], launch_head="0" * 40,
+                diff_attribution=None)
+            jobs = Path(self.root) / "jobs.log"
+            jobs.write_text("")
+            env = dict(T.P.prepare_route_artifact_env(path, start=True, jobs=jobs))
+            with mock.patch.dict(os.environ, env), mock.patch.object(
+                    adapter.DISPATCH_MAIN, "dispatch_metadata_prompt", return_value="Dispatch metadata:\n- unit: x\n"):
+                prompts[unit] = adapter.DISPATCH_MAIN.unit_leg_prompt(adapter._ADAPTER, args, BRIEF)
+        self.assertNotIn("Starting another worker", prompts["general/explore"])
+        self.assertNotIn("--ephemeral", prompts["general/explore"])
+        self.assertIn("No further workers", prompts["general/explore"])
+        self.assertIn(wb.unit_safety_prompt("review") + call, prompts["qa/code-review"])
+
 
 if __name__ == "__main__":
     unittest.main()

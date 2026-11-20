@@ -49,6 +49,11 @@ case "$family" in
     realization=portable-persona
     requirement="opencode edit/read tools plus normal preflight guards"
     ;;
+  general)
+    status=portable
+    realization=portable-persona
+    requirement="read-only lookup or investigation with OpenCode file, search and web tools; the node's one report is the only file written"
+    ;;
   material)
     status=tool-contract
     realization=portable-with-tool-contract
