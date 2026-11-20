@@ -34,6 +34,10 @@ An invalid target or unsupported budget is rejected before user-file mutation. `
 
 The command configures future consumer reads. It does not rewrite generated adapter projections, active route seals, or process-local model selections. Use the existing runtime consumer and route policy as the authority for those surfaces.
 
+## Newer model notes (read-only)
+
+`hearting update` and `harness runtime refresh` print `model follow:` lines, and `harness config status` adds `newer n` / `proposal n` to a models.conf reading, when the harness's own model list (the one its CLI already received for this account; Hearting never refreshes it or starts a service) shows a newer model for a cell of the user's file. `utilities/model_follow.py` holds the one rule; each harness's list reader (`tools/fleet/explorer/model_catalog.py`) only turns its list into rows. A cell is a depth line `model/<id>:<effort>` or a tier line, and a newer model is the newest same-family version visible in the account (Codex `upgrade.model` is read first; one pointing at another family, or a price more than double or below half, is a proposal). The effort stays, or drops to the value just below when the new model lacks it. A line that cannot be derived is not printed, and a list that cannot be read is skipped without failing the command. Nothing here writes models.conf: the notes name the `hearting model set` command to run by hand. A CLI-too-old note appears only from local facts (Codex: the list's `client_version` equals the installed CLI, the table's model is marked previous generation, and no newer same-family model is listed; Claude: a listed model needs a newer CLI), never from the network.
+
 ## Shipped-default-only maintenance
 
 A change that touches only the shipped default stays separate from the user-owned actual model set: edit `adapters/<harness>/config/models.conf`, then finish through the normal generation and existing fixture path as small `direct` work. It does not pick new concrete default values on its own, does not sync provider or user config, and does not clean up model-name literals across the repo.
