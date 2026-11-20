@@ -450,6 +450,19 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
         self.assertIsNone(row(self._balanced(), None))
         self.assertIsNone(D.query_field_weights(self._balanced(), "code", None))
 
+    def test_the_display_reader_keeps_a_switched_off_row_and_names_the_overridden_cells(self):
+        row = lambda config, field: D.field_weight_row(config, field, self.TABLE)  # noqa: E731
+        config = self._balanced({"design": {"codex": 1.0}, "docs": 0.7, "opencode": 0.4})
+        self.assertEqual(row(config, "design"), ({"claude": 1.0, "codex": 1.0, "opencode": 0.85}, ("codex",)))
+        cells, named = row(config, "docs")
+        self.assertEqual((cells, named), ({"claude": 0.7, "codex": 0.7, "opencode": 0.7},
+                                          ("claude", "codex", "opencode")))
+        self.assertTrue(D.field_weights_off(config, cells))
+        self.assertEqual(row(config, "code"), ({"claude": 0.95, "codex": 0.85, "opencode": 1.0}, ()))
+        self.assertFalse(D.field_weights_off(config, row(config, "code")[0]))
+        config["allocation"]["strategy"] = "capacity-aware"
+        self.assertEqual(row(config, "code"), (None, ()))
+
     def test_a_row_equal_across_the_enabled_harnesses_is_neutral_too(self):
         # `research` is claude 0.9 / codex 1.0 / opencode 1.0: with claude disabled the choosable
         # cells are equal and the row cancels; a differing enabled cell keeps it.
