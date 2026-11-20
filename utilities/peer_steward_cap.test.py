@@ -407,6 +407,37 @@ class PeerStewardWiringTest(GrantFixture):
         self.assertEqual(self.check.calls[-1][0], "advance")
         self.assertIs(self.check.calls[-1][1][0], duty)
 
+    def test_one_round_hands_every_steward_check_the_same_session_reading(self):
+        from peer_read_context import PeerReadContext
+        duties = [{"id": f"steward-check-claude-s{n}", "state": "pending",
+                   "intent": {"kind": "steward-check"}} for n in range(3)]
+        store = mock.MagicMock()
+        store.root = Path(self.base)
+        seen = []
+        with mock.patch("peer_steward_native.end_observation",
+                        side_effect=lambda: object()) as fresh:
+            context = PeerReadContext(registry_append_only=True)
+            peer_steward._reconcile_obligations(store, duties, read_context=context)
+            seen.append([call[2].get("end_observation") for call in self.check.calls
+                         if call[0] == "advance"])
+            self.assertEqual(fresh.call_count, 1)             # one reading for the round
+            self.check.calls.clear()
+            # The next round has its own context, so it reads the process table again.
+            peer_steward._reconcile_obligations(
+                store, duties, read_context=PeerReadContext(registry_append_only=True))
+            seen.append([call[2].get("end_observation") for call in self.check.calls
+                         if call[0] == "advance"])
+            self.assertEqual(fresh.call_count, 2)
+        for readings in seen:
+            self.assertEqual(len(readings), 3)
+            self.assertIsNotNone(readings[0])
+            self.assertTrue(all(reading is readings[0] for reading in readings))
+        self.assertIsNot(seen[0][0], seen[1][0])
+        # Without a round context a check takes its own reading, as before.
+        self.check.calls.clear()
+        peer_steward._reconcile_obligations(store, duties[:1], read_context=None)
+        self.assertEqual(self.check.calls[-1][2], {})
+
 
 if __name__ == "__main__":
     unittest.main()

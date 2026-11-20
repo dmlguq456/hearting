@@ -1703,6 +1703,16 @@ class StewardCheckWindowClosedTest(CheckBase):
         self.assertEqual((duty["state"], duty["observation"]["reason"]),
                          ("complete", "session-ended"))
 
+    def test_the_round_reading_reaches_every_lifetime_question_of_the_check(self):
+        reading = object()
+        self.register()
+        with mock.patch.object(SC, "_end_observation",
+                               side_effect=AssertionError("the round reading is used")):
+            SC.advance(self.duty(), self.store, now=T0 + 1, end_observation=reading)
+        seen = [call.args[3] for call in SC._session_liveness.call_args_list]
+        self.assertTrue(seen)
+        self.assertTrue(all(value is reading for value in seen))
+
     def test_unresolved_role_release_keeps_the_duty_for_the_next_pass(self):
         self.liveness = "ended"
         self.released.return_value = {"roles": "unresolved", "marker": "kept"}

@@ -262,9 +262,14 @@ def _holder_seat_keys(harness: str, session_id: str):
     return keys
 
 
-def _window_closed(harness: str, session_id: str) -> bool:
-    """Release a holder only on positive native proof of exact session end."""
-    return _session_liveness(harness, session_id, (), _end_observation()) == "ended"
+def _window_closed(harness: str, session_id: str, observation=None) -> bool:
+    """Release a holder only on positive native proof of exact session end.
+
+    ``observation`` is the runner pass's one shared reading of the live session holders;
+    without it the call takes its own."""
+    if observation is None:
+        observation = _end_observation()
+    return _session_liveness(harness, session_id, (), observation) == "ended"
 
 
 _ACTIVITY_EVENTS = frozenset({"start", "prompt", "real-prompt", "summary"})
@@ -289,7 +294,7 @@ def _evidence_ts(relation: dict) -> float:
     return latest
 
 
-def _seat_cleared(harness: str, session_id: str) -> bool:
+def _seat_cleared(harness: str, session_id: str, observation=None) -> bool:
     """True only when every seat this holder's role sits in recorded the holder's own
     confirmed same-harness ``/clear``, nothing shows the holder after that clear, and the
     session is not ``live``.
@@ -352,19 +357,22 @@ def _seat_cleared(harness: str, session_id: str) -> bool:
                 return False
     except Exception:  # noqa: BLE001 - unreadable lineage concludes nothing
         return False
-    return _session_liveness(harness, session_id, _agents(), _end_observation()) != "live"
+    if observation is None:
+        observation = _end_observation()
+    return _session_liveness(harness, session_id, _agents(), observation) != "live"
 
 
-def _release_if_window_closed(duty, store, harness: str, session_id: str, now: float) -> bool:
+def _release_if_window_closed(duty, store, harness: str, session_id: str, now: float,
+                              observation=None) -> bool:
     """Release a role only on exact native end or confirmed clear evidence.
 
     The release itself is the one ``release_closed_session``; if role resolution is
     uncertain, keep the duty for the next pass.
     """
     try:
-        if _window_closed(harness, session_id):
+        if _window_closed(harness, session_id, observation):
             reason = "session-ended"
-        elif _seat_cleared(harness, session_id):
+        elif _seat_cleared(harness, session_id, observation):
             reason = "cleared"
         else:
             return False
@@ -999,8 +1007,11 @@ def _throttled(duty_id_: str, kind: str, now: float) -> bool:
     return False
 
 
-def advance(duty: dict, store, *, now: float | None = None) -> None:
-    """One runner pass for one duty. Before the due time this is a memory comparison."""
+def advance(duty: dict, store, *, now: float | None = None, end_observation=None) -> None:
+    """One runner pass for one duty. Before the due time this is a memory comparison.
+
+    ``end_observation`` is the runner pass's shared ``end_observation()``: every duty of
+    one pass asks the same live-session question of one process-table reading."""
     if not _active(duty):
         return
     now = _now() if now is None else now
@@ -1015,7 +1026,7 @@ def advance(duty: dict, store, *, now: float | None = None) -> None:
         return
     if not _throttled(duty["id"], "window", now):
         # A cadence for the native window-closed read, not a time condition on the verdict.
-        if _release_if_window_closed(duty, store, harness, session_id, now):
+        if _release_if_window_closed(duty, store, harness, session_id, now, end_observation):
             return
     if phase == "notified":
         _advance_notified(duty, store, observation, harness, session_id, now)

@@ -86,6 +86,34 @@ class SessionEndTest(f.GrantFixture):
                     other.assert_called_once_with('claude', 'owner',
                         process if kind == 'receipt' else marker['session_process'], observation=observation)
 
+    def test_checks_of_one_round_share_one_process_table_census(self):
+        import claude_process_identity
+        import peer_obligations
+        sc = f._load('steward_check_round_census', 'steward_check.py')
+        store = peer_obligations.ObligationStore(f.peer_message.peer_state_root())
+        duties = []
+        for number in range(3):
+            sid = 'round-%d' % number
+            self.session(sid, self.primary)
+            f.peer_message.grant_steward('claude', sid, f.EXPLICIT_TO, 'explicit', f.TS,
+                                         source='explicit', steward_seat=None)
+            duties.append((sid, sc.register('claude', sid, store=store, ensure_runner=False)))
+
+        def release_all(observation):
+            with mock.patch.object(f.fleet_steward, '_peer_message_module', return_value=f.peer_message), \
+                 mock.patch.object(f.fleet_steward, '_registry_record', return_value=None), \
+                 mock.patch.object(claude_process_identity, 'claude_session_census',
+                                   return_value=(True, set(), set())) as census:
+                for sid, duty in duties:
+                    sc._release_if_window_closed(duty, store, 'claude', sid, 1e10, observation)
+            return census.call_count
+
+        # Each check taking its own reading walks the process table every time ...
+        alone = release_all(None)
+        self.assertGreaterEqual(alone, 3)
+        # ... while one reading shared by the round's checks walks it once.
+        self.assertEqual(release_all(f.fleet_steward.end_observation()), 1)
+
     def test_other_registry_process_keeps_watch_for_three_harnesses(self):
         import subprocess
         from types import SimpleNamespace

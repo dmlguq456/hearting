@@ -4162,6 +4162,50 @@ class SidlessObligationProcessBindingTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "pending")
         notice.assert_not_called()
 
+    def test_existing_sender_notices_read_the_active_list_once_per_pass(self):
+        import fcntl
+        obligations = peer_steward.peer_obligations
+        store = obligations.ObligationStore()
+        _proof, _ref, _store, duty = self._row_and_duty()
+        ref = duty["intent"]["ref"]
+        row = peer_steward.peer_message._read_pending(ref)
+        peer_steward.peer_message._save_pending(dict(
+            row, created=time.time() - peer_steward._FLUSH_STUCK_HOURS * 3600 - 1))
+        # The runner holds its own lock, as it does when it asks for itself.
+        store.ensure_directory()
+        lock = os.open(store.root / obligations.RUNNER_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, lock)
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        def real_runner_check(root=None, *, _store=None, **_ignored):
+            return obligations._ensure_runner(root, use_remembered=True, store=_store)
+
+        discover = obligations.ObligationStore._discover
+        with self._no_window(), \
+             mock.patch.object(obligations, "ensure_normal_runner", side_effect=real_runner_check), \
+             mock.patch.object(obligations.ObligationStore, "_discover",
+                               autospec=True, side_effect=discover) as reads:
+            # The first pass creates the sender notice (a write, read fresh).
+            peer_steward._resume_message_obligation(store.get(duty["id"]), store)
+            self.assertIsNotNone(store.get("delay-" + ref))
+            reads.reset_mock()
+            store.begin_read_pass()
+            try:
+                for _ in range(3):  # three existing notices' checks of one pass
+                    peer_steward._resume_message_obligation(store.get(duty["id"]), store)
+                # One read serves every existing notice's runner check of the pass.
+                self.assertEqual(reads.call_count, 1)
+                # A write inside the pass drops the shared read: the next check re-reads.
+                store.create("pass-write", "retire", {}, {"target": "pane"})
+                peer_steward._resume_message_obligation(store.get(duty["id"]), store)
+                self.assertEqual(reads.call_count, 2)
+            finally:
+                store.end_read_pass()
+            reads.reset_mock()
+            for _ in range(3):  # outside a pass each check reads for itself, as before
+                peer_steward._resume_message_obligation(store.get(duty["id"]), store)
+            self.assertEqual(reads.call_count, 6)
+
     def test_replaced_foreground_uses_only_the_existing_bounded_sender_notice(self):
         _proof, _ref, store, duty = self._row_and_duty()
         pending_ref = duty["intent"]["ref"]

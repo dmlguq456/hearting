@@ -2914,10 +2914,8 @@ class ObligationStore:
         finally:
             os.close(root_fd)
 
-    def list(self, *, states: Iterable[str] | None = None,
-             kinds: Iterable[str] | None = None,
-             cached_terminal: bool = False,
-             fast_active_only: bool = False) -> list[dict]:
+    def _selected_records(self, states, kinds, cached_terminal, fast_active_only):
+        """The stored records ``list`` selects, uncopied; read once per runner pass."""
         explicit_states = states is not None
         wanted = set(_PENDING_STATES if states is None else states)
         wanted_kinds = None if kinds is None else set(kinds)
@@ -2933,8 +2931,7 @@ class ObligationStore:
                 fast_active_only=fast_active_only)
             if context is not None:
                 context["records"] = records
-        output = []
-        for key, record in records.items():
+        for record in records.values():
             followup = bool(
                 states is None and record is not None
                 and record.get("state") == "complete"
@@ -2944,8 +2941,21 @@ class ObligationStore:
             if (record is not None and (record.get("state") in wanted or followup)
                     and (wanted_kinds is None
                          or (record.get("intent") or {}).get("kind") in wanted_kinds)):
-                output.append(copy.deepcopy(record))
-        return output
+                yield record
+
+    def list(self, *, states: Iterable[str] | None = None,
+             kinds: Iterable[str] | None = None,
+             cached_terminal: bool = False,
+             fast_active_only: bool = False) -> list[dict]:
+        return [copy.deepcopy(record) for record in self._selected_records(
+            states, kinds, cached_terminal, fast_active_only)]
+
+    def has_active(self, *, kinds: Iterable[str] | None = None) -> bool:
+        """Whether ``list(kinds=kinds, fast_active_only=True)`` would be non-empty.
+
+        The runner-start checks need only that answer; this reads the same records
+        (the pass's shared read inside a runner pass) without copying them."""
+        return any(True for _record in self._selected_records(None, kinds, False, True))
 
     @staticmethod
     def _terminal_time_ns(record):
@@ -3873,7 +3883,7 @@ def _handoff_legacy_runner(store: ObligationStore, lock_path: Path, *,
     # Any newly accepted active duty may require code newer than the runner
     # already holding this lease. Consult only active markers so this handoff
     # never scans settled history on the producer callback.
-    active_duties = store.list(kinds={"registered-batch", "run-notice"}, fast_active_only=True)
+    active_duties = store.has_active(kinds={"registered-batch", "run-notice"})
     if not active_duties and not reconciliation_required:
         return False
     if not service_current:
@@ -3936,7 +3946,7 @@ def _ensure_runner(root, *, service_current=None, use_remembered=False,
     # Producer callbacks already know which duty they just accepted. Consult
     # only active markers here so a cold migration over terminal history never
     # delays the callback that starts the shared runner.
-    duties = store.list(fast_active_only=True)
+    duties = store.has_active()
     lock_path = store.root / RUNNER_LOCK_NAME
     if not duties and not remember_binding and not reconciliation_required:
         if not use_remembered or not lock_path.exists():
