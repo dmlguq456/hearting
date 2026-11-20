@@ -345,6 +345,13 @@ def complete_node(
             materialize_after_terminal_close(Path(jobs), attempt_id)
         except Exception:  # noqa: BLE001 -- a committed close is never unwound by delivery-layer failure
             pass
+        # The marker transaction is this close's own writer: the per-model record the registry's
+        # other closes keep, once, on the one transition (`closed` is never an already-closed row).
+        try:
+            import model_outcome_record
+            model_outcome_record.note_attempt_closed(Path(jobs), attempt_id)
+        except Exception:  # noqa: BLE001
+            pass
     if isinstance(artifact_root, str) and isinstance(route_id, str) and route_id:
         try:
             route_file = canonical_route_path(artifact_root, route_id)

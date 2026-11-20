@@ -26,14 +26,6 @@ FETCHERS = {}
 _LOCK = threading.RLock()
 _THREADS = {}
 _CLAUDE_LOCK = threading.RLock()
-# One cache file, one lock: every writer of <harness>.json reads, edits and
-# replaces it inside `_cache_mutex`. Claude's own blocking waits are unchanged;
-# the other writers wait at most LOCK_WAIT seconds. Past that a usage writer
-# publishes as it did before the lock existed, and a per-model line is dropped.
-LOCK_WAIT = 1.0
-_THREAD_LOCKS = {"claude": _CLAUDE_LOCK}
-_THREAD_LOCKS_GUARD = threading.Lock()
-_HELD = threading.local()
 
 
 def state_dir():
@@ -176,13 +168,6 @@ def _read(harness, now=None, stale_max=None, *, credential=None):
 
 def _write(harness, payload, fetched_at, attempted_at, error_observation=None,
            *, credential_generation=None):
-    with _cache_mutex(harness, LOCK_WAIT):
-        _write_locked(harness, payload, fetched_at, attempted_at, error_observation,
-                      credential_generation=credential_generation)
-
-
-def _write_locked(harness, payload, fetched_at, attempted_at, error_observation=None,
-                  *, credential_generation=None):
     directory = state_dir()
     os.makedirs(directory, exist_ok=True)
     providers = {}
@@ -255,17 +240,13 @@ def record_attempt(harness, now=None):
     if harness == "claude":
         return False
     now = time.time() if now is None else float(now)
+    previous = read(harness, now=now, stale_max=float("inf"))
     try:
-        with _cache_mutex(harness, LOCK_WAIT):
-            previous = read(harness, now=now, stale_max=float("inf"))
-            _write(harness, previous.get("payload") or {}, previous.get("observed_at") or 0.0,
-                   now, error_observation=previous.get("error_observation"))
+        _write(harness, previous.get("payload") or {}, previous.get("observed_at") or 0.0,
+               now, error_observation=previous.get("error_observation"))
         return True
     except OSError:
         return False
-
-
-PROVIDER_HARNESSES = ("opencode", "claude", "codex")
 
 
 def record_provider(harness, provider, model, account_scope, state, reason=None,
@@ -275,23 +256,11 @@ def record_provider(harness, provider, model, account_scope, state, reason=None,
     ``credential_generation`` is an opaque digest of the credential the outcome
     was observed with; readers holding a different one treat the row as unknown.
     """
-    if (harness not in PROVIDER_HARNESSES or not isinstance(provider, str) or not provider
+    if (harness != "opencode" or not isinstance(provider, str) or not provider
             or not isinstance(model, str) or not model
             or state not in ("usable", "unavailable")):
         return False
-    with _cache_mutex(harness, LOCK_WAIT) as held:
-        if not held and harness != "opencode":
-            return False  # a per-model line is not worth racing a usage writer
-        return _record_provider(harness, provider, model, account_scope, state, reason,
-                                now, source, credential_generation)
-
-
-def _record_provider(harness, provider, model, account_scope, state, reason, now, source,
-                     credential_generation):
     now = time.time() if now is None else float(now)
-    # Only OpenCode's own recorder moves the usage attempt time. For the other
-    # harnesses it is the refresh back-off, and a per-model line must not move it.
-    keep_attempt = harness != "opencode"
     try:
         directory = state_dir()
         os.makedirs(directory, exist_ok=True)
@@ -300,16 +269,12 @@ def _record_provider(harness, provider, model, account_scope, state, reason, now
             with open(path, encoding="utf-8") as fh:
                 item = json.load(fh)
         except (OSError, ValueError, TypeError):
-            item = None
+            item = {"schema_version": SCHEMA_VERSION, "harness": harness,
+                    "fetched_at": 0.0, "attempted_at": now, "payload": {}}
         if (not isinstance(item, dict) or item.get("schema_version") != SCHEMA_VERSION
                 or item.get("harness") != harness):
-            if harness == "claude":
-                # A Claude cache is bound to a credential generation only its
-                # usage worker can state; never invent one here.
-                return False
             item = {"schema_version": SCHEMA_VERSION, "harness": harness,
-                    "fetched_at": 0.0, "attempted_at": 0.0 if keep_attempt else now,
-                    "payload": {}}
+                    "fetched_at": 0.0, "attempted_at": now, "payload": {}}
         providers = item.get("providers") if isinstance(item.get("providers"), dict) else {}
         key = json.dumps([provider, model, account_scope or "unscoped"], separators=(",", ":"))
         providers[key] = {"provider": provider, "model": model,
@@ -318,8 +283,7 @@ def _record_provider(harness, provider, model, account_scope, state, reason, now
         if isinstance(credential_generation, str) and credential_generation:
             providers[key]["credential_generation"] = credential_generation
         item["providers"] = providers
-        if not keep_attempt:
-            item["attempted_at"] = now
+        item["attempted_at"] = now
         fd, temp = tempfile.mkstemp(prefix=".%s." % harness, dir=directory, text=True)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -334,34 +298,6 @@ def _record_provider(harness, provider, model, account_scope, state, reason, now
         return True
     except OSError:
         return False
-
-
-def _unavailable_line(harness, key):
-    try:
-        with open(_path(harness), encoding="utf-8") as fh:
-            row = json.load(fh)["providers"].get(key)
-    except (OSError, ValueError, TypeError, KeyError, AttributeError):
-        return False
-    return isinstance(row, dict) and row.get("state") == "unavailable"
-
-
-def record_model_outcome(harness, provider, model, account_scope, state, reason=None,
-                         now=None, source=None):
-    """Claude/Codex per-model line: a rejection is kept; an answer only lifts one.
-
-    ``unavailable`` is written as is. ``usable`` is written only over an existing
-    ``unavailable`` line for the same model and account scope, so a success never
-    rewrites the file unless there is a rejection to lift. The check and the
-    write share one lock hold, so a concurrent usage writer cannot undo either.
-    """
-    key = json.dumps([provider, model, account_scope or "unscoped"], separators=(",", ":"))
-    if state == "usable" and not _unavailable_line(harness, key):
-        return False  # the common success: nothing to lift, no lock, no write
-    with _cache_mutex(harness, LOCK_WAIT) as held:
-        if not held or (state == "usable" and not _unavailable_line(harness, key)):
-            return False
-        return record_provider(harness, provider, model, account_scope, state, reason=reason,
-                               now=now, source=source)
 
 
 def read_provider(harness, provider, model, account_scope, *, now=None,
@@ -424,71 +360,19 @@ def provider_records(harness, account_scopes=None):
 
 
 @contextmanager
-def _cache_mutex(harness, wait=None):
-    """Serialize one harness cache file's read-edit-replace across threads/processes.
-
-    Yields whether the lock is held. ``wait=None`` blocks as Claude always did;
-    a number gives up after that many seconds and yields False, leaving the
-    caller to carry on as it did before the lock. A holder is re-entered by its
-    own thread (nested writers share one hold). Keep the lock inode stable. HTTP
-    and worker joins never run under this lock.
-    """
-    nested = getattr(_HELD, "state", None)
-    if nested is None:
-        nested = _HELD.state = {}
-    if harness in nested:
-        nested[harness][0] += 1
-        try:
-            yield nested[harness][1]
-        finally:
-            nested[harness][0] -= 1
-        return
-    deadline = None if wait is None else time.monotonic() + wait
-    with _THREAD_LOCKS_GUARD:
-        thread_lock = _THREAD_LOCKS.setdefault(harness, threading.RLock())
-    if not thread_lock.acquire(timeout=-1 if deadline is None
-                               else max(0.0, deadline - time.monotonic())):
-        yield False
-        return
-    fd = None
-    held = False
-    try:
-        try:
-            os.makedirs(state_dir(), exist_ok=True)
-            fd = os.open(os.path.join(state_dir(), ".%s.lock" % harness),
-                         os.O_CREAT | os.O_RDWR, 0o600)
-            held = _flock(fd, deadline)
-        except OSError:
-            if deadline is None:
-                raise
-        nested[harness] = [1, held]
-        try:
-            yield held
-        finally:
-            nested.pop(harness, None)
-    finally:
-        if fd is not None:
-            os.close(fd)
-        thread_lock.release()
-
-
-def _flock(fd, deadline):
-    if deadline is None:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        return True
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return True
-        except BlockingIOError:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            time.sleep(min(0.005, remaining))
-
-
 def _claude_mutex():
-    return _cache_mutex("claude")
+    """Serialize only Claude lease/publication changes across threads/processes.
+
+    Keep the lock inode stable. HTTP and worker joins never run under this lock.
+    """
+    with _CLAUDE_LOCK:
+        os.makedirs(state_dir(), exist_ok=True)
+        fd = os.open(os.path.join(state_dir(), ".claude.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
 
 
 def _claude_lease():

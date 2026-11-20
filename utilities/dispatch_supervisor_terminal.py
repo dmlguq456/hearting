@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 import opencode_server_log
 from dispatch_contract import reconcile_attempt_terminal
+from model_outcome_record import REJECTED_REASON
 from route_authority import HANDOFF_RE, handoff_search, pass_blocker_violation
 
 
@@ -65,7 +66,7 @@ EDGE_BLOCK_REASON = "runtime-edge-block-envelope"
 #             and 16387).
 # Capacity, usage limit, overload, auth, 5xx and edge-block envelopes never
 # reach this check: it only refines the final `runtime-error-envelope` fall-through.
-MODEL_REJECTED_REASON = "runtime-model-rejected"
+MODEL_REJECTED_REASON = REJECTED_REASON  # the record reads this same prefix
 _MODEL_REJECTION_RUNTIMES = frozenset({"claude", "codex"})
 _MODEL_REJECTION_CODES = frozenset({"modelNotFound", "model_not_found"})
 _MODEL_NAME = r"[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,79}"
@@ -644,78 +645,12 @@ def reconcile_supervisor_terminal(
     # turn output can also precede route/child checks or envelope conversion.
     if emit is not None:
         emit({"type": "dispatch.supervisor.terminal", "terminal": asdict(terminal)})
-    outcome = reconcile_attempt_terminal(
+    return reconcile_attempt_terminal(
         Path(jobs),
         attempt_id,
         terminal.note,
         evidence=terminal.evidence(),
     )
-    if outcome == "closed":
-        note_model_outcome(jobs, attempt_id, terminal.note, terminal.failure_class,
-                           terminal.reconcile_reason)
-    return outcome
-
-
-# The terminal classes in which the model itself answered: a handed-off result,
-# whether PASS, FAIL or BLOCKED, or a final handoff whose shape was wrong
-# (`dead-contract`, only ever read from a finished result). A later one of these
-# for the same model and account lifts an earlier model rejection. Process death,
-# capacity and auth ends say nothing of whether the model answered.
-_MODEL_ANSWERED_CLASSES = frozenset({"pass", "fail", "blocked"})
-_MODEL_VARIANT_RE = re.compile(r"(\[[^\]]*\]|#.*)$")
-# A launch that named no model (`--inherit-model-settings`, a runtime default).
-_UNRESOLVED_MODELS = frozenset({"inherit", "default", "runtime-default", "unknown"})
-
-
-def _model_key(value: object) -> str:
-    return _MODEL_VARIANT_RE.sub("", str(value or "").strip()).lower()
-
-
-def note_model_outcome(
-    jobs: str | Path, attempt_id: str, note: str, failure_class: str, reconcile_reason: str
-) -> None:
-    """Keep the per-model record for a Claude/Codex attempt whose row just closed.
-
-    Every path that confirms a terminal sign and wins the close calls this once
-    (the supervisor, the post-exit watcher, the completion join's direct closes);
-    a re-observation of an already closed row never does, so one end is never
-    written twice and an old refusal is not revived over a newer answer.
-
-    One line in the existing usage-cache provider record (the file OpenCode
-    already uses), on the model the attempt launched and the account scope it
-    launched under. Best effort: nothing here can change the terminal result,
-    the next action, or which harness is chosen -- no reader of these lines for
-    Claude/Codex exists yet. OpenCode keeps its own classification and record.
-    """
-    rejected = reconcile_reason.startswith(MODEL_REJECTED_REASON)
-    answered = failure_class in _MODEL_ANSWERED_CLASSES or note == "dead-contract"
-    if not rejected and not answered:
-        return
-    try:
-        from dispatch_completion_join import exact_attempt_row
-        meta = exact_attempt_row(Path(jobs), attempt_id).metadata
-        harness = str(meta.get("harness") or "")
-        launched = str(meta.get("model") or "").strip()
-        if (harness not in _MODEL_REJECTION_RUNTIMES or not launched
-                or _model_key(launched) in _UNRESOLVED_MODELS):
-            return  # no settled model to put a line on
-        if rejected:
-            named = reconcile_reason[len(MODEL_REJECTED_REASON) + 1:]
-            # A refusal that points at another model says nothing about this one.
-            if named and _model_key(named) != _model_key(launched):
-                return
-        tools = str(Path(__file__).resolve().parents[1] / "tools")
-        if tools not in sys.path:
-            sys.path.insert(0, tools)
-        from fleet.collectors import usage_cache
-        scope = str(meta.get("quota_scope") or "") if harness == "claude" else ""
-        usage_cache.record_model_outcome(
-            harness, harness, _model_key(launched), scope or "unscoped",
-            "unavailable" if rejected else "usable",
-            reason="model-unavailable" if rejected else None,
-            source="supervisor-terminal")
-    except Exception:  # noqa: BLE001 - a record that cannot be kept never changes the close
-        return
 
 
 def _tail_rows(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
