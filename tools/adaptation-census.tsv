@@ -451,6 +451,8 @@ tool-deferred	dispatch-refusal-census.py
 tool-deferred	dispatch_refusal_census.test.py
 tool-deferred	e2e_latency
 tool-deferred	entry-skill-layer.test.py
+tool-deferred	field-weights-table.py
+tool-deferred	field_weights_table.test.py
 tool-deferred	figure-semantic-verify.test.py
 tool-deferred	fixture_processes.py
 tool-deferred	fixture_processes.test.py

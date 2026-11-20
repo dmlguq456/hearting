@@ -927,6 +927,40 @@ def flat_harness_weights(weights):
     return {name: value for name, value in weights.items() if name in DISPATCHABLE_HARNESSES}
 
 
+def field_weight_row(config, field, table):
+    """The applied row for `field` before the neutral check, with the harnesses the
+    user's override named: `(row, overridden)`, or `(None, ())` for no field or a
+    strategy other than `balanced` (only that strategy reads field rows, like
+    `harness_weights`). `query_field_weights` and Fleet's display both read here.
+    """
+    if not isinstance(field, str):
+        return None, ()
+    if (config.get("allocation") or {}).get("strategy") != "balanced":
+        return None, ()
+    row = {name: 1.0 for name in HARNESS_ORDER}
+    default = ((table or {}).get("weights") or {}).get(field)
+    if isinstance(default, dict):
+        row.update({name: float(default[name]) for name in HARNESS_ORDER if name in default})
+    allocation = config.get("allocation")
+    override = (allocation.get("harness_weights") or {}).get(field) if isinstance(allocation, dict) \
+        and isinstance(allocation.get("harness_weights"), dict) else None
+    overridden = ()
+    if isinstance(override, dict):
+        overridden = tuple(name for name in HARNESS_ORDER if name in override)
+        row.update({name: float(override[name]) for name in overridden})
+    elif override is not None and not isinstance(override, bool):
+        overridden = HARNESS_ORDER
+        row = {name: float(override) for name in HARNESS_ORDER}
+    return row, overridden
+
+
+def field_weights_off(config, row):
+    """True when every enabled harness has the same cell: the same factor on every
+    cell cancels in the share, so such a row cannot change a choice."""
+    enabled = [name for name in HARNESS_ORDER if name in query_owners(config)] or list(HARNESS_ORDER)
+    return len({row[name] for name in enabled}) == 1
+
+
 def query_field_weights(config, field, table):
     """The applied row for `field`: the registry's default row with the user's
     per-field override on top, as `{harness: weight}` in a fixed harness order.
@@ -940,23 +974,10 @@ def query_field_weights(config, field, table):
     the `balanced` strategy reads field rows (like `harness_weights`), so any
     other strategy, or a config with no allocation block, gets None too.
     """
-    if not isinstance(field, str):
+    row, _overridden = field_weight_row(config, field, table)
+    if row is None or field_weights_off(config, row):
         return None
-    if (config.get("allocation") or {}).get("strategy") != "balanced":
-        return None
-    row = {name: 1.0 for name in HARNESS_ORDER}
-    default = ((table or {}).get("weights") or {}).get(field)
-    if isinstance(default, dict):
-        row.update({name: float(default[name]) for name in HARNESS_ORDER if name in default})
-    allocation = config.get("allocation")
-    override = (allocation.get("harness_weights") or {}).get(field) if isinstance(allocation, dict) \
-        and isinstance(allocation.get("harness_weights"), dict) else None
-    if isinstance(override, dict):
-        row.update({name: float(override[name]) for name in HARNESS_ORDER if name in override})
-    elif override is not None and not isinstance(override, bool):
-        row = {name: float(override) for name in HARNESS_ORDER}
-    enabled = [name for name in HARNESS_ORDER if name in query_owners(config)] or list(HARNESS_ORDER)
-    return None if len({row[name] for name in enabled}) == 1 else row
+    return row
 
 
 def query_allocation(config):

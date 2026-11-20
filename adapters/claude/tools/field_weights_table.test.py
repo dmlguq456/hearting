@@ -1,0 +1,1 @@
+../../../tools/field_weights_table.test.py
