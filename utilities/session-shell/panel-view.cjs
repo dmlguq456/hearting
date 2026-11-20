@@ -34,6 +34,12 @@ const MESSAGES_MAX=3;
 // group heads and eight titles (two to a group, the waiting ones first). Short of rows MESSAGES and MEM go down first, to one
 // or two rows each, before the STATUS section gives up any of its rows.
 const STATUS_MIN=5,STATUS_MAX=12;
+// 11-20 (the person: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" / "REPO ---- SESSION ----"): the panel beside the native area has two groups: REPO
+// (the repository's: its row and, right under it, the STATUS section) and SESSION (this session's: MODEL, CTX, TITLE, NOW, QUESTIONS, the route
+// box, MESSAGES, MEM). Each group's head is one row `REPO ────` / `SESSION ────`. REPO's head is the REPO row itself (`merged`: `REPO   hearting
+// · wt 12 ────`, no row more); `separate` puts a head row of its own over the REPO row (kept for the pictures). SESSION's head stands where the
+// empty row between the two groups' metadata stood, so it costs no row either, and goes with it short of rows.
+const GROUP_HEAD='merged';
 // 11-16 (the person: "메모리도 메시지랑 같은 맥락이야"): MEM shows the newest MEM_MAX records at most, each its
 // dim head row and its headline on up to two rows (spec rule 46 (b)). 11-18 (the person: "MEM는 최대 최근 3개만 띄워도 되겠다"): three at most.
 const MEM_MAX=3;
@@ -771,20 +777,27 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // the name is cut with `…`; the name and `›` stay to the last. A press anywhere on the row opens the
     // status popup. No artifact root: no button (`status_doc` absent).
     const statusDoc=model.status_doc&&typeof model.status_doc==='object'&&clean(model.status_doc.word).trim()?model.status_doc:null;
-    const topActions=new Map(),withoutButton=new Map();
+    const topActions=new Map(),withoutButton=new Map(),groupHeads=new Set();
     const statusButton=whole=>{const arrow=text('›','dim');if(!whole)return [arrow];
       return [text(clean(statusDoc.word).trim(),statusDoc.has_doc===true?'loc_repo':'dim'),text(' '),arrow];};
     // `name` and `count` with the button at the right end of `room` cells, or null without a button.
+    // 11-20: the REPO row is the REPO group's head: its free cells are a thin rule (a section head's, its color) where `n` allows one.
+    const ruleRun=n=>({...text('─'.repeat(Math.max(1,n)),'dim'),role:'messages'});
+    const fillMid=n=>n>=4?[text(' '),ruleRun(n-2),text(' ')]:[pad(n)];
+    const fillEnd=n=>n>=3?[text(' '),ruleRun(n-1)]:[pad(n)];
     const withButton=(name,count,room)=>{
       if(!statusDoc)return null;
       // In order: the whole button, `›` alone, then `› ` without the count; the word does not come back.
       for(const [lead,whole] of [[[...name,...count],true],[[...name,...count],false],...(count.length?[[name,false]]:[])]){
-        const b=statusButton(whole);if(size(lead)+1+size(b)<=room)return [...lead,pad(room-size(lead)-size(b)),...b];
+        const b=statusButton(whole);if(size(lead)+1+size(b)<=room)return [...lead,...fillMid(room-size(lead)-size(b)),...b];
       }
-      return [...cut(name,Math.max(1,room-2)),pad(Math.max(1,room-Math.min(size(name),Math.max(1,room-2))-1)),...statusButton(false)];
+      return [...cut(name,Math.max(1,room-2)),...fillMid(Math.max(1,room-Math.min(size(name),Math.max(1,room-2))-1)),...statusButton(false)];
     };
+    // A group's head row: its name (the title role, as a section's), a thin rule to the row's end.
+    const groupHead=name=>{const lead=[{...text(name,'dim'),role:'title'}],rest=inner-size(lead);
+      return rest>=3?[...lead,text(' '),{...text('─'.repeat(rest-1),'dim'),role:'messages'}]:cut(lead,inner);};
     // Spec rule 46: the newest saved memory records (this repository's and the global ones, MEM_MAX at
-    // most) stand in their own section under the messages, two rows or three each (below). An older backend
+    // most) stand in their own section under the messages, one row each (below). An older backend
     // sends the newest one as painted pieces only (`3m decision headline`): that one record,
     // without its kind (rule 46 (e)); the head carries no MEM row either way.
     const memItems=(()=>{
@@ -803,12 +816,19 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // effort, context]; without Git it parts the repository from the model.
       if(sideRepo.length){
         // The name keeps its color; the count (dim) shows whole or not at all.
-        const room=inner-labelWidth,count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
+        // 11-20: the REPO group's head is this row: `REPO   hearting · wt 12 ────` (narrower than 30 cells inside the word stands first, `REPO `,
+        // as the other labels do not); the `separate` form has a head row of its own over it and this row keeps its value alone.
+        const separate=(model.group_head||GROUP_HEAD)==='separate',name=separate?'':'REPO';
+        const word=labelWidth||separate?null:text('REPO ','dim');
+        const room=inner-labelWidth-(word?5:0),count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
         const withCount=count.length>0&&size(sideRepo)+size(count)<=room;
         const button=withButton(sideRepo,count,room);
-        const plain=labelled('REPO',withCount?[...sideRepo,...count]:cut(sideRepo,room));
+        const value=withCount?[...sideRepo,...count]:cut(sideRepo,room);
+        const lead=parts=>word?[word,...parts]:labelled(name,parts);
+        const plain=lead(separate?value:[...value,...fillEnd(room-size(value))]);
+        if(separate){groupHeads.add(top.length);top.push(groupHead('REPO'));}
         if(button){topActions.set(top.length,'popup:STATUS');withoutButton.set(top.length,plain);}
-        top.push(button?labelled('REPO',button):plain);mark(0,'head',...(withCount&&!sideGit.length?['git']:[]));
+        top.push(button?lead(button):plain);mark(top.length-1,'head',...(withCount&&!sideGit.length?['git']:[]));
       }
       // Short of cells the first part (the branch, the model name) gives way so what follows
       // it (the status and a warning, the effort) stays whole.
@@ -819,7 +839,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       };
       if(sideGit.length){gitRows.add(top.length);top.push(labelled('GIT',firstGives(sideGit,inner-labelWidth)));mark(top.length-1,'git');}
       {const peerParts=peerRow(inner-labelWidth);if(peerParts.length){gitRows.add(top.length);top.push(labelled('PEERS',peerParts));}}
-      if(top.length){metaGaps.add(top.length);top.push([]);}
+      // 11-20: the SESSION group's head stands where the empty row between the two groups of metadata stood (and goes with it).
+      metaGaps.add(top.length);top.push(groupHead('SESSION'));
       if(labelWidth){
         // Spec rule 42: `MODEL` and `CTX` as REPO's and GIT's; `CTX` stands for the word
         // `context` (a backend without `context_side` has its word taken off here).
@@ -1769,27 +1790,17 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // (`◆ project · decision · 10m`); short of cells the kind leaves, then the scope (the mark and the
     // age stay). Short of rows (below) every headline takes one row, then fewer records show. No popup:
     // its head has no `›`.
-    let memBody=2,memOne=false;
-    const memTop=m=>{
-      const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
-      for(const words of [[m.scope,m.kind],[m.scope],[]]){
-        const row=[text([mark,...words.filter(Boolean),m.age].filter(Boolean).join(' · ').replace(/^(.) · /,'$1 '),'dim')];
-        if(size(row)<=inner)return row;
-      }
-      return cut([text([mark,m.age].filter(Boolean).join(' '),'dim')],inner);
-    };
-    // 11-20 (the person: "MESSAGE, MEM은 좀 더 세로길이 따라서 과감하게 표시 줄을 줄여버려 1~2줄 수준으로"): the one-row form a record takes
-    // when rows run short, as a message's (`messageLine`): its mark and age dim, then the headline in the body color (`…` where it goes on).
+    // 11-20 (the person: "메모리 내용은 한줄로 바꾸고 (지금은 두줄이네) 메시지 처럼 팝업이 가능하게"): a record is one row, as a message's one-row form
+    // (`messageLine`): its mark, age and kind dim, then the headline in the body color (`…` where it goes on; the kind goes first where the
+    // headline would be left under 14 cells). A press on it opens the MEM popup (below, `memoryBody`: the record whole).
     const memLine=m=>{
       const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
-      return cut([text([mark,m.age].filter(Boolean).join(' ')+' ','dim'),text(m.text,'loc_repo')],inner);
+      for(const lead of [[mark,m.age,m.kind],[mark,m.age]]){
+        const head=text(lead.filter(Boolean).join(' ')+' ','dim');
+        if(inner-size([head])>=14||lead.length===2)return cut([head,text(m.text,'loc_repo')],inner);
+      }
     };
-    const memRows=m=>{
-      if(memOne)return [memLine(m)];
-      let body=wrapAll([text(m.text,'loc_repo')],inner-2);
-      if(body.length>memBody)body=[...body.slice(0,memBody-1),ellipsis(body[memBody-1],inner-2)];
-      return [memTop(m),...body.map(row=>[text('  '),...row])];
-    };
+    const memRows=m=>[memLine(m)];
     // STATUS (11-20, the person: "현황이 사용성이 많아 질 수 있는 부분이니까 좀 더 눈에 띄면 좋겠어" / "기본적으로 5줄 이상 써서 보이는것도
     // 중요할것 같다"; the 11-15 button on the REPO row stands in this head now): the section's head `현황 ──── ›`, then its groups in the
     // order of the list the person liked (`STATUS-LIST-SIAN`): what is in progress, what waits for the person, what ended lately, what
@@ -1815,6 +1826,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return size(row)<=inner?row:null;
     };
     const statusCountRow=groups=>statusCounts(groups,'name')||statusCounts(groups,'short')||cut(joined(groups.map(g=>[text(g.short+' '+g.count,'loc_repo')]),' · '),inner);
+    // A title as the document wrote it: `title · #PR · vX.Y.Z · 기록 N` (the pieces that are not there are left out). Short of cells the tail goes
+    // first, piece by piece from the end (a dim tail, no `…`); a title that is still too wide is cut with `…`.
+    const statusTitle=(title,room,ink)=>{
+      const pieces=title.split(' · ');
+      while(pieces.length>1&&measure(pieces.join(' · '))>room)pieces.pop();
+      const head=pieces.shift(),tail=pieces.length?' · '+pieces.join(' · '):'';
+      return cut([text(head,ink),...(tail?[text(tail,'dim')]:[])],Math.max(1,room));
+    };
     const statusRows=n=>{
       if(!statusGroups.length||n<1)return [];
       const shown=new Map(statusGroups.map(g=>[g,0]));
@@ -1837,7 +1856,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         flush();
         const [glyph,mark,ink]=STATUS_LOOK[g.kind];
         out.push(cut([text(g.name,'loc_repo'),text(' '),text(String(g.count),g.kind==='waiting'?'lvl_y':'dim')],inner));
-        for(const title of g.items.slice(0,shown.get(g)))out.push(cut([text('  '),text(glyph+' ',mark),text(title,ink)],inner));
+        for(const title of g.items.slice(0,shown.get(g)))out.push([text('  '),text(glyph+' ',mark),...statusTitle(title,inner-4,ink)]);
       }
       flush();
       return out;
@@ -1851,7 +1870,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       {name:'STATUS',on:statusGroups.length>0,max:statusMax,head:()=>sectionHead([],statusWord,[],[[]],true),rows:n=>statusRows(n),action:'popup:STATUS'},
       {name:'ROUTE',on:!!routeTitle,box:true},
       {name:'MESSAGES',on:messageTotal>0,max:MESSAGES_MAX,head:()=>messagesHead(take.MESSAGES),rows:n=>messageRows(n),action:'popup:MESSAGES'},
-      {name:'MEM',on:memItems.length>0,max:MEM_MAX,head:()=>sectionHead([],'MEM',[],[[]],false),rows:n=>memItems.slice(0,n).flatMap(memRows)}];
+      // (11-20: the head and every record open the MEM popup, the record pressed first on screen: `popup:MEM:<n>`.)
+      {name:'MEM',on:memItems.length>0,max:MEM_MAX,head:()=>sectionHead([],'MEM',[],[[]],true),rows:n=>memItems.slice(0,n).flatMap(memRows),action:'popup:MEM',rowAction:i=>'popup:MEM:'+i}];
     const take={},kept={};
     for(const s of SECTIONS){take[s.name]=s.max;kept[s.name]=s.on;}
     // 11-16 (the person: "질문은 이전처럼 그냥 붉은색 블록으로 감싸는게 모양은 제일 나아" / "붉은 바운더리 말이야"): the QUESTIONS
@@ -1865,7 +1885,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const sectionRows=s=>s.name==='QUESTIONS'?questionRowsIn():s.rows(take[s.name]);
     const sectionSize=s=>!kept[s.name]?0:s.box?routeBox():(s.name==='QUESTIONS'&&boxedQuestions()?2:1)+sectionRows(s).length;
     const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size;
-    let keepGit=true,keepSpacers=true,keepMetaGap=true,keepRules=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0,keepFootRule=true,keepQuestionBox=true;
+    let keepGroupHeads=true,keepGit=true,keepSpacers=true,keepMetaGap=true,keepRules=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0,keepFootRule=true,keepQuestionBox=true;
     // 11-16 (the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을 USAGE로 해서 넣자"): the
     // panel's bottom is the USAGE section: its name row (the thin rule above the last row, now named), then
     // one row for each harness (Claude, Codex, OpenCode, Fleet's header order): the harness's name dim, then the
@@ -2050,16 +2070,16 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     resGpus=resourceGpuTotal();
     give(()=>side&&resHosts>0&&resGpus>0,()=>{resGpus--;},()=>{resGpus++;});
     give(()=>side&&resHosts>0,()=>{resHosts--;},()=>{resHosts++;});
+    // 11-20: a REPO head row of its own (the `separate` form) is decoration: it goes with the empty rows, before any content row does.
+    give(()=>keepGroupHeads&&groupHeads.size>0,()=>{keepGroupHeads=false;},()=>{keepGroupHeads=true;});
     give(()=>keepSpacers,()=>{keepSpacers=false;},()=>{keepSpacers=true;});
     if(!usageOn)give(()=>!!footBase(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
     give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
     // 11-20 (the person: "MESSAGE, MEM은 좀 더 세로길이 따라서 과감하게 표시 줄을 줄여버려 1~2줄 수준으로"): MEM and MESSAGES are the first
-    // sections to go down, before the STATUS section, QUESTIONS or the route box give up a row. MEM's headlines take one row (11-16), then
-    // both take their one-row form (a message: arrow, number, text; a record: mark, age, headline), then they show two of them, then
-    // one (`+N` on the MESSAGES head counts the rest): from nine and six rows down to two rows, then one, each.
-    give(()=>kept.MEM&&memBody>1,()=>{memBody=1;},()=>{memBody=2;});
+    // sections to go down, before the STATUS section, QUESTIONS or the route box give up a row. The messages take their one-row form (a record is
+    // one row already), then MEM shows two records and MESSAGES two messages, then one of each (`+N` on the MESSAGES head counts the rest): from six
+    // rows down to two rows, then one, each.
     give(()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
-    give(()=>kept.MEM&&!memOne,()=>{memOne=true;},()=>{memOne=false;});
     give(()=>kept.MEM&&take.MEM>2,()=>{take.MEM--;},()=>{take.MEM++;});
     give(()=>kept.MESSAGES&&take.MESSAGES>2,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
     give(()=>kept.MEM&&take.MEM>1,()=>{take.MEM--;},()=>{take.MEM++;});
@@ -2109,20 +2129,39 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // (11-16: this window's own usage row beside the buttons costs no row, so it stays while no other usage row is left to give.)
     give(()=>keepQuota&&(!usageOn||footRule()>0),()=>{keepQuota=false;},()=>{keepQuota=true;});
     const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
-      keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled,memOne]);
+      keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepGroupHeads,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]);
     const stuck=new Set();
     for(const {undo,family} of gave.reverse()){
       if(family&&stuck.has(family))continue;
       const was=choices();undo();
       if(need()>budget){if(family)stuck.add(family);const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);keepRouteRule=v[24];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(25,31);memOne=v[31];}
+        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepGroupHeads,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);keepRouteRule=v[24];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(25,31);}
     }
     const order=[];
-    top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
+    top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i))&&(keepGroupHeads||!groupHeads.has(i)))
       order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i),plain:withoutButton.get(i)});});
     // The row that carries the status button, and its place in `content` (the button goes once the STATUS section stands).
-    let buttonAt=-1,buttonPlain=null;
-    for(const item of order){if(item.plain&&buttonAt<0){buttonAt=content.length;buttonPlain=item.plain;}add(item.parts,item.action,item.groups);}
+    // 11-20: beside the native area the STATUS section is the REPO group's: it stands right under the REPO row (a window with no REPO row
+    // starts with it); in the bottom layout, which has no group heads, it stays second among the sections.
+    let buttonAt=-1,buttonPlain=null,statusPlaced=false;
+    const statusSection=SECTIONS.find(x=>x.name==='STATUS');
+    const placeStatus=()=>{
+      if(statusPlaced||!side||!kept.STATUS)return;
+      statusPlaced=true;
+      add(statusSection.head(),statusSection.action);
+      for(const row of sectionRows(statusSection))add(row,statusSection.action);
+    };
+    if(!order.some(item=>item.plain))placeStatus();
+    for(const item of order){
+      if(item.plain&&buttonAt<0){buttonAt=content.length;buttonPlain=item.plain;}
+      add(item.parts,item.action,item.groups);
+      if(item.plain&&kept.STATUS&&side){
+        // The section's head carries the button now, so the REPO row (the head of the group) does not.
+        content[buttonAt]=buttonPlain;for(let i=hits.length-1;i>=0;i--)if(hits[i].row===buttonAt+1&&hits[i].action==='popup:STATUS')hits.splice(i,1);
+        placeStatus();
+      }
+    }
+    const headRows=content.length;
     // Each section stands whole (its head and the rows it kept), one after another from the top; the
     // rows left over stand between the sections above and MESSAGES·MEM (spec rule 14: those two keep to
     // the panel's bottom, right above the last row), or under the last section when there are none.
@@ -2130,6 +2169,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(const s of SECTIONS){
       if(!kept[s.name])continue;
       // QUESTIONS never gives its place to the structural rows above it: those go first (`lastRow`).
+      if(s.name==='STATUS'&&statusPlaced)continue;
       if(s.name==='STATUS'&&content.length+lower.length+sectionSize(s)+footRule()>budget-1)continue;
       if(s.name!=='QUESTIONS'&&content.length+lower.length+sectionSize(s)+(['MESSAGES','MEM'].includes(s.name)?footRule():0)>budget-1)break;
       if(s.box){
@@ -2147,11 +2187,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         add(boxBottom(key).parts,'question');
         continue;
       }
-      // 11-20: the section's head carries the button, so the REPO row (the unlabelled head, the bottom layout's first row) does not.
+      // 11-20: the section's head carries the button, so the bottom layout's first row does not.
       if(s.name==='STATUS'&&buttonAt>=0){content[buttonAt]=buttonPlain;for(let i=hits.length-1;i>=0;i--)if(hits[i].row===buttonAt+1&&hits[i].action==='popup:STATUS')hits.splice(i,1);}
       const into=['MESSAGES','MEM'].includes(s.name)?(parts,action,groups)=>lower.push({parts,action,groups}):add;
       into(s.head(),s.action,s.groups);
-      sectionRows(s).forEach(row=>into(row,s.action));
+      sectionRows(s).forEach((row,i)=>into(row,s.rowAction?s.rowAction(i):s.action));
     }
     // 11-16: the USAGE rows stand last in the lower block (the last harness's row, where it fits, on the last row below).
     if(resourceCount()){lower.push({parts:resourceHead()});for(const line of resourceLines())lower.push({parts:line});}
@@ -2186,7 +2226,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return join(tries.find(gs=>size(join(gs))<=quotaRoom)||[]);
     })();
     const lastEnd=usageOn?usageLines().at(-1):null;
-    lastRow(keepQuota?quotaRow:[],usageOn?(lastEnd&&lastUsage.length&&lastEnd.harness===harness?['quota']:[]):keepQuota&&quota.length?['quota']:[],order.length,kept.QUESTIONS?0:1);
+    lastRow(keepQuota?quotaRow:[],usageOn?(lastEnd&&lastUsage.length&&lastEnd.harness===harness?['quota']:[]):keepQuota&&quota.length?['quota']:[],headRows,kept.QUESTIONS?0:1);
   }
   const count=fill?height:Math.min(height,content.length+2),rows=[];
   // Spec rules 16-17, 29 (a): the top border carries Fleet's session-row head on the
@@ -2511,15 +2551,10 @@ function requestForms(q,{text,measure,width,arrow='loc_repo'}){
   })();
   return {head,title:titleRow,status:statusRow,titled,one};
 }
-// 11-15 (popup design E): the MESSAGES popup's rows: the requests this session sent or received
-// (their numbers, reports and body) and the recent messages, the newest first, each its head (the
-// direction, the other session, then dim harness, time, kind and a sent one's delivery state) and
-// its whole text under it, two cells in. What the panel's rows cut reads whole here.
-function messagesBody({model={},columns=72,cellWidth}={}){
-  const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
-  const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
-  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
-  const wrapText=(value,key,width,lead='  ')=>{
+// A text wrapped at word boundaries into rows of `width` cells, each led by `lead` (a word wider than a row goes on by grapheme); shared by the
+// MESSAGES popup and the MEM popup (11-20), which draw their rows by one rule.
+function makeWrapText(measure,text,clean){
+  return (value,key,width,lead='  ')=>{
     const out=[];const room=Math.max(4,width-measure(lead));
     for(const paragraph of clean(value).split(/\s*\n\s*/)){
       let row='',used=0;
@@ -2534,6 +2569,39 @@ function messagesBody({model={},columns=72,cellWidth}={}){
     }
     return out;
   };
+}
+// 11-20 (the person: "메모리 내용은 한줄로 바꾸고 ... 메시지 처럼 팝업이 가능하게"): the MEM popup's rows, drawn as the MESSAGES popup's: the records the
+// panel's model holds (`memory_items`, newest first), each its head (`◆ project · decision · 10m`: `◆` durable or `◇` working, its scope, kind and age,
+// dim), its headline whole in the body color two cells in, and its body (the record's snippet the backend carried, never anything else) under it.
+// `rows.starts` is the row each record starts at, for the popup that opens on a pressed record.
+function memoryBody({model={},columns=72,cellWidth}={}){
+  const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
+  const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
+  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
+  const wrapText=makeWrapText(measure,text,clean);
+  const out=[];out.starts=[];
+  for(const m of (Array.isArray(model.memory_items)?model.memory_items:[]).filter(m=>m&&typeof m==='object'&&clean(m.text).trim())){
+    if(out.length)out.push([]);
+    out.starts.push(out.length);
+    const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
+    const head=[mark,...[m.scope,m.kind].map(v=>clean(v).trim()).filter(Boolean),clean(m.age).trim()].filter(Boolean).join(' · ').replace(/^(.) · /,'$1 ');
+    out.push([text(head,'dim')]);
+    const title=clean(m.text).trim(),body=clean(m.body).trim();
+    // (a body that goes on from the headline, a record with no headline of its own, is read once, whole.)
+    if(!body.startsWith(title))out.push(...wrapText(title,'loc_repo',columns));
+    if(body&&body!==title)out.push(...wrapText(body,body.startsWith(title)?'loc_repo':'dim',columns));
+  }
+  return out.length?out:[[text('·')]];
+}
+// 11-15 (popup design E): the MESSAGES popup's rows: the requests this session sent or received
+// (their numbers, reports and body) and the recent messages, the newest first, each its head (the
+// direction, the other session, then dim harness, time, kind and a sent one's delivery state) and
+// its whole text under it, two cells in. What the panel's rows cut reads whole here.
+function messagesBody({model={},columns=72,cellWidth}={}){
+  const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
+  const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
+  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
+  const wrapText=makeWrapText(measure,text,clean);
   const out=[];
   for(const q of (Array.isArray(model.requests)?model.requests:[]).filter(q=>q&&typeof q.id==='string')){
     if(out.length)out.push([]);
@@ -2745,7 +2813,7 @@ function stageWordOf(shape){return /^staged/.test(shape)?'staged':/^(|unknown|fr
 function stageLeadOf(r){const word=stageWordOf(String((r&&r.shape)||''));return word==='staged'?'':word;}
 function stageLinedOf(r){const shape=String((r&&r.shape)||''),n=Array.isArray(r&&r.stages)?r.stages.length:0;
   return shape!=='framed'&&(/^staged/.test(shape)?n>0:n>1);}
-module.exports={render,keyRows,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,veil,
+module.exports={render,keyRows,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,memoryBody,veil,
   RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST,EASE:RULE_EASE},scanAt,WAVE:{COUNT:WAVE_COUNT,LAP:WAVE_LAP,STEPS:WAVE_STEPS,FLOOR:WAVE_FLOOR,MIN:WAVE_MIN},
   BORDER:{LIT:BORDER_LIT,ARC:BORDER_ARC,LAP:BORDER_LAP,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};
 module.exports.routesBody=routesBody;

@@ -343,6 +343,18 @@ class GroupsTest(StatusTest):
         text_ = "# t\n\n## 결정 기다리는 것\n지금 없음\n\n## 하는 중\n\n## 끝난 일\n- 하나\n"
         self.assertEqual(self.kinds(text_), [("waiting", 0, []), ("done", 1, ["하나"])])
 
+    def test_both_heading_name_sets_of_the_campaign_document_read_as_the_same_four_groups(self):
+        """The document's maker has not settled the names yet: each name of a pair reads as the same group, whatever the order in the file."""
+        old = ("# t\n\n## 결정 기다리는 것\n- 질문 하나\n\n## 하는 중\n- 일 하나\n\n## 끝난 일\n- 11-19 끝남 하나 · #1790\n\n## 예정\n- 나중 하나\n")
+        new = ("# t\n\n## 하는 중\n- 일 하나\n\n## 기다리는 것\n- 질문 하나\n\n## 최근에 끝난 것\n- 11-19 끝남 하나 · #1790\n\n## 나중에 할 것\n- 나중 하나\n")
+        shuffled = ("# t\n\n## 나중에 할 것\n- 나중 하나\n\n## 최근에 끝난 것\n- 11-19 끝남 하나 · #1790\n\n## 기다리는 것\n- 질문 하나\n\n## 하는 중\n- 일 하나\n")
+        want = [("running", 1, ["일 하나"]), ("waiting", 1, ["질문 하나"]), ("done", 1, ["11-19 끝남 하나 · #1790"]), ("next", 1, ["나중 하나"])]
+        for text_ in (old, new, shuffled):
+            self.assertEqual(self.kinds(text_), want, text_)
+        # A line that is no bullet is a note, not a job; a lone `예정` missing is no group.
+        notes = "# t\n\n## 기다리는 것\n질문판 기준 10:00\n지금 없음.\n\n## 하는 중\n- 일 하나\n6시간 넘게 움직임 없는 열린 일 32개는 접어 둠.\n"
+        self.assertEqual(self.kinds(notes), [("running", 1, ["일 하나"]), ("waiting", 0, [])])
+
     def test_a_hand_written_page_gives_what_it_can_and_a_page_without_lists_gives_none(self):
         self.assertEqual(self.kinds(DOC.format(name="x")), [("waiting", 1, ["하나"]), ("next", 1, ["둘"])])
         self.assertEqual(session_status.parse_groups("# 제목\n\n그냥 글\n\n## 판\n- 항목\n"), [])

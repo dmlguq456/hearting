@@ -646,7 +646,9 @@ let table=null,tableAsking=false,tableAgain=false;
 // own route box laid at the popup's width (`panelView.routesBody`); a reading follows either way and replaces it.
 let routePopup=null;
 // 11-15 (design 2): the status popup first, as its button stands at the panel's head (the REPO row).
-const SECTIONS=['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES'];
+// 11-20 (the person: "메모리 ... 메시지 처럼 팝업이 가능하게"): MEM opens a popup of the same frame and keys as MESSAGES', its rows drawn from the
+// records the panel already holds (`panelView.memoryBody`): no reading, no new kind of popup.
+const SECTIONS=['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES','MEM'];
 const POPUP_KIND={ROUTE:'routes',STATUS:'status',NOW:'now'};
 // 11-18: the width kind of a table popup: the routes popup stands wider (`panelView.popupWidth`), the others as a table; the question popup is `question`.
 const tableKind=name=>name==='ROUTE'?'route':'table';
@@ -699,7 +701,7 @@ function popupShown(){return (block.focused||!!table)&&activated&&!relay&&!ended
 function sections(){
   const m=panelModel,list=v=>Array.isArray(v)&&v.length>0;
   const has={STATUS:!!statusDoc(),NOW:!!m.now,QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
-    MESSAGES:list(m.messages)||list(m.requests)};
+    MESSAGES:list(m.messages)||list(m.requests),MEM:list(m.memory_items)};
   const current=table?table.kind:'QUESTIONS';
   return SECTIONS.filter(name=>has[name]||name===current);
 }
@@ -727,6 +729,7 @@ function tableTitle(kind){
     return whole.startsWith(word)&&whole.length>word.length?[dim(word),{text:whole.slice(word.length)}]:[dim(whole)];}
   // `NOW · <counts>` for the list; `NOW · <time> <kind>` for the part being read.
   if(kind==='NOW'){const v=table?.page?table.read:table?.list,more=String(v?.title||'');return more?[dim('NOW · '),{text:more}]:[dim('NOW')];}
+  if(kind==='MEM')return [dim('MEM')];
   return [dim('MESSAGES')];
 }
 // `as read at 14:05 · reading again` (the words are the panel's; no time known: what follows the ` · `).
@@ -742,6 +745,7 @@ function staleWords(stale){
 function tableRows(inner){
   const t=table;
   if(t.kind==='MESSAGES')return [...panelView.messagesBody({model:panelModel,columns:inner,cellWidth}),...actionLines];
+  if(t.kind==='MEM')return panelView.memoryBody({model:panelModel,columns:inner,cellWidth});
   if(t.kind==='NOW')return nowRows(t);
   if(!t.loaded)return [[{text:t.error?label('popup_unread','could not read'):'⠏',dim:true}]];
   return t.rows;
@@ -1021,6 +1025,11 @@ function openPopup(name,open='',page=false){
   if(name==='ROUTE'&&!table.loaded)Object.assign(table,routeFirst(table)||{});
   if(block.focused)block.leave();
   if(name==='MESSAGES')blockAction('r');
+  else if(name==='MEM'){
+    // The popup opens on the record pressed (`popup:MEM:<n>`): its head is the first row on screen.
+    const at=Number(open),starts=panelView.memoryBody({model:panelModel,columns:Math.max(1,table.width-4),cellWidth}).starts||[];
+    if(Number.isInteger(at)&&at>0&&at<starts.length)table.scroll=starts[at];
+  }
   else if(!kept)askTable();
   queueDisplay();
 }

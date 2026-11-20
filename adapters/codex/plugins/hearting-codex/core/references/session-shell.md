@@ -426,16 +426,24 @@ head from the sections. The bottom
 layout keeps the metadata row (or rows) first and one content row
 (`title │ NOW …`, each keeping at least half of what is left).
 
+Two groups (11-20, the person: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" / "REPO ---- SESSION ----"), beside the native area. REPO is the repository's: the
+REPO row, which is the group's head (`REPO   hearting · wt 12 ────`: the word in the label column, the rule dim in a section head's color running to the row's end,
+the status button, where there is no STATUS section, at its end; no row more than before; narrower than 30 cells inside the word stands first as `REPO `), and under
+it the STATUS section, then GIT and PEERS where they stood. SESSION is this session's: its head `SESSION ────` stands where the empty row between the two groups of
+metadata stood and goes with it short of rows, then MODEL, CTX, TITLE, NOW, QUESTIONS, the route box, MESSAGES, MEM. RESOURCES and USAGE keep their own heads, place and shape
+at the panel's bottom (they read under SESSION; they belong to neither group). The bottom layout has no group heads: its first row carries the repository and the session together.
+(`panel-view`'s `GROUP_HEAD` is `merged`; `separate`, a head row of its own over the REPO row, is the other form, one row more, the first row to go short of rows.)
+
 Under the head the panel is a few rows per section (11-15, popup design E), each
 a press away from its popup, where the section's own table reads whole: in order
-QUESTIONS, STATUS, the route box, MESSAGES and MEM (beside the native area all of
-them; under it QUESTIONS, STATUS, the route box and MESSAGES). The panel draws no LAB and no SESSIONS
+QUESTIONS, the route box, MESSAGES and MEM (beside the native area all of
+them; under it QUESTIONS, STATUS, the route box and MESSAGES; beside the native area the STATUS section stands in the REPO group, under the REPO row). The panel draws no LAB and no SESSIONS
 section (11-15, the person: the experiment board and the machine's sessions read in Fleet's own
 LAB and session tables, which stay; the panel no longer reads the board or the session table, nor
 watches their files). Every other section's head has one form:
 its count where it has one, its name tag in dark gray upper case, its counts by
 state, a thin rule, and `›` (`3 QUESTIONS ──── ›`,
-`MESSAGES +3 ──── ›`; `MEM ────` has no popup and no `›`; under the native area
+`MESSAGES +3 ──── ›`, `MEM ──── ›` (11-20: MEM has a popup since); under the native area
 `messages` keeps its word). The routes stand in the one thin rounded box, as
 v4.36.4 drew it (restored 11-15: the person had asked for the routes to open a
 popup, not for the box to go), its title in its top line (`╭─ 2 ROUTE ─╮`,
@@ -594,7 +602,8 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   elapsed time, `model` its context.
 - STATUS (11-20, the person: "현황이 사용성이 많아 질 수 있는 부분이니까 좀 더 눈에 띄면 좋겠어" / "패널 공간에 현황은 중요하지. 기본적으로 5줄
   이상 써서 보이는것도 중요할것 같다"; the 11-15 button on the REPO row had been the whole of it): the section second from the top, right
-  under the question to answer here (a question never gives its place) and above the route box, in both placements. Its head is
+  under the REPO row (11-20, below: the section is the REPO group's) beside the native area, and second among the sections in the bottom layout
+  (under the question to answer here, which never gives its place, and above the route box). Its head is
   `현황 ──── ›` (`STATUS`, Fleet's `fleet.repo.status`; a press on it or on any row opens the status popup, and the REPO row's button is
   gone while the section stands). Under it the lists of this campaign's status document, in the order of the list the person liked
   (`STATUS-LIST-SIAN`): `하는 중` (in progress), `기다리는 것` (what waits for the person), `최근에 끝난 것`, `나중에 할 것`; each a head row
@@ -604,7 +613,8 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   the backend with the button's value (`session_status.read`'s `groups`, the first 64 KiB, again only when the document's modification
   time or size changed; no new timer, watch or worker). No document, or none with such a heading: no section, and the button stays on
   the REPO row. A `## 결정 기다리는 것` with nothing under it is the count 0. Body rows: `STATUS_MIN` = 5 while rows allow, up to
-  `STATUS_MAX` = 12 (four heads and eight titles, two to a group) where they are plentiful. Short of rows the groups give their titles up
+  `STATUS_MAX` = 12 (four heads and eight titles, two to a group) where they are plentiful. A title is as the document wrote it (`title · #PR · vX.Y.Z ·
+  기록 N`, a finished one's date first): short of cells the tail goes first, piece by piece from its end (the tail dim), then the title is cut with `…`. Short of rows the groups give their titles up
   from the last: `하는 중`, `기다리는 것`, `최근에 끝난 것`, `나중에 할 것` stand as counts, the neighbouring ones on one row
   (`최근에 끝난 것 4 · 나중에 할 것 3`, the short names `끝난 일 4 · 예정 3` where the full ones do not fit), and the group that waits for the
   person keeps its title to the last: five rows are `하는 중` with a title, `기다리는 것` with a title and one row of counts; below five
@@ -628,18 +638,19 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   display line in `peer-received/<key>.json` beside the prompt frontier (11-17), and runtime notices keep their own
   eight places, so a run of completion notices never pushes it out.
 - MEM: the newest saved memory records of this repository and the global ones
-  together (11-15), newest first, three at most (`MEM_MAX`, five until 11-18, the person: "MEM는 최대 최근 3개만 띄워도 되겠다"; 11-16, the person: "메모리도
-  메시지랑 같은 맥락이야"), from the journal Fleet reads (the newest `add`/`supersede`
-  rows of its project, and the global ones of the same read), two rows each as
-  v4.36.4 drew them (spec rule 46 (b), restored 11-16): a dim head row saying what the
-  record is as the memory system records it (the person's 11-15 words: `◆` durable
-  or `◇` working, `·` for a record naming no tier, then its scope, `project` or
-  `global`, its kind and its age: `◆ project · decision · 10m`) and, two cells in,
-  the stored headline (else the start of its snippet) in the body color on up to two
-  rows, the second ending in `…` where it goes on. Short of cells the head row loses
-  the kind, then the scope (the mark and the age stay); short of rows every headline
-  takes one row, then (11-20) each record takes its one-row form (its mark and age dim, then the headline in the body color,
-  `…` where it goes on: `◆ 10m headline`), then two records show, then one; no section without a journal row.
+  together (11-15), newest first, three at most (`MEM_MAX`, five until 11-18, the person: "MEM는 최대 최근 3개만 띄워도 되겠다"), from the journal Fleet
+  reads (the newest `add`/`supersede` rows of its project, and the global ones of the same read). 11-20 (the person: "메모리 내용은 한줄로 바꾸고 (지금은 두줄이네)
+  메시지 처럼 팝업이 가능하게"): one row a record, as a message's one-row form (spec rule 46 (b) drew two rows from 11-16): its mark (`◆` durable,
+  `◇` working, `·` for a record naming no tier), its age and its kind dim, then the stored headline (else the start of its snippet) in the body
+  color, `…` where it goes on (`◆ 10m decision headline`; short of cells the kind goes first, where the headline would be left under 14 cells; the
+  mark and the age stay). The head is `MEM ──── ›`: a press on it, or on a record (`popup:MEM:<n>`), opens the MEM popup. Short of rows MEM shows two
+  records, then one, after the messages took the one-row form; no section without a journal row.
+  The MEM popup is the MESSAGES popup's frame, keys and press rules (the table popup: `←→` section, PgUp/PgDn, Esc), its rows drawn from the records the
+  panel already holds (`memory_items`, `panelView.memoryBody`; no reading, no new kind of popup): each record its dim head (`◆ project · decision · 10m`:
+  mark, scope, kind, age), its headline whole in the body color, and its body under it, dim: the snippet the journal keeps (`session_panel.MEMORY_BODY` =
+  600 characters, one line of printable text; nothing where it is the headline itself or a `superseded_by=` pointer; a body that goes on from the headline
+  is read once, whole). The record pressed is the first on screen where the popup is longer than its rows. Nothing else is drawn: no session record, no
+  other project's text. The popup's name stands on the bottom line after MESSAGES.
 
 - USAGE (spec rule 59, 11-16, the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을
   USAGE로 해서 넣자"): the section at the panel's bottom, its name row `USAGE ────` (as MESSAGES' and MEM's, no `›`: it
@@ -704,8 +715,8 @@ observed is left out, never painted as `?` or an estimate. When rows run short t
 RESOURCES (11-18: its GPU rows, then its host rows and name; the idle count goes with its host row); empty rows and a value's further rows
 (title, NOW, a route's title); then (11-20, the person: "MESSAGE, MEM은 좀 더 세로길이 따라서 과감하게 표시 줄을 줄여버려 1~2줄 수준으로" and "현황 5줄과
 NOW·QUESTIONS·ROUTE가 MESSAGES·MEM보다 먼저 자리를 받게") MESSAGES and MEM go down before any other section gives a row, in this order: MEM's
-headlines take one row each; every message takes the one-row form (`← [e7] text`); every record takes its one-row form; MEM shows two records;
-MESSAGES two messages; MEM one record; MESSAGES one message (`+N` on its head counts the rest): from nine and six rows down to two rows, then one;
+every message takes the one-row form (`← [e7] text`); MEM shows two records;
+MESSAGES two messages; MEM one record; MESSAGES one message (`+N` on its head counts the rest): from six rows (a record is one row since 11-20) down to two rows, then one;
 then the STATUS section's titles above its five rows; then the question's action row, its summary's second row and the guidance line;
 the structural rows (the empty row inside the metadata, the head's rule; the question box's two border lines); then the
 route box's own steps (11-17: its zone rules are not among them, they stay while a row of the zone shows), every
@@ -998,7 +1009,7 @@ the panel together; above the folded strip, never over it): the question popup
 while a question waits to be answered here, else the first section with
 something in it. A press on a panel section (its head or a row) or on a group of
 the folded strip opens that section's popup, and a new question or a failed
-route never opens one. The popups are five
+route never opens one. The popups are six
 kinds over one frame and one set of keys: STATUS (11-15, design 2: the REPO row's button; the table
 popup's frame, width and keys; its title `현황 <campaign> · <age>`, `현황` alone without a document;
 Fleet's status lines for the project as its project page draws them, an empty row, then the whole
@@ -1015,9 +1026,9 @@ stands at once, and its lines are kept only for the width and value they were as
 ROUTE (Fleet's own table: the backend's `popup` reading draws
 Fleet's `draw_routes` with one route unfolded and Fleet's route page into a grid of
 the popup's width and sends the painted cells, Fleet's row tints left out; narrow,
-Fleet's columns leave as Fleet leaves them), NOW (11-17, below) and MESSAGES (the requests and messages whole, then
-the peer delivery reading `r`). The bottom line lists the sections with
-something in them in the panel's order, `현황 · NOW · QUESTIONS · ROUTE · MESSAGES` (STATUS by its button's
+Fleet's columns leave as Fleet leaves them), NOW (11-17, below), MESSAGES (the requests and messages whole, then
+the peer delivery reading `r`) and MEM (11-20: the records whole, drawn from the panel's own values as MESSAGES' are, no reading). The bottom line lists the sections with
+something in them in the panel's order, `현황 · NOW · QUESTIONS · ROUTE · MESSAGES · MEM` (STATUS by its button's
 word, there while the button or the STATUS section stands; NOW while the panel holds a NOW; `Ctrl+]` still opens what it opened before, never NOW), the current one bright; ←→ (or a press on a name) moves to
 the next or previous one. A popup row reaches the terminal with every control character (C0, DEL and
 C1) as a space. In a table ↑↓, Tab and Shift+Tab unfold the next or

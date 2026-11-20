@@ -350,7 +350,7 @@ for(const o of [{},{messages:0},{mem:false}]){
   assert.match(ls[n-3],/^│ ─{46} │$/,ls.join('\n'));
   // The section heads' rule: its look (dim, the messages role).
   const rule=v.rows[n-3].find(p=>/^─+$/.test(p.text));assert(rule&&rule.dim===true,JSON.stringify(v.rows[n-3]));
-  assert.match(ls[n-4],o.mem===false?/[^─]/:/^│   점멸은 1초 박자로/,ls[n-4]);
+  assert.match(ls[n-4],o.mem===false?/[^─]/:/^│ ◇ 2h lesson 점멸은 1초 박자로/,ls[n-4]);   // 11-20: a record is one row
 }
 // Without MESSAGES and MEM nothing stands to part; under the native area there is no MEM and no rule.
 const none=lines(draw({messages:0,mem:false}));assert(!/^│ ─{46} │$/.test(none.at(-3)),none.join('\n'));

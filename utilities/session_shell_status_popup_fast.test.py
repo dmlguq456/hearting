@@ -414,6 +414,26 @@ const checks={};
     checks.width_reopen_vm=count('vm')-v1;
     await close();
   }
+  if(cfg.scenario==='mem'){
+    // 11-20: the MEM section's records are one row each; a press on a record opens the MEM popup (the MESSAGES popup's frame and keys) on it.
+    await until(has('MEM ─'),'the MEM section');
+    const panel=await screen();
+    checks.rows=panel.filter(l=>l.includes('MEMREC')).length;
+    checks.row_cut=panel.some(l=>l.includes('MEMREC_ONE')&&l.includes('…'))&&!panel.some(l=>l.includes('MEMREC_ONE_END'));
+    const spot=await at('MEMREC_TWO');await press(spot.x,spot.y,0);
+    let r=await until(popupHas('MEM'),'the MEM popup');
+    const b=box(r.s);checks.title=b.rows[0];checks.foot=b.rows.at(-1);
+    checks.whole=popupHas('MEMREC_ONE_END')(r.s);checks.second=popupHas('MEMREC_TWO second record')(r.s);
+    // (Both records fit the popup, so it stands at its top: the first row is the newest record's head.)
+    checks.first_row=body(r.s)[0];
+    await close();
+    // The head opens it too; ←→ walk the sections (MEM is the last).
+    const head=await at('MEM ─');await press(head.x+2,head.y,0);
+    r=await until(popupHas('MEMREC_ONE_END'),'the MEM popup from its head');checks.head_first=body(r.s)[0];
+    await key('\x1b[D',300);r=await until(s=>{const b=box(s);return !!b&&b.rows[0].includes('MESSAGES')||!!b&&!b.rows[0].includes('MEM');},'a section before MEM');
+    await key('\x1b[C',300);r=await until(popupHas('MEMREC_ONE_END'),'MEM again by →');checks.walk=true;
+    await close();
+  }
   fs.writeFileSync(cfg.result,JSON.stringify({checks}));
 }catch(error){console.error(error.stack);process.exitCode=1;}
 finally{try{child.write('\x1b');child.write('\x15');}catch{}await sleep(300);try{child.kill();}catch{}}
@@ -485,6 +505,16 @@ class PtyTest(unittest.TestCase):
             'routes': 1, 'questions': 0, 'campaigns': [{'campaign': 'camp-000', 'line': line}], 'next': '다음 일'}}],
             'system': {}, 'routes': [], 'sessions': [{'tag': 'e1', 'repo_id': 'proj', 'harness': 'claude', 'state': 'idle',
                                                       'title': '이 창'}]}, ensure_ascii=False))
+        if scenario == 'mem':
+            # 11-20: two saved memory records (global, so any folder reads them) in the case's own journal; the MEM section stands
+            # from them, and its popup reads each whole (the snippet is the body the journal keeps).
+            journal = Path(self.env['XDG_STATE_HOME']) / 'agent-memory/write-events.jsonl'
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(time.time() - 300))
+            journal.write_text('\n'.join(json.dumps({'ts': stamp, 'action': 'add', 'type': 'decision', 'tier': 'durable', 'scope': 'global',
+                                                    'id': 'mem-%d' % n, 'snippet': snippet}) for n, snippet in enumerate((
+                'MEMREC_ONE first record body line, which goes on and on so that the one row cuts it short of its end MEMREC_ONE_END',
+                'MEMREC_TWO second record')) ) + '\n')
         backend = case / 'backend'
         backend.write_text(BACKEND.format(python=sys.executable, utilities=str(ROOT / 'utilities'), tools=str(ROOT / 'tools'),
                                           sid=SID, vm=str(vm), control=str(control)))
@@ -535,6 +565,16 @@ class PtyTest(unittest.TestCase):
         # The document's read failed: Fleet's word, dim, in the popup; the next opening reads it.
         self.assertTrue(any(self.unreadable in row for row in checks['unread_frame']), checks['unread_frame'])
         self.assertTrue(checks['after_unread'])
+
+    def test_a_memory_record_is_one_row_and_a_press_opens_the_mem_popup_on_it(self):
+        checks = self.run_case('mem')
+        self.assertEqual(checks['rows'], 2, checks)                      # one row a record
+        self.assertTrue(checks['row_cut'], checks)                        # the long record's row ends in `…`, its end is not there
+        self.assertIn('MEM', checks['title'], checks)
+        self.assertTrue(checks['whole'] and checks['second'], checks)     # the popup reads the record whole
+        self.assertIn('◆ global · decision', checks['first_row'], checks)  # each record's head: the mark, its scope, its kind and its age
+        self.assertIn('◆ global · decision', checks['head_first'], checks)
+        self.assertTrue(checks['walk'], checks)
 
     def test_a_late_fleet_part_of_another_width_is_not_kept(self):
         checks = self.run_case('width')

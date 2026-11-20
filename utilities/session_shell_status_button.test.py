@@ -80,16 +80,17 @@ for(const name of names)for(const wt of [true,false])for(let w=24;w<=60;w++){
 for(const s of ['true,true,false','false,true,false','false,false,false','false,false,true'])assert(stages.has(s),[...stages].join(' | '));
 // The design's 40-cell rows (the name's room 29 cells).
 const at40=name=>str(render({width:40,model:{repo_side:[p(name)],status_doc:{word:'현황',has_doc:true}}}).rows[1]);
-assert.equal(at40('hearting'),'│ REPO   hearting · wt 12       현황 › │');
-assert.equal(at40('shell-tools-kit'),'│ REPO   shell-tools-kit · wt 12     › │');
-assert.equal(at40('speech-separation-bench'),'│ REPO   speech-separation-bench     › │');
+// (11-20: the REPO row is the REPO group's head, its free cells a thin rule.)
+assert.equal(at40('hearting'),'│ REPO   hearting · wt 12 ───── 현황 › │');
+assert.equal(at40('shell-tools-kit'),'│ REPO   shell-tools-kit · wt 12 ─── › │');
+assert.equal(at40('speech-separation-bench'),'│ REPO   speech-separation-bench ─── › │');
 assert.equal(at40('very-long-project-name-for-tests'),'│ REPO   very-long-project-name-for… › │');
 // The word in the body color (Fleet's `soft`, the panel's `loc_repo`: 253), `›` dim.
 {const v=render({width:54,model:{repo_side:[p('hearting')],status_doc:{word:'현황',has_doc:true}}});
- assert.equal(str(v.rows[1]),'│ REPO   hearting · wt 12                     현황 › │');
+ assert.equal(str(v.rows[1]),'│ REPO   hearting · wt 12 ─────────────────── 현황 › │');
  const w=v.rows[1].find(x=>x.text==='현황');assert(w.foreground===253&&w.dim!==true&&w.bold!==true,JSON.stringify(w));}
 // English: `STATUS ›`.
-assert.equal(str(render({width:54,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true}}}).rows[1]),'│ REPO   hearting · wt 12                   STATUS › │');
+assert.equal(str(render({width:54,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true}}}).rows[1]),'│ REPO   hearting · wt 12 ───────────────── STATUS › │');
 """)
 
     def test_no_document_dims_the_button_and_no_root_shows_none(self):
@@ -102,7 +103,7 @@ assert.equal(str(render({width:54,model:{repo_side:[p('hearting')],status_doc:{w
 // No artifact root (no value): the row as before, no button and no press on it.
 for(const status_doc of [undefined,null,{word:'',has_doc:true}]){
  const v=render({width:54,model:{repo_side:[p('hearting')],status_doc}});
- assert.match(str(v.rows[1]),/^│ REPO   hearting · wt 12 +│$/,JSON.stringify(status_doc));
+ assert.match(str(v.rows[1]),/^│ REPO   hearting · wt 12 ─+ │$/,JSON.stringify(status_doc));
  assert(!v.hits.some(h=>h.row===1),JSON.stringify(status_doc));
  assert(!v.rows.flat().some(x=>x.text==='현황'));}
 """)
@@ -111,7 +112,7 @@ for(const status_doc of [undefined,null,{word:'',has_doc:true}]){
         self.node(r"""
 // Narrower than 30 cells inside (the 32-cell side panel): the first row, unlabelled, the same order.
 {const v=render({width:32,model:{repo_side:[p('hearting')],status_doc:{word:'현황',has_doc:true}}});
- assert.equal(str(v.rows[1]),'│ hearting · wt 12      현황 › │');assert(v.hits.some(h=>h.row===1&&h.action==='popup:STATUS'));}
+ assert.equal(str(v.rows[1]),'│ REPO hearting · wt 12 현황 › │');assert(v.hits.some(h=>h.row===1&&h.action==='popup:STATUS'));}
 // The bottom layout: the right end of the first row (`repo │ model │ context`); short of cells the word goes, then the row is cut.
 for(const [w,want] of [[80,/│ hearting │ Opus 5\.5 │ ctx 46% +현황 › │$/],[34,/│ hearting │ Opus 5\.5 │ ctx 4… › │$/]]){
  const v=render({width:w,side:false,height:8,model:{repo:[p('hearting')],context:[p('ctx 46%')],status_doc:{word:'현황',has_doc:true}}});
