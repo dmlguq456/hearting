@@ -100,12 +100,14 @@ parts = [token_count(cw.get(key)) for key in (
 # catalogue defaults are not capacity evidence.
 up = cwin.get("used_percentage")
 win = cwin.get("context_window_size")
-if isinstance(up, (int, float)) and not isinstance(up, bool) and math.isfinite(up):
-    cpct = min(99, round(up))
+# Half-up and no ceiling: the shell panel and Fleet (session_line._percent) read the same
+# callback value this way, so the bottom line and the panel of a window show one number.
+if isinstance(up, (int, float)) and not isinstance(up, bool) and math.isfinite(up) and up >= 0:
+    cpct = int(math.floor(up + 0.5))
 elif (all(value is not None for value in parts)
       and isinstance(win, (int, float)) and not isinstance(win, bool)
       and math.isfinite(win) and win > 0):
-    cpct = min(99, round(100 * sum(parts) / win))
+    cpct = int(math.floor(100 * sum(parts) / win + 0.5))
 else:
     cpct = -1
 print("S_CWD=" + shlex.quote(cwd))

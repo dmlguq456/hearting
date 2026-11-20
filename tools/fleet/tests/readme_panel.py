@@ -210,11 +210,11 @@ def with_status_document(snapshot, now):
 class World:
     """The demo world's panel inputs, keyed by native session id."""
 
-    def __init__(self, snapshot, now):
+    def __init__(self, snapshot, now, hosts=None):
         from tools.fleet.session_line import session_route_status
         # The status document of the project the first picture shows, in the temporary HOME.
         snapshot, self.status_projects = with_status_document(snapshot, now)
-        self.snapshot, self.now = snapshot, now
+        self.snapshot, self.now, self.hosts = snapshot, now, hosts
         self.sessions = {s.session_id: s for s in snapshot.sessions if not s.is_child}
         self.tags = {(s.harness, s.session_id): "[" + s.session_tag + "]"
                      for s in self.sessions.values() if s.session_tag}
@@ -280,9 +280,18 @@ class World:
         # ``session_doers`` is the map Fleet's shared producer publishes (the model and effort of each
         # session it read), here read from the demo snapshot by the same function.
         import human_wait_state
-        return {"route_panels": self.panels, "by_session": waiting,
+        from fleet.explorer import live
+        view = {"route_panels": self.panels, "by_session": waiting,
                 "session_doers": human_wait_state.session_doers(self.snapshot),
                 "items": [item for items in self.questions.values() for item in items]}
+        # The RESOURCES section: the compute hosts' sample as the shared producer turns it into its view (`resources_view`, with the
+        # session records of the same pass for the numbers that hold a GPU), and the repository names of the sessions (`session_repos`).
+        _rows, index = live._session_records(self.snapshot, self.now, live._resolver(self.snapshot))
+        for key, repo in live.session_repos((_rows, index)).items():
+            view["session_doers"][key] = {**view["session_doers"].get(key, {}), "repo": repo}
+        if self.hosts:
+            view["resources"] = human_wait_state.resources_view(self.hosts, self.now, index)
+        return view
 
     def counts(self, harness, sid):
         mine = len(self.questions.get(sid, ()))
@@ -298,7 +307,9 @@ def popup_width(cols, kind="text"):
         return max(4, cols)
     if cols < 80:
         return cols - 4
-    return min(116, cols - 4) if kind == "table" else 76
+    # 11-18: the routes popup alone stands up to 196 cells, the question popup up to 132, the other table popups up to 116.
+    return (min(196, cols - 4) if kind == "route" else min(132, cols - 4) if kind == "question"
+            else min(116, cols - 4) if kind == "table" else 76)
 
 
 # The other harnesses' usage windows (demo values; the session's own harness takes ``World.values``).
@@ -307,7 +318,7 @@ DEMO_USAGE = {"claude": {"rl_5h": 18, "rl_7d": 40, "rl_ms": []},
               "opencode": {"rl_5h": 9, "rl_7d": 33, "rl_ms": []}}
 
 
-def projection(world, harness, sid, *, columns=40, rows=46, state="working", popup_columns=None):
+def projection(world, harness, sid, *, columns=40, rows=46, state="working", popup_columns=None, side=False):
     """``panel_projection``'s payload for one demo session, its live readers replaced."""
     import human_wait_state
     import session_shell
@@ -355,7 +366,7 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working", pop
         os.environ.pop("NO_COLOR", None)
         payload = session_shell.panel_projection(harness, sid, native_pid=81000 + len(sid),
                                                  native_start=1, columns=columns, rows=rows,
-                                                 state=state, expanded=True, popup_columns=popup_columns)
+                                                 state=state, expanded=True, popup_columns=popup_columns, side=side)
     # The host puts the status button's value in the model (``host.cjs`` ``statusDoc``).
     status = world.status(sid)
     if isinstance(status, dict) and isinstance(status.get("word"), str):
@@ -427,8 +438,8 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const plain=part=>({text:part.text,fg:part.foreground??null,bg:part.background??null,
   dim:part.dim===true,bold:part.bold===true,reverse:part.reverse===true});
 const cellWidth=s=>[...String(s)].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
-const SECTIONS=['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES'];
-// host.cjs: tableParts, statusDoc, sectionLabel, sections, label, tableGuide, wrapGuide, tableTitle
+const SECTIONS=['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES','MEM'];
+// host.cjs: tableParts, statusDoc, sections, label, tableGuide, wrapGuide, tableTitle
 // (the same code, over the job's model and table instead of the host's globals).
 function tableParts(result){
   const styles=Array.isArray(result.styles)?result.styles:[];
@@ -436,11 +447,10 @@ function tableParts(result){
     ...(Number.isInteger(run?.[2])&&run[2]>=0&&run[2]<=400?{cells:run[2]}:{})})));
 }
 const statusDoc=m=>m.status_doc&&typeof m.status_doc.word==='string'?m.status_doc:null;
-const sectionLabel=(m,name)=>name==='STATUS'?String(statusDoc(m)?.word||'STATUS'):name;
 function sections(m,block,table){
   const list=v=>Array.isArray(v)&&v.length>0;
   const has={STATUS:!!statusDoc(m),NOW:!!m.now,QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
-    MESSAGES:list(m.messages)||list(m.requests)};
+    MESSAGES:list(m.messages)||list(m.requests),MEM:list(m.memory_items)};
   const current=table?table.kind:'QUESTIONS';
   return SECTIONS.filter(name=>has[name]||name===current);
 }
@@ -456,7 +466,7 @@ function wrapGuide(lines,inner,rows){
 function tableTitle(m,kind,table){
   const dim=v=>({text:v,dim:true});
   if(kind==='ROUTE'){const r=/^route (\d+)(.*)$/.exec(String(m.route_label||'').trim());return r?[{text:r[1]},dim(' ROUTE'+r[2])]:[dim('ROUTE')];}
-  if(kind==='STATUS'){const word=sectionLabel(m,'STATUS'),whole=String(table?.result?.title||word);
+  if(kind==='STATUS'){const word='STATUS',whole=String(table?.result?.title||word);
     return whole.startsWith(word)&&whole.length>word.length?[dim(word),{text:whole.slice(word.length)}]:[dim(whole)];}
   return [dim('MESSAGES')];
 }
@@ -481,7 +491,7 @@ function tableTitle(m,kind,table){
     let popup=null;
     const table=job.table||null;
     if(job.window&&(block.focused||table)){
-      const {cols,rows}=job.window,kind=table?'table':'text',width=view.popupWidth(cols,kind),inner=Math.max(0,width-4),room=view.popupRoom(rows,0);
+      const {cols,rows}=job.window,kind=table?(table.kind==='ROUTE'?'route':'table'):'question',width=view.popupWidth(cols,kind),inner=Math.max(0,width-4),room=view.popupRoom(rows,0);
       const names=sections(base,block,table),current=Math.max(0,names.indexOf(table?table.kind:'QUESTIONS'));
       let title,body;
       if(table){
@@ -499,7 +509,7 @@ function tableTitle(m,kind,table){
         if(block.question){const all=block.detail({budget:room+1,columns:inner});title=all[0]||label;body=all.slice(1);}
         else body=block.detail({budget:room,columns:inner});
       }
-      const shown=view.popup({cols,rows,band:0,kind,title,body,sections:names,labels:names.map(name=>sectionLabel(base,name)),
+      const shown=view.popup({cols,rows,band:0,kind,title,body,sections:names,
         current,model:base,configuration,cellWidth,background:'dark'});
       const veil=view.veil(configuration,{colors:base.colors??256,noColor:base.no_color===true,background:'dark'});
       popup={left:shown.left,top:shown.top,rows:shown.rows.map(row=>row.map(plain)),veil};
@@ -543,8 +553,11 @@ def _xterm(index):
 
 def _richer():
     from tools.fleet import render_cells
-    return {index: tuple(round(v * 255 / 1000) for v in render_cells._RICHER_RGB_1000[name])
-            for name, index in render_cells._MUTED_256.items() if name in render_cells._RICHER_RGB_1000}
+    opened = {index: tuple(round(v * 255 / 1000) for v in render_cells._RICHER_RGB_1000[name])
+              for name, index in render_cells._MUTED_256.items() if name in render_cells._RICHER_RGB_1000}
+    opened.update({index: tuple(round(v * 255 / 1000) for v in render_cells._HARNESS_RGB_1000[name])
+                   for name, index in render_cells._HARNESS_256.items() if name in render_cells._HARNESS_RGB_1000})
+    return opened
 
 
 def _colour(value, default, richer):
@@ -659,7 +672,7 @@ CONVERSATION = {
     ),
 }
 _CONVERSATION_STYLE = {"you": {"fg": 253, "bold": True}, "body": {"fg": None}, "dim": {"dim": True},
-                       "claude": {"fg": 116}, "codex": {"fg": 176}, "opencode": {"fg": 147}}
+                       "claude": {"fg": 173}, "codex": {"fg": 147}, "opencode": {"fg": 153}}
 
 
 # The window's last line under the native screen is the shell's one line in every harness (spec rule 60):

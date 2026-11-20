@@ -105,6 +105,46 @@ class DispatchAllocationTest(unittest.TestCase):
             {"harness_weights": "ignored under least-recent-attempts"},
         )
 
+    def test_field_weights_is_read_by_balanced_only(self):
+        inert = self.allocation.inert_allocation_keys
+        base = {"window": 30, "field_weights": {"claude": 0.95, "codex": 0.85, "opencode": 1.0}}
+        self.assertEqual(inert({**base, "strategy": "balanced"}), {})
+        self.assertEqual(inert({**base, "strategy": "capacity-aware"}),
+                         {"field_weights": "ignored under capacity-aware"})
+
+    def test_effective_weights_are_the_per_harness_product(self):
+        effective = self.allocation.effective_harness_weights
+        row = {"claude": 0.95, "codex": 0.85, "opencode": 1.0}
+        got = effective({"harness_weights": {"opencode": 0.4, "codex": 0.7}, "field_weights": row})
+        self.assertEqual(sorted(got), ["claude", "codex", "opencode"])
+        self.assertAlmostEqual(got["claude"], 0.95)
+        self.assertAlmostEqual(got["codex"], 0.595)
+        self.assertAlmostEqual(got["opencode"], 0.4)
+        # the field row alone, and the harness weights alone
+        self.assertEqual(effective({"field_weights": row}), row)
+        self.assertEqual(effective({"harness_weights": {"opencode": 0.4}}), {"opencode": 0.4})
+
+    def test_a_route_without_field_weights_reads_neutral_exactly_as_before(self):
+        effective = self.allocation.effective_harness_weights
+        weights = {"opencode": 0.3}
+        # same object back: a route sealed before the key existed, or with no field, is untouched
+        self.assertIs(effective({"harness_weights": weights}), weights)
+        self.assertIsNone(effective({"strategy": "balanced"}))
+        self.assertIsNone(effective({"field_weights": {}}))
+        self.assertIsNone(effective(None))
+        self.assertEqual(effective({"harness_weights": weights, "field_weights": {}}), weights)
+
+    def test_every_caller_that_hands_weights_to_the_selector_goes_through_the_one_product(self):
+        # The product lives in one place; a caller that passes `harness_weights` straight from the
+        # sealed allocation would silently skip the field row. (The Fleet title worker has no field.)
+        import re
+        direct = re.compile(r"harness_weights\s*=\s*allocation\.get\(")
+        for name in ("stage-dispatch-fallback.py", "dispatch-owner.py", "dispatch-batch.py",
+                     "dispatch_replacement.py"):
+            text = (ROOT / "utilities" / name).read_text(encoding="utf-8")
+            self.assertIsNone(direct.search(text), name)
+            self.assertIn("effective_harness_weights(", text, name)
+
     def test_inert_keys_only_report_keys_that_are_actually_present(self):
         inert = self.allocation.inert_allocation_keys
         self.assertEqual(inert({"strategy": "capacity-aware", "window": 30}), {})

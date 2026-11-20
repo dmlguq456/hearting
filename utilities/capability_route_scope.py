@@ -438,7 +438,9 @@ def compose_observations(route, t=None):
     answers = [
         (t("route.q.main_capability"), route["capability"]),
         (t("route.q.new_measurement"), t("route.a.lab_declared") if lab_run else t("route.a.depends_on_work")),
-        ("standard+", t("route.a.yes") if route["effective_intensity"] in {"standard", "strong", "thorough", "adversarial"} else t("route.a.no")),
+        # 11-20: a unit route has no intensity, so "is it standard+" has no answer (the record keeps `quick`).
+        ("standard+", t("route.a.not_applicable") if route.get("capability") == TOPO.UNIT_CAPABILITY
+         else t("route.a.yes") if route["effective_intensity"] in {"standard", "strong", "thorough", "adversarial"} else t("route.a.no")),
         (t("route.q.split_stages"), t("route.a.stages_declared", count=len(nodes)) if shape == "staged" else t("route.frame.pending") if shape == "framed" else t("route.a.single_run")),
         (t("route.q.inline_exception"), str(selection.get("inline_reason") or selection.get("selection_basis") or unknown) if shape == "direct" else t("route.a.not_applicable")),
         (t("route.q.delegation_surface"), t("route.a.surface", native=native_label, headless=seen if headless else unknown)),
@@ -491,13 +493,14 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
     detail = t("route.intensity.unspecified") if source == "shape-default" else ""
     if requested and requested != route["effective_intensity"]:
         detail += f", requested={requested}"
-    lines = [f"  intensity={route['effective_intensity']} (source={source}{detail})"]
+    unit_route = route.get("capability") == TOPO.UNIT_CAPABILITY   # one leg, no owner; its intensity is not a choice
+    # 11-20: a unit route's card does not tell an intensity (the record keeps `effective_intensity`; only this text leaves it out).
+    lines = [] if unit_route else [f"  intensity={route['effective_intensity']} (source={source}{detail})"]
     shape = (route.get("selection") or {}).get("shape") or shape_for_intensity(route["effective_intensity"])
     if shape == "framed":
         legs = len(RP.frame_legs(route))
         lines = ["  " + t("route.intensity.framed", requested=requested or "default", legs=legs,
                            bootstrap=route["effective_intensity"], source=source)]
-    unit_route = route.get("capability") == TOPO.UNIT_CAPABILITY   # one leg, no owner; its intensity is not a choice
     if source == "shape-default" and shape != "framed" and not unit_route:
         lines.append("  " + t("route.intensity.hint"))
     capability = basis.get("compose-capability", {})
@@ -562,6 +565,32 @@ def _compose_field_line(route):
     return f"  field {field} ({source})\n" if field else ""
 
 
+def frame_advice(route) -> list:
+    """`[(kind, detail), ...]`: why a directly opened `solo` or `staged` route may be worth a frame first.
+
+    Advice only -- the route opens either way, and nothing reads this to allow or refuse anything.
+    It reuses the signals the frame width already reads (`route_plan.frame_signals`). A part's start
+    approval is not one: the card already shows it and the approval itself stops that step. A framed route, a route made from a proposal (its direction was
+    settled), a route that carries its own frame legs, a unit route and the inline `direct` shape get none."""
+    selection = route.get("selection") or {}
+    if (selection.get("shape") not in ("solo", "staged") or route.get("route_plan")
+            or route.get("capability") in (ROUTE_PLAN.CAPABILITY, TOPO.UNIT_CAPABILITY)
+            or ROUTE_PLAN.frame_legs(route)):    # a preset that carries its own frame settles the direction itself
+        return []
+    text = (route.get("work_request") or {}).get("text") or ""
+    # The path pattern runs to the next space, so a Korean particle ("core/x.md의") rides along; drop it.
+    signals = [(kind, re.sub(r"[가-힣]+$", "", detail) if kind == "protected-path" else detail)
+               for kind, detail in ROUTE_PLAN.frame_signals(text, route.get("capability"))]
+    return signals
+
+
+def frame_advice_reason(signals, t=None) -> str:
+    """The one-line reason for `signals`, in the operator's language (`t`) or machine form (no `t`)."""
+    if t is None:
+        return ",".join(f"{kind}:{detail}" for kind, detail in signals)
+    return " · ".join(t("route.advice." + kind, detail=detail) for kind, detail in signals)
+
+
 def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
                  campaign_selection=None, include_decisions=True, non_git_decision=None, intent_original=None,
                  launches=None):
@@ -575,9 +604,17 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
     graph = "→".join(ids) if ids else "-"
     t = UI_TEXT.translator()
     gates = ",".join(sorted({row["gate"] for row in route.get("human_gate_bindings") or []})) or t("route.none")
+    if route.get("capability") == TOPO.UNIT_CAPABILITY:
+        # 11-20: a unit route has no procedure to weigh, so its header names the unit and no shape or intensity
+        # (`[경로] unit · qa/code-review · route …`); the sealed record keeps both values.
+        unit = next((n["unit"] for n in route["nodes"] if n.get("unit")), "-")
+        header = t("route.card.header_unit", capability=route['capability'], unit=unit,
+                   route_id=route['route_id'], gates=gates)
+    else:
+        header = t("route.card.header", capability=route['capability'], shape=shape,
+                   intensity=route['effective_intensity'], graph=graph, route_id=route['route_id'], gates=gates)
     card = (
-        t("route.card.header", capability=route['capability'], shape=shape,
-          intensity=route['effective_intensity'], graph=graph, route_id=route['route_id'], gates=gates)
+        header
         + f"\n  cwd {route['cwd']} · slug {route.get('slug', '-')}\n"
         + _compose_field_line(route)
         + _compose_campaign_line(campaign_selection if campaign_selection is not None
@@ -606,6 +643,9 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
                           origin=observed['confirmation']['origin'])
     for answer in observed["pre_execution_answers"]:
         card += f"\n  {answer['question']}. {answer['name']}: {answer['answer']}"
+    advice = frame_advice(route)
+    if advice:  # advice only: the route is already open, whatever the session does with it
+        card += "\n  " + t("route.card.frame_advice", reason=frame_advice_reason(advice, t))
     if framed:
         pair = len([n for n in route.get("nodes", []) if _frame_node(n)]) == 2
         card += ("\n  " + t("route.card.frame_proposes")

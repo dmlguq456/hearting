@@ -37,6 +37,9 @@ MAX_LOG_BYTES = 2 * 1024 * 1024 * 1024
 DUE_SECONDS = 300
 # While the last pass left removable files behind, the next pass may start sooner.
 BACKLOG_DUE_SECONDS = 60
+# After a round of the log directory ends, the next round opens at most once per
+# this interval. Not a setting.
+ROUND_REOPEN_SECONDS = 24 * 3600
 EXAMINE_LIMIT = 64
 MAX_DIRECTORY_ENTRIES = 50000
 MAX_PASS_SECONDS = 10
@@ -115,9 +118,40 @@ def _advisory_lock(layout):
 
 
 def _read_state(layout):
+    return _read_state_at(layout.root_fd)
+
+
+def follow_up_pass_ns(jobs, *, now_ns=None) -> int:
+    """Start (ns) of the last pass, only if it left ``more`` and the short interval passed.
+
+    Read-only and lock-free. Anything unreadable, malformed, missing or in the
+    future yields 0, so a caller that does not know does not hurry.
+    """
+    try:
+        now_ns = time.time_ns() if now_ns is None else int(now_ns)
+        root_fd = os.open(dispatch_state_root(Path(jobs).resolve(strict=False)), _DIR_FLAGS)
+    except Exception:  # noqa: BLE001
+        return 0
+    try:
+        state = _read_state_at(root_fd)
+        last = state.get("last_result")
+        passed = state.get("last_pass_ns")
+        if (isinstance(last, dict) and type(last.get("more")) is int and last["more"] == 1
+                and type(passed) is int and 0 < passed <= now_ns
+                and now_ns - passed >= BACKLOG_DUE_SECONDS * 1_000_000_000):
+            return passed
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(root_fd)
+    return 0
+
+
+def _read_state_at(root_fd):
     try:
         fd = os.open(STATE_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                     dir_fd=layout.root_fd)
+                     dir_fd=root_fd)
     except FileNotFoundError:
         return {"last_pass_ns": 0, "cursor": ""}
     with os.fdopen(fd, "rb") as handle:
@@ -837,17 +871,40 @@ def _pass(jobs, root, layout, state, now_ns, started):
                 unknown_names.add(name)
                 deferred += 1
     over_limit_bytes = max(0, total_bytes - removed_bytes - MAX_LOG_BYTES)
-    # A round is every name the rows point at, looked at once. A pass that found
-    # nothing to remove keeps the short interval until the round is spent; a
-    # removal after that opens the next round.
+    # A round is every name the rows point at, looked at once. While a round is
+    # open every pass keeps the short interval, whatever it removed: what it
+    # removed says nothing about the names not yet examined. A removal after the
+    # round is spent opens the next round, at most once a day.
     left = state.get("round_left")
-    if type(left) is not int or left < 0:
+    seen = state.get("round_left_seen")  # round_left as the last pass of this release left it
+    entry_ok = type(left) is int and left >= 0
+    if not entry_ok:
         left = len(ordered)
+    closed = state.get("round_closed_ns")
+    recent = (type(closed) is int and 0 <= now_ns - closed < ROUND_REOPEN_SECONDS * 1_000_000_000)
+    if entry_ok and type(seen) is int and seen > 0 and not recent and (left == 0 or left > seen):
+        # Inside a round round_left only shrinks. An older release spent (or spent and
+        # reopened) the round this release left open, and it records no end. Take the
+        # end as now: a reopened round is closed below and the next removal does not
+        # reopen it within a day.
+        state["round_closed_ns"] = closed = now_ns
+        recent = True
+    if recent and left > 0:
+        # Within a day of the recorded end, an open round can only have been
+        # reopened by an older release that does not know the daily rule.
+        left = 0
+    spent_now = bool(left)
     left = max(0, left - len(examined_names))
-    if removed and not left:
+    if spent_now and not left:
+        state["round_closed_ns"] = now_ns  # this pass ended the round
+        recent = True
+    if removed and not left and not recent:
+        # A new round opens only when the last one ended over a day ago or its
+        # end time is unknown; otherwise each newly expired log would reopen it.
         left = len(ordered)
-    round_more = bool(examined_names) and not selected and left > 0
+    round_more = bool(examined_names) and left > 0
     state["round_left"] = left
+    state["round_left_seen"] = left
     result = {
         "examined": len(examined_names), "eligible": len(eligible), "eligible_bytes": eligible_bytes,
         "removed": removed, "removed_bytes": removed_bytes, "deferred": deferred + discovery_deferred,

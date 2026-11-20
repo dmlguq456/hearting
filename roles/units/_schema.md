@@ -1,9 +1,9 @@
 # Unit-Def Schema (canonical authoring contract)
 
 > A **unit** is the single declaration of one dispatchable behavior atom — the SoT that
-> replaces both the `roles/modes/*` / `adapters/*/agent-modes/*` persona double-copy and
-> the runtime team agents. Units are dispatched as dispatch-depth-2 nodes; they are never native
-> team subagents. `family:` is a grouping label only.
+> replaces the `roles/modes/*` / `adapters/*/agent-modes/*` persona double-copy. Units run as
+> route nodes — a stage at dispatch depth 2, or the one leg of a unit route at depth 1; a sealed
+> fallback may run a node on a runtime-native subagent. `family:` is a grouping label only.
 
 ## File layout
 
@@ -16,7 +16,7 @@ roles/units/
     memory-flow.md      # authorized-memory closing wrapper
     dual-io.md          # direct-call vs pipeline return switch
   <family>/<unit>.md    # one unit per file; family ∈ {qa, research, dev, design,
-                        #   material, editorial, plan}
+                        #   material, editorial, plan, general}
   <family>/_NOTES.md    # authoring residue: content mined from legacy sources that
                         #   found no home — must be reviewed, never silently dropped
 ```
@@ -63,16 +63,30 @@ bootstrap:                    # OPTIONAL runtime bootstrap material; absent = no
 ## Body
 
 The irreducible domain persona at the declared floor. English canonical (localization is
-a projection concern). Reference `_shared/*` fragments — do not restate them. Merge, per
-unit, the three legacy sources: `roles/modes/<f>/<m>.md` (EN), the
-`adapters/claude/agent-modes/<f>/<m>.md` divergent copy (KO), and any load-bearing blocks
-from the retired team agent file. Nothing load-bearing drops silently → `_NOTES.md`.
+a projection concern). Reference `_shared/*` fragments — do not restate them.
 
 The `stance:` text is carried by the runtime into the worker prompt, just before the body.
 
+**Two-layer form (pilot: `qa/code-review`, `qa/test`, `dev/backend`, `editorial/report`).**
+A unit body may be written as two sections, both always carried with the worker text:
+
+```
+## 지킬 것   (every line is a must: ownership boundaries, domain prohibitions, tool contract,
+              spec/precondition checks, the output shape and verdict tokens, round rules;
+              review units add one line pointing at the carried stance text)
+## 참고      (defaults the worker may override: role and tone, procedure, criteria lists,
+              examples, memory; its head states the precedence: this turn's instruction >
+              project conventions > the person's profile > these defaults)
+```
+
+A line the unit cannot do without belongs in 지킬 것; write-scope does not stop a worker from
+writing inside its worktree, so a prohibition lives there too. Lines moved out of the worker
+text are recorded in `<family>/_NOTES.md`, never deleted. No checker enforces the headings;
+units not yet moved keep the single-body form.
+
 ## Floor guidance (from the investigation gradient)
 
-- `near-zero`: material/*, qa/test, design/verifier, research/fact-check — kernel +
+- `near-zero`: material/{browser-fetch,pdf-extract,web-image-search}, qa/test, design/verifier, research/fact-check — kernel +
   worker-type + stance + I/O carry almost everything; keep THICK tool fragments.
 - `low`: dev/*, editorial/*, qa/data-curate.
 - `moderate`: qa/code-review, qa/plan-review, qa/security-review (confidence bar = 8;

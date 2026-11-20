@@ -201,14 +201,25 @@ the goal and deciding metric are. One file per project root, next to `project-me
 
 One short page a person reads first to see where a project stands. Fleet puts its one
 line on the project's OVERVIEW rule and its parts at the top of the project page.
-Writing one is optional and nothing waits on it:
-without one, Fleet builds the line from the routes, questions and results it already
-shows.
 
-- **Where.** `campaigns/<campaign-locator>/현황.md` (or `STATUS.md`), directly in
-  the campaign folder. Fleet prefers these campaign pages, reads up to three newest
-  summaries on the repo page, and keeps the newest summary on OVERVIEW. Editing a
-  page in place is observed even when the campaign directory's timestamp is old.
+**The campaign document is made by code. A main session does not edit it by hand.** The
+entrance refresh worker (`utilities/campaign_document.py`, one turn after a begin, any
+close or a seal; the generator leaves a close that is not proven out of the document) writes `campaigns/<campaign>/campaign.md` for each campaign that
+moved: the sections `## 하는 중` → `## 기다리는 것` → `## 최근에 끝난 것` (→ `## 나중에 할 것`,
+not yet written), one line per piece of work, routes of one PR joined. It creates the file or
+replaces one whose first line is its marker `<!-- hearting:campaign-document v1 -->`; a
+`campaign.md` without the marker, a link, a directory and a hand-written `현황.md` /
+`STATUS.md` are never written. Nothing waits on it: without a document, Fleet builds the line
+from the routes, questions and results it already shows. What `## 기다리는 것` lists is as of the
+document's last refresh: besides a worker turn, the question board's producer asks for one when
+the set of open questions changes (never from a question's own hook path).
+
+- **Where.** `campaigns/<campaign-locator>/campaign.md`, directly in the campaign
+  folder, made by the code above. Fleet prefers these campaign pages, reads up to three
+  newest summaries on the repo page, and keeps the newest summary on OVERVIEW. A
+  hand-written `현황.md` / `STATUS.md` left in the same folder stays but is not shown once
+  a `campaign.md` is there, and nothing edits it. Editing a page in place is observed even
+  when the campaign directory's timestamp is old.
 - **Legacy documents.** With no campaign page, Fleet reads status documents directly
   in a cycle's `artifacts/`, not the chronological research folders. When
   `finalize` picks the
@@ -218,69 +229,65 @@ shows.
   (`core/CORE.md` §3, primary selection). Names match NFC-normalized and case-folded. A
   file at the cycle root (`campaigns/<campaign>/<cycle>/현황.md`) makes the seal fail
   with `file-outside-artifacts` and is not read; copies under `_internal/` or
-  `versions/`, or deeper inside `artifacts/`, are not read either. A campaign keeps one
-  and edits it in place (a finalized cycle still takes writes, D-123).
-- **One selection rule.** Fleet, the close-time stamp updater and the artifact
-  entrance use the common campaign-document reader. Conflicting campaign-root
-  `STATUS.md` / `현황.md` candidates remain ambiguous; neither mtime nor a legacy
-  copy resolves that conflict. Unreadable, oversized or symlinked canonical
-  candidates remain unknown and are not edited. Legacy-only pages retain their
-  read compatibility. Automatic updates change only their existing stamp and
-  runtime closure lines, preserving the person's decisions and prose.
+  `versions/`, or deeper inside `artifacts/`, are not read either. These cycle documents
+  are legacy: nothing keeps them current now (a finalized cycle still takes writes, D-123).
+- **`campaign.md` first.** A campaign folder's `campaign.md` is opened by name before
+  any older name (no folder listing, no ownership marker required); too large or unreadable,
+  it is unknown and no older name stands in for it.
+- **One selection rule.** Fleet and the artifact entrance use the common campaign-document
+  reader. Conflicting campaign-root `STATUS.md` / `현황.md` candidates remain ambiguous;
+  neither mtime nor a legacy copy resolves that conflict. Unreadable, oversized or symlinked
+  canonical candidates remain unknown. Legacy-only pages (a hand-written `현황.md` /
+  `STATUS.md`, or one in a cycle's `artifacts/`) keep their read compatibility; the runtime
+  never edits them.
 - **Other campaign documents.** Optional handoffs and topic Markdown documents
   also live directly under the campaign. The common entrance lists them as
   campaign documents, with their existing ownership and locator; it creates no
   cycle or authority ID for them. Missing identity remains unknown. This does
   not move historical research/cycle documents or require a new page.
-- **Shape.** Markdown in the reader's language. Only the parts below are read; other
-  sections are free.
-
-  ```markdown
-  # <project or campaign> 현황
-
-  갱신 2026-11-02 21:50 · optional pointers
-
-  **한 줄**: where the work stands, in one sentence.
-
-  ## 결정 필요
-  - one bullet per thing that waits on the person: a decision or an action
-
-  ## 다음
-  - the next step first
-  ```
-
-  English headings read the same: `**One line**:`, `## Decisions needed`, `## Next`.
-  Readers take the one-line paragraph (else the first paragraph above the first section
-  that is not the `갱신`/`Updated` stamp, else the title), count the top-level bullets
-  under the decisions heading, and take the first bullet under the next heading. A
-  section that records decisions already made (`## 사용자 결정 기록`, `## Decision log`)
-  is not counted. The file's modification time is when the status last changed.
-- **Refresh.** Whoever runs the work edits it when the state changes. A route's proven
-  close (`capability-route finish`, or an owner's runtime close) also refreshes the
-  campaign's page when one exists (`utilities/status_board.py`): it sets the `갱신`/`Updated` stamp
-  and puts one line first under `## 최근 마감` / `## Recently closed` (at most five:
-  when, the route's intent, the route id and any PR link in the close summary). The
-  one line, `## 결정 필요`, `## 다음` and anything else a person writes, inside that
-  section too, stay the person's; a page is never created and a
-  failure leaves it as it was. A PR merge has no Hearting event, so nothing refreshes
-  on it, and nothing checks freshness. Fleet shows the age in front of a document older
-  than three days.
+- **Reading.** Readers take the one-line paragraph (else the first paragraph above the first
+  section that is not the `갱신`/`Updated` stamp, else the title), count the top-level
+  bullets under the decisions heading (`## 기다리는 것`, `## 결정 필요`, `## Decisions needed`)
+  and take the first bullet under the next heading (`## 나중에 할 것`, `## 다음`, `## Next`).
+  A section that records decisions already made (`## 사용자 결정 기록`, `## Decision log`) is
+  not counted. The file's modification time is when the status last changed. Fleet shows the
+  age in front of a document older than three days.
 
 ### Root `README.md` / `index.html` — the read entrance
 
-Four files directly under the artifact root, written by `utilities/artifact_entrance.py`:
-`README.md` and `index.html` (the entrance) and `all-campaigns.md` / `all-campaigns.html`
-(every campaign). They are a derived reading surface, not canonical records: admission,
+Eight files directly under the artifact root, written by `utilities/artifact_entrance.py`:
+`README.md` and `index.html` (the entrance), `all-campaigns.md` / `all-campaigns.html`
+(every campaign), `all-spec.md` / `all-spec.html` (every spec topic, plus the contents line below) and
+`recent-route-reports.md` / `recent-route-reports.html` (the recent route reports). They are a derived reading surface, not canonical records: admission,
 census and residue never take them as input, and deleting them is safe — the next publish
 recreates them. They are classified `C-RT` in `core/CORE.md` §3.
 
 - **When.** Right after a seal (the first seal and a re-seal refresh alike), and whenever
   `hearting reports` or `hearting open` runs. No other write path touches them.
-- **Content.** The 20 most recent user-facing documents (date, title, one-line summary,
-  "+N more"), the 10 most recent campaigns with their cycle count, latest date and work
-  record count, a link to the full campaign list, the root totals, and a link to the ID
-  index `campaigns/INDEX.md`. Every link is a relative path; there is no absolute path,
-  host name, user name, script or external resource in either file.
+- **Content.** The entrance has three sections, top to bottom: **spec** (the 3 most
+  recently changed spec topics, each with the day it was last changed and its title, and
+  one "N more" line, N being the topics not shown, absent when none is hidden, that opens
+  `all-spec.*`), **campaigns** (the 3 most recent campaigns with date, title and the
+  campaign's one-line summary from `meta.json`, then one "All N campaigns" line, N being
+  every campaign, that opens `all-campaigns.*`) and **records** (a link to the recent
+  route reports page and a link to the ID index `campaigns/INDEX.md`), plus the root
+  totals. The line counts are the constants `ENTRANCE_SPEC_LINES` and
+  `ENTRANCE_CAMPAIGN_LINES` (not settings). Under the spec and campaigns titles one
+  explanatory line says what the section is (the spec line carries the topic count), and
+  the "recent route reports" line carries one line saying the page is not usually opened;
+  none of these lines is numbered. `all-spec.*` lists every spec topic in the entrance's
+  form and order (date, linked title) with a link back to the entrance, or "No documents
+  yet." when there is none. A spec topic is a component's `prd.md`, or the top `prd.md`
+  of a reference that has no component folder (titled by its first heading, else the
+  reference's title). The top `prd.md` of a reference with components is a table of
+  contents, not a topic: it is not counted in "N topics" or "N more" and only
+  `all-spec.*` shows it, as one line above the topics (its first heading, else
+  "Contents"; the day follows the topic rule). The recent
+  route reports page lists the 20 most recent user-facing documents as a bulleted list
+  (date, title, one-line summary, "+N more"; no numbers, which belong to the entrance's
+  lines), with a link back to the entrance. Every link is a
+  relative path; there is no absolute path, host name, user name, script or external
+  resource in any file.
 - **Reading rule.** A document row marked `audience: "user"` is user-facing; a row without
   that key (an older sealed cycle) follows the same name rule described above. The
   representative document per cycle is ranked by name only (`현황.md`/`STATUS.md`, then
@@ -288,16 +295,26 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   manifest `primary`. Manifests are read newest first, up to 300 or 16 MiB each; there is
   no full scan and no cache.
 - **Row sources.** Rows come from sealed cycles today; a source of rows that are not cycle
-  folders plugs in through `artifact_entrance.ROW_SOURCES`, and its rows join the same list.
-- **Commands.** `hearting reports` prints the same numbered list in the terminal and
-  `hearting open <number|words>` opens one result or, with no argument, the browser
-  entrance. Both names are reserved by the one launcher (`tools/install/harness.sh`) in
+  folders plugs in through `artifact_entrance.ROW_SOURCES`, and its rows join the same
+  list. The spec topic rows (`canonical-topic`) go to the spec section (a reference's
+  contents `prd.md` only to `all-spec.*`); every other row goes to the recent route
+  reports page.
+- **Commands.** `hearting reports` prints the entrance's numbered lines in the terminal
+  (campaign summaries included; the derived chapters are named by their `.md` file) and
+  `hearting open <number|words>` opens that line (a spec topic, a campaign folder, a page)
+  or, with no argument, the browser entrance. A lone number that is not an entrance line
+  prints one line on stderr and exits 1; it is never searched as a word. Words search the route reports and the spec
+  topics; when several match, the list is printed without numbers and the words are to be
+  narrowed. Both names are reserved by the one launcher (`tools/install/harness.sh`) in
   every runtime and are not installer subcommands.
+- **Write order.** The chapters the entrance points at are written first and `README.md`
+  and `index.html` last, so an interrupted publish never leaves an entrance pointing at a
+  chapter that was not written.
 - **Ownership.** Each file starts with `<!-- hearting:artifact-entrance v1 -->` (an HTML
   file keeps `<!DOCTYPE html>` above it). A same-named file without that marker, or a
   symbolic link at that name, is never overwritten, followed, or moved — it stays its
-  owner's. Rewriting is byte-deterministic: identical root content and declared language
-  produce identical bytes.
+  owner's; this holds for all eight files. Rewriting is byte-deterministic: identical root
+  content and declared language produce identical bytes.
 - **First record.** When a root first shows a user-facing document, one call with a
   cycle id writes `.runtime/artifact-entrance.json`
   (`{"schema": 1, "first_cycle_id", "first_cycle_path"}`) once; it is never rewritten. A
@@ -533,15 +550,15 @@ observation for its title and NOW. No setting or sidecar field is added.
 
 `artifact_workflow_group_review.py` (the existing job; see
 [WORKFLOW_GROUPS.md](WORKFLOW_GROUPS.md)) decides, with **one model call per campaign per
-sweep**, the workflow groups of new cycles and the title, summary, branches, and kinds of
-the campaign and of every target cycle. Code, not the model, owns IDs, sources, times,
-counters, the vocabulary check, and history. The model chooses tags from the vocabulary
-or proposes at most one new branch (up to twelve when the vocabulary is empty); a one-member
-group stays allowed. A cycle already in a group is sent only for its metadata, and only
-while it has none; past cycles are never filled in automatically.
+sweep**, the title, summary, branches, and kinds of the campaign and of every target
+cycle. Code, not the model, owns IDs, sources, times, counters, the vocabulary check, and
+history. The model chooses tags from the vocabulary or proposes at most one new branch (up
+to twelve when the vocabulary is empty). The review does not read or write
+`workflow-groups.json`; existing declarations stay as they are. Past cycles are never
+filled in automatically.
 
 A failed call, an invalid answer, an unreadable `meta.json`, a conflict, or a busy lock writes
-no group, metadata, vocabulary, number state, or history line and is retried at a
+no metadata, vocabulary, number state, or history line and is retried at a
 later seal under the existing retry rules; the seal itself is never affected. (The review's
 own judgement record and counters keep working as before.) `--dry-run` writes nothing at all.
 `HEARTING_WORKFLOW_GROUP_REVIEW=off` disables the whole automatic job;

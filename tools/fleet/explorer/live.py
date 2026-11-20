@@ -17,6 +17,7 @@ from .view_model import ExplorerViewModel
 from ..config import ui_text
 from ..display import codex_credits
 from ..model import current_attempt_rank
+from ..palette import ROUTE_FIELDS
 from .. import route_visibility
 
 HARNESSES = ("claude", "codex", "opencode")
@@ -768,13 +769,63 @@ def _chain_leg_name(node):
     return "frame" if capability == "route-frame" else _short_capability(capability) or "·"
 
 
+def _is_unit_node(node):
+    return _chain_leg_name(node) == "unit"
+
+
+def _chain_links(node, earlier, frames):
+    """Whether ``earlier`` is tied to ``node`` by what the routes themselves recorded: the route it
+    continues (``source_route_id``), a leg of the same approved plan (``route_plan``) or the frame that
+    opened that plan, or the next step of a declared ``--plan``. One tie needs no record: a route opened
+    right after a frame route (``frames``) belongs to that frame, since a frame that ends with nothing to
+    choose leaves the next route to be composed by hand. A route that only sits in the same session or
+    campaign is not otherwise tied. A unit route is nobody's leg and has no legs of its own."""
+    if _is_unit_node(node) or _is_unit_node(earlier):
+        return False
+    plan, before = node.get("route_plan"), earlier.get("route_plan")
+    if node.get("source_route_id") and node["source_route_id"] == earlier.get("route_id"):
+        return True
+    if node.get("planned") and earlier.get("planned"):
+        return True
+    if isinstance(plan, Mapping) and isinstance(before, Mapping):
+        return (plan.get("decision") == before.get("decision") and plan.get("digest") == before.get("digest")
+                and (_num(before.get("index")) or 0) < (_num(plan.get("index")) or 0))
+    frame = frames.get(node.get("route_id"))
+    return earlier.get("capability") == "route-frame" and frame is not None and earlier.get("route_id") == frame
+
+
 def _chain_legs(nodes, rid, own, status, progress):
     """``[[leg, status, progress], ...]``: the frame that opened the route, the latest finished leg
-    of every other capability since it, and the route's own leg."""
+    of every other capability since it, and the route's own leg. Only routes tied to this one by a
+    recorded relation (``_chain_links``) are legs; the others are not part of its work."""
     index = _chain_position(nodes, rid)
     if index is None:
         return [[own, status, progress]] if own else []
-    before = nodes[:index]
+    # ``frames[route]``: the frame a route belongs to without anyone having recorded it. A plan leg's is the
+    # frame that opened its plan (the nearest frame before the plan's first leg, so a frame opened between two
+    # legs is not theirs); any other route's is the route right before it when that is a frame route (unit
+    # routes between are skipped; a frame or unit route has none: frame -> frame needs a record).
+    frames, plan_frame = {}, {}
+    for i, node in enumerate(nodes[:index + 1]):
+        plan = node.get("route_plan")
+        if isinstance(plan, Mapping):
+            key = (plan.get("decision"), plan.get("digest"))
+            if key not in plan_frame:
+                plan_frame[key] = next((nodes[j].get("route_id") for j in range(i - 1, -1, -1)
+                                        if nodes[j].get("capability") == "route-frame"), None)
+            frames[node.get("route_id")] = plan_frame[key]
+        elif node.get("capability") != "route-frame" and not _is_unit_node(node):
+            before = next((nodes[j] for j in range(i - 1, -1, -1) if not _is_unit_node(nodes[j])), None)
+            if before is not None and before.get("capability") == "route-frame":
+                frames[node.get("route_id")] = before.get("route_id")
+    tied, pending = {index}, [index]
+    while pending:
+        later = pending.pop()
+        for i in range(later):
+            if i not in tied and _chain_links(nodes[later], nodes[i], frames):
+                tied.add(i)
+                pending.append(i)
+    before = [nodes[i] for i in sorted(tied) if i != index]
     frame = next((i for i in range(len(before) - 1, -1, -1)
                   if before[i].get("capability") == "route-frame"), None)
     legs = []
@@ -1101,6 +1152,12 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             capability, record,
             _text(view.get("execution_topology")) or _text(record.get("execution_topology")))
         short = "frame" if framed_route else _short_capability(capability)
+        if short == "unit":
+            # A unit route's kind word is what its work is (its field), not how it is run; one that records none keeps `unit`.
+            recorded = _text(view.get("field")) or _text(record.get("field"))
+            short_label = recorded if recorded in ROUTE_FIELDS else short
+        else:
+            short_label = short
         cwd = _text(view.get("cwd")) or _text(record.get("cwd")) or _text(_get(owner, "cwd"))
         repo = (session_row or {}).get("repo") or _repo_of(resolver, cwd)
         owner_state = (session_row or {}).get("state")
@@ -1247,11 +1304,13 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "result_at": _num(_get(result, "at")),
             "worker": worker, "age": age, "legs": legs,
             "stages": stages, "resume": resume, "activity": "running" if running else "ended",
-            "loops": None, "worktree": worktree, "tree_label": short,
+            "loops": None, "worktree": worktree, "tree_label": short_label,
             "harness": owner_harness, "model": owner_model, "effort": owner_effort,
             "mode": mode,
             "intensity": intensity,
             "profile": _text(_get(owner, "model_profile", "profile")) if owner is not None else None,
+            # 11-18: the field the route records (``code``, ``lab``, ``docs`` …); the kind word's hue follows it.
+            "field": _text(view.get("field")) or _text(record.get("field")),
             "capability": short, "shape": shape, "past_from": None,
             "worker_stage": worker_stage or "·", "worker_unit": worker_unit,
             "worker_stage_key": None, "worker_step_key": None,
@@ -1296,7 +1355,70 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status,
                                   borrowed_frame_identity)
-    return routes, nodes
+    return _stand_called_units(routes, collected), nodes
+
+
+_CALLED_MARK = {"working": "working", "idle": "idle", "blocked": "blocked", "dead": "dead", "queued": "idle", "stale": "stale"}
+
+
+def _stand_called_units(routes, collected):
+    """A unit leg a worker started stands below its caller's route, not as a route of its own.
+
+    The registry row names the calling worker (``caller_attempt_id``); this follows it to that worker's row and
+    its route, and on while that route is itself a called unit's. A leg whose chain ends at a route that is no
+    called unit's is listed on that route as ``called``, in the order they were called (``caller`` names the
+    attempt each hangs under, so a called unit's own calls nest under it); it is no route in this list, so no
+    count of routes holds it. Only a leg that ended cleanly (``done``) is left out; one that is not running (dead and
+    not yet closed, waiting for a place, not known) stays, with its state. A chain that breaks (the calling row is not read) or turns back on itself leaves
+    the leg as the route it is. Only the rows already read are followed."""
+    at, called = {}, {}
+    for rid, slot in collected.items():
+        for job in slot["jobs"]:
+            attempt = _text(_get(job, "attempt_id"))
+            if attempt is None:
+                continue
+            at.setdefault(attempt, rid)
+            caller = _text(_get(job, "caller_attempt_id"))
+            if caller is not None:
+                called.setdefault(attempt, (rid, job, caller))
+    if not called:
+        return routes
+    by_id = {route["id"]: route for route in routes}
+
+    def root(attempt):
+        seen = set()
+        while attempt in called and attempt not in seen:
+            seen.add(attempt)
+            own, _job, caller = called[attempt]
+            if caller not in at or at[caller] == own:
+                return None
+            if caller not in called:
+                return at[caller]
+            attempt = caller
+        return None
+    gone, listed = set(), {}
+    for attempt, (rid, job, caller) in called.items():
+        top = root(attempt)
+        if top is None or top not in by_id or rid not in by_id or top == rid:
+            continue
+        gone.add(rid)
+        state = _text(_get(job, "liveness")) or "unknown"
+        if state == "done":
+            continue                       # ended cleanly: its line goes (the result reaches its caller)
+        shown, harness = by_id[rid], _text(_get(job, "harness"))
+        order = _num(_get(job, "registry_order"))
+        listed.setdefault(top, []).append((order if order is not None else len(listed.get(top, ())), {
+            "id": rid, "attempt": attempt, "caller": caller, "title": shown.get("title"),
+            "unit": (_text(_get(job, "unit")) or "").rsplit("/", 1)[-1] or None,
+            "kind": shown.get("tree_label"), "field": shown.get("field"),
+            # what is not running and not over still stands (a dead leg not yet closed, one waiting for a place, one not known) with
+            # the mark Fleet's route row gives that state, and its own word
+            "marker": _CALLED_MARK.get(state, "stale"), "state": state,
+            "harness": harness, "model": _model_pair(_get(job, "resolved_model", "model"), harness),
+            "effort": _effort(_get(job, "effort")), "elapsed_min": _num(_get(job, "elapsed_min"))}))
+    for top, items in listed.items():
+        by_id[top]["called"] = [item for _order, item in sorted(items, key=lambda pair: pair[0])]
+    return [route for route in routes if route["id"] not in gone]
 
 
 def _direct_routes(routes, session_rows, session_index, now=None):
@@ -1359,6 +1481,7 @@ def _direct_routes(routes, session_rows, session_index, now=None):
             "mode": _text(record.get("capability_mode")) or _text(node.get("capability_mode")),
             "intensity": _text(record.get("effective_intensity")) or _text(node.get("intensity")),
             "profile": None, "capability": _short_capability(capability), "shape": "direct",
+            "field": _text(record.get("field")),
             "past_from": None, "worker_stage": "·", "worker_unit": None,
             "worker_stage_key": None, "worker_step_key": None,
             "owner_context": None, "owner_gauge": [None, None], "worker_contexts": [], "subworker": None,
@@ -1382,6 +1505,8 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
         return []
     detail = _parallel_stage_details(view_nodes, now)
     short, mode = route.get("capability"), route.get("mode")
+    unit_route = short == "unit"         # no owner and no mode: its leg band names neither
+    mode = None if unit_route else mode
     name = f"leg {len(legs) or 1} · {short or '·'}{' ' + mode if mode else ''}"
     frame_nodes = [node for node in view_nodes if _is_frame_leg(node)]
     if frame_nodes and (short == "frame" or route.get("shape") == FRAME_ROUTE_SHAPE):
@@ -1416,8 +1541,9 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
         owner_line.append([" · " + route["age"], "dim"])
     return [{
         "kind": "leg", "n": name, "st": leg_status, "verdict": f"{done}/{len(view_nodes)}",
-        "lines": [owner_line], "detail": detail,
-        "title": [[name, "head"]] + _route_title_line(rid, route, route.get("resume")), "loops": [],
+        "lines": [] if unit_route else [owner_line], "detail": detail,
+        "title": [[name, "head"]] + _route_title_line(rid, route, route.get("resume"), "worker" if unit_route else "owner"),
+        "loops": [],
     }]
 
 
@@ -2089,6 +2215,27 @@ def _steward_targets(session_rows, session_index, tag_by_sid):
     return steward_targets
 
 
+def _registered_tag(harness, sid):
+    """The Fleet number the tag registry holds for a session this pass has no row for, or None."""
+    from ..session_tags import assigned_tag
+    tag = assigned_tag(harness, sid)
+    return str(tag) if tag else None
+
+
+def session_repos(records):
+    """``{"<harness>\\0<session id>": repo name}``: the repository name Fleet puts on each session of a pass (its session
+    row's ``repo``), for each id the session answers to. No read of its own: ``records`` is the pass's ``(rows, index)``."""
+    rows, index = records
+    repo_of = {row["tag"]: row.get("repo") for row in rows}
+    found = {}
+    for tag, info in index.items():
+        repo, harness = repo_of.get(tag), _text(_get(info["session"], "harness", "adapter", "h"))
+        if isinstance(repo, str) and repo and harness:
+            for known in info["ids"]:
+                found[harness + "\0" + str(known)] = repo
+    return found
+
+
 def session_peers(snapshot, now=None, records=None):
     """``{"<harness>\\0<session id>": {"tag", "supervisors": [[tag, harness]], "targets": [[tag, harness]]}}`` for each
     session in a supervision relation, from the steward records the snapshot already holds (no read of its own).
@@ -2105,13 +2252,26 @@ def session_peers(snapshot, now=None, records=None):
     for steward, watched in targets.items():
         for tag in watched:
             supervisors.setdefault(tag, []).append(steward)
-    found = {}
+    found, registered = {}, {}
     for tag, info in index.items():
-        above, below = supervisors.get(tag, []), targets.get(tag, [])
+        above = [[t, harness_of.get(t) or ""] for t in supervisors.get(tag, [])]
+        below = [[t, harness_of.get(t) or ""] for t in targets.get(tag, [])]
+        # 11-18: a registered relation is a fact whether or not the other end drew a panel in the last ten minutes. An end
+        # this pass has no row for stands by the number the tag registry already holds for it (a local read, no collection).
+        session = info["session"]
+        for entries, side in ((_get(session, "steward_targets"), below), (_get(session, "steward_parents"), above)):
+            for item in entries or ():
+                sid, other_harness = _text(_get(item, "session_id")), (_text(_get(item, "harness")) or "").lower()
+                if not sid or tag_by_sid.get(sid) in harness_of or sid in info["ids"] or other_harness not in HARNESSES:
+                    continue
+                if (other_harness, sid) not in registered:           # one registry read per end, not one per window
+                    registered[(other_harness, sid)] = _registered_tag(other_harness, sid)
+                other = registered[(other_harness, sid)]
+                if other and other != tag and other not in harness_of and all(other != seen[0] for seen in side):
+                    side.append([other, other_harness])
         if not (above or below):
             continue
-        entry = {"tag": tag, "supervisors": [[t, harness_of.get(t) or ""] for t in above[:8]],
-                 "targets": [[t, harness_of.get(t) or ""] for t in below[:16]]}
+        entry = {"tag": tag, "supervisors": above[:8], "targets": below[:16]}
         for sid in info["ids"]:
             found[str(_get(info["session"], "harness")) + "\0" + sid] = entry
     return found
@@ -3859,7 +4019,7 @@ def session_route_status(snapshot, now=None, *, include_details=False, records_o
         # Spec rule 23: every current route (the panel shows them all, scrolling in place).
         for route in selected:
             row = {key: str(route.get(key) or "")[:320] for key in
-                   ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability")}
+                   ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability", "field")}
             # Each stage's box in Fleet's route detail (verdict, time, unit, output, rounds note).
             boxes = {}
             for group in (route_nodes or {}).get(route.get("id")) or ():

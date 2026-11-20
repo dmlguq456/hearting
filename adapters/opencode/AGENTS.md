@@ -51,7 +51,8 @@ In this Git worktree, handle one reversible outcome inline, including a small
 feature's source, tests and README: known scope, focused checks; no shared
 contract change, long resource work, artifact handoff or independent verifier.
 Read/edit/check/reply; recorded automatically without task/compose/finish/capability-info calls.
-Compose before scope grows. Other work starts with:
+Compose before scope grows. Work whose direction is clear opens with `--shape
+solo|staged --capability <kind>` (§0.2.1). Other work starts with:
 
 ```
 hearting run capability-route compose --start --prompt-file <task>
@@ -65,8 +66,8 @@ from the first draft; keep plans, reviews, versions and target references in
 `.agent_reports`.
 
 Use the receipt's `runtime` command prefixes. `hearting run <utility>` uses
-`AGENT_HOME`, else the installed release. Flags are hints unless the person
-or a frame already chose the shape; honor it, using `--shape staged --capability
+`AGENT_HOME`, else the installed release. Flags are hints; honor a shape the
+person or a frame already chose, using `--shape staged --capability
 <kind> --graph <stage,…>` for person-named stages (§0.2.1). Refusals name missing inputs.
 Before unapproved material work, present the §0.4 intent card (진행 / 수정 /
 중단). Peer requests need only compose's `[경로]` line and scope, except for
@@ -89,7 +90,9 @@ No directive in view: read the printed `receipt_file`; a missing directive is
   not `end-turn`, so keep launch output unfiltered.
 
 To message another session, run `hearting run peer-steward prompt
-<name-or-pane> --body-file <file>`; reply text sends nothing.
+<name-or-pane> --body-file <file>`; reply text sends nothing. The person reads
+that message in the receiving window: write a few lines, keep the detail in a
+file and give its path.
 
 ## Finishing work (Tracked-Workflow Continuation)
 

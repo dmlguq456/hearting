@@ -217,8 +217,8 @@ class EntryTest(unittest.TestCase):
         self.assertEqual(row["result_targets"][0]["availability"], "available")
         self.assertEqual(row["result_targets"][1]["version"], {"kind": "unknown"})
         t = lambda key, **kw: {"entrance.open_record": "기록 보기", "entrance.open_result": "결과물 열기"}.get(key, key)
-        markdown = entrance.render_markdown(snapshot, t)
-        html = entrance.render_html(snapshot, t)
+        markdown = entrance.render_recent_markdown(snapshot, t)
+        html = entrance.render_recent_html(snapshot, t)
         self.assertIn("기록 보기", markdown); self.assertIn("결과물 열기", markdown)
         self.assertIn(row["record_target"], markdown)
         self.assertIn(result.as_uri(), html)
@@ -273,7 +273,7 @@ class EntryTest(unittest.TestCase):
         entry = self.add(results=F.result_versions(self.tmp.name, [result.name], []))
         snapshot = entrance.scan(self.root)
         links = Links()
-        links.feed(entrance.render_html(snapshot, entrance._translator()))
+        links.feed(entrance.render_recent_html(snapshot, entrance._translator()))
         targets = [urlsplit(href) for href in links.hrefs]
         self.assertIn(result, [Path(unquote(url.path)) for url in targets if url.scheme == "file"])
         self.assertTrue(any(not url.scheme and self.root / unquote(url.path) == self.root / self.binding["path"]
@@ -1067,20 +1067,17 @@ class MigrationTest(turns.EndToEndTest):
         self.assertEqual(len(automatic), 1)
         self.assertEqual(automatic[0]["session"], {"harness": "claude", "sid": turns.SID})
 
-    def test_A12_recently_closed_keeps_user_text_and_links_exact_journal_entries(self):
+    def test_A12_recording_never_edits_a_hand_written_status_page(self):
         record = self.legacy()
         page = P.cycle_dir(self.root, record["campaign_id"], record["cycle_id"]) / "artifacts/STATUS.md"
-        page.write_text("# Project status\nUpdated 2026-11-01 09:00\n\n## Next\n- person's judgment\n")
+        text = "# Project status\nUpdated 2026-11-01 09:00\n\n## Next\n- person's judgment\n"
+        page.write_text(text)
         for n in range(2):
             turns.T.turn_start("codex", "journal-writer", str(self.repo), self.env)
             (self.repo / "README.md").write_text("result " + str(n))
             result = turns.T.turn_end("codex", "journal-writer", str(self.repo), self.env)
             self.assertIn(result["state"], {"recorded", "appended"})
-        text = page.read_text()
-        self.assertIn("## Next\n- person's judgment", text)
-        self.assertIn("View record", text)
-        self.assertIn("Open result", text)
-        self.assertIn("#art_", text)
+        self.assertEqual(page.read_text(), text)
 
     def test_M16_late_end_during_restore_resolves_target_after_original_record_lock(self):
         record = self.legacy(); cid = record["cycle_id"]

@@ -47,7 +47,7 @@ def _private_json(path: Path, limit: int):
 DISPLAY_DEFAULTS = {"layout": "side", "side_width": 40, "side_min_columns": 100,
                     "narrow": "bottom", "auxiliary": "summary", "bottom_rows": 14,
                     "position": "right", "theme": "terminal", "shade": "none", "route_line": "time",
-                    "rule_motion": "rule"}
+                    "worker_box": "closed", "rule_motion": "rule"}
 # Appearance choices. An unknown value falls back to its default on its own and
 # never disables the shell, so a hand-edited or newer value cannot cost the panel.
 APPEARANCE = {"position": ("right", "left"), "theme": ("terminal", "light", "mono"),
@@ -57,7 +57,10 @@ APPEARANCE = {"position": ("right", "left"), "theme": ("terminal", "light", "mon
 # 11-15): a light over the head rule under a lit frame (`rule`, the default), one arc round the
 # frame (`border`), a wave round it (`scanners`), or nothing (`off`). Same per-key fallback: the
 # `on` saved before 11-15 reads as `rule`, and the file is not rewritten for it.
-CHOICES = {**APPEARANCE, "route_line": ("time", "model"), "rule_motion": ("rule", "border", "scanners", "off")}
+# 11-18 (the person: "박스 여부는 내가 골라가면서 볼 수 있게 그냥 옵션에 좀 넣어줘"): `worker_box`, how the ROUTE box draws a stage's workers:
+# in a `closed` box (the default), an `open` one (its top line and left side), or `none` (the stage row and the `↳` indent).
+CHOICES = {**APPEARANCE, "route_line": ("time", "model"), "worker_box": ("closed", "open", "none"),
+           "rule_motion": ("rule", "border", "scanners", "off")}
 
 
 def _appearance(value):
@@ -1138,16 +1141,41 @@ def _observe_session(observe, harness, sid, pid, start):
 PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r",
                     "g_spin", "g_work_off", "tag_steward", "tag_steward_dim",
                     "zone_direct", "zone_dispatch", "zone_request",
+                    # 11-18: the five fields' hues for a route's kind word (`kind_`) and its bracket (dim, plain, bold).
+                    *("kind%s_%s" % (weight, field) for field in ("code", "lab", "design", "docs", "research")
+                      for weight in ("", "q", "s", "b")),
                     "hb_claude", "hb_codex", "hb_opencode", "hb_other",
                     # Fleet's stage colors (`render_stages.route_stage_key`): a running stage lit, the others dimmed.
                     *("stg%d_%s" % (i, on) for i in range(5) for on in ("on", "off")))
 
 
+def _panel_read_target(harness, sid, native_pid, native_start):
+    """The session this panel READS: ``(sid, pid, start, parked)``.
+
+    A Claude window whose conversation was sent to the background (``/bg``, or the left arrow
+    on an empty prompt) stays the shell's viewer of the old session id, while the conversation
+    goes on as another session in another process (``session_registry.parked_successor``, read
+    live each time; it never stores the link). The panel then draws that session's route
+    chain, context, NOW, peers and requests. Input, delivery and questions keep the host's own
+    ids: only what the panel reads changes. No link, or any doubt, reads the host's own."""
+    if harness == "claude" and native_pid:
+        try:
+            from fleet import session_registry
+            found = session_registry.parked_successor(
+                harness, sid, viewer_pid=int(native_pid), viewer_start=native_start)
+        except Exception:
+            found = None
+        if found:
+            return found["session_id"], found["pid"], found["proc_start"], found
+    return sid, native_pid, native_start, None
+
+
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
                      native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False,
-                     upgrade_note="", native_model=None, popup_columns=None, table_columns=None) -> dict:
-    """No collection pass: read the same exact native display and question APIs."""
+                     upgrade_note="", native_model=None, popup_columns=None, table_columns=None, side=False) -> dict:
+    """No collection pass: read the same exact native display and question APIs. ``side``: the panel stands beside the native area
+    and open, so it draws RESOURCES (the shared producer takes the host sample only for such a panel)."""
     import time
     registry_root()
     import human_wait_state
@@ -1162,18 +1190,25 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.config import ui_text
     from fleet.session_view import observe
     from fleet.session_work import observe as observe_work, open_count, recent_memory
-    from fleet.session_panel import MEMORY_ITEMS, presentation, request_rows, usage_rows
+    from fleet.session_panel import MEMORY_ITEMS, presentation, request_rows, resource_rows, usage_rows
     from fleet.session_line import peer_message_rows
-    counts, route = human_wait_state.cached_statusline(harness, sid)
+    read_sid, read_pid, read_start, parked = _panel_read_target(harness, sid, native_pid, native_start)
+    counts, route = human_wait_state.cached_statusline(harness, read_sid)
     view = human_wait_state.cached_view(request=False) or {}
+    if side and expanded:
+        human_wait_state.note_resources_wanted()
     seat = session_tidy.resolve_seat(harness, env={}, sid=sid)
     display = session_tidy.prompt_display(seat, harness, sid)
     received = display.get("received") or []
     peers = ["⇄ " + _plain(row.get("sender") or row.get("sender_harness") or "peer")
              + " · " + _plain(row.get("text"), 160) for row in received[-2:]]
-    tag = assigned_tag(harness, sid)
+    tag = assigned_tag(harness, read_sid)
     tag = f"[{tag}]" if tag and not str(tag).startswith("[") else str(tag or "[?]")
-    values, watched = _observe_session(observe, harness, sid, native_pid, native_start) if native_pid else ({}, [])
+    values, watched = _observe_session(observe, harness, read_sid, read_pid, read_start) if native_pid else ({}, [])
+    if parked:
+        # The window's own record ends the link when it changes: watch it for the next projection.
+        from fleet import session_registry
+        watched.append(os.fspath(Path(session_registry.registry_path("claude", parked["viewer_pid"]))))
     # The native OpenCode sidebar already owns this display value. It does not
     # establish an effective policy, process liveness or input readiness.
     if (harness == "opencode" or harness == "codex" and values.get("ctx_pct") is None) and type(native_context) in (int, float) and 0 <= native_context <= 100:
@@ -1185,10 +1220,11 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     if harness == "claude" and isinstance(native_badges,dict):
         values.update(native_route=native_badges.get('native_route'),native_wait=native_badges.get('native_wait'))
     # Fleet's steward mark, from the same role evidence Fleet's collector reads (markers and
-    # relations); no collection pass. A failed read shows no mark.
+    # relations); no collection pass. A failed read shows no mark. It is read for the session
+    # the panel shows (``read_sid``): beside another session's number it would be that one's mark.
     try:
         from fleet.collectors import steward as steward_role
-        values["steward"] = bool(steward_role.role_flag(harness, sid, cwd=values.get("cwd")))
+        values["steward"] = bool(steward_role.role_flag(harness, read_sid, cwd=values.get("cwd")))
     except Exception:
         values["steward"] = False
     elsewhere = []
@@ -1279,8 +1315,13 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             pass  # Optional metadata cannot interrupt this terminal's display.
     native_footer = None
     native_owned = (native_badges or {}).get("owned", ()) if isinstance(native_badges, dict) else ()
-    panel = presentation(values, view, harness, sid, columns, native_owned=native_owned,
+    panel = presentation(values, view, harness, read_sid, columns, native_owned=native_owned,
                          display=display, now=time.time())
+    # 11-18: when the producer last read this session's routes (epoch seconds, down to the minute so the
+    # projection changes at most once a minute for it): the route popup's first screen says as of when it stands.
+    observed = view.get("observed_at")
+    panel["route_read_at"] = (int(observed) // 60 * 60
+                              if isinstance(observed, (int, float)) and not isinstance(observed, bool) and 0 < observed < 1e11 else 0)
     # A result line (a continue that was not sent) otherwise waits for the next hook,
     # which in a cleared window is the person's next input. Display only. Its own
     # field: Claude's `notice` below is the native status row's segments.
@@ -1329,6 +1370,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         if isinstance(row.get("now"), str) and row["now"]:
             paint["now"] = row["now"]
         return paint
+    def called_paint(rows):
+        for item in rows or ():
+            item["paint"] = route_paint(item)
+            called_paint(item.get("called"))
     for row in panel["routes"]:
         row["paint"] = route_paint(row)
         # Spec E9 rule 43: the owner apart from a worker that leads the row, and each live worker.
@@ -1336,6 +1381,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             row["owner_paint"] = route_paint(row["owner_paint"])
         for worker in row.get("workers_live") or ():
             worker["paint"] = route_paint(worker)
+            called_paint(worker.get("called"))
+        called_paint(row.get("called"))
     # The repo's open work, as the earlier panel's tail row read it.
     # (`◌` is Fleet's stale route alone: the open work's line has no glyph, popup design F 10.)
     panel["work"] = styled([(str(open_count(work)) + " open · " + _plain(work[0].get("headline")), "loc_repo")]) if work else []
@@ -1355,7 +1402,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     # Requests sent and received: the open work, read from the request records (not from the
     # recent-message tail, so a request does not leave when newer messages push it out).
     request_errors = []
-    request_views, request_paths = _request_views(harness, sid, time.time(), request_errors)
+    request_views, request_paths = _request_views(harness, read_sid, time.time(), request_errors)
     watched.extend(request_paths)
     # 11-16: the other session's model and effort as far as the values Fleet's shared producer already read
     # for the session displays (``session_doers`` in the cache this projection reads above) know them.
@@ -1364,10 +1411,16 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     def doer_of(other_harness, other_sid):
         found = doers.get(str(other_harness) + "\0" + str(other_sid))
         return found if isinstance(found, dict) else None
-    panel["requests"] = request_rows(request_views, time.time(), assigned_tag, doer_of) if request_views else []
+    own_known = doer_of(harness, read_sid) or {}
+    panel["requests"] = request_rows(request_views, time.time(), assigned_tag, doer_of, own_repo=own_known.get("repo")) if request_views else []
     # The PEERS line: who supervises whom (the steward records the shared producer already read, `session_peers` in the
     # cache read above; no read of its own), this window's own group first when it is supervised, then the one it leads.
-    panel["peers"] = peer_groups((view.get("session_peers") or {}).get(harness + "\0" + sid), tag, harness)
+    panel["peers"] = peer_groups((view.get("session_peers") or {}).get(harness + "\0" + read_sid), tag, harness)
+    # 11-18: the RESOURCES section (the compute hosts' CPU, memory and GPU use and the numbers of the sessions that hold a GPU): the
+    # sample the shared producer already took, in the cache read above (no read of its own).
+    panel["resources"] = [{"host": styled(row["host"]), "stats": [styled(item) for item in row["stats"]],
+                           "gpus": [{name: styled(parts) for name, parts in gpu.items()} for gpu in row["gpus"]]}
+                          for row in resource_rows(view.get("resources"), time.time())]
     for request in panel["requests"]:
         # Painted as a route's doer is: the same harness, model and effort keys.
         request["paint"] = route_paint(request)
@@ -1390,6 +1443,9 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
                        for key in PANEL_STYLE_KEYS}
     # A popup that could not be read says so in Fleet's own word (`fleet.output.unreadable`).
     panel.setdefault("labels", {})["popup_unread"] = ui_text("fleet.output.unreadable")
+    # The route popup's first screen (read before this one, a reading under way): its as-of words.
+    panel["labels"]["popup_shown_at"] = ui_text("fleet.session_panel.popup_shown_at")
+    panel["labels"]["popup_shown_failed"] = ui_text("fleet.session_panel.popup_shown_failed")
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
     # The model name the host reads off the native's own screen, painted by the rule route rows
     # use (its family's color, else this harness's: ``_model_key(model, harness=...)``), so the
@@ -1624,9 +1680,16 @@ def _popup_view_model(harness, sid, kind):
     from fleet.collectors import collect_all
     from fleet.refresh import as_snapshot
     from fleet.explorer import live
+    # The routes popup draws no steward badge; the STATUS popup keeps the collection it had.
     snapshot = as_snapshot(collect_all(usage="cache-only", include_report_verification=False,
-                                       route_sessions=[(harness, sid)]))
+                                       route_sessions=[(harness, sid)],
+                                       **({"route_view": "routes"} if kind == "routes" else {})))
     return live.build_view_model(snapshot)
+
+
+# A popup's held backend draws a route unfolded or its page from the collection it made, while the host says
+# nothing changed (`reuse`). One slot: (harness, sid) -> (view model, the time it was collected).
+_HELD_VIEW = {}
 
 
 _ROUTE_ID = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
@@ -1816,7 +1879,14 @@ def _panel_popup(binding, request):
     if kind == "now":
         return _now_popup(binding, request, columns, colors, no_color)
     opened = request.get("open") if isinstance(request.get("open"), str) and len(request["open"]) <= 64 else ""
-    vm = _popup_view_model(harness, sid, kind)
+    held = _HELD_VIEW.get((harness, sid)) if request.get("reuse") is True else None
+    if held is None:
+        import time
+        started = time.time()
+        held = (_popup_view_model(harness, sid, kind), started)
+        _HELD_VIEW.clear()
+        _HELD_VIEW[(harness, sid)] = held
+    vm, read_at = held
     grid = CellGrid(columns, POPUP_ROWS + 8)
     from dataclasses import replace
     from fleet.explorer import pages
@@ -1845,8 +1915,10 @@ def _panel_popup(binding, request):
         rows.pop(0)
         hits = [{**hit, "row": hit["row"] - 1} for hit in hits if hit["row"] > 0]
     if page:
-        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "routes": ids[:64], "page": page}
-    return _popup_table(kind, rows, styles, hits, len(ids), colors=colors, no_color=no_color, page=False)
+        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "routes": ids[:64], "page": page,
+                "read_at": int(read_at)}
+    return _popup_table(kind, rows, styles, hits, len(ids), colors=colors, no_color=no_color, page=False,
+                        read_at=int(read_at))
 
 
 def _input_readiness(binding, request):
@@ -1974,7 +2046,7 @@ def _backend_operation(request: dict) -> dict:
             retained_questions=request.get("retained_questions", ()), pane_binding=binding,
             answer_busy=request.get("answer_busy") is True,
             upgrade_note=request.get("upgrade_note") if request.get("upgrade_note") in ("pending", "scrollback") else "",
-            native_model=request.get("native_model"))}
+            native_model=request.get("native_model"), side=request.get("side") is True)}
     if op == "answer":
         return _block_answer(binding, request)
     if op == "popup":
@@ -1999,7 +2071,7 @@ def _backend_operation(request: dict) -> dict:
         owner = process(claim.get("pid"))
         if not owner or owner["start"] != claim.get("start"):
             return {"ok": False, "reason": "claimant-unavailable"}
-        text = row.get("text")
+        text = peer.pasted_text(row)
         if (not isinstance(text, str) or not text.strip() or len(text.encode()) > 32768
                 or any(ord(c) < 32 and c not in "\n\t" or ord(c) == 127 for c in text)):
             return {"ok": False, "reason": "unsafe-payload"}

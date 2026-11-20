@@ -787,6 +787,54 @@ class ActivateAndBeginTest(ProducerTestBase):
             P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct")
         self.assertEqual(ctx.exception.code, "route-already-closed")
 
+    def test_a_unit_route_turn_begins_its_own_cycle_as_a_child_of_the_sealed_one(self):
+        # `fresh_cycle` (a unit route's next turn): the sealed cycle is not bound again; a child cycle begins in
+        # the same work stream and seals as the route's newer cycle (the index accepts a second cycle of a
+        # route only as the child of its first); asking again resumes it; another turn cannot join it.
+        self.activate()
+        route, route_file, first = self.begin()
+        self.write_output(first)
+        self.close(route, route_file)
+        self.assertEqual(P.finalize(self.root, cycle_id=first["cycle_id"])["status"], "sealed")
+        R.retire_stale_closure(route_file)
+        again = P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct")
+        self.assertEqual((again["status"], again["cycle_id"]), ("resumed", first["cycle_id"]))   # default unchanged
+        second = P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct",
+                         fresh_cycle="att-turn-2")
+        self.assertEqual(second["status"], "begun")
+        self.assertNotEqual(second["cycle_id"], first["cycle_id"])
+        self.assertEqual(second["campaign_id"], first["campaign_id"])
+        record = P.read_cycle_record(self.root, second["cycle_id"])
+        self.assertEqual((record["continues_cycle_id"], record["continuation_attempt_id"], record["parent_cycle_id"]),
+                         (first["cycle_id"], "att-turn-2", first["cycle_id"]))
+        self.assertEqual(P.read_cycle_record(self.root, first["cycle_id"])["state"], "sealed")
+        retry = P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct",
+                        fresh_cycle="att-turn-2")
+        self.assertEqual((retry["status"], retry["cycle_id"]), ("resumed", second["cycle_id"]))
+        with self.assertRaises(P.ProducerError) as ctx:
+            P.begin(self.root, route_file=route_file, capability="autopilot-code", intensity="direct",
+                    fresh_cycle="att-turn-3")
+        self.assertEqual(ctx.exception.code, "unit-continue-prior-cycle-open")
+        self.write_output(second)
+        self.close(route, route_file)
+        self.assertEqual(P.finalize(self.root, cycle_id=second["cycle_id"])["status"], "sealed")
+        self.assertEqual(P.route_cycle_for(self.root, P.load_route(self.root, route_file))["cycle_id"],
+                         second["cycle_id"])
+        # two turns that began in the same second (or in the opposite order): the chain still names the newer one
+        import artifact_producer_routes as routes_module
+        real_list = routes_module.list_cycle_records
+        def same_second(root, **kw):
+            rows = [dict(r, started_on="2026-01-01T00:00:00Z") for r in real_list(root, **kw)]
+            return sorted(rows, key=lambda r: r["cycle_id"] != first["cycle_id"])   # the older one listed last
+        with mock.patch.object(routes_module, "list_cycle_records", same_second):
+            self.assertEqual(P.route_cycle_for(self.root, P.load_route(self.root, route_file))["cycle_id"],
+                             second["cycle_id"])
+        # a rebuilt index names the same newest cycle for the route as the incremental one
+        import artifact_admission
+        rebuilt = artifact_admission.rebuild_index(self.root)
+        self.assertEqual({row["cycle_id"] for bucket in rebuilt.routes.values() for row in bucket.values()},
+                         {second["cycle_id"]})
+
     def test_stage_worker_joins_owner_cycle_by_node(self):
         self.activate()
         route, route_file, owner = self.begin("standard")
@@ -927,7 +975,8 @@ class BootstrapTest(ProducerTestBase):
 
     def test_bootstrap_creates_no_legacy_bucket_directory(self):
         self.begin()
-        names = sorted(p.name for p in self.root.iterdir())
+        import artifact_entrance  # a begin also asks for the derived entrance
+        names = sorted(p.name for p in self.root.iterdir() if p.name not in artifact_entrance.ENTRANCE_NAMES)
         self.assertEqual(names, [".runtime", "campaigns"])
 
     def test_bootstrapped_root_denies_legacy_top_level_write(self):
@@ -1416,7 +1465,8 @@ class FinalizeTest(ProducerTestBase):
         import artifact_entrance
         self.assertEqual(entrance.read_text(encoding="utf-8").splitlines()[0],
                          artifact_entrance.MARKER)
-        self.assertIn("final_report.md", entrance.read_text(encoding="utf-8"))
+        self.assertNotIn("final_report.md", entrance.read_text(encoding="utf-8"))
+        self.assertIn("final_report.md", (self.root / "recent-route-reports.md").read_text(encoding="utf-8"))
 
     def test_re_finalize_of_a_sealed_cycle_refreshes_the_entrance(self):
         self.activate()
@@ -1429,7 +1479,8 @@ class FinalizeTest(ProducerTestBase):
         again = P.finalize(self.root, cycle_id=result["cycle_id"])
         self.assertIn(again["status"], {"sealed", "already-sealed", "refreshed"}, again)
         import artifact_entrance
-        self.assertEqual(artifact_entrance.recent_rows(self.root)[0]["extra"], 1)
+        row = next(r for r in artifact_entrance.recent_rows(self.root) if r.get("cycle_id") == result["cycle_id"])
+        self.assertEqual(row["extra"], 1)
 
     def test_an_entrance_failure_never_changes_the_seal(self):
         self.activate()
@@ -1437,12 +1488,14 @@ class FinalizeTest(ProducerTestBase):
         self.write_output(result, "final_report.md", b"# Result\n\nBody.\n")
         self.close(route, route_file)
         stderr = io.StringIO()
+        entrance = self.root / "README.md"
+        before = entrance.read_bytes() if entrance.exists() else None  # the begin's own request may have written it
         with mock.patch("artifact_entrance.request_refresh", side_effect=RuntimeError("boom")), \
                 contextlib.redirect_stderr(stderr):
             sealed = P.finalize(self.root, cycle_id=result["cycle_id"])
         self.assertEqual(sealed["status"], "sealed", sealed)
         self.assertIn("artifact_entrance skipped error=RuntimeError", stderr.getvalue())
-        self.assertFalse((self.root / "README.md").exists())
+        self.assertEqual(entrance.read_bytes() if entrance.exists() else None, before)
 
     def test_finalize_returns_before_a_slow_entrance_refresh(self):
         import artifact_entrance
@@ -1466,6 +1519,8 @@ class FinalizeTest(ProducerTestBase):
                     child.kill()
                     child.wait(timeout=5)
         self.addCleanup(settle)
+        for name in artifact_entrance.ENTRANCE_NAMES:  # what the begin and the close asked for is derived: start clean
+            (self.root / name).unlink(missing_ok=True)
         # Also delay an accidental in-process call, so the original synchronous
         # finalize cannot pass this regression by avoiding the child entirely.
         original = artifact_entrance.refresh
@@ -3056,6 +3111,33 @@ class SharedAdmissionTest(ProducerTestBase):
         second = P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec")
         self.assertEqual(second["shared_reference_id"], first["shared_reference_id"])
         self.assertEqual(len(P.list_references(self.root, "spec")), 1)
+
+    def test_a_new_spec_revision_draws_the_entrance_again(self):
+        result = self._sealed_cycle()
+        self.wait_for_entrance()
+        self.assertNotIn("shared/spec/", (self.root / "README.md").read_text(encoding="utf-8"))
+        admitted = P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec")
+        self.assertEqual(admitted["status"], "admitted", admitted)
+        self.wait_for_entrance()
+        prd = (f"shared/spec/{admitted['shared_reference_id']}/revisions/"
+               f"{admitted['shared_reference_revision_id']}/prd.md")
+        for name in ("README.md", "index.html"):
+            self.assertIn(prd, (self.root / name).read_text(encoding="utf-8"), name)
+
+    def test_an_entrance_failure_never_changes_an_admission_and_a_retry_asks_nothing(self):
+        result = self._sealed_cycle()
+        self.wait_for_entrance()
+        stderr = io.StringIO()
+        with mock.patch("artifact_entrance.request_refresh", side_effect=RuntimeError("boom")) as asked, \
+                contextlib.redirect_stderr(stderr):
+            admitted = P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec")
+            again = P.admit_shared(self.root, cycle_id=result["cycle_id"], kind="spec", source="spec")
+        self.assertEqual(admitted["status"], "admitted", admitted)
+        self.assertEqual(again["status"], "reused", again)
+        self.assertEqual(asked.call_count, 1)
+        self.assertIn("artifact_entrance skipped error=RuntimeError", stderr.getvalue())
+        reference = json.loads((Path(admitted["revision_dir"]).parent.parent / "reference.json").read_text())
+        self.assertEqual(reference["latest_revision_id"], admitted["shared_reference_revision_id"])
 
     def test_admit_spec_creates_immutable_revision(self):
         result = self._sealed_cycle()

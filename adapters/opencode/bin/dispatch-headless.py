@@ -86,6 +86,7 @@ from dispatch_contract import (
 )
 from parent_next_directive import receipt_lines as parent_next_receipt_lines  # noqa: E402
 import launch_receipt  # noqa: E402
+from dispatch_contract_rows import is_unit_leg_launch  # noqa: E402
 import dispatch_wrapper_common as WRAPPER_COMMON  # noqa: E402
 import dispatch_headless_main as DISPATCH_MAIN  # noqa: E402
 import frame_repository
@@ -857,13 +858,18 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
 
 def _supervised_owner(args: argparse.Namespace) -> bool:
     """A sealed route binding supervises its owner; a registered depth-1 owner
-    without one (the quick and solo shape) is supervised too. Route identity
-    stays separate from the reason to supervise."""
+    without one is supervised when it is quick or solo, or when it is bound to its
+    route by its own node (the middle cell's owner: standard, no binding, the route
+    passed as arguments). Route identity stays separate from the reason to supervise.
+
+    The question Claude and Codex ask (any registered depth-1 owner) is not asked here:
+    a standard+ owner with no route would change its one-shot launch."""
     if getattr(args, "owner_route_binding", None):
         return True
     return (getattr(args, "dispatch_depth", None) == 1
             and getattr(args, "worker_type", None) == "owner"
-            and getattr(args, "intensity", None) not in STANDARD_PLUS_INTENSITIES)
+            and (getattr(args, "intensity", None) not in STANDARD_PLUS_INTENSITIES
+                 or WRAPPER_COMMON.supervisor_route(args) is not None))
 
 
 def initialize_supervised_owner_input(args: argparse.Namespace, jobs: Path) -> None:
@@ -903,6 +909,9 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         variant=(settings["variant"] if settings["source"] != "inherit" else None),
         title=title,
         standalone=standalone,
+        session=(getattr(args, "session_plan", None).session_id
+                 if getattr(args, "session_plan", None) is not None
+                 and args.session_plan.kind == "resumed" else None),
     )
     prompt_arg = f'"$(cat -- {shlex.quote(os.path.abspath(prompt_path))})"'
     # V2 dropped `--dir`: the worker's Location is its process cwd, and a worker left
@@ -1192,6 +1201,9 @@ def main(argv: list[str]) -> int:
         registry = resolve_global_registry(agent_home, args.jobs, args.dispatch_depth, action)
         jobs = registry.path
         args.jobs_path = jobs
+        if is_unit_leg_launch(args):
+            import unit_continue
+            unit_continue.plan_for_args(args, jobs, "opencode")   # a unit leg's session lives in OpenCode's own store
         from review_input import prepare_request as prepare_review_input
         prepare_review_input(args)
         args.attempt_id = new_attempt_id(args.attempt_id) if action in ("register", "start") else args.attempt_id

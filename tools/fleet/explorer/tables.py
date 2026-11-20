@@ -5,6 +5,7 @@ from .live import current_route_counts, route_marker_state, unknown_kind, unknow
 from .grid import CellGrid, cell_width
 from .style import recede_key
 from ..config import ui_text
+from ..palette import ROUTE_FIELDS, harness_spin, kind_intensity_key, kind_word_key, route_field, route_form
 
 X = 34
 GAP = 3
@@ -275,8 +276,9 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
     # A short screen keeps fewer RECENT rows (at least one) before it gives the pin up.
     room = getattr(grid, "viewport_rows", 0) - OVERVIEW_SCROLL_ROWS
     recent = sum(1 for repo in repos if repo.get("done") and repo_label(repo.get("name")))
-    recent_rows = min(recent, max(min(1, recent), room - 4 - len(route_rows)))
-    tail_height = 4 + len(route_rows) + recent_rows
+    route_lines = len(route_rows) + sum(len(called_lines(route)) for route in route_rows)
+    recent_rows = min(recent, max(min(1, recent), room - 4 - route_lines))
+    tail_height = 4 + route_lines + recent_rows
     pin = getattr(grid, "pin_bottom", None)
     sticky = pin is not None and getattr(state, "scope", "-") == "-" and tail_height <= room
     for repo in repos:
@@ -383,8 +385,8 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                     not branch_tail or tail.startswith(branch_tail) and branch_tail == " (%s)" % branch))
                 title_text = _clip(title, room)
                 bold_key = ("dim" if session.get("title_wait") and not session.get("title") else
-                            {"claude": ("c", 1, 0), "codex": ("m", 1, 0),
-                             "opencode": ("l", 1, 0)}.get(harness, "unknown"))
+                            {"claude": "hb_claude", "codex": "hbb_codex",
+                             "opencode": "hb_opencode"}.get(harness, "unknown"))
                 title_end = grid.put(x + c["title"], y, title_text, bold_key,
                                      limit=x + c["title"] + room)
                 if tail:
@@ -567,7 +569,9 @@ def _draw_overview_tail(grid, vm, state, x, use, right, y, route_rows, repos, he
                              steward=bool((source or {}).get("steward")),
                              repo_w=repo_width, show_repo=bool(repo_name),
                              columns=columns, title_w=title_w)
-        y += 1
+        y = draw_called_rows(grid, x, use, y + 1, route, columns, title_w,
+                             hit=(x + IND + 1, right, ("root", "ROUTES", {"ropen:ROUTES": route.get("id")}))
+                             if getattr(state, "scope", "-") == "-" else None)
     y += 1
     y = section_head(grid, x, right, y, [("RECENT", "label"), (" · completed results", "dim")])
     shown = 0
@@ -684,6 +688,9 @@ def _harness_mix(routes):
         subworker = route.get("subworker")        # only the depth-2 workers the tree draws
         if subworker and len(subworker) > 1 and str(subworker[1]) in counts:
             counts[str(subworker[1])] += 1
+        for item in route.get("called") or ():     # a unit a worker called runs a session of its own: no route, a worker
+            if isinstance(item, Mapping) and str(item.get("harness") or "") in counts:
+                counts[str(item["harness"])] += 1
     return [(" owner·worker ", "dim"),
             ("claude", "hb_claude" if counts["claude"] else "dim"),
             (f" {counts['claude']}", "soft" if counts["claude"] else "dim"), (" · ", "dim"),
@@ -894,7 +901,7 @@ TOOL_TARGET_W = 40          # ``>_ python3 · tools/run-tests.py --sel…`` on a
 
 
 def _route_rail_text(route):
-    """The stage rail's plain words, to size it before drawing (``one-shot ●``)."""
+    """The stage rail's plain words, to size it before drawing (``solo ●``)."""
     stages = route.get("stages") or ()
     current = next((stage for stage in stages if stage.get("st") in ("active", "failed")), None)
     if len(stages) <= 1:
@@ -907,7 +914,7 @@ def route_now_texts(route):
     the open tool's allow-listed summary, widest first and each a whole value
     (``python3 tools/run-tests.py``, ``python3 run-tests.py``, ``python3``); a path gives way
     to its file name, then the tool name stands alone. Empty for a staged or chained route,
-    or when nothing open is observed (the row keeps ``one-shot ●``)."""
+    or when nothing open is observed (the row keeps ``solo ●``)."""
     doer = route.get("doer")
     stages = route.get("stages") or ()
     if (not isinstance(doer, Mapping) or not doer.get("tool") or len(stages) != 1
@@ -926,7 +933,7 @@ def route_now_texts(route):
 
 
 def _draw_route_now(grid, x, end, y, route, texts):
-    """``one-shot ● python3 tools/run-tests.py  3m · +1 agent`` in a one-step route's progress
+    """``solo ● python3 tools/run-tests.py  3m · +1 agent`` in a one-step route's progress
     cell: its stage word and mark first (spec E9 rule 24: the kind word stays, as on the
     shell panel's third row), then the widest summary that fits, with the tool's time and
     agent count when they fit too (the agent count goes first). False when not even the
@@ -1027,11 +1034,78 @@ def route_result_word(route):
     return "" if PASSED.fullmatch(outcome) else outcome[:16]
 
 
+def called_lines(route, callers=None, besides=()):
+    """The unit legs a worker of this route started and still runs, as ``(item, depth)`` in the order they were called,
+    each one's own calls right after it (``live._stand_called_units`` lists them on the route they stand below; they are
+    no route of this table and no count of routes holds them). ``callers`` keeps only the legs those attempts started
+    (and what those legs started in turn); ``besides`` leaves those attempts' legs out."""
+    items = [item for item in (route.get("called") or ()) if isinstance(item, Mapping)]
+    attempts = {item.get("attempt") for item in items}
+    out, seen = [], set()
+
+    def walk(caller, depth):
+        for item in items:
+            if item.get("caller") == caller and id(item) not in seen and depth < 4:
+                seen.add(id(item))
+                out.append((item, depth))
+                walk(item.get("attempt"), depth + 1)
+    for caller in dict.fromkeys(item.get("caller") for item in items if item.get("caller") not in attempts):
+        if (callers is None or caller in callers) and caller not in besides:
+            walk(caller, 0)
+    return out
+
+
+def called_age(item):
+    from .live import _dur
+    return _dur(item.get("elapsed_min")) or ""
+
+
+def called_kind_parts(item):
+    """The called unit's kind cell: its field (`code`, `docs`) and the unit's own name."""
+    word = str(item.get("kind") or item.get("field") or "").strip()
+    word = word if word in ROUTE_FIELDS else "unit"
+    parts = [(word, kind_word_key(route_field(item.get("field"), word)) or "grp")]
+    return parts + ([(" · ", "dim"), (str(item["unit"]), "soft")] if item.get("unit") else [])
+
+
+def draw_called_rows(grid, x, use, y, route, c, title_w, hit=None):
+    """Under a route's row, one indented row for each unit a worker of it called and still runs, in the same columns
+    (its mark two cells in, harness model effort, its title two cells in, its field and its name, its time).
+    ``hit`` is ``(from, to, action)`` of the route's own row: a press on these rows opens the route as it does there."""
+    for item, depth in called_lines(route):
+        if hit is not None:
+            grid.add_hit(y, *hit)
+        indent = 2 * (depth + 1)
+        age = _clip(called_age(item), AGE_W + 1)
+        age_x = x + use - _seg_width(age)
+        marker, marker_key = _ROUTE_MARK.get(item.get("marker"), _ROUTE_MARK["idle"])
+        parts = model_cell_parts(item.get("harness") or "·", item.get("model") or None, item.get("effort") or "")
+        first_key = parts[0][1] if isinstance(parts[0][1], str) else ""
+        marker_key = harness_spin(marker_key, first_key[3:] if first_key.startswith("hb_") else None)
+        grid.put(x + IND + 1 + indent, y, marker, marker_key)
+        harn_end = _overview_harness_end(use, c)
+        if harn_end is not None:
+            _put_model_cell(grid, x + c["h"], y, parts, min(x + c["ctx"] - c["gap"], x + harn_end))
+        cursor = x + c["title"]
+        room = max(0, min(title_w, age_x - c["gap"] - cursor))
+        if room > indent:
+            grid.put(cursor + indent, y, _clip(str(item.get("title") or "·"), room - indent), "soft",
+                     limit=cursor + room)
+            cursor += room + c["gap"]
+            kind = called_kind_parts(item)
+            if age_x - c["gap"] - cursor >= _seg_width(kind[0][0]):
+                for text, key in kind:
+                    cursor = grid.put(cursor, y, text, key, limit=age_x - c["gap"])
+        grid.put(age_x, y, age, "dim")
+        y += 1
+    return y
+
+
 def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, title_w=None,
                    repo_w=None, title_below=True):
     """One route on one line, in the session row's columns:
 
-    ``⠏ [e9]    claude Opus 5.5 med   ━━──────── 25%  PR #1505 보정  one-shot ●   >_ Bash   1h 27m``
+    ``⠏ [e9]    claude Opus 5.5 med   ━━──────── 25%  PR #1505 보정  solo ●   >_ Bash   1h 27m``
 
     marker and ID, MODEL (harness model effort of who works now), CONTEXT, TITLE (the project
     name ahead of it on a list that is not grouped by project), the stage rail with any
@@ -1042,6 +1116,10 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
     age = _clip(str(route.get("age") or ""), AGE_W + 1)
     age_x = right - _seg_width(age)
     marker, marker_key = _ROUTE_MARK[route_marker_state(route)]
+    # 11-18: the working spinner turns in the color of the harness this row names (its doer's, the one its model cell leads with).
+    parts, (pct, window, tokens), tool, agents = route_doer_cells(route)
+    first_key = parts[0][1] if parts and isinstance(parts[0][1], str) else ""
+    marker_key = harness_spin(marker_key, first_key[3:] if first_key.startswith("hb_") else None)
     grid.put(x + IND + 1, y, marker, marker_key)
     tag = str(route.get("session_tag") or route.get("past_from") or "")
     tag_x = x + IND + 3
@@ -1053,7 +1131,6 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
         grid.put(tag_x + 1 + _seg_width(shown), y, "]", "dim")
     if steward and x + IND + 9 <= x + c["h"]:
         grid.put(x + IND + 8, y, "⚑", "steward")
-    parts, (pct, window, tokens), tool, agents = route_doer_cells(route)
     harn_end = _overview_harness_end(use, c)
     # What this row leaves out or cuts, for the unfolded route to give in full (a cut title is
     # whole on the route detail's top band).
@@ -1174,6 +1251,7 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
     marker, marker_key = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"),
                           "blocked": ("●", "g_blocked"), "done": ("✓", "grp_live"),
                           "stale": ("◌", "dim"), "wait": ("·", "dim")}.get(state, ("●", "g_work_off"))
+    marker_key = harness_spin(marker_key, route.get("harness"))        # 11-18: the owner's harness names this line
     grid.put(x0, y, marker, marker_key)
     x = x0 + 2
     if repo_w:
@@ -1209,18 +1287,54 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
 
 
 # 11-17 (route row 5): the kind word is the one bold word of a route's cell; a lit stage name keeps its hue at plain weight.
-_PLAIN_WEIGHT = {"g_work": "grp_live", "stg3_on": "g_idle", "eff_xhigh": "hb_codex"}
+_PLAIN_WEIGHT = {"g_work": "grp_live", "stg3_on": "g_idle", "eff_xhigh": "fam_fable"}
 
 
-def _kind_cell(route):
-    """``code(standard)``: the kind word (bold) and its intensity in dim brackets; nothing else goes in the brackets."""
+def _is_unit_route(route):
+    return str(route.get("capability") or "").strip() == "unit"
+
+
+def _kind_cell(route, bracket=True, tail=True):
+    """``code(team·standard)``: the kind word (bold) and, in brackets, the route's FORM and its INTENSITY after a ``·``, always
+    both (``code(solo·quick)``, ``lab(team·strong)``); only the form where the record names no intensity, and a ``unit`` route's
+    bracket is its form alone (``code(unit)``, 11-20: see the last paragraph).
+    11-19 (the person, in order: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?", "code(unit) 이렇게 쓰는건 이상한가?", "근데
+    강도랑은 좀 다르잖아. 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만 수행하는 건지", "unit, one-shot, staged을
+    괄호로 넣어야하나 싶은데", "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아", "강도도 표기해 항상", "unit과 one-shot의
+    의미가 딱 들으면 잘 구분이 되나? staged도 그 framed랑 함께 잘 표현이 되는 단어인가? 전반적으로 전향적 검토가 필요해", "team도 괜찮은데?";
+    the forms read as who makes the work, ``unit`` / ``solo`` / ``team``): two axes, the
+    form (``palette.route_form``) is how the route runs and the intensity is a separate axis over all three forms. The whole bracket's
+    color and weight follow the intensity (``kind_intensity_key``), a dim bracket where the route has no field hue. A route of another
+    shape (a frame, an older record) keeps its intensity bracket alone; an older unit route that records no field keeps ``unit``
+    with no bracket; a ``direct`` route has none. ``tail=False``: the form alone (the narrow form, the intensity goes first);
+    ``bracket=False``: the bare kind word.
+    11-20 (the person: "solo라도 strong은 가능하잖아. unit이어도 마찬가지고. 맞지?", the answer: a unit does one thing and has no
+    procedure, so its intensity means nothing and ``quick`` is always the same blank value, only the model depth varies; then "unit에는
+    강도를 표시안하는게 맞겠네"): a unit route's bracket holds its form alone, ``code(unit)``, whatever intensity the record keeps (the
+    record, the governor and the budget are untouched; only this text leaves it out). Its color is the one a form-only bracket already
+    has (the field's hue at the plain weight, dim where the field has no hue): the weight steps are an intensity's alone, so a unit
+    is neither dim (that would still read as ``quick``) nor bold, and no color of its own is added."""
     kind = str(route.get("capability") or "").strip()
     intensity = str(route.get("intensity") or "").strip()
+    unit = _is_unit_route(route)
+    if unit:
+        recorded = str(route.get("field") or "").strip()
+        kind = recorded if recorded in ROUTE_FIELDS else kind
+        intensity = ""               # 11-20: a unit route shows no intensity (an older one, with no field, no bracket at all: its bare `unit`)
     if route.get("shape") == "direct" and intensity.casefold() in ("", "direct"):
         intensity = ""               # the `direct` zone's own name says it (11-17, route zones)
     if not kind:
         return []
-    return [(kind, "grp")] + ([("(" + intensity + ")", "dim")] if intensity else [])
+    # 11-18: the kind word wears its field's hue and the bracket the same hue stepped by its intensity's weight; a route
+    # with no field hue keeps the bold body word and the dim bracket.
+    field = route_field(route.get("field"), kind)
+    word_key = kind_word_key(field) or "grp"
+    if not bracket:
+        return [(kind, word_key)]
+    form = route_form(route.get("capability"), route.get("shape"), route.get("field"))
+    inside = (form + ("·" + intensity if intensity and tail else "")) if form else intensity
+    bracket_key = kind_intensity_key(field, intensity) or "dim"
+    return [(kind, word_key)] + ([("(" + inside + ")", bracket_key)] if inside else [])
 
 
 def _blinking_stage(stages, at, lit):
@@ -1239,9 +1353,10 @@ def _stage_word(route):
 
 
 def _staged_cells(route, earlier, stages, at, lit):
-    """``frame ✓ → code(standard) · staged 3/6: execute``, widest first; short of cells the earlier legs go, then the
-    intensity, then the kind, then the shape word, then the position; the stage stays."""
-    kind, bare = _kind_cell(route), _kind_cell({**route, "intensity": ""})
+    """``frame ✓ → code(team·standard) · 3/6: execute``, widest first; short of cells the earlier legs go, then the intensity
+    (``code(team) · 3/6: execute``), then the bracket, then the kind, then another shape's own word, then the position; the stage
+    stays. The word ``staged`` is never written before the position."""
+    kind, formal, bare = _kind_cell(route), _kind_cell(route, tail=False), _kind_cell(route, bracket=False)
     position = f"{at + 1}/{len(stages)}"
     stage = _blinking_stage(stages, at, lit)
 
@@ -1251,10 +1366,11 @@ def _staged_cells(route, earlier, stages, at, lit):
         if word:
             out += ([(" · ", "dim")] if kind_cell else []) + [(word + ": ", "dim")]
         return out + stage
-    word = (_stage_word(route) + " " if _stage_word(route) else "") + position
+    # (the word `staged` is never written before the position: 11-19, the form `team` stands in the bracket)
+    word = (_stage_word(route) + " " if _stage_word(route) not in ("", "staged") else "") + position
     cells = [build(earlier, kind, word)] if earlier else []
-    return cells + [build([], kind, word), build([], bare, word), build([], [], word), build([], [], position),
-                    build([], [], "")]
+    return cells + [build([], kind, word), build([], formal, word), build([], bare, word), build([], [], word),
+                    build([], [], position), build([], [], "")]
 
 
 def _draw_route_progress(grid, x, end, y, route, card=True):
@@ -1322,7 +1438,7 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
         after.extend([("  resume ", "dim"), (str(route["resume"]), "g_idle")])
     elif route.get("loops"):
         after.append(("  " + str(route["loops"]), "dim"))
-    # 11-17 (route row 5): a route its owner does alone has no stage line: `code(quick)`, after the chain it continues; the
+    # 11-17 (route row 5): a route its owner does alone has no stage line: `code(solo·quick)`, after the chain it continues; the
     # row's own mark (the spinner in front) is what moves.
     if (str(route.get("shape") or "") == "one-shot-owner" and len(stages) <= 1 and not route.get("resume")
             and _kind_cell(route)):
@@ -1330,12 +1446,14 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
         cells = (earlier + [(" → ", "dim")] if earlier else []) + _kind_cell(route)
         if sum(_seg_width(text) for text, _key in cells) > end - x:
             cells = _kind_cell(route)
+        if sum(_seg_width(text) for text, _key in cells) > end - x:
+            cells = _kind_cell(route, tail=False)           # (the intensity goes first)
         cursor = _put_segments(grid, x, y, cells, end)
         cursor = _put_segments(grid, cursor, y, after, end)
         if card:
             _put_route_card(grid, cursor, end, y, route)
         return
-    # Spec E9 rule 24, 11-17 (route row 5): a route that runs a worker per stage reads `code(standard) · staged 3/7: execute`
+    # Spec E9 rule 24, 11-17 (route row 5): a route that runs a worker per stage reads `code(team·standard) · 3/7: execute`
     # (the shell panel's route lines, in one row); the chain of kinds it continues leads it (`frame ✓ → code(standard) · …`).
     # The kind is the one bold word, the stage's name the one thing that blinks. Short of cells see `_staged_cells`.
     # Any route with a stage list reads so, whatever its shape (`map-reduce 2/3: analyze`; no word when none is named).
@@ -1413,18 +1531,20 @@ def _stage_hue(route, step):
 
 
 def _stage_items(stages, lit=True):
-    bright_hues = ("hb_opencode", "hb_claude", "grp_live", "g_idle", "hb_codex")
-    dim_hues = ("version_release", "h_claude", "g_work_off", "lvl_y_dim", "h_codex")
+    # The stage palette is blue, cyan, green, yellow, magenta (the family hues): none of them is a harness color.
+    bright_hues = ("fam_sonnet", "fam_opus", "grp_live", "g_idle", "fam_fable")
+    dim_hues = ("version_release", "famd_opus", "g_work_off", "lvl_y_dim", "famd_fable")
     result = []
     for index, stage in enumerate(stages):
         status = stage.get("st")
         if status == "active" and lit:
-            name_key = {0: "hb_opencode", 1: "hb_claude", 2: "g_work", 3: "stg3_on", 4: "eff_xhigh"}[index % len(bright_hues)]
+            name_key = {0: "fam_sonnet", 1: "fam_opus", 2: "g_work", 3: "stg3_on", 4: "eff_xhigh"}[index % len(bright_hues)]
         elif status == "failed":
             name_key = bright_hues[index % len(bright_hues)]
         else:
             name_key = dim_hues[index % len(dim_hues)]
-        parts = [(str(stage.get("name", "·")), name_key)]
+        # (11-19: the one-shot node is drawn by the form's name, `solo`; the node id itself is the record's)
+        parts = [({"one-shot": "solo"}.get(str(stage.get("name", "·")), str(stage.get("name", "·"))), name_key)]
         if int(stage.get("r") or 1) > 1:
             live = status in ("active", "failed")
             parts.append((f" R{stage['r']}", "g_idle" if live and stage.get("r", 1) >= 3 else "dim"))
@@ -1614,6 +1734,7 @@ def session_marker(session):
     marker, marker_key = {"working": ("⠏", "spin"), "blocked": ("●", "blocked"),
                           "dead": ("✕", "dead"), "done": ("✓", "done")}.get(
                               session.get("state"), ("●", "idle"))
+    marker_key = harness_spin(marker_key, session.get("harness"))      # 11-18: a working spinner in its harness's color
     if session.get("answer_wait_marker") == "●":
         marker, marker_key = "●", "blocked"
     elif session.get("answer_wait_marker") == "◑":
@@ -1720,14 +1841,21 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 _tint_row(grid, y, x - 1, right, 236)
             y += 1
             if not is_open:
+                y = draw_called_rows(grid, x, use, y, route, row_cols, row_title_w, hit=(x, right, action))
                 continue
-            kind_parts = [(str(route.get("capability") or "·"), "soft")]
+            field = route_field(route.get("field"), route.get("capability"))
+            kind_parts = [(str(route.get("capability") or "·"), kind_intensity_key(field, "standard") or "soft")]
             short = {"standard": "std", "light": "lt", "quick": "q", "thorough": "thr",
                      "adversarial": "adv"}
             suffix = "·".join(short.get(value, value) for value in
                               (route.get("mode"), route.get("intensity")) if value)
+            unit_route = _is_unit_route(route)
+            if unit_route:
+                # A unit route has no owner and no mode: its kind line is the first row's word, its field (`code`).
+                kind_parts, suffix = _kind_cell(route) or kind_parts, ""
             if suffix:
-                kind_parts.append(("(" + suffix + ")", "dim"))
+                # The whole bracket (a mode word may stand in it: `(dev·q)`) takes the field's hue at its intensity's weight.
+                kind_parts.append(("(" + suffix + ")", kind_intensity_key(field, suffix) or "dim"))
             def next_row(row):
                 """Close this unfolded row and open the next one under it."""
                 _tint_row(grid, row, x - 1, right, 236)
@@ -1739,7 +1867,8 @@ def draw_routes(grid, vm, state, x=34, y=3):
             grid.add_hit(y, x, right, action)
             cursor = grid.put(x + cols["title"], y, "└ kind ", "dim", limit=right)
             # The unfolded owner is whole (harness, model, effort, profile), wrapped if need be.
-            cursor, y = _put_wrapped(grid, cursor, y, kind_parts + [("  owner ", "dim")] + _owner_parts(route),
+            owner_words = [] if unit_route else [("  owner ", "dim")] + _owner_parts(route)
+            cursor, y = _put_wrapped(grid, cursor, y, kind_parts + owner_words,
                                      right, x + cols["title"] + 2, next_row)
             # The folded row shows the live doer's context; the owner's own stays here (on a
             # line of its own when the kind line has no room left for it).
@@ -1808,6 +1937,8 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 not slim or context_x - (x + cols["prog"]) >= 10)
             worker_progress_end = context_x - gap if inline_context and slim else progress_end
             label = str(worker[0]) if worker else "worker"
+            if unit_route and label == "worker":
+                label = "unit"             # a unit route has no owner: its worker is the unit (`unit · qa/code-review`)
             unit = route.get("worker_unit")
             route_end = x + cols["kind"] - gap
             route_start = x + cols["title"]
@@ -1843,7 +1974,7 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 # the weight every family-coloured model name has here.
                 if index == 0 and isinstance(style, str) and style.startswith("hb_"):
                     style = {"hb_claude": "h_claude", "hb_codex": "h_codex",
-                             "hb_opencode": "version_release"}.get(style, style)
+                             "hb_opencode": "h_opencode"}.get(style, style)
                 elif style == "eff_medium":
                     style = "branch_s"
                 if link and worker_owner_limit < owner_limit:
@@ -1883,16 +2014,52 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 _, y = _put_wrapped(grid, route_start + 2, y, words, right, route_start + 2, next_row)
                 _tint_row(grid, y, x - 1, right, 236)
                 y += 1
-            for index, worker_context in enumerate(worker_contexts):
-                if body_context is not None and index == context_index and inline_context:
-                    continue
-                grid.add_hit(y, x, right, action)
-                if body_context is not None and index == context_index:
+            def put_called(y, lines):
+                """The units a worker called and still runs (or that stand not running yet, with their state), one more level
+                in: name, harness and effort, state and time as the worker row reads them."""
+                for item, depth in lines:
+                    grid.fill(x - 1, right, y, " ", tint=236)
+                    grid.add_hit(y, x, right, action)
+                    called_x = route_start + 2 * (depth + 1)
+                    # (the stage cell of a worker row stands empty here: the name may run on into it)
+                    name_end = x + cols["own"] - gap
+                    cursor = grid.put(called_x, y, "└ ", "dim", limit=name_end)
+                    grid.put(cursor, y, _clip(str(item.get("unit") or "unit"), max(0, name_end - cursor)),
+                             "title_dim", limit=name_end)
+                    parts = model_cell_parts(item.get("harness") or "·", None if cols["narrow"] else item.get("model") or None,
+                                             item.get("effort") or "")
+                    _put_model_cell(grid, x + cols["own"], y, parts, worker_owner_limit)
+                    working = item.get("marker") == "working"
+                    state_word = "running" if working else str(item.get("state") or item.get("marker") or "idle")
+                    grid.put(x + cols["prog"], y, state_word,
+                             "g_work" if working else "g_dead" if item.get("marker") == "dead" else "dim", limit=age_edge)
+                    age = _clip(called_age(item), cols["age_w"])
+                    grid.put(x + use - _seg_width(age), y, age, "dim")
+                    _tint_row(grid, y, x - 1, right, 236)
+                    y += 1
+                return y
+            # Each worker's row (and its context row) has the units that worker called right under it; units called by an
+            # attempt no row here carries (the owner, or a worker not listed) stand after the last row.
+            carried = {str(item["attempt"]) for item in worker_contexts if item.get("attempt")}
+            # 11-19 (review of #1742, N2): the body worker's own row stands before the loop, so the units it called stand right under
+            # it (its context row, when the context is not on its row) and are not drawn again in the loop: a body worker that is not
+            # the first of `worker_contexts` (a parallel slice the route's node names) never has them under an earlier worker's rows.
+            if body_context is not None:
+                own_calls = (called_lines(route, callers={str(body_context.get("attempt") or "")})
+                             if body_context.get("attempt") else [])
+                if inline_context:
+                    y = put_called(y, own_calls)
+                else:
                     # At the smallest widths keep the metric as a continuation,
                     # without presenting the same worker's identity a second time.
+                    grid.add_hit(y, x, right, action)
                     grid.put(route_start, y, context_text, "dim", limit=x + use)
-                    y += 1
+                    y = put_called(y + 1, own_calls)
+            for index, worker_context in enumerate(worker_contexts):
+                if body_context is not None and index == context_index:
                     continue
+                own_calls = called_lines(route, callers={str(worker_context.get("attempt") or "")}) if worker_context.get("attempt") else []
+                grid.add_hit(y, x, right, action)
                 label = str(worker_context.get("stage") or "worker")
                 grid.put(route_start, y, _clip(f"└ {label} · {index + 1}", route_end - route_start),
                          "title_dim", limit=route_end)
@@ -1908,7 +2075,8 @@ def draw_routes(grid, vm, state, x=34, y=3):
                     grid.put(x + cols["prog"], y, f"{word} ·" if pct is None else f"{word} {pct}%",
                              "dim", limit=age_edge)
                 _tint_row(grid, y, x - 1, right, 236)
-                y += 1
+                y = put_called(y + 1, own_calls)
+            y = put_called(y, called_lines(route, besides=carried))
             if is_open and y < bottom:
                 from .pages import draw_route_detail
                 if not getattr(state, "no_repo_group", False):

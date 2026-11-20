@@ -2333,8 +2333,8 @@ class FallbackTest(unittest.TestCase):
   receipt=dict(line.split("=",1) for line in out.getvalue().splitlines() if "=" in line)
   self.assertEqual(receipt["allocation_rank"],"claude,codex")
   self.assertEqual(receipt["allocation_preferred"],"codex")
-  # The shipped default now seals `harness_weights`; under capacity-aware it is inert too.
-  self.assertEqual(receipt["allocation_inert_keys"],"depth_affinity_weight,harness_weights,usage_gate_used_percent,usage_headroom_exponent")
+  # The shipped default now seals `harness_weights` and, for a code route, `field_weights`; under capacity-aware both are inert too.
+  self.assertEqual(receipt["allocation_inert_keys"],"depth_affinity_weight,field_weights,harness_weights,usage_gate_used_percent,usage_headroom_exponent")
   self.assertTrue(receipt["allocation_receipt"].startswith("al-"),receipt)
   ledger=Path(self.tmp.name)/"allocation"/f"{route['route_id']}.jsonl"
   self.assertEqual(receipt["allocation_ledger"],str(ledger)); self.assertTrue(ledger.is_file())
@@ -2346,7 +2346,7 @@ class FallbackTest(unittest.TestCase):
   self.assertEqual(ledger_row["action"],"dry-run"); self.assertEqual(ledger_row["writer"],"stage-dispatch-fallback.py")
   self.assertEqual(ledger_row["strategy"],"capacity-aware"); self.assertEqual(ledger_row["preferred"],"codex")
   self.assertIs(ledger_row["preferred_honored"],False)
-  self.assertEqual(sorted(ledger_row["inert_keys"]),["depth_affinity_weight","harness_weights","usage_gate_used_percent","usage_headroom_exponent"])
+  self.assertEqual(sorted(ledger_row["inert_keys"]),["depth_affinity_weight","field_weights","harness_weights","usage_gate_used_percent","usage_headroom_exponent"])
   self.assertEqual(ledger_row["rank"],["claude","codex"]); self.assertEqual(ledger_row["fallback_hop"],"cross-harness-headless")
   self.assertEqual(ledger_row["capacity"]["codex"],74.0); self.assertEqual(ledger_row["counts"]["claude"],3)
   # A missing allocation context (no sealed policy) still leaves the child evidence.
@@ -3223,6 +3223,80 @@ class FallbackTest(unittest.TestCase):
   self.assertEqual(rank(None)[0],"opencode")
   self.assertEqual(rank({"opencode":0.3})[0],"claude")
   self.assertEqual(rank({"opencode":0.3})[-1],"opencode")
+ def _field_rank(self,field_weights,*,scores=None,states=None,route_extra=None,node_policy=None):
+  node=self._depth_affinity_node(2)
+  node["harness_policy"]=node_policy or {"primary":["claude","codex","opencode"],"relief":[],
+                                          "last_resort":[],"promote_relief_below":0}
+  route=self._depth_affinity_route(["opencode","claude","codex"],affinity=False)
+  if field_weights is not None:
+   route["dispatch_allocation"]["field_weights"]=field_weights
+  route.update(route_extra or {})
+  with mock.patch.object(F,"_usage_states",return_value=states or {"claude":"ok","codex":"ok","opencode":"ok"}), \
+      mock.patch.object(F.CAPACITY,"capacity_scores",return_value=scores or {"claude":80,"codex":80,"opencode":80}):
+   hops,context=F.ordered_fallback_hops(route,node,self.jobs)
+  return hops,context["rank"]
+ def test_field_weights_reach_the_stage_fallback_ranking_and_a_missing_key_is_neutral(self):
+  # Equal headroom: the declared order puts opencode first. A field row that lowers it moves it
+  # back; a route sealed without the key (no field, neutral row, older route) ranks as it always did.
+  _h,base=self._field_rank(None)
+  self.assertEqual(base[0],"opencode")
+  self.assertEqual(self._field_rank({})[1],base)
+  self.assertEqual(self._field_rank({"claude":1.0,"codex":1.0,"opencode":1.0})[1],base)
+  self.assertNotEqual(self._field_rank({"claude":1.0,"codex":1.0,"opencode":0.3})[1][0],"opencode")
+  # and it multiplies the user's flat weights instead of replacing them
+  _h,ranked=self._field_rank({"claude":0.95,"codex":0.85,"opencode":1.0},
+                             route_extra={"dispatch_allocation":{**self._depth_affinity_route(
+                               ["opencode","claude","codex"],affinity=False)["dispatch_allocation"],
+                               "harness_weights":{"opencode":0.3},
+                               "field_weights":{"claude":0.95,"codex":0.85,"opencode":1.0}}})
+  self.assertEqual(ranked[-1],"opencode")
+ def test_the_field_row_multiplies_once_and_the_receipt_prints_that_one_product(self):
+  # Equal headroom, claude 6 and codex 5 recent attempts, claude 0.95 vs codex 0.85: one product
+  # leaves claude's share a hair above codex's, so the lighter-used codex still leads; multiplying
+  # the row a second time (0.9025 vs 0.7225) would hand the lead to claude. The receipt's `w=`
+  # is the same single product.
+  import dispatch_allocation_receipt as REC
+  row={"claude":0.95,"codex":0.85,"opencode":1.0}
+  node=self._depth_affinity_node(2)
+  node["harness_policy"]={"primary":["claude","codex"],"relief":[],"last_resort":[],"promote_relief_below":0}
+  route=self._depth_affinity_route(["claude","codex"],affinity=False)
+  route["field"]="code"
+  route["dispatch_allocation"]["field_weights"]=row
+  with mock.patch.object(F,"_usage_states",return_value={"claude":"ok","codex":"ok","opencode":"ok"}), \
+       mock.patch.object(F,"attempt_counts",return_value={"claude":6,"codex":5,"opencode":0}), \
+       mock.patch.object(F.CAPACITY,"capacity_scores",return_value={"claude":80,"codex":80,"opencode":80}):
+   _hops,context=F.ordered_fallback_hops(route,node,self.jobs)
+  self.assertEqual(context["rank"],["codex","claude"])
+  args=SimpleNamespace(action="dry-run",slug="once",jobs=self.jobs)
+  with mock.patch.dict(os.environ,{"AGENT_HOME":str(ROOT),"AGENT_DISPATCH_JOBS":str(self.jobs)}):
+   receipt=F._persist_allocation_receipt(args,route,node,context,{"child_harness":context["rank"][0]},
+                                         attempt_id="att-once",fallback_hop="cross-harness-headless")
+  ledger=[json.loads(line) for line in Path(receipt["path"]).read_text(encoding="utf-8").splitlines() if line.strip()]
+  self.assertTrue(REC.format_row(ledger[0]).endswith("field=code w=claude:0.95|codex:0.85|opencode:1.0"),
+                  REC.format_row(ledger[0]))
+ def test_a_field_row_cannot_cross_the_gate_a_limit_a_band_or_a_pin(self):
+  row={"claude":1.0,"codex":0.2,"opencode":0.2}
+  # gate: claude has 5% headroom left, so the ungated peers stay ahead of it whatever the row says
+  _h,ranked=self._field_rank(row,scores={"claude":5,"codex":80,"opencode":80})
+  self.assertEqual(ranked[-1],"claude")
+  # limit: a limited harness is not ranked ahead of the others, whatever the row says
+  _h,ranked=self._field_rank({"claude":0.1,"codex":0.1,"opencode":1.0},
+                             states={"claude":"ok","codex":"ok","opencode":"limited(2026-11-28)"})
+  self.assertNotEqual(ranked[0],"opencode")
+  # band: a last_resort harness stays behind the primary one although its row weight is higher
+  _h,ranked=self._field_rank({"claude":0.05,"codex":1.0,"opencode":1.0},
+                             node_policy={"primary":["claude"],"relief":[],"last_resort":["codex","opencode"],
+                                          "promote_relief_below":0})
+  self.assertEqual(ranked[0],"claude")
+  # pin: a sealed worker pin stays first even when the row weighs against it
+  node=self._pinned_balanced_node()
+  route=self._pinned_balanced_route()
+  route["dispatch_allocation"]["field_weights"]={"claude":0.05,"codex":1.0,"opencode":1.0}
+  with mock.patch.object(F,"_usage_states",return_value={"claude":"ok","codex":"ok","opencode":"ok"}), \
+      mock.patch.object(F.CAPACITY,"capacity_scores",return_value={"claude":80,"codex":80,"opencode":80}):
+   hops,context=F.ordered_fallback_hops(route,node,self.jobs)
+  self.assertEqual(context["rank"][0],"claude")
+  self.assertEqual(hops[0]["candidates"][0]["child_harness"],"claude")
  def test_balanced_stage_affinity_cannot_lift_a_gated_harness(self):
   node={
    "harness_affinity":"claude",

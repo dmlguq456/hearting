@@ -21,7 +21,7 @@ def evidence_text(value):
     return " · ".join(part.strip() for part in re.split(r"\s*·\s*", text) if part.strip() not in {"", "·"})
 
 
-def route_evidence(visibility):
+def route_evidence(visibility, unit=False):
     """Translate reader codes only; quoted evidence is never a verdict."""
     codes = visibility.get("codes")
     if not isinstance(codes, dict) or codes.get("schema") != "route_visibility_codes_v1":
@@ -31,6 +31,8 @@ def route_evidence(visibility):
     stages = codes.get("stages") or []
     shape = codes.get("shape") or "unknown"
     shape = shape if shape in {"direct", "solo", "staged", "framed"} else "unknown"
+    if unit:
+        shape = "unit"          # (11-19: a unit route's recorded shape is `solo`, but its form is `unit`)
     summary = [text("shape_" + shape)]
     tests = [row for row in stages if len(row) == 4 and row[1] == "test"]
     test_state = "pass" if tests and all(row[2] == "done" and row[3] == "1" for row in tests) else "recorded" if tests else "none"
@@ -128,12 +130,21 @@ def route_kind(row):
         shown["legs"] = row["legs"]
     # 11-17 (route row 5): the kind's own intensity word and the chain of kinds the route continues (name and state).
     intensity = sanitize_title(str(row.get("intensity") or ""))[:32]
+    # 11-19 (the person, in order: "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" / "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" /
+    # "강도도 표기해 항상" / "unit과 one-shot의 의미가 딱 들으면 잘 구분이 되나? staged도 그 framed랑 함께 잘 표현이 되는 단어인가? 전반적으로 전향적
+    # 검토가 필요해" / "team도 괜찮은데?"): the intensity of every route is sent, a unit route's too (11-20: the panel's drawing leaves a unit's out, `code(unit)`; this is the record's value); and the route's FORM (`unit`, `solo`, `team`:
+    # who makes the work; `palette.route_form`, decided here once), which the panel draws in the bracket before the intensity (`code(team·standard)`).
+    unit_route = str(row.get("capability") or "") == "unit"
     if intensity:
         shown["intensity"] = intensity
+    from .palette import route_form
+    form = route_form(row.get("capability"), row.get("shape"), row.get("field"))
+    if form:
+        shown["kind_form"] = form
     chain = [{"name": sanitize_title(str(leg[0]))[:24], "state": sanitize_title(str(leg[1]))[:12]}
              for leg in (row.get("chain") or ())[:6]
              if isinstance(leg, (list, tuple)) and len(leg) >= 2 and sanitize_title(str(leg[0]))]
-    if chain:
+    if chain and not unit_route:
         shown["chain"] = chain
     return shown
 
@@ -319,6 +330,39 @@ def doer_paint(row, cells=None):
     return shown
 
 
+def called_rows(items, now, depth=0):
+    """The unit legs a row's attempt started and still runs, painted as a worker's row is: its mark, the unit's short
+    name, its harness, model and effort, its time; the ones it started in turn under it."""
+    from .session_line import route_glyph, elapsed_text, _number
+    out = []
+    for item in (items if isinstance(items, list) else ())[:8]:
+        if not isinstance(item, dict):
+            continue
+        unit = sanitize_title(str(item.get("unit") or ""))[:48]
+        if not unit:
+            continue
+        marker = item.get("marker") if item.get("marker") in ("working", "idle", "blocked", "dead", "stale") else "idle"
+        glyph, key = route_glyph(marker)
+        shown = {"glyph": glyph, "glyph_key": key, "kind": marker, "unit_word": unit, **doer_paint(item, None)}
+        # Under the route the unit is a row of its own: its title and its kind (its field: `code`, `docs`), as a unit route's.
+        title = sanitize_title(str(item.get("title") or ""))[:160]
+        if title:
+            shown["title"] = title
+        from .palette import route_field, ROUTE_FIELDS
+        word = sanitize_title(str(item.get("kind") or item.get("field") or ""))[:16]
+        if word in ROUTE_FIELDS:
+            shown["kind_word"] = word
+            if route_field(word, word):
+                shown["kind_field"] = route_field(word, word)
+        if _number(item.get("since")) is not None:
+            shown["elapsed"] = elapsed_text(max(0.0, (now - item["since"]) / 60))
+        below = called_rows(item.get("called"), now, depth + 1) if depth < 3 else []
+        if below:
+            shown["called"] = below
+        out.append(shown)
+    return out
+
+
 def route_row(row, now=None, *, cells=None):
     """A route row's painted values (spec rules 5-7); an unreported value is left out."""
     import time
@@ -341,6 +385,27 @@ def route_row(row, now=None, *, cells=None):
     kind_word = _short_capability(sanitize_title(str(row.get("capability") or ""))[:64] or None)
     if kind_word:
         shown["kind_word"] = kind_word
+        # 11-18: the field whose hue the kind word and its bracket wear (one of five); none = the body color.
+        from .palette import route_field, ROUTE_FIELDS
+        field = route_field(sanitize_title(str(row.get("field") or ""))[:16], kind_word)
+        if field:
+            shown["kind_field"] = field
+        # A unit route (one worker, no owner): its first word is the route's field (what the work is: `code`, `docs`; an
+        # older route that records none keeps `unit`) and the unit's short name (`qa/code-review` reads `code-review`) stands
+        # on the worker's line. It is nobody's leg, and its bracket is its form alone (`code(unit)`, 11-20): its intensity is not a choice.
+        if kind_word == "unit":
+            shown["unit_route"] = True
+            unit = sanitize_title(str(row.get("worker_unit") or "")).rsplit("/", 1)[-1][:48]
+            if unit:
+                shown["unit_word"] = unit
+            word = sanitize_title(str(row.get("field") or ""))[:16]
+            if word in ROUTE_FIELDS:
+                shown["kind_word"] = word
+                field = route_field(word, word)
+                if field:
+                    shown["kind_field"] = field
+                else:
+                    shown.pop("kind_field", None)
     shown.update(doer_paint(row, cells))
     minutes = None
     if _number(row.get("since")) is not None:
@@ -375,7 +440,11 @@ def route_row(row, now=None, *, cells=None):
                     for i, node in enumerate(n for n in (row.get("stages") or ())[:16] if isinstance(n, dict))}
             if worker["stage"] in keys:
                 worker["stage_key"] = keys[worker["stage"]]
+            if item.get("called"):
+                worker["called"] = called_rows(item["called"], now)
             shown["workers_live"].append(worker)
+    if row.get("called"):
+        shown["called"] = called_rows(row["called"], now)
     # The doer reports its open tool only while it works (Fleet's ``_route_doer``).
     tool = sanitize_title(str(row.get("tool") or ""))[:48]
     if tool:
@@ -431,7 +500,7 @@ def _request_delivery(row, gone=False):
     return word
 
 
-def request_rows(views, now, tag_of, doer_of=None):
+def request_rows(views, now, tag_of, doer_of=None, own_repo=None):
     """The panel's lines for requests this session sent (``out``) and received (``in``).
 
     ``views`` are plain dicts made by the host (a ``peer-request-v1`` record, which side this
@@ -490,6 +559,11 @@ def request_rows(views, now, tag_of, doer_of=None):
                     known = None
             known = known if isinstance(known, dict) else {}
             doer = doer_paint({"harness": other["harness"], "model": known.get("model"), "effort": known.get("effort")})
+            # 11-18 (the person: "세션 id 외에도 repo 위치까지 request는 표시를 해주는게 좋겠네"): the other session's repository name as
+            # Fleet writes it (a value the shared pass already read); not drawn for a session of this window's own repository.
+            repo = known.get("repo")
+            if isinstance(repo, str) and repo and repo != own_repo:
+                doer["repo"] = repo
         delivery = _request_delivery(deliveries.get(current.get("transfer_ref")),
                                      gone=bool(view.get("gone")))
         word = lambda key: ui_text("fleet.session_panel." + key)  # noqa: E731
@@ -633,6 +707,18 @@ def _memory_values(row, now=None):
     return text, age, sanitize_title(str(row.get("type") or "")).strip()[:32]
 
 
+MEMORY_BODY = 600      # characters of a record's snippet the MEM popup shows under its headline
+
+
+def _memory_body(row, text):
+    """The record's own snippet (what the journal keeps of its body, never anything else) for the MEM popup, ``MEMORY_BODY`` characters at
+    most; empty where it is the headline itself, a ``superseded_by=`` pointer or nothing."""
+    snippet = " ".join(str(row.get("snippet") or "").split())
+    if not snippet or snippet.startswith("superseded_by=") or snippet == text:
+        return ""
+    return "".join(ch for ch in snippet if ch.isprintable())[:MEMORY_BODY]
+
+
 def session_memory(values, now=None):
     """``3m decision <headline>`` (spec E9 rule 37 (b)): this repo's newest saved memory row,
     its age and type dim and its headline (else the start of its snippet) in the body color.
@@ -665,15 +751,15 @@ def memory_kind(kind):
 # 11-15 (panel polish 5): the memory system's own tier and scope names, as its records carry them.
 MEMORY_TIERS = ("durable", "working")
 MEMORY_SCOPES = ("project", "global")
-# 11-16 (panel polish 1116): the MEM section's records, five at most (the panel's `MEM_MAX`).
-MEMORY_ITEMS = 5
+# 11-16 (panel polish 1116): the MEM section's records (the panel's `MEM_MAX`); 11-18 (the person: "MEM는 최대 최근 3개만 띄워도 되겠다"): the newest three.
+MEMORY_ITEMS = 3
 
 
 def session_memory_items(values, now=None):
     """Spec E9 rule 46: the MEM section's records, ``MEMORY_ITEMS`` at most, newest first: each its short type
     word, its age and its headline (else the start of its snippet), and (11-15) its tier and scope
-    as the record carries them (none where it carries neither name). Nothing without a record or a
-    text; a body is never carried."""
+    as the record carries them (none where it carries neither name) and (11-20, the MEM popup) its body: the
+    snippet the journal keeps, ``MEMORY_BODY`` characters at most. Nothing without a record or a text."""
     items = []
     for row in values.get("memory_recent") or ():
         if not isinstance(row, dict):
@@ -682,7 +768,8 @@ def session_memory_items(values, now=None):
         if text:
             items.append({"kind": memory_kind(kind), "age": age, "text": text,
                           "tier": row.get("tier") if row.get("tier") in MEMORY_TIERS else "",
-                          "scope": row.get("scope") if row.get("scope") in MEMORY_SCOPES else ""})
+                          "scope": row.get("scope") if row.get("scope") in MEMORY_SCOPES else "",
+                          "body": _memory_body(row, text)})
         if len(items) >= MEMORY_ITEMS:
             break
     return items
@@ -737,6 +824,64 @@ def usage_rows(harness, values):
     return rows
 
 
+# 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): a host sample older than this is
+# not drawn (the producer takes a new one at most once a minute, and only while a side panel draws it: `human_wait_state.RESOURCE_SAMPLE_S`).
+RESOURCES_MAX_AGE = 150.0
+# The widths of the memory gauge a GPU's group may take (11-19): the panel picks one of these, 4 to 10 cells.
+GAUGE_MIN, GAUGE_MAX = 4, 10
+
+
+def resource_rows(value, now):
+    """The RESOURCES section's hosts, one dict each, its values painted as ``(text, key)`` parts: the host, its CPU and memory
+    use and one entry per GPU in its number's order (the percent, ``21/24G``, and the numbers of the sessions that hold it:
+    none where it does not know them). A GPU a process runs on has its percent in its level's color; one nothing runs on is
+    shown the same way with the sample's own values, all of it ``dim`` and with no session numbers (11-19, the person: "빈 GPU도
+    일관성있게 표시해줘. 그냥 0% 0/48GB 이런식으로 해놔. 컬러만 좀 어둡게 하면 되잖아. 0%에"). Fleet's host sample as the shared
+    producer kept it; nothing is read here. A sample older than ``RESOURCES_MAX_AGE`` gives no rows.
+
+    11-19 (the person, on v4.59.6's panel: "가로로 길어지면 RESOURCE에 게이지도 넣어주면 좋고"): each GPU also carries its memory
+    gauge drawn at every width the panel may give it (``gauge4`` … ``gauge10``, the keys the panel picks one of; it never draws a
+    fill of its own). It is Fleet's VRAM gauge: the fill is ``_gauge_segs`` over the memory ratio and the fill's color
+    ``_resource_level_key(ratio, True)``, so it reads the same as Fleet's ``VRAM ━━━━━─ 21/24GB``. A GPU nothing runs on has all of
+    it ``dim``; an unknown memory is Fleet's unknown gauge (the empty track, ``dim``) at the same width."""
+    if not isinstance(value, dict) or not isinstance(value.get("observed_at"), (int, float)) or now - value["observed_at"] > RESOURCES_MAX_AGE:
+        return []
+    from .render_gpu import _gauge_segs, _resource_level_key
+    percent = lambda x: "%d%%" % round(x)  # noqa: E731
+
+    def vram_gauge(used, total, busy, cells):
+        ratio = 100.0 * used / total if used is not None and total else None
+        key = _resource_level_key(ratio, True) if busy else "dim"
+        (filled, _), (empty, _) = _gauge_segs(ratio, cells, track=cells)
+        return [part for part in ((filled, key), (empty, "dim")) if part[0]]
+    rows = []
+    for host in value.get("hosts") or ():
+        gpus = []
+        for gpu in host["gpus"]:
+            busy = bool(gpu["busy"])
+            util, used, total = gpu["util"], gpu["used"], gpu["total"]
+            row = {"label": [("GPU%d" % gpu["i"], "dim")]}
+            if util is not None:
+                # 11-18: the use is its number, in its level's color (the gauge, 11-19, is the memory's).
+                row["pct"] = [(percent(util), _level(util) if busy else "dim")]
+            for cells in range(GAUGE_MIN, GAUGE_MAX + 1):
+                row["gauge%d" % cells] = vram_gauge(used, total, busy, cells)
+            if used is not None and total:
+                row["mem"] = [("%d/%dG" % (round(used), round(total)), "dim")]
+            users = [("[" + str(tag).strip("[]") + "]", "loc_repo") for tag in gpu["users"]] if busy else []
+            if users:
+                row["users"] = [part for i, one in enumerate(users) for part in ((one,) if not i else ((" ", "dim"), one))]
+            gpus.append(row)
+        row = {"host": [(host["name"], "loc_repo")], "gpus": gpus}
+        stats = []
+        for word, number in (("CPU", host.get("cpu")), ("MEM", host.get("mem"))):
+            if number is not None:
+                stats.append([(word + " ", "dim"), (percent(number), "loc_repo")])
+        row["stats"] = stats
+        rows.append(row)
+    return rows
+
+
 # A finished route's result row (the producer keeps the two most recent after the current
 # routes) is news: it stays until the person's next input, ten minutes at most (the bound the
 # notice line's news used), and a result that did not pass takes Fleet's failure mark.
@@ -775,7 +920,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         routes.append({**route_row(row, cells=route_gauge_cells(columns)), "id": clean(row.get("id")), "title": clean(row.get("title")),
                        "state": clean(row.get("state")), "state_label": state_label(row.get("state")), "stage": clean(row.get("worker_stage")),
                        "stages": stages, "stage_more": row.get("stage_more", 0),
-                       "visibility": route_evidence(visibility),
+                       "visibility": route_evidence(visibility, unit=str(row.get("capability") or "") == "unit"),
                        "reason": clean(reason), "outcome": clean(row.get("outcome")),
                        "owner": owner_text, "owner_line": "" if runs_itself else owner_text,
                        # Spec E9 rule 24: the route's kind (its sealed topology) and, when a
@@ -822,7 +967,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         # 11-17 (route row 5): a frame route whose two legs are done waits for the person's direction.
         "direction_wait")}
     # Fixed words are English in every language (spec rule 3).
-    labels.update(settings="Settings", routes="route", context="context", route_line="route line",
+    labels.update(settings="Settings", routes="route", context="context", route_line="route line", worker_box="worker box",
                   rule_motion="rule motion")
     from .session_line import effort_label, gauge_parts, answer_wait_word
     selected = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model, harness=harness))]

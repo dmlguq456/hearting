@@ -27,7 +27,7 @@ and native completion remains separate from process liveness.
 
 The always-loaded `adapters/claude/CLAUDE.md` keeps purpose, judgment, where
 to look, and the instruction to follow the next action the runtime prints.
-Detail it used to carry lives here and in the core sections it names.
+Detail lives here and in the core sections it names.
 
 - Claude hooks realize portable invariants for workflow signals, spec-read
   observations, memory, and design checks. Main-session memory lifecycle does
@@ -115,7 +115,7 @@ The Claude Code adapter maps portable roles from `core/CONVENTIONS.md §2` to co
 | `deep orchestrator` | `opus` xhigh | Stage gates, failover, and evidence judgment for standard+ dispatch-depth-1 ownership |
 | `fast implementer` | `sonnet` | Routine implementation and refactoring; escalate complex API/library design |
 | `orchestrator` | `sonnet` medium | Balanced mechanical coordination of decided calls, paths, and states |
-| `external adversary` | Codex CLI via `codex-review-team` | Independent hostile review for the `adversarial` intensity pass. The same Codex engine may host a neutral cross-harness parallel leg, but that is a reviewer role, not this hostile role. |
+| `external adversary` | a different reviewer, engine or harness, proven by the adapter (`CONVENTIONS §1`) | Independent hostile review for the `adversarial` intensity pass. The same Codex engine may host a neutral cross-harness parallel leg, but that is a reviewer role, not this hostile role. |
 | `external adversary orchestrator` | `sonnet` wrapper | Invoke and summarize the external engine rather than perform the review |
 
 Route-bound registered work uses a second, independent execution-budget axis:
@@ -255,3 +255,27 @@ New installations enable the shared session shell for new Claude, Codex and Open
 terminals. Updates preserve existing choices and older absent policies. Use
 `hearting session shell disable` to restore native launch behavior, or
 `hearting session shell enable` to enable it again. Existing sessions keep running.
+
+## Left arrow stays in the conversation
+
+Claude Code's `←` on an empty prompt sends the conversation to a background
+session under a new session id, which the Hearting shell, panel and message
+delivery do not follow. An install therefore adds `leftArrowOpensAgents: false`
+to Claude's global config file (`~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`;
+Claude ignores this key in `settings.json`) only when the key is absent, so a
+value you set yourself, `true` or `false`, is never overwritten. `/bg`,
+`/background` and `claude agents` still work. To undo it, set it to `true` in
+`/config` ("← opens agents") or in that file; later installs keep your value.
+Uninstall removes the key only while it is still the `false` the install wrote.
+New Claude sessions pick it up for certain; a session that is already open can
+pick it up shortly afterwards (it re-reads the file), so restart it if the arrow
+still sends it to the background.
+
+The file is rewritten under the same `<file>.lock` directory lock Claude takes
+for each of its own saves, so an open Claude's save is never overwritten. If
+Claude is saving at that moment the install waits about two seconds, then skips
+the key with a report line and the next install tries again. Hearting never
+breaks a lock it did not take, never creates the file when it is missing (Claude
+creates it; the next install adds the key), leaves a file it cannot rewrite
+exactly (for example a number outside the JSON range) as it is, and skips a file
+that belongs to another user.

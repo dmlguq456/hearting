@@ -4573,6 +4573,7 @@ class ClearHelperTest(TidyCase):
         self.jobs.write_text("", encoding="utf-8")
         self.extra = {"HERDR_PANE_ID": PANE, "HEARTING_TIDY_TEST_ROOT": str(self.iso.root),
                       "HEARTING_TIDY_HERDR": str(self.fake_herdr), "HEARTING_TIDY_COMPACT_CONFIRM": "0",
+                      "HEARTING_TIDY_CONTINUE_WINDOW": "600",    # the window follows the wait unless set
                       "AGENT_DISPATCH_JOBS": str(self.jobs)}
         self.calls = []
         self.claude_without_agents("sid-A", "sid-B")
@@ -4735,6 +4736,16 @@ class ClearHelperTest(TidyCase):
                 last = self.notices(seat)[-1]
                 self.assertIn(word, last)
 
+    def test_a_screen_that_was_not_read_records_what_the_read_was_waiting_for(self):
+        seat, req = self.booked()
+        verdict = {"cleared": "skipped", "reason": "screen-unknown", "detail": "not-quiet"}
+        self.assertEqual(self.run_helper(seat, req, verdict=verdict), "skipped")
+        held = st.read_json(self.state / "clear" / f"{seat.key}.json")
+        self.assertEqual((held["reason"], held["detail"]), ("screen-unknown", "not-quiet"))
+        seat, req = self.booked()
+        self.assertEqual(self.run_helper(seat, req, verdict={"cleared": "skipped", "reason": "draft"}), "skipped")
+        self.assertNotIn("detail", st.read_json(self.state / "clear" / f"{seat.key}.json"))
+
     def test_an_unverified_compact_is_not_resent_and_becomes_cleared_when_the_compaction_shows_up(self):
         seat, req = self.booked()
 
@@ -4811,6 +4822,7 @@ class ContinueHelperTest(TidyCase):
         self.extra = {"HERDR_PANE_ID": PANE, "HEARTING_TIDY_TEST_ROOT": str(self.iso.root),
                       "HEARTING_TIDY_HERDR": str(self.fake_herdr), "HEARTING_TIDY_COMPACT_CONFIRM": "30"}
         self.calls = []
+        self.slept = []
 
     def booked(self, harness="claude", sid="sid-A", no_continue=False, card=True):
         shutil.rmtree(self.state, ignore_errors=True)               # every case starts from an empty seat
@@ -4826,10 +4838,14 @@ class ContinueHelperTest(TidyCase):
     def run_helper(self, seat, req, verdict=None, cont=None, after_clear=None, extra=None):
         def fake_steward(path, nonce, pane):
             self.calls.append("clear")
+            if callable(verdict):
+                return dict(verdict(len([c for c in self.calls if c == "clear"])))
             return dict(verdict or {"cleared": "true", "new_session": "sid-B"})
 
         def fake_continue(path, nonce, pane):
             self.calls.append(("continue", pane, nonce, Path(path).name))
+            if callable(cont):
+                return dict(cont(len([c for c in self.calls if c != "clear"])))
             return dict(cont or {"continued": "true"})
         real_finish = clear._finish
         changed_after_clear = [False]
@@ -4845,7 +4861,7 @@ class ContinueHelperTest(TidyCase):
         with self.iso.patched_environ({**self.extra, **(extra or {})}), \
                 mock.patch.object(clear, "_finish", side_effect=finish_then_change):
             return clear.run_helper(seat.key, req["nonce"], wait=lambda *_a: "idle", steward=fake_steward,
-                                    continuer=fake_continue, sleep=lambda _s: None)
+                                    continuer=fake_continue, sleep=self.slept.append)
 
     def booking(self, seat):
         return st.read_json(self.state / "clear" / f"{seat.key}.json")
@@ -4972,6 +4988,188 @@ class ContinueHelperTest(TidyCase):
                     self.assertEqual(len(self.notices(seat)), 1)
                     self.assertIn(word, self.notices(seat)[0])
                     self.assertIn("이어서해", self.notices(seat)[0])
+
+    def expire(self, seat, *, continued=False):
+        path = self.state / "clear" / f"{seat.key}.json"
+        data = st.read_json(path)
+        (data["continued"] if continued else data)["deadline"] = st.now_epoch() - 1
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_a_shell_host_that_does_not_answer_yet_is_asked_again_inside_the_booking(self):
+        # The panel host taking over answers nothing for a moment (15:09 on 11-20 lost the booking).
+        for first in ({"cleared": "skipped", "reason": "shell-no-answer"},
+                      {"cleared": "queued", "reason": "shell-no-answer"}):
+            with self.subTest(first=first):
+                self.calls = []
+                seat, req = self.booked()
+                answers = lambda n: first if n < 3 else {"cleared": "true", "new_session": "sid-B"}
+                self.assertEqual(self.run_helper(seat, req, verdict=answers), "continued")
+                self.assertEqual(self.calls[:3], ["clear"] * 3)
+                held = self.booking(seat)
+                self.assertEqual((held["status"], held["continued"]["state"]), ("cleared", "sent"))
+                self.assertEqual(self.notices(seat), [])
+
+    def test_a_shell_host_that_never_answers_ends_with_its_own_reason_when_the_booking_runs_out(self):
+        seat, req = self.booked()
+
+        def never(n):
+            if n == 3:
+                self.expire(seat)
+            return {"cleared": "skipped", "reason": "shell-no-answer" if n < 3 else "expired"}
+        self.assertEqual(self.run_helper(seat, req, verdict=never), "skipped")
+        held = self.booking(seat)
+        self.assertEqual((held["status"], held["reason"]), ("skipped", "shell-no-answer"))
+        self.assertEqual(self.calls, ["clear"] * 3)
+        self.assertIn("화면 요청에 답하지", self.notices(seat)[0])
+
+    def test_a_host_that_is_gone_for_good_is_given_up_on_after_about_a_minute_not_the_whole_booking(self):
+        seat, req = self.booked()
+        looks = []
+
+        def gone(n):
+            looks.append(n)
+            return {"cleared": "skipped", "reason": "shell-no-answer"}
+        self.assertEqual(self.run_helper(seat, req, verdict=gone), "skipped")
+        self.assertEqual(len(looks), clear.SCREEN_DOUBT_LOOKS)
+        self.assertLessEqual(clear.SCREEN_DOUBT_LOOKS * clear.SCREEN_RETRY_SEC, 60)
+        held = self.booking(seat)
+        self.assertEqual((held["status"], held["reason"]), ("skipped", "shell-no-answer"))
+
+    def test_an_expiry_after_a_busy_look_is_not_reported_as_the_hosts_silence(self):
+        seat, req = self.booked()
+
+        def answers(n):
+            if n == 1:
+                return {"cleared": "skipped", "reason": "shell-no-answer"}
+            if n == 2:
+                return {"cleared": "queued", "reason": "not-idle-working"}
+            self.expire(seat)
+            return {"cleared": "skipped", "reason": "expired"}
+        self.assertEqual(self.run_helper(seat, req, verdict=answers), "skipped")
+        self.assertEqual(self.booking(seat)["reason"], "expired")
+
+    def test_other_screen_doubts_are_still_final_for_a_tidy_the_person_asked_for(self):
+        for reason in ("draft", "shell-editor-open", "screen-unknown", "shell-host-outdated"):
+            with self.subTest(reason=reason):
+                self.calls = []
+                seat, req = self.booked()
+                verdict = {"cleared": "skipped", "reason": reason}
+                self.assertEqual(self.run_helper(seat, req, verdict=verdict), "skipped")
+                self.assertEqual(self.calls, ["clear"])
+
+    def test_the_continue_window_opens_at_the_confirmed_compaction_and_is_as_long_as_that_wait(self):
+        self.assertEqual(clear.CONTINUE_WINDOW_SEC, clear.COMPACT_CONFIRM_SEC)
+        seat, req = self.booked()
+        self.assertEqual(self.run_helper(seat, req, extra={"HEARTING_TIDY_CONTINUE_WINDOW": ""}), "continued")
+        held = self.booking(seat)
+        self.assertGreater(held["continued"]["finished"], held["finished"])   # opened at ``cleared``
+        # The compaction wait changed through its setting moves the window with it (30 s here).
+        self.assertAlmostEqual(held["continued"]["deadline"] - held["finished"], 30, delta=5)
+        seat, req = self.booked()
+        self.run_helper(seat, req, extra={"HEARTING_TIDY_CONTINUE_WINDOW": "200"})
+        held = self.booking(seat)
+        self.assertAlmostEqual(held["continued"]["deadline"] - held["finished"], 200, delta=5)
+
+    def test_a_session_still_on_its_own_turn_is_asked_again_for_the_continue_inside_the_window(self):
+        # The helper is the one process that lives through the window on every harness: OpenCode has
+        # no end-of-turn callback that asks again, and a Claude hook comes only if a turn runs after
+        # the compaction. A notice or result turn after the compaction (5 of 10 manual tidies expired
+        # this way) must not leave the continue unsent.
+        self.assertFalse(hasattr(clear, "HELPER_ASKS_AGAIN"))
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                self.calls = []
+                seat, req = self.booked(harness=harness, sid=f"sid-{harness}")
+                cont = lambda n: ({"continued": "queued", "reason": "not-idle-working"} if n < 3
+                                  else {"continued": "true"})
+                self.assertEqual(self.run_helper(seat, req, cont=cont), "continued")
+                self.assertEqual([c if c == "clear" else "continue" for c in self.calls],
+                                 ["clear", "continue", "continue", "continue"])
+                self.assertEqual(self.booking(seat)["continued"]["state"], "sent")
+                self.assertEqual(self.notices(seat), [])
+
+    def test_the_hook_process_asks_once_even_when_the_session_is_busy(self):
+        # ``receiver_idle`` runs ``_continue`` inside a hook process with a time limit.
+        seat, req = self.booked(harness="codex", sid="sid-cx")
+        asked = []
+
+        def busy(path, nonce, pane):
+            asked.append(1)
+            return {"continued": "queued", "reason": "not-idle-working"}
+        self.run_helper(seat, req, cont={"continued": "queued", "reason": "awaiting-native-receiver"})
+        held = self.booking(seat)
+        self.assertEqual(held["continued"]["state"], "pending")
+        slept = []
+        with self.iso.patched_environ(self.extra):
+            self.assertEqual(clear._continue(seat.key, req["nonce"], busy, sleep=slept.append), "cleared")
+        self.assertEqual((len(asked), slept), (1, []))
+        self.assertEqual(self.booking(seat)["continued"]["state"], "pending")
+
+    def test_codex_holds_the_continue_for_a_draft_and_asks_again_not_every_second(self):
+        seat, req = self.booked(harness="codex", sid="sid-cx")
+        cont = lambda n: ({"continued": "queued", "reason": "draft"} if n < 3 else {"continued": "true"})
+        self.assertEqual(self.run_helper(seat, req, cont=cont), "continued")
+        self.assertEqual(self.slept.count(clear.CONTINUE_INPUT_RETRY_SEC), 2)
+        self.assertGreaterEqual(clear.CONTINUE_INPUT_RETRY_SEC, 10.0)     # each ask starts a steward
+
+    def test_a_busy_codex_past_the_continue_window_ends_as_expired_at_once(self):
+        seat, req = self.booked(harness="codex", sid="sid-cx")
+
+        def busy(n):
+            if n == 2:
+                self.expire(seat, continued=True)
+            return {"continued": "queued", "reason": "not-idle-working"}
+        self.assertEqual(self.run_helper(seat, req, cont=busy), "cleared")
+        held = self.booking(seat)["continued"]
+        self.assertEqual((held["state"], held["reason"]), ("skipped", "expired"))
+        self.assertEqual(len([c for c in self.calls if c != "clear"]), 2)
+        self.assertIn("예약 시간", self.notices(seat)[0])
+
+    def test_a_continue_that_was_already_handed_to_the_receiver_is_not_asked_again(self):
+        for verdict in ({"continued": "queued", "reason": "not-idle-working", "transfer_ref": "ref-1"},
+                        {"continued": "queued", "reason": "awaiting-native-receiver"},
+                        {"continued": "queued", "reason": "peer-delivery-already-claimed"}):
+            with self.subTest(verdict=verdict):
+                self.calls = []
+                seat, req = self.booked(harness="codex", sid="sid-cx")
+                self.assertEqual(self.run_helper(seat, req, cont=verdict), "cleared")
+                self.assertEqual(len([c for c in self.calls if c != "clear"]), 1)
+                self.assertEqual(self.booking(seat)["continued"]["state"], "pending")
+
+    def test_two_asks_that_overlap_send_the_continue_once_not_twice_and_not_never(self):
+        # The helper's ask (A) and a hook's ask (B) overlap: A holds the claim while B asks, B is told
+        # ``superseded``, A finds the session busy and puts the continue back, then B settles. B's
+        # ``superseded`` must not overwrite the pending continue (it once ended it as skipped).
+        for harness, ask_again in (("codex", True), ("claude", False)):
+            with self.subTest(harness=harness):
+                self.calls = []
+                seat, req = self.booked(harness=harness, sid=f"sid-{harness}")
+                self.run_helper(seat, req, cont={"continued": "queued", "reason": "awaiting-native-receiver"})
+                self.assertEqual(self.booking(seat)["continued"]["state"], "pending")
+                with self.iso.patched_environ(self.extra):
+                    path = clear.reservation_path(seat.key)
+                nonce, told = req["nonce"], []
+
+                def hook_ask(path_, nonce_, pane):               # B's steward, after B's own look
+                    a_claim, why = clear.claim_continue(path_, nonce_)    # A got there first
+                    self.assertEqual(why, "")
+                    _claim, told_why = clear.claim_continue(path_, nonce_)   # B's claim
+                    told.append(told_why)
+                    clear.release_unsent_continue(a_claim)       # A: the session was busy
+                    return {"continued": "skipped", "reason": told_why}
+                with self.iso.patched_environ(self.extra):
+                    self.assertEqual(clear._continue(seat.key, nonce, hook_ask, sleep=lambda _s: None),
+                                     "cleared")
+                self.assertEqual(told, ["superseded"])
+                held = self.booking(seat)["continued"]
+                self.assertEqual(held["state"], "pending")        # not "skipped": the next ask can send
+                sends = []
+                with self.iso.patched_environ(self.extra):
+                    outcome = clear._continue(seat.key, nonce,
+                                              lambda *_a: sends.append(1) or {"continued": "true"},
+                                              sleep=lambda _s: None, ask_again=ask_again)
+                self.assertEqual((outcome, len(sends)), ("continued", 1))
+                self.assertEqual(self.booking(seat)["continued"]["state"], "sent")
 
     def test_a_continue_window_that_passed_types_nothing_and_says_so(self):
         seat, req = self.booked()
@@ -7499,6 +7697,63 @@ class CardWordLanguage(unittest.TestCase):
                       "[Only part of the recent conversation was kept; check the original record.]"):
             self.assertIn(words, body)
         self.assertIsNone(re.search(r"[가-힣]", body), body)
+
+
+class CompactionPositionTest(TidyCase):
+    """The idle booking's "was it compacted meanwhile" comparison (an earlier boundary scrolling
+    out of the transcript's 8 MB tail made a long session look compacted: 11-18..11-20)."""
+
+    BOUNDARY = json.dumps({"type": "system", "subtype": "compact_boundary", "sessionId": "sid-A"}) + "\n"
+
+    def position(self, transcript):
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE, "HEARTING_TIDY_TEST_ROOT": str(self.iso.root)}):
+            seat = st.resolve_seat("claude", str(self.cwd))
+            summary = {("claude", "sid-A"): {"transcript": str(transcript) if transcript else ""}}
+            with mock.patch.object(st, "session_summary", return_value=summary), \
+                    mock.patch.object(st, "_read_ledger_lines", return_value=[]):
+                return clear.compaction_position(seat, "claude", "sid-A")
+
+    def test_an_earlier_boundary_that_scrolls_out_of_the_tail_is_no_compaction(self):
+        transcript = self.iso.root / "t.jsonl"
+        transcript.write_text("{}\n" + self.BOUNDARY, encoding="utf-8")
+        booked = self.position(transcript)
+        self.assertEqual(len(booked.partition(":")[2]), 64)
+        with transcript.open("a", encoding="utf-8") as handle:
+            line = json.dumps({"type": "assistant", "text": "x" * 4000}) + "\n"
+            for _ in range(8 * 1024 * 1024 // len(line) + 8):
+                handle.write(line)
+        later = self.position(transcript)
+        self.assertEqual(later.partition(":")[2], "")                 # the boundary left the tail
+        self.assertNotEqual(later, booked)
+        self.assertFalse(clear.compaction_moved(booked, later))
+
+    def test_a_boundary_written_after_booking_is_a_compaction(self):
+        transcript = self.iso.root / "t.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        booked = self.position(transcript)
+        unknown = self.position(None)                      # booked before the history was known
+        for older, moved in ((booked, True), (unknown, False)):   # "unknown" says nothing about before
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write(self.BOUNDARY)
+            self.assertEqual(clear.compaction_moved(older, self.position(transcript)), moved)
+            transcript.write_text("{}\n", encoding="utf-8")
+        # A second boundary after a first one is told apart by its row.
+        transcript.write_text(self.BOUNDARY, encoding="utf-8")
+        first = self.position(transcript)
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "system", "subtype": "compact_boundary",
+                                     "sessionId": "sid-A", "n": 2}) + "\n")
+        self.assertTrue(clear.compaction_moved(first, self.position(transcript)))
+
+    def test_a_new_ledger_row_unreadable_or_unknown_history_and_old_bookings(self):
+        self.assertTrue(clear.compaction_moved("1.0:" + "a" * 64, "2.0:" + "a" * 64))
+        self.assertTrue(clear.compaction_moved("0", "5.0"))
+        self.assertFalse(clear.compaction_moved("0:" + "a" * 64, "0:unreadable"))
+        self.assertFalse(clear.compaction_moved("0:unknown", "0:" + "a" * 64))
+        self.assertFalse(clear.compaction_moved("0:unreadable", "0:" + "a" * 64))
+        self.assertTrue(clear.compaction_moved("0", "0:" + "a" * 64))     # a booking from before "unknown"
+        self.assertFalse(clear.compaction_moved("0:" + "a" * 64, "0:" + "a" * 64))
+        self.assertEqual(self.position(None), "0:unknown")
 
 
 if __name__ == "__main__":

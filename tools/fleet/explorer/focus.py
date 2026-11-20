@@ -928,7 +928,7 @@ def _profile_cell(values, profile):
     return [model, effort]
 
 
-def _allocation_fields(policy):
+def _allocation_fields(policy, field_view=None):
     """The DISPATCH ALLOCATION lines as ``[label, [[text, colour key], ...]]``."""
     allocation = policy.get("allocation") or {}
     fields = []
@@ -947,6 +947,9 @@ def _allocation_fields(policy):
                 parts += [[harness, "hb_" + harness], [" ", "dim"],
                           ["▮" * max(1, round(10 * weight)), "hb_" + harness], [f" {weight:.1f}    ", "dim"]]
             fields.append(["weights:", parts])
+            if field_view:
+                from .models import field_line_fragments
+                fields.append(["field tilt:", field_line_fragments(field_view)])
         affinity = allocation.get("depth_affinity") or {}
         parts = []
         if affinity.get("worker"):
@@ -971,6 +974,76 @@ def _allocation_fields(policy):
         fields.append(["confirmation:", [[str(confirmation or "·"), "soft"], ["   permissions ", "label"],
                                          [str(permission or "·"), "soft"]]])
     return fields
+
+
+def _field_table(module):
+    """The registry's ``field_harness_weights`` and field names, or ``(None, ())`` when unreadable."""
+    try:
+        with open(module.default_topology_path(), encoding="utf-8") as handle:
+            table = json.load(handle).get("field_harness_weights")
+    except (OSError, ValueError, AttributeError):
+        return None, ()
+    if not isinstance(table, dict) or not isinstance(table.get("weights"), dict) or not table["weights"]:
+        return None, ()
+    return table, tuple(module.field_vocabulary())
+
+
+def _basis_differences(model_config, profile_map, table):
+    """``"<harness> <profile> <model>"`` notes for each profile the table's basis names where this
+    install's model differs from the shipped model table; ``[]`` when nothing can be compared."""
+    notes = []
+    profiles = ((table.get("basis") or {}).get("profiles") or {})
+    for harness in ("claude", "codex", "opencode"):
+        installed = (profile_map or {}).get(harness)
+        if not installed or not isinstance(profiles.get(harness), list):
+            continue
+        try:
+            shipped = model_config.parse_config(model_config.shipped_path(harness))
+        except Exception:
+            continue
+        for profile in profiles[harness]:
+            was, now = _profile_cell(shipped, profile), installed.get(profile)
+            if was and now and was[0] != now[0]:
+                notes.append(f"{harness} {profile} {now[0]}")
+    return notes
+
+
+def _field_view(module, policy, profile_map=None, model_config=None):
+    """The per-field rows Fleet shows: each row is the applied row (registry default + the user's
+    override) read through ``dispatch-defaults``, so the rule is not written a second time here."""
+    table, vocabulary = _field_table(module)
+    if table is None or (policy.get("allocation") or {}).get("strategy") != "balanced":
+        return None
+    harnesses = ("claude", "codex", "opencode")
+    named = [name for name in table["weights"] if name in vocabulary] or list(table["weights"])
+    rows, quiet = [], []
+    for name in named + [item for item in vocabulary if item not in named]:
+        row, overridden = module.field_weight_row(policy, name, table)
+        if row is None:
+            continue
+        if name not in table["weights"] and not overridden:
+            quiet.append(name)
+            continue
+        top = max(row.values())
+        rows.append({"field": name, "cells": dict(row), "off": bool(module.field_weights_off(policy, row)),
+                     "overridden": list(overridden),
+                     "top": [harness for harness in harnesses if abs(row[harness] - top) < 1e-9]})
+    if quiet:
+        rows.append({"field": "·".join(quiet), "cells": {harness: 1.0 for harness in harnesses}, "off": True,
+                     "overridden": [], "top": []})
+    differs = _basis_differences(model_config, profile_map, table) if model_config else []
+    shown = ", ".join(differs[:3]) + (f" +{len(differs) - 3}" if len(differs) > 3 else "")
+    return {"checked_on": str(table.get("checked_on") or ""), "rows": rows,
+            "basis": "shipped model table" if (table.get("basis") or {}).get("models") else "",
+            "differs": shown}
+
+
+def _field_overrides(policy):
+    """Field names the user's ``allocation.harness_weights`` overrides (blocks or one number)."""
+    weights = (policy.get("allocation") or {}).get("harness_weights")
+    if not isinstance(weights, dict):
+        return []
+    return [name for name in weights if name not in ("claude", "codex", "opencode")]
 
 
 _ALLOCATION_OPTIONAL = ("usage_gate_used_percent", "depth_affinity", "depth_affinity_weight",
@@ -1099,8 +1172,15 @@ def read_model_config():
                 note = "last resort " + " ".join(bands["last_resort"])
             pools[profile] = [[list(bands.get("primary") or ())], note]
         pools.setdefault("top", None)
-        allocation = {"fields": _allocation_fields(policy),
+        try:
+            field_view = _field_view(module, policy, profile_map, model_config)
+        except Exception:
+            field_view = None          # an unreadable field table leaves only its own line out
+        allocation = {"fields": _allocation_fields(policy, field_view),
                       "note": "new dispatch decisions only · running and sealed routes keep their choice"}
+        if field_view:
+            allocation["field_view"] = field_view
+        allocation["field_overrides"] = _field_overrides(policy)
         allocation.update(_allocation_editable(module, policy))
         steward = _steward_editable(module, policy)
     except Exception:

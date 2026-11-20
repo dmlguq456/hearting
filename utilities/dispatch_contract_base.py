@@ -499,9 +499,14 @@ def resolve_model_governor_root(
     artifact_root: str | Path,
     environ: dict[str, str] | os._Environ[str] | None = None,
 ) -> Path:
-    """Resolve one canonical governor root and reject ambient split-brain roots."""
+    """Resolve one canonical governor root and reject ambient split-brain roots.
+
+    The scratch root of record-free unit routes counts under its project's governor: one set of limits."""
+
+    import unit_ephemeral
 
     env = os.environ if environ is None else environ
+    artifact_root = unit_ephemeral.counted_root(artifact_root)
     expected = (
         Path(artifact_root).expanduser().resolve(strict=False)
         / ".runtime"

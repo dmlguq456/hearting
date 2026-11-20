@@ -76,6 +76,7 @@ $HOME/hearting/                                       # canonical linked maintai
 $HOME/agent_setting/                                  # legacy linked checkout fallback
 $HOME/.claude/              # Claude Code runtime home, mostly runtime-owned
 $HOME/.codex/               # Codex runtime home, mostly runtime-owned
+$HOME/.config/opencode/     # OpenCode global config home
 ```
 
 General-user installation uses a checksum-verified managed release. Maintainer
@@ -213,7 +214,7 @@ never orders a move or a delete.
 | `notes/`, `proposals/`, `spec-research-alternative/`, `research-alternative/` | present containers whose owner is not declared — recognized, not adopted | `C-LEG(undeclared-container)` |
 | `.git/`, `.agents/`, `.codex/`, `.probe-*/` | runtime residue that lives beside artifacts without being one | `C-LEG(runtime-residue)` |
 | `_scratch/` | the sole exact census exclusion | `C-SCR` |
-| `README.md`, `index.html`, `all-campaigns.md`, `all-campaigns.html` (files) | derived read entrance that Hearting rewrites (not canonical; not an admission, census or residue input; a same-named file without the generator's `<!-- hearting:artifact-entrance v1 -->` marker stays with its owner: the generator leaves it unchanged and in place) | `C-RT` |
+| `README.md`, `index.html`, `all-campaigns.md`, `all-campaigns.html`, `all-spec.md`, `all-spec.html`, `recent-route-reports.md`, `recent-route-reports.html` (files) | derived read entrance that Hearting rewrites (not canonical; not an admission, census or residue input; a same-named file without the generator's `<!-- hearting:artifact-entrance v1 -->` marker stays with its owner: the generator leaves it unchanged and in place) | `C-RT` |
 
 The following paths are a sealed-evidence exception set. These exact prefixes
 (and their descendants) or exact files take precedence over their parent
@@ -412,8 +413,8 @@ other cycles, and sealed records stay unchanged.
 (`artifact-project-meta/v1`) carry an easy title, a one-line summary, branch and
 kind tags, and a short ID for each campaign and cycle; every change adds one line
 to the single history recorder under `.runtime/artifact-producer/v1/history/`.
-The one background job — the workflow-group review right after a seal — decides
-the groups and these fields together with one model call per campaign; a person or
+The one background job — the review right after a seal — decides
+these fields with one model call per campaign and does not touch workflow groups; a person or
 an agent corrects them with `utilities/artifact_meta.py` (one command for all three
 harnesses). The campaign title is read from a valid `meta.json`, else from
 `campaign-display-titles.json` (read-only: a title there is a person's title and is
@@ -476,8 +477,8 @@ success. `artifact_workflow_groups.py prepare|apply|verify` owns a checked
 single-file replacement, including corrections and withdrawal; no route
 parent/`depends_on` meaning or extra workflow gate is introduced.
 `artifact_workflow_group_review.py sweep` reviews newly sealed cycles in the
-background (groups and metadata in one model call per campaign, written together
-under one lock). The exact v1 schema and verification semantics are in
+background (title, summary, branches, and kinds in one model call per campaign;
+it never declares or changes a group). The exact v1 schema and verification semantics are in
 [WORKFLOW_GROUPS.md](WORKFLOW_GROUPS.md); the metadata is in
 [ARTIFACT_META.md](ARTIFACT_META.md).
 

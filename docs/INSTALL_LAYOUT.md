@@ -542,8 +542,7 @@ OpenCode credentials, DB state, logs, sessions, or snapshots into the repo.
 
 ## Migration / Verification
 
-The manual `ln -sfn` recipes and the ~275-line manual verification battery
-this section used to hold are now machine-checked:
+Installation and verification are machine-checked:
 
 ```bash
 harness install [claude|codex|opencode|all]

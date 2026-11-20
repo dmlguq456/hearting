@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 import fcntl
 import math
 import uuid
@@ -565,7 +566,8 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
                      recommended=None, secret=False, cwd=None, incarnation=None, replace=True):
     """Register one explicit question on the caller's current prompt, without waiting.
 
-    A new question replaces this session's earlier waiting one. `replace=False` leaves a
+    A new question replaces this session's earlier waiting one; the returned value then carries
+    `replaced` (that question's id and text) so the caller can say so. `replace=False` leaves a
     different open question in place and refuses instead (`question-open-elsewhere`)."""
     import session_tidy as tidy
     if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
@@ -649,6 +651,10 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
     if prior:
         _queue_message_decision(prior)
     _request_producer()
+    if (prior and prior.get("id") != item_id and prior.get("mode") == "message"
+            and prior.get("lifecycle") == "open"):
+        # The earlier unanswered question of this session was just closed as replaced.
+        return {**value, "replaced": {"id": prior["id"], "question": str(prior.get("question") or "")}}
     return value
 
 
@@ -1214,7 +1220,7 @@ def _valid_doers(value):
     kept = {}
     for key, doer in value.items():
         if (isinstance(key, str) and "\0" in key and len(key) <= 300 and isinstance(doer, dict)
-                and all(name in ("model", "effort") and isinstance(text, str) and len(text) <= 64
+                and all(name in ("model", "effort", "repo") and isinstance(text, str) and len(text) <= 64
                         and text.isprintable() for name, text in doer.items())):
             kept[key] = dict(doer)
     return kept
@@ -1233,6 +1239,187 @@ def _valid_peers(value):
                         for name in ("supervisors", "targets"))):
             kept[key] = {"tag": entry["tag"], "supervisors": entry["supervisors"], "targets": entry["targets"]}
     return kept
+
+
+_RESOURCE_HOSTS, _RESOURCE_GPUS = 8, 16
+
+
+def _valid_resources(value):
+    """The bounded ``resources`` view (the compute hosts' CPU, memory and GPU use, with the session numbers that hold a GPU), or {}."""
+    if not isinstance(value, dict) or not isinstance(value.get("hosts"), list) or len(value["hosts"]) > _RESOURCE_HOSTS:
+        return {}
+    number = lambda x, top=None: x is None or (isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and 0 <= x <= (top or 1e9))
+    text = lambda x: isinstance(x, str) and 0 < len(x) <= 32 and x.isprintable()
+    kept = []
+    for host in value["hosts"]:
+        if not (isinstance(host, dict) and text(host.get("name")) and isinstance(host.get("gpus"), list)
+                and len(host["gpus"]) <= _RESOURCE_GPUS and number(host.get("cpu"), 100) and number(host.get("mem"), 100)):
+            return {}
+        gpus = []
+        for gpu in host["gpus"]:
+            if not (isinstance(gpu, dict) and isinstance(gpu.get("i"), int) and 0 <= gpu["i"] < 1000 and isinstance(gpu.get("busy"), bool)
+                    and number(gpu.get("util"), 100) and number(gpu.get("used")) and number(gpu.get("total"))
+                    and isinstance(gpu.get("users"), list) and len(gpu["users"]) <= 4 and all(text(u) for u in gpu["users"])):
+                return {}
+            gpus.append({name: gpu[name] for name in ("i", "busy", "util", "used", "total", "users")})
+        kept.append({"name": host["name"], "self": host.get("self") is True, "cpu": host.get("cpu"), "mem": host.get("mem"), "gpus": gpus})
+    observed = value.get("observed_at")
+    return {"observed_at": float(observed), "hosts": kept} if kept and isinstance(observed, (int, float)) and not isinstance(observed, bool) else {}
+
+
+# The compute hosts' sample the producer shows the panels' RESOURCES from. It is Fleet's own host collector (`compute_hosts.collect`,
+# the sample Fleet's RESOURCES view draws). Reading a host costs the servers an SSH probe, so it is taken only for a display that draws it:
+#  * only while a side panel that draws RESOURCES has asked (`note_resources_wanted`; a status line alone, a bottom panel or no panel
+#    asks nothing, and then no host is read);
+#  * at most once in RESOURCE_SAMPLE_S, whatever the number of windows (one producer), by a pass that is already running, in one
+#    short-lived thread the pass never waits for: the pass uses the last sample it has, so a panel's refresh is never held behind a slow host;
+#  * not at all while Fleet is open: Fleet reads the hosts every ten seconds and leaves each sample for the producer
+#    (`share_resource_sample`), which uses a sample younger than RESOURCE_SAMPLE_S, whoever took it, before it reads a host itself.
+RESOURCE_SAMPLE_S = 60.0
+RESOURCE_WANT_S, _RESOURCE_WANT_TOUCH_S = 90.0, 20.0
+_RESOURCE_SHARED_MAX = 1 << 20
+# `on` is set by the resident producer's own loop alone: a refresh anywhere else (a test, a one-shot) reads no host.
+_resources = {"started": 0.0, "at": 0.0, "snapshot": None, "thread": None, "on": False}
+
+
+def note_resources_wanted(now=None):
+    """A side panel that draws RESOURCES asks for the host sample: the marker's time, touched at most every ``_RESOURCE_WANT_TOUCH_S``."""
+    now = time.time() if now is None else now
+    try:
+        root = state_root()
+        marker = root / ".resources-wanted"
+        try:
+            if 0 <= now - marker.lstat().st_mtime < _RESOURCE_WANT_TOUCH_S:
+                return
+        except OSError:
+            pass
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(marker, os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            os.utime(fd, (now, now))
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _resources_wanted(now):
+    """Whether a side panel asked for the host sample within ``RESOURCE_WANT_S``."""
+    try:
+        info = (state_root() / ".resources-wanted").lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and 0 <= now - info.st_mtime < RESOURCE_WANT_S
+
+
+def share_resource_sample(snapshot):
+    """Leave a host sample Fleet took for the producer (it reads a sample younger than ``RESOURCE_SAMPLE_S`` instead of its own probe)."""
+    if not isinstance(snapshot, dict) or snapshot.get("error") or not isinstance(snapshot.get("hosts"), list):
+        return
+    try:
+        _write(state_root() / "resource-sample.json", {"at": time.time(), "snapshot": snapshot})
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _shared_resource_sample():
+    """``(snapshot, at)`` of the sample Fleet left, or None."""
+    try:
+        path = state_root() / "resource-sample.json"
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > _RESOURCE_SHARED_MAX:
+            return None
+        value = json.loads(path.read_text(encoding="utf-8"))
+        at, snapshot = value["at"], value["snapshot"]
+        if isinstance(at, bool) or not isinstance(at, (int, float)) or not isinstance(snapshot, dict):
+            return None
+        return snapshot, float(at)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _resource_sample(now):
+    """``(snapshot, sampled_at)`` of the last compute-host sample, and a new one started in a thread when none is younger than
+    ``RESOURCE_SAMPLE_S`` (the sample Fleet left counts)."""
+    shared = _shared_resource_sample()
+    if shared is not None and _resources["at"] < shared[1] <= now + 5:
+        _resources.update(snapshot=shared[0], at=shared[1])
+    thread = _resources["thread"]
+    if (thread is None or not thread.is_alive()) and now - max(_resources["started"], _resources["at"]) >= RESOURCE_SAMPLE_S:
+        _resources["started"] = now
+
+        def run():
+            try:
+                from tools.fleet.collectors import compute_hosts
+                _resources.update(snapshot=compute_hosts.collect(timeout=20.0), at=time.time())
+            except Exception:
+                pass
+        _resources["thread"] = threading.Thread(target=run, name="resource-sample", daemon=True)
+        _resources["thread"].start()
+    return _resources["snapshot"], _resources["at"]
+
+
+def _clipped(value, limit):
+    """``value`` as text within ``limit`` characters, a longer one ending in ``…`` (never cut without the mark)."""
+    value = str(value)
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
+def resources_view(snapshot, sampled_at, index):
+    """The sample as the panels draw it, from the pass's own session records (``index``: the numbers of the sessions that hold a GPU)."""
+    if not isinstance(snapshot, dict) or snapshot.get("error") or not isinstance(snapshot.get("hosts"), list):
+        return {}
+    from tools.fleet.explorer.live import _host_records
+    _labels, compute = _host_records({"compute_hosts": snapshot}, index)
+    hosts = []
+    for name, base, cpu, mem, _swap, gpus in compute[:_RESOURCE_HOSTS]:
+        hosts.append({"name": _clipped(name, 32), "self": bool(base),
+                      "cpu": round(cpu[0] * 100 / cpu[1]) if cpu and cpu[1] else None,
+                      "mem": round(mem[0] * 100 / mem[1]) if mem and mem[1] else None,
+                      "gpus": [{"i": int(g[0]), "busy": g[1] == "working", "util": g[4], "used": g[5], "total": g[6],
+                                "users": [_clipped(t, 32) for t in g[7][:4]]}
+                               for g in gpus[:_RESOURCE_GPUS] if g[0] is not None]})
+    return _valid_resources({"observed_at": sampled_at, "hosts": hosts})
+
+
+def _open_wait_rows(rows):
+    """id -> row for the waits a person must answer now (the set the campaign document lists)."""
+    return {row["id"]: row for row in rows or ()
+            if isinstance(row, dict) and isinstance(row.get("id"), str) and not row.get("stale") and person_wait(row)}
+
+
+def _request_documents_for_changed_waits(before_rows, after_rows):
+    """Ask each artifact root whose open questions changed to refresh its campaign documents.
+
+    Called by the detached producer after it wrote the copy, outside the hook path and every seat
+    lock, and only when the set of open questions differs from the copy it replaced. A root is the
+    one a changed question's folder resolves to (an `S4` question's folder is in its own file, which
+    is read only now that something changed). A failure is dropped: the copy is already written."""
+    before, after = _open_wait_rows(before_rows), _open_wait_rows(after_rows)
+    changed = {key: after.get(key) or before[key] for key in before.keys() ^ after.keys()}
+    if not changed:
+        return
+    cwds = {key: row.get("cwd") for key, row in changed.items() if row.get("cwd")}
+    lost = {key for key in changed if key not in cwds and key.startswith("S4:")}
+    if lost:
+        for path in state_root().glob("*.json"):
+            if re.fullmatch(r"[0-9a-f]{64}", path.stem):
+                value = _read(path)
+                if value and value.get("id") in lost and isinstance(value.get("cwd"), str):
+                    cwds[value["id"]] = value["cwd"]
+    from tools.fleet.collectors import project_status
+    import artifact_entrance
+    roots = set()
+    for cwd in cwds.values():
+        found = project_status.artifact_root(cwd) if isinstance(cwd, str) and os.path.isabs(cwd) else None
+        if found:
+            roots.add(os.path.realpath(str(found)))
+    for root in sorted(roots):
+        try:
+            artifact_entrance.request_refresh(Path(root))
+        except Exception:  # noqa: BLE001 -- a refresh that cannot be asked for never touches the copy
+            pass
 
 
 def publish_cache(result: dict) -> bool:
@@ -1281,7 +1468,9 @@ def publish_cache(result: dict) -> bool:
              "route_panels": panels,
              "session_doers": _valid_doers(result.get("session_doers")),
              "session_peers": _valid_peers(result.get("session_peers")),
+             "resources": _valid_resources(result.get("resources")),
              "route_sessions": result.get("route_sessions", []),
+             "reconnect_aware": True,   # absent from an older release's cache (see `_replace_older_producer`)
              "unattributed": [item.get("id") for item in items
                               if item.get("attribution") == "unattributed" and not item.get("stale")],
              "health": [{"source": row.get("source"), "state": row.get("state")}
@@ -1332,6 +1521,7 @@ def publish_cache(result: dict) -> bool:
                                   for row in result.get("health", ()) if isinstance(row, dict)]}
         with _cache_write_lock():
             previous = _read_cache_file()
+            before_rows = (previous or {}).get("items")
             if previous and previous.get("closed_questions"):
                 value["closed_questions"] = previous["closed_questions"]
             selected = previous.get("selected_responses", {}) if previous else {}
@@ -1412,6 +1602,11 @@ def publish_cache(result: dict) -> bool:
             if not _write_cache_value(value):
                 return False
             _write(_fleet_cache_path(), fleet_value)
+        if value["complete"] or value["items"]:   # a pass that failed and saw nothing is no answer
+            try:
+                _request_documents_for_changed_waits(before_rows, value["items"])
+            except Exception:  # noqa: BLE001 -- the copy is written; the documents catch up on their next turn
+                pass
         return True
     except (OSError, ValueError, TypeError):
         return False
@@ -1487,8 +1682,8 @@ def cached_fleet_view(*, now=None, request=True):
     return value
 
 
-def cached_view(*, now=None, request=True):
-    value = _read_cache(now=now)
+def cached_view(*, now=None, request=True, max_age=_DISPLAY_TTL):
+    value = _read_cache(now=now, max_age=max_age)
     if request:
         observed = value.get("observed_at") if value else None
         if observed is None or (time.time() if now is None else float(now)) - float(observed) > _REQUEST_TTL:
@@ -1503,6 +1698,7 @@ def cached_view(*, now=None, request=True):
             "route_panels": value.get("route_panels", {}),
             "session_doers": _valid_doers(value.get("session_doers")),
             "session_peers": _valid_peers(value.get("session_peers")),
+            "resources": _valid_resources(value.get("resources")),
             "observed_at": value["observed_at"]}
 
 
@@ -3194,11 +3390,18 @@ def _workflow_gate_detail(binding, item):
         if not isinstance(question, dict):
             continue
         options = question.get("options") if isinstance(question.get("options"), list) else []
-        choices = [{"value": option["label"], "label": option["label"],
-                    **({"means": option["means"]} if isinstance(option.get("means"), str)
-                       else {})}
-                   for option in options if isinstance(option, dict)
-                   and isinstance(option.get("label"), str)]
+        choices = []
+        for option in options:
+            if not (isinstance(option, dict) and isinstance(option.get("label"), str)):
+                continue
+            choice = {"value": option["label"], "label": option["label"]}
+            # The card's own words, then the one line the runtime reads from the proposal's structure.
+            means = " ".join(part for part in (
+                option["means"] if isinstance(option.get("means"), str) else "",
+                FI.route_scope_note(interview, question.get("id"), option["label"])) if part)
+            if means or isinstance(option.get("means"), str):
+                choice["means"] = means
+            choices.append(choice)
         entry = {"id": question["id"], "question": question["question"], "choices": choices,
                  # The existing frame answer validator accepts off-menu notes.
                  "is_other": True}
@@ -4629,6 +4832,7 @@ def _request_producer(harness=None, session_id=None):
                 age = time.time() - marker.stat().st_mtime
             except OSError:
                 age = _REQUEST_TTL
+            recorded = False
             demands = _route_demands() if harness and session_id else None
             key = str(harness) + "\0" + str(session_id)
             changed = demands is not None and time.time() - demands.get(key, 0) >= _REQUEST_TTL
@@ -4636,6 +4840,7 @@ def _request_producer(harness=None, session_id=None):
                 demands[key] = time.time()
                 demands = dict(sorted(demands.items(), key=lambda item: item[1], reverse=True)[:_ROUTE_DEMAND_LIMIT])
                 _write(marker, demands)
+                recorded = True
             elif age >= _REQUEST_TTL:
                 marker.touch(exist_ok=True)
                 marker.chmod(0o600)
@@ -4644,9 +4849,30 @@ def _request_producer(harness=None, session_id=None):
         now = time.time()
         cache = _read_cache(now=now)
         fresh = cache is not None and now - float(cache["observed_at"]) <= _REQUEST_TTL
-        if not fresh or changed:
-            _ensure_producer()
+        if (not fresh or changed) and not _ensure_producer() and fresh and recorded:
+            _replace_older_producer(cache)
     except OSError:
+        return
+
+
+def _replace_older_producer(cache):
+    """Ask the install-time handoff, detached (a render never waits), to replace an older release's producer.
+
+    Its proof is unchanged: it signals only the one same-user, same-state, same-install producer that
+    holds the lock and is not already the installed release.
+    """
+    if cache.get("reconnect_aware") is True:   # an older release builds the cache afresh, without this key
+        return
+    try:
+        import peer_obligations
+        root = Path(__file__).resolve().parents[1]
+        if peer_obligations.installed_release(root=root) != root:   # only a window of the installed release asks
+            return
+        end_with_test(subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--reconnect-cache"],
+                         env={**os.environ, "AGENT_HOME": str(root), "PYTHONDONTWRITEBYTECODE": "1"},
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         close_fds=True, start_new_session=True))
+    except (OSError, subprocess.SubprocessError, ImportError):
         return
 
 
@@ -4691,10 +4917,12 @@ def _cache_release_committed(code_root, observers):
 
 
 def reconnect_cache_producer(*, wait_for_commit=False):
-    """Install-time handoff through the existing managed observer lifecycle.
+    """Handoff through the existing managed observer lifecycle.
 
-    Ordinary render requests never call this. No new process ownership record
-    is needed: the existing private state root and actual flock identify duty.
+    The installer calls it after an install, and a window's request calls it
+    (`_replace_older_producer`); both run it in a detached child, so a render
+    never waits here. No new process ownership record is needed: the existing
+    private state root and actual flock identify duty.
     """
     import peer_obligations as observers
     code_root = Path(__file__).resolve().parents[1]
@@ -4800,7 +5028,7 @@ _SESSION_DOERS = 64
 
 
 def session_doers(snapshot):
-    """``{"<harness>\\0<session id>": {"model", "effort"}}`` for the sessions a refresh pass already
+    """``{"<harness>\\0<session id>": {"model", "effort"}}`` (and, merged in after, ``"repo"``) for the sessions a refresh pass already
     interpreted (each id the session answers to), bounded; a value it does not know is left out."""
     doers = {}
     for session in getattr(snapshot, "sessions", None) or ():
@@ -4860,10 +5088,21 @@ def _refresh_cache() -> bool:
                     # The displayed sessions' own model and effort from this same pass: a panel names
                     # the other session of a peer request with them (no second read or collection).
                     result["session_doers"] = session_doers(snapshot)
+                    if records:
+                        # Each session's repository name as Fleet writes it (a request line names the other session's).
+                        from tools.fleet.explorer.live import session_repos
+                        for key, repo in session_repos(records[0]).items():
+                            if (key in result["session_doers"] or len(result["session_doers"]) < _SESSION_DOERS) and 0 < len(repo) <= 64 and repo.isprintable():
+                                result["session_doers"][key] = {**result["session_doers"].get(key, {}), "repo": repo}
                     # Who supervises whom (the steward records this pass already holds): the panel's PEERS line.
                     # (The session records the pass worked out for the route rows are used again, not worked out twice.)
                     from tools.fleet.explorer.live import session_peers
                     result["session_peers"] = _bounded(session_peers(snapshot, records=records[0] if records else None))
+                    # The compute hosts' last sample (the resident producer's loop only, and only while a side panel that draws RESOURCES
+                    # asks for it; a one-shot refresh has none): CPU, memory and each GPU's use.
+                    if _resources["on"] and records and _resources_wanted(time.time()):
+                        sample, sampled_at = _resource_sample(time.time())
+                        result["resources"] = resources_view(sample, sampled_at, records[0][1])
             except Exception:
                 pass  # route observation failure must not discard answer waits
         if not publish_cache(result):
@@ -5367,6 +5606,7 @@ def _producer_loop(fd: int) -> None:
     global _producer_root
     root = state_root()
     _producer_root = root
+    _resources["on"] = True
     try:
         if not root.is_dir():
             return
@@ -5420,6 +5660,7 @@ def _producer_loop(fd: int) -> None:
         return
     finally:
         _producer_root = None
+        _resources["on"] = False
         _stop_wake_events()
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)

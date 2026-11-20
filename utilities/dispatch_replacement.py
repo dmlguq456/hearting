@@ -2736,7 +2736,7 @@ def _capacity_hold(jobs, source, model=None, *, allow_frame_peer=False):
                     capacity = _capacity_reader()
                     report = capacity.capacity_report()
                     scores = report['scores']
-                    from dispatch_allocation import attempt_counts
+                    from dispatch_allocation import attempt_counts, effective_harness_weights
                     counts = attempt_counts(jobs, window=allocation.get('window', 30))
                     selected, _, _, _ = capacity.select(
                         policy, states, counts, allocation.get('harness_order', []), scores,
@@ -2745,7 +2745,7 @@ def _capacity_hold(jobs, source, model=None, *, allow_frame_peer=False):
                         preferred=capacity.preferred_for_depth(allocation, int(source.get('dispatch_depth', '1'))),
                         affinity_weight=allocation.get('depth_affinity_weight', .5),
                         headroom_exponent=allocation.get('usage_headroom_exponent', 1),
-                        harness_weights=allocation.get('harness_weights'),
+                        harness_weights=effective_harness_weights(allocation),
                     )
                     if selected == peer_harness:
                         # The following normal dispatch-owner start consumes the
@@ -2778,7 +2778,7 @@ def _capacity_hold(jobs, source, model=None, *, allow_frame_peer=False):
             scores, harness, usage_gate_used_percent=gate):
         return None
     states = usage_states(jobs, models={harness: model or source.get('model')}, recheck=True)
-    from dispatch_allocation import attempt_counts
+    from dispatch_allocation import attempt_counts, effective_harness_weights
     counts = attempt_counts(jobs, window=allocation.get('window', 30))
     selected, _, _, _ = capacity.select(
         policy, states, counts, allocation.get('harness_order', []), scores,
@@ -2786,7 +2786,7 @@ def _capacity_hold(jobs, source, model=None, *, allow_frame_peer=False):
         preferred=capacity.preferred_for_depth(allocation, int(source.get('dispatch_depth', '1'))),
         affinity_weight=allocation.get('depth_affinity_weight', .5),
         headroom_exponent=allocation.get('usage_headroom_exponent', 1),
-        harness_weights=allocation.get('harness_weights'),
+        harness_weights=effective_harness_weights(allocation),
     )
     if selected == harness:
         return None  # original all-gated recovery, quality bands and relief remain intact

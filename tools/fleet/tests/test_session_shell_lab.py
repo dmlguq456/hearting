@@ -205,7 +205,7 @@ fs.watch=(...args)=>{
 };
 const c={fs,path,setTimeout,clearTimeout,watchers:new Map(),sid:'s',ended:false,relay:false,succeeding:false,
  projectionTimer:undefined,projecting:false,projectionPending:false,selection:0,clock:0,nativeSelectionRevision:0,
- sourceError:undefined,openColumns:()=>40,panelView:{popupWidth:()=>76},rows:30,cols:80,state:'idle',expanded:true,nativeContext:undefined,
+ sourceError:undefined,openColumns:()=>40,geometry:()=>({side:true}),panelView:{popupWidth:()=>76},rows:30,cols:80,state:'idle',expanded:true,nativeContext:undefined,
  nativeMcp:undefined,block:{references:()=>[],update(){}},actionWorker:undefined,currentDelivery:undefined,
  upgradeNoteNow:()=>'',displayValues:{},harness:'codex',turnRecord:'',readTurnRecord(){},noteTurn(){},
  projectionKey:'',heldBytes:0,shownState:()=>'idle',bootstrapModel:false,nativeSelected:{},publishNativeDisplay(){},
@@ -279,7 +279,7 @@ fs.watch=(...args)=>{
 let drawn=[];
 const c={fs,path,setTimeout,clearTimeout,watchers:new Map(),sid:'s',ended:false,relay:false,succeeding:false,
  projectionTimer:undefined,projecting:false,projectionPending:false,selection:0,clock:0,nativeSelectionRevision:0,
- sourceError:undefined,openColumns:()=>40,panelView:{popupWidth:()=>76},rows:30,cols:80,state:'idle',expanded:true,nativeContext:undefined,
+ sourceError:undefined,openColumns:()=>40,geometry:()=>({side:true}),panelView:{popupWidth:()=>76},rows:30,cols:80,state:'idle',expanded:true,nativeContext:undefined,
  nativeMcp:undefined,block:{references:()=>[],update(){}},actionWorker:undefined,currentDelivery:undefined,
  upgradeNoteNow:()=>'',displayValues:{},harness:'codex',turnRecord:'',readTurnRecord(){},noteTurn(){},
  projectionKey:'',heldBytes:0,shownState:()=>'idle',bootstrapModel:false,nativeSelected:{},publishNativeDisplay(){},

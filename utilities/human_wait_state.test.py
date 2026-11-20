@@ -439,6 +439,36 @@ class HumanWaitStateTests(unittest.TestCase):
                          [FI.UNDERSTANDING_SLOT, "scope", "speed"])
         self.assertEqual([question.get("recommended") for question in questions], [0, 1, None])
 
+    def test_frame_interview_detail_carries_the_route_scope_line_in_the_choice_means_only(self):
+        import frame_interview as FI
+        leg = {"capability": "autopilot-code", "shape": "solo"}
+        options = [{"label": "Go", "means": "Run it"}, {"label": "Go bare"}, {"label": "Later", "means": "Not now"}]
+        interview = {"understanding": "Restated task", "questions": [
+            {"id": "go", "question": "Proceed?", "recommended": 0, "options": options},
+            {"id": "other", "question": "Also?", "options": [{"label": "Go", "means": "x"}]}],
+            "route_proposals": {"question": "go", "by_option": {
+                "Go": {"legs": [leg, leg], "execution_scope": "complete"},
+                "Go bare": {"legs": [leg, leg, leg], "execution_scope": "report"},
+                "Later": {"legs": [leg]}}}}
+        binding = {"route": {"route_id": "rt-x", "nodes": [],
+                             "human_gate_bindings": [{"gate": "frame-review", "node": "owner"}]},
+                   "resolution": {}}
+        for lang, first, second in (
+                ("en", "Run it Runs all 2 legs through to the end, without asking again in between.",
+                 "Stops each time a leg ends; the next leg starts when you say so."),
+                ("ko", "Run it leg 2개를 끝까지 이어서 진행합니다. 중간에 다시 묻지 않습니다.",
+                 "leg가 하나 끝날 때마다 멈춥니다. 다음 leg는 말씀하시면 시작합니다.")):
+            with self.subTest(lang=lang), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}), \
+                    mock.patch.object(state, "_workflow_gate_interview", return_value=(interview, None)):
+                detail, error = state._workflow_gate_detail(binding, {"gate_id": "frame-review"})
+            self.assertIsNone(error)
+            route, other = detail["detail"]["questions"][1:]
+            self.assertEqual([choice["value"] for choice in route["choices"]], ["Go", "Go bare", "Later"])
+            self.assertEqual([choice["label"] for choice in route["choices"]], ["Go", "Go bare", "Later"])
+            self.assertEqual([choice.get("means") for choice in route["choices"]], [first, second, "Not now"])
+            self.assertEqual(other["choices"], [{"value": "Go", "label": "Go", "means": "x"}])
+            self.assertEqual(route["question"], "Proceed?")
+
     def test_absent_herdr_does_not_leave_a_dedupe_marker(self):
         with mock.patch("human_wait_state.shutil.which", return_value=None):
             self.assertFalse(state._notify_item({"id": "S4:missing", "question": "확인"},
@@ -877,6 +907,57 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertEqual(answer(native_envelope, "act-native"), ((0, 0, (0, 0)), (0, 0, (0, 0))))
         self.assertTrue(state.publish_cache({"items": [], "observed_at": time.time(), "complete": True}))
         self.assertEqual(counts(), (0, 0, (0, 0)))
+
+    def test_a_changed_set_of_open_questions_asks_its_root_once_and_the_same_set_asks_nothing(self):
+        """The producer writes the copy; the campaign document follows when the open questions change."""
+        import artifact_entrance
+        mine, other = Path(self.tmp.name) / "mine", Path(self.tmp.name) / "other"
+        for folder in (mine, other):
+            (folder / ".agent_reports").mkdir(parents=True)
+        mine_root, other_root = (Path(os.path.realpath(folder / ".agent_reports")) for folder in (mine, other))
+        now = time.time()
+
+        def row(name, folder, source="S1"):
+            return {"id": f"{source}:{name}", "source": source, "kind": "decision", "since": now,
+                    "owner": {"harness": "claude", "session_id": "s-" + name}, "cwd": str(folder)}
+
+        def publish(*items, at=None):
+            self.assertTrue(state.publish_cache({"items": list(items), "complete": True, "observed_at": at or time.time()}))
+        with mock.patch.object(artifact_entrance, "request_refresh") as refresh:
+            publish(row("a", mine))                                      # asked
+            self.assertEqual([call.args for call in refresh.call_args_list], [(mine_root,)])
+            publish(row("a", mine), at=time.time() + 1)                  # the copy is written again, the set is the same
+            publish(row("a", mine), at=time.time() + 2)
+            self.assertEqual(refresh.call_count, 1)
+            publish(row("a", mine), row("b", other))                     # another root's question goes there alone
+            self.assertEqual([call.args for call in refresh.call_args_list][1:], [(other_root,)])
+            publish(row("b", other))                                     # answered (gone from the set)
+            self.assertEqual([call.args for call in refresh.call_args_list][2:], [(mine_root,)])
+            publish(row("b", other), at=time.time() + 3)
+            self.assertEqual(refresh.call_count, 3)
+
+    def test_a_question_whose_folder_is_only_in_its_file_and_a_failed_pass_are_handled(self):
+        import artifact_entrance
+        folder = Path(self.tmp.name) / "mine"
+        (folder / ".agent_reports").mkdir(parents=True)
+        digest = "d" * 64
+        state._write(state.state_root() / (digest + ".json"), {
+            "schema_version": 1, "mode": "message", "source": "S4", "id": "S4:" + digest, "harness": "claude",
+            "session_id": "s-d", "seat_key": "seat-d", "sequence": 1, "question": "Q?", "since": time.time(),
+            "lifecycle": "open", "cwd": str(folder)})
+        item = {"id": "S4:" + digest, "source": "S4", "kind": "message", "since": time.time(),
+                "owner": {"harness": "claude", "session_id": "s-d"}}      # the copy carries no folder
+        with mock.patch.object(artifact_entrance, "request_refresh") as refresh:
+            self.assertTrue(state.publish_cache({"items": [item], "complete": True, "observed_at": time.time()}))
+            self.assertEqual([call.args for call in refresh.call_args_list],
+                             [(Path(os.path.realpath(folder / ".agent_reports")),)])
+            # a pass that failed and saw nothing is no answer: it asks nothing
+            self.assertTrue(state.publish_cache({"items": [], "complete": False, "observed_at": time.time()}))
+            self.assertEqual(refresh.call_count, 1)
+        # a refresh that fails never fails the copy
+        with mock.patch.object(artifact_entrance, "request_refresh", side_effect=OSError("busy")):
+            self.assertTrue(state.publish_cache({"items": [], "complete": True, "observed_at": time.time()}))
+        self.assertEqual(state._read_cache()["items"], [])
 
 
 class _StrictOpenCodeTransport:
@@ -4001,6 +4082,19 @@ class MessageCompletionTests(unittest.TestCase):
             tidy.run_hook(signal["harness"], "prompt", signal["session_id"], cwd=str(self.f.root),
                           prompt_text=text, env=os.environ, render_context=True, emit=lines.append)
         return "\n".join(lines)
+
+    def test_a_question_asked_replaced_or_answered_never_asks_the_entrance_for_a_refresh(self):
+        """The prompt hook holds the seat lock: the campaign document follows the question list on its own."""
+        import artifact_entrance
+        (self.f.root / ".agent_reports").mkdir()
+        with mock.patch.object(artifact_entrance, "request_refresh", side_effect=AssertionError("asked")) as refresh:
+            signal, envelope = self.f.ask(text="Which one?", choices=["Alpha", "Beta"])
+            self.prompt(signal, "2")                                    # answered at the prompt
+            self.assertEqual(self.source(signal)["lifecycle"], "answered")
+            self.f.ask(text="First?")
+            self.f.ask(text="Second?")                                  # the first is replaced
+            refresh.assert_not_called()
+        self.assertFalse(hasattr(state, "_refresh_campaign_documents"))
 
     def test_choice_question_closes_only_on_one_exact_choice_prompt(self):
         choices = ["Alpha plan", "Beta plan", "Gamma plan"]

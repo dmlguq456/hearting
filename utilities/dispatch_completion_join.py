@@ -1262,6 +1262,14 @@ def previous_harvest_wording(text: str) -> str:
     return text.replace(current, previous)
 
 
+def _child_note(jobs: str, child) -> str | None:
+    """The registry note of one receipt child (None when the row cannot be read)."""
+    try:
+        return exact_attempt_row(Path(jobs), child["attempt_id"]).metadata.get("note")
+    except (OSError, ValueError, KeyError, JoinContractError):
+        return None
+
+
 def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
     """`Next ready:` lines for an owner's depth-2 stage/review row that just finished; [] when unsure.
 
@@ -1289,7 +1297,22 @@ def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
                 completed = dispatch_stage_advance.completed_nodes(Path(jobs), route["route_id"])
                 started = dispatch_stage_advance.started_nodes(Path(jobs), route["route_id"], route["route_hash"])
                 for node in dispatch_stage_advance.runnable_successors(route, completed, started):
-                    if worker_bootstrap._dispatchable_stage(node):
+                    from route_form import one_shot_review_route
+                    if one_shot_review_route(route) and node.get("id") == "one-shot":
+                        # The middle cell: the review is done; the owner's end is its own final handoff, unless
+                        # a verdict blocks (then the verdict text above is the instruction). A review group is
+                        # one batch: any blocking leg blocks it.
+                        import review_round_cap
+                        if any(_child_note(jobs, other) == review_round_cap.REVIEW_BLOCKING_NOTE
+                               for other in receipt.get("children") or []) or (
+                                meta.get("note") == review_round_cap.REVIEW_BLOCKING_NOTE):
+                            lines.append("Next ready: nothing to start; the independent review has finished and "
+                                         "blocks. Follow the Review FAIL instruction above; do not return a final "
+                                         "handoff before you have.")
+                        else:
+                            lines.append("Next ready: nothing to start; the independent review has finished. "
+                                         "Act on its verdict as your task describes, then return your final handoff.")
+                    elif worker_bootstrap._dispatchable_stage(node):
                         lines.append("Next ready: " + worker_bootstrap.route_start_command(route_file, node["id"]))
                     else:
                         lines.append(f"Next ready: run {node['id']} yourself (per your Route steps).")
@@ -1371,6 +1394,16 @@ def unit_leg_report_line(metadata, *, jobs=None) -> str:
     return f"Report: {artifact}" if artifact else ""
 
 
+def unit_leg_reason_line(metadata) -> str:
+    """`Reason: <why>` for a continued unit turn (one that wakes an earlier session) that ended as an error,
+    from the reason the row already records (`app-server-request-failed:thread/resume` when Codex refused to
+    wake the thread). "" for a first turn, any other row, or an end that recorded none."""
+    reason = str(metadata.get("reconcile_reason") or "").strip()
+    if not metadata.get("continues_attempt_id") or not reason:
+        return ""
+    return f"Reason: {reason}"
+
+
 def completion_followup_text(receipt: dict, *, jobs: str) -> str:
     if receipt.get("children") and all(child.get("reason") == "cancelled-by-parent"
             and child.get("required_action") == "advance-completed" for child in receipt["children"]):
@@ -1382,6 +1415,7 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
     work_commands = {}
     completed_work = set()
     summaries = []
+    kept_notes = []
     parked_notes = []
     unit_reports, other_work = [], False
     if jobs:
@@ -1401,8 +1435,17 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                         completed_work.add(child["attempt_id"])
                         import work_intent
                         summary = work_intent.sealed_summary(meta, child["attempt_id"])
+                        import unit_continue
+                        try:
+                            head, kept = unit_continue.notice_lines(jobs, meta)
+                        except (OSError, ValueError):
+                            head, kept = "", ""     # a turn's own line is a courtesy: never lose its summary
+                        if summary and head:
+                            summary = head + "\n" + summary
                         if summary and summary not in summaries:
                             summaries.append(summary)
+                        if kept:
+                            kept_notes.append(kept)
                     continue  # Already sealed; successful work has no extra command obligation.
                 path = Path(meta.get("owner_route_file") or meta.get("route_file") or "")
                 route = json.loads(path.read_text())
@@ -1415,7 +1458,7 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                     path, jobs, agent_home=Path(__file__).resolve().parents[1])
                 report = unit_leg_report_line(meta)
                 if meta["worker_type"] not in {"owner", "frame"}:
-                    unit_reports.append(report)
+                    unit_reports.append("\n".join(filter(None, (report, unit_leg_reason_line(meta)))))
                 else:
                     other_work = True
                 if meta["worker_type"] == "owner" and child["required_action"] == "inspect-done-failure":
@@ -1436,6 +1479,7 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                  f"{child['next_leg']['compose_command']}" for child in receipt["children"] if child.get("next_leg")]
         return (RUNTIME_V1_FOLLOWUP_PREFIXES[bool(summaries)]
                 + "".join("\n" + summary for summary in summaries)
+                + "".join("\n" + note for note in kept_notes)
                 + ("".join("\n" + note for note in notes)
                    + ("\nIf this next leg is already approved, execute it in this turn or its existing registered continuation. "
                       "Nothing starts it from receipt alone; obtain approval only for work outside the existing scope." if notes else "")))
@@ -4799,7 +4843,6 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--attempt-id", action="append", default=[])
     value.add_argument("--interval", type=float, default=2.0)
     value.add_argument("--timeout", type=float, default=3600.0)
-    value.add_argument("--liveness-command", help="Compatibility input; only shared exact process evidence decides readiness")
     value.add_argument("--recover-receiptless", action="store_true",
                        help="run bounded exact-proof recovery while joining owned children")
     return value
@@ -4823,7 +4866,6 @@ def main(argv: list[str] | None = None) -> int:
         }
         print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
         return 69
-    liveness = [args.liveness_command] if args.liveness_command else None
     try:
         if bool(args.parent_attempt_id) == bool(args.parent_session_id):
             raise JoinContractError("parent-identity-ambiguous")
@@ -4838,7 +4880,6 @@ def main(argv: list[str] | None = None) -> int:
                 recover_receiptless=args.recover_receiptless,
                 interval=args.interval,
                 timeout=args.timeout,
-                liveness_command=liveness,
                 registry_append_only=True,
             )
         else:
@@ -4851,7 +4892,6 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 interval=args.interval,
                 timeout=args.timeout,
-                liveness_command=liveness,
                 registry_append_only=True,
             )
     except JoinContractError as exc:

@@ -1019,6 +1019,13 @@ def inspect_terminal_value(parsed, *, worktree, artifact_root_metadata,
                     else "artifact-missing"
                 ),
             )
+        if artifact_path.is_file():
+            import unit_ephemeral
+            if unit_ephemeral.is_scratch_root(root) and not unit_ephemeral.answer_text(artifact_path):
+                # An ephemeral route's report is its answer to the caller: no text is no answer, and an
+                # end with none has not done the work, whatever its handoff says.
+                return _result(3, "invalid", str(parsed["source"]), "-", "missing", "contract-violation",
+                               reason="empty-answer")
         parsed["artifact_state"] = "readable"
         parsed["artifact_shape"] = "directory" if artifact_path.is_dir() else "file"
         parsed["artifact_path_b64"] = _encode_path(artifact_path)

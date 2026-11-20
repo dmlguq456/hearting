@@ -194,8 +194,6 @@ reader accepts only structured rollout `response_item` function-call records
 paired by exact call id; prompt wording is not an evidence source. Claude uses
 its native question, permission, post-tool, prompt, stop, and session events.
 
-Write-denying hook gates are retired; no write preflight or core-read marker is required.
-
 Codex can run
 `adapters/codex/bin/preflight.sh prompt-signal [cwd] [session-id]` to carry the
 fuller routing contract as a worker-startup/manual subcommand, not a per-turn

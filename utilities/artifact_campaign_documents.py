@@ -15,6 +15,7 @@ import unicodedata
 from artifact_nofollow import open_relative, open_root
 
 STATUS_NAMES = ('현황.md', 'status.md')
+CAMPAIGN_DOCUMENT = 'campaign.md'
 READ_LIMIT = 65536
 LIST_LIMIT = 1000
 ROW_LIMIT = 300
@@ -49,7 +50,18 @@ def status_candidates(folder):
 
 
 def read_document(folder, name):
-    """Bounded bytes and their fd's stat; no payload pathname is reopened."""
+    """Bounded bytes and their fd's stat; no payload pathname is reopened.
+
+    A file replaced while it is read (the generator's atomic write) is read once more."""
+    try:
+        return _read_once(folder, name)
+    except ValueError as error:
+        if str(error) != 'document-changed':
+            raise
+    return _read_once(folder, name)
+
+
+def _read_once(folder, name):
     parent = open_root(folder)
     try:
         fd = open_relative(parent, [name])
@@ -104,8 +116,40 @@ def select_status(folder, *, canonical=True, candidates=None):
     return dict(result, status='known', path=paths[0])
 
 
+def campaign_page(folder):
+    """The campaign folder's own ``campaign.md``, opened by name; None when there is no such name.
+
+    The folder is not listed, so a long folder still shows it. A page that is a link, not a
+    regular file, over the read limit or unreadable is the campaign's page that cannot be taken:
+    it is ``unknown`` and no older name stands in for it. No ownership marker is required here.
+    """
+    path = Path(folder) / CAMPAIGN_DOCUMENT
+    try:
+        # The common case, no page, costs one stat: the no-follow open below walks every path
+        # component and is far dearer on a network share. Whatever stands there is opened safely.
+        os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        pass
+    try:
+        raw, _, coverage = read_document(Path(folder), CAMPAIGN_DOCUMENT)
+        if coverage == 'complete':
+            raw.decode('utf-8')
+    except FileNotFoundError:
+        return None
+    except (OSError, RuntimeError, ValueError, UnicodeError):
+        return {'status': 'unknown', 'path': None, 'candidates': [path]}
+    if coverage != 'complete':
+        return {'status': 'unknown', 'path': None, 'candidates': [path]}
+    return {'status': 'known', 'path': path, 'candidates': [path]}
+
+
 def campaign_status(campaign):
-    """One campaign's canonical selection, else its legacy cycle pages."""
+    """One campaign's ``campaign.md``, else its canonical selection, else its legacy cycle pages."""
+    page = campaign_page(campaign)
+    if page is not None:
+        return page
     primary = select_status(campaign)
     if primary['status'] != 'absent':
         return primary
@@ -158,9 +202,14 @@ def entrance_snapshot(root):
             except (OSError, RuntimeError, ValueError):
                 errors.append(campaign.relative_to(root).as_posix() + ':documents-unreadable')
                 continue
+            generated = CAMPAIGN_DOCUMENT in names  # the name the readers open, exactly (`Campaign.md` is not that page)
             for name in names:
                 if name.startswith('.') or not name.casefold().endswith('.md'):
                     continue
+                if name == CAMPAIGN_DOCUMENT:
+                    continue  # the campaign's own page is no route report: the campaign line opens it
+                if generated and fold(name) in STATUS_NAMES:
+                    continue  # a hand-written status page beside it is not shown once `campaign.md` is there
                 if len(rows) >= ROW_LIMIT:
                     errors.append('campaign-documents-bounded')
                     break

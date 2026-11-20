@@ -53,10 +53,15 @@ const styleOf=p=>JSON.stringify([p.foreground??null,!!p.dim,!!p.bold,p.backgroun
 const runs=row=>{const all=[];for(const p of row)for(const c of [...p.text])all.push([c,styleOf(p)]);
  const inner=all.slice(2,-2),out=[];for(const [c,s] of inner){const last=out.at(-1);if(last&&last[1]===s)last[0]+=c;else out.push([c,s]);}return out;};
 const strip=m=>{const {lab,sessions,memory_items,messages,wait,answerable,...rest}=m;return {...rest,messages:[]};};
-let n=0,same=0,folded=0,soloSame=0,soloFolded=0;
+let n=0,same=0,folded=0,soloSame=0,soloFolded=0,noTool=0;
 for(const c of golden.cases){
- const model=c.alone?strip(golden.scenes[c.scene]):golden.scenes[c.scene];
- const v=pv.render({frame:0,width:c.width,height:c.height,side:c.side,fill:c.side,model,state:'working',configuration:c.cfg,background:c.background});
+ const scene=c.alone?strip(golden.scenes[c.scene]):golden.scenes[c.scene];
+ // 11-18 (review C4): under the native area a route's row reads its owner (as the NOW under it does); the golden's row is the leading
+ // worker's, so the comparison there is made without the owner's values (`owner_paint`), which the panel's own tests draw.
+ const model=c.side?scene:{...scene,routes:(scene.routes||[]).map(({owner_paint,...route})=>route)};
+ // 11-18: the golden draws a worker `↳` under its owner with a stage row of its own, which is the `none` form of the panel setting
+ // `worker_box` (the default now boxes the workers under the owner with the stage text on the box's top line); the comparison is made in that form.
+ const v=pv.render({frame:0,width:c.width,height:c.height,side:c.side,fill:c.side,model,state:'working',configuration:{...c.cfg,worker_box:'none'},background:c.background});
  const label=JSON.stringify({scene:c.scene,side:c.side,width:c.width,height:c.height,cfg:c.cfg,background:c.background,alone:!!c.alone});
  const b=boxOf(v);assert(b,'no route box '+label+'\n'+v.rows.map(txt).join('\n'));
  const want=c.rows.map(row=>row.map(([t,s])=>[t,JSON.stringify(golden.styles[s])]));
@@ -76,17 +81,34 @@ for(const c of golden.cases){
   for(const [t2,st] of r)for(const ch of t2){if(n>=want)return out;n++;const last=out.at(-1);if(last&&last[1]===st)last[0]+=ch;else out.push([ch,st]);}
   return out;};
  const stageLine=r=>/^│ +(?:staged )?\d+\/\d+: /.test(textOf(r));
- const sessionExtra=r=>!stageLine(r)&&!whoHead(r)&&/^│ {5,}\S/.test(textOf(r));   // indented four or more under the box's own edge: a gauge, a tool, a NOW
+ const sessionExtra=r=>stageLine(r)||!whoHead(r)&&/^│ {5,}\S/.test(textOf(r));   // indented four or more under the box's own edge: a gauge, a tool, a NOW (and the stage row, now on the first line)
  const sessions=(rows,hs)=>{const keep=rows.map(r=>!sessionExtra(r)),at=keep.map((k,i)=>k?i:-1).filter(i=>i>=0);
   return {rows:at.map(i=>whoHead(rows[i])||rows[i]),hits:hs.filter(h=>keep[h[0]]).map(h=>[at.indexOf(h[0]),...h.slice(1)])};};
+ // 11-18: a route's time stands at the right end of its first line (the kind line), no row of its own: the golden's time-only row
+ // leaves with the other session rows (above), and the time on a drawn kind line is blanked to the padding the golden has there.
+ const kindLine=/^│ \S (?:[a-z-]+(?: ✓)? → )*[a-z-]+(?:\([^)]*\))?(?: · \S.*?)? +(?:\d+h )?\d+m │$/;
+ // 11-18 (review C3): the stage text (` · 3/6: execute`) stands on that first line too, and no stage row apart; the golden has it on
+ // a row of its own, which leaves with the session rows above, so on the drawn first line the stage text is blanked to padding as well.
+ const stageMid=/^(│ \S (?:[a-z-]+(?: ✓)? → )*[a-z-]+(?:\([^)]*\))?)( · (?:[a-z-]+ )?\d+\/\d+(?:: \S.*?)?)( +(?:\d+h )?\d+m │)$/;
+ const blankStage=r=>{const m=stageMid.exec(textOf(r));if(!m)return r;
+  const from=[...m[1]].length,to=from+[...m[2]].length,pad=r.find(([t])=>/^ +$/.test(t))?.[1]??r.at(-1)[1],out=[];let n=0;
+  for(const [t,st] of r)for(const ch of t){const blank=n>=from&&n<to;n++;const style=blank?pad:st,c=blank?' ':ch,last=out.at(-1);if(last&&last[1]===style)last[0]+=c;else out.push([c,style]);}
+  return out;};
+ const blankTime=rows=>rows.map(blankStage).map(r=>kindLine.test(textOf(r))?r.map(([t,st],i)=>[i>0&&/^ +(?:\d+h )?\d+m$/.test(t)?' '.repeat(t.length):t,st]):r);
  const unzone=(rows,hs)=>{const keep=rows.map(r=>!zoneRule(r)),at=keep.map((k,i)=>k?i:-1).filter(i=>i>=0);
   return {rows:at.map(i=>rows[i]),hits:hs.filter(h=>keep[h[0]]).map(h=>[at.indexOf(h[0]),...h.slice(1)])};};
  const mine=(rows,hs)=>{const own=new Set(hs.filter(h=>h[3]==='popup:MESSAGES').map(h=>h[0]));
   const keep=rows.map((r,i)=>i>0&&i<rows.length-1&&!own.has(i)&&!txt(r.map(([t])=>({text:t}))).includes('├'));
   const at=keep.map((k,i)=>k?i:-1).filter(i=>i>=0);
   return {rows:at.map(i=>rows[i]),hits:hs.filter(h=>keep[h[0]]).map(h=>[at.indexOf(h[0]),...h.slice(1)])};};
- if(!drawn){
-  const own=unzone(v.rows.slice(b.a,b.b+1).map(runs),hits),got=sessions(own.rows,own.hits),exp=sessions(want,c.hits);
+ // 11-18: under the native area the command column (`>_ Edit`) is gone and the title takes its room, so a golden bottom row that
+ // has one is not compared cell for cell: the drawn box must carry no command and keep the golden's routes (their titles lead the rows).
+ const goldenTool=!c.side&&want.some(r=>textOf(r).includes('>_ '));
+ if(goldenTool){
+  const rowsText=v.rows.slice(b.a,b.b+1).map(txt).join('\n');
+  assert(!rowsText.includes('>_'),label+'\n'+rowsText);noTool++;
+ }else if(!drawn){
+  const own=unzone(blankTime(v.rows.slice(b.a,b.b+1).map(runs)),hits),got=sessions(own.rows,own.hits),exp=sessions(want,c.hits);
   // A box with no requests folds its routes one step sooner as well where the zone's rule row now takes one of its rows (the
   // rule stays while a row of its zone shows): then it draws fewer rows than the golden and the golden's rows no longer apply.
   if(got.rows.length<exp.rows.length&&c.side&&c.height<=16)soloFolded++;
@@ -95,7 +117,7 @@ for(const c of golden.cases){
    assert.deepEqual(got.hits,exp.hits,label);soloSame++;
   }
  }else{
-  const own0=unzone(v.rows.slice(b.a,b.b+1).map(runs).map(r=>r.map(([t,s])=>[t,s])),hits),own=sessions(own0.rows,own0.hits),oldSide=sessions(want,c.hits),got=mine(own.rows,own.hits),exp=mine(oldSide.rows,oldSide.hits);
+  const own0=unzone(blankTime(v.rows.slice(b.a,b.b+1).map(runs).map(r=>r.map(([t,s])=>[t,s]))),hits),own=sessions(own0.rows,own0.hits),oldSide=sessions(want,c.hits),got=mine(own.rows,own.hits),exp=mine(oldSide.rows,oldSide.hits);
   // The requests now take more rows than the one row v4.36.4 gave each, so a short box folds its routes one step
   // sooner: where it still draws the routes in the same form, they are v4.36.4's rows cell for cell (and their
   // press cells); where it folds them, the golden's rows no longer apply (the fold's own tests are below).
@@ -106,8 +128,8 @@ for(const c of golden.cases){
  }
  n++;
 }
-console.log('cases',n,JSON.stringify({same,folded,soloSame,soloFolded}));assert(same>=12&&folded<=4&&same+folded===17,JSON.stringify({same,folded}));
-assert(soloSame>=45&&soloFolded<=3&&soloSame+soloFolded===51,JSON.stringify({soloSame,soloFolded}));
+console.log('cases',n,JSON.stringify({same,folded,soloSame,soloFolded,noTool}));assert(same>=8&&folded<=4&&same+folded+noTool>=17&&n===68,JSON.stringify({same,folded,noTool}));
+assert(soloSame>=35&&soloFolded<=3&&n===same+folded+soloSame+soloFolded+noTool,JSON.stringify({soloSame,soloFolded,noTool}));
 """)
         self.assertIn("cases 68", out)
 
@@ -259,7 +281,7 @@ const styles={dim:{dim:true},loc_repo:{foreground:253},lvl_g:{foreground:150},g_
 // Fleet's table cells as the backend sends them: plain, dim, a gray, a hue, a dim hue, a bold dim.
 const table=[[{text:'STATE',dim:true},{text:'  ROUTE  ',foreground:-1},{text:'AGE',foreground:244}],
  [{text:'✕',foreground:217,bold:true},{text:' 휠 입력 시험 '},{text:'54m',foreground:242},{text:' code ',dim:true,bold:true}],
- [{text:'⠋',foreground:230},{text:' 팝업 바탕 ',foreground:253},{text:'claude',foreground:116},{text:' 대기',foreground:150,dim:true}]];
+ [{text:'⠋',foreground:230},{text:' 팝업 바탕 ',foreground:253},{text:'claude',foreground:116},{text:'cc',foreground:173},{text:' 대기',foreground:150,dim:true}]];
 const question=[[{text:'◑ ',role:'accent'},{text:'route 상자를 이대로 둘까요?'}],[{text:'  '},{text:'▸',foreground:116,bold:true},{text:' 1 네',foreground:253,bold:true}],[{text:'    2 아니오',dim:true}],[{text:'↑↓ · Enter 보내기 · Esc 닫기',dim:true}]];
 const messages=pv.messagesBody({model:{styles,requests:[{id:'rq-a',glyph:'◂',who:'[e7]',title:'검토 요청',status:'열림',details:[['전달','전달됨','dim']],body:['본문']}],
  messages:[{way:'←',who:'[e1]',harness:'claude',when:'08:10',text:'CI 통과'}]},columns:60});
@@ -285,7 +307,9 @@ for(const [name,body,kind] of [['question',question,'text'],['table',table,'tabl
   assert.equal(top.find(p=>p.text.includes('QUESTIONS')).foreground,f.popupTitle,label);
   assert.equal(top.find(p=>p.text==='3 ').foreground,face==='light'?88:217,label);
   if(name==='table'){const all=frame.flat();assert.equal(all.find(p=>p.text.includes('휠 입력')).foreground,f.bright);
-   assert.equal(all.find(p=>p.text==='claude').foreground,face==='light'?23:116);const d=all.find(p=>p.text===' 대기');assert(d.dim===false&&d.foreground===(face==='light'?22:150),label);}
+   assert.equal(all.find(p=>p.text==='claude').foreground,face==='light'?23:116);
+   // 11-18: Claude's harness orange 173 has its own deep pair (166) on the light face; the teal keeps its own.
+   assert.equal(all.find(p=>p.text==='cc').foreground,face==='light'?166:173);const d=all.find(p=>p.text===' 대기');assert(d.dim===false&&d.foreground===(face==='light'?22:150),label);}
   if(name==='question'){const all=frame.flat();assert.equal(all.find(p=>p.text.startsWith('route 상자')).foreground,f.bright);assert.equal(all.find(p=>p.text==='◑ ').foreground,f.accent);}
   // The empty cells round the frame keep the terminal's own (no ground).
   for(const row of [r.rows[0],r.rows.at(-1)])if(r.top<r.frame.top)assert(row.every(p=>p.background===undefined),label);

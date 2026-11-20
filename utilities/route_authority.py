@@ -26,6 +26,7 @@ from typing import Mapping, NamedTuple
 
 from dispatch_attempt_policy import committed_outcome, readable_result, verdict_pass
 import review_round_cap as _ROUND
+from route_form import one_shot_review_node_ids, serial_attempt_route
 from session_identity import identity as session_identity, session_label
 
 
@@ -415,7 +416,9 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
             "The exact independent review process has ended and its lease is released." if live else "")
     if action == "completion-owner":
         from dispatch_attempt_policy import verdict_pass
-        applicable = not facts.get("closing") and metadata.get("workflow_completion") == "runtime-v1"
+        # A unit turn a later turn continued has nothing left to settle: the route's end is the last turn's.
+        applicable = (not facts.get("closing") and not facts.get("continued")
+                      and metadata.get("workflow_completion") == "runtime-v1")
         applicable = applicable and (status in {"open", "running"} if facts.get("executing") else
             metadata.get("dispatch_depth") == "1" and status == "done" and verdict_pass(metadata))
         return ContinuationDecision(bool(applicable), "applicable" if applicable else "not-applicable")
@@ -880,6 +883,10 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
                     raise _contract_error("owner-closure-intensity-unknown", "owner-closure-intensity-unknown:" + route["effective_intensity"])
                 raise
         worker_type = node.get("worker_type") or ("review" if node.get("kind") == "review-worker" else "test")
+        # The middle cell's review (`solo` at `standard` and up): the owner both makes the work and starts this review,
+        # so the review's rounds are counted on its lineage, not once per reviewed content.
+        review_cell = _is_one_shot_review(route, node)
+        same_content_rows = None
         # Strict terminal no-start rows remain in the physical registry and in
         # dispatch-node's lineage view, but are not launched rounds. Derive the
         # exclusion from the same launch-fence proof used by retry admission.
@@ -915,6 +922,13 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
                                    or meta.get("review_subject_digest") == source_digest]
                     budget_kinds = [_ROUND.classify_round_row(s, m,
                         worker_type=m.get("worker_type") or worker_type) for s, m in budget_rows]
+                    if review_cell:
+                        # Rounds of this review count on the node's lineage; the rows that judged these
+                        # exact bytes still decide whether the owner has corrected anything since.
+                        same_content_rows = budget_rows
+                        budget_rows, budget_kinds = rows, kinds
+        if same_content_rows is None:
+            same_content_rows = budget_rows
         verdicts = [i for i, kind in enumerate(budget_kinds) if kind == "verdict"]
         subject_attempts = {m.get("attempt_id") for _status, m in budget_rows if m.get("attempt_id")}
         budget_revisions = [revision for revision in revisions if any(
@@ -960,7 +974,7 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
             retry_predecessor([{**rows[-1][1], "_status": rows[-1][0]}]))
         if (action == "round" and state == "admit" and source_aware and not transport_retry
                 and node.get("kind") == "review-worker"
-                and _ROUND.open_blocking_verdict(budget_rows, worker_type) is not None):
+                and _ROUND.open_blocking_verdict(same_content_rows, worker_type) is not None):
             state = "review-correction-required"
         # The verdict budget stays with the content subject, but the round kind
         # follows the node lineage: a correction always changes the reviewed
@@ -969,7 +983,7 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         # scratch. A list the owner already disposed (owner-closure) is not
         # open, and attempt history alone (crash, capacity death, invalid
         # envelope) never establishes a prior judgment.
-        lineage_closure = bool(source_aware and not verdicts and node.get("kind") == "review-worker"
+        lineage_closure = bool(source_aware and (review_cell or not verdicts) and node.get("kind") == "review-worker"
                                and _ROUND.open_blocking_verdict(rows, worker_type) is not None)
         round_kind = "closure-check" if closure or lineage_closure else "correction" if verdicts else "first"
         budget = _ROUND.RoundBudget(len(verdicts), counted, budget_kinds_for_streak.count("verdict-less"), cap, state,
@@ -994,6 +1008,11 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         return ContinuationDecision(True, state, budget=budget, census={
             "verdict_rounds": budget.verdict_rounds + (site == "registered"),
             "verdictless_rounds": budget.verdictless_rounds, "cap": budget.cap, "closure_class": closure})
+    if action in {"owner-closure", "complete-inline"} and _is_one_shot_review(route, node):
+        # The owner made the work this review judges: it cannot close that review itself, by an
+        # owner-closure record or an inline completion. A review that cannot run is not a pass.
+        return ContinuationDecision(False, state, action + "-review-of-own-work", "settle",
+                                    detail="the owner of a solo route cannot close the review of its own work")
     if action == "owner-closure" and node.get("completion_gate") == "code-test":
         return ContinuationDecision(False, "not-review", "owner-closure-node-not-review",
                                     "settle", detail="code-test remains a test-owned gate")
@@ -1020,6 +1039,13 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
     return ContinuationDecision(allowed, state, reason, "same-command" if state.startswith("blocked-") else budget.next_action,
         "The exact active round settles without overwriting its result." if state.startswith("blocked-") else "",
         detail, budget)
+
+
+def _is_one_shot_review(route, node) -> bool:
+    """Whether `node` is one of the middle cell's review nodes (the owner makes the work and starts this
+    review; from `strong` the review is a group of legs, and every leg counts its rounds on its own lineage)."""
+    return (isinstance(node, dict) and node.get("id") in one_shot_review_node_ids(route)
+            and node.get("kind") == "review-worker")
 
 
 # ---------------------------------------------------------------------------
@@ -1428,7 +1454,7 @@ def depth1_supported_harnesses(route, *, worker_type: str | None) -> set[str]:
     if not isinstance(route, dict):
         return set()
     route = route_in_force(route)
-    if route.get("effective_intensity") == "quick" or route.get("registered_headless_candidates") is not None:
+    if serial_attempt_route(route) or route.get("registered_headless_candidates") is not None:
         rows, fields = route.get("registered_headless_candidates") or [], ("harness",)
     else:
         rows = (route.get("dispatch_evidence") or {}).get("tuples") or []

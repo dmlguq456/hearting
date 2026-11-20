@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import stat
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
@@ -28,7 +29,7 @@ from artifact_producer_store import (
     _earlier_documents, _folder_cycle_id, _fsync_dir, _json_bytes, _LayoutScan, _read_json,
     _rfc3339, _write_atomic, _write_campaign, _write_campaign_runtime_record,
     _write_cycle_record, campaign_dir, campaign_runtime_record, CONTRACT, cycle_dir,
-    cycle_disposition, is_active, list_cycle_records, ProducerError, read_campaign,
+    cycle_disposition, is_active, list_cycle_records, producer_dir, ProducerError, read_campaign,
     read_campaign_tombstone, read_cycle_record, RELATED_KINDS,
 )
 
@@ -39,8 +40,8 @@ from artifact_producer_routes import (
 from artifact_producer_history import (
     _campaign_lines_locked, _command_line, _command_stamp, _flush_campaign_pending_locked,
     _flush_cycle_pending_locked, _HAND_ACTOR, _history_by, _history_deliver_locked,
-    _last_known_path, _locator_suffix, _merge_pending, _observe_root_controls,
-    _preserve_current_manifest, _read_manifest_raw, _UNSET, _with_cycle_lines, _with_pending,
+    _last_known_path, _locator_suffix, _merge_pending,
+    _observe_root_controls, _preserve_current_manifest, _read_manifest_raw, _UNSET, _with_cycle_lines, _with_pending,
 )
 
 from artifact_producer_interim import (
@@ -54,6 +55,17 @@ from artifact_producer_manifest import (
 from artifact_producer_refresh import (
     REFRESH_ADMISSION_WAIT_SECONDS, refresh_cycle,
 )
+
+
+def _request_entrance_refresh(root: Path) -> None:
+    """The entrance is drawn again after a write that changes what it shows (what `finalize` does).
+
+    Best effort and without waiting: the entrance never changes or fails the command that asked."""
+    try:
+        import artifact_entrance  # lazy: a cycle operation never depends on the entrance
+        artifact_entrance.request_refresh(Path(root))
+    except Exception as exc:  # noqa: BLE001
+        print(f"artifact_entrance skipped error={type(exc).__name__}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +186,9 @@ def cycle_mark(root: Path, cycle_id: str, *, discard: bool = False, superseded_b
     if len(chosen) != 1:
         raise ProducerError("request-invalid", "cycle-mark takes exactly one of --discard, --superseded-by, --clear, --primary")
     if primary is not None:
-        return _mark_primary(root, cycle_id, primary, reason=reason, now=now)
+        marked = _mark_primary(root, cycle_id, primary, reason=reason, now=now)
+        _request_entrance_refresh(root)  # the entrance names the cycle's primary document
+        return marked
     stamp = _command_stamp()
     lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
     try:
@@ -232,6 +246,179 @@ def cycle_mark(root: Path, cycle_id: str, *, discard: bool = False, superseded_b
 # -- the next manifest document of a closed cycle, for a change that is not a file change ---
 
 
+def _snapshot_holds_document(root: Path, cycle_id: str, raw: bytes, document: Mapping[str, Any]) -> bool:
+    """Whether the copy kept for this document's revision, if there is one, holds this document: the same bytes,
+    or the same document in another formatting (a person re-saved it).  Nothing kept answers True."""
+    try:
+        path = artifact_lifecycle.manifest_snapshot_path(root, cycle_id, document.get("manifest_revision_id"))
+    except artifact_lifecycle.LifecycleError:
+        return True  # no copy can be kept under a malformed revision ID; the rules of `validate_update` say so
+    if not os.path.lexists(str(path)):
+        return True
+    if path.is_symlink():
+        return False
+    try:
+        kept = path.read_bytes()
+        if kept == raw:
+            return True
+        return artifact_manifest.manifest_digest(json.loads(kept.decode("utf-8"))) == artifact_manifest.manifest_digest(document)
+    except (OSError, ValueError, UnicodeError, TypeError, AttributeError):
+        return False
+
+
+def _keep_snapshot(root: Path, cycle_id: str, raw: bytes, document: Mapping[str, Any]) -> None:
+    """Keep a published document's bytes (`preserve_manifest_snapshot`): a copy already kept for the revision that holds the
+    same document in another formatting is the copy kept (the earlier document is what is kept, not how it was
+    written); another document is refused, as a refusal and not an exception out of the command."""
+    try:
+        artifact_lifecycle.preserve_manifest_snapshot(root, cycle_id, raw)
+    except artifact_lifecycle.LifecycleError as exc:
+        if exc.code == "manifest-snapshot-conflict" and _snapshot_holds_document(root, cycle_id, raw, document):
+            return
+        raise ProducerError(exc.code, exc.detail) from exc
+
+
+_MOVED_FIELDS = ("campaign_id", "parent_cycle_id")
+
+
+def _precheck_move(root: Path, record: Mapping[str, Any], source: Path, target_dir: Path, new_campaign_id: str,
+                   parent: Any, members: Sequence[Path], *, found: Any = _UNSET, digest: Optional[str] = None,
+                   ) -> artifact_index.IndexDocument:
+    """Refuse, before the folder moves, a manifest the adoption would stop on.  The adoption (see
+    `_adopt_location_locked`) writes the cycle's and each member's next document after the folder has moved, so
+    the same documents are computed and checked here, read-only, first: a refusal leaves every byte as it was.
+    The admission index is read once (the lock is held, and nothing before the adoption writes it); it is returned,
+    for the adoption to publish the cycle's own document from the same read."""
+    target = _read_json(target_dir / "campaign.json") or {}
+    index = artifact_admission.load_index(root)
+
+    def one(rec: Mapping[str, Any], folder: Path, parent_value: Any, read: Any, read_digest: Optional[str]) -> None:
+        if read is _UNSET:
+            read = _read_manifest_raw(folder) if _closed_record(rec) else None
+        _precheck_publish(root, rec, _cycle_rel(root, folder),
+                          _plan_document(root, rec, parent_value, new_campaign_id, target, read, read_digest), index)
+
+    # The cycle's own manifest was read (and hashed) once by the caller, which hands the same read on to the adoption.
+    one(record, source, record.get("parent_cycle_id") if parent is _UNSET else parent, found, digest)
+    for member in members:
+        member_record = read_cycle_record(root, member.name)
+        if member_record is not None:
+            one(member_record, member, member_record.get("parent_cycle_id"), _UNSET, None)
+    return index
+
+
+def _plan_document(root: Path, record: Mapping[str, Any], parent: Any, new_campaign_id: str,
+                   target: Mapping[str, Any], manifest: Any, digest: Optional[str]):
+    """The next manifest document of a closed cycle whose place (campaign, parent) is now `new_campaign_id` and
+    `parent`, computed and written nowhere: `(raw, document, refreshed, digest, publish)` with `publish` False
+    when the document says nothing the move changes; None for a cycle with no manifest.  The one computation
+    behind `_adopt_location_locked` and the check a move makes before it renames anything."""
+    if manifest is None:
+        return None
+    raw, document = manifest
+    observed_digest = digest or artifact_manifest.manifest_digest(document)
+    if observed_digest != record.get("manifest_digest"):
+        previous = artifact_lifecycle.find_manifest_snapshot(
+            root, record["cycle_id"], manifest_digest=record.get("manifest_digest"))
+        if previous is not None:
+            document = previous
+            raw = artifact_manifest.canonical_bytes(document)
+            digest = record["manifest_digest"]
+    refreshed = _next_document(document, artifact_identity.IdAllocator())
+    if (record.get("relocation") or {}).get("original_root"):
+        import artifact_cross_root_move
+        refreshed = artifact_cross_root_move.relocate_document(root, refreshed, record["relocation"])
+    campaign_row = dict(refreshed.get("campaign") or {})
+    campaign_row.update(campaign_id=new_campaign_id, goal=str(target.get("goal", "")),
+                        title=str(target.get("title", "")),
+                        completion_criterion={"statement": str(
+                            (target.get("completion_criterion") or {}).get("statement", ""))})
+    refreshed["campaign"] = campaign_row
+    refreshed["cycle"] = dict(refreshed["cycle"], campaign_id=new_campaign_id, parent_cycle_id=parent)
+    publish = not (refreshed["campaign"] == document.get("campaign") and refreshed["cycle"] == document.get("cycle"))
+    return raw, document, refreshed, digest, publish
+
+
+def _precheck_publish(root: Path, record: Mapping[str, Any], where: str, plan: Any,
+                      index: Optional[artifact_index.IndexDocument] = None) -> None:
+    """What `_publish_document_locked` would refuse for this plan, said before anything is written.  The refusals are
+    the ones that function makes (`_publication_refusals`, called by both): the copy kept for the document's revision
+    holds another document, the next document does not pass `validate_update`, the index lists another document
+    for the cycle than the one in the folder, or the index would not take the next one.  A refusal names what the
+    manifest differs from and what a person can do, and nothing was moved."""
+    if plan is None or not plan[4]:
+        return
+    raw, document, refreshed, digest, _publish = plan
+    cycle_id = record["cycle_id"]
+    sealed = record.get("manifest_digest")
+    if not _snapshot_holds_document(root, cycle_id, raw, document):
+        raise ProducerError("manifest-snapshot-conflict", (
+            f"{where}/manifest.json: the copy kept for its revision {document.get('manifest_revision_id')} holds "
+            "another document than the manifest in the folder, so the move would stop half done; nothing was moved. "
+            "next=put manifest.json back as that kept copy holds it (the copy is the document the cycle was sealed "
+            "with), then run cycle-move again"))
+    digest = digest or artifact_manifest.manifest_digest(document)
+    edited = digest != sealed
+    differs = (f"the record names {sealed} as the sealed manifest and the folder holds {digest}, and no copy of "
+               "the sealed document is kept to go back to") if edited else ""
+    back = ("next=put manifest.json back as it was sealed (from a backup of the folder, if there is one)"
+            if edited else "next=put manifest.json back as it was sealed")
+    try:
+        _publication_refusals(root, record, document, refreshed, digest, _MOVED_FIELDS, index)
+    except ProducerError as exc:
+        if exc.code == "manifest-invalid":
+            raise ProducerError("manifest-invalid", (
+                f"{where}/manifest.json: the next document of this cycle breaks the manifest rules ({exc.detail})"
+                + (f"; {differs}" if edited else "")
+                + f"; nothing was moved. {back}, or take out what breaks the rules named above, then run cycle-move again")
+            ) from exc
+        if exc.code == "already-sealed-mismatch":
+            raise ProducerError("manifest-invalid", (
+                f"{where}/manifest.json: the manifest in the folder is not the one the cycle was sealed with "
+                f"({exc.detail})" + (" and no copy of the sealed document is kept to go back to" if edited else "")
+                + f"; the move would stop half done; nothing was moved. {back}, then run cycle-move again")) from exc
+        raise ProducerError(exc.code, (
+            f"{where}/manifest.json: the index would not take the next document of this cycle ({exc.detail}); "
+            f"nothing was moved. {back}, then run cycle-move again")) from exc
+
+
+def _publication_refusals(root: Path, record: Mapping[str, Any], document: Mapping[str, Any],
+                          refreshed: Mapping[str, Any], digest: str, moved_fields: Sequence[str],
+                          index: Optional[artifact_index.IndexDocument]) -> Tuple[str, bytes, artifact_index.IndexDocument]:
+    """Everything that decides whether `refreshed` may replace `document` as the cycle's current document, read-only:
+    the rules of `validate_update`, the document the index lists for the cycle being the earlier one (`digest`), and
+    the index taking the next document.  The one judgment behind `_publish_document_locked`, which makes it before
+    it writes anything, and `_precheck_publish`, which makes it before a move renames the folder.  Raises the
+    `ProducerError` of the first refusal (`manifest-invalid` with the violation codes, `already-sealed-mismatch`
+    with the digest the index lists, `index-rejected`); returns the next document's digest and bytes, and the index read."""
+    cycle_id = record["cycle_id"]
+    earlier = {old.get("manifest_revision_id"): old for old in _earlier_documents(root, cycle_id, refreshed)}
+    earlier[document.get("manifest_revision_id")] = dict(document)
+    report = artifact_manifest.validate_update(refreshed, preserved=list(earlier.values()), previous=document,
+                                               changeable_cycle_fields=moved_fields)
+    if not report.ok:
+        raise ProducerError("manifest-invalid", ";".join(v.code for v in report.violations))
+    new_digest = artifact_manifest.manifest_digest(refreshed)
+    new_raw = artifact_manifest.canonical_bytes(refreshed)
+    if index is None:
+        index = artifact_admission.load_index(root)  # the one read of a locked section
+    row = index.manifests.get(cycle_id)
+    if isinstance(row, dict) and row.get("manifest_digest") != digest:
+        raise ProducerError("already-sealed-mismatch", (
+            f"the index lists {row.get('manifest_digest')} for the cycle, the manifest at hand is {digest}"))
+    identity = artifact_lifecycle.read_root_identity(root)
+    index_report = artifact_index.check(
+        index, refreshed, idempotency_key=cycle_id, manifest_digest=new_digest,
+        repository_id=identity.repository_id if identity else None,
+        replaces_manifest_digest=digest if isinstance(row, dict) else None,
+        known_parent_cycle_ids=(set(artifact_admission._producer_cycle_ids(root)) |
+            ({record["parent_cycle_id"]} if record.get("parent_cycle_id") and
+             (record.get("relocation") or {}).get("external_parent_root") else set())))
+    if not index_report.ok:
+        raise ProducerError("index-rejected", ";".join(v.code for v in index_report.violations))
+    return new_digest, new_raw, index
+
+
 def _publish_document_locked(root: Path, record: Mapping[str, Any], directory: Path, raw: bytes,
                              document: Mapping[str, Any], refreshed: Dict[str, Any],
                              lines: Sequence[Mapping[str, Any]], *, now: Optional[float],
@@ -252,30 +439,10 @@ def _publish_document_locked(root: Path, record: Mapping[str, Any], directory: P
     manifest_path = directory / "manifest.json"
     if digest is None:
         digest = artifact_manifest.manifest_digest(document)
-    artifact_lifecycle.preserve_manifest_snapshot(root, cycle_id, raw)
-    earlier = {old.get("manifest_revision_id"): old for old in _earlier_documents(root, cycle_id, refreshed)}
-    earlier[document.get("manifest_revision_id")] = dict(document)
-    report = artifact_manifest.validate_update(refreshed, preserved=list(earlier.values()), previous=document,
-                                               changeable_cycle_fields=moved_fields)
-    if not report.ok:
-        raise ProducerError("manifest-invalid", ";".join(v.code for v in report.violations))
-    new_digest = artifact_manifest.manifest_digest(refreshed)
-    new_raw = artifact_manifest.canonical_bytes(refreshed)
-    if index is None:
-        index = artifact_admission.load_index(root)  # the one read of this locked section
-    row = index.manifests.get(cycle_id)
-    if isinstance(row, dict) and row.get("manifest_digest") != digest:
-        raise ProducerError("already-sealed-mismatch", "index")
-    identity = artifact_lifecycle.read_root_identity(root)
-    index_report = artifact_index.check(
-        index, refreshed, idempotency_key=cycle_id, manifest_digest=new_digest,
-        repository_id=identity.repository_id if identity else None,
-        replaces_manifest_digest=digest if isinstance(row, dict) else None,
-        known_parent_cycle_ids=(set(artifact_admission._producer_cycle_ids(root)) |
-            ({record["parent_cycle_id"]} if record.get("parent_cycle_id") and
-             (record.get("relocation") or {}).get("external_parent_root") else set())))
-    if not index_report.ok:
-        raise ProducerError("index-rejected", ";".join(v.code for v in index_report.violations))
+    # Nothing is written until the next document is accepted: a copy kept for this revision is the bytes the
+    # cycle was sealed with, and a refused attempt must not leave the bytes it was refused for in that place.
+    new_digest, new_raw, index = _publication_refusals(root, record, document, refreshed, digest, moved_fields, index)
+    _keep_snapshot(root, cycle_id, raw, document)
     base_record = dict(record_after if record_after is not None else record)
     pending = _merge_pending(base_record.get("history_pending") or [], lines)
     if _history_deliver_locked(root, pending):
@@ -283,7 +450,7 @@ def _publish_document_locked(root: Path, record: Mapping[str, Any], directory: P
     where = cycle_path or _cycle_rel(root, directory)
     _write_journal(root, cycle_id, state="refreshing", manifest_digest=new_digest, previous_manifest_digest=digest,
                    cycle_path=where, manifest_revision_id=refreshed["manifest_revision_id"], history_pending=pending)
-    artifact_lifecycle.preserve_manifest_snapshot(root, cycle_id, new_raw)
+    _keep_snapshot(root, cycle_id, new_raw, refreshed)
     # COMMIT POINT: atomic replacement of the current document.
     _write_atomic(manifest_path, new_raw)
     index = artifact_index.apply(index, refreshed, cycle_path=where, manifest_digest=new_digest,
@@ -435,10 +602,14 @@ def _adopt_location_locked(root: Path, record: Mapping[str, Any], new_directory:
     The one procedure behind `cycle-move` and the finding of a hand-made move (the admission lock is
     held; the folder is already where it is).  The cycle's own binding, record, campaign lists, current
     manifest (a new document, the earlier one preserved) and index row follow, in an order a stopped run
-    is finished by the next look.  `parent` (when given) is the new parent cycle ID or `None`.  Returns
+    is finished by the next look (a run that stops for a reason that does not go away, a manifest that cannot
+    be the next document, would stop the next look the same way, so `cycle_move` checks every document it
+    will write before the folder moves: `_precheck_move`).  `parent` (when given) is the new parent cycle ID or `None`.  Returns
     the record as written and the campaign IDs whose locator index is now stale.  `manifest` (the
-    `_read_manifest_raw` result, `None` for none) and its `manifest_digest` are what a reconcile read
-    before it took the lock; left out, the folder's manifest is read here."""
+    `_read_manifest_raw` result, `None` for none) and its `manifest_digest` are what the caller already
+    read (a reconcile, before it took the lock; a move, once); left out, the folder's manifest is read here.
+    A closed cycle that has left its campaign needs its manifest kept before this runs: the old campaign
+    is read in here, and its close binds the cycle to those bytes."""
     cycle_id = record["cycle_id"]
     import artifact_request
     anchor = artifact_request.scope_anchor(new_directory) if record.get("request_binding") else None
@@ -488,6 +659,8 @@ def _adopt_location_locked(root: Path, record: Mapping[str, Any], new_directory:
             operation="update", field="parent", before={"value": record.get("parent_cycle_id")},
             after={"value": parent}, reason=reason, now=now, by=by))
         changed.append(new_campaign_id)
+    # The manifest the old campaign's close reads was kept by the caller before this (see `cycle_move`,
+    # `_reconcile_locked_run`): once the folder has left, the campaign is read with the kept copy.
     # The binding the folder carries names the campaign it sits under.
     binding = artifact_locator.read_cycle_binding(new_directory / artifact_locator.CYCLE_BINDING)
     if binding is None or binding.get("campaign_id") != new_campaign_id or binding.get("cycle_id") != cycle_id:
@@ -500,36 +673,17 @@ def _adopt_location_locked(root: Path, record: Mapping[str, Any], new_directory:
     pending_record = _with_cycle_lines(updated, lines)
     if manifest is _UNSET:
         manifest = _read_manifest_raw(new_directory) if _closed_record(record) else None
-    if manifest is not None:
-        raw, document = manifest
-        observed_digest = manifest_digest or artifact_manifest.manifest_digest(document)
-        if observed_digest != record.get("manifest_digest"):
-            previous = artifact_lifecycle.find_manifest_snapshot(
-                root, cycle_id, manifest_digest=record.get("manifest_digest"))
-            if previous is not None:
-                document = previous
-                raw = artifact_manifest.canonical_bytes(document)
-                manifest_digest = record["manifest_digest"]
-        refreshed = _next_document(document, artifact_identity.IdAllocator())
-        if (record.get("relocation") or {}).get("original_root"):
-            import artifact_cross_root_move
-            refreshed = artifact_cross_root_move.relocate_document(root, refreshed, record["relocation"])
-        campaign_row = dict(refreshed.get("campaign") or {})
-        campaign_row.update(campaign_id=new_campaign_id, goal=str(target.get("goal", "")),
-                            title=str(target.get("title", "")),
-                            completion_criterion={"statement": str(
-                                (target.get("completion_criterion") or {}).get("statement", ""))})
-        refreshed["campaign"] = campaign_row
-        refreshed["cycle"] = dict(refreshed["cycle"], campaign_id=new_campaign_id,
-                                  parent_cycle_id=updated.get("parent_cycle_id"))
-        if refreshed["campaign"] == document.get("campaign") and refreshed["cycle"] == document.get("cycle"):
+    plan = _plan_document(root, record, updated.get("parent_cycle_id"), new_campaign_id, target, manifest, manifest_digest)
+    if plan is not None:
+        raw, document, refreshed, manifest_digest, publish = plan
+        if not publish:
             written = pending_record  # nothing the document says changed (only a folder name)
             _write_cycle_record(root, written, exclusive=False)
             _swap_index_path_locked(root, cycle_id, where, index=index)
         else:
             written = _publish_document_locked(
                 root, record, new_directory, raw, document, refreshed, lines, now=now, record_after=updated,
-                moved_fields=("campaign_id", "parent_cycle_id"), index=index, cycle_path=where,
+                moved_fields=_MOVED_FIELDS, index=index, cycle_path=where,
                 digest=manifest_digest)
     else:
         written = pending_record
@@ -539,6 +693,8 @@ def _adopt_location_locked(root: Path, record: Mapping[str, Any], new_directory:
     # An explicit request-folder move already moved these bytes. Apply the
     # same existing metadata/history operation to each logical scope too.
     if command == "cycle-move" and (old_campaign_id != new_campaign_id or record.get("locator") != new_locator):
+        # The members' manifests were kept before this ran (`cycle_move` before the rename; a reconcile
+        # lists each member as a moved cycle of its own), so the old campaign read above found them.
         for member in artifact_request.members(root, new_directory):
             child = read_cycle_record(root, member.name)
             _, touched = _adopt_location_locked(
@@ -572,6 +728,28 @@ def _retarget_index_paths(root: Path, old_prefix: str, new_prefix: str) -> None:
         artifact_admission._write_index(root, replace(index, cycles=cycles))
 
 
+def _record_place_holds(root: Path, record: Mapping[str, Any]) -> bool:
+    """Is the cycle's folder where its record says: there, in the campaign and under the name the record
+    names, carrying this cycle's binding?  Read from that one folder; nothing else is looked at."""
+    if record.get("journal_migration"):
+        return True  # its folder is a backup outside campaigns/: a look at campaigns/ has nothing to settle for it
+    try:
+        folder = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
+        if not folder.is_dir() or folder.is_symlink():
+            return False
+        import artifact_request
+        anchor = artifact_request.scope_anchor(folder)
+        holder = anchor if anchor is not None else folder
+        # The oldest layout keeps the cycle one level down, in `<campaign>/cycles/<id>`.
+        old_layout = anchor is None and holder.parent.name == "cycles" and not record.get("locator")
+        campaign = _read_json((holder.parent.parent if old_layout else holder.parent) / "campaign.json") or {}
+        return (campaign.get("campaign_id") == record["campaign_id"]
+                and _folder_cycle_id(folder) == record["cycle_id"]
+                and not (isinstance(record.get("locator"), str) and record["locator"] != holder.name))
+    except (ProducerError, artifact_locator.LocatorError, OSError):
+        return False
+
+
 def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional[str] = None, parent: Optional[str] = None,
                no_parent: bool = False, reason: Optional[str] = None, now: Optional[float] = None,
                target_artifact_root: Optional[Path] = None, source_campaign: Optional[str] = None,
@@ -595,6 +773,17 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
     if campaign is None and parent is None and not no_parent:
         raise ProducerError("request-invalid", "cycle-move changes the campaign and/or the parent")
     stamp = _command_stamp()
+    # A folder that is not where its record says (an earlier run stopped after the folder moved, or it was
+    # moved by hand) is for the one look every writer takes first, before the lock, as `campaign-close`
+    # takes it: it keeps the evidence, makes the records say where the folder is, and the move asked for
+    # then goes on from there (a cycle already under the target campaign is `unchanged`).  The folders
+    # of the root are read only when the record's own place does not hold; a look that could not finish
+    # leaves the answer to the checks below, which refuse as they did.
+    if cycle_id:
+        asked = read_cycle_record(root, cycle_id)
+        if asked is not None and not asked.get("deleted_at") and not _record_place_holds(root, asked):
+            if reconcile_root(root, now=now).get("status") == "reconciled":
+                _request_entrance_refresh(root)  # what it set right is on the entrance, whatever this move then does
     lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
     stale: List[str] = []
     old_campaign_id = None
@@ -619,8 +808,18 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
         import artifact_request
         member_ids = [path.name for path in artifact_request.members(root, source)]
         destination = source
+        checked_index = None  # the admission index the check of the documents read; `None` when no check was made
+        read_once: Any = _UNSET
+        read_digest: Optional[str] = None
         if target is not None and target["campaign_id"] != old_campaign_id:
             artifact_locator.prepare_index_update(root, [old_campaign_id, target["campaign_id"]])
+            # The manifest is read and hashed once for the whole move: the next documents it will write once the
+            # folder has moved are checked from that read first (read-only), then kept and handed on to the adoption.
+            read_once = _read_manifest_raw(source) if _closed_record(record) else None
+            read_digest = artifact_manifest.manifest_digest(read_once[1]) if read_once is not None else None
+            checked_index = _precheck_move(root, record, source, campaign_dir(root, target["campaign_id"], target),
+                                           target["campaign_id"], new_parent, artifact_request.members(root, source),
+                                           found=read_once, digest=read_digest)
             if target.get("state") == "satisfied":
                 try:
                     artifact_campaign._reopen_locked(
@@ -637,16 +836,34 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
             else:
                 locator_name = keep.name
             destination = target_dir / locator_name
-            # The folder moves first; whatever stops after this is what the next look finishes.
+            # The evidence the old campaign's close reads stays behind the folder: the manifest read above is kept
+            # and handed on to the adoption below.  The folders of a request's members keep theirs the same way.
+            # The folder then moves, and whatever stops after this is what the next look finishes
+            # (`_reconcile_locked_run` keeps the same bytes first).
+            _preserve_current_manifest(root, record, source, found=read_once, digest=read_digest, match_record=True)
+            # The members' bytes are kept before the old campaign is read, as the cycle's own are, and, as for the
+            # cycle, what cannot be kept does not stop the move (it is met again where the manifest is replaced).
+            for member in artifact_request.members(root, source):
+                member_record = read_cycle_record(root, member.name)
+                if member_record is not None:
+                    _preserve_current_manifest(root, member_record, member, match_record=True)
             os.rename(str(source), str(destination))
             _fsync_dir(target_dir)
             _fsync_dir(source.parent)
         if destination == source and new_parent is _UNSET:
             return {"status": "unchanged", "cycle_id": cycle_id, "campaign_id": old_campaign_id,
                     "cycle_dir": str(source)}
-        written, stale = _adopt_location_locked(
+        if destination == source:  # a new parent only: the cycle's own next document, read once for the check and the adoption
+            anchor = artifact_request.scope_anchor(source) if record.get("request_binding") else None
+            read_once = _read_manifest_raw(source) if _closed_record(record) else None
+            read_digest = artifact_manifest.manifest_digest(read_once[1]) if read_once is not None else None
+            checked_index = _precheck_move(root, record, source, anchor.parent if anchor is not None else source.parent,
+                                           old_campaign_id, new_parent, [], found=read_once, digest=read_digest)
+        written, moved_stale = _adopt_location_locked(
             root, record, destination, command="cycle-move", stamp=stamp, reason=reason, now=now,
-            by="human", parent=new_parent, old_campaign_folder=source.parent)
+            by="human", parent=new_parent, old_campaign_folder=source.parent,
+            manifest=read_once, manifest_digest=read_digest, index=checked_index)
+        stale += moved_stale
         stale = list(dict.fromkeys(stale + [old_campaign_id, written["campaign_id"]]))
         artifact_locator.update_indexes(root, stale)
         _flush_cycle_pending_locked(root, cycle_id)
@@ -654,6 +871,7 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
         artifact_admission._release_lock(root, lock_fd)
     if old_campaign_id != written["campaign_id"]:
         _drop_group_membership(root, old_campaign_id, [cycle_id, *member_ids])
+    _request_entrance_refresh(root)
     return {"status": "moved", "cycle_id": cycle_id, "campaign_id": written["campaign_id"],
             "parent_cycle_id": written.get("parent_cycle_id"), "cycle_dir": str(destination)}
 
@@ -839,6 +1057,7 @@ def delete_cycle(root: Path, cycle_id: str, *, reason: Optional[str] = None, now
         artifact_admission._release_lock(root, lock_fd)
     for cid in campaigns:
         _drop_group_membership(root, cid, deleted_ids)
+    _request_entrance_refresh(root)
     if already_gone:
         return {"status": "already-deleted", "cycle_id": cycle_id}
     done = {"status": "deleted", "cycle_id": cycle_id, "campaign_id": campaign_id}
@@ -904,23 +1123,82 @@ def delete_campaign(root: Path, campaign: str, *, reason: Optional[str] = None,
         _flush_campaign_pending_locked(root, campaign_id)
     finally:
         artifact_admission._release_lock(root, lock_fd)
+    _request_entrance_refresh(root)
     done = {"status": "deleted", "campaign_id": campaign_id, "cycle_ids": gone}
     return dict(done, reparented=reparented) if reparented else done
+
+
+def _records_naming(root: Path, names: Any, skip: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """The cycle records whose `locator` is one of `names`, by that name, in the order of their files.  A cycle
+    whose ID is in `skip` (its folder was found, so it is not one whose folder lost its identity) is not read."""
+    found: Dict[str, List[Dict[str, Any]]] = {}
+    directory = producer_dir(root) / "cycles"
+    for entry in sorted(directory.iterdir(), key=lambda p: p.name) if directory.is_dir() else []:
+        if entry.suffix != ".json" or entry.name.startswith(".") or entry.stem in skip:
+            continue
+        record = _read_json(entry)
+        if record is not None and isinstance(record.get("locator"), str) and record["locator"] in names:
+            found.setdefault(record["locator"], []).append(record)
+    return found
+
+
+def _settle_unknown_folders(root: Path, scan: _LayoutScan, unknown: Sequence[Tuple[int, str, str, Path]]) -> None:
+    """Of the folders with no `.cycle.json` and no manifest (`unknown`: its place among the blockers, its campaign,
+    its name, its path), take back the ones that are nobody's unknown: the record of a cycle that ended with no
+    output or was deleted (state `abandoned` or `no-lineage`, or `deleted_at`) names it as its own place (this
+    campaign, this folder name), no record of a cycle that is still there names it too, and nothing is in it
+    but empty folders.
+
+    Only a closed cycle with a published row can be taken for gone, and the identity files of a cycle that
+    has a record naming this very place are what this folder lacks: no cycle's work can be what is left here, so
+    it does not keep the scan from saying what is gone.  A folder that holds a file, one named by a record of
+    another campaign or by no detached record stays what it was, a blocker, and so does one that a sealed,
+    superseded or open record names as well: the cycle that record is of may be the one that lost its files."""
+    scan.named = _records_naming(root, {name for _where, _campaign, name, _folder in unknown}, set(scan.cycles))
+    passed = set()
+    for place, campaign_id, name, folder in unknown:
+        mine = [record for record in scan.named.get(name, []) if record.get("campaign_id") == campaign_id]
+        detached = [record for record in mine
+                    if record.get("deleted_at") or record.get("state") in artifact_campaign.DETACHED_STATES]
+        if detached and len(detached) == len(mine) and _holds_no_file(folder):
+            passed.add(place)
+    if passed:
+        scan.blockers = [item for place, item in enumerate(scan.blockers) if place not in passed]
+        scan.complete = not scan.blockers
+
+
+def _holds_no_file(folder: Path, *, limit: int = 1000) -> bool:
+    """True when nothing but folders is under `folder` (a link of any kind is something)."""
+    seen = 0
+
+    def unreadable(exc):
+        raise exc
+
+    try:
+        for current, directories, files in os.walk(str(folder), followlinks=False, onerror=unreadable):
+            seen += 1
+            if files or seen > limit or any(os.path.islink(os.path.join(current, name)) for name in directories):
+                return False
+    except OSError:
+        return False
+    return True
 
 
 def _scan_layout(root: Path) -> _LayoutScan:
     """Where every campaign and cycle ID sits, read from the folders alone (a `lstat` and a few small files each).
 
     A symbolic link, an unreadable folder, a folder that carries no ID or an ID seen twice makes the
-    answer `complete=False`: such a scan can say where something moved to, never that something is gone."""
+    answer `complete=False`: such a scan can say where something moved to, never that something is gone.
+    `scan.blockers` names each entry that did so, with its path from the root and the reason."""
     scan = _LayoutScan({}, {}, {}, set(), True)
+    unknown: List[Tuple[int, str, str, Path]] = []  # the folders with no ID, settled once the folders are all read
     base = Path(root) / "campaigns"
     try:
         names = sorted(os.listdir(str(base)))
     except FileNotFoundError:
         return scan
     except OSError:
-        scan.complete = False
+        scan.block(root, base, "unreadable")
         return scan
     for name in names:
         if name.startswith("."):
@@ -929,27 +1207,29 @@ def _scan_layout(root: Path) -> _LayoutScan:
         try:
             mode = os.lstat(str(entry)).st_mode
         except OSError:
-            scan.complete = False
+            scan.block(root, entry, "unreadable")
             continue
         if stat.S_ISLNK(mode):
-            scan.complete = False
+            scan.block(root, entry, "symbolic-link")
             continue
         if not stat.S_ISDIR(mode):
             continue
         campaign = _read_json(entry / "campaign.json")
         campaign_id = campaign.get("campaign_id") if campaign else None
         if not artifact_identity.is_well_formed(campaign_id, "campaign"):
-            scan.complete = False
+            # A folder whose campaign.json cannot be opened (the folder or the file refuses this user) is one
+            # that cannot be read, not one that names no campaign: the answer to it is another.
+            scan.block(root, entry, "unreadable" if _cannot_open(entry / "campaign.json") else "no-campaign-id")
             continue
         if campaign_id in scan.campaigns:
             scan.duplicates.add(campaign_id)
-            scan.complete = False
+            scan.block(root, entry, f"id-seen-twice {campaign_id} (also {_rel_or_abs(root, scan.campaigns[campaign_id])})")
             continue
         scan.campaigns[campaign_id] = entry
         try:
             children = sorted(os.listdir(str(entry)))
         except OSError:
-            scan.complete = False
+            scan.block(root, entry, "unreadable")
             continue
         for child in children:
             path = entry / child
@@ -958,25 +1238,26 @@ def _scan_layout(root: Path) -> _LayoutScan:
             try:
                 mode = os.lstat(str(path)).st_mode
             except OSError:
-                scan.complete = False
+                scan.block(root, path, "unreadable")
                 continue
             if stat.S_ISLNK(mode):
-                scan.complete = False
+                scan.block(root, path, "symbolic-link")
                 continue
             if not stat.S_ISDIR(mode):
                 continue
             if child == "cycles":
-                scan.complete = False  # an old layout: moves are not judged from it
+                scan.block(root, path, "old-cycles-layout")  # moves are not judged from it
                 continue
             cycle_id = _folder_cycle_id(path)
             if cycle_id is None:
-                scan.complete = False
+                unknown.append((len(scan.blockers), campaign_id, child, path))
+                scan.block(root, path, "not-a-cycle")
                 continue
             if cycle_id in scan.cycles or cycle_id in scan.duplicates:
                 scan.duplicates.add(cycle_id)
-                scan.cycles.pop(cycle_id, None)
+                first = scan.cycles.pop(cycle_id, None)
                 scan.folder_campaign.pop(cycle_id, None)
-                scan.complete = False
+                scan.block(root, path, f"id-seen-twice {cycle_id}" + (f" (also {_rel_or_abs(root, first)})" if first else ""))
                 continue
             scan.cycles[cycle_id] = path
             scan.folder_campaign[cycle_id] = campaign_id
@@ -985,13 +1266,33 @@ def _scan_layout(root: Path) -> _LayoutScan:
                 member_id = member.name
                 if member_id in scan.cycles or member_id in scan.duplicates:
                     scan.duplicates.add(member_id)
-                    scan.cycles.pop(member_id, None)
+                    first = scan.cycles.pop(member_id, None)
                     scan.folder_campaign.pop(member_id, None)
-                    scan.complete = False
+                    scan.block(root, member, f"id-seen-twice {member_id}" + (f" (also {_rel_or_abs(root, first)})" if first else ""))
                     continue
                 scan.cycles[member_id] = member
                 scan.folder_campaign[member_id] = campaign_id
+    if unknown:
+        _settle_unknown_folders(root, scan, unknown)
     return scan
+
+
+def _cannot_open(path: Path) -> bool:
+    """True when `path` exists (or cannot be told not to) but this user cannot open it: a permission or I/O error."""
+    try:
+        os.close(os.open(str(path), os.O_RDONLY | os.O_NONBLOCK))
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return False
+
+
+def _rel_or_abs(root: Path, path: Path) -> str:
+    try:
+        return Path(path).relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _hand_changes(root: Path, scan: _LayoutScan, published: Mapping[str, str]) -> Dict[str, Any]:
@@ -1220,6 +1521,16 @@ def _reconcile_locked_run(root: Path, now: Optional[float], scan: _LayoutScan, p
                 pre = manifests.get(cycle_id)
                 if pre is None or pre.fingerprint != _manifest_fingerprint(folder):
                     return None
+        # Every cycle that left a closed campaign keeps the manifest its close binds it to before any of them
+        # is adopted: adopting one reads the campaign it left, and that read asks for the bytes of all the
+        # cycles the close names, the ones not yet looked at too.  The bytes are those read before the lock.
+        for cycle_id, folder in list(changes["cycle_moves"]) + list(changes["cycle_revive"]):
+            current = read_cycle_record(root, cycle_id)
+            if current is not None:
+                pre = (manifests or {}).get(cycle_id)
+                _preserve_current_manifest(
+                    root, current, folder, found=pre.found if pre is not None else None,
+                    digest=pre.digest if pre is not None else None, match_record=True)
         stamp = _command_stamp()
         by = _HAND_ACTOR
         stale: List[str] = []

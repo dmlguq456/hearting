@@ -12,19 +12,23 @@ from pathlib import Path
 
 import dispatch_runtime_support as RUNTIME_SUPPORT
 import model_profile as PROFILE
+import route_form as ROUTE_FORM
 
 from capability_route_base import (
     DEFAULTS, ROOT, TOPO,
 )
+from capability_route_dispatch import _expand_parallel_groups
 
 
-def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=None):
+def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=None, owner_default=None):
     """One selection for compile and verify: demand, otherwise legacy default.
 
     Intensity describes the workflow shape; its compatibility default must not
-    veto the independently validated judgment/execution demand.
+    veto the independently validated judgment/execution demand. `owner_default` is the default of an
+    owner that makes the work itself at a higher intensity (the middle cell `solo·standard`, whose
+    recipe declares it): that owner is read as the maker (A), not as the intensity's conductor.
     """
-    default = registry["owner_profile_by_intensity"].get(effective) or "light"
+    default = owner_default or registry["owner_profile_by_intensity"].get(effective) or "light"
     selection = PROFILE.resolve_profile_demand(
         demand, explicit_profile=explicit_profile if explicit_profile is not None else default if demand is None else None,
         legacy=explicit_profile is None, existing_versioned_stage=True)
@@ -42,16 +46,18 @@ def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=No
     return profile, selection
 
 
-def _owner_node(node, effective):
-    """Whether `node` IS the route's owner: only the quick shape's `one-shot`
-    node (the owner and the node are one process there). A standard+ recipe's
+def _owner_node(node, effective, form=None):
+    """Whether `node` IS the route's owner: only the one-shot owner form's `one-shot`
+    node (the owner and the node are one process there). `form` is the route form
+    (`route_plan.form_of`); a caller with only an intensity leaves it out. A standard+ recipe's
     depth-1 `_kernel/owner` *stage* nodes (prd-transaction, handback, deploy,
     ...) are not the owner and never inherit its profile (review R2 B1: sealing
     `top` onto them made compile and verify disagree again, and would have
     spent the main-session model on stages nobody asked for). One predicate
     for the compiler and every verify check."""
 
-    return (effective == "quick" and node.get("id") == "one-shot"
+    form = form or ROUTE_FORM.form_of(None, effective)
+    return (form == "solo" and node.get("id") == "one-shot"
             and node.get("dispatch_depth") == 1 and node.get("unit") == "_kernel/owner")
 
 
@@ -116,6 +122,58 @@ def unit_leg_node(recipe, unit, registry=None):
     node.update({"role": head["role"], "unit": unit, "worker_type": head["worker_type"],
                  "model_profile": staged_unit_profile(registry or TOPO.load_registry(), unit)})
     return node
+
+
+def one_shot_review_declared(recipe):
+    """Whether this recipe declares the middle cell `solo·standard` (`one_shot_review`)."""
+    return isinstance(recipe, dict) and "one_shot_review" in recipe
+
+
+def one_shot_owner_default(recipe, effective, owner_makes_the_work):
+    """The default model role of the owner that makes the middle cell's work, or None for any other route.
+
+    `owner_makes_the_work` is A (a `one-shot` owner node / the `solo` form): a team conductor at the same
+    intensity keeps the intensity's default."""
+    if (not owner_makes_the_work or effective in (None, "direct", "quick")
+            or not one_shot_review_declared(recipe)):
+        return None
+    return recipe["one_shot_review"]["owner_model_profile"]
+
+
+def one_shot_review_node(recipe):
+    """The middle cell's review node: the recipe's own standard review node, borrowed.
+
+    ONE function for the compiler and `verify_route`. It keeps the node's unit, outputs, write scope and
+    completion gate; it depends on nothing (the owner's end node waits on it, never the reverse), reads
+    the declared inputs (the owner's source, not a plan), takes the declared model role, and its fallback
+    chain is the declared hops (no `inline`: the maker cannot close a review of its own work)."""
+    declared = recipe["one_shot_review"]
+    node = next(n for n in recipe["standard_plus"]["nodes"] if n.get("id") == declared["node"])
+    node = json.loads(json.dumps(node))
+    node.update({"depends_on": [], "inputs": list(declared["inputs"]),
+                 "fallback_hops": list(declared["fallback_hops"]), "model_profile": declared["model_profile"]})
+    return node
+
+
+def one_shot_review_nodes(recipe, effective="standard", registry=None, persona_policy=True):
+    """The middle cell's verification nodes at `effective`: the borrowed review node, widened from `strong`
+    into the kind's own declared review group.
+
+    ONE function for the compiler and `verify_route`. The group is the one the team route expands
+    (`parallel_groups`, `_expand_parallel_groups`): the same legs, perspectives and widths. Only the anchor
+    leg differs: it takes the cell's review model (`one_shot_review.model_profile`), so `strong` never
+    reviews more shallowly than `standard` does. The other legs keep the model the group declares."""
+    anchor = one_shot_review_node(recipe)
+    declared = recipe["one_shot_review"]["node"]
+    groups = [g for g in recipe["standard_plus"].get("parallel_groups") or [] if g.get("node") == declared]
+    if not groups:
+        return [anchor]
+    registry = registry or TOPO.load_registry()
+    nodes = _expand_parallel_groups([anchor], groups, effective, recipe["capability"],
+                                    auxiliary_check_units=registry.get("auxiliary_check_units"),
+                                    persona_policy=persona_policy)
+    nodes[0]["model_profile"] = recipe["one_shot_review"]["model_profile"]
+    return nodes
 
 
 def _quick_frame_diversity(candidates):

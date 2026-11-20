@@ -100,8 +100,7 @@ sys.exit(0 if _has_opencode_skills(data) else 1)' ; then
 
 usage() {
   cat <<'EOF'
-usage: preflight.sh write <file> [session-id] [turn-id]
-       preflight.sh read <file> [session-id]
+usage: preflight.sh read <file> [session-id]
        preflight.sh stages [--capability <name>] [--json]
        preflight.sh capability <name> [cwd] [session-id]
        preflight.sh skill <name> [cwd] [session-id]
@@ -292,18 +291,6 @@ cmd=${1:-}
 case "$cmd" in
   doctor)
     doctor
-    ;;
-  write)
-    if [ "${2:-}" = "-h" ] || [ "${2:-}" = "--help" ]; then
-      [ "$#" -eq 2 ] || { echo "opencode preflight: write help accepts no extra arguments" >&2; exit 64; }
-      printf '%s\n' 'usage: preflight.sh write <file> [session-id] [turn-id]'
-      exit 0
-    fi
-    [ "$#" -ge 2 ] && [ "$#" -le 4 ] || { echo "opencode preflight: write expects <file> [session-id] [turn-id]" >&2; exit 64; }
-    file=$2
-    case "$file" in -*) echo "opencode preflight: write file must be absolute or ./-prefixed" >&2; exit 64;; esac
-    # Compatibility command: write gates have been retired.
-
     ;;
   material-route|worktree-path)
     # Retired with the write gates. `check` used to report route participation;

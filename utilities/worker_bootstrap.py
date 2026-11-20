@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from parent_next_directive import entrypoint
+from route_form import one_shot_owner, one_shot_review_node_ids, one_shot_review_nodes, one_shot_review_route
 
 WORKER_TYPES = ("owner", "stage", "review", "support", "frame")
 UNIT_REF_RE = re.compile(r"^[a-z-]+/[a-z-]+$")
@@ -602,7 +603,7 @@ def resolve_node_scope(
         outputs = tuple((node or {}).get("outputs", []))
         write_scope = tuple((node or {}).get("write_scope", []))
         if (route.get("capability") == "autopilot-code"
-                and route.get("effective_intensity") == "quick" and node_id == "one-shot"
+                and one_shot_owner(route) and node_id == "one-shot"
                 and (node or {}).get("kind") == "capability-owner"
                 and (node or {}).get("unit") == "_kernel/owner"
                 and set(write_scope) == {"source-scoped", "plans/<cycle>/**"}):
@@ -629,7 +630,7 @@ def resolve_node_scope(
     outputs = tuple((node or {}).get("outputs", []))
     write_scope = tuple((node or {}).get("write_scope", []))
     if (route.get("capability") == "autopilot-code"
-            and route.get("effective_intensity") == "quick"
+            and one_shot_owner(route)
             and node_id == "one-shot" and (node or {}).get("kind") == "capability-owner"
             and (node or {}).get("unit") == "_kernel/owner"
             and set(write_scope) == {"source-scoped", "plans/<cycle>/**"}):
@@ -969,12 +970,57 @@ def owner_inline_marker_prompt(args) -> str:
                   and not dispatch_contract._owner_executed_node(n)]
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return ""
-    if not stages:
-        return ""
+    if not stages or one_shot_review_route(route):
+        return ""  # the middle cell's owner never closes its review inline: `one_shot_review_prompt`
     command = (f"python3 {shlex.quote(entrypoint(_REPO_ROOT, 'utilities/capability-route.py'))} complete --inline "
                f"--node <node> --reason \"<one line>\"")
     return (f"A declared stage ({', '.join(str(n['id']) for n in stages)}) you run yourself instead of dispatching "
             f"still publishes its completion marker: `{command}` (route and attempt axes are derived; pass --evidence with a cycle-local file when the stage produced one or the route has no bound cycle). Without it the route never settles.\n\n")
+
+
+def _review_rounds(route) -> int:
+    import review_round_cap
+    return review_round_cap.max_review_rounds(route["effective_intensity"])
+
+
+def one_shot_review_prompt(route, route_file, jobs=None) -> str:
+    """The middle cell's paragraph for its owner: make the work, then start the declared review (from `strong`,
+    the review group) with this one command and wait for it. Text only; the runtime still decides every start
+    and every verdict."""
+    nodes = one_shot_review_nodes(route)
+    if not nodes:
+        return ""
+    node = nodes[0]
+    command = route_start_command(route_file, node.get("parallel_anchor") or node["id"], jobs=jobs)
+    if len(nodes) > 1:
+        legs = ", ".join(f"{n['id']} ({n.get('unit')}, {n.get('perspective')})" for n in nodes)
+        return (f"This route is one session that makes the work and {len(nodes)} independent reviews of it, one review "
+                f"group ({legs}) that a single start command runs together. Make the work, run your own checks, and "
+                f"commit it in this worktree. Once those checks pass, start the review group with exactly this "
+                f"command: `{command}`. When the receipt shows the children started, end the turn with the standalone "
+                "line `runtime_wait: registered-children`; the runtime waits for every review and brings the verdicts "
+                "back to this same session. (A receipt that prints `parent_next=bounded-wait` instead names its own "
+                "wait command: run that printed command once, then read each review's result.) If any verdict "
+                "blocks, fix every blocking finding of every blocking report in this worktree in one pass, run the "
+                "same checks, commit, and start the closure checks with the same command, then wait again. Each "
+                f"review gets {_review_rounds(route)} rounds in all: when its last round still blocks, correct no "
+                "further, write the remaining findings in your report, and end with `verdict: FAIL`. If no review "
+                "blocks, return your final handoff. You cannot review your own work or close any of these reviews "
+                "yourself: do not run `complete --inline` for them, and do not report PASS without every review. "
+                "Do not start the reviews before your work is committed.\n\n")
+    return (f"This route is one session that makes the work and one independent review ({node['id']}, "
+            f"{node.get('unit')}) of it. Make the work, run your own checks, and commit it in this worktree. "
+            f"Once those checks pass, start the independent review with exactly this command: `{command}`. "
+            "When the receipt shows the child started, end the turn with the standalone line "
+            "`runtime_wait: registered-children`; the runtime waits for the review and brings its verdict back "
+            "to this same session. (A receipt that prints `parent_next=bounded-wait` instead names its own wait "
+            "command: run that printed command once, then read the review's result.) If the verdict blocks, fix every blocking finding in this worktree in one "
+            "pass, run the same checks, commit, and start the closure check with the same command, then wait "
+            f"again. The review gets {_review_rounds(route)} rounds in all: if the closure check blocks too, correct "
+            "no further, write the remaining findings in your report, and end with `verdict: FAIL`. "
+            "If it does not block, return your final handoff. You cannot review your own work or close "
+            "this review yourself: do not run `complete --inline` for it, and do not report PASS without the "
+            "review. Do not start the review before your work is committed.\n\n")
 
 
 def route_start_command(route_file, node_id: str, *, jobs=None, reviewed_evidence=None) -> str:
@@ -1102,6 +1148,16 @@ def continuation_followup_fields(route, node, metadata, jobs, route_file):
             producers = [n for n in _route_nodes(route) if n.get("kind") == "pipeline-stage"
                          and node["id"] in {n2["id"] for n2 in judging_stages(route, n["id"])}]
             source_review = bool(subject and subject.get("family") == "source")
+            if node["id"] in one_shot_review_node_ids(route):
+                # The middle cell: the owner made the work this review blocked, so the owner corrects it. Every
+                # leg of a review group counts its own rounds, so one leg's spent rounds spend the correction.
+                verdicts = sum(1 for st, m in _lineage_rows(route, jobs).get(node["id"], ())
+                               if ROUND.classify_round_row(st, m, worker_type="review") == "verdict")
+                cap = ROUND.max_review_rounds(route["effective_intensity"])
+                return {"kind": "review", "attempt": attempt, "artifact": str(artifact), "target": "",
+                        "source": True, "command": command, "producer_command": "", "owner_fixes": True,
+                        "closure_spent": verdicts >= cap, "corrections": cap - 1,
+                        **({"group": True} if node.get("parallel_group") else {})}
             targets = [reviewed["path"]] if reviewed else []
             if (reviewed and subject and any(item.get("path") == "checklist.md"
                     for item in subject.get("manifest", ()) if isinstance(item, dict))):
@@ -1151,6 +1207,21 @@ def continuation_followup_text(fields):
             return ""
         if len(fields) == 1:
             return continuation_followup_text(fields[0])
+        if all(item.get("kind") == "review" and item.get("owner_fixes") for item in fields):
+            # A review group of the owner's own work: several legs blocked. Name every report, give one command.
+            attempts = ", ".join(dict.fromkeys(str(item["attempt"]) for item in fields))
+            artifacts = ", ".join(dict.fromkeys(bounded(item.get("artifact")) for item in fields))
+            commands = "; ".join(dict.fromkeys(command(item.get("command")) for item in fields if item.get("command")))
+            if any(item.get("closure_spent") for item in fields):
+                n = min(item.get("corrections", 1) for item in fields)
+                allowed = "the correction allowed is" if n == 1 else f"the {n} corrections allowed are"
+                return (f"Review FAIL {attempts}: a review still blocks, and {allowed} spent. "
+                        f"Do not correct further. Write the remaining findings from {artifacts} in your report and "
+                        "end with `verdict: FAIL`.")
+            return (f"Review FAIL {attempts}: the independent reviews of your work block. Fix every blocking finding "
+                    f"in {artifacts} in this worktree in one pass, run the same checks you ran before, commit, then "
+                    f"start the closure checks with the same command: {commands}. "
+                    "Do not review it yourself and do not close any of them inline.")
         if all(item.get("kind") == "review" for item in fields):
             artifacts = list(dict.fromkeys(bounded(item.get("artifact")) for item in fields))
             targets = list(dict.fromkeys(bounded(item.get("target")) for item in fields if item.get("target")))
@@ -1162,6 +1233,19 @@ def continuation_followup_text(fields):
                     + (" First use " + "; ".join(producers) + "." if producers else "")
                     + " Then run the same start for the closure check: " + "; ".join(commands))
         return "\n".join(dict.fromkeys(filter(None, (continuation_followup_text(item) for item in fields))))
+    if fields.get("kind") == "review" and fields.get("owner_fixes"):
+        if fields.get("closure_spent"):
+            allowed = ("the one correction allowed is" if fields.get("corrections", 1) == 1
+                       else f"the {fields['corrections']} corrections allowed are")
+            # A leg of a review group may have its last round as the first judgment of changed work, not a closure check.
+            blocks = "a review still blocks" if fields.get("group") else "the closure check still blocks"
+            return (f"Review FAIL {fields['attempt']}: {blocks}, and {allowed} "
+                    f"spent. Do not correct further. Write the remaining findings from "
+                    f"{bounded(fields['artifact'])} in your report and end with `verdict: FAIL`.")
+        return (f"Review FAIL {fields['attempt']}: the independent review of your work blocks. Fix every blocking "
+                f"finding in {bounded(fields['artifact'])} in this worktree in one pass, run the same checks you "
+                f"ran before, commit, then start the closure check with the same command: {command(fields['command'])}. "
+                "Do not review it yourself and do not close it inline.")
     if fields.get("kind") == "review":
         target = bounded(fields.get("target")) or ("the source through the bounded producing stage" if fields.get("source") else "the reviewed inputs")
         producer = (" First use " + command(fields["producer_command"]) + ".") if fields.get("producer_command") else ""
@@ -1256,6 +1340,8 @@ def owner_route_steps_prompt(args, environ) -> str:
         transactions = [n for n in nodes if _owner_spec_transaction(n)]
         if not stages and not transactions:
             return ""
+        if one_shot_review_route(route):
+            return one_shot_review_prompt(route, route_file)
         ready = [n["id"] for n in dispatch_stage_advance.runnable_successors(route, frozenset(), frozenset())]
     except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError):
         return ""
@@ -2227,7 +2313,7 @@ def unit_safety_prompt(worker_type: str) -> str:
     """The kernel's safety lines for a unit route's worker, whose first instruction is not the whole kernel.
 
     Only what keeps a bounded worker inside its node: its role, its guards and scope, what it leaves to
-    the supervisor, and where its scratch goes. (It may call other workers: a later route lets it.)"""
+    the supervisor, and where its scratch goes. (Starting another worker is `unit_call_prompt`.)"""
     lines = ["You are a bounded worker, not the user-facing main session. Treat the assigned route, node "
              "scope and completion gate as fixed. Preserve permission, safety and git-state guards, and write "
              "only inside the assigned scope.",
@@ -2242,6 +2328,21 @@ def unit_safety_prompt(worker_type: str) -> str:
                      "says otherwise. Record prioritized findings, locations, checks and uncertainty in the review "
                      "artifact. Do not implement fixes or widen the review.")
     return "\n".join(lines) + "\n"
+
+
+def unit_call_prompt(root: Path) -> str:
+    """How a unit route's worker hands a lookup to another worker (the one way a worker starts another).
+
+    One read-only unit worker per question, opened by `compose --start --unit <u> --ephemeral`: nothing
+    lands in the project's artifact folder, and its answer comes back as the `Answer:` text of the wait
+    result. The called worker carries the same limits and its scope is its own read-only report: starting
+    it widens nothing of yours. What a worker leaves running when it ends is stopped with it."""
+    command = f"python3 {root / 'utilities' / 'capability-route.py'} compose --start --unit <family/name> --ephemeral --prompt-file <brief>"
+    return ("Starting another worker: hand a read-only lookup you need (a search, many files to read, text to "
+            f"transcribe) to a unit worker with `{command}`; the brief holds the question. Run the wait command its "
+            "receipt prints and read the `Answer:` text. Wait for it before you end: a worker you started is "
+            "stopped when you end. If the start is refused (the shared worker limit), say so in your result; "
+            "never start the same question again.\n")
 
 
 def worker_terminal_contract(root: Path) -> str:
@@ -2488,16 +2589,24 @@ def _query_tokens(task: str, worktree: str | None) -> str:
 
 
 def _bootstrap_memory_block(topics, task, worktree, *, root=None, timeout_s: float = 3.0,
-                            environ=None) -> str:
-    """Bounded read-only preference bodies through ``mem bootstrap-context``; failure is ``""``."""
+                            environ=None, labels=()) -> str:
+    """Bounded read-only preference bodies through ``mem bootstrap-context``; failure is ``""``.
+
+    ``labels`` are exact capsule labels (``unit:<family/name>``, ``field:<id>``): records
+    tagged with one come first, declared query groups fill the rest, one record once.
+    """
     q1 = " ".join(BOOTSTRAP_MEMORY_TOPICS[t] for t in topics if t in BOOTSTRAP_MEMORY_TOPICS)
-    if not q1 or not worktree:
+    if not (q1 or labels) or not worktree:
         return ""
     mem = Path(root or _REPO_ROOT) / "tools" / "memory" / "mem.py"
-    cmd = [sys.executable, str(mem), "bootstrap-context", "--cwd", str(worktree), "--query", q1]
-    q2 = _query_tokens(task, worktree)
-    if q2:
-        cmd += ["--query", q2]
+    cmd = [sys.executable, str(mem), "bootstrap-context", "--cwd", str(worktree)]
+    for label in labels:
+        cmd += ["--topic", label]
+    if q1:
+        cmd += ["--query", q1]
+        q2 = _query_tokens(task, worktree)
+        if q2:
+            cmd += ["--query", q2]
     cmd += ["--limit", "4", "--max-bytes", str(_MEMORY_BLOCK_MAX_BYTES)]
     try:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, cwd=str(worktree),
@@ -2510,20 +2619,62 @@ def _bootstrap_memory_block(topics, task, worktree, *, root=None, timeout_s: flo
     return out
 
 
-def unit_bootstrap_prompt(args, task: str, environ, *, root: Path | None = None) -> str:
-    """Material a unit declared in its ``bootstrap:`` frontmatter, or ``""``.
+_FIELD_LABEL_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
-    Runtime-supplied and read-only. A unit without a declaration receives nothing
-    (no subprocess, no scan); any failure drops the material, never the launch.
+
+def _work_style_labels(args) -> tuple[str, ...]:
+    """Exact capsule labels for this node: its ``unit:`` label, then the route's sealed ``field:``.
+
+    A conductor owner (a route whose stages run at dispatch depth 2) gets none: its stages' units do
+    that work. A route's one-shot owner is the whole worker, so it gets the ``field:`` label only.
+    Any failure is no label.
+    """
+    try:
+        worker_type = getattr(args, "worker_type", None)
+        unit = getattr(args, "unit", None) or ("plan/frame" if worker_type == "frame" else None)
+        labels: list[str] = []
+        if unit and unit not in RESERVED_UNITS and UNIT_REF_RE.match(unit) and worker_type in WORKER_TYPES[1:]:
+            labels.append(f"unit:{unit}")
+        route: dict = {}
+        try:   # an unreadable route costs only its own labels; the unit label stays
+            route_file = getattr(args, "route_file", None) or getattr(
+                getattr(args, "owner_route_binding", None), "route_file", None)
+            loaded = json.loads(Path(route_file).read_text(encoding="utf-8")) if route_file else {}
+            route = loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            route = {}
+        nodes = route.get("nodes") or []
+        if worker_type == "owner" and any(n.get("dispatch_depth") == 2 for n in nodes):
+            return ()
+        field = route.get("field")
+        if isinstance(field, str) and _FIELD_LABEL_RE.match(field):
+            labels.append(f"field:{field}")
+        return tuple(labels)
+    except Exception:
+        return ()
+
+
+def unit_bootstrap_prompt(args, task: str, environ, *, root: Path | None = None) -> str:
+    """Read-only material attached while a worker's prompt is assembled, or ``""``.
+
+    Two sources, both runtime-supplied and read-only: records the user tagged with this node's
+    unit label or the route's field label ("work style", every unit, no declaration), and what a
+    unit declared in its ``bootstrap:`` frontmatter. Neither is automatic memory injection and a
+    worker never writes memory. Nothing found, or any failure, drops the material, never the launch.
     """
     try:
         root = Path(root or _REPO_ROOT)
-        decl = unit_bootstrap_declaration(root, getattr(args, "unit", None))
-        if not decl or getattr(args, "worker_type", None) not in BOOTSTRAP_STAGE_TYPES:
+        worker_type = getattr(args, "worker_type", None)
+        decl = {}
+        if worker_type in BOOTSTRAP_STAGE_TYPES:
+            decl = unit_bootstrap_declaration(root, getattr(args, "unit", None))
+            gate = getattr(args, "completion_gate", None)
+            if decl.get("gates") and gate not in decl["gates"]:
+                decl = {}
+        labels = _work_style_labels(args)
+        if not decl and not labels:
             return ""
         gate = getattr(args, "completion_gate", None)
-        if decl.get("gates") and gate not in decl["gates"]:
-            return ""
         lines = []
         if decl.get("exemplar") in BOOTSTRAP_EXEMPLAR_KINDS:
             found = _deliverable_exemplars(gate, getattr(args, "artifact_root", None), environ)
@@ -2535,15 +2686,22 @@ def unit_bootstrap_prompt(args, task: str, environ, *, root: Path | None = None)
                     "Take every fact only from your assigned inputs.\n"
                     "  For HTML, skim the structure; do not load embedded media.\n")
         memory = _bootstrap_memory_block(decl.get("memory", ()), task, getattr(args, "worktree", None),
-                                         root=root, environ=environ)
+                                         root=root, environ=environ, labels=labels)
         if memory:
-            lines.append("- Saved preferences from memory (reference only; apply only what fits your assignment; "
+            if labels and decl:
+                head = ("Your user's working style and saved preferences from memory (those tagged for this "
+                        "unit or field come first; ")
+            elif labels:
+                head = "Your user's working style for this work, from records tagged with its unit or field ("
+            else:
+                head = "Saved preferences from memory ("
+            lines.append(f"- {head}reference only; apply only what fits your assignment; "
                          "do not write, curate, or sync memory):\n" + memory + "\n")
         if not lines:
             return ""
-        return ("Unit bootstrap material (runtime-supplied, read-only reference):\n" + "".join(lines)
-                + "- If format guidance and your inputs disagree: content follows the inputs, "
-                  "format follows these conventions.\n\n")
+        tail = ("- If format guidance and your inputs disagree: content follows the inputs, "
+                "format follows these conventions.\n" if decl else "")
+        return "Unit bootstrap material (runtime-supplied, read-only reference):\n" + "".join(lines) + tail + "\n"
     except Exception:
         return ""
 

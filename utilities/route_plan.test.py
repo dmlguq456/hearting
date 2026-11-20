@@ -66,6 +66,19 @@ class ExtractionTest(unittest.TestCase):
         self.assertEqual(decide("quick", "score/a.py hardcore/b.py adapters/codex-extra/a.py notprd.md")[0], 1)
         self.assertEqual(decide("quick", "/tmp/work/prd.md")[0], 2)
 
+    def test_frame_signals_are_the_signs_the_frame_width_reads_and_never_decide_anything(self):
+        signals = RP.frame_signals
+        self.assertEqual(signals("utilities/x.py 확인"), [])
+        self.assertEqual(signals("core/WORKFLOW.md 고침"), [("protected-path", "core/WORKFLOW.md")])
+        self.assertEqual(signals("adapters/claude/a.py adapters/codex/b.py"), [("adapters", "claude,codex")])
+        self.assertEqual(signals("adapters/claude/a.py"), [])
+        self.assertEqual(signals("clean", "autopilot-spec"), [("capability", "autopilot-spec")])
+        self.assertEqual(signals("clean", "autopilot-ship"), [("capability", "autopilot-ship")])
+        self.assertEqual(signals("clean", "autopilot-code"), [])
+        self.assertEqual([kind for kind, _ in signals("spec/a.md adapters/claude/a adapters/codex/b", "autopilot-spec")],
+                         ["protected-path", "adapters", "capability"])
+        self.assertEqual(signals(None), [])
+
     def parse(self, text):
         return RP.parse_proposal(text)
 
@@ -464,8 +477,10 @@ class ProposalValidationTest(ValidationBase):
              "ignored:legs[0].intensity:standard-for-direct"),
             ({"capability": "autopilot-code", "shape": "direct", "intensity": "strong"}, "direct",
              "ignored:legs[0].intensity:strong-for-direct"),
-            ({"capability": "autopilot-code", "shape": "solo", "intensity": "standard"}, "quick",
-             "ignored:legs[0].intensity:standard-for-solo"),
+            # solo carries quick, and standard and up where its kind declares a one-shot review (code does): a
+            # proposal below what the form allows keeps its default (direct is no solo intensity).
+            ({"capability": "autopilot-code", "shape": "solo", "intensity": "direct"}, "quick",
+             "ignored:legs[0].intensity:direct-for-solo"),
             ({"capability": "autopilot-code", "shape": "staged", "intensity": "quick", "graph": ["execute"]},
              "standard", "ignored:legs[0].intensity:quick-for-staged"),
             ({"capability": "autopilot-code", "shape": "staged", "intensity": "direct", "graph": ["execute"]},
@@ -477,6 +492,14 @@ class ProposalValidationTest(ValidationBase):
                 self.assertEqual(row["reason"], "valid", row)
                 self.assertEqual(row["facts"]["legs"][0]["intensity"], effective)
                 self.assertEqual(row["read_notes"], [note])
+        for kept in ("strong", "thorough", "adversarial"):
+            solo_up = self.evaluate([{"capability": "autopilot-code", "shape": "solo", "intensity": kept}])
+            self.assertEqual((solo_up["reason"], solo_up["facts"]["legs"][0]["intensity"], solo_up.get("read_notes", [])),
+                             ("valid", kept, []))
+        solo_standard = self.evaluate([{"capability": "autopilot-code", "shape": "solo", "intensity": "standard"}])
+        self.assertEqual(solo_standard["reason"], "valid", solo_standard)
+        self.assertEqual(solo_standard["facts"]["legs"][0]["intensity"], "standard")
+        self.assertEqual(solo_standard.get("read_notes", []), [])
         staged_strong = self.evaluate([{"capability": "autopilot-code", "shape": "staged", "intensity": "strong",
                                         "graph": ["execute"]}])
         self.assertEqual(staged_strong["reason"], "valid", staged_strong)

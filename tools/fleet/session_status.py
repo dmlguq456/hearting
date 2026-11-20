@@ -3,13 +3,17 @@
 ``read(cwd, route_ids)`` is the panel's one value (``None`` when the folder has no artifact root: no
 button then).  The document is the one of this session's own campaign (route -> its record's campaign
 key -> ``route_autoclose.campaign_of_route`` -> the campaign folder -> ``artifact_campaign_documents.
-campaign_status``, the selection Fleet, ``status_board`` and the entrance share); a session whose
+campaign_status``, the selection Fleet and the entrance share); a session whose
 routes span several campaigns shows the most recently changed document among them (Fleet's own rule).
 A session with no route, no campaign key, a campaign Fleet does not list (closed, or not yet named) or
 a campaign without a document shows the document Fleet's project line picks (``project_status.collect``).
 No document at all is still a value (``has_doc`` False: the button stands, dim) with the place a
 document would stand.  ``watch`` is for the panel's existing file watch (no poller): the document, and
 each session campaign's folder as one folder target (a trailing separator) so a new document redraws.
+
+The value does not read the document (11-20: the panel has the button alone, no preview): it is whether a document stands, its
+title and its age.  ``parse_groups`` / ``read_groups`` (the document's lists: what is in progress, what waits for the person,
+what ended lately, what comes later) are kept for the popup's coming list and are not called on the panel's refresh path.
 
 ``held(cwd, claim)`` is the value the host already holds (its button's) taken for the popup, so the popup
 does not read what the button read: it stands only where the claim names a status document inside this
@@ -19,8 +23,8 @@ folder's own artifact root (else ``None``, and the popup reads).
 its project page draws them (``pages.repo_status_lines``), an empty row, then the whole document
 (``transcript.doc_rows``: Fleet cards, fences as written, markdown tables aligned).  Rows are lists of
 ``(text, key)`` segments; ``key`` is a Fleet palette key (``None`` for padding).  Nothing here writes,
-asks, gates or starts a process; ``project_status``, ``artifact_campaign_documents`` and
-``status_board`` are called, not changed.
+asks, gates or starts a process; ``project_status`` and ``artifact_campaign_documents``
+are called, not changed.
 """
 from collections.abc import Mapping
 import json
@@ -47,6 +51,8 @@ _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}_")
 _ROOTS = {}            # session folder -> (resolved at, artifact root or None)
 _KEYS = {}             # (root, route id) -> its campaign key (a route's key never changes)
 _FOLDERS = {}          # (root, campaign key) -> (resolved at, campaign folder or None)
+GROUP_ITEMS = 6        # titles kept per group (the panel shows eight at most in all)
+GROUP_TITLE = 200      # cells of a title kept
 
 
 def clear_cache():
@@ -166,6 +172,102 @@ def _age(stamp, now):
         return ""
 
 
+# The headings of the campaign document (``## 하는 중`` ...) and the near spellings an older hand-written page uses.  A heading
+# that names a record of what is done (``기록``, ``log`` ...) is no list of work.  The order is the panel's.  A heading is read by how it
+# BEGINS (as ``project_status._section_kind`` reads ``다음``/``예정``), an English word whole (``Definition of Done``, ``Not done yet``,
+# ``How to do the release`` name no list).
+_GROUP_WORDS = (
+    ("running", ("하는 중", "진행 중", "in progress", "in flight", "doing")),
+    ("waiting", ("결정 기다리", "기다리는", "결정 필요", "결정할", "결정 대기", "사용자에게 필요", "decisions needed",
+                 "decision needed", "needs decision", "to decide", "open decision", "pending decision", "needs you", "waiting")),
+    ("done", ("끝난 일", "끝난 것", "최근에 끝", "최근 마감", "recently closed", "recently done", "done")),
+    ("next", ("예정", "나중에", "다음", "next", "later", "할 일", "to do", "todo")),
+)
+_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_BULLET = re.compile(r"^(?:[-*+]|\d+[.)])\s+(.*)$")
+_ENGLISH_WORD = re.compile(r"[a-z][a-z ]*")
+
+
+def _begins(lowered, word):
+    if not lowered.startswith(word):
+        return False
+    return not (_ENGLISH_WORD.fullmatch(word) and lowered[len(word):len(word) + 1].isalnum())
+
+
+# What a hand-written heading may carry before its words: a number (``1.``, ``2)``) and pictures or marks (``⏳``, ``🔴``, ``[``).
+_LEAD = re.compile(r"^[\W_]*(?:\d+[.)]\s*)?[\W_]*")
+
+
+def _group_kind(title):
+    lowered = title.casefold().lstrip()
+    lowered = lowered[_LEAD.match(lowered).end():]
+    if any(word in lowered for word in project_status._RECORD_WORDS):
+        return None
+    for kind, words in _GROUP_WORDS:
+        if any(_begins(lowered, word) for word in words):
+            return kind
+    return None
+
+
+def parse_groups(text):
+    """The lists of a status document as ``[{kind, name, count, items}]`` in the panel's order.
+
+    Read: the top-level bullets under a heading of a list (``하는 중``, ``결정 기다리는 것``, ``끝난 일``, ``예정`` and the near
+    spellings above; one of each kind, the first).  A bullet that is only a note in parentheses (``(… 접어 둠)``) is no title.
+    A list with no title is left out, except the one that waits for the person: its heading with nothing under it says
+    nothing waits (count 0).  Nothing is invented: a document with no such heading gives ``[]``."""
+    found, current, level, fence = {}, None, 0, False
+    for raw in str(text).splitlines():
+        if raw.strip().startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence:                       # what a code fence holds is no heading and no job
+            continue
+        heading = _HEADING.match(raw.strip())
+        if heading:
+            depth, words = len(heading.group(1)), project_status._plain(heading.group(2))
+            if depth == 1:
+                current = None
+                continue
+            kind = _group_kind(words)
+            if kind is not None and kind not in found:
+                current, level = kind, depth
+                found[kind] = []
+            elif current is not None and depth <= level:
+                current = None
+            continue
+        if current is None or raw[:1] in (" ", "\t"):
+            continue
+        bullet = _BULLET.match(raw)
+        if not bullet:
+            continue
+        title = project_status._plain(bullet.group(1))
+        if title and not (title.startswith(("(", "（")) and title.endswith((")", "）"))):
+            found[current].append(title)
+    groups = []
+    for kind in ("running", "waiting", "done", "next"):
+        titles = found.get(kind)
+        if titles is None or not (titles or kind == "waiting"):
+            continue
+        items = [transcript.clean(title)[:GROUP_TITLE] for title in titles[:GROUP_ITEMS]]
+        groups.append({"kind": kind, "name": ui_text("fleet.status.group." + kind), "count": len(titles), "items": items})
+    return groups
+
+
+def read_groups(path):
+    """``parse_groups`` of the document's first 64 KiB; ``[]`` if unreadable.  (Kept for the popup's list; the panel's refresh does not call it.)"""
+    try:
+        lines, _cut = read_text(path)
+        return parse_groups("\n".join(lines)) if lines is not None else []
+    except Exception:  # noqa: BLE001 -- a document that cannot be read gives no section, never a failed button
+        return []
+
+
+# 11-20 (the person: "현황은 영어로"): the panel's other section names (REPO, GIT, PEERS, SESSION, ROUTE, MESSAGES, MEM) are English whatever
+# language is declared, so this one is too.  Fleet's explorer keeps ``fleet.repo.status`` (there every section name follows the language).
+STATUS_WORD = "STATUS"
+
+
 def _title(word, campaign, age):
     if not (campaign or age):
         return word
@@ -176,10 +278,10 @@ def read(cwd, routes=(), now=None):
     """The panel's status value for a session folder, or ``None`` when its project has no artifact root.
 
     ``routes``: this session's route ids (or its route rows, each with ``id``).  Never raises.
-    Keys: ``word`` (Fleet's ``fleet.repo.status``), ``has_doc``, ``campaign`` (name, '' when not known),
+    Keys: ``word`` (the section's name, ``STATUS``), ``has_doc``, ``campaign`` (name, '' when not known),
     ``age`` (Fleet's age words, '' when none), ``title`` (the popup's title), ``path`` (the document or
     ''), ``slot`` (where a missing document would stand, '' when no campaign is known), ``watch``
-    (paths for the panel's file watch)."""
+    (paths for the panel's file watch).  The document itself is not read."""
     if not cwd:
         return None
     now = time.time() if now is None else now
@@ -187,7 +289,7 @@ def read(cwd, routes=(), now=None):
         root = _root(cwd, now)
         if not root:
             return None
-        word = ui_text("fleet.repo.status")
+        word = STATUS_WORD
         folders = _campaign_folders(root, _route_ids(routes), now)
         path, folder = _own_document(folders)
         campaign = _campaign_name(folder) if folder else ""
@@ -224,10 +326,11 @@ def held(cwd, claim, now=None):
             return None
         path = ""
         if claim.get("has_doc") is True:
+            import artifact_campaign_documents as documents
             path = claim.get("path")
             if (not isinstance(path, str) or not os.path.isabs(path) or len(path) > 4096 or "\0" in path
                     or os.path.commonpath([root, os.path.realpath(path)]) != root
-                    or _fold(os.path.basename(path)) not in project_status.STATUS_NAMES):
+                    or _fold(os.path.basename(path)) not in (documents.CAMPAIGN_DOCUMENT, *documents.STATUS_NAMES)):
                 return None
             slot = ""
         return {"word": word, "has_doc": bool(path), "campaign": "", "age": "", "title": title, "path": path,

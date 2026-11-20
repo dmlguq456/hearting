@@ -1386,6 +1386,91 @@ class TestRoute(unittest.TestCase):
    with self.assertRaisesRegex(ValueError,"invalid dispatch_allocation"):
     R.verify_route(bad,R.ROOT)
 
+ # --- field weights: a route with a field seals that field's applied row beside the allocation ---
+ SHIPPED_WEIGHTS="  harness_weights:\n    claude: 0.5\n    opencode: 0.3\n"
+ def _shipped_config(self,weights=None):
+  text=(R.ROOT/"profiles"/"dispatch-defaults.yaml").read_text(encoding="utf-8")
+  self.assertIn(self.SHIPPED_WEIGHTS,text)
+  return text if weights is None else text.replace(self.SHIPPED_WEIGHTS,weights)
+ def _reseal(self,route):
+  route["route_hash"]=R.route_hash(route); route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
+  return route
+ def test_a_field_route_seals_its_applied_row_and_keeps_harness_weights_flat(self):
+  with dispatch_defaults_config(self._shipped_config()):
+   route=self._standard()
+  self.assertEqual(route["field"],"code")
+  allocation=route["dispatch_allocation"]
+  self.assertEqual(allocation["field_weights"],{"claude":0.95,"codex":0.85,"opencode":1.0})
+  self.assertEqual(allocation["harness_weights"],{"claude":0.5,"opencode":0.3})
+  R.verify_route(route,R.ROOT)
+ def test_the_users_field_block_overrides_cell_by_cell_without_touching_harness_weights(self):
+  weights=self.SHIPPED_WEIGHTS+"    code:\n      claude: 1.0\n    design: 0.5\n"
+  with dispatch_defaults_config(self._shipped_config(weights)):
+   route=self._standard()
+  allocation=route["dispatch_allocation"]
+  self.assertEqual(allocation["field_weights"],{"claude":1.0,"codex":0.85,"opencode":1.0})  # unnamed cells keep the default
+  self.assertEqual(allocation["harness_weights"],{"claude":0.5,"opencode":0.3})
+  R.verify_route(route,R.ROOT)
+ def test_a_neutral_row_a_non_balanced_strategy_or_no_field_seal_no_key(self):
+  # code at 1.0 in every cell: nothing to seal, so the allocation is what it was before the key existed
+  with dispatch_defaults_config(self._shipped_config(self.SHIPPED_WEIGHTS+"    code: 1.0\n")):
+   neutral=self._standard()
+  with dispatch_defaults_config(self._shipped_config()):
+   expected=R.DEFAULTS.query_allocation(R.DEFAULTS.load_validated(R.DEFAULTS.default_config_path(),R.DEFAULTS.default_topology_path())[0])
+  self.assertEqual(neutral["dispatch_allocation"],expected)
+  self.assertNotIn("field_weights",neutral["dispatch_allocation"])
+  # the legacy-schema configs these older tests use never read a field row
+  with dispatch_defaults_config(DD_CONFIG_A):
+   legacy=self._standard()
+  self.assertNotIn("field_weights",legacy["dispatch_allocation"])
+ def test_a_number_override_or_equal_cells_seal_no_row_and_one_odd_cell_seals_it(self):
+  # `docs: 0.5` puts the same factor on every cell; it cancels in the share, so the route is
+  # byte-identical to one sealed without any field override (only the user file's own digest differs).
+  def seal(extra):
+   with dispatch_defaults_config(self._shipped_config(self.SHIPPED_WEIGHTS+extra)):
+    return self._standard()
+  base=seal("")
+  for extra in ("    code: 0.5\n","    code: 1.0\n","    code:\n      claude: 0.7\n      codex: 0.7\n      opencode: 0.7\n"):
+   route=seal(extra)
+   self.assertNotIn("field_weights",route["dispatch_allocation"],extra)
+   self.assertEqual(route["dispatch_allocation"],{k:v for k,v in base["dispatch_allocation"].items() if k!="field_weights"},extra)
+  odd=seal("    code:\n      claude: 0.7\n      codex: 0.7\n      opencode: 0.8\n")
+  self.assertEqual(odd["dispatch_allocation"]["field_weights"],{"claude":0.7,"codex":0.7,"opencode":0.8})
+ def test_a_continuation_receipt_names_the_row_the_choice_multiplies_though_the_route_lost_the_field(self):
+  import dispatch_allocation as DA, dispatch_allocation_receipt as REC
+  with dispatch_defaults_config(self._shipped_config()):
+   source=self._standard()
+  first=source["nodes"][0]["id"]
+  cont=R.build_continuation_route(source,resume_from_node=first,requested_boundary=first,
+                                  reason="review-fixture",artifact_root=source["artifact_root"])
+  self.assertIsNone(cont.get("field"))  # the continuation does not carry the field (route bytes stay)
+  self.assertEqual(cont["dispatch_allocation"]["field_weights"],source["dispatch_allocation"]["field_weights"])
+  tails={}
+  for label,route in (("source",source),("continuation",cont)):
+   with tempfile.TemporaryDirectory() as home:
+    jobs=Path(home)/"jobs.log"; jobs.write_text("")
+    REC.record_allocation_receipt(route_id=route["route_id"],route_node="execute",route_hash=route["route_hash"],
+     dispatch_depth=2,writer="stage-dispatch-fallback.py",child_harness="claude",
+     allocation=route["dispatch_allocation"],rank=["claude","codex"],field=route.get("field"),
+     attempt_id="att-x",jobs=jobs)
+    line=REC.format_row(REC.read_rows(jobs=jobs)[0])
+   tails[label]=line[line.index("field="):]
+  used=REC._fmt_map(DA.effective_harness_weights(cont["dispatch_allocation"]),digits=3)
+  self.assertEqual(tails["source"],"field=code w="+used)
+  self.assertEqual(tails["continuation"],"field=- w="+used)
+ def test_a_route_sealed_before_field_weights_existed_verifies_and_reads_neutral(self):
+  import dispatch_allocation as DA
+  with dispatch_defaults_config(self._shipped_config()):
+   route=self._standard()
+  route["dispatch_allocation"].pop("field_weights")
+  R.verify_route(self._reseal(route),R.ROOT)
+  self.assertEqual(DA.effective_harness_weights(route["dispatch_allocation"]),{"claude":0.5,"opencode":0.3})
+ def test_verify_rejects_invalid_field_weights(self):
+  with dispatch_defaults_config(self._shipped_config()): route=self._standard()
+  for value in (0,1.5,True,{},{"claude":0},{"claude":1.2},{"claude":True},{"gemini":0.5},"claude:0.5"):
+   bad=json.loads(json.dumps(route)); bad["dispatch_allocation"]["field_weights"]=value
+   with self.assertRaisesRegex(ValueError,"invalid dispatch_allocation"):
+    R.verify_route(self._reseal(bad),R.ROOT)
  def test_verify_rejects_short_balanced_window(self):
   with dispatch_defaults_config(DD_CONFIG_A):
    route=self._standard()
@@ -5634,6 +5719,31 @@ class SourceLineageVerdictTest(unittest.TestCase):
     verdict=R.source_lineage_verdict(root,base)
     self.assertEqual(verdict.kind,"diverged")
 
+ def test_a_sealed_commit_merged_in_through_another_parent_is_a_descendant(self):
+  # The work tree's head moved on through a merge whose first parent is another line: the sealed commit is an
+  # ancestor of HEAD but not on its first-parent line. It only moved forward, so it is not `diverged`.
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   root,git,base=self._repo(tmp)
+   git("checkout","-q","--orphan","trunk"); git("rm","-rqf",".")
+   (root/"t").write_text("t"); git("add","."); git("commit","-q","-m","trunk")
+   git("merge","--no-ff","--allow-unrelated-histories","-q","-m","merge the work",base)
+   head=subprocess.run(["git","-C",str(root),"rev-parse","HEAD"],capture_output=True,text=True).stdout.strip()
+   first_parent=subprocess.run(["git","-C",str(root),"rev-list","--first-parent","HEAD"],capture_output=True,text=True).stdout.split()
+   self.assertNotIn(base,first_parent,"fixture must reach the sealed commit only through the second parent")
+   verdict=R.source_lineage_verdict(root,base)
+   self.assertEqual((verdict.kind,verdict.distance),("descendant",2))
+   self.assertEqual(verdict.commits[0],head)
+   self.assertNotIn(base,verdict.commits)
+   self.assertEqual(verdict.branch,"trunk")
+  with tempfile.TemporaryDirectory() as tmp:
+   root,git,base=self._repo(tmp)
+   with self.subTest("an unrelated head stays diverged"):
+    git("checkout","-q","--orphan","trunk"); git("rm","-rqf",".")
+    (root/"t").write_text("t"); git("add","."); git("commit","-q","-m","trunk")
+    verdict=R.source_lineage_verdict(root,base)
+    self.assertEqual((verdict.kind,verdict.distance),("diverged",None))
+
  def test_a_sd156_3_merge_in_progress_is_unverifiable(self):
   import subprocess
   with tempfile.TemporaryDirectory() as tmp:
@@ -7527,12 +7637,16 @@ class ShapeIntensityDiagnosticTest(unittest.TestCase):
   return R.compose_route(**d)
 
  def test_cli_mismatch_names_allowed_values(self):
-  cases=(("direct", "standard", "direct"), ("solo", "standard", "quick"),
+  cases=(("direct", "standard", "direct"), ("solo", "direct", "quick,standard,strong,thorough,adversarial"),
          ("staged", "quick", "standard,strong,thorough,adversarial"))
   for shape, intensity, allowed in cases:
    with self.subTest(shape=shape):
     with self.assertRaisesRegex(ValueError, rf"compose-shape-intensity-mismatch:{shape} .*allowed: {allowed}"):
      self.compose(shape=shape,graph=None if shape != "staged" else "execute,test,report",intensity=intensity)
+ def test_a_kind_that_declares_no_one_shot_review_still_carries_only_quick_on_solo(self):
+  # The middle cell is declared per kind (`one_shot_review`); lab declares none.
+  with self.assertRaisesRegex(ValueError, r"compose-shape-intensity-mismatch:solo .*allowed: quick\)"):
+   self.compose(capability="autopilot-lab",capability_mode="setup",shape="solo",graph=None,intensity="standard")
 
 
 class ComposeRouteTest(TestRoute):
@@ -9720,8 +9834,14 @@ class OwnerNodeBoundTerminalTest(unittest.TestCase):
   self.assertFalse(gate["passed"],gate)
   self.assertIn(gate["reason"],("owner-route-identity-mismatch","owner-terminal-evidence-unverified"))
 
- def test_node_bound_owner_needs_a_quick_route(self):
-  gate=self.observe(self.row(),route=dict(self.route,effective_intensity="standard"))
+ def test_node_bound_owner_needs_the_route_whose_owner_makes_the_work(self):
+  # read from the nodes (a depth-1 owner `one-shot`), not from the intensity: an owner node that is not the
+  # maker's `one-shot` (a team's) is not the node-bound shape, whatever the record says
+  team=dict(self.route,effective_intensity="standard",nodes=[dict(self.node,id="execute")])
+  self.jobs.write_text(self.row(route_node="execute")+"\n")
+  with patch_split(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
+       patch_split(R,"owner_terminal_prerequisites",return_value={}):
+   gate=R.terminal_gate_observation(team,jobs=self.jobs,exact_terminal=True)["execute"]
   self.assertFalse(gate["passed"],gate)
   self.assertEqual(gate["reason"],"owner-route-identity-mismatch")
 

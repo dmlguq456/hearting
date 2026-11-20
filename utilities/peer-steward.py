@@ -1596,9 +1596,24 @@ def _placement_result(*argv):
     return result
 
 
+def _project_start_hint():
+    """The window value in this process's environment as a lookup hint, else ``""``.
+
+    A session Claude's background daemon started carries the window value the daemon inherited
+    from whichever window first started it, not one a window gave this session: no hint."""
+    hint = os.environ.get("HERDR_PANE_ID", "")
+    if not hint:
+        return ""
+    try:
+        import peer_address
+        return "" if peer_address._service_hosted(os.getpid()) else hint
+    except Exception:
+        return ""
+
+
 def _project_start_workspace():
     """A directory match locates a workspace; it never proves caller ownership."""
-    hint = os.environ.get("HERDR_PANE_ID")
+    hint = _project_start_hint()
     if not hint:
         return None
     try:
@@ -1724,7 +1739,7 @@ def _start_request(args):
             args.project_workspace = _project_start_workspace()
     args.start_request.update(beside=args.beside,
                               project_workspace=getattr(args, "project_workspace", None),
-                              project_hint=os.environ.get("HERDR_PANE_ID", ""))
+                              project_hint=_project_start_hint())
     if terminal_surface.is_tmux_pane(args.beside or args.pane or ""):
         return _start_tmux_request(args)
     workspace = (args.beside.split(":")[0] if args.beside else
@@ -5247,7 +5262,8 @@ def _watch_publish_ready_receipt(target, native_state, arm, expected, server,
 def _schedule_message_obligation(row, target, pane=None, *, delay_notice_for=None, handoff_acceptance=False):
     """Persist exact transport ownership without copying the sealed message body."""
     sender = row.get("from") or {}
-    recipient = peer_message.pending_delivery_recipient(row) or row.get("to") or {}
+    binding = peer_message.pending_delivery_binding(row)
+    recipient = (binding or {}).get("recipient") or row.get("to") or {}
     sid = recipient.get("session_id")
     harness = recipient.get("harness")
     identity = {"server": _HERDR_SESSION or "default", "pane": pane or "",
@@ -5259,7 +5275,10 @@ def _schedule_message_obligation(row, target, pane=None, *, delay_notice_for=Non
             identity["namespace"] = (_PEER_NAMESPACE or peer_address.caller_endpoint(
                 server=_HERDR_SESSION)["socket"])
     intent = {"ref": row.get("ref"), "body_digest": row.get("body_sha256"),
-              "target": target, "from": sender, "to": recipient,
+              "target": target, "from": sender,
+              # A row that went on to a background session still names the old id: the duty
+              # keeps the row's own target, and its receipt names who took it.
+              "to": row.get("to") if (binding or {}).get("parked_from") else recipient,
               "refs": list(row.get("refs") or []),
               "delay_notice_for": delay_notice_for or ""}
     if row.get("producer_binding") is not None:
@@ -5275,8 +5294,13 @@ def _schedule_message_obligation(row, target, pane=None, *, delay_notice_for=Non
         return None
 
 
-def _ensure_sender_delay_notice(row):
-    """Persist and enqueue one normal peer message for an overdue original ref."""
+def _ensure_sender_delay_notice(row, store=None):
+    """Persist and enqueue one normal peer message for an overdue original ref.
+
+    ``store`` is the runner's own store, inside its read pass. Only the branch that
+    writes nothing (the notice already exists) uses it, so its runner check reads the
+    pass's shared active list; every branch that creates a duty keeps a fresh store
+    and reads the records its own write produced."""
     original_ref = row.get("ref")
     refs = row.get("refs") or []
     if (not isinstance(original_ref, str) or
@@ -5294,9 +5318,15 @@ def _ensure_sender_delay_notice(row):
                 "recipient_harness": sender.get("harness", ""),
                 "recipient_session_id": sender.get("session_id", "")}
     try:
-        existing = peer_obligations.ObligationStore().get(notice_id)
+        default_store = peer_obligations.ObligationStore()
+        existing = default_store.get(notice_id)
         if existing:
-            peer_obligations.ensure_normal_runner()
+            shared = (store if store is not None
+                      and store.state_root == default_store.state_root else None)
+            if shared is None:
+                peer_obligations.ensure_normal_runner()
+            else:
+                peer_obligations.ensure_normal_runner(_store=shared)
             return existing
         created = float(row.get("created") or time.time())
         sent_at = datetime.datetime.fromtimestamp(
@@ -5329,14 +5359,14 @@ def _ensure_sender_delay_notice(row):
         return None
 
 
-def _ensure_sender_delay_notice_if_due(row):
+def _ensure_sender_delay_notice_if_due(row, store=None):
     """Retain the existing one-hour sender notice for an unresolved pending row."""
     try:
         age = max(0.0, time.time() - float(row.get("created") or time.time()))
     except (TypeError, ValueError):
         age = 0.0
     if age >= _FLUSH_STUCK_HOURS * 3600:
-        return _ensure_sender_delay_notice(row)
+        return _ensure_sender_delay_notice(row, store)
     return None
 
 
@@ -5420,7 +5450,7 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
         if not delay_for:
             _ensure_sender_delay_notice_if_due({
                 "ref": ref, "refs": intent.get("refs") or [], "from": intent.get("from") or {},
-                "to": intent.get("to") or {}, "created": duty.get("accepted_at")})
+                "to": intent.get("to") or {}, "created": duty.get("accepted_at")}, store)
         checkpoint(state="unknown", observation={"ref": ref, "reason": "pending-row-unreadable"})
         return
     if row is None:
@@ -5448,7 +5478,7 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
     if peer_message._unresolved_target(row.get("to")) and not row.get("bound_to"):
         if row.get("receipt") == "target-identity-changed" or "ambiguous" in row.get("receipt", ""):
             # Delivery stays refused; the sender's one-hour notice is still owed.
-            _ensure_sender_delay_notice_if_due(row)
+            _ensure_sender_delay_notice_if_due(row, store)
             checkpoint(state="unknown", observation={"ref": ref, "reason": row["receipt"]})
             return
         import peer_address
@@ -5457,13 +5487,13 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
         if peer_address.is_herdr_pane_address(name) and not namespace:
             # An older window request never recorded where it was made; the
             # runner's own Herdr namespace is no evidence of it. It stays refused.
-            _ensure_sender_delay_notice_if_due(row)
+            _ensure_sender_delay_notice_if_due(row, store)
             checkpoint(state="unknown", observation={"ref": ref, "reason": "target-namespace-unrecorded"})
             return
         current, error = peer_address.resolve(name, server=globals()["_HERDR_SESSION"],
                                               namespace=namespace)
         if not current or not peer_message.usable_session_id(current.get("session_id")):
-            _ensure_sender_delay_notice_if_due(row)
+            _ensure_sender_delay_notice_if_due(row, store)
             checkpoint(state="unknown", observation={"ref": ref, "reason": error or "target-identity-unverified"})
             return
         row = peer_message.bind_unresolved_pending_recipient(ref, {
@@ -5522,7 +5552,7 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
     if not native_recipient:
         # A window-bound row without a session id (first input to a fresh window)
         # has no Hearting record to deliver through. It is never typed.
-        _ensure_sender_delay_notice_if_due(row)
+        _ensure_sender_delay_notice_if_due(row, store)
         checkpoint(state="unknown", observation={"ref": ref, "reason": "target-session-unresolved"})
         return
     import session_shell
@@ -5530,7 +5560,7 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
     attachment, attachment_reason = _current_shell_binding(harness, sid)
     if attachment_reason == "target-identity-changed":
         # Identity protection refuses delivery; the sender's one-hour notice still applies.
-        _ensure_sender_delay_notice_if_due(row)
+        _ensure_sender_delay_notice_if_due(row, store)
         checkpoint(state="unknown", observation={"ref": ref, "reason": attachment_reason})
         return
     if attachment is None:
@@ -5549,7 +5579,7 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
                 ref, duty_id=duty_id, expected_revision=duty.get("revision"),
                 identity=intent.get("identity") or {}, message=row, evidence=evidence)
             if status == "cancelled":
-                _ensure_sender_delay_notice(row)
+                _ensure_sender_delay_notice(row, store)
                 checkpoint(state="cancelled", delivery="failed", cleanup="complete",
                            observation={"ref": ref, "reason": "recipient-session-ended",
                                         "session_id": sid, "harness": harness})
@@ -5587,7 +5617,7 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
             ref, timeout=0.25, start_interrupted=_codex_shell_start_gate(attachment))
     elif row.get("state") in {"queued", "unverified"}:
         # Accepted or ambiguous: never resent. The one-hour sender notice still applies.
-        _ensure_sender_delay_notice_if_due(row)
+        _ensure_sender_delay_notice_if_due(row, store)
         recorded = duty.get("observation") or {}
         if recorded.get("ref") == ref and recorded.get("transport_state") == row["state"]:
             return  # The recorded acceptance evidence is unchanged; nothing is rewritten.
@@ -5596,7 +5626,7 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
     # pass does not read the row again.
     age = max(0.0, time.time() - float(row.get("created") or time.time()))
     if age >= _FLUSH_STUCK_HOURS * 3600:
-        _ensure_sender_delay_notice(row)
+        _ensure_sender_delay_notice(row, store)
     checkpoint(state="pending", observation={"ref": ref, "state": row.get("state"),
                                              "reason": reason})
 
@@ -5636,7 +5666,8 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
     import dispatch_pending_delivery as pending
     from dispatch_seat_handover import _effective, lineage_effect_lock
     from dispatch_session_sweep import (
-        IDENTITY_KEY, STORAGE_KEY, addressed_records, delivery_context, is_human_gate_record,
+        IDENTITY_KEY, STORAGE_KEY, addressed_records, delivery_context, delivery_display_text,
+        is_human_gate_record,
     )
     spec = importlib.util.spec_from_file_location(
         "_retained_rewake", _UTILITIES_DIR.parent / "hooks/dispatch-owner-rewake.py")
@@ -6016,6 +6047,8 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
             if continued:
                 member_context[index][CONTINUED_KEY] = continued
         message = delivery_context([(jobs.parent, member_context)])
+        # The person's window gets a short line when every record has one; the agent keeps `message`.
+        display_line = delivery_display_text([(jobs.parent, member_context)])
         from dispatch_recipient_receipt import claimed_send_current
         if not all(claimed_send_current(jobs.parent, storage_recipient, member,
                 claim_owner, recipient_harness, recipient_sid, jobs=jobs)
@@ -6085,7 +6118,8 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
                                 pending_member["delivery_id"], claim_owner=claim_owner)
                         return
             code = cmd_prompt(args, expected_recipient=(recipient_harness, recipient_sid),
-                              on_prepared=bind_transfer, producer_binding=producer_binding)
+                              on_prepared=bind_transfer, producer_binding=producer_binding,
+                              **({"display_line": display_line} if display_line else {}))
         current = [pending.read(jobs.parent, storage_recipient, member["delivery_id"])
                    for member in transfer_members]
         if current and all(item and item.get("state") == "acked" for item in current):
@@ -6588,6 +6622,21 @@ def _active_index_generation(store):
     return (info.st_dev, info.st_ino, info.st_mtime_ns)
 
 
+def _round_end_observation(read_context):
+    """The round's one reading of the live session holders (`read_context`), or None.
+
+    Every steward check of a round asks whether a session ended; they share this
+    reading instead of each walking ``/proc``. It lives in the round's read context and
+    is dropped with it, so the next round reads the process table again."""
+    if read_context is None:
+        return None
+    try:
+        from peer_steward_native import end_observation
+        return read_context.end_observation(end_observation)
+    except Exception:  # noqa: BLE001 - without it each check takes its own reading
+        return None
+
+
 def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state=None,
                            notice_selection=None, runner_incarnation=None,
                            settlement_context=None, between_duties=None):
@@ -6655,7 +6704,11 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
                     duty, store, read_context=read_context,
                     settlement_context=settlement_context)
             elif kind == "steward-check":
-                _steward_check_module().advance(duty, store)
+                observation = _round_end_observation(read_context)
+                if observation is None:
+                    _steward_check_module().advance(duty, store)
+                else:
+                    _steward_check_module().advance(duty, store, end_observation=observation)
         except Exception as exc:
             try:
                 store.update(duty["id"],
@@ -6732,7 +6785,7 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     import dispatch_pending_delivery as pending
     from dispatch_notice_state import keep_claim
     from dispatch_seat_handover import record_recipient_binding
-    from dispatch_session_sweep import STORAGE_KEY, IDENTITY_KEY, delivery_context
+    from dispatch_session_sweep import STORAGE_KEY, IDENTITY_KEY, delivery_context, delivery_display_text
     from dispatch_recipient_receipt import claimed_send_current, release_unsubmitted_claim
     from peer_read_context import PeerReadContext
     import session_notice
@@ -7115,6 +7168,7 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
         if not claimed:
             return
         body = delivery_context([(root, [entry[5] for entry in claimed])])
+        display_line = None if folded else delivery_display_text([(root, [entry[5] for entry in claimed])])
         if folded:
             body += ("\n\nfolded run notices (parent completion already received):\n"
                      + "\n".join(f"- {line}" for line in folded))
@@ -7159,7 +7213,8 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                 except (OSError, ValueError, KeyError, TypeError, RuntimeError):
                     return
             code = cmd_prompt(args, expected_recipient=(harness, recipient_sid),
-                              on_prepared=bind_transfer, producer_binding=producer)
+                              on_prepared=bind_transfer, producer_binding=producer,
+                              **({"display_line": display_line} if display_line else {}))
             submitted = code in {0, 3}
     finally:
         globals()["_HERDR_SESSION"] = old_server
@@ -7297,6 +7352,51 @@ def _retire_finished_lineage_bundles(store, *, now=None, deadline_ns=None):
         else:
             result["skipped"] += 1
     return result
+
+
+# The last (pgid, log pass) whose group was seen still populated, and when: the
+# group is looked at again at most once a minute, not on every runner tick.
+_RETENTION_GROUP_SEEN: dict = {}
+
+
+def _log_retention_follow_up_due(jobs, state):
+    """Whether the log retirement left more to do and the previous start has settled.
+
+    Read-only on the log retirement state. Anything unknown means no: the six-hour
+    duty stays the fallback, so an unreadable state never turns into a tight loop.
+    """
+    try:
+        import dispatch_log_retention
+        from dispatch_contract import process_group_observation as observe_group
+
+        pass_ns = dispatch_log_retention.follow_up_pass_ns(jobs)
+        last = state.get("last_pass_ns") if isinstance(state, dict) else None
+        if not pass_ns or type(last) is not int or last <= 0:
+            return False
+        # A log pass must have run since the previous start; otherwise a state that
+        # cannot be written, or a pass that keeps finding the lock busy, would restart
+        # the child every minute.
+        if pass_ns <= last:
+            return False
+        if "child_pgid" not in state:
+            # A start recorded before this rule (or a runner that died between its two
+            # writes) names no group; one overlapping start is harmless because each
+            # retention pass takes its own lock and an overlapping one returns busy.
+            return True
+        pgid = state["child_pgid"]
+        if type(pgid) is not int or pgid <= 0:
+            return False
+        seen = _RETENTION_GROUP_SEEN.get("key") == (pgid, pass_ns) and (
+            time.monotonic() - _RETENTION_GROUP_SEEN.get("at", 0.0)
+            < dispatch_log_retention.BACKLOG_DUE_SECONDS)
+        if seen:
+            return False
+        if observe_group(pgid).state == "empty":
+            return True
+        _RETENTION_GROUP_SEEN.update(key=(pgid, pass_ns), at=time.monotonic())
+        return False
+    except Exception:  # noqa: BLE001 -- unknown means the six-hour duty
+        return False
 
 
 def _runner_maintenance_pass(store):
@@ -7451,11 +7551,15 @@ def _runner_maintenance_pass(store):
         jobs = root / "jobs.log"
         from dispatch_contract import stable_state_root
         canonical = root == stable_state_root(os.environ).resolve()   # never a fixture's own root
-        if (canonical and jobs.is_file()
-                and peer_obligations.runner_duty_due(state, MAINTENANCE_DUE_SECONDS)):
+        due = canonical and jobs.is_file() and peer_obligations.runner_duty_due(
+            state, MAINTENANCE_DUE_SECONDS)
+        follow = (canonical and jobs.is_file() and not due
+                  and _log_retention_follow_up_due(jobs, state))
+        if due or follow:
             # Recorded first: a start that fails is not retried before the next due window.
+            launched = time.time_ns()
             peer_obligations.write_runner_duty_state(
-                root, "retention", {"last_pass_ns": time.time_ns()},
+                root, "retention", {"last_pass_ns": launched},
                 expected_root_identity=identity)
             child = subprocess.Popen(
                 [sys.executable, str(Path(__file__).resolve().parent / "dispatch_registry_archive.py"),
@@ -7465,7 +7569,15 @@ def _runner_maintenance_pass(store):
             # It forks the passes off and exits at once, so this wait is short and leaves no zombie.
             with contextlib.suppress(subprocess.TimeoutExpired):
                 child.wait(timeout=10)
+            # The child leads its own process group and the forked passes stay in it, so
+            # its pid names the group the next follow-up checks for emptiness.
+            with contextlib.suppress(OSError, ValueError, RuntimeError):
+                peer_obligations.write_runner_duty_state(
+                    root, "retention", {"last_pass_ns": launched, "child_pgid": child.pid},
+                    expected_root_identity=identity)
             result["retention"] = {"started": child.pid}
+            if follow:
+                result["retention"]["follow_up"] = 1
     except (OSError, ValueError, RuntimeError):
         pass
     return result
@@ -8018,7 +8130,8 @@ def _codex_shell_start_gate(binding):
 
 def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
                        expected_recipient=None, on_prepared=None, producer_binding=None, handoff=None,
-                       binding=None, pane=None, native_owner=None, sender_row=None, request=None):
+                       binding=None, pane=None, native_owner=None, sender_row=None, request=None,
+                       display_line=None):
     """Native-session address using the existing sealed message and carrier.
 
     Delivery never types into a window: a shell attachment takes it through its host
@@ -8044,7 +8157,7 @@ def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
             reference_evidence=reference_evidence,
             producer_binding=producer_binding, handoff=handoff,
             original_target=args.target, server=_HERDR_SESSION or "default", prepared=prepared,
-            namespace=_PEER_NAMESPACE, request=request)
+            namespace=_PEER_NAMESPACE, request=request, display_line=display_line)
         if on_prepared is not None:
             on_prepared(ref)
     except (OSError, ValueError):
@@ -8171,7 +8284,7 @@ def _prompt_unresolved(args, body, reason, *, from_identity, from_name, from_har
 
 
 def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_binding=None,
-               handoff=None, resolved_recipient=None, sender=None, request=None):
+               handoff=None, resolved_recipient=None, sender=None, request=None, display_line=None):
     """Seal a peer message and route it through the recipient's native carrier.
 
     ``sender`` is the observed predecessor identity for a supervisor-issued
@@ -8262,7 +8375,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         native_owner=native_owner, from_identity=from_identity, from_name=from_name,
         expected_recipient=expected_recipient, on_prepared=on_prepared,
         producer_binding=producer_binding, handoff=handoff, sender_row=sender_row,
-        request=request)
+        request=request, display_line=display_line)
 
 
 def cmd_request(args):
@@ -8469,7 +8582,8 @@ def _native_tidy_command(args, req, *, continuing):
     target = f"native:{req['seat']['native']['job']}"
     receipt = (f"action={action} {word}={outcome} harness={harness} old_session={old} "
                f"new_session={new or '-'} verify=native ms={int((time.monotonic() - started) * 1000)}"
-               + (f" reason={verdict['reason']}" if verdict.get("reason") else ""))
+               + (f" reason={verdict['reason']}" if verdict.get("reason") else "")
+               + (f" detail={verdict['detail']}" if verdict.get("detail") else ""))
     try:
         _record(to_harness=harness, to_name=target, kind="notice",
                 summary_text=f"[notice] action={action} {outcome}",
@@ -8596,12 +8710,12 @@ def cmd_idle_card_request(args):
     path = Path(args.request)
     req, why = clear.validate_idle_request(path, args.nonce)
 
-    def finish(outcome, reason=""):
+    def finish(outcome, reason="", detail=""):
         harness = str((req or {}).get("harness") or "unknown")
         sid = str((req or {}).get("sid") or "")
         pane = (req or {}).get("seat", {}).get("pane")
         receipt = (f"action=idle-card-request accepted={outcome} harness={harness} session={sid}"
-                   + (f" reason={reason}" if reason else ""))
+                   + (f" reason={reason}" if reason else "") + (f" detail={detail}" if detail else ""))
         try:
             if req and req.get("origin") != "idle":
                 _record(to_harness=harness, to_name=args.target, kind="notice",
@@ -8612,7 +8726,7 @@ def cmd_idle_card_request(args):
         except Exception:
             pass
         print(f"accepted={outcome} target={args.target} harness={harness} session={sid}"
-              + (f" reason={reason}" if reason else ""))
+              + (f" reason={reason}" if reason else "") + (f" detail={detail}" if detail else ""))
         return 0 if outcome == "true" else (3 if outcome in ("queued", "skipped") else 5)
 
     if req is None:
@@ -8621,7 +8735,7 @@ def cmd_idle_card_request(args):
     if seat.get("kind") == "native":
         from session_tidy_native import idle_card_request
         verdict = idle_card_request(req, str(path), args.nonce, screen_ready=_screen_ready)
-        return finish(verdict.get("accepted", "failed"), verdict.get("reason", ""))
+        return finish(verdict.get("accepted", "failed"), verdict.get("reason", ""), verdict.get("detail", ""))
     if _surface_missing(args.target):
         return finish("failed", "tmux-not-found" if terminal_surface.is_tmux_pane(args.target)
                       else "herdr-not-found")
@@ -8759,6 +8873,24 @@ def _continue_look(target, req):
     return None
 
 
+def _continue_composer_reason(target, harness="codex"):
+    """Why a Codex or OpenCode continue must not start a turn now: the input box holds the
+    person's writing, a form is open, or the screen cannot be read; else None.
+
+    Claude's continue types into the pane behind the same judgement
+    (`_native_idle_prompt_guard`); Codex's goes through its native queue and OpenCode's through
+    its idle plugin, which start the turn at the moment the session is idle (not by typing, so
+    the writing is never overwritten, but never started over either), so the box is read before
+    the continue is bound to either."""
+    refusal = _tmux_input_refusal(target)
+    if refusal:
+        return refusal
+    lines, why = _read_screen_reason(target)
+    if lines is None:
+        return why or "screen-unknown"
+    return _screen_ready(harness, lines)
+
+
 def cmd_continue(args):
     """Deliver the booked no-trailer continue to the exact native receiver."""
     import session_tidy_clear as clear
@@ -8828,6 +8960,8 @@ def cmd_continue(args):
         if reason.startswith("not-idle-") or reason == "new-session-unknown" and (
                 transfer_ref or str(req.get("new_session") or "-") == "-"):
             return "queued"
+        if harness in ("codex", "opencode") and reason in clear.CONTINUE_INPUT_WAIT:
+            return "queued"     # the writing in the box or a passing doubt; nothing was bound
         return _look_outcome(reason)
 
     reason = None
@@ -8851,6 +8985,8 @@ def cmd_continue(args):
     if req is None:
         return finish("skipped", why)
     reason = _continue_look(target, req)
+    if not reason and harness in ("codex", "opencode"):
+        reason = _continue_composer_reason(target, harness)
     if reason:
         return finish(held(reason), reason)
     req, why = clear.claim_continue(args.request, args.nonce)
@@ -8858,6 +8994,8 @@ def cmd_continue(args):
         return finish("skipped", why)
     claim_id = (req.get("continued") or {}).get("claim_id")
     reason = _continue_look(target, req)
+    if not reason and harness in ("codex", "opencode"):
+        reason = _continue_composer_reason(target, harness)
     if reason:
         clear.release_unsent_continue(req)
         return finish(held(reason), reason)

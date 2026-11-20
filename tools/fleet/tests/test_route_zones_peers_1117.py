@@ -5,7 +5,7 @@ the shell panel's grammar.
     with no row has none); the requests are the third zone, under the routes, and the section head counts the routes alone.
   * `PEERS  [c7] ⚑ ─ [d4] [3b]` stands under the page title, before MODEL, the same order from every window; a window with no
     relation has no line; short of cells the last numbers go as `+N`; a number that is not this window's opens that page.
-  * A route staged into one stage reads `code(standard) · staged 1/1: execute`, as the panel does.
+  * A route staged into one stage reads `code(team·standard) · 1/1: execute`, as the panel does.
   * The supervision relation is the one the steward columns read (same repository, registered), and the panel's cache map.
   * `+N`: the numbers a group lost are counted inside that group; a group whose head does not fit goes whole, and no count is put
     on the groups left. The older PEERS row (the sessions a message links, and the `PEERS tab ›` link) stays under MESSAGES: whole
@@ -157,12 +157,16 @@ class SessionPageZones(unittest.TestCase):
             self.assertFalse(any(re.search(r"─ (direct|dispatch|request) ─", line) for line in rows), scope)
 
     def test_the_direct_word_is_not_a_bracket_and_a_real_intensity_stays(self):
-        self.assertEqual(tables._kind_cell({"capability": "code", "shape": "direct", "intensity": "direct"}), [("code", "grp")])
-        self.assertEqual(tables._kind_cell({"capability": "code", "shape": "direct", "intensity": ""}), [("code", "grp")])
+        # (11-18: `code` is a field's own name, so its word and bracket wear the field's hue.)
+        self.assertEqual(tables._kind_cell({"capability": "code", "shape": "direct", "intensity": "direct"}), [("code", "kind_code")])
+        self.assertEqual(tables._kind_cell({"capability": "code", "shape": "direct", "intensity": ""}), [("code", "kind_code")])
         self.assertEqual(tables._kind_cell({"capability": "code", "shape": "direct", "intensity": "quick"}),
-                         [("code", "grp"), ("(quick)", "dim")])
+                         [("code", "kind_code"), ("(quick)", "kindq_code")])
         self.assertEqual(tables._kind_cell({"capability": "code", "shape": "staged", "intensity": "standard"}),
-                         [("code", "grp"), ("(standard)", "dim")])
+                         [("code", "kind_code"), ("(team·standard)", "kinds_code")])          # (11-19: the form leads the intensity)
+        # A route with no field hue keeps the bold body word and the dim bracket.
+        self.assertEqual(tables._kind_cell({"capability": "spec", "shape": "staged", "intensity": "standard"}),
+                         [("spec", "grp"), ("(team·standard)", "dim")])
 
 
 class SinglestageStaged(unittest.TestCase):
@@ -180,14 +184,15 @@ class SinglestageStaged(unittest.TestCase):
     def test_a_staged_route_with_one_stage_reads_the_stage_line_the_panel_reads(self):
         one = {"state": "working", "shape": "staged", "capability": "code", "intensity": "standard",
                "stages": [{"name": "execute", "st": "active"}], "legs": (("code", "active", "1/1"),)}
-        self.assertEqual(self.cell(one, 60), "code(standard) · staged 1/1: execute")
-        self.assertEqual(self.cell(one, 24), "staged 1/1: execute")
+        self.assertEqual(self.cell(one, 60), "code(team·standard) · 1/1: execute")
+        self.assertEqual(self.cell(one, 24), "code · 1/1: execute")
+        self.assertEqual(self.cell(one, 16), "1/1: execute")
         self.assertNotIn("●", self.cell(one, 60))
         self.assertNotIn("(execute", self.cell(one, 60))
         # The route its owner does alone (shape one-shot-owner) stays as it was.
         solo = {"state": "working", "shape": "one-shot-owner", "capability": "code", "intensity": "quick",
                 "stages": [{"name": "one-shot", "st": "active"}], "legs": (("code", "active", None),)}
-        self.assertEqual(self.cell(solo, 60), "code(quick)")
+        self.assertEqual(self.cell(solo, 60), "code(solo·quick)")
 
 
 class PeersLine(unittest.TestCase):
@@ -230,10 +235,11 @@ class PeersLine(unittest.TestCase):
             for _ in range(nth + 1):
                 at = line.index(token, at + 1)
             return grid.cells[row][at][1]
-        self.assertEqual(key("[c7]"), "hb_claude")
+        # 11-18: this window's number is its harness color bold; the other sessions' are the receded harness color, plain.
+        self.assertEqual(key("[c7]"), "h_claude")
         self.assertEqual(key("[3b]"), "hbb_codex")
         self.assertEqual(key("[3b]", 1), "hbb_codex")
-        self.assertEqual(key("[a1]"), "hb_claude")
+        self.assertEqual(key("[a1]"), "h_claude")
         self.assertEqual(key("⚑"), "tag_steward")
         self.assertEqual(key("─"), "dim")
         self.assertNotRegex(line.split("PEERS", 1)[1], r"working|idle|blocked|●|⠏")

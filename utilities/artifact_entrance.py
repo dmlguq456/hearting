@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
 """Derived read entrance for one artifact root.
 
-Writes `README.md`, `index.html`, `all-campaigns.md` and `all-campaigns.html`
-directly under the artifact root so a person can see what came out most
-recently and open it, without any external tool.  The same computation feeds
-`hearting reports` (the numbered list in the terminal) and `hearting open`
-(opening one document or the browser entrance).
+Writes `README.md`, `index.html`, `all-campaigns.md`, `all-campaigns.html`,
+`all-spec.md`, `all-spec.html`, `recent-route-reports.md` and
+`recent-route-reports.html` directly under the
+artifact root so a person can see what exists and open it, without any external
+tool.  The entrance (`README.md`/`index.html`) has three sections: spec topics,
+recent campaigns (with their one-line summary) and the records (links to the
+recent route reports page and the ID index).  The spec and campaign sections
+show `ENTRANCE_SPEC_LINES` / `ENTRANCE_CAMPAIGN_LINES` lines and fold the rest
+into one line that opens `all-spec.*` / `all-campaigns.*`.  The route reports themselves are
+listed on `recent-route-reports.*`.  One function (`entrance_sections`) feeds the
+entrance files, `hearting reports` (the numbered list in the terminal) and
+`hearting open <number>`, so the three point at the same lines.
 
 What this module never does: it never creates, moves, renames, or deletes a
 campaign, a cycle, a manifest, or any document, and it never creates a symbolic
-link. Refresh writes the four entrance files above plus, once ever,
+link. Refresh writes the eight entrance files above plus, once ever,
 `<root>/.runtime/artifact-entrance.json` (the first user-facing cycle record).
+One worker turn may also write a campaign's `campaign.md` (see `campaign_document`; it
+replaces only a file whose first line is its own marker) before it refreshes the entrance.
 Seal requests also use two locks and one coalesced pending record under
 `<root>/.runtime/`; the finite refresh worker consumes that record and exits.
 
@@ -23,7 +32,8 @@ and `iter_cycle_dirs`; manifests are read newest first, only until the recent
 list is full or `MAX_MANIFESTS` is reached (a full scan is never done).
 
 Row sources: every recent row carries an internal `kind` (not rendered); rows
-built from cycle folders are `"cycle"`.  `ROW_SOURCES` is the one place where
+built from cycle folders are `"cycle"`.  Rows of kind `canonical-topic` are the
+spec section's, not the route reports page's: `scan` returns them as `topics`.  `ROW_SOURCES` is the one place where
 rows that are not cycle folders can join the recent list.  It is an ordered
 tuple of callables including the common daily-journal reader; each takes the artifact root and returns
 rows (`kind`, `date`, `title`, `doc_path`, optional `summary`/`extra`/
@@ -63,7 +73,13 @@ except Exception:  # pragma: no cover - a missing catalog never blocks the entra
 
 
 RECENT_LIMIT = 20
-CAMPAIGN_LIMIT = 10
+CAMPAIGN_LIMIT = 10  # `campaign_groups`' own default; the entrance uses ENTRANCE_CAMPAIGN_LINES
+ENTRANCE_SPEC_LINES = 3
+ENTRANCE_CAMPAIGN_LINES = 3
+SPEC_MD = "all-spec.md"
+SPEC_HTML = "all-spec.html"
+RECORDS_MD = "recent-route-reports.md"
+RECORDS_HTML = "recent-route-reports.html"
 MAX_MANIFESTS = 300
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 HEAD_BYTES = 16 * 1024
@@ -71,6 +87,16 @@ SUMMARY_CHARS = 120
 MARKER = "<!-- hearting:artifact-entrance v1 -->"
 
 # Hook for rows that are not cycle folders (see the module header).
+def _campaign_target_path(folder: str, campaign_path: Path) -> str:
+    """`<folder>/campaign.md` when the campaign has a readable one, else the folder itself."""
+    try:
+        from artifact_campaign_documents import CAMPAIGN_DOCUMENT, campaign_page
+        page = campaign_page(campaign_path)
+    except Exception:  # noqa: BLE001 -- a document that cannot be taken leaves the folder
+        return folder
+    return folder + "/" + CAMPAIGN_DOCUMENT if page is not None and page.get("status") == "known" else folder
+
+
 def _daily_journals(root):
     from artifact_journal import entrance_snapshot
     return entrance_snapshot(root)
@@ -90,6 +116,8 @@ ROW_SOURCES: Tuple[Callable[[Path], Iterable[Mapping]], ...] = (_daily_journals,
 _DATE_FULL = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 ENTRANCE_NAMES = store.ENTRANCE_NAMES
+DERIVED_KINDS = ("spec-rest", "all-campaigns", "recent-routes")  # lines that open a derived chapter
+ENTRANCE_FIRST = ("README.md", "index.html")  # the entrance proper, written after its chapters
 FIRST_RECORD_REL = ".runtime/artifact-entrance.json"
 
 _STATUS_NAMES = tuple(unicodedata.normalize("NFC", name).casefold()
@@ -115,28 +143,37 @@ def _fallback_translator(message: str, /, **fields: Any) -> str:
     """English-only stand-in when the shared catalog is unavailable."""
     templates = {
         "entrance.title": "Artifacts",
-        "entrance.totals": "Campaigns: {campaigns} · cycles: {cycles} · running: {open}",
-        "entrance.recent_documents": "Recent documents",
-        "entrance.recent_campaigns": "Recent campaigns",
+        "entrance.totals": "Campaigns: {campaigns} · routes: {cycles} · running: {open}",
+        "entrance.section_spec": "spec",
+        "entrance.section_campaigns": "Campaigns",
+        "entrance.section_records": "Records",
+        "entrance.recent_routes": "Recent route reports",
+        "entrance.spec_note": "How this repo works now. {count} topics; each change edits the same document.",
+        "entrance.campaigns_note": "One document per stream of work. No new document appears; this one is rewritten.",
+        "entrance.records_note": "Reports left by routes. Not usually opened.",
+        "entrance.all_spec": "All spec topics",
+        "entrance.spec_rest": "{count} more",
+        "entrance.spec_contents": "Contents",
         "entrance.more": "+{count} more",
-        "entrance.records": "work records {count}",
-        "entrance.cycles": "cycles {count}",
+        "entrance.cycles": "routes {count}",
         "entrance.latest": "latest {date}",
         "entrance.all_campaigns": "All campaigns",
+        "entrance.all_campaigns_line": "All {count} campaigns",
         "entrance.id_index": "ID index",
         "entrance.back": "Back to the entrance",
         "entrance.rewrite": ("Hearting rewrites this file. Editing it is overwritten; "
                              "deleting it comes back at the next publish."),
-        "entrance.empty": "No user-facing document yet.",
+        "entrance.empty": "No documents yet.",
         "entrance.status_ambiguous": "conflicting status pages",
         "entrance.status_recorded": "recorded",
         "entrance.status_unknown": "unconfirmed",
         "open.viewer": "Viewer: {url}",
-        "reports.empty": "No user-facing document yet.",
+        "reports.empty": "No documents yet.",
         "reports.foreign": "Kept an existing {name}: it carries no Hearting entrance marker.",
         "reports.entrance": "Entrance: {path}",
         "open.not_found": "No artifact matches {query}.",
-        "open.ambiguous": "Several artifacts match; open one by number.",
+        "open.ambiguous": "Several artifacts match; add more words to narrow it.",
+        "open.no_line": "There is no line {number}. The entrance has lines 1 to {last}.",
         "install.entrance": ("Results land in each project's `.agent_reports/`; "
                              "open its `README.md` or run `hearting reports`."),
         "completion.entrance": "Artifact list: {path}",
@@ -321,29 +358,35 @@ def _campaign_identity(entry: Path) -> Tuple[Optional[str], Dict[str, Any]]:
     return campaign_id if isinstance(campaign_id, str) else None, record
 
 
-def _campaign_title(root: Path, campaign_id: Optional[str], locator: str, campaign_path: Path,
-                    membership: Optional[Dict[str, Dict[str, Any]]] = None) -> str:
-    """`artifact_meta.effective_title` without its per-call campaign-location lookup.
+def _campaign_meta(root: Path, campaign_id: Optional[str], locator: str, campaign_path: Path,
+                   membership: Optional[Dict[str, Dict[str, Any]]] = None) -> Tuple[str, str]:
+    """`(title, summary)`: `artifact_meta.effective_title` without its per-call
+    campaign-location lookup, plus the one-line summary from the same meta.json.
 
     The campaign directory is already known from the enumeration, so the only
     saving is that lookup; the source order (meta.json title, old display
     declaration, folder name) is the same function's order.  `membership` is
     shared across one scan because `read_campaign_meta` would otherwise rescan
-    every cycle record."""
+    every cycle record.  A campaign without a readable meta.json has no summary."""
+    summary = ""
     if campaign_id:
         try:
             if (campaign_path / artifact_meta.META_NAME).is_file():
                 read = artifact_meta.read_campaign_meta(root, campaign_id,
                                                        members=membership if membership is not None else {})
-                title = ((read.doc or {}).get("campaign") or {}).get("title") if read.status == "ok" else None
+                campaign = (read.doc or {}).get("campaign") if read.status == "ok" else None
+                campaign = campaign if isinstance(campaign, dict) else {}
+                if isinstance(campaign.get("summary"), str):
+                    summary = _clip(campaign["summary"])
+                title = campaign.get("title")
                 if isinstance(title, str) and title:
-                    return _nfc(title)
+                    return _nfc(title), summary
             legacy, _protected = artifact_meta.legacy_title(root, campaign_id)
             if legacy:
-                return _nfc(legacy)
+                return _nfc(legacy), summary
         except Exception:  # noqa: BLE001 - a title never blocks the entrance
             pass
-    return _nfc(locator)
+    return _nfc(locator), summary
 
 
 def _document_rows(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -403,12 +446,13 @@ def _cycle_locator(cycle_path: Path, root: Path) -> str:
 
 
 def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
-         campaign_limit: int = CAMPAIGN_LIMIT) -> Dict[str, Any]:
+         campaign_limit: int = ENTRANCE_CAMPAIGN_LINES) -> Dict[str, Any]:
     """Read-only snapshot of the root feeding every rendered file and the CLI."""
     root = Path(root)
     snapshot: Dict[str, Any] = {
         "root": str(root),
         "recent": [],
+        "topics": [],
         "campaigns": [],
         "all_campaigns": [],
         "totals": {"campaigns": 0, "cycles": 0, "open": 0},
@@ -438,21 +482,23 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
             entries.append((key, campaign_locator, cycle_locator, cycle_path, campaign_path))
         totals["campaigns"] += 1
         totals["cycles"] += len(cycles)
+        folder = _nfc(campaign_path.relative_to(root).as_posix())
         campaign_rows.append({
             "title": "",
-            "path": _nfc(campaign_path.relative_to(root).as_posix()),
+            "path": folder,
+            # The campaign's own document when it has one, else the folder.
+            "target": _campaign_target_path(folder, campaign_path),
             "cycles": len(cycles),
             "date": max(dates) if dates else "",
             "locator": campaign_locator,
-            "doc_cycles": 0,
-            "docs": [],
+            "summary": "",
         })
     membership = artifact_meta._membership(root) if has_meta else None
     for row, (campaign_locator, campaign_id, campaign_path) in zip(campaign_rows, identities):
-        row["title"] = _campaign_title(root, campaign_id, campaign_locator, campaign_path, membership)
+        row["title"], row["summary"] = _campaign_meta(root, campaign_id, campaign_locator,
+                                                      campaign_path, membership)
     snapshot["totals"] = totals
     snapshot["all_campaigns"] = sorted(campaign_rows, key=lambda row: (_desc(row["date"]), row["locator"]))
-    by_locator = {row["locator"]: row for row in campaign_rows}
 
     entries.sort(key=lambda item: (_desc(item[0]), item[1], item[2]))
     recent: List[Dict[str, Any]] = []
@@ -466,7 +512,6 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
             break
         if date_key:
             active_date = date_key
-        group = by_locator.get(campaign_locator)
         manifest_path = cycle_path / "manifest.json"
         try:
             size = manifest_path.stat().st_size
@@ -520,25 +565,43 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
             "extra": extras,
             "selected_by": selected_by,
         })
-        if group is not None:
-            group["doc_cycles"] += 1
-            group["docs"].append({"title": title, "path": document_rel})
 
-    recent.extend(_source_rows(root, statuses=snapshot.setdefault("source_status", [])))
+    source_rows = _source_rows(root, statuses=snapshot.setdefault("source_status", []))
+    topics = [row for row in source_rows if row["kind"] == "canonical-topic"]
+    recent.extend(row for row in source_rows if row["kind"] != "canonical-topic")
     recent.sort(key=lambda row: (_desc(row.get("at") or row["date"]), row["cycle_id"] or row["doc_path"], row["doc_path"]))
     snapshot["recent"] = recent[:recent_limit]
-    groups = []
-    for row in snapshot["all_campaigns"]:
-        live = dict(row)
-        live["records"] = max(0, live["cycles"] - live["doc_cycles"])
-        live["docs"] = list(live["docs"])[:3]
-        groups.append(live)
-    snapshot["campaigns"] = groups[:campaign_limit]
+    topics.sort(key=lambda row: (_desc(row["date"]), row.get("component") or "", row["doc_path"]))
+    with_components = {row.get("reference_id") for row in topics if row.get("component")}
+    for row in topics:  # titles come from the PRD bytes the spec reader already verified
+        row["role"] = "contents" if not row.get("component") and row.get("reference_id") in with_components \
+            else "topic"
+        _topic_title(row)
+    snapshot["topics"] = topics
+    snapshot["campaigns"] = [dict(row) for row in snapshot["all_campaigns"][:campaign_limit]]
     return snapshot
 
 
-def _document_path(root: Path, doc: str, *, placed: bool = False) -> Optional[Path]:
-    """A regular document under root, without traversal or any symlink component."""
+_SPEC_TAIL = re.compile(r" — [^—]*\bPRD\b[^—]*$")
+
+
+def _topic_title(row: Dict[str, Any]) -> None:
+    """Set the line's title from the PRD's first H1 (already read with the PRD).
+
+    A topic drops the H1's trailing ` — …PRD…` part and falls back to the component name,
+    or to the reference's title for a reference without components.  A reference's top
+    contents `prd.md` keeps its H1 as written; without one the renderer says "Contents"."""
+    h1 = row.get("h1") or ""
+    if row["role"] == "contents":
+        row["title"] = h1
+        return
+    title = _SPEC_TAIL.sub("", h1).strip()
+    row["title"] = " ".join(title.split()) or row["title"]
+
+
+def _document_path(root: Path, doc: str, *, placed: bool = False,
+                   directory: bool = False) -> Optional[Path]:
+    """A regular document (or a directory) under root, without traversal or any symlink component."""
     if not doc or doc.startswith("/") or "\\" in doc or "\x00" in doc:
         return None
     parts = doc.split("/")
@@ -553,7 +616,8 @@ def _document_path(root: Path, doc: str, *, placed: bool = False) -> Optional[Pa
         if placed:
             path = resolve_placed_output(path)
             return _document_path(root, path.relative_to(root).as_posix())
-        if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+        if not (path.is_dir() if directory else path.is_file()) \
+                or not path.resolve().is_relative_to(root.resolve()):
             return None
     except (OSError, ValueError, RuntimeError):
         return None
@@ -600,6 +664,8 @@ def _source_row(root: Path, raw: Any) -> Optional[Dict[str, Any]]:
         row.update({key: raw.get(key) for key in ('artifact_root_id', 'repository_id', 'campaign_id',
             'cycle_id', 'cycle_path', 'artifact_id', 'artifact_revision_id', 'reference_id', 'component',
             'revision_id', 'source_revision_id', 'source_path', 'logical_locator', 'status', 'coverage', 'digest')})
+        h1 = raw.get('h1')
+        row['h1'] = " ".join(_nfc(h1).split()) if isinstance(h1, str) else ""
     if kind == "journal-entry":
         from artifact_journal import is_well_formed
         if not (is_well_formed(raw.get("artifact_id", ""), "artifact")
@@ -665,7 +731,9 @@ class _Desc:
 
 
 def recent_rows(root: Path, limit: int = RECENT_LIMIT) -> List[Dict[str, Any]]:
-    """The numbered list `hearting reports` and `hearting open` share with the entrance."""
+    """Recent records (cycle reports, journal entries, campaign documents), newest first, at most `limit`.
+
+    Not the entrance's numbered lines (`entrance_sections` owns those)."""
     return scan(root, recent_limit=limit)["recent"]
 
 
@@ -686,6 +754,17 @@ def all_campaigns(root: Path) -> List[Dict[str, Any]]:
 
 def _md_text(value: str) -> str:
     return re.sub(r"([\\`*_\[\]])", r"\\\1", _nfc(value))
+
+
+def _md_summary(value: str) -> str:
+    """A model-written summary line: Markdown specials and `<`, `>`, `&` show as typed.
+    Backslash escapes, not entities: the viewer does not decode entities, and the raw file stays readable."""
+    return re.sub(r"([\\`*_\[\]<>&])", r"\\\1", _nfc(value))
+
+
+def _campaign_target(row: Mapping[str, Any]) -> str:
+    """Where a campaign line opens: its document when it has one, else its folder."""
+    return str(row.get("target") or row["path"])
 
 
 def _md_href(path: str) -> str:
@@ -730,17 +809,17 @@ def _row_status(row, t):
 
 def _markdown_recent(snapshot: Dict[str, Any], t) -> List[str]:
     lines: List[str] = []
-    for number, row in enumerate(snapshot["recent"], start=1):
+    for row in snapshot["recent"]:
         suffix = f"  ({t('entrance.more', count=_count(row['extra']))})" if row["extra"] else ""
         where = f"  — `{_md_href(row['cycle_path'])}`" if row["cycle_path"] else ""
-        lines.append(f"{number}. {row['date']}  [{_md_text(row['title'])}](<{_record_md_href(row)}>)"
+        lines.append(f"- {row['date']}  [{_md_text(row['title'])}](<{_record_md_href(row)}>)"
                      f"{where}{suffix}")
         if row["kind"] in ("journal-entry", "campaign-document"):
             links = [f"[{t('entrance.open_record')}](<{_record_md_href(row)}>)"]
             links += [f"[{t('entrance.open_result')}](<{item['href']}>)" for item in _result_links(row)]
             lines.append("   " + " · ".join(links) + " · " + _md_text(_row_status(row, t)))
         if row["summary"]:
-            lines.append(f"   {_md_text(row['summary'])}")
+            lines.append(f"   {_md_summary(row['summary'])}")
     if not lines:
         lines.append(t("entrance.empty"))
     if _partial_sources(snapshot):
@@ -748,20 +827,65 @@ def _markdown_recent(snapshot: Dict[str, Any], t) -> List[str]:
     return lines
 
 
-def _markdown_campaigns(snapshot: Dict[str, Any], t) -> List[str]:
-    lines: List[str] = []
-    for row in snapshot["campaigns"]:
-        parts = [t("entrance.cycles", count=_count(row["cycles"]))]
-        if row["date"]:
-            parts.append(t("entrance.latest", date=row["date"]))
-        parts.append(t("entrance.records", count=_count(row["records"])))
-        lines.append(f"- [{_md_text(row['title'])}](<{_md_href(row['path'])}>) — "
-                     + " · ".join(parts))
-        for document in row["docs"]:
-            lines.append(f"  - [{_md_text(document['title'])}](<{_md_href(document['path'])}>)")
+def _spec_topics(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every spec topic: each component's PRD, and the top `prd.md` of a reference without components."""
+    return [row for row in (snapshot.get("topics") or []) if row.get("role") == "topic"]
+
+
+def _spec_contents(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The top `prd.md` of a reference that has components: a table of contents, not a topic."""
+    return [row for row in (snapshot.get("topics") or []) if row.get("role") == "contents"]
+
+
+def entrance_sections(snapshot: Dict[str, Any], t) -> List[Dict[str, Any]]:
+    """The entrance's sections and lines, numbered once for every consumer.
+
+    `README.md`, `index.html`, `hearting reports` and `hearting open <number>` all
+    read this list, so they point at the same lines.  Only lines that link
+    somewhere carry a `number` (1, 2, … from the top).  A section's `note` is the
+    one line under its title; a line's `note` is the one line about it.  Neither
+    is numbered."""
+    def line(kind, title, md, html, target, *, date="", summary="", row=None, directory=False,
+             note=""):
+        return {"kind": kind, "date": date, "title": title, "summary": summary, "note": note,
+                "md": md, "html": html, "target": target, "row": row,
+                "directory": directory, "number": None}
+
+    sections: List[Dict[str, Any]] = []
+    components = _spec_topics(snapshot)
+    if components:
+        lines = [line("spec", row["title"], _record_md_href(row), _record_href(row), row["doc_path"],
+                      date=row["date"], row=row) for row in components[:ENTRANCE_SPEC_LINES]]
+        if len(components) > ENTRANCE_SPEC_LINES:
+            lines.append(line("spec-rest",
+                              t("entrance.spec_rest", count=_count(len(components) - ENTRANCE_SPEC_LINES)),
+                              SPEC_MD, SPEC_HTML, SPEC_HTML))
+        sections.append({"key": "spec", "title": t("entrance.section_spec"),
+                         "note": t("entrance.spec_note", count=_count(len(components))), "lines": lines})
+    lines = [line("campaign", row["title"], _md_href(_campaign_target(row)), _href(_campaign_target(row)),
+                  _campaign_target(row), date=row["date"], summary=row.get("summary") or "",
+                  directory=_campaign_target(row) == row["path"])
+             for row in snapshot["campaigns"][:ENTRANCE_CAMPAIGN_LINES]]
     if not lines:
-        lines.append(t("entrance.empty"))
-    return lines
+        lines.append(line("text", t("entrance.empty"), None, None, None))
+    else:
+        lines.append(line("all-campaigns", t("entrance.all_campaigns_line",
+                                             count=_count(len(snapshot["all_campaigns"]))),
+                          "all-campaigns.md", "all-campaigns.html", "all-campaigns.html"))
+    sections.append({"key": "campaigns", "title": t("entrance.section_campaigns"),
+                     "note": t("entrance.campaigns_note"), "lines": lines})
+    sections.append({"key": "records", "title": t("entrance.section_records"), "note": "", "lines": [
+        line("recent-routes", t("entrance.recent_routes"), RECORDS_MD, RECORDS_HTML, RECORDS_HTML,
+             note=t("entrance.records_note")),
+        line("id-index", t("entrance.id_index"), "campaigns/INDEX.md", "campaigns/INDEX.md",
+             "campaigns/INDEX.md")]})
+    number = 0
+    for section in sections:
+        for item in section["lines"]:
+            if item["md"] is not None:
+                number += 1
+                item["number"] = number
+    return sections
 
 
 def render_markdown(snapshot: Dict[str, Any], t) -> str:
@@ -772,25 +896,32 @@ def render_markdown(snapshot: Dict[str, Any], t) -> str:
         "",
         t("entrance.totals", campaigns=_count(totals["campaigns"]),
           cycles=_count(totals["cycles"]), open=_count(totals["open"])),
-        "",
-        f"## {t('entrance.recent_documents')}",
-        "",
     ]
+    for section in entrance_sections(snapshot, t):
+        lines.extend(["", f"## {section['title']}", ""])
+        if section["note"]:
+            lines.extend([_md_text(section["note"]), ""])
+        for item in section["lines"]:
+            if item["md"] is None:
+                lines.append(_md_text(item["title"]))
+                continue
+            when = f"{item['date']}  " if item["date"] else ""
+            lines.append(f"{item['number']}. {when}[{_md_text(item['title'])}](<{item['md']}>)")
+            if item["summary"]:
+                lines.append(f"   {_md_summary(item['summary'])}")
+            if item["note"]:
+                lines.append(f"   {_md_text(item['note'])}")
+        if section["key"] == "records" and _partial_sources(snapshot):
+            lines.append(t("entrance.partial"))
+    lines.extend(["", t("entrance.rewrite"), ""])
+    return "\n".join(lines)
+
+
+def render_recent_markdown(snapshot: Dict[str, Any], t) -> str:
+    lines = [MARKER, f"# {t('entrance.recent_routes')}", "",
+             f"[{t('entrance.back')}](<README.md>)", ""]
     lines.extend(_markdown_recent(snapshot, t))
-    lines.extend([
-        "",
-        f"## {t('entrance.recent_campaigns')}",
-        "",
-    ])
-    lines.extend(_markdown_campaigns(snapshot, t))
-    lines.extend([
-        "",
-        f"[{t('entrance.all_campaigns')}](<all-campaigns.md>) · "
-        f"[{t('entrance.id_index')}](<campaigns/INDEX.md>)",
-        "",
-        t("entrance.rewrite"),
-        "",
-    ])
+    lines.extend(["", t("entrance.rewrite"), ""])
     return "\n".join(lines)
 
 
@@ -806,8 +937,22 @@ def render_all_markdown(snapshot: Dict[str, Any], t) -> str:
         parts = [t("entrance.cycles", count=_count(row["cycles"]))]
         if row["date"]:
             parts.append(t("entrance.latest", date=row["date"]))
-        lines.append(f"- [{_md_text(row['title'])}](<{_md_href(row['path'])}>) — " + " · ".join(parts))
+        lines.append(f"- [{_md_text(row['title'])}](<{_md_href(_campaign_target(row))}>) — " + " · ".join(parts))
     if not snapshot["all_campaigns"]:
+        lines.append(t("entrance.empty"))
+    lines.extend(["", t("entrance.rewrite"), ""])
+    return "\n".join(lines)
+
+
+def render_spec_markdown(snapshot: Dict[str, Any], t) -> str:
+    components = _spec_topics(snapshot)
+    lines = [MARKER, f"# {t('entrance.all_spec')}", "", f"[{t('entrance.back')}](<README.md>)", ""]
+    for row in _spec_contents(snapshot):
+        lines.extend([f"{row['date']}  [{_md_text(row['title'] or t('entrance.spec_contents'))}]"
+                      f"(<{_record_md_href(row)}>)", ""])
+    for row in components:
+        lines.append(f"- {row['date']}  [{_md_text(row['title'])}](<{_record_md_href(row)}>)")
+    if not components:
         lines.append(t("entrance.empty"))
     lines.extend(["", t("entrance.rewrite"), ""])
     return "\n".join(lines)
@@ -854,12 +999,8 @@ def _count(value: int) -> str:
     return f"{value:,}"
 
 
-def render_html(snapshot: Dict[str, Any], t) -> str:
-    totals = snapshot["totals"]
-    body = [f"<h1>{_escape(t('entrance.title'))}</h1>",
-            f'<p class="meta">{_escape(t("entrance.totals", campaigns=_count(totals["campaigns"]), cycles=_count(totals["cycles"]), open=_count(totals["open"])))}</p>',
-            f"<h2>{_escape(t('entrance.recent_documents'))}</h2>",
-            "<ol>"]
+def _html_recent_items(snapshot: Dict[str, Any], t) -> List[str]:
+    body: List[str] = []
     for row in snapshot["recent"]:
         suffix = f" &#183; {_escape(t('entrance.more', count=_count(row['extra'])))}" if row["extra"] else ""
         summary = f"<br><span class=\"meta\">{_escape(row['summary'])}</span>" if row["summary"] else ""
@@ -877,29 +1018,56 @@ def render_html(snapshot: Dict[str, Any], t) -> str:
         body.append(f"<li>{_escape(t('entrance.empty'))}</li>")
     if _partial_sources(snapshot):
         body.append(f"<li>{_escape(t('entrance.partial'))}</li>")
-    body.extend(["</ol>", f"<h2>{_escape(t('entrance.recent_campaigns'))}</h2>", "<ul>"])
-    for row in snapshot["campaigns"]:
-        parts = [t("entrance.cycles", count=_count(row["cycles"]))]
-        if row["date"]:
-            parts.append(t("entrance.latest", date=row["date"]))
-        parts.append(t("entrance.records", count=_count(row["records"])))
-        body.append(f'<li><a href="{_href(row["path"])}">{_escape(row["title"])}</a> '
-                    f'<span class="meta">&#183; {_escape(" · ".join(parts))}</span>')
-        if row["docs"]:
-            body.append("<ul>")
-            for document in row["docs"]:
-                body.append(f'<li><a href="{_href(document["path"])}">{_escape(document["title"])}</a></li>')
-            body.append("</ul>")
-        body.append("</li>")
-    if not snapshot["campaigns"]:
-        body.append(f"<li>{_escape(t('entrance.empty'))}</li>")
-    body.extend([
-        "</ul>",
-        f'<p><a href="all-campaigns.html">{_escape(t("entrance.all_campaigns"))}</a> '
-        f'&#183; <a href="campaigns/INDEX.md">{_escape(t("entrance.id_index"))}</a></p>',
-        f'<p class="note">{_escape(t("entrance.rewrite"))}</p>',
-    ])
+    return body
+
+
+def render_html(snapshot: Dict[str, Any], t) -> str:
+    totals = snapshot["totals"]
+    body = [f"<h1>{_escape(t('entrance.title'))}</h1>",
+            f'<p class="meta">{_escape(t("entrance.totals", campaigns=_count(totals["campaigns"]), cycles=_count(totals["cycles"]), open=_count(totals["open"])))}</p>']
+    for section in entrance_sections(snapshot, t):
+        body.append(f"<h2>{_escape(section['title'])}</h2>")
+        if section["note"]:
+            body.append(f'<p class="meta">{_escape(section["note"])}</p>')
+        body.append("<ul>")
+        for item in section["lines"]:
+            if item["html"] is None:
+                body.append(f"<li>{_escape(item['title'])}</li>")
+                continue
+            when = f'<span class="meta">{_escape(item["date"])}</span> ' if item["date"] else ""
+            summary = f'<br><span class="meta">{_escape(item["summary"])}</span>' if item["summary"] else ""
+            note = f' <span class="meta">{_escape(item["note"])}</span>' if item["note"] else ""
+            body.append(f'<li>{when}<a href="{item["html"]}">{_escape(item["title"])}</a>{note}{summary}</li>')
+        body.append("</ul>")
+        if section["key"] == "records" and _partial_sources(snapshot):
+            body.append(f'<p class="meta">{_escape(t("entrance.partial"))}</p>')
+    body.append(f'<p class="note">{_escape(t("entrance.rewrite"))}</p>')
     return _html_page(t("entrance.title"), getattr(t, "lang", "en"), body)
+
+
+def render_recent_html(snapshot: Dict[str, Any], t) -> str:
+    body = [f"<h1>{_escape(t('entrance.recent_routes'))}</h1>",
+            f'<p><a href="index.html">{_escape(t("entrance.back"))}</a></p>', "<ul>"]
+    body.extend(_html_recent_items(snapshot, t))
+    body.extend(["</ul>", f'<p class="note">{_escape(t("entrance.rewrite"))}</p>'])
+    return _html_page(t("entrance.recent_routes"), getattr(t, "lang", "en"), body)
+
+
+def render_spec_html(snapshot: Dict[str, Any], t) -> str:
+    components = _spec_topics(snapshot)
+    body = [f"<h1>{_escape(t('entrance.all_spec'))}</h1>",
+            f'<p><a href="index.html">{_escape(t("entrance.back"))}</a></p>']
+    for row in _spec_contents(snapshot):
+        body.append(f'<p><span class="meta">{_escape(row["date"])}</span> '
+                    f'<a href="{_record_href(row)}">{_escape(row["title"] or t("entrance.spec_contents"))}</a></p>')
+    body.append("<ul>")
+    for row in components:
+        body.append(f'<li><span class="meta">{_escape(row["date"])}</span> '
+                    f'<a href="{_record_href(row)}">{_escape(row["title"])}</a></li>')
+    if not components:
+        body.append(f"<li>{_escape(t('entrance.empty'))}</li>")
+    body.extend(["</ul>", f'<p class="note">{_escape(t("entrance.rewrite"))}</p>'])
+    return _html_page(t("entrance.all_spec"), getattr(t, "lang", "en"), body)
 
 
 def render_all_html(snapshot: Dict[str, Any], t) -> str:
@@ -909,7 +1077,7 @@ def render_all_html(snapshot: Dict[str, Any], t) -> str:
         parts = [t("entrance.cycles", count=_count(row["cycles"]))]
         if row["date"]:
             parts.append(t("entrance.latest", date=row["date"]))
-        body.append(f'<li><a href="{_href(row["path"])}">{_escape(row["title"])}</a> '
+        body.append(f'<li><a href="{_href(_campaign_target(row))}">{_escape(row["title"])}</a> '
                     f'<span class="meta">&#183; {_escape(" · ".join(parts))}</span></li>')
     if not snapshot["all_campaigns"]:
         body.append(f"<li>{_escape(t('entrance.empty'))}</li>")
@@ -935,7 +1103,7 @@ def request_refresh(root: Path, cycle_id: Optional[str] = None) -> None:
     if in_test_process():
         # A test process never spawns a detached child (the checkpoint trigger's
         # rule); refreshing in place keeps its fixtures free of stray writers.
-        refresh(root, cycle_id=cycle_id)
+        _worker_pass(root, cycle_id)
         return
     runtime = root / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -962,6 +1130,19 @@ def request_refresh(root: Path, cycle_id: Optional[str] = None) -> None:
             os.close(fd)
 
 
+def _worker_pass(root: Path, cycle_id: Optional[str] = None) -> None:
+    """One worker turn: bring the campaign documents up to date, then refresh the entrance.
+
+    The documents come first so that the entrance written next already points at a document
+    this turn created. A failing generator never stops the entrance."""
+    try:
+        import campaign_document
+        campaign_document.catch_up(root, cycle_id)
+    except Exception as exc:  # noqa: BLE001 -- the entrance never waits on the documents
+        print(f"campaign_document skipped error={type(exc).__name__}", file=sys.stderr)
+    refresh(root, cycle_id=cycle_id)
+
+
 def _refresh_requested(root: Path, fd: int) -> None:
     """Consume pending requests without sleeping or holding the request lock over a refresh."""
     runtime = root / ".runtime"
@@ -978,7 +1159,7 @@ def _refresh_requested(root: Path, fd: int) -> None:
                 demand = store._read_json(pending) or {}
                 pending.unlink()
             try:
-                refresh(root, cycle_id=demand.get("cycle_id"))
+                _worker_pass(root, demand.get("cycle_id"))
             except Exception as exc:  # best effort, including a follow-up request
                 print(f"artifact_entrance skipped error={type(exc).__name__}", file=sys.stderr)
     finally:
@@ -1032,6 +1213,10 @@ def _refresh_and_snapshot(root: Path, cycle_id: Optional[str] = None):
     payloads = {
         "README.md": render_markdown(snapshot, t),
         "index.html": render_html(snapshot, t),
+        RECORDS_MD: render_recent_markdown(snapshot, t),
+        RECORDS_HTML: render_recent_html(snapshot, t),
+        SPEC_MD: render_spec_markdown(snapshot, t),
+        SPEC_HTML: render_spec_html(snapshot, t),
     }
     # All page inputs, translations and renderer implementation determine reuse.
     # The cached file bytes are compared as well, so foreign edits and missing
@@ -1041,7 +1226,10 @@ def _refresh_and_snapshot(root: Path, cycle_id: Optional[str] = None):
         renderer_revision = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     except OSError:
         renderer_revision = None  # no reliable identity: render normally
-    fingerprint = json.dumps([snapshot["all_campaigns"], getattr(t, "lang", "en"),
+    pages_input = [{"title": row["title"], "path": row["path"], "target": _campaign_target(row),
+                    "cycles": row["cycles"], "date": row["date"]}
+                   for row in snapshot["all_campaigns"]]  # the cells the page renders
+    fingerprint = json.dumps([pages_input, getattr(t, "lang", "en"),
         [t(k, **fields) for k, fields in (
             ("entrance.all_campaigns", {}), ("entrance.back", {}),
             ("entrance.cycles", {"count": "123"}),
@@ -1066,7 +1254,10 @@ def _refresh_and_snapshot(root: Path, cycle_id: Optional[str] = None):
     written: List[str] = []
     foreign: List[str] = []
     created: List[str] = []
-    for name in ENTRANCE_NAMES:
+    # The chapters the entrance points at are written first and the two entrance files
+    # last, so a write that fails part-way never leaves an entrance pointing at a chapter
+    # that does not exist.
+    for name in (*(n for n in ENTRANCE_NAMES if n not in ENTRANCE_FIRST), *ENTRANCE_FIRST):
         if name not in payloads:
             continue
         path = root / name
@@ -1156,20 +1347,25 @@ def resolve_root(explicit: Optional[str] = None) -> Path:
 
 
 def _print_rows(rows: Sequence[Dict[str, Any]], root: Path) -> None:
-    for number, row in enumerate(rows, start=1):
+    """Rows without numbers: the entrance's numbers do not count these."""
+    for row in rows:
         suffix = f"  ({_translator()('entrance.more', count=_count(row['extra']))})" if row["extra"] else ""
-        print(f"{number}. {row['date']}  {row['title']}{suffix}")
+        when = f"{row['date']}  " if row["date"] else ""
+        print(f"{when}{row['title']}{suffix}")
         status = ' · ' + _row_status(row, _translator()) if row['kind'] == 'campaign-document' else ''
         print(f"   {_record_target(row)}{status}")
         for item in _result_links(row):
             print(f"   {_translator()('entrance.open_result')}: {item['path']}")
 
 
+def _can_open_externally() -> bool:
+    """Whether this shell has a screen to open a document on."""
+    return sys.stdout.isatty() and bool(
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY") or sys.platform == "darwin")
+
+
 def _open_externally(path: Path | str) -> None:
-    if not sys.stdout.isatty():
-        return
-    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-            or sys.platform == "darwin"):
+    if not _can_open_externally():
         return
     opener = "open" if sys.platform == "darwin" else "xdg-open"
     try:
@@ -1183,13 +1379,27 @@ def _open_externally(path: Path | str) -> None:
 def _command_reports(root: Path) -> int:
     result, snapshot = _refresh_and_snapshot(root)
     t = _translator()
-    rows = snapshot["recent"] if snapshot else []
-    if _partial_sources(snapshot):
+    sections = entrance_sections(snapshot, t) if snapshot else []
+    if snapshot and _partial_sources(snapshot):
         print(t("entrance.partial"))
-    if not rows:
+    if not sections:
         print(t("reports.empty"))
-    else:
-        _print_rows(rows, root)
+    for section in sections:
+        print(section["title"])
+        if section["note"]:
+            print(f"   {section['note']}")
+        for item in section["lines"]:
+            if item["number"] is None:
+                print(f"   {item['title']}")
+                continue
+            when = f"{item['date']}  " if item["date"] else ""
+            print(f"{item['number']}. {when}{item['title']}")
+            # a terminal reads the `.md` chapter; `index.html` links the `.html` one
+            print(f"   {item['md'] if item['kind'] in DERIVED_KINDS else item['target']}")
+            if item["summary"]:
+                print(f"   {item['summary']}")
+            if item["note"]:
+                print(f"   {item['note']}")
     print(t("reports.entrance", path=str(root / "README.md")))
     for name in result["foreign"]:
         print(t("reports.foreign", name=name))
@@ -1206,17 +1416,30 @@ def _open_target(root: Path) -> Path:
 def _command_open(root: Path, args: Sequence[str]) -> int:
     t = _translator()
     _, snapshot = _refresh_and_snapshot(root)
-    rows = snapshot["recent"] if snapshot else []
     if not args:
         target = root / "index.html"
         print(str(target))
         _show_viewer(root, target, t)
         return 0
     selector = " ".join(args)
+    numbered = [item for section in (entrance_sections(snapshot, t) if snapshot else [])
+                for item in section["lines"] if item["number"] is not None]
+    line: Optional[Dict[str, Any]] = None
     chosen: Optional[Dict[str, Any]] = None
-    if len(args) == 1 and args[0].isdigit() and 1 <= int(args[0]) <= len(rows):
-        chosen = rows[int(args[0]) - 1]
+    if len(args) == 1 and args[0].isascii() and args[0].isdigit():
+        if not numbered:  # no entrance lines at all: there is no range to name
+            print(t("open.not_found", query=selector), file=sys.stderr)
+            return 1
+        if not 1 <= int(args[0]) <= len(numbered):  # a number is a line, never a search word
+            print(t("open.no_line", number=args[0], last=len(numbered)), file=sys.stderr)
+            return 1
+        line = numbered[int(args[0]) - 1]
+        doc_path = line["target"]
+        if line["kind"] in DERIVED_KINDS and not _can_open_externally():
+            doc_path = line["md"]  # a shell without a screen reads the `.md` chapter
+        chosen = line["row"] or {"doc_path": doc_path, "kind": line["kind"]}
     if chosen is None:
+        rows = (snapshot["recent"] + snapshot["topics"]) if snapshot else []
         words = [word.casefold() for word in args if word.strip()]
         matches = [row for row in rows if all(
             word in (" ".join([row["title"], row["summary"], row["doc_path"], row["cycle_path"] or '']).casefold())
@@ -1229,7 +1452,7 @@ def _command_open(root: Path, args: Sequence[str]) -> int:
             print(t("open.ambiguous"), file=sys.stderr)
             return 1
         chosen = matches[0]
-    target = _document_path(root, chosen["doc_path"])
+    target = _document_path(root, chosen["doc_path"], directory=bool(line and line["directory"]))
     if target is None:
         print(t("open.not_found", query=selector), file=sys.stderr)
         return 1

@@ -118,7 +118,8 @@ from mem_base import (  # noqa: F401
     CAPSULE_LIST_FIELDS, DELIVERY_STATES, DOCTOR_DURABLE_SOFT_CEILING,
     DOCTOR_WORKING_BLOAT_CEILING, enc_cwd, EXCHANGE_MAX_RUNS, EXCHANGE_NOTICE_REPEAT_SECONDS,
     EXCHANGE_READ_INTERVAL_SECONDS, EXCHANGE_RECEIVE_RETRY_SECONDS, EXCHANGE_RUN_LOCK,
-    EXCHANGE_SCHEDULE_LOCK, EXCHANGE_SPAWN_GRACE_SECONDS, EXCHANGE_STATE_FILE,
+    EXCHANGE_SCHEDULE_LOCK, EXCHANGE_SPAWN_GRACE_SECONDS, EXCHANGE_STALE_DAYS,
+    EXCHANGE_STATE_FILE,
     EXCHANGE_WINDOW_SECONDS, find_by_source, FM_ORDER, INJECT_DEFAULT_CLEANUP_LINES,
     INJECT_DEFAULT_MAX_BULLETS, INJECT_DEFAULT_MAX_CHARS, INJECT_DEFAULT_MAX_DURABLE,
     INJECT_DEFAULT_MAX_WORKING, INJECT_DEFAULT_SNIPPET_CHARS, INJECTION_PAT, iter_md_files,
@@ -261,6 +262,44 @@ def _session_id_from_env():
         except Exception:
             return ""
     return ""
+
+def _work_labels(tier, rtype):
+    """The field/unit labels of the session's one current route, for a work-style record (D-82).
+
+    Only a durable ``preference`` record (the work-style shape) gets them. No route, several
+    routes, direct work, a worker session, or any failure gives ``[]``: the write itself never
+    depends on this. The labels are only ever *added* (see ``_merge_auto_topics``).
+    """
+    if tier != "durable" or rtype != "preference":
+        return []
+    for base in (MEM_MODULE_DIR.parents[1] / "utilities", AGENT_HOME / "utilities"):
+        if not (base / "memory_work_labels.py").is_file():
+            continue
+        if str(base) not in sys.path:
+            sys.path.append(str(base))
+        try:
+            from memory_work_labels import labels_for_session
+            return [label for label in labels_for_session() if isinstance(label, str)]
+        except Exception:
+            return []
+    return []
+
+
+def _merge_auto_topics(base, auto):
+    """``base`` plus the automatic labels whose kind (``field``/``unit``) ``base`` lacks.
+
+    Never replaces or reorders what ``base`` holds: a label a person wrote, or one the record
+    already carries, stays, and a kind already present is left alone.
+    """
+    merged = list(base or [])
+    kinds = {str(item).strip().casefold().partition(":")[0] for item in merged if isinstance(item, str)}
+    for label in auto or []:
+        kind = label.strip().casefold().partition(":")[0]
+        if kind not in kinds:
+            kinds.add(kind)
+            merged.append(label)
+    return merged
+
 
 # Module-level FTS and CJK-shadow availability caches, initialized by get_con().
 _FTS_OK = None     # FTS5 unicode61 availability.
@@ -1300,8 +1339,12 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
                  source=None, quiet=False, requires_consume=False, journal_action=None,
                  journal_insert_only=False, journal_actor=None,
                  journal_cwd=_WRITE_EVENT_CWD_UNSET, headline=None, aliases=None,
-                 entities=None, topics=None, artifact_refs=None):
-    """DB write primitive: one write, one connection, one transaction."""
+                 entities=None, topics=None, artifact_refs=None, auto_topics=None):
+    """DB write primitive: one write, one connection, one transaction.
+
+    ``auto_topics`` are labels the runtime offers (not the caller's ``topics``): they are
+    merged into a record's topics, never replacing its existing or given ones.
+    """
     assert tier in TIERS and scope in SCOPES
     ok, why = quality_ok(body)
     if not ok:
@@ -1336,6 +1379,10 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
             supplied = (aliases, entities, topics, artifact_refs)
             for idx, (raw, old) in enumerate(zip(supplied, current[1:])):
                 normalized = _normalize_capsule_list(raw if raw is not None else old)
+                if idx == 2 and auto_topics:  # topics slot: merge in, never replace
+                    had = _normalize_capsule_list(old)  # a kind the record had, or the caller gave, is not filled in
+                    lacking = _merge_auto_topics(had, auto_topics)[len(had):]
+                    normalized = _normalize_capsule_list(_merge_auto_topics(normalized, lacking))
                 if idx == 1:  # entities slot: merge in deterministic extraction
                     normalized = _merge_entities(normalized, _extracted)
                 values.append(json.dumps(normalized, ensure_ascii=False))
@@ -1433,7 +1480,8 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
                     " delivery_state=CASE WHEN delivery_state='pending' OR ?='pending' "
                     "THEN 'pending' ELSE delivery_state END WHERE id=?",
                     (today(), requested_delivery, dup))
-            if any(value is not None for value in (headline, aliases, entities, topics, artifact_refs)) or _extracted:
+            if (any(value is not None for value in (headline, aliases, entities, topics, artifact_refs))
+                    or _extracted or auto_topics):
                 refresh_capsule(dup)
             _capture_v2_operation(
                 con, "put", post_ids=[dup], reason="dedup-reinforce"
@@ -1460,7 +1508,7 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
             "injection_flag": 1 if "injection-pattern" in flags else 0,
             "delivery_state": requested_delivery,
             "headline": _normalize_headline(headline, body),
-            "aliases": aliases or [], "entities": _merge_entities(entities, _extracted), "topics": topics or [],
+            "aliases": aliases or [], "entities": _merge_entities(entities, _extracted), "topics": _merge_auto_topics(topics, auto_topics),
             "artifact_refs": artifact_refs or [], "status": "active",
             "canonical_id": sid, "superseded_by": None, "capsule_version": 1,
         }
@@ -5143,6 +5191,7 @@ def doctor(json_output=False):
             return 2
         policy = sync_v2.remote_policy(_sync_environment(), connection=con)
         sync_snapshot = sync_v2.sync_status(con, policy=policy)
+        stale_line = _exchange_stale_line(con)
         # ① PRAGMA integrity_check
         rows = con.execute("PRAGMA integrity_check").fetchall()
         verdict = rows[0][0] if rows else "unknown"
@@ -5311,11 +5360,14 @@ def doctor(json_output=False):
             _doctor_check(results, "dump-freshness", "OK", f"dump max(updated)={dump_max}")
 
     sync_level = int(sync_snapshot.get("exit_code", 2))
+    sync_message = f"{sync_snapshot.get('status')}: {sync_snapshot.get('reason') or 'ok'}"
+    if stale_line:
+        sync_message += f" | {stale_line}"
     _doctor_check(
         results,
         "sync-v2",
         "OK" if sync_level == 0 else "WARN" if sync_level == 1 else "FAIL",
-        f"{sync_snapshot.get('status')}: {sync_snapshot.get('reason') or 'ok'}",
+        sync_message,
     )
     max_level = 0
     for name, status, message in results:
@@ -5515,6 +5567,9 @@ def inject(max_working=None, max_durable=None, hook=False, payload=None):
             (encc, today())))
         # Collect cleanup candidates while the connection remains open.
         cleanup_lines = inject_cleanup_candidates(con, encc)
+        stale = _exchange_stale_line(con)
+        if stale:
+            cleanup_lines.insert(0, "⚠️ " + stale)
         # Count cwd-scoped injection-flagged working and durable records.
         flagged_cnt = con.execute(
             "SELECT COUNT(*) FROM records "
@@ -6326,7 +6381,11 @@ def _sync_locked(json_output=False, routine=False, apply_expiry=False,
             reason = "remote-rewind"
         else:
             exchange_status = "hard-failure"
-            reason = "exchange-validation-failed"
+            # Name the environment check and (shortened) path that failed, never
+            # the exception text, which can carry host paths or project names.
+            label = git_exchange_v2.failure_label(exc)
+            reason = f"exchange-validation-failed:{label}" if label else (
+                "exchange-validation-failed")
         status.update(common, status=exchange_status, reason=reason,
                       exit_code=exc.exit_code)
         return _emit_sync(status, json_output)
@@ -6583,6 +6642,46 @@ def _exchange_read_trigger():
         _schedule_exchange("read")
     except Exception:
         pass
+
+
+def _exchange_stale_line(con):
+    """One line when a remote exchange is configured, work is waiting, and nothing
+    has gone up for ``EXCHANGE_STALE_DAYS``; ``None`` when healthy or not applicable.
+
+    Read-only and local: DB outbox/peer rows plus the last recorded failure reason.
+    """
+    try:
+        if not sync_v2.remote_policy(_sync_environment()).get("enabled"):
+            return None
+        pending, oldest = con.execute(
+            "SELECT COUNT(*), MIN(queued_at) FROM sync_outbox WHERE state<>'confirmed'"
+        ).fetchone()
+        if not pending:
+            return None
+        peer = con.execute(
+            "SELECT confirmed_at FROM sync_peer_state WHERE peer_id='origin'"
+        ).fetchone()
+
+        def _age_days(raw):
+            when = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=datetime.timezone.utc)
+            return (datetime.datetime.now(datetime.timezone.utc) - when).total_seconds() / 86400
+
+        waiting = _age_days(oldest)   # a write queued just now is not a stall
+        since = _age_days(peer[0]) if peer and peer[0] else waiting
+        if waiting < 1 or since < EXCHANGE_STALE_DAYS:
+            return None
+        state = _exchange_state_load()
+        notice = state.get("failure_notice") or state.get("last_notified")
+        cause = _exchange_clean_reason(
+            notice.get("reason") if isinstance(notice, dict) else notice)
+        days = int(since)
+        line = (f"memory not pushed to the remote for {days} day{'' if days == 1 else 's'}; "
+                f"{pending} pending; cause: ")
+        return (line + cause)[:140]
+    except Exception:
+        return None
 
 
 def _exchange_consume_notice():
@@ -8824,10 +8923,11 @@ def _cli_main():
     args = ap.parse_args()
 
     # A failed background exchange is reported once, by the next command a
-    # person or agent runs. Hook-driven reads (candidates, inject) stay silent:
+    # person or agent runs. Hook-driven reads (candidates, inject, recall-gate)
+    # and the runtime's worker-start read (bootstrap-context) stay silent:
     # nobody sees their stderr, so they must not use the notice up.
     no_touch_read = args.cmd in ("show", "recall") and getattr(args, "no_touch", False)
-    if not no_touch_read and args.cmd not in ("candidates", "inject", "recall-gate"):
+    if not no_touch_read and args.cmd not in ("candidates", "inject", "recall-gate", "bootstrap-context"):
         _exchange_consume_notice()
     probe_deadline = None
     if args.cmd == "candidates":
@@ -8847,7 +8947,8 @@ def _cli_main():
             requires_consume=args.requires_consume,
             journal_action="add",
             headline=args.headline, aliases=args.alias, entities=args.entity,
-            topics=args.topic, artifact_refs=args.artifact_ref,
+            topics=args.topic, auto_topics=_work_labels(args.tier, args.type),
+            artifact_refs=args.artifact_ref,
         )
     elif args.cmd == "note":
         write_record("working", "project", args.type, args.body,

@@ -25,6 +25,7 @@ from dispatch_contract import (
     DispatchContractError, completion_marker_gate, owner_frame_launch_gate,
     parse_registry_metadata, verdict_pass,
 )
+from dispatch_attempt_policy import deferred_completion, terminal_conflict_pending
 from dispatch_completion_join import (
     join_selected_attempts, current_delivery_state, delivery_classification,
     delivery_required_action, completion_harvest_command,
@@ -37,7 +38,9 @@ from execution_access import ExecutionAccessError, prepare_task_request
 import owner_write_advisory as OWNER_WRITE_ADVISORY
 import route_plan as RP
 import resource_resume as RESOURCE_RESUME
+import route_form
 import frame_repository
+import unit_continue as UC
 try:  # ends a detached child with the test that started it; no-op outside tests
     from detached_lifetime import bind as end_with_test
 except ImportError:  # a partial tree without it (e.g. a fixture release): no record
@@ -257,6 +260,42 @@ def _frame_decision_result(decision, question, question_path, answer_path):
     return result
 
 
+def _store_frame_intent(question, response, directory, frame_dir):
+    """The one place the agreed intent is rendered: the round's copy once, then the shared copy."""
+    import frame_interview as FI
+    import workflow_state as WS
+    rendered = FI.render_intent(
+        question, response, now=question["created"],
+        **({"approval_scope": _approval_scope(question, response)} if "route_proposals" in question else {}))
+    _store_bytes_once(directory / "intent.md", rendered.encode())
+    _checkpoint("after-intent-render")
+    intent = frame_dir / "intent.md"
+    if not intent.exists() or intent.read_text() != rendered:
+        WS._atomic_write(intent, rendered)
+
+
+def _intent_placed(frame_dir):
+    """Whether the shared intent exists (a file the cycle recorded as moved still counts)."""
+    import artifact_producer
+    path = frame_dir / "intent.md"
+    return os.path.lexists(path) or artifact_producer.resolve_placed_output(path) != path
+
+
+def released_without_intent(route, jobs):
+    """A `proceed` recorded with its question and answer, and no intent rendered yet.
+
+    The question board releases the gate with the person's answer and writes nothing else; the
+    next plain start fills in the one missing step."""
+    import workflow_state as WS
+    resolution = WS.human_gate_resolution(
+        WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs).journal(), "frame-review")
+    artifact = resolution.get("artifact")
+    # The fill needs the recorded question and the answer both readable: a cycle folder that was moved
+    # or removed leaves nothing to fill, and that start goes on past the released gate as it always did.
+    return bool(resolution["status"] == "proceed" and artifact and resolution.get("answers")
+                and os.path.isfile(artifact) and not _intent_placed(Path(artifact).parent.parent))
+
+
 def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
                          decision="proceed", runtime_root=ROOT, run=subprocess.run, automatic=False):
     """Own raise -> actual answers -> intent -> release through existing commands.
@@ -315,8 +354,10 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
     if not answers and not next_round and decision == "proceed" and resolution["status"] in {"revise", "stop"}:
         decision = resolution["status"]  # A plain resume cannot replace the person's decision.
     if resolution["status"] in {"proceed", "revise", "stop"} and not next_round:
-        # A submitted answer remains readable after its cycle is sealed. Do not
-        # reopen the producer or write into a completed cycle on a lost reply.
+        # A submitted answer remains readable after its cycle is sealed. A lost reply does not reopen
+        # the producer. The one write below (the intent a board answer left unrendered) may land in a
+        # sealed cycle: closed cycles accept writes, their proofs and the campaign close ignore later
+        # files, and the next refresh adds them to the manifest (artifact_seal_abolition.test.py).
         recorded_path = Path(resolution["artifact"])
         recorded = FI.load_json_file(recorded_path)
         if "repository_preparation" in recorded and "repository_preparation" not in supplied:
@@ -340,7 +381,13 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
             raise ValueError("frame-input-invalid: answers do not match the recorded interview")
         if response != recorded_answer:
             raise ValueError("frame-input-conflict: preserve the recorded answer")
-        return _frame_decision_result(decision, recorded, recorded_path, recorded_path.parent / "answers.json")
+        directory = recorded_path.parent
+        if decision == "proceed" and response is not None and not _intent_placed(directory.parent):
+            # Released without a render (the board's answer path): write what the conversation would have.
+            response = FI.recorded_answer_context(response, resolution.get("actor_kind"))
+            _store_once(directory / "answers.json", response)
+            _store_frame_intent(recorded, response, directory, directory.parent)
+        return _frame_decision_result(decision, recorded, recorded_path, directory / "answers.json")
     context = prepare_route_artifact_env(Path(path), start=False, jobs=Path(jobs))
     output = context.get("AGENT_ARTIFACT_OUTPUT_DIR")
     if not output:
@@ -374,6 +421,13 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
     refused_answer = None
     if not answers and not next_round and resolution["status"] == "blocked" and native.is_file():
         answers = native                    # the person's native reply, recorded when it arrived
+    elif (not answers and not next_round and not automatic and resolution["status"] == "blocked"
+            and answer_path.is_file() and (directory / "intent.md").is_file()):
+        # The answer file holds no decision. The round's intent is written only for a `proceed`, just
+        # before its release, so it is the record that this answer's proceed flow reached the render.
+        saved_answers = FI.load_json_file(answer_path, max_bytes=FI.MAX_ANSWERS_BYTES, kind="answers")
+        if isinstance(saved_answers, dict) and saved_answers.get("basis") != FI.AUTOMATIC_BASIS:
+            answers = answer_path           # saved by this flow before the release it did not reach
     response = (FI.load_json_file(answers, max_bytes=FI.MAX_ANSWERS_BYTES, kind="answers")
                 if answers else None)
     # A native timeout/acknowledgement is not an answer file. Keep the same
@@ -393,7 +447,7 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         if (response.get("basis") == FI.AUTOMATIC_BASIS) != bool(automatic) or (
                 automatic and actor_kind != "supervisor"):
             raise ValueError("gate-release-authority-refused: only the runtime records an automatic agreement, "
-                             "and only when both frames agree with nothing left to choose")
+                             "and only when nothing is left to choose")
         binding = next((row for row in route.get("human_gate_bindings", [])
                         if row.get("gate") == "frame-review"), {})
         authority = (resolution.get("release_authority") or
@@ -487,16 +541,8 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
             raise ValueError("frame-answer-conflict: the recorded decision cannot be replaced")
     elif resolution["status"] != "blocked":
         raise ValueError("frame-raise-pending: the gate was not durably registered")
-    intent = frame_dir / "intent.md"
     if decision == "proceed":
-        rendered = FI.render_intent(
-            question, response, now=question["created"],
-            **({"approval_scope": _approval_scope(question, response)} if "route_proposals" in question else {}))
-        saved = directory / "intent.md"
-        _store_bytes_once(saved, rendered.encode())
-        _checkpoint("after-intent-render")
-        if not intent.exists() or intent.read_text() != rendered:
-            WS._atomic_write(intent, rendered)
+        _store_frame_intent(question, response, directory, frame_dir)
     if resolution["status"] == "blocked":
         command("release", "--decision", decision, *(["--answers", str(answer_path)] if response is not None else []))
     current = WS.human_gate_resolution(ledger.journal(), "frame-review")
@@ -636,7 +682,17 @@ def _owns(meta, parent, jobs):
     return route_authority.owns(meta, parent, jobs)
 
 
-def _slot(route, node, rows, jobs=None):
+def require_route_parent(meta, jobs, aid):
+    """Refuse unless this caller owns the attempt `meta` describes: its launching session (or that seat's
+    successor), or the worker whose attempt started it (a unit leg a worker started is followed by that worker)."""
+    if meta.get("caller_attempt_id") and meta["caller_attempt_id"] == os.environ.get("AGENT_DISPATCH_ATTEMPT_ID"):
+        return
+    parent = _current_parent_session_id()
+    if not route_authority.require_known(_owns(meta, parent, jobs), meta, jobs):
+        raise DispatchContractError("work-parent-recovery-required", aid)
+
+
+def _slot(route, node, rows, jobs=None, path=None):
     matches = [aid for aid, (_, meta) in rows.items()
                if ((node == "owner" and meta.get("worker_type") == "owner"
                     and route["route_id"] in {meta.get("owner_route_id"), meta.get("route_id")})
@@ -652,6 +708,12 @@ def _slot(route, node, rows, jobs=None):
                     route["route_id"], route["route_hash"]):
                 matches = [owner]
                 adopted[owner] = binding
+    if matches and path is not None and jobs is not None and node != "owner" and unit_leg(route, node):
+        # A unit route's next turn is a new attempt of this node once the last one ended and the route is closed
+        # (or reopened for it): the slot is then that turn's id, which has no row yet.
+        turn = UC.ready_to_continue(jobs, route, path, node, rows)
+        if turn is not None:
+            return turn.attempt_id
     aid = matches[-1] if matches else attempt_id(route, node)
     if aid in rows:
         if not matches:
@@ -673,10 +735,9 @@ def _slot(route, node, rows, jobs=None):
         # A live attempt delivers to the session that launched it, so another
         # session cannot adopt it. A finished one only has a result to read:
         # the session a supervisor handed the route to may harvest it.
+        # A unit leg a worker started is followed by that worker (it is no session; its attempt is the caller).
         if status != "done":
-            parent = _current_parent_session_id()
-            if not route_authority.require_known(_owns(meta, parent, jobs), meta, jobs):
-                raise DispatchContractError("work-parent-recovery-required", aid)
+            require_route_parent(meta, jobs, aid)
         digest = (meta.get("owner_route_hash") or meta.get("route_hash")) if node == "owner" else meta.get("route_hash")
         if aid in adopted:
             digest = adopted[aid].route_hash
@@ -789,10 +850,16 @@ def _start(route, path, jobs, node, harness, run, on_registered=None):
 
 
 def _start_bound(route, path, jobs, node, harness, run, on_registered, repository):
+    # A unit route's next turn is a new attempt of the same node; its text and its predecessor ride along.
+    turn = UC.next_turn(jobs, route, node, _rows(jobs)) if unit_leg(route, node) else None
+    aid = turn.attempt_id if turn else attempt_id(route, node)
     command = [sys.executable, str(ROOT / "utilities/dispatch-owner.py"), "--start",
                "--route-evidence", str(path), "--jobs", str(jobs),
                "--slug", route["slug"] + "-" + node,
-               "--attempt-id", attempt_id(route, node)]
+               "--attempt-id", aid]
+    if turn:
+        command += ["--continues-attempt-id", turn.prev_attempt_id, "--turn", str(turn.turn),
+                    "--continuation-text", turn.text]
     if node == "owner" or not route.get("artifact_root") or unit_leg(route, node):
         # A route with no artifact root has no runtime home for a prompt file; every sealed route has one.
         # A unit leg gets the brief itself: nothing is added to it here.
@@ -823,7 +890,7 @@ def _start_bound(route, path, jobs, node, harness, run, on_registered, repositor
             # prepared. Preserve the existing typed execution-access reason
             # and stop before dispatch-owner can take its default grant path.
             return {
-                "attempt_id": attempt_id(route, node),
+                "attempt_id": aid,
                 "exit_code": 69,
                 "receipt": f"check=failed\nreason={exc.reason}\ndetail={exc.detail}\nchild_spawned=0\n",
                 "diagnostic": "",
@@ -843,10 +910,10 @@ def _start_bound(route, path, jobs, node, harness, run, on_registered, repositor
     if on_registered is None:
         result = run(command, text=True, capture_output=True, check=False)
     elif run is subprocess.run:
-        result = _run_reporting_registration(command, attempt_id(route, node), reported)
+        result = _run_reporting_registration(command, aid, reported)
     else:   # an injected launcher may report the registration itself, or simply return when done
         result = run(command, text=True, capture_output=True, check=False, on_registered=reported)
-    receipt = {"attempt_id": attempt_id(route, node), "exit_code": result.returncode,
+    receipt = {"attempt_id": aid, "exit_code": result.returncode,
                "receipt": result.stdout, "diagnostic": result.stderr,
                "started_at": round(started, 1), "ended_at": round(time.time(), 1),
                **({"registered_at": round(registered[0], 1)} if registered else {})}
@@ -1197,8 +1264,26 @@ def _checkpoint(name):
     return FAULT_HOOK(name) if FAULT_HOOK is not None else None
 
 
-def _proposal_rows(route, jobs, root, record, output):
-    """Each brief's proposal row, every leg validated by a memory compile (nothing written or started)."""
+def _frame_brief_digest(route, jobs, node):
+    """The sha256 of `node`'s brief as its frame leg completed it ("" when the marker does not say).
+
+    The card is made after the frame legs complete, so a brief that still has this digest has the bytes
+    the card was made from, whichever runtime made the card."""
+    try:
+        marker = json.loads((Path(jobs).parent / "completion" / route["route_id"] / (node + ".json")).read_text(encoding="utf-8"))
+        evidence = marker["evidence"]
+        digest = evidence["sha256"]
+        return digest if isinstance(digest, str) and Path(str(evidence.get("path"))).name == "direction-brief.md" else ""
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+
+
+def _proposal_rows(route, jobs, root, record, output, recorded=None):
+    """Each brief's proposal row, every leg validated by a memory compile (nothing written or started).
+
+    With `recorded` (the interview copy of the proposal the person chose), a brief whose bytes are
+    unchanged since its frame leg completed gives that copy as its proposal: the card the person
+    answered showed it (`RP.keep_card_copy`)."""
     module = _route_module()
     readiness = {}
 
@@ -1238,6 +1323,7 @@ def _proposal_rows(route, jobs, root, record, output):
                 parent = path.parent.resolve(strict=True)
                 stamp = parent.stat()
                 binding = {"parent": {"path": str(parent), "device": stamp.st_dev, "inode": stamp.st_ino}}
+            preparations[:] = [item for item in preparations if item["leg"] != index]   # a second compile of the leg replaces the first
             preparations.append({"leg": index, "cwd": proposed, "state": state, **binding,
                                  "existing_destination": target == proposed and os.path.lexists(path)})
         return compiled
@@ -1247,6 +1333,8 @@ def _proposal_rows(route, jobs, root, record, output):
         preparations = []
         row = RP.evaluate_brief(output / "shards" / node / "direction-brief.md", root=root, node=node,
                                 compile_leg=compile_leg, start_approvals=module.route_start_approvals)
+        if recorded is not None and row["proposal"] is not None and row["sha256"] == _frame_brief_digest(route, jobs, node):
+            row = RP.keep_card_copy(row, recorded, compile_leg=compile_leg, start_approvals=module.route_start_approvals)
         if preparations and row["proposal"] is not None:
             row["repository_preparation"] = list(preparations)
             for preparation in preparations:
@@ -1322,17 +1410,20 @@ AUTOMATIC_DIRECTION_DIR = "shards/frame/automatic"
 def _automatic_direction(route, rows, output):
     """`(interview, answers)` the runtime records itself when there is nothing to choose, else None.
 
-    Only when both frame legs returned valid, equal proposals, no start approval is in scope,
-    neither brief lists a question only the user can answer, and the caller is not a registered
-    worker. The answer is the depth-0 session's existing on-behalf (`supervisor`) authority with
-    basis `automatic-agreement`; every other case asks the person exactly as before (WORKFLOW §0.4)."""
+    Only when both frame legs returned valid, equal proposals -- or the one leg of a one-leg frame
+    returned a valid proposal, which has no second leg to disagree with -- no start approval is in
+    scope, no brief lists a question only the user can answer, no part needs the repository prepared,
+    the proposal stays inside the intent's 안 할 것, and the caller is not a registered worker. The
+    answer is the depth-0 session's existing on-behalf (`supervisor`) authority with basis
+    `automatic-agreement`; every other case asks the person exactly as before (WORKFLOW §0.4)."""
     import frame_interview as FI
     if os.environ.get("AGENT_DISPATCH_REGISTERED_WORKER") == "1":
         return None
-    if len(rows) != 2 or not RP.proposals_equal(rows) or any(_start_approval_keys(row) for row in rows):
+    single = len(rows) == 1 and rows[0]["proposal"] is not None
+    if not (single or RP.proposals_equal(rows)) or any(_start_approval_keys(row) for row in rows):
         return None
-    if any(row.get("repository_preparation") for row in rows):
-        return None
+    if any(row.get("repository_preparation") or row.get("read_notes") for row in rows):
+        return None   # a part the compile cut or left out is a difference only the person can see
     texts = []
     for row in rows:
         try:
@@ -1354,21 +1445,30 @@ def _automatic_direction(route, rows, output):
     summary = " / ".join(item for item in summaries if item) if RP.wording_differs(rows) else summaries[0]
     if len(summary) > FI.MAX_OPTION_MEANS_CHARS:
         summary = summary[:FI.MAX_OPTION_MEANS_CHARS - 1].rstrip() + "…"
+    translate = work_intent.ui_translator()
     question = {"id": FI.ROUTE_QUESTION_ID, "topic": "진행 방향", "kind": "yes-no",
-                "question": "두 갈래 검토가 같은 진행 방향을 냈습니다. 이대로 시작할까요?",
-                "options": [{"label": "진행", "means": summary or work_intent.ui_translator()("direction.default_means"),
+                "question": ("검토가 고를 것을 남기지 않았습니다. 이대로 시작할까요?" if single
+                             else "두 갈래 검토가 같은 진행 방향을 냈습니다. 이대로 시작할까요?"),
+                "options": [{"label": "진행",
+                             "means": summary or translate("direction.default_means_single" if single
+                                                           else "direction.default_means"),
                              FI.PROPOSAL_MARK: rows[0]["node"]},
                             {"label": "보류", "means": "시작하지 않고 방향을 다시 봅니다"}],
-                "recommended": 0, "why": "두 갈래가 같은 결론이고 사람이 고를 질문을 남기지 않았습니다"}
+                "recommended": 0,
+                "why": ("한 갈래 검토이고 사람이 고를 질문을 남기지 않았습니다" if single
+                        else "두 갈래가 같은 결론이고 사람이 고를 질문을 남기지 않았습니다")}
     interview = {"schema": FI.SCHEMA, "route_id": route["route_id"], "round": 1,
                  "understanding": understanding, "brief": brief, "questions": [question]}
+    if single:
+        interview["frame_legs"] = 1   # read only by the notice wording; the two-leg interview is unchanged
     if FI.validate({**interview, "summary": "-"}, intensity=route["effective_intensity"]):
         return None
     answers = {"schema": FI.ANSWERS_SCHEMA, "route_id": route["route_id"], "round": 1,
                "actor_kind": "supervisor", "basis": FI.AUTOMATIC_BASIS,
                "understanding_confirmed": True, "correction": "",
                "answers": {FI.ROUTE_QUESTION_ID: {
-                   "choice": 0, "note": "자동: 두 갈래가 같은 방향을 내고 물을 것을 남기지 않음"}}}
+                   "choice": 0, "note": ("자동: 한 갈래 검토가 물을 것을 남기지 않음" if single
+                                    else "자동: 두 갈래가 같은 방향을 내고 물을 것을 남기지 않음")}}}
     return interview, answers
 
 
@@ -1385,7 +1485,9 @@ def _automatic_direction_notice_text(interview, answers) -> str:
     except (KeyError, IndexError, TypeError, AttributeError):
         option = ""
     import work_intent
-    return work_intent.ui_translator()("direction.notice", option=f": {option}" if option else "")
+    one_leg = isinstance(interview, dict) and interview.get("frame_legs") == 1
+    key = "direction.notice_single" if one_leg else "direction.notice"
+    return work_intent.ui_translator()(key, option=f": {option}" if option else "")
 
 
 def _automatic_direction_notice(output) -> str:
@@ -1624,12 +1726,13 @@ def _decide(route, jobs, root, record, output, briefs, intent):
         _store_bytes_once(output / AUTOMATIC_DIRECTION_DIR / AUTOMATIC_NOTICE_NAME, (notice + "\n").encode())
     if not isinstance(interview, dict) or not isinstance(answers, dict) or "route_proposals" not in interview:
         return ended(RP.NO_PROPOSAL_READ)
-    rows = _proposal_rows(route, jobs, root, record, output)
-    shown = [{key: row[key] for key in ("node", "proposal", "reason", "brief_path", "sha256", "source", "read_notes")
-              if key in row} for row in rows]
     choice = FI.route_choice(interview, answers)
     if choice is None:
         return ended(RP.NO_PROPOSAL_READ)
+    rows = _proposal_rows(route, jobs, root, record, output,
+                          recorded=choice["proposal"] if choice["state"] == "selected" else None)
+    shown = [{key: row[key] for key in ("node", "proposal", "reason", "brief_path", "sha256", "source", "read_notes")
+              if key in row} for row in rows]
     if choice["state"] != "selected":
         return ended({"declined": "route-declined", "off-menu": "route-off-menu"}.get(choice["state"], "route-unanswered"), shown)
     valid = [row for row in rows if row["proposal"] is not None]
@@ -2363,6 +2466,15 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
     if pending and pending.get("state") != "finished":
         return {**result, "state":"needs-attention", "reason":"finish-pending",
                 "required_action":"resume-inline-finish", "finish_state":pending.get("state")}
+    unit = unit_leg(route)
+    if unit is not None:
+        rows = _rows(jobs)
+        if UC.ready_to_continue(jobs, route, path, unit["id"], rows) is not None:
+            # A kept request for a unit route's next turn and nothing in its way: reopen the route (the closure
+            # record is set aside, not deleted) and start the turn below.
+            turns = UC.chain(rows, route["route_id"], unit["id"])
+            require_route_parent(turns[-1][2], jobs, turns[-1][0])
+            UC.reopen(path)
     closed = closed_outcome(path, route)
     if closed and closed.get("autoclose"):
         # The runtime closed this route after it sat unused (route_autoclose.py).
@@ -2419,6 +2531,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 publication = None
         return _with_next_leg(route, {**result, "state": "completed", "required_action": "advance-completed",
                                       "outcome": closed,
+                                      **_closed_unit_summary(route, jobs),
                                       **({"completion_delivery": delivery} if delivery else {}),
                                       **({"shared_publication": publication} if publication is not None else {})})
     from start_receipt import runtime_commands
@@ -2636,6 +2749,8 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
         except DispatchContractError as exc:
             if exc.reason not in {"human-gate-not-raised", "human-gate-unreleased"}:
                 raise
+            gate_pending = True
+        if not gate_pending and released_without_intent(route, jobs):
             gate_pending = True
         if gate_pending or interview or answers:
             step = frame_interview_step(route, path, jobs, interview=interview, answers=answers, decision=decision)
@@ -2867,7 +2982,7 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock):
     resume = result["resume_command"]
     rows = _rows(jobs)
     node = leg["id"]
-    aid = _slot(route, node, rows, jobs)
+    aid = _slot(route, node, rows, jobs, path)
     if aid not in rows:
         rows, refusal = _launch_admitted(route, path, jobs, node, None, run, result,
                                          wait=wait, sleep=sleep, clock=clock)
@@ -2881,14 +2996,16 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock):
                     "next_step": f"The unit worker did not start ({reason}); nothing ran. Run resume_command "
                         "again once the reason is cleared; it starts the same worker again."}
     attempts = {aid}
-    result.update(unit_attempt_id=aid, owner_started=False, **_wait_fields(attempts, rows, resume))
+    result.update(unit_attempt_id=aid, owner_started=False, **_wait_fields(attempts, rows, resume),
+                  **_turn_fields(rows[aid][1], jobs))
     joined = _timed_join(result, clock, jobs=jobs, expected_attempts=attempts,
                          timeout=_wait_budget(result) if wait else 0, recover=True, observe_only=not wait)
     result["observation"] = joined
     if joined["state"] == "ready":
         outcome = _outcome(jobs, aid)
         if outcome["classification"] == "success":
-            return {**result, "state": "completed", "result": outcome}
+            return {**result, "state": "completed", "result": outcome, **_unit_summary(jobs, aid, sleep=sleep),
+                    **_turn_fields(_rows(jobs).get(aid, ("", {}))[1], jobs)}
         # The one leg ended without a pass: the same work goes out again as a new unit route.
         command = _compose_again(route)
         return {**result, "state": "needs-attention", "reason": "unit-outcome-needs-inspection",
@@ -2905,6 +3022,124 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock):
             "next_step": "The unit worker runs as a separate attempt and its result comes back to this session "
                 "when it ends. Follow parent_next: end-turn means yield; bounded-wait means run "
                 "parent_next_command once."}
+
+
+def _turn_fields(meta, jobs) -> dict:
+    """A continued unit turn's receipt fields (`{}` for the first turn): its number, predecessor, session
+    and this turn's own tokens (`turn_tokens_complete` False is a lower bound)."""
+    if not meta.get("continues_attempt_id"):
+        return {}
+    fields = {"turn": UC.turn_of(meta), "continues_attempt_id": meta["continues_attempt_id"],
+              "session": meta.get("session") or "pending"}
+    try:
+        from attempt_view import session_tokens
+        tokens, complete = session_tokens(meta, jobs)
+    except Exception:  # noqa: BLE001 -- tokens are a courtesy, never a reason to stop a receipt
+        tokens, complete = None, False
+    if tokens is not None:
+        fields.update(turn_tokens=tokens, turn_tokens_complete=bool(complete))
+    return fields
+
+
+def correct_unit_route(route, path, jobs, text, request_id=None, **start_kwargs):
+    """`correct --route <unit route>`: keep `text` for the route's next turn and start it when nothing is in the way.
+
+    Returns `(exit_code, receipt)`. Without `text` it only shows the turns so far. A running turn (or one whose
+    route has not closed yet) leaves the text kept (`retained`); the next `start` (or the end notice's
+    resume_command) starts the turn once the route is closed. Asking again with the same text keeps one request."""
+    leg = unit_leg(route)
+    if leg is None:
+        return 2, {"state": "not-admitted", "reason": "correct-unit-route-required"}
+    rows = _rows(jobs)
+    turns = UC.chain(rows, route["route_id"], leg["id"])
+    if text is None:
+        return 0, {"state": "unit-turns", "route_id": route["route_id"],
+                   "turns": [{"turn": UC.turn_of(m), "attempt_id": a, "status": st,
+                              "session": m.get("session") or ("first" if UC.turn_of(m) == 1 else "pending")}
+                             for a, st, m in turns]}
+    if not turns:
+        return 69, {"state": "not-admitted", "reason": "unit-continue-no-turn-yet",
+                    "next_step": "This route has not started its worker; run start for it first."}
+    if route.get("route_plan") is not None:
+        # A leg of an approved route plan has its cycle folder fixed by the request grouping: no second cycle.
+        return 69, {"state": "not-admitted", "reason": "unit-continue-request-bound-route",
+                    "next_step": "This unit route is a leg of an approved plan, so it cannot take another turn; "
+                                 "compose the unit again with the new request."}
+    import unit_ephemeral
+    if unit_ephemeral.is_scratch_root(Path(route.get("artifact_root", ""))):
+        return 69, {"state": "not-admitted", "reason": "correct-unit-ephemeral-unsupported",
+                    "next_step": "A record-free (--ephemeral) unit route cannot take another turn; run the "
+                                 "unit again with a new brief."}
+    try:
+        require_route_parent(turns[-1][2], jobs, turns[-1][0])
+        last_status, last_meta = turns[-1][1], turns[-1][2]
+        if (last_status in {"done", "killed", "cancelled"} and not verdict_pass(last_meta)
+                and deferred_completion(last_meta) != "pending"
+                and not terminal_conflict_pending(last_meta)):
+            # The last turn ended without a verdict, so the route never closes and a kept text would never start.
+            return 69, {"state": "not-admitted", "reason": "unit-continue-last-turn-no-verdict",
+                        "required_action": "compose-again", "parent_next": "compose",
+                        "parent_next_command": _compose_again(route),
+                        "next_step": "The unit worker's last turn ended without a verdict, so this route cannot "
+                                     "take another turn and nothing was kept. To run the same unit again, run "
+                                     "parent_next_command (a new route; this one stays as it ended)."}
+        kept = UC.submit(jobs, route["route_id"], text, request_id)
+    except DispatchContractError as exc:
+        return 69, {"state": "not-admitted", "reason": exc.reason,
+                    "retry_when": "The route's launching session (or the worker that started it) asks.",
+                    "next_step": "Only the session that started this unit route can ask for another turn."}
+    except UC.ContinueError as exc:
+        return 69, {"state": "not-admitted", "reason": str(exc)}
+    entry = kept["entry"]
+    new_id = UC.attempt_id_for(route["route_id"], leg["id"], entry["id"])
+    if kept["duplicate"] and rows.get(new_id, ("",))[0] == "done":
+        # This text already ran as that turn; its result is (or will be) delivered by that turn's end notice.
+        # Starting nothing, say so instead of letting the closed route read back the old result as if it were new.
+        return 0, {"state": "already-asked", "route_id": route["route_id"], "request_id": entry["id"],
+                   "duplicate": True, "retained": False, "unit_attempt_id": new_id,
+                   **_turn_fields(rows[new_id][1], jobs),
+                   "next_step": "This text already ran as that turn; its result is (or will be) delivered by "
+                                "that turn's end notice, and nothing new started. To ask for another turn, "
+                                "send a different text or pass a new --request-id."}
+    receipt = start_work(route, path, jobs, **start_kwargs)
+    rows = _rows(jobs)
+    started = new_id in rows
+    receipt.update(request_id=entry["id"], duplicate=kept["duplicate"], retained=not started,
+                   continues_attempt_id=turns[-1][0])
+    if started:
+        receipt.update(unit_attempt_id=new_id, **_turn_fields(rows[new_id][1], jobs))
+    else:
+        receipt["next_step"] = ("The text is kept for this route's next turn. It starts when the running turn "
+                                "has ended and the route has closed: run resume_command then (the end notice "
+                                "carries it). ") + str(receipt.get("next_step") or "")
+    return 0, receipt
+
+
+def _unit_summary(jobs, aid, *, sleep=time.sleep) -> dict:
+    """`{"summary": <text>}` the runtime sealed for a finished unit leg, `{}` when there is none.
+
+    A session that was woken for the end gets this text with the notice; a worker that waited for its
+    called leg (`start --wait`, the polling delivery) has no notice, so the receipt carries it. The
+    runtime seals it a moment after the route closes: read it for a few seconds at most."""
+    import work_intent
+    meta = _rows(jobs).get(aid, ("", {}))[1]
+    for attempt in range(UNIT_SUMMARY_READS):
+        text = work_intent.sealed_summary(meta, aid) if meta else ""
+        if text:
+            return {"summary": text}
+        if attempt + 1 < UNIT_SUMMARY_READS:
+            sleep(UNIT_SUMMARY_READ_SECONDS)
+    return {}
+
+
+def _closed_unit_summary(route, jobs) -> dict:
+    """The sealed summary of a closed unit route's one leg (`{}` for any other route)."""
+    leg = unit_leg(route)
+    if not leg:
+        return {}
+    turns = UC.chain(_rows(jobs), route["route_id"], leg["id"])
+    last = turns[-1][0] if turns else attempt_id(route, leg["id"])
+    return {**_unit_summary(jobs, last), **_turn_fields(turns[-1][2] if turns else {}, jobs)}
 
 
 def _with_next_leg(route, result):
@@ -3015,6 +3250,16 @@ def _compose_again(route) -> str:
         task.write_text(str((route.get("work_request") or {}).get("text") or ""), encoding="utf-8")
     selection = route.get("selection") if isinstance(route.get("selection"), dict) else {}
     shape = selection.get("shape") or ("direct" if route.get("effective_intensity") == "direct" else "staged")
+    # The form is read from the nodes, not the recorded word: `compose --shape solo --signal ...` sealed a
+    # team route (word `solo`, team nodes) before the middle cell existed, and that route is built again as
+    # `staged` at its own intensity. The middle cell (one owner that starts its review) keeps `solo` and
+    # carries `standard` back, so a rest never turns "no end without a review" into a `solo·quick`.
+    sealed_intensity = route.get("effective_intensity")
+    unit = bool(unit_leg(route))
+    middle_cell = route_form.one_shot_review_route(route)
+    if (shape == "solo" and not unit and sealed_intensity not in (None, "quick", "direct")
+            and not route_form.one_shot_owner(route)):
+        shape = "staged"
     # A framed compose names no capability: the shape is the route.
     named = [] if shape == "framed" else ["--capability", route["capability"],
                                           "--capability-mode", str(route.get("capability_mode") or "default")]
@@ -3030,7 +3275,7 @@ def _compose_again(route) -> str:
         argv += ["--graph", "resume-run,run-verify"]
     elif shape == "staged" and ((route.get("composed_recipe") or {}).get("compose") or {}).get("graph"):
         argv += ["--graph", ",".join(route["composed_recipe"]["compose"]["graph"])]
-    if shape == "staged" and route.get("effective_intensity"):
+    if (shape == "staged" or middle_cell) and route.get("effective_intensity"):
         argv += ["--intensity", route["effective_intensity"]]
     elif shape == "framed":
         basis = {row.get("axis"): row for row in (route.get("selection") or {}).get("selection_basis", [])}
@@ -3161,10 +3406,25 @@ def start_work(route, path, jobs, *, wait=False, interview=None, answers=None,
     return save(_arm_capacity_resume(result, path, jobs), jobs)
 
 
+UNIT_SUMMARY_READS = 10          # the seal follows the route close by well under a second
+UNIT_SUMMARY_READ_SECONDS = 0.5
+
+
+def _is_unit_route_file(path) -> bool:
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8")).get("capability") == "unit"
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def _arm_capacity_resume(result, path, jobs):
     """A usage-limit pause with a known reset time, or an owner launch that did not start,
     resumes itself once (audit §4 #17)."""
     import capacity_auto_resume as capacity_resume
+    if os.environ.get("AGENT_DISPATCH_CHILD") == "1" and _is_unit_route_file(path):
+        # A worker that started a unit leg is no session to notice: it reads this refusal itself, and a
+        # resume the runtime made later would start the leg after its caller may be gone.
+        return result
     try:
         armed = capacity_resume.arm(result, path, jobs)
     except (OSError, ValueError):

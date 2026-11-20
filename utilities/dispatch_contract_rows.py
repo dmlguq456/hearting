@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import fcntl
 import hashlib
 import json
+import re
 import os
 from pathlib import Path
 import stat
@@ -667,6 +668,34 @@ def workflow_completion_receipt(args) -> str:
     if is_runtime_owner_launch(args):
         return ",workflow_completion=runtime-v1"
     return ""
+
+
+def caller_attempt_receipt(args) -> str:
+    """Name the worker that started this unit leg: the row hangs under it and its end stops the leg.
+
+    A unit route started from a depth-0 session has no calling attempt (the session's own
+    environment names none), so only a leg a registered worker started carries the field."""
+    caller = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
+    if caller and caller != getattr(args, "attempt_id", "") and is_unit_leg_launch(args) \
+            and re.fullmatch(r"att-[A-Za-z0-9._-]{1,240}", caller):
+        return f",caller_attempt_id={caller}"
+    return ""
+
+
+def unit_continue_receipt(args) -> str:
+    """Row fields of a unit leg's session and, for a continued turn, its place in the chain.
+
+    `session_id` is the harness session the turn runs in when the adapter chose it up front (Claude); a
+    continued turn adds `continues_attempt_id`, `turn` and `session` (`resumed` or `fresh:<reason>`)."""
+    if not is_unit_leg_launch(args):
+        return ""
+    out = f",session_id={args.unit_session_id}" if getattr(args, "unit_session_id", "") else ""
+    if getattr(args, "continues_attempt_id", None):
+        out += f",continues_attempt_id={args.continues_attempt_id},turn={int(getattr(args, 'turn', 0) or 2)}"
+        plan = getattr(args, "session_plan", None)
+        if plan is not None:
+            out += f",session={plan.row_value}"
+    return out
 
 
 def reconcile_attempt_terminal(

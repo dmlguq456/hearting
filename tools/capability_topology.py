@@ -140,6 +140,40 @@ def _validate_fields(registry):
             raise TopologyError(f"field_default_recipes[{field}]: {row['capability']} does not default to {field}")
 
 
+_FIELD_WEIGHT_HARNESSES = ("claude", "codex", "opencode")
+
+
+def _validate_field_harness_weights(registry):
+    """The default gradient of the harness choice by field (core/OPERATIONS.md §5.10).
+
+    Names a field's row only for fields in the vocabulary; a field without a
+    row (admin, other) weighs 1.0. Model names live only in the adapters'
+    models.conf, so the basis points at depth names, never at a model.
+    """
+    table = registry.get("field_harness_weights")
+    if not isinstance(table, dict) or set(table) != {"checked_on", "rule", "basis", "weights"}:
+        raise TopologyError("field_harness_weights must be {checked_on, rule, basis, weights}")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(table["checked_on"])) or not str(table["rule"]).strip():
+        raise TopologyError("field_harness_weights needs a YYYY-MM-DD checked_on and a rule")
+    basis = table["basis"]
+    profiles = basis.get("profiles") if isinstance(basis, dict) else None
+    if (not isinstance(basis, dict) or set(basis) != {"models", "profiles"} or not isinstance(profiles, dict)
+            or set(profiles) != set(_FIELD_WEIGHT_HARNESSES)
+            or any(not isinstance(v, list) or not v or not set(v) <= set(registry["model_profiles"])
+                   for v in profiles.values())):
+        raise TopologyError("field_harness_weights.basis must name each harness's depth profiles "
+                            "from model_profiles (never a vendor model name)")
+    weights = table["weights"]
+    if not isinstance(weights, dict) or not set(weights) <= set(FIELDS):
+        raise TopologyError("field_harness_weights.weights may name only declared fields")
+    for field, row in weights.items():
+        if (not isinstance(row, dict) or set(row) != set(_FIELD_WEIGHT_HARNESSES)
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v <= 1
+                       for v in row.values())):
+            raise TopologyError(f"field_harness_weights.weights[{field}] must give claude, codex "
+                                "and opencode a number above 0 and at most 1")
+
+
 def load_registry(path: Path | str = REGISTRY):
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
@@ -194,8 +228,12 @@ def capability_registry_digest(registry, capability, extra_recipes=()):
     # The part catalog is never part of the shared projection: a route that uses
     # no catalog data keeps the digest it had before the catalog existed. Only
     # the rows a composed recipe actually used (`compose.parts`) are added.
+    # `field_harness_weights` is a default the route seals into its own allocation
+    # (`dispatch_allocation.field_weights`), like the user's dispatch defaults: editing the
+    # table does not make a sealed graph stale.
     projection = {k: v for k, v in registry.items()
-                  if k not in ("recipes", "completion_gate_contracts", "part_catalog")}
+                  if k not in ("recipes", "completion_gate_contracts", "part_catalog",
+                               "field_harness_weights")}
     projection["recipes"] = recipes
     projection["completion_gate_contracts"] = {k: v for k, v in contracts.items() if k in referenced}
     if used_parts:
@@ -1036,6 +1074,34 @@ def _validate_continuations(recipe, registry, nodes, by_id):
             )
 
 
+
+ONE_SHOT_REVIEW_KEYS = {"node", "inputs", "fallback_hops", "model_profile", "owner_model_profile"}
+
+
+def _validate_one_shot_review(recipe, registry):
+    """The middle cell's review node: a kind that declares `one_shot_review` borrows one of its own
+    standard review nodes (inputs, registered fallback hops without `inline` or `native-subagent`, model role); everything else about the
+    node is that node's own. `owner_model_profile` is the model role of the owner that makes the work."""
+    where = f"{recipe['capability']}:one_shot_review"
+    declared = recipe["one_shot_review"]
+    if not isinstance(declared, dict) or set(declared) != ONE_SHOT_REVIEW_KEYS:
+        raise TopologyError(f"{where}: must declare exactly {sorted(ONE_SHOT_REVIEW_KEYS)}")
+    node = next((n for n in recipe["standard_plus"]["nodes"] if n.get("id") == declared["node"]), None)
+    if (node is None or node.get("kind") != "review-worker" or node.get("dispatch_depth") != 2
+            or not node.get("completion_gate")):
+        raise TopologyError(f"{where}: node must be one of the recipe's depth-2 review-worker nodes")
+    inputs = declared["inputs"]
+    if not isinstance(inputs, list) or not inputs or any(not isinstance(i, str) for i in inputs):
+        raise TopologyError(f"{where}: inputs must be a non-empty list")
+    hops = declared["fallback_hops"]
+    if (not isinstance(hops, list) or "inline" in hops or "native-subagent" in hops or len(hops) != len(set(hops))
+            or set(hops) - FALLBACK_HOPS or not hops):
+        # A native subagent's completion is recorded inline, which the cell refuses for the review of the owner's own work.
+        raise TopologyError(f"{where}: fallback_hops must be distinct registered dispatch hops without inline "
+                            "or native-subagent")
+    _validate_model_profile(registry, declared["model_profile"], where)
+    _validate_model_profile(registry, declared["owner_model_profile"], where + ":owner")
+
 def _validate_recipe(recipe, registry, standard_plus_owner_profile):
     required = {"capability", "modes", "topology_class", "direct_predicates", "promotion_signals",
                 "quick", "standard_plus", "completion_gates", "human_gates",
@@ -1068,6 +1134,8 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
     _validate_guard_scope(recipe, quick.get("write_scope", []), quick.get("guard_preconditions", []), registry, "quick")
     _validate_bucket_anchor(recipe, registry, quick.get("write_scope", []), None, "quick")
     graph = recipe["standard_plus"]
+    if "one_shot_review" in recipe:
+        _validate_one_shot_review(recipe, registry)
     if any(key in graph for key in bare_depth_keys):
         raise TopologyError(f"{recipe['capability']}: bare standard+ dispatch-depth fields are forbidden")
     if graph.get("owner_dispatch_depth") != 1:
@@ -2028,6 +2096,7 @@ def validate_registry(registry, manifest=None):
     if actual != expected:
         raise TopologyError(f"coverage mismatch missing={sorted(expected-actual)} extra={sorted(actual-expected)}")
     _validate_fields(registry)
+    _validate_field_harness_weights(registry)
     for recipe in registry["recipes"]:
         _validate_recipe(recipe, registry, standard_plus_owner_profile)
         _validate_gate_contracts(recipe, registry)

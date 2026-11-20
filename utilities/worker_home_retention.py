@@ -433,6 +433,16 @@ def _main_runtime_state(row: _Row) -> str:
         return "unknown"
 
 
+def _window_seconds(snapshot, row) -> float:
+    """The idle window of a finished home: `IDLE_SECONDS`, longer for a unit route's last turn
+    (`unit_continue.keep_window`), whose session the next turn wakes."""
+    if row is None or row.meta.get("capability") != "unit":
+        return IDLE_SECONDS
+    import unit_continue
+    state = _main_runtime_state(row) if not row.meta.get("caller_attempt_id") else "unknown"
+    return unit_continue.keep_window(row.meta, snapshot.rows, IDLE_SECONDS, state)
+
+
 def _retain_raw_for_main(row: _Row, first_ns: int, now_ns: int) -> bool:
     harness = row.meta.get("harness", "")
     if harness not in {"claude", "opencode"}:
@@ -654,7 +664,8 @@ def _delivery_state(root: Path, meta: dict, *, legacy_empty_tombstone: bool = Fa
     ``legacy_empty_tombstone``: the pruner of 2026-09-06 to 10-15 left a
     zero-byte ``<record>.json.pruned`` only for a terminal (acked/expired/rejected)
     record, written before the record was removed. A caller that opts in reads such
-    a tombstone, with its record gone, as resolved. Only log retention opts in.
+    a tombstone, with its record gone, as resolved. Log retention and worktree
+    cleanup's registry duty opt in.
     Worker-home retention keeps refusing it (its folders can hold credentials and
     evidence), and so does the registry archive: moving the row would let the
     orphan-home path retire the home this tombstone still protects."""
@@ -3345,7 +3356,7 @@ def _detach(ctx: _Context, key: str, ident: list[int], attempt: str | None, raw:
                     except OSError:
                         return "late-evidence-unreadable"
                     idle_from = max(first_ns, verdict.activity_ns, mark, st.st_mtime_ns)
-                    if ctx.now_ns - idle_from < IDLE_SECONDS * 10**9:
+                    if ctx.now_ns - idle_from < _window_seconds(ctx.snapshot, row) * 10**9:
                         return "late-activity"
                     source_mount = _mount_id(layout.workers_fd)
                     target_mount = _mount_id(layout.retiring_fd)
@@ -3957,7 +3968,7 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
                 start = ended if ended is not None else first
                 mark = _stat_mtime(key, dir_fd=layout.views_fd, follow_symlinks=False)
                 idle_from = max(start, verdict.activity_ns, mark, ident[3])
-                if now_ns - idle_from >= IDLE_SECONDS * 10**9:
+                if now_ns - idle_from >= _window_seconds(snapshot, candidate_row) * 10**9:
                     due.append((key, ident[:3], verdict, start, binding))
                     # Each detach re-reads the registry, so removal is the slow
                     # step. Once the removal budget is full, stop examining:

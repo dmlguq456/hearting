@@ -635,8 +635,11 @@ HOME retention, rechecks identity and settlement immediately before removal, and
 holds all bound attempt/child/successor reference admissions through quarantine
 and unlink. It resumes on the next normal cadence after
 interruption; examining and removing have separate time budgets (it examines
-only the logs and prompt sidecars still present), and the next
-pass may start after one minute while removable files remain. It runs beside the existing post-exit reaper and selector-free
+only the logs and prompt sidecars still present). While a round over all
+logs is open every pass may start after one minute, whatever it removed, and so may the pass
+after one that leaves removable files beyond its limits; once a round ends, a new round opens
+at most once a day, and a round an older release ended without an end time is closed by the
+next pass of this release. It runs beside the existing post-exit reaper and selector-free
 `reconcile --apply`; exact-attempt transactions remain scoped to their attempt.
 The same pass retires two state-root leftovers untouched for seven days: a
 route's completion markers when neither the registry nor its archive names that route and
@@ -651,7 +654,9 @@ not removed by this policy.
 hours, moves settled history out of the live `jobs.log`. Because a tail runs
 only when a dispatch ends, the peer obligation runner's six-hour maintenance
 pass also starts these post-exit retention passes (homes, logs, reusable
-runtimes, archive) in a short-lived process. A group of rows that
+runtimes, archive) in a short-lived process; it starts them sooner when the last
+log pass left `more` and a minute passed, the previous start's process group is
+empty, and a log pass ran since that start. A group of rows that
 share an attempt or route id moves only as a whole, when every row ended (the
 last write of its attempt log, else its registration) at least 14 days ago,
 belongs to a route closed at least 14 days ago (a row with no route keys has none
@@ -705,7 +710,7 @@ lifecycle predicate term.
 | Tiny reversible fix satisfying WORKFLOW §0.2.1 in the current Git worktree | Read, edit, check and reply; existing hooks record it automatically |
 | Other `direct` work whose selected route does not change source | Work directly in the main working tree |
 | Small work routed to `quick` because atomic-direct predicates are incomplete and no promotion signal is present | Registered-headless dispatch-depth-1 one-shot conductor in an isolated worktree |
-| Work promoted to `standard+` by durable scope, shared-contract, resource, resume, verifier, or separability signals | Use a worktree and task branch from the latest base. Separable multi-file or feature work at `standard+` must use headless dispatch. Team delegation and inline micro-stages are limited to `quick` and genuinely microscopic stages. |
+| Work promoted to `standard+` by durable scope, shared-contract, resource, resume, verifier, or separability signals | Use a worktree and task branch from the latest base. Separable multi-file or feature work at `standard+` must use headless dispatch. Inline micro-stages are limited to `quick` and genuinely microscopic stages. |
 | A new independent request while work is active | Dispatch it to a new worktree alongside the first job |
 
 Explicit `direct` remains inline; small local completion units use WORKFLOW §0.2.1 without start/finish. When an explicit selected route changes source, the approved
@@ -716,15 +721,14 @@ start uses the shared source-worktree preparation contract above.
 Dispatch rules:
 
 **Owner-supervisor liveness correction (SD-78/86/91/92/97).** Codex
-`app-server-supervised` and Claude `session-resume-supervised` owner rows both
+`app-server-supervised` and Claude/OpenCode `session-resume-supervised` owner rows all
 seal and hold the same canonical exact-attempt `flock-v1` lease while the outer
 supervisor lives. The shared classifier combines a held lease with
 `parked|deliverable|recovery` phase and reports `parked-supervised`; Fleet and
 the orphan watcher consume that verdict, so an inner turn exit is never
 owner-death evidence. Missing, foreign, nonce-mismatched, symlinked, unlocked,
 or terminal-row lease evidence fails closed. Phase edges append outer PID/start
-and before/after phase to the attempt-scoped transition audit. This shared rule
-supersedes the Codex-only lease wording later in this section.
+and before/after phase to the attempt-scoped transition audit.
 
 Owner supervision follows the owner's current adopted route through the shared
 owner-route lifecycle resolver, including a continuation adopted during a model
@@ -824,7 +828,7 @@ final mismatch keeps the affected release for a normal retry.
 
 Release pruning is evidence-bound. `harness update` retains every superseded
 release whose migration quiescence/final-delta proof is incomplete. The
-The existing `harness update --force-prune-unproven` path applies only to two
+existing `harness update --force-prune-unproven` path applies only to two
 typed proof gaps after successful carry operations: a promoted migration's
 regular-file final digest mismatch, or containment that specifically identifies
 missing candidate attempt IDs. The final proof check and deletion remain in the
@@ -1144,8 +1148,7 @@ A legacy hash collision is diagnostic
      independent verification, and sync stages receive no bundle-root grant.
      Wrappers never widen access to its parent or embed the absolute root in
      artifact-sink receipts.
-   - **Light team delegation:** open a team agent in the background and name the work root in its prompt. The main session opens QA against that same path. Use only for small, fast iterations.
-   - **Quick one-shot:** compile one dispatch-depth-1 conductor and launch it only
+    - **Quick one-shot:** compile one dispatch-depth-1 conductor and launch it only
      through a checked registered-headless wrapper. Its micro-stages stay inline
      inside that worker, it opens no dispatch-depth-2 child, and any mutating
      quick job uses an isolated worktree. Unsupported or exhausted checked
@@ -1156,8 +1159,8 @@ A legacy hash collision is diagnostic
      type and `_kernel/owner`; standard+ capability ownership is a distinct
      semantic responsibility.
    - **Partial parallel continuation:** the original immutable launch input, or the complete exact original registry rows for older batches, supplies the source manifest and its assignment hashes. Verify its sealed digest and each member binding before reserving the one failed leg. A current retry brief belongs to that leg's launch; the original group assignment and successful peer identities remain unchanged. The replacement keeps the source member fields except its attempt ID; its current parent and retry brief are recorded by the ordinary launch path. Reused PASS, quiescence, scope and independence checks remain in force on all three harnesses. The ordinary group `start` finds this shape itself: when one sealed member ended with the strict no-start proof and every other member holds its current PASS marker, any live owner of the route re-launches only that member, with no continuation file and no round consumed; a still-running peer returns the same-command wait. If that successor also fails to start, the next `start` keeps the peers on their realized tuples and places only the gap again through the ordinary harness assignment without every harness it could not start on; the step seal (`<identity>.step-<n>.json`) fixes that placement and identity, the governor admits the changed gap placement only against it, and exhausted candidates end in `parallel-headless-unavailable`.
-   - **Full headless ceremony:** launch an adapter-specific headless main in the worktree. It acts as a complete main for that runtime, including team roles, hooks or preflight, and plan artifacts. The adapter owns noninteractive tool and permission setup and documents its cost realization. The top-level dispatch is a dispatch-depth-1 capability owner that returns only synthesis to main.
-   - At `standard+`, the dispatch-depth-1 owner is a thin conductor. It dispatches compiled `code-plan`, `plan-check`, `code-execute`, `impl-review`, `code-test`, and `code-report` nodes through dispatch-depth-2 headless sessions, reads verdict/status metadata rather than stage bodies, and passes context only through files. A route stage is the semantic work and completion-gate unit; a worker session is only an execution-capacity unit. They are not one-to-one. The owner may keep a stage in one session or declare bounded first-class sub-sessions below the same route node when scope size, context pressure, or round-trip cost warrants it. That choice is owner discretion and does not require route recompilation. A declared `parallel_group` replaces member-level starts with one exact `dispatch-batch --parallel-group` transaction. Before any stage, the owner verifies that the artifact root and `spec/` exist.
+   - **Full headless ceremony:** launch an adapter-specific headless main in the worktree. It acts as a complete main for that runtime, including hooks or preflight and plan artifacts. The adapter owns noninteractive tool and permission setup and documents its cost realization. The top-level dispatch is a dispatch-depth-1 capability owner that returns only synthesis to main.
+   - At `standard+`, the dispatch-depth-1 owner is a thin conductor. It dispatches the compiled `plan`, `plan-check`, `execute`, `impl-review`, `test`, and `report` nodes through dispatch-depth-2 headless sessions, reads verdict/status metadata rather than stage bodies, and passes context only through files. A route stage is the semantic work and completion-gate unit; a worker session is only an execution-capacity unit. They are not one-to-one. The owner may keep a stage in one session or declare bounded first-class sub-sessions below the same route node when scope size, context pressure, or round-trip cost warrants it. That choice is owner discretion and does not require route recompilation. A declared `parallel_group` replaces member-level starts with one exact `dispatch-batch --parallel-group` transaction. Before any stage, the owner verifies that the artifact root exists and, when `spec/` exists, reads it.
    - Artifact relocation uses that same authority to protect live work. A no-live history move does not transfer parent authority, and historical redirects never authorize root-local writes.
    - **Inline finish history:** cycle-wide pending lookup excludes only `finished` slots; a continuation can finish the same cycle while earlier receipts remain recorded.
      Route-scoped reads and completion replay keep that history and reverify its exact authority, binding, marker and outcome; unknown states remain pending.
@@ -1190,8 +1193,8 @@ A legacy hash collision is diagnostic
      Admission records a worktree baseline keyed by the manifest hash, and the stage gate measures against it. This is what makes the post-hoc diff-scope audit a statement about the slices rather than about the whole worktree, and it is why the same manifest can be re-admitted and re-completed idempotently. The gate refuses with `subdivision-baseline-missing` when no admission baseline exists, `subdivision-commit-attempted` when `HEAD` left the baseline commit's first-parent line or a lineage-clean commit carries a slice's `fixed_files` (parallel slices are no-commit workers), and `subdivision-scope-violation` when a change outside the declared union appeared after admission, whether it is still uncommitted or already in a commit. Each refusal writes an SD-93 ledger row and no marker. **The order is fixed: the owner closes the stage gate first and commits after.** Committing the slices' work before the gate is refused, because at the gate that commit is indistinguishable from a slice having committed; committing after it is ordinary, and replaying the same gate on the same manifest and evidence then resumes the published marker instead of re-auditing a worktree that has legitimately moved on. **Declared limit of that judgement:** the gate tells an owner commit from a slice commit by what the commit carries, so a pre-gate commit that carries no slice's `fixed_files` and leaves every file's content identical to the admission baseline is judged neither — not a slice commit, because it carries none of the declared union, and not a scope violation, because its content still matches the baseline — and it passes. In that one shape SD-103's no-commit rule is stated but not enforced. It is the accepted cost of not judging by HEAD movement alone, which refused the owner's own commit against a write-once baseline and an unrewindable HEAD, with no recovery path. After a failed slice, the owner derives the gap-retry chain from the failed slices alone (`stage_session_contract.derive_gap_retry_manifest`); it carries exactly those slices' `fixed_files` and their leg binding, and never re-opens a successful sibling's. When a serial chain stops, the runtime writes its rest itself (`dispatch_subsession_advance.chain_continuation`): a session that ran and did not pass runs again as a gap-retry whose brief adds how that attempt ended, what its handoff recorded as done and the leg's done-when items it left unmet, the never-started sessions follow, and a passed session is not repeated. The owner's chain notice names that manifest and the one `stage-session-chain.py start --manifest <file>` command (the owner is its own `--parent`).
    - **Phase brief, state ledger, and scope stop:** each sub-session reads its phase brief and assigned state ledger. Only a registered serial-chain session at index 2 or later reads the exact predecessor handoff named in its prompt; index 1, parallel slices, and a 1/1 gap-retry have no predecessor handoff. The phase brief assigns the work; its `narrow_verify` command is a required check, and the worker also runs any additional checks named in the brief. A generated parallel slice brief names the plan, worktree, source fixed files, required verify command, and its own report path relative to the cycle output directory as a separate artifact output. A bound execute session uses its in-scope brief report or, when its evidence scope permits, `evidence/<subsession-id>/report.md`; runtime resolves that path under the assigned cycle and adds it to the effective fence separately from source `fixed_files` and their hash. The slice makes no git writes (no add/commit/checkout/restore/stash/reset/rollback; git reads run with `GIT_OPTIONAL_LOCKS=0`, which the launch also exports), leaving `checklist.md` and the dev log to the owner. It persists `_internal/state/<attempt_id>.md` with the current slice, completed items, exact next command, invariants, and forbidden files. The ledger is flushed at least every three material edits and after every verification round trip. Pre-compact must validate and flush it; post-compact must re-read it before another edit. A missing or stale required ledger fails closed. The fixed file list is an execution fence: when a necessary file is outside it, finish independent in-scope work and report the exact path, change, and unfinished item to the owner without widening the list. For a bound artifact-only node, the effective fence is formed from the phase brief's in-scope outputs relative to the cycle output directory, while declared worktree files are read-only inputs. For a bound node that also has source scope, a serial or gap-retry session keeps its declared fixed files and adds the phase brief's artifact outputs that fall in the node's artifact scope; a parallel slice keeps its declared list so slices stay disjoint. Wide mechanical edits use a codemod plus bounded diff verification instead of expanding an individual session ad hoc.
    - **Separability under SD-17:** dispatch is mandatory when the stage output contract is complete and its edit surface is not boundary-coupled through shared semantic anchors or sequential boundary assertions. A non-separable stage may run inline only if the reason is recorded in `plans/<slug>/_internal/metrics.md`; missing evidence is a contract violation. Parallelize separable census or independent file groups in-session. `hooks/stage-dispatch-reminder.sh` only reminds a dispatch-depth-1 conductor of this; it does not deny an in-session stage on any harness.
-   - Dispatch-depth-2 review helpers are read-only by default. The code route opens framing at width two by default and for `standard+`; an explicit `quick`/`direct` frame may narrow to one only when no protected path, multiple adapter paths, or spec/ship hint is present. Strong opens width-two plan/implementation-review groups; `thorough+` adds declared third implementation-risk/failure-mode legs. Other capability groups stay at their registry-declared width. Every leg is a sibling under the same owner, has a sealed role/profile/perspective and disjoint write scope, and joins before continuation. No worker fan-out, undeclared breadth, or dispatch depth 3 is permitted. Stage-worker ownership remains disjoint: `code-plan` owns plan artifacts; `code-execute` alone mutates source; `code-test` owns test evidence while source stays read-only; `code-report` owns the final report and locked summary.
-   - The number of concurrent workers is set by the model-worker governor's `dispatch` class limit (`utilities/model-worker-governor.py`, `CLASS_LIMITS`); there is no separate per-conductor process cap. Each stage pipeline is sequential, and in-session implementation-team workers do not count. Dispatches beyond the governor limit are queued or refused by the governor.
+   - Dispatch-depth-2 review helpers are read-only by default. The code route opens framing at width two by default and for `standard+`; an explicit `quick`/`direct` frame may narrow to one only when no protected path, multiple adapter paths, or spec/ship hint is present. Strong opens width-two plan, plan-check and implementation-review groups; `thorough+` adds each group's declared third leg (implementation-risk scout, simplicity check, failure-mode review). Other capability groups stay at their registry-declared width. Every leg is a sibling under the same owner, has a sealed role/profile/perspective and disjoint write scope, and joins before continuation. No worker fan-out, undeclared breadth, or dispatch depth 3 is permitted. Stage-worker ownership remains disjoint: `code-plan` owns plan artifacts; `code-execute` alone mutates source; `code-test` owns test evidence while source stays read-only; `code-report` owns the final report and locked summary.
+   - The number of concurrent workers is set by the model-worker governor's `dispatch` class limit (`utilities/model-worker-governor.py`, `CLASS_LIMITS`); there is no separate per-conductor process cap. Each stage pipeline is sequential. Dispatches beyond the governor limit are queued or refused by the governor.
    - Every dispatch prompt exposes capability, `capability_mode`, assigned
      contract/route node, portable unit, QA, intensity, dispatch depth, parent
      slug, parent session ID, worker type, model role, and owner so the adapter
@@ -1207,11 +1210,13 @@ A legacy hash collision is diagnostic
      deterministic scalar-versus-slash shape only and never overrides canonical
      fields. `worker_role` remains legacy read-only identity metadata.
    - For a route-bound job, the compiler selects and seals both portable model role and model profile; wrappers resolve the profile through adapter config and reject trailing model/effort replacement. A model or effort different from the profile default is chosen once at `compose --pin <owner|frame|worker>=<harness>[:<model>[@<effort>]]`, sealed into the route (`selection_pins`, inherited by continuations), moved later only by the route's parent with `start --pin` (recorded beside the route), and read by the wrapper from the bound route with those changes applied (`model_source=pin`, `model_pin_status=applied|harness-only|harness-mismatch|none`); a checked capacity retry may still replace a pinned model and then reports `model_source=pin+capacity` with `model_pin=`. A sealed worker or owner pin also beats an explicit `--adapter` while the pinned harness is usable (supported by the checked tuple and under no active usage limit); the replaced request is recorded as `explicit_adapter=`, and a pinned harness that cannot run keeps the request and reports `harness-mismatch`. A sealed worker pin also bounds `stage-dispatch-fallback` descent: only the pinned harness's headless candidates may take that step (native-subagent/inline only when the owner runs on that harness); other harnesses are recorded `skipped-worker-pin`, and when the pinned harness cannot take the step the chain stops with `reason=worker-pin-unavailable` and one plain detail line instead of moving the step to another tool. Top (main-session-only) models are accepted for `frame` only; an owner or worker pin naming one keeps the tool and drops the model with `warning=pin-dropped`. Within an otherwise same-harness width-two pair only, shared code may verify a sibling model and select the next declared profile whose configured model differs; the sealed `--model-profile` remains unchanged. Explicit `--profile`, `--explicit-profiles`, and harness/profile-only pins remain eligible; only a concrete model pin or capacity-retry-chosen model is preserved. Traversal skips profiles configured to the sibling's model and skips `top` and `mini`; profile order is a decision rule, not a quality ranking. Non-route direct/lifecycle surfaces retain their explicit model/inheritance contracts. Registered substantive owner/stage/review nodes reject `mini`. The orchestrator chooses harness placement subject to sealed diversity axes.
-   - **Cross-harness routing under SD-16:** current enabled harnesses bound new automatic choices and their launch rechecks; sealed policy preserves quality ordering inside that bound. An explicit target admitted by the sealed allocation pool or its node/owner policy continues on the same route after it is disabled, as does an exact previously launched replay or same-harness capacity retry; the existing diagnostic records `policy_note=disabled-since-admission`. Usage/quota, model eligibility, checked tuples, parent, claim and manifest checks still apply. Historical tuple/manifest checks and successful, running or unconfirmed peers remain independent of live defaults. An enabled explicit pin may use its target’s formally checked evidence outside the original pool without widening automatic choices. New targets already disabled at admission retain B behavior without new confirmation or provenance. Before dispatch, query each harness through `utilities/usage-check.sh`, which reports `ok`, `limited(reset)`, or `unknown`. The cascade is explicit target (including an explicit pin), hard eligibility, sealed affinity/policy, the balanced usage gate, quality band, then allocation ordering (target shares scaled by the optional `allocation.harness_weights`, e.g. OpenCode `0.3`). A frame leg reads the `harness_policy` sealed on its own node and is eligible on any harness the route's evidence admits for its owner or its own launch; an explicit harness outside the profile's bands is followed when enabled or already admitted by this route. Claude headroom reads Fleet's credential-bound account cache (`usage_cache.read`, within the capacity stale window) first and falls back to statusline taps; Claude hard exclusions stay native. Unknown gauges pass the balanced gate optimistically and use the neutral ordering share, while account-bound native quota rejections (through their exact reset and model scope), legacy death markers from `usage-check.sh`, and, for Codex and OpenCode, a shared-gauge window at 100% used with a future reset (except Codex with usable credits in that same fresh snapshot; read through the same capacity cache judge; 99%, a past reset, or a cache older than an hour keeps today's `ok`, and Claude keeps its native evidence) remain hard exclusions until the login a worker would use answers otherwise: while Claude is held, a launch decision (`usage-check.sh --recheck`, `recheck=True`) sends that login one minimal request (`dispatch_capacity_evidence.probe`) at most every 10 minutes per login (`unscoped` while no account resolves) and model family, whatever the last attempt's outcome. The probed model follows the window that holds: Haiku for an all-model window, the limited family or model for a narrower one. An answer newer than a limit decides it: one that goes through lifts a limit whose window covers the probed model (an all-model window for any model, a family or model window only for that one), as when another account is signed in or quota returns before the recorded reset, and a rejection holds the models its window covers until its own reset. Later rejections preserve successful evidence that already lifted older limits. A probe that cannot run or fails for another reason changes nothing; gauges and Fleet read the stored answers. Under `capacity-aware`, unknown/zero headroom is excluded. Allocation order is compiled and sealed into the route (`dispatch_allocation`, `dispatch_defaults_digest`); `verify` never reloads live config. A user prohibition is stronger than any signal. A policy change is complete only when the allocation ledger (`utilities/dispatch_allocation_receipt.py list|summary`) shows the new field on a real attempt, not when the file validates.
+   - **Cross-harness routing under SD-16:** current enabled harnesses bound new automatic choices and their launch rechecks; sealed policy preserves quality ordering inside that bound. An explicit target admitted by the sealed allocation pool or its node/owner policy continues on the same route after it is disabled, as does an exact previously launched replay or same-harness capacity retry; the existing diagnostic records `policy_note=disabled-since-admission`. Usage/quota, model eligibility, checked tuples, parent, claim and manifest checks still apply. Historical tuple/manifest checks and successful, running or unconfirmed peers remain independent of live defaults. An enabled explicit pin may use its target’s formally checked evidence outside the original pool without widening automatic choices. New targets already disabled at admission retain B behavior without new confirmation or provenance. Before dispatch, query each harness through `utilities/usage-check.sh`, which reports `ok`, `limited(reset)`, or `unknown`. The cascade is explicit target (including an explicit pin), hard eligibility, sealed affinity/policy, the balanced usage gate, quality band, then allocation ordering (target shares scaled by the optional `allocation.harness_weights`, e.g. OpenCode `0.3`, and by one field weight for the route's field: share = headroom^exponent × affinity × `harness_weights` × field row). The field rows are a comparative-advantage gradient from `capabilities/topologies.json` `field_harness_weights` (a field without a row weighs 1.0); a field name inside `allocation.harness_weights` overrides that row (a block sets cells; a number switches the row off, since equal cells cancel in the share); compose seals the applied row as `dispatch_allocation.field_weights` only when its cells differ and the field is known, so other routes keep their bytes. Usage rules (gate, limited, headroom, recent count) are one rule for every field, and a field weight leaves the gate, a limit, a quality band, an explicit choice and a pin as they are. A frame leg reads the `harness_policy` sealed on its own node and is eligible on any harness the route's evidence admits for its owner or its own launch; an explicit harness outside the profile's bands is followed when enabled or already admitted by this route. Claude headroom reads Fleet's credential-bound account cache (`usage_cache.read`, within the capacity stale window) first and falls back to statusline taps; Claude hard exclusions stay native. Unknown gauges pass the balanced gate optimistically and use the neutral ordering share, while account-bound native quota rejections (through their exact reset and model scope), legacy death markers from `usage-check.sh`, and, for Codex and OpenCode, a shared-gauge window at 100% used with a future reset (except Codex with usable credits in that same fresh snapshot; read through the same capacity cache judge; 99%, a past reset, or a cache older than an hour keeps today's `ok`, and Claude keeps its native evidence) remain hard exclusions until the login a worker would use answers otherwise: while Claude is held, a launch decision (`usage-check.sh --recheck`, `recheck=True`) sends that login one minimal request (`dispatch_capacity_evidence.probe`) at most every 10 minutes per login (`unscoped` while no account resolves) and model family, whatever the last attempt's outcome. The probed model follows the window that holds: Haiku for an all-model window, the limited family or model for a narrower one. An answer newer than a limit decides it: one that goes through lifts a limit whose window covers the probed model (an all-model window for any model, a family or model window only for that one), as when another account is signed in or quota returns before the recorded reset, and a rejection holds the models its window covers until its own reset. Later rejections preserve successful evidence that already lifted older limits. A probe that cannot run or fails for another reason changes nothing; gauges and Fleet read the stored answers. Under `capacity-aware`, unknown/zero headroom is excluded. Allocation order is compiled and sealed into the route (`dispatch_allocation`, `dispatch_defaults_digest`); `verify` never reloads live config. A user prohibition is stronger than any signal. A policy change is complete only when the allocation ledger (`utilities/dispatch_allocation_receipt.py list|summary`) shows the new field on a real attempt, not when the file validates.
 
      Codex account payloads preserve optional `credits.{has_credits,unlimited,balance}` and `spend_control_reached` from the API root or rollout `rate_limits`. The shared pure `credits_usable(payload)` accepts only boolean `has_credits is True` or `unlimited is True`, with spend control absent, null, or boolean false. Balance stays opaque and does not contribute to headroom. This exception lifts only the gauge hard hold: zero headroom, configured soft gates, manual score precedence, native/legacy rejection, model eligibility, and current enabled/admitted-continuation rules remain unchanged.
 
      **Provider/model availability:** quota headroom and execution availability are separate evidence. A candidate carries `usable`, `unavailable`, or `unknown`, scoped to its provider, selected account, and model where evidence supports that precision, with its reason and observation time. A confirmed credential or entitlement rejection is a hard exclusion for only the candidates covered by that evidence and outranks older successful quota/cache data. A runtime that serves several providers through one login reports a typed authentication error (OpenCode `provider.auth`) as a confirmed rejection of that provider, account, and credential generation even without a numeric HTTP status; it stays a runtime death that automatic replacement may move to another harness, not a whole-harness login failure. Rate limits, quota, transport, internal, and unclassified errors remain unknown and cannot clear a confirmed rejection. A newer same-scope success, an observed active-account change, or a changed credential generation (re-login or token refresh) may restore eligibility. Automatic selection admits a candidate only with `usable` evidence or as an `unknown` of a provider Hearting verifies before placement (today the OpenCode Go usage/entitlement probe); another provider's `unknown` is reported as unverified and is not selected automatically, so a harness with no admissible candidate is left out without a pause. Automatic ranking and every cached ordering consume this filter before headroom, affinity, bias, and fallback; an explicit harness choice, pin, or model still runs its configured model, and an explicit model pin remains exact and reports its native error. Credential presence and model inventory are not execution or entitlement evidence.
+     **Refreshing the field rows (a person's task; nothing automates it):** recompute `field_harness_weights` when the shipped model table changes and when `checked_on` is three months old. For each depth, gather measurements that compare the three harnesses' default models with one another, write them as the input file `tools/field-weights-table.py` describes, run it, copy its rows into `capabilities/topologies.json`, and update `checked_on` and `basis`. Keep the sources in the work record outside the repository; no check fails on the date.
+
    - **Nested child-spawn eligibility under SD-48:** root headless readiness,
      runtime-native subagent readiness, and a conductor's ability to launch a
      registered dispatch-depth-2 child are separate runtime surfaces. Before
@@ -1281,9 +1286,11 @@ A legacy hash collision is diagnostic
      integration ref, main automatically runs
      `utilities/worktree-cleanup.py --check --worktree <path>` and then the
      same command with `--apply` when eligible. The state machine blocks the
-     primary worktree, dirty/untracked state, Git operations, locks, unmerged
+     primary worktree, dirty/untracked state, ignored files other than
+     rebuildable caches, Git operations, locks, unmerged
      HEADs absent from a freshly fetched remote default branch, local
-     integration commits not present in that remote tip, and active exact job
+     integration commits not present in that remote tip, a worktree whose
+     owner cannot be established, and active exact job
      PIDs or process cwd. A local integration branch may be behind the remote
      tip; cleanup does not require switching to or updating that branch. If
      remote evidence cannot be refreshed, cleanup blocks instead of trusting a
@@ -1297,6 +1304,48 @@ A legacy hash collision is diagnostic
      ref without remote evidence and records `integration_upstream=local-only`.
      It does not infer local-only from a missing upstream and does not weaken
      clean, merged, inactive-process, lock, or Git-operation gates.
+   - `git worktree remove` deletes ignored files with the folder, so the clean
+     check also reads them (`status --ignored=matching`, which counts a wholly
+     ignored folder as one entry). Only a short fixed list of rebuildable caches
+     does not count, and each is recognised by what it holds: a `__pycache__/`
+     whose entries (one level down) are all plain `*.pyc` files, a single
+     `*.pyc`, and `.pytest_cache/`, `.mypy_cache/` or `.ruff_cache/` carrying the
+     `CACHEDIR.TAG` those tools write (the tool's own `.gitignore` of `*` makes
+     git list the folder's contents, so an entry under such a folder counts too);
+     names that can hold results (`build/`, `dist/`, `node_modules/`, `.venv/`,
+     checkpoints) are never on it, and nothing selects or extends the list. Any
+     other ignored file blocks with `ignored-files`, `artifact_harvest_required=1`,
+     and the count, total size and largest paths (control characters in a name
+     are escaped); move or delete them, then run `--check` again. The final
+     recheck before removal reads them again. A tracked file marked
+     `skip-worktree` or `assume-unchanged` is hidden from `status` yet deleted
+     with the folder, so one that still exists makes the worktree `dirty`.
+   - The owner check accepts a worktree owned by the running user, or one owned
+     like this repository's shared git directory when the running user can
+     write that directory (network mounts show every file under one foreign
+     uid); any other owner stays `worktree-owner-unknown`. That second form does
+     not apply to root, and on a mount that shows every owner as one uid it
+     cannot tell users apart (the checkout is then protected by candidate
+     selection, not by this check). The process scan looks only at this host's
+     `/proc`: use of the same worktree from another host sharing the storage is
+     not seen. In the process scan, a same-user process whose cwd the kernel
+     refuses to show although its uid and gid (real, effective and saved) all
+     equal the running user's (a non-dumpable login-session process or the user
+     service manager) is counted as `unreadable_pids=N` instead of making the
+     whole scan unknown; it cannot be placed in or out of the worktree, while
+     registry-known worker PIDs and every readable cwd are still checked. A
+     refused process with any different uid or gid (for example one started with
+     `sg` or `newgrp`), an unreadable `/proc/<pid>/status`, and any other read
+     failure still block as `process-scan-unavailable`.
+   - A registry row for the worktree holds it as `retained-work` while its route
+     is open, a readable failed or blocked result is unclosed, a delivery is
+     open, not yet made or unreadable, or an owner input request is unfinished.
+     Two leftovers no longer hold it: an unfinished owner input request once the
+     row's route is closed (no replacement owner can take it; the text stays in
+     the state folder), and a zero-byte `.pruned` marker the 2026-09/10 pruner
+     left where a finished delivery's record had been. An open route, a delivery
+     whose record is still open (its recipient may be alive), and a marker that is
+     not an empty regular file still hold it.
    - Cleanup does not copy or harvest agent artifacts: workers wrote them to
      the canonical root from the start. A stale matching open registry row is
      reconciled to `done,note=cleanup-merged` only after every other safety
@@ -1316,9 +1365,7 @@ A legacy hash collision is diagnostic
 
 **SD-91 current Codex override:** the projected Codex Stop bridge silently reads
 only enough payload to clear one exact interaction marker. It reads no registry,
-starts no subprocess or SessionEnd work, and emits no continuation. This
-supersedes older `native-Stop` and ordinary interactive park wording in this
-section; those shapes are migration history only.
+starts no subprocess or SessionEnd work, and emits no continuation.
 
 SD-92 completion binds to the calling `CODEX_THREAD_ID`.
 The interactive launcher and gateway are retired. Native queue
@@ -1640,7 +1687,7 @@ denial has exited; a still-live denied environment remains unobservable.
 ### §5.10c. Unit Route — One Unit, No Owner
 
 `capability-route.py compose --start --unit <family/name> --prompt-file <brief>` opens one
-read-only unit as a route of its own (kind `unit`, quick, one leg, no owner). The depth-0 session
+read-only unit as a route of its own (kind `unit`, one leg, no owner, no intensity; its record keeps `quick` as a compatibility value). The depth-0 session
 launches the leg through the path that launches a frame leg: the route seals the leg
 (`launch_authority: depth-0`), `dispatch-owner.py --start --route-evidence <route> --route-node unit`
 starts one registered depth-1 attempt, and `capability-route.py start --route <id>` follows it again
@@ -1657,6 +1704,30 @@ and the notice carries the same summary (its result line says the review complet
 whose report is empty, says no review was done or declares nothing is not finished work and is offered again. The same
 notice path serves all three harnesses. The launching session need not be an owner: this section does not change which work is direct, solo or staged
 (`core/WORKFLOW.md` §0.2.1).
+
+A registered worker (owner, stage worker or unit worker) may open a unit route too. Its leg is a depth-1 leg of
+its own route, so no depth number stands in the way: a chain of workers each starting another is bounded by the
+worker governor's cap and start budget, and the start it cannot fit is refused in the governor's refusal form
+(`waiting-capacity`; a worker arms no later automatic start). The leg's row names the starting worker
+(`caller_attempt_id`) and Fleet hangs it below it. The starting worker follows its leg with the printed bounded
+wait and receives the sealed summary there; if it ends first, `dispatch-reap-watch.py` stops what it still runs
+(`failure_class=cancelled`, `reconcile_reason=caller-ended`). `--ephemeral` keeps the route's files in the project's scratch
+root (`<runtime>/ephemeral/<key>/.agent_reports`, one per project) so the project's artifact folder and campaign records get nothing (its workers still
+count under the project's governor), and the
+notice (or wait result) carries the answer, cut with the place to read the rest. Details: `capabilities/unit.md`.
+
+A unit route that has ended on a verdict takes another turn with `capability-route.py correct --route <id> --message-file <text>`
+(the route's parent only): once the last turn has ended and the route has closed, the route's closure record is
+set aside (`<route id>.superseded-<time>.outcome.json`) and a new attempt of the same route and node starts in a new
+cycle, waking the previous turn's harness session when its file is still in that turn's worker home (copied alone
+into the new home, with the new turn's own permissions and model), else starting a fresh session that is told the
+brief and the previous result (`session: resumed | fresh:<reason>`). While a turn runs the text is only kept
+(`retained`) and the next plain `start --route` starts it; nothing waits between turns. A text that already ran as a turn
+is not started again (`state: already-asked`: send another text or a new `--request-id`), and a route whose last turn
+ended without a verdict keeps nothing and returns the compose-again command (`not-admitted`). The last turn's home waits
+by where its parent is: a leg a worker started, while that worker runs; a main-session leg, while that session
+lives, in both cases at most `route_autoclose.IDLE_SECONDS` (seven days); then `route_autoclose.QUIET_SECONDS` (one hour) once it is gone, or `route_autoclose.IDLE_SECONDS` when it cannot be told. Details:
+`capabilities/unit.md`.
 
 ### §5.11. Commit and Push Policy for `<agent-home>`
 
@@ -3553,6 +3624,8 @@ receipt. Both exit 0: queued is normal acceptance, not a failure to resend;
 a refusal, unresolved address or identity mismatch exits non-zero.
 `hearting run peer-steward prompt <name-or-pane> --body-file <file>` is
 the send path; reply text addressed to another session reaches nobody.
+The person reads that message in the receiving window: write a few lines, keep
+the detail in a file and give its path.
 
 **Peer requests.** A request for work is `peer-steward.py request <address> --body-file
 <file>` (a new `--rev` label supersedes the revision; `request <rq-id> --cancel` withdraws

@@ -396,7 +396,7 @@ def approval_question_id(leg, key) -> str:
 # those parts keep their gate for the person.
 FRAME_REVIEW_SOURCES = ("user", "supervisor")
 PERSON_ONLY_START_APPROVALS = ("deploy", "handback", "preview")
-# A supervisor answer the runtime records for the depth-0 session when both frame legs agree, no
+# A supervisor answer the runtime records for the depth-0 session when the frame legs agree, no
 # start approval is in scope and no question is left (WORKFLOW §0.4): the existing on-behalf
 # authority, labelled so it is never mistaken for a session's own judgement.
 AUTOMATIC_BASIS = "automatic-agreement"
@@ -820,6 +820,28 @@ def pending_answer_response(interview: dict, response) -> bool:
     return True
 
 
+def route_scope_note(interview: dict, question_id, label) -> str:
+    """One line read from the structure, for an option mapped to a proposal of two or more legs.
+
+    Says whether the legs run on without asking again (`complete`) or stop at each leg's end
+    (`report`). Nothing is stored: it is added where a card is shown, and an option with no proposal,
+    or a proposal of one leg, gets none. The answer is still the option's `label`."""
+    field = interview.get("route_proposals") if isinstance(interview, dict) else None
+    if not isinstance(field, dict) or field.get("question") != question_id:
+        return ""
+    proposal = (field.get("by_option") or {}).get(label)
+    legs = proposal.get("legs") if isinstance(proposal, dict) else None
+    if not isinstance(legs, list) or len(legs) < 2:
+        return ""
+    try:
+        import work_intent
+        translate = work_intent.ui_translator()
+        return translate("frame.route_scope_report" if proposal.get("execution_scope") == "report"
+                         else "frame.route_scope_complete", legs=len(legs))
+    except Exception:  # noqa: BLE001 -- the catalog is optional here; the card stands without the line
+        return ""
+
+
 def pending_question_block(interview: dict) -> str:
     """The registered words and choices the parent leaves in ordinary conversation."""
     lines = [_text(interview.get("understanding"))]
@@ -827,6 +849,9 @@ def pending_question_block(interview: dict) -> str:
         lines.extend(["", _text(question.get("question"))])
         for option in question.get("options") or []:
             lines.append(f"- {_text(option.get('label'))}: {_text(option.get('means'))}")
+            note = route_scope_note(interview, question.get("id"), option.get("label"))
+            if note:
+                lines.append(f"  {note}")
     return "\n".join(lines)
 
 
@@ -1063,8 +1088,10 @@ def _route_lines(interview: dict, answers: dict, scope: dict) -> list[str]:
     for index, leg in enumerate(proposal.get("legs") or []):
         graph = ",".join(leg.get("graph") or []) or "whole recipe"
         size = f" (size {leg['size']})" if leg.get("size") else ""
+        later = ("  (waits for the person's word)" if proposal.get("execution_scope") == "report"
+                 else "  (starts when the leg before it ends, without asking again)")
         lines.append(f"- Leg {index}: {leg.get('capability')} / {leg.get('mode') or 'default mode'} / "
-                     f"{leg.get('shape')}{size} / {graph}" + ("  (starts now)" if index == 0 else "  (next step, decided separately)"))
+                     f"{leg.get('shape')}{size} / {graph}" + ("  (starts now)" if index == 0 else later))
         for condition in leg.get("done_when") or []:
             text = condition.get("text") if isinstance(condition, dict) else condition
             lines += _proposal_conflicts(text, fields)

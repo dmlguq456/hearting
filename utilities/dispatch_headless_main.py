@@ -109,6 +109,10 @@ def add_launch_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--capacity-retry", type=int, choices=(0, 1), default=0)
     p.add_argument("--prior-attempt-id")
     p.add_argument("--automatic-retry-of", help="Exact failed predecessor; revalidated atomically at claim")
+    # A unit route's next turn (`correct --route`): the previous turn's attempt, this turn's number and text.
+    p.add_argument("--continues-attempt-id", help=argparse.SUPPRESS)
+    p.add_argument("--turn", type=int, default=0, help=argparse.SUPPRESS)
+    p.add_argument("--continuation-text", default="", help=argparse.SUPPRESS)
     p.add_argument("--cooled-model")
     p.add_argument("--selection-source")
     p.add_argument("--launch-authority", choices=("conductor", "ancestor-broker"), default="conductor")
@@ -152,13 +156,16 @@ def bind_worker_contract(h, args, *, profile_type) -> str:
 def dispatch_metadata_prompt(h, args, *, guard_session_id: bool = True) -> str:
     """The prompt's `Dispatch metadata` block, through the artifact context."""
     guard = f"- guard_session_id: {args.attempt_id}\n" if guard_session_id else ""
+    # 11-20: a unit route has no intensity (one unit does one job, nothing checks it), so its worker is
+    # told neither a `qa:` nor an `intensity:` value. The row and the environment keep the recorded `quick`.
+    qa, intensity = ("-", "-") if getattr(args, "capability", None) == "unit" else (args.qa, args.intensity)
     return (
         "Dispatch metadata:\n"
         f"- capability: {args.capability}\n"
         f"- capability_mode: {args.capability_mode}\n"
         f"- worker_mode: {args.worker_mode or '-'}\n"
-        f"- qa: {args.qa}\n"
-        f"- intensity: {args.intensity}\n"
+        f"- qa: {qa}\n"
+        f"- intensity: {intensity}\n"
         f"- dispatch_depth: {args.dispatch_depth}\n"
         f"- worker_type: {args.worker_type}\n"
         f"{guard}"
@@ -208,16 +215,27 @@ def unit_leg_prompt(h, args, task: str, *, commit_clause: str = "") -> str | Non
     scope = wb.resolve_node_scope(route, args.route_node, wb._child_scope_environment(args, route, os.environ),
                                   parent_attempt_id=getattr(args, "parent_attempt_id", None),
                                   route_file=args.route_file)
+    if getattr(args, "continues_attempt_id", None):
+        import unit_continue
+        plan = unit_continue.plan_for_args(args, args.jobs_path, Path(h.__file__).resolve().parents[1].name)
+        if plan is not None and plan.kind == "resumed":
+            # The woken session holds the brief and the kernel's rules already: only this turn's facts and text.
+            return unit_continue.turn_prompt(args, plan, dispatch_metadata_prompt(h, args), task, args.jobs_path)
+        task = unit_continue.turn_prompt(args, plan, "", task, args.jobs_path)
     persona = wb.unit_persona_body(h.ROOT, args.unit) or ""
     stance = wb.unit_stance_text(h.ROOT, args.unit)
     unit_text = "\n\n".join(part for part in (stance if stance and stance not in persona else "", persona) if part)
     # The kernel's closing contract, without the paragraph that only a supervised owner reads.
     contract = "\n\n".join(paragraph for paragraph in wb.worker_terminal_contract(h.ROOT).split("\n\n")
                             if "supervised owner" not in paragraph)
+    # A support leg (a lookup) starts no other worker, as `roles/worker-types/support.md` says: it is not told how.
+    call = "" if args.worker_type == "support" else f"{wb.unit_call_prompt(h.ROOT)}\n"
     return (f"{unit_text}\n\n"
             f"{dispatch_metadata_prompt(h, args)}\n"
             f"{commit_clause}"
-            f"{wb.unit_safety_prompt(args.worker_type)}\n"
+            f"{wb.unit_safety_prompt(args.worker_type)}"
+            f"{call}"
+            f"{wb.unit_bootstrap_prompt(args, task, os.environ)}"
             f"Assignment:\n{task.rstrip()}\n\n"
             f"{wb.node_scope_prompt(scope)}\n"
             f"{contract}\n\n"

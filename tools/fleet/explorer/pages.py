@@ -462,7 +462,7 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
         for gpu in gpu_rows:
             cursor = x + 3
             for text, key in gpu:
-                key = {"host": "loc_repo", "gpu_ada": "h_claude"}.get(str(key), key)
+                key = {"host": "loc_repo"}.get(str(key), key)
                 cursor = grid.put(cursor, y, str(text), key, limit=right - 1)
             y += 1
     pane_lines = tuple(session.get("pane_lines") or ())
@@ -531,8 +531,10 @@ def _peers_line(grid, vm, tag, x, y, right):
     if not groups:
         return y, set(), False
     harness_of = {str(item.get("tag")): str(item.get("harness") or "") for item in vm.sessions}
-    key_of = lambda other: ("hbb_" if other == tag else "hb_") + (harness_of.get(other) if harness_of.get(other) in
-                                                                  ("claude", "codex", "opencode") else "other")
+    # 11-18: this window's number is its harness color, bold; the other sessions' are the same color a step down (`h_*`, the
+    # receded harness color) and plain, so this window's stands out at a glance.
+    key_of = lambda other: ("hbb_" if other == tag else "h_" if harness_of.get(other) in ("claude", "codex", "opencode") else "hb_") + (
+        harness_of.get(other) if harness_of.get(other) in ("claude", "codex", "opencode") else "other")
     value_x = _field(grid, x, y, "PEERS", right)
     total = sum(len(members) for _steward, members in groups)
 
@@ -595,8 +597,9 @@ def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
                      "soft" if values else "dim", limit=right)
             y += 1
     y = _route_visibility_lines(grid, route.get("visibility"), x, right, y, bottom, whole)
-    y = _draw_route_subset(grid, vm, (route,), x, y, bottom, opened=ident, no_repo_group=True,
-                           view_key="route:" + ident, state=state)
+    # (The units a worker of this route called are not drawn on the route page: it reads as it did before the call.)
+    y = _draw_route_subset(grid, vm, ({key: value for key, value in route.items() if key != "called"},), x, y, bottom,
+                           opened=ident, no_repo_group=True, view_key="route:" + ident, state=state)
     draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y + 1, state,
                       bottom=min(bottom, grid.rows - 6))
 

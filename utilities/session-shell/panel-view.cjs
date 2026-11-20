@@ -26,13 +26,20 @@ const BORDER_ARC=1/4,BORDER_LAP=60;
 // second) in the lit red of `FACES.*.waitBlink`, as many in its other red.
 const WAIT_BLINK=10;
 // 11-16 (the person: "최대 5개 정도로 늘리고, 그전에 원래 형식으로 돌려"): MESSAGES shows the newest MESSAGES_MAX
-// messages at most, each its head row and its first line (spec rule 31).
-const MESSAGES_MAX=5;
+// messages at most, each its head row and its first line (spec rule 31). 11-20 (the person: "대신 MESSAGE도 최대 3개 정도로
+// 다시 줄이고"): three at most.
+const MESSAGES_MAX=3;
+const REPO_NAME_MIN=8;
+// 11-20 (the person: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" / "REPO ---- SESSION ----"): the panel beside the native area has two groups: REPO
+// (the repository's: its row, GIT, PEERS) and SESSION (this session's: MODEL, CTX, TITLE, NOW, QUESTIONS, the route box, MESSAGES, MEM). Each group's head
+// is one row `REPO ────` / `SESSION ────`. REPO's head is the REPO row itself (`REPO   hearting · wt 12 ────`, no row more). SESSION's head stands
+// where the empty row between the two groups' metadata stood, so it costs no row either, and goes with it short of rows. The bottom layout has no group
+// heads: first row, GIT, PEERS, then the title and NOW row and the route box.
 // 11-16 (the person: "메모리도 메시지랑 같은 맥락이야"): MEM shows the newest MEM_MAX records at most, each its
-// dim head row and its headline on up to two rows (spec rule 46 (b)).
-const MEM_MAX=5;
+// dim head row and its headline on up to two rows (spec rule 46 (b)). 11-18 (the person: "MEM는 최대 최근 3개만 띄워도 되겠다"): three at most.
+const MEM_MAX=3;
 const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom',auxiliary:'summary',bottom_rows:14,
-  position:'right',theme:'terminal',shade:'none',route_line:'time',rule_motion:'rule'};
+  position:'right',theme:'terminal',shade:'none',route_line:'time',worker_box:'closed',rule_motion:'rule'};
 // Panel color schemes (spec rule 22: the reviewed set A, the question rose one
 // step deeper). `terminal` is the terminal's own background with the shared
 // palette; `light` declares a light terminal; `mono` drops hue and keeps weight,
@@ -76,23 +83,52 @@ const FACES={
     // an L* gap of 15 apart; these are 34 apart (L* 79 and 44.5), the darker still readable.
     waitBlink:[217,95],
     // 11-16 (the person: "usage에서 하네스 이름도 어둡게 원래 테마 컬러를 넣어주고"): the harness names of the USAGE rows, each in
-    // its Fleet hue (`hb_*`: claude cyan, codex magenta, opencode blue) one step down (L* 53.5, 52.3, 59.3; the lit hues
-    // 116, 176, 147 are L* 81, 67, 74), so a name reads as a label and never louder than its numbers.
-    harnessName:{claude:66,codex:133,opencode:104}},
+    // its Fleet hue (`hb_*`: claude orange 173, codex lavender 147, opencode sky 153) one step down (L* 48.6, 59.3, 70.0; the lit hues
+    // are L* 63.8, 74.2, 84.4), so a name reads as a label and never louder than its numbers.
+    // 11-18 (the harness colors follow the products' own themes): Claude's name was 66, now 130; Codex's was 133, now 104
+    // (the step under 147); OpenCode's was 104, now 110 (the step under 153). Each pair is 13 or more apart (CIEDE2000).
+    harnessName:{claude:130,codex:104,opencode:110},
+    // 11-18 (the person: "패널 스캐너 동작도"): while a session works, the moving frame and the head rule's light take the
+    // session's harness color instead of the vanilla ramp: the same steps (the arc's four, the head rule's five, the wave's two
+    // ends), each a step of that harness's hue (`orbit` brightest first: a lit tint of the harness color, the color, two steps
+    // toward the still frame's gray; `scan` the head rule's, dimmest first, from the still frame's gray to the lit tint, each step 8 or more L* above the one before and the last as bright as the body text; `waveRGB` the same two
+    // ends in 24-bit color: the still frame's gray and the lit tint's own RGB). A waiting frame's reds, the unknown harness's
+    // vanilla and mono are as before.
+    ramp:{claude:{orbit:[216,173,137,102],scan:[243,137,209,216,223],waveRGB:[[128,128,128],[255,175,135]]},
+      codex:{orbit:[189,147,104,245],scan:[243,104,177,183,189],waveRGB:[[128,128,128],[215,215,255]]},
+      opencode:{orbit:[195,153,110,246],scan:[243,103,74,117,195],waveRGB:[[128,128,128],[215,255,255]]}}},
   light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
     working:22,idle:58,blocked:131,dead:88,done:22,steward:[132,175],
     orbit:[22,65,108,151],waveRGB:[[118,118,118],[0,95,0]],scan:[244,242,240,238,236],
     breath:[88,124,131],breathRGB:[[135,0,0],[175,95,95]],
     veil:250,bright:232,popup:254,popupLine:137,popupTitle:232,popupFloor:241,chosen:223,waitBlink:[88,167],
     rgb:{popup:'#f1e7dc',popupLine:'#9c8571',popupTitle:'#342a23',chosen:'#fecca4'},
-    // (The light face: the deep hues 23, 60, 25 (L* 36, 42, 40) one step lighter: L* 50.8, 45.7, 56.7.)
-    harnessName:{claude:30,codex:96,opencode:68}},
+    // (The light face: the deep hues 166, 25, 31 (L* 54.7, 40, 52.3). Codex's name is the step lighter, 68 (L* 56.7); Claude's deep orange
+    // and OpenCode's deep sky are already the lightest that read on white (166, 3.3; 31, 4.1), so their names are the head's own hue.)
+    harnessName:{claude:166,codex:68,opencode:31},
+    // 11-18 (PEERS: this window's number is its deep hue bold, every other window's one step back, "나머지는 컬러도 조금 어둡게"):
+    // on white the step back is the lighter one. Claude 173 (2.8 on white, 12.4 from 166 by CIEDE2000), Codex 68 (its name's own,
+    // 16.8 from 25), OpenCode 66 (4.0 on white, 14.3 from 31, 23.5 from Codex's 68). Only PEERS reads it; the USAGE names keep `harnessName`.
+    peerOther:{claude:173,codex:68,opencode:66},
+    // (The light face's ramps, the deep pairs 166, 25, 31 first, toward the light ground: the harness's own steps; `scan` dimmest first,
+    // from the still frame's gray up to the deep color.)
+    ramp:{claude:{orbit:[166,173,216,223],scan:[243,102,137,173,166],waveRGB:[[118,118,118],[215,95,0]]},
+      codex:{orbit:[25,68,146,189],scan:[243,60,61,26,25],waveRGB:[[118,118,118],[0,95,175]]},
+      opencode:{orbit:[31,74,110,152],scan:[243,102,67,32,31],waveRGB:[[118,118,118],[0,135,175]]}}},
 };
 // Fleet's 256-color hues on each face. The light face takes the reviewed deep
 // counterparts (running 22, attention 58, failure 88, project 23, model 60)
 // instead of the earlier strong substitutes; the dark face changes only the
 // failure red, and only on a shade.
-const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,176:60,147:25,230:22,219:132,137:94}};
+// 11-18 (OpenCode's sky 153 -> 31, #0087af, 4.1 on white; Codex's 147 shares Sonnet's, so its deep pair is 25: the person chose the same color.)
+// 11-18 (Claude's harness orange 173 -> 166, #d75f00, 3.3 on white: the deep orange nearest its hue (56°; 130 is 64° and is the
+// direct zone's and lab's own deep hue here), 9.4 from that 130 by CIEDE2000: see PR text).
+// 11-18: the three zone hues (orange, violet, aqua) and the five field hues (code blue, lab amber, design rose, docs sand,
+// research sky) take their dark counterparts on the light face: the same hue at a contrast of 4.5 or more on white
+// (130 4.7, 55 10, 29 4.5; 26 5.8, 130 4.7, 162 5.0, 94 5.7, 24 7.0), set apart from each other and the state hues
+// (Lab distance 20 or more; lab 130 and docs 94 are the closest pair, as amber and sand are in the dark set).
+const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,173:166,176:60,147:25,153:31,230:22,219:132,137:94,
+  208:130,99:55,43:29,69:26,214:130,205:162,180:94,38:24}};
 const LINES=new Set(['frame','route','messages']);
 function face(theme,background){return theme==='light'?'light':background==='light'||background==='dark'?background:'';}
 // A moving frame cell's color: an arc or lit-frame shade from its face's ramp (0 the brightest); a wave
@@ -100,11 +136,13 @@ function face(theme,background){return theme==='light'?'light':background==='lig
 // the head rule's light step (1 the dimmest .. 5); a waiting step from its face's 256-color reds, or in
 // 24-bit color (when the terminal says it takes it) a point on the cosine between its face's two ends.
 const mix=(a,b,f)=>'#'+a.map((c,i)=>Math.round(c+(b[i]-c)*f).toString(16).padStart(2,'0')).join('');
-function orbitTone(part,F,colors){
-  if(part.tone==='arc')return F.orbit[Math.max(0,Math.min(F.orbit.length-1,part.level))];
-  if(part.tone==='scan')return F.scan[Math.max(0,Math.min(F.scan.length-1,part.level-1))];
-  if(part.tone==='wave'){const [lo,hi]=F.waveRGB,q=Math.max(0,Math.min(1,part.level));
-    return colors>256?mix(lo,hi,WAVE_FLOOR+(1-WAVE_FLOOR)*q):F.orbit[Math.round((1-q)*(F.orbit.length-1))];}
+function orbitTone(part,F,colors,harness=''){
+  // A working session's tones are its harness's (`F.ramp`); a waiting one's reds (`breath`) and an unknown harness's are the face's own.
+  const R=part.tone!=='breath'&&F.ramp&&F.ramp[harness]||F;
+  if(part.tone==='arc')return R.orbit[Math.max(0,Math.min(R.orbit.length-1,part.level))];
+  if(part.tone==='scan')return R.scan[Math.max(0,Math.min(R.scan.length-1,part.level-1))];
+  if(part.tone==='wave'){const [lo,hi]=R.waveRGB,q=Math.max(0,Math.min(1,part.level));
+    return colors>256?mix(lo,hi,WAVE_FLOOR+(1-WAVE_FLOOR)*q):R.orbit[Math.round((1-q)*(R.orbit.length-1))];}
   const steps=part.steps,k=part.step;
   if(colors>256&&steps>1){
     const f=(Math.cos(Math.PI*k/(steps-1))+1)/2,[hi,lo]=F.breathRGB;
@@ -112,7 +150,7 @@ function orbitTone(part,F,colors){
   }
   return F.breath[Math.max(0,Math.min(F.breath.length-1,k))];
 }
-function appearance(rows,configuration={},{colors=256,noColor=false,background=''}={}){
+function appearance(rows,configuration={},{colors=256,noColor=false,background='',harness=''}={}){
   const cfg={...defaults,...configuration},theme=['terminal','light','mono'].includes(cfg.theme)?cfg.theme:'terminal';
   if(noColor)return rows;
   const known=face(theme,background),full=colors>=256;
@@ -159,8 +197,8 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     else if(role==='steward'&&theme==='mono')dim=false;
     // Spec rule 47: the moving frame's cells take their step's tone on their face (an unknown face
     // the dark face's), at full strength; mono never moves (no tone).
-    else if(role==='harness-name'&&theme!=='mono'){foreground=F.harnessName[part.harness]??foreground;dim=false;}
-    else if(role==='orbit'&&theme!=='mono'&&part.tone){foreground=orbitTone(part,FACES[known||'dark'],colors);dim=false;}
+    else if(role==='harness-name'&&theme!=='mono'){foreground=((part.peer&&F.peerOther)||F.harnessName)[part.harness]??foreground;dim=false;}
+    else if(role==='orbit'&&theme!=='mono'&&part.tone){foreground=orbitTone(part,FACES[known||'dark'],colors,harness);dim=false;}
     // Spec rule 22: on a known face each line takes its role's color with or
     // without a shade (frame 244/243, route 245/243, messages 242/245); an
     // unknown face keeps the terminal's own, mono keeps no hue.
@@ -169,6 +207,8 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
       // On a shade nothing is dimmed on top: secondary text and lines take their own color.
       if(LINES.has(role)){foreground=F[role];dim=false;}
       else if(role==='title'){foreground=F.title;dim=false;}
+      // A kind word's bracket keeps its field's hue and its weight step (quick dim) on a shade too.
+      else if(role==='kind'&&foreground!==null){/* kept as it is */}
       else if(foreground===null||dim||role==='secondary'){foreground=foreground===null&&!dim&&role!=='secondary'?F.body:F.secondary;dim=false;}
       return {...part,foreground,dim,bold,background:F[shade]};
     }
@@ -184,10 +224,10 @@ const graphemes=s=>SEGMENTER&&JOINS.test(s)?Array.from(SEGMENTER.segment(s),x=>x
 // Spec rule 49 (d): the narrow-width judgment is one constant (native-display's NATIVE_MIN), so
 // the editor has no `threshold`; `side_min_columns` stays in `defaults` only so a saved policy
 // keeps its keys.
-const fields=['layout','position','side_width','narrow','auxiliary','bottom_rows','theme','shade','route_line','rule_motion'];
-const names=['layout','position','width','narrow','auxiliary','height','theme','shade','route_line','rule_motion'];
+const fields=['layout','position','side_width','narrow','auxiliary','bottom_rows','theme','shade','route_line','worker_box','rule_motion'];
+const names=['layout','position','width','narrow','auxiliary','height','theme','shade','route_line','worker_box','rule_motion'];
 const OPTIONS={layout:['side','bottom'],position:['right','left'],narrow:['bottom','compact'],auxiliary:['summary','detail'],
-  theme:['terminal','light','mono'],shade:['none','light','medium'],route_line:['time','model'],rule_motion:['rule','border','scanners','off']};
+  theme:['terminal','light','mono'],shade:['none','light','medium'],route_line:['time','model'],worker_box:['closed','open','none'],rule_motion:['rule','border','scanners','off']};
 const APPEARANCE_KEYS=['position','theme','shade'];
 // The session's own state, as Fleet's session row judges and draws it
 // (render_cells `_LIVE_GLYPH`/`_state_key`): a working session spins.
@@ -399,7 +439,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const joinAll=groups=>groups.filter(g=>g.length).flatMap((g,i)=>i?[...bar,...g]:g);
     // The session.
     const tag=/^\[[^\]?]{1,16}\]$/.test(String(model.tag||''))?clean(String(model.tag).slice(1,-1)):'';
-    const glyph=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
+    const glyph=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[0]==='spin'&&['claude','codex','opencode'].includes(harness)?'hb_'+harness:own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
     const number=tag?[text('[','dim'),model.steward===true?{...text(tag,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})}:{...text(tag,own?own[1]:'dim'),role:'session'},text(']','dim')]:[];
     const lead=[...glyph,...(glyph.length&&number.length?[text(' ')]:[]),...number];
     const project=Array.isArray(model.repo_side)?P(model.repo_side):P(model.repo).filter(p=>!/^\[[^\]]*\] ?$/.test(String(p.text)));
@@ -495,14 +535,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(const sp of spans)if(sp.left<limit())hits.push({row:0,left:sp.left,right:Math.min(sp.right,limit()-1),action:sp.action});
     hits.push({row:0,left:0,right:width-1,action:'unfold'});
     const shown=new Set(body);
-    const painted=appearance(out,{...cfg,shade:'none'},{colors:model.colors??256,noColor:model.no_color===true,background});
+    const painted=appearance(out,{...cfg,shade:'none'},{colors:model.colors??256,noColor:model.no_color===true,background,harness});
     const spins=out.map((r,i)=>r.some(part=>part.spin)?i:-1).filter(i=>i>=0);
     const groupsPainted=['head',...(groups.some(g=>g.parts.some(p=>p.text==='CTX '))?['context']:[]),...(body.some(part=>quotaParts.has(part))?['quota']:[]),
       ...(wait.length&&body.some(p=>wait.includes(p))?['wait']:[]),...(groups.some(g=>g.route)?['route']:[])];
     const color=own&&own[1]!=='g_work_off'?own[1]:'dim';
     // The wait's cells, swapped by the host between the two reds on Fleet's beat (only those cells).
     const cells=blinkCells(out,measure,clean,0,1);
-    const look={...cfg,shade:'none'},paint={colors:model.colors??256,noColor:model.no_color===true,background};
+    const look={...cfg,shade:'none'},paint={colors:model.colors??256,noColor:model.no_color===true,background,harness};
     const motion=cells.length?{cells,at:tick=>appearance([cells.map(c=>({...c.blink,text:c.ch,blinkTone:blinkTone(tick)}))],look,paint)[0],
       next:tick=>blinkNext(tick)}:null;
     return {rows:painted,hits,color,groups:[...new Set(groupsPainted)],animated:spins.length>0||!!motion,spins,motion,folded:true};
@@ -574,11 +614,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   // 11-17 (route zones, the person: "그래도 컬러는 전부 달라야하지 않을까"): the `●` and the spinner of a route of the `direct` zone
   // wear that zone's color (a lit beat in it, a dark beat dimmed); a `dispatch` route's are the working green they were, a
   // request's arrow the request color (`requestForms`). A failure's, a result's and a wait's mark keep the state's own.
+  // 11-18 (the harness spinner, below): a spinner on a line that names its harness (`routeGlyph` with `h`) turns in that harness's
+  // color before this, so a `direct` zone's working owner line spins in its harness's color; the zone's color stays on the `●`, on a
+  // spinner whose line names no harness, and on the zone's other marks.
   const zonePaint=(r,part)=>{
     const look=r&&r.zone==='direct'?styles.zone_direct:null;
     return look&&(part.spin||part.text==='●'||/^[\u2800-\u28ff]$/.test(String(part.text)))?{...part,...look,dim:part.dim===true||look.dim===true}:part;
   };
-  const routeGlyph=r=>{const g=r.paint?.glyph||text('·');if(live(r))return zonePaint(r,{...g,...spinGlyph,role:'state:working'});return zonePaint(r,{...g,role:'state:'+(r.kind==='done'&&r.outcome_key==='g_dead'?'dead':r.kind||'idle')});};
+  // 11-18 (the person: "스피너 컬러도 하네스에 맞추고"): the spinner of a line that names its harness (`h`, that line's own harness part)
+  // turns in that harness's color, on every face (a deep pair on the light face, as the harness name's own); a mark that is not the
+  // spinner (`●`, `✕`, `✓`), a route's first line and a line with no known harness keep the state's own color.
+  const harnessSpin=(g,h)=>h&&Number.isInteger(h.foreground)?{...g,foreground:h.foreground,bold:false,dim:false}:g;
+  const routeGlyph=(r,h)=>{const g=r.paint?.glyph||text('·');if(live(r))return h&&Number.isInteger(h.foreground)?harnessSpin({...g,...spinGlyph},h):zonePaint(r,{...g,...spinGlyph,role:'state:working'});return zonePaint(r,{...g,role:'state:'+(r.kind==='done'&&r.outcome_key==='g_dead'?'dead':r.kind||'idle')});};
   // A finished route's row leads its title with the result word (`FAIL · title`), so a cut title keeps it.
   const titleOf=(r,fallback='·')=>[...(r.kind==='done'&&r.outcome?[text(r.outcome,r.outcome_key||'lvl_g'),text(' · ','dim')]:[]),...line(r.title||fallback,'loc_repo')];
   const join=(groups,sep=' · ')=>groups.filter(g=>g&&g.length).flatMap((g,i)=>i?[text(sep),...g]:g);
@@ -684,7 +731,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const worktrees=painted(model.worktrees),sideGit=Array.isArray(model.git_side)?painted(model.git_side):git;
     const sideRepo=Array.isArray(model.repo_side)?painted(model.repo_side):repo;
     const labelled=(label,parts)=>labelWidth?[text(label.padEnd(labelWidth),'dim'),...parts]:parts;
-    // 11-17 (the person's PEERS sketch): `PEERS  [c7] ⚑ ─ [d4] [3b]`: the supervising session, its flag, a dash, then the
+    // 11-17 (the person's PEERS sketch): `PEERS  [c7] ⚑  ─ [d4] [3b]`: the supervising session, its flag, two cells, a dash, then the
     // ones it supervises; the same order from every window. Each number is its harness's color (this window's own bold),
     // the flag alone Fleet's steward pink, the dash and the `·` between two groups dim. No state of any session. Short of
     // cells the last numbers go from the back and the count of the ones a group lost stands inside that group (`[3b] ⚑ ─
@@ -694,13 +741,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const peers=model.peers&&typeof model.peers==='object'&&Array.isArray(model.peers.groups)?model.peers:null;
       const groups=(peers?peers.groups:[]).filter(g=>g&&g.steward&&Array.isArray(g.members)&&g.members.length);
       if(!groups.length)return [];
-      const number=e=>({...text('['+clean(e.tag)+']',e.key||'dim'),...(e.me===true?{bold:true}:{}),role:'peer'});
+      // 11-18 (the person: "PEERS에서 볼드 여부만 해놓으니까 나의 세션이 뭔지 확 안오네, 나머지는 컬러도 조금 어둡게"): this window's number is its harness
+      // color, bold (the brightest); every other session's is its harness's one step back (the USAGE names' own `FACES.*.harnessName`;
+      // on the light face `FACES.light.peerOther`, the lighter step, so it never equals this window's deep hue), drawn as that
+      // face's fixed color, never the terminal's dim, plain. No color: weight alone tells them apart, as before.
+      const number=e=>{const h=/^hb_(claude|codex|opencode)$/.exec(e.key||'');
+        return {...text('['+clean(e.tag)+']',e.key||'dim'),...(e.me===true?{bold:true,role:'peer'}:h?{role:'harness-name',harness:h[1],peer:true}:{role:'peer'})};};
       const flag={...text('⚑','tag_steward'),role:'steward',...(model.no_color===true||cfg.theme==='mono'?{bold:true,dim:false}:{})};
       const build=keep=>{
         const out=[];let rest=keep;
         for(const g of groups){
           const take=Math.min(rest,g.members.length),lost=g.members.length-take;rest-=take;
-          const piece=[number(g.steward),text(' '),flag,text(' '),text('─','dim'),...g.members.slice(0,take).flatMap(e=>[text(' '),number(e)]),
+          const piece=[number(g.steward),text(' '),flag,text('  '),text('─','dim'),...g.members.slice(0,take).flatMap(e=>[text(' '),number(e)]),
             ...(lost?[text(' +'+lost,'dim')]:[])];
           const next=[...out,...(out.length?[text(' · ','dim')]:[]),...piece];
           // A group with no number left stands only where its head and its count fit; else it, and those after it, go.
@@ -714,26 +766,42 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return cut(build(1),room);
     };
     // 11-15 (the person: "현황은 REPO 옆에 버튼을 만드는게 나을거 같은데", design 2 as recommended): the status
-    // button `현황 ›` (`STATUS ›`, Fleet's `fleet.repo.status`) at the right end of the REPO row: the word in
+    // button `STATUS ›` (11-20: English, as the section's other names) at the right end of the REPO row: the word in
     // the body color, `›` dim as a section head's, no ground, no count; no status document: all of it dim
-    // (a press still opens it). Short of cells the word goes first (`›` stays), then `· wt N` whole, then
-    // the name is cut with `…`; the name and `›` stay to the last. A press anywhere on the row opens the
+    // (a press still opens it). 11-20 (the person: "현황은 미리보기 없이 버튼만 만들자"): the button is all the panel has of the status, with a
+    // document or without one; the popup it opens holds the list. Short of cells the name is cut (to eight cells at least) before the word goes,
+    // then `· wt N`, then the word (`›` stays); the name and `›` stay to the last. A press anywhere on the row opens the
     // status popup. No artifact root: no button (`status_doc` absent).
     const statusDoc=model.status_doc&&typeof model.status_doc==='object'&&clean(model.status_doc.word).trim()?model.status_doc:null;
     const topActions=new Map();
     const statusButton=whole=>{const arrow=text('›','dim');if(!whole)return [arrow];
       return [text(clean(statusDoc.word).trim(),statusDoc.has_doc===true?'loc_repo':'dim'),text(' '),arrow];};
     // `name` and `count` with the button at the right end of `room` cells, or null without a button.
+    // 11-20: the REPO row is the REPO group's head: its free cells are a thin rule (a section head's, its color) where `n` allows one.
+    const ruleRun=n=>({...text('─'.repeat(Math.max(1,n)),'dim'),role:'messages'});
+    const fillMid=n=>n>=4?[text(' '),ruleRun(n-2),text(' ')]:[pad(n)];
+    const fillEnd=n=>n>=3?[text(' '),ruleRun(n-1)]:[pad(n)];
     const withButton=(name,count,room)=>{
       if(!statusDoc)return null;
-      // In order: the whole button, `›` alone, then `› ` without the count; the word does not come back.
-      for(const [lead,whole] of [[[...name,...count],true],[[...name,...count],false],...(count.length?[[name,false]]:[])]){
-        const b=statusButton(whole);if(size(lead)+1+size(b)<=room)return [...lead,pad(room-size(lead)-size(b)),...b];
+      // 11-20 (the word is `STATUS`, six cells): the name is cut (down to REPO_NAME_MIN cells) before the word goes, and the count goes before the name
+      // is cut below that; only then the word goes (`›` stays), with the count and then without it.
+      const word=statusButton(true);
+      for(const keep of count.length?[count,[]]:[[]]){
+        const left=room-size(word)-1-size(keep);
+        if(left<Math.min(size(name),REPO_NAME_MIN))continue;
+        const lead=[...(size(name)<=left?name:cut(name,left)),...keep];
+        return [...lead,...fillMid(room-size(lead)-size(word)),...word];
       }
-      return [...cut(name,Math.max(1,room-2)),pad(Math.max(1,room-Math.min(size(name),Math.max(1,room-2))-1)),...statusButton(false)];
+      for(const lead of [[...name,...count],...(count.length?[name]:[])]){
+        const b=statusButton(false);if(size(lead)+1+size(b)<=room)return [...lead,...fillMid(room-size(lead)-size(b)),...b];
+      }
+      return [...cut(name,Math.max(1,room-2)),...fillMid(Math.max(1,room-Math.min(size(name),Math.max(1,room-2))-1)),...statusButton(false)];
     };
+    // A group's head row: its name (the title role, as a section's), a thin rule to the row's end.
+    const groupHead=name=>{const lead=[{...text(name,'dim'),role:'title'}],rest=inner-size(lead);
+      return rest>=3?[...lead,text(' '),{...text('─'.repeat(rest-1),'dim'),role:'messages'}]:cut(lead,inner);};
     // Spec rule 46: the newest saved memory records (this repository's and the global ones, MEM_MAX at
-    // most) stand in their own section under the messages, two rows or three each (below). An older backend
+    // most) stand in their own section under the messages, one row each (below). An older backend
     // sends the newest one as painted pieces only (`3m decision headline`): that one record,
     // without its kind (rule 46 (e)); the head carries no MEM row either way.
     const memItems=(()=>{
@@ -752,11 +820,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // effort, context]; without Git it parts the repository from the model.
       if(sideRepo.length){
         // The name keeps its color; the count (dim) shows whole or not at all.
-        const room=inner-labelWidth,count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
+        // 11-20: the REPO group's head is this row: `REPO   hearting · wt 12 ────` (narrower than 30 cells inside the word stands first, `REPO `,
+        // as the other labels do not).
+        const count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
+        const word=labelWidth?null:text('REPO ','dim'),room=inner-labelWidth-(word?5:0);
         const withCount=count.length>0&&size(sideRepo)+size(count)<=room;
-        const button=withButton(sideRepo,count,room);
+        const button=withButton(sideRepo,count,room),value=withCount?[...sideRepo,...count]:cut(sideRepo,room);
         if(button)topActions.set(top.length,'popup:STATUS');
-        top.push(labelled('REPO',button||(withCount?[...sideRepo,...count]:cut(sideRepo,room))));mark(0,'head',...(withCount&&!sideGit.length?['git']:[]));
+        const row=button||[...value,...fillEnd(room-size(value))];
+        top.push(word?[word,...row]:labelled('REPO',row));mark(top.length-1,'head',...(withCount&&!sideGit.length?['git']:[]));
       }
       // Short of cells the first part (the branch, the model name) gives way so what follows
       // it (the status and a warning, the effort) stays whole.
@@ -767,7 +839,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       };
       if(sideGit.length){gitRows.add(top.length);top.push(labelled('GIT',firstGives(sideGit,inner-labelWidth)));mark(top.length-1,'git');}
       {const peerParts=peerRow(inner-labelWidth);if(peerParts.length){gitRows.add(top.length);top.push(labelled('PEERS',peerParts));}}
-      if(top.length){metaGaps.add(top.length);top.push([]);}
+      // 11-20: the SESSION group's head stands where the empty row between the two groups of metadata stood (and goes with it).
+      metaGaps.add(top.length);top.push(groupHead('SESSION'));
       if(labelWidth){
         // Spec rule 42: `MODEL` and `CTX` as REPO's and GIT's; `CTX` stands for the word
         // `context` (a backend without `context_side` has its word taken off here).
@@ -954,13 +1027,31 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // Requests this session sent (→) or received (◂): lines in the route box after the routes
     // (R27); each opens in place by its own key and reads whole on its own page.
     const requestList=Array.isArray(model.requests)?model.requests.filter(q=>q&&typeof q.id==='string'):[];
-    const elapsedWidth=Math.max(0,...listed.map(r=>measure(r.elapsed||'')));
-    const columnWidth=(pick)=>Math.max(0,...listed.map(r=>size(pick(r))));
-    const owner=r=>{const p=r.paint||{};return [p.harness,p.model_text&&text(' '),p.model_text,p.effort&&text(' '),p.effort].filter(Boolean);};
+    // Under the route (`side:false`) a unit a worker called is a row of its own under its caller's, in the same columns: it is a
+    // route-shaped row (its title two cells in, its kind, its time) that no count of routes holds. Its cells count in the columns' widths.
+    const workersAll=r=>Array.isArray(r.workers_live)?r.workers_live.filter(w=>w&&typeof w==='object').slice(0,8):[];
+    const walkCalled=(items,depth)=>(Array.isArray(items)?items:[]).filter(c=>c&&typeof c==='object').slice(0,8).flatMap(c=>[[c,depth],...walkCalled(c.called,depth+1)]);
+    const flatCalled=r=>[...walkCalled(r.called,0),...workersAll(r).flatMap(w=>walkCalled(w.called,0))];
+    const calledBottom=new Map(listed.map(r=>[r,side?[]:flatCalled(r).filter(([c])=>clean(c.unit_word||'').trim()).map(([c,depth])=>({
+      title:c.title||'',kind:c.kind,paint:c.paint||{},elapsed:c.elapsed,unit_route:true,called:true,unit_word:c.unit_word,kind_word:c.kind_word,
+      kind_field:c.kind_field,indent:2+2*depth,shape:''}))]));
+    const calledAll=[...calledBottom.values()].flat();
+    const indentOf=r=>r.indent||0;
+    const titleCols=x=>[...(indentOf(x)?[text(' '.repeat(indentOf(x)))]:[]),...titleOf(x,'')];
+    // The columns of a set of rows: the width of one cell of each, and of the time. The routes' columns are the routes' alone;
+    // the called rows' are counted only in the set bottomLayout tries them in.
+    const columnsOf=set=>({set,elapsed:Math.max(0,...set.map(r=>measure(r.elapsed||''))),width:pick=>Math.max(0,...set.map(r=>size(pick(r))))});
+    const routeCols=columnsOf(listed);
+    // Under the route (`side:false`) a unit route's worker is its unit: the unit's short name leads the doer column, dim as a role word.
+    // The column is as wide as the routes' harness, model and effort. A unit's name is counted only where every route of the box is a
+    // unit route (so no other route's row changes); beside any other route the name stands in the column's cells if they hold it
+    // (bottomLayout, doerCell), never in the title's.
+    const owner=(r,named=true)=>{const p=leadPaint(r),u=named&&r.unit_route===true?clean(r.unit_word||'').trim():'';
+      return [...(u?[text(u,'dim'),text(' ')]:[]),p.harness,p.model_text&&text(' '),p.model_text,p.effort&&text(' '),p.effort].filter(Boolean);};
     // A route whose record names its kind: its stage stands in the kind column, never as
     // the older `execute ✕ 2/3` step text (that stays for a record that names no kind).
     const shaped=r=>{const shape=String(r.shape||'');return shape==='one-shot-owner'||!!shape&&shape!=='unknown'&&(!/^staged/.test(shape)||Array.isArray(r.stages)&&r.stages.length>0);};
-    const third=r=>r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:r.step&&!shaped(r)?[text(r.step)]:[];
+    const third=r=>r.step&&!shaped(r)?[text(r.step)]:[];
     // 11-16 (the person: "staged stage 펼쳤을떄 stage 이름은 좀 눈에 띄게 ... fleet 처럼"): a stage's name in the expanded rows
     // (a live worker's stage row, the kind row's stage) wears the color Fleet gives that stage of its route (the backend's
     // `key`/`stage_key`: Fleet's `route_stage_key`, one table for both screens); mono, eight colors and NO_COLOR read as before.
@@ -972,7 +1063,19 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const stageCell=(stage,key)=>[stageName(stage,key),...(markOf(stage)?[text(' '),markOf(stage)]:[])];
     // The kind word leads a route, the one bold word of its first line (the body color, never dim, in mono and NO_COLOR too);
     // its intensity follows in dim brackets. Nothing else goes in the brackets.
-    const kindText=word=>({text:clean(word),foreground:null,bold:true,dim:false});
+    // 11-18 (route kind color; the person: "code, lab 같은 라우트 유형에 컬러를 넣어줘" / "강도도 컬러를 넣어주자"): the kind word wears
+    // its field's hue (the backend's `kind_field`: one of five; an older route that records none, its own kind's name when that is
+    // a field's), and its bracket the same hue stepped by weight (quick dim, standard plain, strong and beyond bold). Where no
+    // hue is shown (mono, NO_COLOR, under 256 colors) or the route has no field, both read as they did.
+    const hued=model.no_color!==true&&cfg.theme!=='mono'&&(model.colors??256)>=256;
+    const FIELDS=['code','lab','design','docs','research'],WEIGHT={quick:'q',light:'q',standard:'s',strong:'b',thorough:'b',adversarial:'b'};
+    const kindField=(r,name)=>{
+      const word=clean(name).trim(),own=word===clean(r.kind_word||'').trim();
+      const field=own?clean(r.kind_field||'').trim():['code','lab','design','research'].includes(word)&&!clean(r.field||r.kind_field||'').trim()?word:'';
+      return hued&&FIELDS.includes(field)&&styles['kind_'+field]?field:'';
+    };
+    const kindText=(word,field='')=>field?{...text(clean(word),'kind_'+field),bold:true,dim:false}:{text:clean(word),foreground:null,bold:true,dim:false};
+    const bracket=(word,field='',inten='')=>field?{...text('('+word+')','kind'+(WEIGHT[String(inten||word).trim().toLowerCase()]||'s')+'_'+field),role:'kind'}:text('('+word+')','dim');
     const framed=r=>String(r.shape||'')==='framed';
     // A direct route's word stands for its intensity when the record names none (the backend sends it in the screen language).
     const intensityRaw=r=>{
@@ -983,84 +1086,155 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     // 11-17 (route zones): in the `direct` zone the zone's own name says it, so `(direct)` (the word the record or its shape
     // gives) is left out of the line; a real intensity (`quick`) stays.
+    // 11-19 (the person, in order: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?" / "code(unit) 이렇게 쓰는건 이상한가?" / "근데 강도랑은 좀
+    // 다르잖아. 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만 수행하는 건지" / "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" /
+    // "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" / "강도도 표기해 항상" / "unit과 one-shot의 의미가 딱 들으면 잘 구분이 되나?
+    // staged도 그 framed랑 함께 잘 표현이 되는 단어인가? 전반적으로 전향적 검토가 필요해" / "team도 괜찮은데?"): two axes. The bracket of a route in
+    // the `dispatch` zone holds its FORM (`kind_form`, the backend's one word for it, read as who makes the work: `unit` one unit called, `solo` the
+    // owner alone doing the whole procedure, `team` the owner and a worker for each stage; English in every language; `direct` has no bracket)
+    // and its INTENSITY after a `·` (`code(team·standard)`), always, whatever the form. (The commands still say `--shape solo|staged`: `staged` is `team`.)
+    // Colour and weight follow the intensity (`kind{q,s,b}_<field>`; no field: a dim
+    // bracket), also when the tail is folded away. A route of another shape (a frame, an older record) keeps its intensity bracket alone, an
+    // older unit route that records no field keeps its bare `unit`, a `direct` route has no form, and a unit a worker called (`called`)
+    // is a row under its caller's with no bracket.
+    // 11-20 (the person: "unit에는 강도를 표시안하는게 맞겠네", after "solo라도 strong은 가능하잖아. unit이어도 마찬가지고": a unit does one
+    // thing and has no procedure, so its intensity means nothing): a unit route's bracket is its form alone, `code(unit)`, whatever intensity
+    // the record keeps (the payload still carries it; only this drawing leaves it out). The bracket's color is the one a form-only bracket
+    // has (the field's hue at the plain weight; dim with no field hue): the weight steps belong to an intensity, so a unit is not dim (that
+    // would still read as `quick`) and not bold. No other form's bracket changes.
     const intensityOf=r=>{
+      if(r.unit_route===true)return '';
       const word=intensityRaw(r);
       return r.zone==='direct'&&(/^direct$/i.test(word)||word===clean(r.shape||'').trim())?'':word;
     };
-    const kindHead=r=>{const word=clean(r.kind_word||'').trim(),inten=intensityOf(r);
-      return word?[kindText(word),...(inten?[text('('+inten+')','dim')]:[])]:[];};
-    // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(standard) · staged 3/7: execute`, a route with
-    // no stage line reads `lab(quick)`; short of cells `3/7: execute`.
+    const formOf=r=>r.zone==='direct'||r.called===true?'':clean(r.kind_form||'').trim();
+    const bracketWord=(r,tail=true)=>{const form=formOf(r),inten=intensityOf(r);return form?form+(tail&&inten?'·'+inten:''):inten;};
+    const kindHead=(r,tail=true)=>{const word=clean(r.kind_word||'').trim(),b=bracketWord(r,tail);
+      const field=kindField(r,word);
+      return word?[kindText(word,field),...(b?[bracket(b,field,intensityOf(r))]:[])]:[];};
+    // Spec rule 34 (d): the bottom layout's route row names its kind too: `code(team·standard) · 3/7: execute` (`staged` is never written before the position), a route with no stage line reads `lab(solo·quick)`; the intensity goes
+    // first short of cells (`code(team) · 3/7: execute`), then the kind, then `staged 3/7: execute`, then `3/7: execute`.
     function kindCell(r){
-      const cell=shapeCell(r),head=kindHead(r);
-      if(!head.length)return cell&&{...cell,kind:cell.full};
-      if(!cell)return {full:[],short:[],kind:head};
-      return {...cell,kind:[...head,text(' · ','dim'),...cell.full]};
+      const cell=shapeCell(r),head=kindHead(r),bare=kindHead(r,false);
+      if(!head.length)return cell&&{...cell,kind:cell.full,bare:cell.full};
+      if(!cell)return {full:[],short:[],kind:head,bare};
+      const rest=cell.full;
+      return {...cell,kind:[...head,text(' · ','dim'),...rest],bare:[...bare,text(' · ','dim'),...rest]};
     }
     // 11-17 (route row 5): every route with a stage list reads its stage line, whatever its shape: the shape's own word
     // (`staged`, `map-reduce`, `transactional-owner`; none when the record names none), the position, the stage's name.
     // A frame route has no stage line (its legs hang under it), and a route its owner does alone (one stage) has none.
-    const stageWord=shape=>/^staged/.test(shape)?'staged':/^(|unknown|framed|one-shot-owner)$/.test(shape)?'':shape;
-    const stageLined=r=>{const shape=String(r.shape||''),n=Array.isArray(r.stages)?r.stages.length:0;
-      return !framed(r)&&(/^staged/.test(shape)?n>0:n>1);};
+    // The word before a stage line's position: never `staged` (the route's form is `team` in the bracket, or the line has no bracket; 11-19:
+    // `code(team·standard) · 3/6: execute`), another shape's own word (`map-reduce`) as before.
+    const stageLead=r=>stageLeadOf(r);
+    const stageLined=stageLinedOf;
     function shapeCell(r){
       const shape=String(r.shape||''),stages=Array.isArray(r.stages)?r.stages:[];
       const current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
       if(stageLined(r)){
-        const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length,word=stageWord(shape);
+        const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length,word=stageLead(r);
         const stage=stageCell(stages[at],'loc_repo');
         return {full:[text((word?word+' ':'')+position+': ','dim'),...stage],short:[text(position+': ','dim'),...stage]};
       }
       return r.step&&!shape?{full:[text(r.step)],short:[text(r.step)]}:null;
     }
-    // Which of the kind and tool columns the bottom rows keep, the same for every row: the
-    // kind word goes first, then the tool, then the `staged` word; the title keeps ten cells (or its
-    // whole width) through both. Short of that the rows keep the earlier columns (title,
-    // owner, context, then the tool or the stage).
-    let bottomPlan;
-    const planBottom=(ow,gw)=>{
-      const kinds=listed.map(kindCell),tools=r=>r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:[];
-      const widths=Object.fromEntries(['kind','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
-      const tw=columnWidth(tools),longest=columnWidth(x=>titleOf(x,'')),avail=inner-(2+3+ow+3+gw+1+elapsedWidth);
-      const levels=widths.kind>widths.full?[['kind',true],['full',true],['full',false],['short',false]]:[['full',true],['full',false],['short',false]];
-      for(const [level,tool] of levels){
+    // Which of the kind column's forms the bottom rows keep, the same for every row: the kind with its stage word first, then
+    // the stage word alone; the title keeps ten cells (or its whole width) through both. Short of that the rows keep the
+    // earlier columns (title, owner, context, then the stage). 11-18: the command column (`>_ Bash`) is gone, as it is
+    // beside the native area: a route reads its harness, model and context number, and its NOW on the row under it.
+    const planBottom=(ow,gw,C)=>{
+      const kinds=C.set.map(kindCell);
+      const widths=Object.fromEntries(['kind','bare','full','short'].map(level=>[level,Math.max(0,...kinds.map(k=>k?size(k[level]):0))]));
+      const longest=C.width(titleCols),avail=inner-(2+3+ow+3+gw+1+C.elapsed);
+      const order=widths.kind>widths.full?['kind',...(widths.bare<widths.kind&&widths.bare>widths.full?['bare']:[]),'full','short']:['full','short'];
+      for(const level of order){
         if(!widths[level])break;
-        const room=avail-(3+widths[level])-(tool&&tw?3+tw:0);
-        if(room>=Math.min(longest,10))return {level,tool:tool&&tw>0,width:widths[level],title:Math.min(longest,room),kinds,tools};
+        const room=avail-(3+widths[level]);
+        if(room>=Math.min(longest,10))return {level,width:widths[level],title:Math.min(longest,room),kinds,top:level===order[0]};
       }
       return {level:''};
     };
-    function folded(r){
-      const p=r.paint||{},lead=[routeGlyph(r),text(' ')];
+    // The bottom rows' columns are one set for the box. The doer column is as wide as the routes' harness, model and effort (a
+    // unit's name counted only where every route of the box is a unit route). Where a unit route is drawn among other routes its
+    // name stands in front of its doer cell when the column holds it (see doerCell), and the column is widened to the whole named
+    // cell only where that changes nothing else in the box: the same stage form, the same title width (so beside a stage cell with
+    // room to spare), and only from the richest stage form the box can have (the first of the order), so a width that widens it
+    // widens it at every wider width; widened or not, every row's columns stand at the same cells and no row lends another its cells.
+    // 11-19 (review of #1742): a unit a worker called never takes from its caller's row. The columns and the stage form are the
+    // routes' alone (`routeCols`: the box as it stands with no called unit); the called rows are drawn into them (the title cut
+    // with `…` and empty where no cells are left, the worker cell folded in the narrow worker line's order). Only where the
+    // columns grown by the called rows leave every route row reading the same, letter for letter (as it reads in the routes'
+    // own), the box takes those wider columns, as it takes the widened named column above, and as that one only from the richest stage
+    // form the box can have (`plan.top`; 11-19 review N1: else the columns widen and narrow again as the window is widened).
+    let bottomSet;
+    const layoutOf=C=>{
+      const gw=C.width(x=>leadPaint(x).gauge5||[]),named=C.width(x=>doerCell(x,Infinity)),
+        base=listed.every(y=>y.unit_route===true)?named:C.width(x=>owner(x,false)),plan=planBottom(base,gw,C);
+      if(named>base&&plan.level&&plan.top){const wide=planBottom(named,gw,C);if(wide.level===plan.level&&wide.title===plan.title)return {ow:named,gw,plan:wide,C};}
+      return {ow:base,gw,plan,C};
+    };
+    const bottomLayout=()=>{
+      if(bottomSet)return bottomSet;
+      const own=layoutOf(routeCols);
+      if(!calledAll.length)return bottomSet=own;
+      const grown=layoutOf(columnsOf([...listed,...calledAll])),letters=parts=>clean(parts.map(p=>p.text).join('')).replace(/\s+/g,' ').trim();
+      return bottomSet=grown.plan.level===own.plan.level&&own.plan.top&&listed.every(r=>letters(folded(r,own))===letters(folded(r,grown)))
+        &&calledAll.every(c=>{folded(c,grown);return !clipped;})?grown:own;
+    };
+    // A unit route's doer cell in a column `width` wide: its name, then as much of the effort, harness and model as the column holds,
+    // in the order the narrow worker line gives them up (effort, then harness, then model; the name stays last). A column that
+    // holds not even the name gets the cell with no name.
+    const doerCell=(r,width)=>{
+      const unit=r.unit_route===true?clean(r.unit_word||'').trim():'',p=leadPaint(r);
+      if(!unit)return owner(r);
+      const H=p.harness?[p.harness]:[],M=p.model_text?[p.model_text]:[],F=p.effort?[p.effort]:[],keep=M.length?M:H;
+      for(const parts of [[H,M,F],[H,M],[[],keep,[]],[[],[],[]]]){
+        const rest=parts.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x),row=[text(unit,'dim'),...(rest.length?[text(' '),...rest]:[])];
+        if(size(row)<=width)return row;
+      }
+      return owner(r,false);
+    };
+    let clipped=false;   // the last bottom row folded had its end cut away by the width
+    function folded(r,laid){
+      // 11-18: beside the native area the one-row form is the leader's; under it the row reads the owner, whose NOW stands under it.
+      const p=side?r.paint||{}:leadPaint(r),ind=indentOf(r),lead=[...(ind?[text(' '.repeat(ind))]:[]),routeGlyph(r,p.harness),text(' ')];
       if(!side){
-        const ow=columnWidth(owner),gw=columnWidth(x=>x.paint?.gauge5||[]),tw3=columnWidth(third);
-        const plan=bottomPlan||(bottomPlan=planBottom(ow,gw));
+        const lay=laid||bottomLayout(),{ow,gw,plan}=lay,C=lay.C,calledRow=ind>0;
+        // A called row is drawn into columns it did not make: its title is cut to what is left of the title's; its worker cell is the
+        // unit's name with what the column holds, else the name cut (the name is what the cell is for).
+        const calledCell=(c,width)=>{const cell=doerCell(c,width),unit=clean(c.unit_word||'').trim();
+          return cell.length&&clean(cell[0].text)===unit?cell:fit([text(unit,'dim')],width);};
+        const fit=(parts,room)=>calledRow&&room<1?[]:cut(parts,room),doer=calledRow?calledCell(r,ow):doerCell(r,ow);
+        // The time of a called row is cut to the width the routes' times leave.
+        const stamp=r.elapsed?calledRow&&measure(r.elapsed)>C.elapsed?fit([text(r.elapsed)],C.elapsed):[text(r.elapsed)]:[];
+        // The title column is as wide as the routes' make it; a called row's two cells in are never wider than it (the bars stay).
+        const avail=inner-(2+3+ow+3+gw+3+1+C.elapsed),titleWidth=plan.level?plan.title:Math.min(C.width(titleCols),Math.max(6,avail-C.width(third),Math.floor(avail/2)));
+        const shift=calledRow?Math.min(ind,titleWidth):ind,row=calledRow?[text(' '.repeat(shift)),routeGlyph(r,p.harness),text(' ')]:lead;
         if(plan.level){
-          const kind=plan.kinds[listed.indexOf(r)],cell=kind?kind[plan.level]:[],name=cut(titleOf(r),plan.title);
-          const parts=[...lead,...name,pad(plan.title-size(name)),text(' │ '),...owner(r),pad(ow-size(owner(r))),text(' │ '),
-            ...(p.gauge5||[]),pad(gw-size(p.gauge5||[])),text(' │ '),...cell,...(plan.tool?[pad(plan.width-size(cell)),text(' │ '),...plan.tools(r)]:[])];
-          const end=r.elapsed?[text(' '),text(r.elapsed)]:[],left=cut(parts,inner-size(end));
+          const at=C.set.indexOf(r),kind=at>=0?plan.kinds[at]:kindCell(r),cell=kind?kind[plan.level]:[],name=fit(titleOf(r),plan.title-shift);
+          const parts=[...row,...name,pad(plan.title-shift-size(name)),text(' │ '),...doer,pad(ow-size(doer)),text(' │ '),
+            ...(p.gauge5||[]),pad(gw-size(p.gauge5||[])),text(' │ '),...cell];
+          const end=stamp.length?[text(' '),...stamp]:[],left=cut(parts,inner-size(end));clipped=size(parts)>inner-size(end);
           return [...left,pad(inner-size(left)-size(end)),...end];
         }
-        // The title gives way first, but keeps half of what the tool or stage column would take.
-        const avail=inner-(2+3+ow+3+gw+3+1+elapsedWidth),titleWidth=Math.min(columnWidth(x=>titleOf(x,'')),Math.max(6,avail-tw3,Math.floor(avail/2)));
-        const name=cut(titleOf(r),titleWidth);
-        const base=[...lead,...name,pad(titleWidth-size(name)),text(' │ '),...owner(r),pad(ow-size(owner(r))),text(' │ '),
+        // The title gives way first, but keeps half of what the stage column would take.
+        const name=fit(titleOf(r),titleWidth-shift);
+        const base=[...row,...name,pad(titleWidth-shift-size(name)),text(' │ '),...doer,pad(ow-size(doer)),text(' │ '),
           ...(p.gauge5||[]),pad(gw-size(p.gauge5||[]))];
-        // The elapsed time keeps the right edge; the tool or stage gives way first, whole (spec rule 30 (d)).
-        const end=r.elapsed?[text(' '),text(r.elapsed)]:[],whole=[...base,text(' │ '),...third(r)];
-        const left=cut(third(r).length&&size(whole)<=inner-size(end)?whole:base,inner-size(end));
+        // The elapsed time keeps the right edge; the stage gives way first, whole (spec rule 30 (d)).
+        const end=stamp.length?[text(' '),...stamp]:[],whole=[...base,text(' │ '),...third(r)];
+        const left=cut(third(r).length&&size(whole)<=inner-size(end)?whole:base,inner-size(end));clipped=size(base)>inner-size(end);
         return [...left,pad(inner-size(left)-size(end)),...end];
       }
       // As in leadRow(): the title gives way first, and each fixed value
       // (harness, model, context, time) shows whole or not at all.
       const H=p.harness?[p.harness]:[],M=p.model_text?[p.model_text]:[],C=p.ctx?[p.ctx]:[];
-      const E=elapsedWidth?[text(' '.repeat(elapsedWidth-measure(r.elapsed||''))+(r.elapsed||''))]:[];
+      const E=routeCols.elapsed?[text(' '.repeat(routeCols.elapsed-measure(r.elapsed||''))+(r.elapsed||''))]:[];
       const drops=routeLine==='model'?[[H,M,C],[H,M],[H],[]]:[[H,C,E],[H,E],[E],[]];
       const join=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
       const right=drops.map(join).find(values=>!values.length||inner-2-size(values)-1>=4)||[];
-      const room=inner-2-size(right)-(right.length?1:0),name=cut(titleOf(r),Math.max(1,room));
-      return cut([...lead,...name,pad(inner-2-size(name)-size(right)),...right],inner);
+      const room=inner-2-ind-size(right)-(right.length?1:0),name=cut(titleOf(r),Math.max(1,room));
+      return cut([...lead,...name,pad(inner-2-ind-size(name)-size(right)),...right],inner);
     }
     // Spec rule 14: the route box is the one thin rounded box (11-15: the questions section has
     // none, its count and `◑` keep the question's rose). Strength of color tells the sections
@@ -1126,111 +1300,194 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const treeOf=r=>side&&Array.isArray(r.workers_live);
     const leadPaint=r=>r.owner_paint&&typeof r.owner_paint==='object'?r.owner_paint:(r.paint||{});
     // A frame route has no owner yet: its two legs hang straight under the route (11-17, route row 5).
-    const leadRole=r=>framed(r)&&treeOf(r)?'':r.owner_paint&&typeof r.owner_paint==='object'?'owner':r.role;
+    // A unit route (one worker called with no owner) has no `owner` or `worker` role: the unit's short name stands in the
+    // role word's place (same dim color, same column), and goes whole when the row has no room for it.
+    const unitRoute=r=>r.unit_route===true;
+    const unitName=r=>unitRoute(r)?clean(r.unit_word||'').trim():'';
+    const leadRole=r=>unitRoute(r)?unitName(r):framed(r)&&treeOf(r)?'':r.owner_paint&&typeof r.owner_paint==='object'?'owner':r.role;
     const workersOf=r=>treeOf(r)?r.workers_live.filter(w=>w&&typeof w==='object').slice(0,8):[];
     // The one-row form's percent and time columns, shared by owners and their workers (rule 48 (c)).
     const allWorkers=listed.flatMap(r=>workersOf(r));
     const ctxWidth=Math.max(0,...listed.map(r=>leadPaint(r).ctx?size([leadPaint(r).ctx]):0),...allWorkers.map(w=>w.paint?.ctx?size([w.paint.ctx]):0));
-    const timeWidth=Math.max(elapsedWidth,...allWorkers.map(w=>measure(w.elapsed||'')));
+    const timeWidth=Math.max(0,...allWorkers.map(w=>measure(w.elapsed||'')));   // (an owner has no time of its own: the route's stands on its first line)
     const ROLE=new Set(['owner','frame','frame-alt','worker']);
+    let unitLabel='';      // the unit's short name on the route being drawn (a unit route's role word)
+    const roled=role=>ROLE.has(role)||(!!unitLabel&&role===unitLabel);
     // A frame leg is `frame`, its alternative `frame-alt`; any other stage worker is `worker`.
-    const workerRole=w=>w.role==='frame'?(/alt/.test(String(w.stage||''))?'frame-alt':'frame'):'worker';
+    const workerRole=w=>unitLabel?unitLabel:w.role==='frame'?(/alt/.test(String(w.stage||''))?'frame-alt':'frame'):'worker';
     // The role column's width is the route's own (11-17: a frame route's `frame-alt` does not widen another route's rows).
     let roleWidth=0;
-    const setRoles=r=>{roleWidth=side?Math.max(0,ROLE.has(leadRole(r))?measure(leadRole(r)):0,...workersOf(r).map(w=>measure(workerRole(w)))):0;};
-    const roleCell=role=>roleWidth?[text((ROLE.has(role)?role:'').padEnd(roleWidth),'dim'),text(' ')]:[];
+    const setRoles=r=>{unitLabel=unitName(r);roleWidth=side?Math.max(0,roled(leadRole(r))?measure(leadRole(r)):0,...workersOf(r).map(w=>unitRoute(r)&&!unitLabel?0:measure(workerRole(w)))):0;};
+    const roleCell=role=>roleWidth?[text((roled(role)?role:'').padEnd(roleWidth),'dim'),text(' ')]:[];
     const rolePart=r=>roleCell(leadRole(r));
     const spaced=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
+    // A unit a worker called (`called`: the backend's list, in the order they were called, each with the ones it called in turn) stands
+    // on one row under its caller's row, two cells in (a called unit's own calls two more): its mark, the unit's short name in the
+    // role word's dim, its harness, model and effort, and its time at the right edge. Short of cells the effort goes first, then the
+    // harness, then the model; the name and the time stay. Only what runs now is listed. Short of rows these rows go first (`keepCalled`).
+    let keepCalled=true;
+    const calledOf=x=>x&&Array.isArray(x.called)?x.called.filter(c=>c&&typeof c==='object').slice(0,8):[];
+    function calledRow(c,gap){
+      const p=c.paint||{},name=clean(c.unit_word||'').trim();
+      if(!name)return null;
+      const head=[text(' '.repeat(gap)),routeGlyph({paint:p,kind:c.kind},p.harness),text(' '),text(name,'dim')];
+      const H=p.harness?[p.harness]:[],M=p.model_text?[p.model_text]:[],F=p.effort?[p.effort]:[],keep=M.length?M:H;
+      const E=c.elapsed?[text(clean(c.elapsed),'dim')]:[];
+      for(const parts of [[H,M,F],[H,M],[[],keep,[]],[[],[],[]]]){
+        const values=spaced(parts),body=[...head,...(values.length?[text(' '),...values]:[])];
+        if(E.length?size(body)+1+size(E)<=inner:size(body)<=inner)return E.length?[...body,pad(inner-size(body)-size(E)),...E]:body;
+      }
+      return cut(head,inner);
+    }
+    const calledRows=(items,gap,depth=0)=>calledOf({called:items}).flatMap(c=>{const row=calledRow(c,gap+2*depth);return row?[row,...(depth<3?calledRows(c.called,gap,depth+1):[])]:[];});
     // The owner's own mark: it spins while it does the work itself, stands as a dim `●` while its workers run, and keeps the
     // route's state mark when nothing runs.
-    const ownerGlyph=(r,supervising)=>live(r)?(supervising?text('●','dim'):{...routeGlyph(r)}):routeGlyph(r);
-    const ownerLead=(r,supervising)=>[text('  '),ownerGlyph(r,supervising),text(' '),...rolePart(r)];
+    const ownerGlyph=(r,supervising)=>live(r)?(supervising?text('●','dim'):{...routeGlyph(r,leadPaint(r).harness)}):routeGlyph(r);
+    const withBare=(lead,bare)=>{lead.bare=bare;return lead;};   // (`bare`: the same lead without its role word, for a unit's name that does not fit)
+    const ownerLead=(r,supervising)=>{const mark=ownerGlyph(r,supervising);return withBare([text('  '),mark,text(' '),...rolePart(r)],[text('  '),mark,text(' ')]);};
     // 11-17 (the person: "라우트 내부의 CTX는 하네스, 모델 옆에 붙이고 게이지는 없애자 ... 대신 NOW를 아래줄에"): a session's
     // first line is its mark, role, harness, model, effort and, beside them, `CTX 40% · 42m` with no gauge. Short of cells the
     // time goes first, then the word `CTX` (the number stays), then the effort, then the harness; the role and the model stay.
-    const whoRow=(r,supervising)=>whoOf(ownerLead(r,supervising),leadPaint(r),leadRole(r),r.elapsed?[text(r.elapsed)]:[]);
-    function whoOf(lead,p,role,E=[],room=inner){
+    // 11-18 (the person: "CTX는 게이지를 포함해서 아래줄로 내리자 ... NOW를 두줄까지는 허용치를 늘려주고 (owner, worker 둘다)"): a session
+    // is three blocks. Its first row is its mark, role, harness, model and effort; under it, two cells in, `CTX ━━━━━───── 41%` (the
+    // gauge and its number, then ` · 12m` only when the time is that session's own: a worker's, never the owner's, which is the
+    // route's time and stands at the end of the route's first line); under that its NOW on at most two rows (the second ending in
+    // `…` where it goes on). A session with no NOW has no NOW rows. Short of cells the first row loses its effort, then its
+    // harness; the CTX row loses its gauge's width first (down to the number alone), then its time, then the word `CTX`.
+    const whoRow=(r,supervising)=>whoOf(ownerLead(r,supervising),leadPaint(r),leadRole(r));
+    function whoOf(lead,p,role,room=inner){
       const value=x=>x?[x]:[];
       const H=value(p.harness),M=value(p.model_text),F=value(p.effort),C=value(p.ctx),keep=M.length?M:H;
-      if(!ROLE.has(role)&&!H.length&&!M.length&&!F.length&&!C.length)return null;
-      const dim=t=>text(t,'dim');
-      // `CTX 40% · 42m`; with no context known the time stands alone.
-      const tail=(time,word)=>{
-        const ctx=C.length?[...(word?[dim('CTX ')]:[]),...C]:[],at=time&&E.length?E:[];
-        return ctx.length&&at.length?[...ctx,dim(' · '),...at]:ctx.length?ctx:at;
-      };
-      const withTail=(left,time,word)=>{const t=tail(time,word);return t.length?[...left,...(left.length?[text(word?'  ':' ')]:[]),...t]:left;};
-      // The time and the word go before the effort does; each form shows whole or not at all.
-      const tries=[[[H,M,F],1,1],[[H,M,F],0,1],[[H,M,F],0,0],[[H,M],0,0],[[[],keep,[]],0,0],[[[],keep,[]],-1,0]];
-      for(const [parts,time,word] of tries){
-        const row=time<0?[...lead,...spaced(parts)]:[...lead,...withTail(spaced(parts),time,word)];
+      if(!roled(role)&&!H.length&&!M.length&&!F.length)return null;   // (a session whose values are not known: its CTX row leads with its mark instead)
+      // A unit's name (in the role word's place) is the last word to stay: the effort goes first, then the harness, then the model, and
+      // the name stands alone. Only where the name itself has no room does it go, whole (never cut in the middle), and the row is drawn
+      // as a row with no name is.
+      const named=!!unitLabel&&!!lead.bare,leads=named?[lead,lead.bare]:[lead];
+      for(const head of leads)for(const parts of [[H,M,F],[H,M],[[],keep,[]],...(named&&head===lead?[[[],[],[]]]:[])]){
+        const row=[...head,...spaced(parts)];
         if(size(row)<=room)return row;
+        // The name alone needs no space after it.
+        if(named&&head===lead&&!parts.some(x=>x.length)&&size(row)-1<=room)return row.slice(0,-1);
       }
-      return cut(lead,room);
+      return cut(leads.at(-1),room);
     }
-    // The one-row form used short of rows is the older fold (who, then percent and time at the right edge in shared columns).
-    const leadRow=(r,supervising)=>foldRow(ownerLead(r,supervising),leadPaint(r),leadRole(r),r.elapsed?[text(r.elapsed)]:[]);
-    // The session's NOW, one row (never wrapped; `…` where it runs over), none when the session has none (no empty row).
-    // Bright while the session works or waits, as Fleet's NOW cell.
-    const nowRow=(p,kind,gap)=>{
-      const value=clean(p?.now||'').replace(/\s+/g,' ').trim();
-      if(!value)return null;
-      return [text(' '.repeat(gap)),...cut([text(value,kind==='working'||kind==='blocked'?'loc_repo':'dim')],Math.max(0,inner-gap))];
+    // The CTX row at `gap` cells in: the gauge (the backend's `gauge_row`, at the panel's width), else the five-cell one, else the
+    // number alone; the session's own time after it when it has one.
+    const ctxRowOf=(p,gap,time,lead=null)=>{
+      const C=p.ctx?[p.ctx]:[],at=time?[text(clean(time),'dim')]:[],head=lead||[text(' '.repeat(gap))];
+      if(!C.length&&!at.length)return null;
+      if(!C.length)return lead?[...head,...at]:null;   // (a time alone is no row: a worker's ends its first row)
+      const gauges=[p.gauge_row,p.gauge,p.gauge5].filter((g,i,all)=>Array.isArray(g)&&g.length&&all.indexOf(g)===i).sort((x,y)=>size(y)-size(x));
+      // The gauge gives up its width first (down to the number alone), then the time, then the word `CTX`.
+      const tries=[];
+      for(const withTime of at.length?[true,false]:[false])for(const g of [...gauges,C])tries.push([g,true,withTime]);
+      tries.push([C,false,false]);
+      for(const [g,word,withTime] of tries){
+        const row=[...head,...(word?[text('CTX ','dim')]:[]),...g,...(withTime?[text(' · ','dim'),...at]:[])];
+        if(size(row)<=inner)return row;
+      }
+      return cut([...head,...C],inner);
     };
+    // The one-row form used short of rows is the older fold (who, then percent and time at the right edge in shared columns).
+    const leadRow=(r,supervising)=>foldRow(ownerLead(r,supervising),leadPaint(r),leadRole(r),[]);
+    // The session's NOW at `gap` cells in, on at most `most` rows (the last ending in `…` where the value goes on; a word wider than a
+    // row goes on by cells, so no row is wider than the box), none when the session has none (no empty row). Bright while the session
+    // works or waits, as Fleet's NOW cell.
+    const nowRows=(p,kind,gap,most=2)=>{
+      const value=clean(p?.now||'').replace(/\s+/g,' ').trim();
+      if(!value)return [];
+      const room=Math.max(1,inner-gap),rows=wrapAll([text(value,kind==='working'||kind==='blocked'?'loc_repo':'dim')],room);
+      const shown=rows.slice(0,most);
+      if(rows.length>most)shown[most-1]=ellipsis(shown[most-1],room);
+      return shown.map(row=>[text(' '.repeat(gap)),...row]);
+    };
+    const nowRow=(p,kind,gap)=>nowRows(p,kind,gap,1)[0]||null;
+    // One session's blocks, as the route box draws them: `who` (or, with its CTX row folded in, `one`), `ctx`, and `now` in its two
+    // forms (`now2`, `now1`). The steps below (short of rows) drop the second NOW row, then the CTX row (its number goes into `one`),
+    // then the first NOW row.
+    const sessionOf=({who,one,p,kind,gap,time,lead,called=[]})=>({who,one,called,ctx:ctxRowOf(p,gap,time,who?null:lead),now2:nowRows(p,kind,gap,2),now1:nowRows(p,kind,gap,1)});
+    const sessionRowsOf=u=>[...(keepCtxLine?(u.who?[u.who,...(u.ctx?[u.ctx]:[])]:[u.ctx||u.one]):[u.one||u.who]),...(keepNow?(nowTwo?u.now2:u.now1):[]),...(keepCalled&&u.called?u.called:[])];
     // The one-row form (an owner's, and since spec rule 48 (c) its workers' too, two cells in):
     // who, then the percent and the time at the right in columns shared by every route and worker.
-    function foldRow(lead,p,role,E){
+    function foldRow(lead0,p,role0,E){
       const value=x=>x?[x]:[];
       const M=value(p.model_text),H=value(p.harness),K=M.length?M:H,F=value(p.effort),C=value(p.ctx);
-      const build=(h,m,f,withContext,e)=>{
+      let lead=lead0,role=role0;
+      const build=(h,m,f,withContext,e,alone)=>{
         const c=withContext&&ctxWidth>0;
         const left=spaced([h,m,f]);
         const right=[...(c?[pad(ctxWidth-size(C)),...C]:[]),...(e&&timeWidth?[...(c?[text(' ')]:[]),pad(timeWidth-size(E)),...E]:[])];
-        const body=[...lead,...left];
-        if(!ROLE.has(role)&&!left.length&&!(c&&size(C))&&!(e&&E.length))return {row:body,empty:true};
+        const body=[...(alone?lead.slice(0,-1):lead),...left];   // (a name alone needs no space after it)
+        if(!roled(role)&&!left.length&&!(c&&size(C))&&!(e&&E.length))return {row:body,empty:true};
         return {row:right.length?[...body,pad(inner-size(body)-size(right)),...right]:body,width:size(body)+(right.length?1+size(right):0)};
       };
       const drops=routeLine==='model'?[[H,M,F,1,1],[H,M,[],1,1],[[],K,[],1,1],[[],K,[],1,0],[[],K,[],0,0]]:
         [[H,M,F,1,1],[H,M,[],1,1],[[],K,[],1,1],[[],K,[],0,1],[[],K,[],0,0]];
-      for(const pick of drops){
-        const got=build(...pick);
-        if(got.empty)return null;
-        if(got.width>inner)continue;
-        return got.row;
+      // A unit's name (in the role word's place) goes whole, never cut, where no form of the row has room for it.
+      // The name stays after the model has gone (the unit's name alone), as in `whoOf`.
+      for(const [head,word] of unitLabel&&lead0.bare?[[lead0,role0],[lead0.bare,'']]:[[lead0,role0]]){
+        lead=head;role=word;
+        for(const pick of head===lead0&&unitLabel&&lead0.bare?[...drops,[[],[],[],0,0,1]]:drops){
+          if(!E.length&&pick[4]&&!pick[3])continue;   // (no time of its own: a row that gave its percent up for a time column would show neither)
+          const got=build(...pick);
+          if(got.empty)return null;
+          if(got.width>inner)continue;
+          return got.row;
+        }
       }
       return null;
     }
-    // 11-17 (route row 5; the person: "CTX는 하네스, 모델 옆에 ... NOW를 아래줄에"): a worker hangs under its owner by a `↳`, with
-    // no box: two rows, its who (its own mark, role, harness, model, effort, then `CTX 22% · 12m`, no gauge) and under it its
-    // NOW (none: no row). Its stage name and open tool are not drawn (the owner's stage line has the stage). A frame leg (the
-    // route has no owner yet) hangs straight under the route the same way. Short of cells the who loses its time, the word
-    // `CTX`, its effort, then its harness; short of rows (rule 48 (c)) the worker takes the owner's one-row form.
-    function workerBlock(w,base){
-      const p=w.paint||{},role=workerRole(w),glyph=routeGlyph({paint:p,kind:w.kind}),E=w.elapsed?[text(w.elapsed)]:[];
-      const gap=base+4;
-      const lead=[text(' '.repeat(base)),text('↳ ','dim'),glyph,text(' '),...roleCell(role)];
+    // 11-17 (route row 5; 11-18: CTX and NOW under the first row): a worker hangs under its owner by a `↳`, with no box: its who (its
+    // own mark, role, harness, model, effort), under it its CTX row (the gauge and number, then ` · 12m` when the worker has a time
+    // of its own) and under that its NOW on up to two rows (none: no row). Its stage name and open tool are not drawn (the owner's
+    // stage line has the stage). A frame leg (the route has no owner yet) hangs straight under the route the same way. Short of
+    // cells the who loses its effort, then its harness; short of rows (rule 48 (c)) the worker takes the owner's one-row form.
+    // In a box (`boxed`, below) the mark leads the row and the CTX and NOW rows stand two cells in.
+    function workerBlock(w,base,boxed=false){
+      const p=w.paint||{},role=workerRole(w),glyph=routeGlyph({paint:p,kind:w.kind},p.harness),E=w.elapsed?[text(w.elapsed)]:[];
+      const gap=boxed?2:base+4;
+      const bare=boxed?[glyph,text(' ')]:[text(' '.repeat(base)),text('↳ ','dim'),glyph,text(' ')];
+      const lead=withBare([...bare,...roleCell(role)],bare);
       // A model name longer than the line itself is cut with `…` rather than left out.
-      let who=whoOf(lead,p,role,E)||cut(lead,inner);
-      if(size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner);
-      const rows=[who],now=nowRow(p,w.kind,gap);
-      if(now)rows.push(now);
-      return {rows,one:foldRow(lead,p,role,E)||cut(lead,inner)};
+      let who=whoOf(lead,p,role)||cut(lead,inner);
+      if(!unitLabel&&size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner);
+      // No CTX value, so no CTX row to carry its time: the time ends its first row, at the right edge (the effort, then the harness, give
+      // way to it; where even the model does not leave it room the row keeps its values and has no time).
+      const stamp=!p.ctx&&w.elapsed?clean(w.elapsed):'';
+      if(stamp){
+        const room=inner-1-measure(stamp),tight=whoOf(lead,p,role,room);
+        if(tight&&size(tight)<=room&&size(tight)>size(lead))who=[...tight,pad(inner-size(tight)-measure(stamp)),text(stamp,'dim')];
+      }
+      return sessionOf({who,one:foldRow(lead,p,role,E)||cut(lead,inner),p,kind:w.kind,gap,time:w.elapsed,called:calledRows(w.called,gap)});
     }
     // Spec rule 24 (11-12), 36 (b), 11-17: the stage line under the owner: `staged 3/6: execute`, the current stage's name
     // the one thing that blinks (a failed one keeps `✕`, a done one `✓`); with no stage running, the next stage and what it
     // waits for. A route with no stage list (one-shot, direct, frame) has none: its first line says what it is. Short of
     // cells the values go from the back, whole: `owner <model>`, then the word `staged` (`3/6: execute`).
-    function placeRow(r,workers=0){
-      const shape=String(r.shape||''),stages=Array.isArray(r.stages)?r.stages:[];
-      if(!stageLined(r))return null;
-      const current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
-      const at=current>=0?current:next>=0?next:stages.length-1,position=(at+1)+'/'+stages.length;
-      const stage=stageCell(stages[at],stageInk(stages[at].key)),pieces=[];
+    // 11-18 (review C2): the stage a worker runs is its own (`w.stage`, a stage's name); the route's current stage is the one for a
+    // worker that names none the route knows. Parallel stages each have their workers' box, in the stages' order.
+    const stagesOf=r=>Array.isArray(r.stages)?r.stages:[];
+    const currentAt=r=>{const stages=stagesOf(r),current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
+      return current>=0?current:next>=0?next:stages.length-1;};
+    const stageGroups=(r,list)=>{
+      const stages=stagesOf(r),groups=new Map();
+      list.forEach((w,i)=>{const named=stages.findIndex(stage=>stage&&w.stage&&stage.name===w.stage),at=named>=0?named:currentAt(r);
+        if(!groups.has(at))groups.set(at,[]);groups.get(at).push(i);});
+      return [...groups.entries()].sort((a,b)=>a[0]-b[0]).map(([at,items])=>({at,items}));
+    };
+    function piecesOf(r){
+      const current=stagesOf(r).findIndex(stage=>stage.current||stage.mark==='✕'),pieces=[];
       if(current>=0){if(r.doer_worker&&r.owner_model&&!treeOf(r))pieces.push([text('owner '+r.owner_model,'dim')]);}
       else if(r.visibility?.next)pieces.push([text(r.visibility.next,'dim')]);
-      const limit=inner-4;
+      return pieces;
+    }
+    function placeRow(r,workers=0,limit=inner-4,given=null){
+      const shape=String(r.shape||''),stages=stagesOf(r);
+      if(!stageLined(r))return null;
+      const at=given!==null&&stages[given]?given:currentAt(r),position=(at+1)+'/'+stages.length;
+      const stage=stageCell(stages[at],stageInk(stages[at].key)),pieces=piecesOf(r);
       // Spec rule 43 (g): the workers gone for rows, the stage line ends with their count (it stays while the values before it go).
-      for(const end of workers?[[text(' · ','dim'),text('worker '+workers,'dim')],[]]:[[]])for(const word of [...new Set([(stageWord(shape)?stageWord(shape)+' ':'')+position,position])])for(let n=pieces.length;n>=0;n--){
+      for(const end of workers?[[text(' · ','dim'),text('worker '+workers,'dim')],[]]:[[]])for(const word of [...new Set([(stageLead(r)?stageLead(r)+' ':'')+position,position])])for(let n=pieces.length;n>=0;n--){
         const row=[text(word,'dim'),text(': ','dim'),...stage,...pieces.slice(0,n).flatMap(piece=>[text(' · ','dim'),...piece]),...end];
         if(size(row)<=limit)return row;
       }
@@ -1238,9 +1495,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     // The first line: a state mark, then the chain of kinds the route continues (`frame ✓ → code(standard)`: what is behind
     // dim with `✓`, this one bold, what is left dim; a frame route reads `frame → ??` until its direction is chosen).
-    function chainParts(r,{past=true,inten=true}={}){
-      const kind=clean(r.kind_word||'').trim(),word=inten?intensityOf(r):'';
-      const own=name=>[kindText(name),...(word?[text('('+word+')','dim')]:[])];
+    function chainParts(r,{past=true,inten=true,tail=true}={}){
+      const kind=clean(r.kind_word||'').trim(),word=inten?bracketWord(r,tail):'';
+      const own=name=>{const field=kindField(r,name);return [kindText(name,field),...(word?[bracket(word,field,intensityOf(r))]:[])];};
       const legs=(Array.isArray(r.chain)?r.chain:[]).filter(l=>l&&l.name);
       if(!legs.length)return kind?own(kind):[];
       const out=[];
@@ -1254,16 +1511,79 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     // A frame route whose legs are not running waits for the person's direction (its mark `◑`, not blinking).
     const directionWait=r=>framed(r)&&!live(r)&&['idle','blocked'].includes(r.kind);
+    // 11-18 (the person, on the first line: "route 첫 줄 오른쪽 끝에 둔다"): the route's elapsed time stands at the right end of this
+    // line, whatever the width, and the kind word with it. Short of cells the middle text (`· waiting for direction`) goes first
+    // (cut with `…`, then whole), then the earlier legs of the chain, then the intensity. A route with no time leaves the end empty.
+    // 11-18 (review C3; the person's picture `● code(standard) · staged 3/6          1h52m`): a route with a stage line carries its stage
+    // there, whether its workers stand in a box or none run. Where no box holds the stage text the first line takes the stage's name
+    // too (`· staged 3/6: execute`; `name` below). Short of cells this middle text goes first (what the stage waits for, then the name,
+    // then the whole), as the waiting-for-direction text does.
+    function stageForms(r,name){
+      if(!stageLined(r))return [];
+      const stages=stagesOf(r),at=currentAt(r),word=(stageLead(r)?stageLead(r)+' ':'')+(at+1)+'/'+stages.length;
+      const forms=[];
+      if(name){const stage=stageCell(stages[at],stageInk(stages[at].key)),pieces=piecesOf(r);
+        for(let n=pieces.length;n>=0;n--)forms.push({named:true,parts:[text(word,'dim'),text(': ','dim'),...stage,...pieces.slice(0,n).flatMap(piece=>[text(' · ','dim'),...piece])]});}
+      forms.push({named:false,parts:[text(word,'dim')]});
+      return forms.map(form=>({named:form.named,parts:[text(' · ','dim'),...form.parts]}));
+    }
     function headRow(r){
-      const chains=[{},{past:false},{past:false,inten:false}].map(o=>chainParts(r,o));
+      const chains=[{},{tail:false},{past:false,tail:false},{past:false,inten:false}].map(o=>chainParts(r,o));
       if(!chains[0].length)return null;
       const wait=directionWait(r)?[text(' · ','dim'),text(t('direction_wait','waiting for direction'),'dim')]:[];
-      const room=inner-2;     // the box's inner width, read now (the row is drawn after the box's width is given back)
-      return blink=>{
-        const mark=wait.length?{...text('◑','g_blocked'),role:'state:blocked'}:live(r)?zonePaint(r,blink?pulse('●'):{...text('●','g_work'),role:'state:working'}):routeGlyph(r);
-        for(const tail of wait.length?[wait,[]]:[[]])for(const chain of chains)if(size(chain)+size(tail)<=room)return [mark,text(' '),...chain,...tail];
-        return [mark,text(' '),...cut(chains.at(-1),room)];
+      const width=inner,room=width-2;     // the box's inner width, read now (the row is drawn after the box's width is given back)
+      const time=clean(r.elapsed||'').trim(),end=time?measure(time)+1:0;
+      // `blink`: the first line's dot pulses; `stage.blinks`: the stage's name blinks where it stands on this line, and the dot then stands still.
+      return (blink,stage=null)=>{
+        const finish=(body,named=false)=>{
+          const dot=blink&&!(named&&stage&&stage.blinks);
+          const mark=wait.length?{...text('◑','g_blocked'),role:'state:blocked'}:live(r)?zonePaint(r,dot?pulse('●'):{...text('●','g_work'),role:'state:working'}):routeGlyph(r);
+          const row=[mark,text(' '),...body],out=time?[...row,pad(Math.max(1,width-size(row)-measure(time))),text(time,'dim')]:row;
+          out.named=named;       // (whether the stage's name stands on this line: the caller draws the stage line apart when it does not)
+          return out;
+        };
+        for(const chain of chains){
+          const left=room-end-size(chain);
+          if(left<0)continue;
+          if(wait.length&&size(wait)<=left)return finish([...chain,...wait]);
+          if(wait.length&&left>=5)return finish([...chain,...cut(wait,left)]);
+          const form=stage?stageForms(r,stage.name).find(f=>size(f.parts)<=left):null;
+          if(form)return finish([...chain,...form.parts],form.named);
+          return finish(chain);
+        }
+        return finish(cut(chains.at(-1),Math.max(1,room-end)));
       };
+    }
+    // 11-18 (the person: "worker 부를떄 stage ~ 부분을 블록의 상단에 그려서 그냥 worker는 박스에 넣어도 되겠는데?" / "박스 여부는 내가 골라가면서 볼 수
+    // 있게 그냥 옵션에 좀 넣어줘"): the setting `worker box` (`closed`, the default; `open`; `none`). A route that has workers and a stage
+    // line puts its workers of that stage in one box under its owner, the stage text (`staged 3/6: execute`) on the box's top line, and
+    // the stage row apart is not drawn. `closed` has all four borders, `open` only the top line and the left side, `none` the stage row
+    // and the `↳` indent as before. The lines are dim; the right side of a closed box stands in one column whatever the widths of the
+    // text (the row is padded in cells). Where the box's text would be under BOX_TEXT_MIN cells wide the closed box gives way to the open
+    // one, and short of rows (below) the closed box's bottom line goes first. A route with no workers draws no box (its stage text stays
+    // on its stage row); a frame route's legs hang under it as before.
+    const BOX_TEXT_MIN=24;
+    const boxSetting=OPTIONS.worker_box.includes(cfg.worker_box)?cfg.worker_box:'closed';
+    const narrower=(by,fn)=>{inner-=by;try{return fn();}finally{inner+=by;}};
+    function boxedWorkers(r,count){
+      if(!side||!count||boxSetting==='none'||!treeOf(r))return null;
+      const line=value=>({...text(value,'dim'),role:'messages'}),W=inner,list=workersOf(r),groups=stageGroups(r,list);
+      const make=closed=>{
+        // One box for each stage that has workers, its top line that stage's own position and name (`staged 2/4: eval-asr`).
+        const by=closed?6:4,boxes=groups.map(g=>({blocks:narrower(by,()=>g.items.map(i=>workerBlock(list[i],0,true))),title:placeRow(r,0,Math.max(1,W-6),g.at)}));
+        if(!boxes.length||boxes.some(box=>!box.title))return null;
+        return {lines:()=>boxes.flatMap(({blocks,title})=>{
+          const rows=[[text('  '),line('┌ '),...title,text(' '),line('─'.repeat(Math.max(0,W-4-size(title)-1-(closed?1:0)))+(closed?'┐':''))]];
+          for(const parts of blocks.flatMap(b=>sessionRowsOf(b).filter(Boolean))){
+            const fit=clip(parts,W-by);
+            rows.push(closed?[text('  '),line('│ '),...fit.parts,pad(W-by-fit.used),line(' │')]:[text('  '),line('│ '),...fit.parts]);
+          }
+          if(closed)rows.push([text('  '),line('└'+'─'.repeat(Math.max(0,W-4))+'┘')]);
+          return rows;
+        })};
+      };
+      const wide=boxSetting==='closed'&&W-6>=BOX_TEXT_MIN?make(true):null,open=make(false);
+      return open?{closed:wide,open}:null;
     }
     const routeRows=[];
     within(()=>{
@@ -1273,19 +1593,23 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         let names=side?wrapAll(title,inner-2):[];
         if(names.length>2)names=[names[0],ellipsis(names[1],inner-2)];
         setRoles(r);
-        const tree=treeOf(r),open=framed(r)&&tree,base=open?2:4,workers=tree?workersOf(r).map(w=>workerBlock(w,base)):[];
+        const tree=treeOf(r),open=framed(r)&&tree,base=open?2:4,workerList=tree?workersOf(r):[],workers=workerList.map(w=>workerBlock(w,base));
+        // The `none` form: each stage's own stage row, its workers under it.
+        const groups=side&&!open&&placeRow(r)?stageGroups(r,workerList).map(g=>({items:g.items,place:placeRow(r,0,inner-4,g.at)})):[];
         const supervising=workers.length>0;
         const place=side?placeRow(r):null,stages=Array.isArray(r.stages)?r.stages:[];
+        const boxed=!open&&place?boxedWorkers(r,workers.length):null;
         const running=stages.find(stage=>stage.current||stage.mark==='✕');
-        routeRows.push({zone:r.zone==='direct'?'direct':'dispatch',parts:folded(r),two:side,first:side?headRow(r):null,
-          who:side&&!open?whoRow(r,supervising):null,lead:side&&!open?leadRow(r,supervising):null,
-          // A route with no session values (a direct one) keeps its time alone on the row it always had, at the right edge.
-          now:side&&!open?nowRow(leadPaint(r),r.kind,4):null,
-          time:side&&!open&&r.elapsed&&!whoRow(r,supervising)?[pad(inner-measure(r.elapsed)),text(r.elapsed)]:null,
+        routeRows.push({zone:r.zone==='direct'?'direct':'dispatch',parts:folded(r),two:side,bnow:side?null:nowRow(leadPaint(r),r.kind,2),first:side?headRow(r):null,
+          // The owner's blocks (11-18); its time is the route's own, which stands on the first line, so it has none here.
+          session:side&&!open?sessionOf({who:whoRow(r,supervising),one:leadRow(r,supervising),p:leadPaint(r),kind:r.kind,gap:4,time:'',lead:ownerLead(r,supervising),called:calledRows(r.called,4)}):null,
+          // A route with no session values and no kind word (no first line to end in its time) keeps its time alone on a row, at the right edge.
+          time:side&&!open&&r.elapsed&&!whoRow(r,supervising)&&!headRow(r)?[pad(inner-measure(r.elapsed)),text(r.elapsed)]:null,
           names,name:[cut(title,inner-2)],glyph,place,action:key,kind:r.kind,
           // The stage name blinks while the stage line stands and a stage runs; else the first line's dot does.
           stageBlinks:!!place&&live(r)&&running&&running.mark==='●',
-          ...(tree?{tree,workers,counted:workers.length?placeRow(r,workers.length):null}:{})});
+          calledRows:side?null:(calledBottom.get(r)||[]).map(c=>folded(c)),calledCount:flatCalled(r).length,
+          ...(tree?{tree,workers,groups,boxed,counted:workers.length?placeRow(r,workers.length):null}:{})});
       }
       for(const q of requestList){
         // A request row opens the MESSAGES popup, where the requests read whole (as their MESSAGES rows did).
@@ -1313,16 +1637,20 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // The route box's own steps short of rows (below): its title's second rows (`keepMulti`), the
     // context rows (and the workers' box) fold into the first rows, the workers go, the kind rows go,
     // every route takes one row, then the box shows fewer routes and scrolls in place.
-    let routeLimit=routeRows.length,keepCtx=true,keepPlace=true;
+    let routeLimit=routeRows.length,keepPlace=true;
+    // Short of rows (below), in this order: the box's closing border, the NOW's second row, the CTX row (its number goes into the first row), the NOW's first row.
+    let keepBoxEnd=true,nowTwo=true,keepCtxLine=true,keepNow=true;
     // Spec rule 48 (c): the workers stay (in their box while the owners keep their context row,
     // else one row each, as their owners) or go (the kind row counts them).
     let keepWorkers=true;
     const anyWorkers=side&&routeRows.some(x=>x.tree&&x.workers.length);
+    const anyCalled=routeRows.some(x=>x.calledCount>0);
     const twoFull=side&&routeRows.some(x=>x.two);
     let twoRows=twoFull;
     // Spec rule 38: who / context and time / what (two rows, then one) / which kind.
     const routeForm=x=>{
-      if(!(twoRows&&x.two))return [x.parts];
+      // Under the native area (11-18) the route's NOW stands on the row under its one row (the first to go short of rows).
+      if(!(twoRows&&x.two))return [x.parts,...(keepNow&&x.bnow?[x.bnow]:[]),...(keepCalled&&x.calledRows?x.calledRows:[])];
       // A request: who and age / title / status; the kind rows gone, the title and the status share a row.
       if(x.request)return [x.head,...(keepPlace&&x.statusRow?[x.titleRow,x.statusRow]:[x.titled])];
       return routeRowsOf(x);
@@ -1333,15 +1661,36 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // the workers go, then the route takes one row.
     function routeRowsOf(x){
       const workers=x.tree&&keepWorkers?x.workers:[],names=keepMulti?x.names:x.name,out=[],indent=text('  ');
-      const owner=keepCtx?x.who:x.lead,place=!keepWorkers&&x.counted?x.counted:x.place,showPlace=keepPlace&&place;
-      if(x.first){out.push(x.first(!(showPlace&&x.stageBlinks)));out.push(...names.map(row=>[indent,...row]));}
+      const place=!keepWorkers&&x.counted?x.counted:x.place,showPlace=keepPlace&&place;
+      // 11-18: the stage text stands on the top of the workers' box, so the stage row is not drawn apart.
+      const boxed=keepWorkers&&keepPlace&&x.boxed&&x.workers.length?(keepBoxEnd&&x.boxed.closed?x.boxed.closed:x.boxed.open):null;
+      // 11-18 (review C3): the stage text stands on the first line unless a stage row stands apart (the `none` form, or the workers'
+      // count form); beside a box it is the position alone (the box's top line has the name), with no workers the name too.
+      // (A route with no first line, no kind word, has no place for it: its stage row stands as it did.)
+      // 11-18 (round 5): a route with no workers (so no box) whose stage name did not fit on its first line gets the stage row back under the
+      // owner (`staged 3/6: execute`), the one the box's top line carries where workers stand; with the name on the first line there is none.
+      const some=!!(x.tree&&x.workers.length);
+      let apart=showPlace&&!boxed&&(some||!x.first);
+      if(x.first){
+        const headStage=x.place&&!apart?{name:!some,blinks:x.stageBlinks}:null;
+        let head=x.first(!((boxed||apart)&&x.stageBlinks),headStage);
+        if(headStage&&headStage.name&&showPlace&&!head.named){apart=true;head=x.first(!x.stageBlinks,headStage);}
+        out.push(head);out.push(...names.map(row=>[indent,...row]));
+      }
       else out.push([...x.glyph,...names[0]],...names.slice(1).map(row=>[indent,...row]));
       // A route whose owner is not known keeps its time and `CTX` row under the title all the same.
-      if(owner)out.push(owner);
-      if(keepCtx&&x.now)out.push(x.now);
-      if(keepCtx&&x.time)out.push(x.time);
-      if(showPlace)out.push([text(owner?'    ':'  '),...place]);
-      for(const w of workers)out.push(...(keepCtx?w.rows:[w.one]));
+      const owner=x.session?sessionRowsOf(x.session).filter(Boolean):[];
+      out.push(...owner);
+      if(keepNow&&x.time)out.push(x.time);
+      const standing=[text(owner.length?'    ':'  ')];
+      if(boxed)out.push(...boxed.lines());
+      else if(apart&&some&&keepWorkers&&x.groups.length>1)for(const g of x.groups){
+        out.push([...standing,...g.place]);
+        for(const i of g.items)out.push(...sessionRowsOf(workers[i]).filter(Boolean));
+      }else{
+        if(apart)out.push([...standing,...place]);
+        for(const w of workers)out.push(...sessionRowsOf(w).filter(Boolean));
+      }
       return out;
     }
     const routeSize=x=>routeForm(x).length;
@@ -1387,7 +1736,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         if(routeRule()&&item.zone&&(!before||before.zone!==item.zone))block.push(zoneRow(item.zone,key));
         before=item;
         // A press on any row of a route opens the route popup with it unfolded.
-        for(const parts of item.two?routeForm(item):[item.parts])block.push(boxRow({parts,action:item.action},key));
+        for(const parts of item.two||item.bnow||item.calledRows&&item.calledRows.length?routeForm(item):[item.parts])block.push(boxRow({parts,action:item.action},key));
       });
       block.push(boxBottom(key,below?hiddenNote('↓'+below):[]));
       return {block,area:{offset:routeOffset,max:routeMax,step:routeStep}};
@@ -1441,27 +1790,25 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // (`◆ project · decision · 10m`); short of cells the kind leaves, then the scope (the mark and the
     // age stay). Short of rows (below) every headline takes one row, then fewer records show. No popup:
     // its head has no `›`.
-    let memBody=2;
-    const memTop=m=>{
+    // 11-20 (the person: "메모리 내용은 한줄로 바꾸고 (지금은 두줄이네) 메시지 처럼 팝업이 가능하게"): a record is one row, as a message's one-row form
+    // (`messageLine`): its mark, age and kind dim, then the headline in the body color (`…` where it goes on; the kind goes first where the
+    // headline would be left under 14 cells). A press on it opens the MEM popup (below, `memoryBody`: the record whole).
+    const memLine=m=>{
       const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
-      for(const words of [[m.scope,m.kind],[m.scope],[]]){
-        const row=[text([mark,...words.filter(Boolean),m.age].filter(Boolean).join(' · ').replace(/^(.) · /,'$1 '),'dim')];
-        if(size(row)<=inner)return row;
+      for(const lead of [[mark,m.age,m.kind],[mark,m.age]]){
+        const head=text(lead.filter(Boolean).join(' ')+' ','dim');
+        if(inner-size([head])>=14||lead.length===2)return cut([head,text(m.text,'loc_repo')],inner);
       }
-      return cut([text([mark,m.age].filter(Boolean).join(' '),'dim')],inner);
     };
-    const memRows=m=>{
-      let body=wrapAll([text(m.text,'loc_repo')],inner-2);
-      if(body.length>memBody)body=[...body.slice(0,memBody-1),ellipsis(body[memBody-1],inner-2)];
-      return [memTop(m),...body.map(row=>[text('  '),...row])];
-    };
+    const memRows=m=>[memLine(m)];
     // The sections in order, each with the most rows it takes and its rows at a given count.
     const SECTIONS=[
       {name:'QUESTIONS',on:asked,max:3,head:()=>sectionHead(questionCount?[{...text(questionCount,'g_blocked'),role:'accent'}]:[],summary?.label||'QUESTIONS'),
         rows:()=>questionRows(),action:'question',groups:model.wait?['wait']:[]},
       {name:'ROUTE',on:!!routeTitle,box:true},
       {name:'MESSAGES',on:messageTotal>0,max:MESSAGES_MAX,head:()=>messagesHead(take.MESSAGES),rows:n=>messageRows(n),action:'popup:MESSAGES'},
-      {name:'MEM',on:memItems.length>0,max:MEM_MAX,head:()=>sectionHead([],'MEM',[],[[]],false),rows:n=>memItems.slice(0,n).flatMap(memRows)}];
+      // (11-20: the head and every record open the MEM popup, the record pressed first on screen: `popup:MEM:<n>`.)
+      {name:'MEM',on:memItems.length>0,max:MEM_MAX,head:()=>sectionHead([],'MEM',[],[[]],true),rows:n=>memItems.slice(0,n).flatMap(memRows),action:'popup:MEM',rowAction:i=>'popup:MEM:'+i}];
     const take={},kept={};
     for(const s of SECTIONS){take[s.name]=s.max;kept[s.name]=s.on;}
     // 11-16 (the person: "질문은 이전처럼 그냥 붉은색 블록으로 감싸는게 모양은 제일 나아" / "붉은 바운더리 말이야"): the QUESTIONS
@@ -1518,12 +1865,121 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return {row:cut([{...mark,role:'harness-name',harness:u.harness}],room),values:false};
     };
     const usageLines=()=>keepQuota&&usageOn?usageData.filter((_u,i)=>keepLine[i]):[];
+    // 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"; then, on v4.54.0,
+    // "RESOURCE는 세로로 차지하는 공간이 너무 많은데, 이걸 게이지는 없애자 그리고 가로로 나열이 가능하면 가로로 나열을 좀 하자"): RESOURCES stands
+    // right above USAGE. One row for each host: its name and `CPU 34%  MEM 61%`. Under it every GPU of the host in its number's order, side by
+    // side (`GPU0  93% 21/24G [3b]  GPU1  40% 10/48G`, `GPU2   0%  0/48G` under them: the grid below), onto the next row where they do not fit; one GPU's group is never split
+    // between rows. The use is its number, in the level's color. 11-19 (the person: "빈 GPU도 일관성있게 표시해줘. 그냥 0% 0/48GB
+    // 이런식으로 해놔. 컬러만 좀 어둡게 하면 되잖아. 0%에"): a GPU nothing runs on has the same group with the sample's own values and no session
+    // number, all of it `dim` (the producer paints it so; the host row no longer counts them). The values are the sample the shared producer
+    // already took. Short of cells on a host row the values go in this order: MEM, then CPU, then the name is cut with `…` (12 cells at least);
+    // short of cells for one GPU's group the memory goes first, then the use, and the session's number stays (who holds the GPU is what the
+    // section is for). Short of rows it gives way before everything else: the GPU rows (from the last), the host rows (from the last; the name
+    // row goes with the last of them), so USAGE and the sections above it stand as they did without it.
+    // 11-19 (the person, on v4.59.6's panel: "가로로 길어지면 RESOURCE에 게이지도 넣어주면 좋고"): where the width allows, a GPU's group has a
+    // memory gauge (Fleet's VRAM gauge: `GPU0  93% ━━━━━━━━─ 21/24G [3b]`) right before its memory number. The rows come first (the person,
+    // 11-18: the section took too many), so the gauge is only what the width has left over: it stands only when the rows are as many as
+    // without it and it has 4 cells at least, in the widest width (up to 10) the section has room for, the same for every group. The
+    // groups may then stand fewer to a row where that keeps the rows as many (a host of two GPUs on a width for three). The backend draws
+    // the gauge at each width (`gauge4` … `gauge10`, the fill and the color are its); the panel only picks one. Not in the forms without
+    // the memory, and not on the host rows.
+    const resourceData=Array.isArray(model.resources)?model.resources.filter(h=>h&&typeof h==='object'&&Array.isArray(h.host)).slice(0,8):[];
+    let resHosts=resourceData.length,resGpus=Infinity;
+    // 11-19 (the person: "그리고 GPU 표시를 행과 열 간격을 맞춰."): one grid for the whole section, from every host's values. The host rows: the name
+    // column as wide as the longest name, each stat (`CPU`, `MEM`) a column with its value right-aligned to the widest. The GPU groups: all the same
+    // width, the label left-aligned, the use and the memory right-aligned, the session numbers left-aligned after them (blank where a GPU has none, so
+    // the next group keeps its place; the last group of a row is not padded behind), two cells between groups; every row of every host takes as many
+    // groups as the widest form lets in one row, so a group and its values stand on the same cells row over row. The form of the groups (the memory,
+    // then the use goes) and the stats' columns (MEM, then CPU) are chosen for the section, not per host; a name that must be cut is the step after.
+    const plainOf=parts=>parts.map(p=>String(p.text)).join('');
+    const blank=n=>n>0?[text(' '.repeat(n))]:[];
+    const leftIn=(parts,w)=>[...parts,...blank(w-size(parts))];
+    const rightIn=(parts,w)=>[...blank(w-size(parts)),...parts];
+    const trimEnd=parts=>{const out=[...parts];while(out.length&&/^ *$/.test(String(out.at(-1).text)))out.pop();return out;};
+    const grid=(()=>{
+      const hosts=resourceData.map(h=>({name:painted(h.host),stats:painted(h.stats).filter(x=>Array.isArray(x)&&x.length).map(painted)}));
+      const nameW=Math.max(0,...hosts.map(h=>size(h.name)));
+      const cols=[];
+      for(const h of hosts)for(const st of h.stats){
+        const key=plainOf([st[0]]).trim();let c=cols.find(x=>x.key===key);
+        if(!c){c={key,labelW:0,valueW:0};cols.push(c);}
+        c.labelW=Math.max(c.labelW,size([st[0]]));c.valueW=Math.max(c.valueW,size(st.slice(1)));
+      }
+      // The stats kept: the most whose aligned row fits; none left, the names alone (each cut to the row where it is longer).
+      let kept=cols.length;
+      while(kept>0&&nameW+cols.slice(0,kept).reduce((n,c)=>n+2+c.labelW+c.valueW,0)>inner)kept--;
+      const cells=resourceData.flatMap(h=>painted(h.gpus)).map(g=>({label:painted(g.label),pct:painted(g.pct),mem:painted(g.mem),users:painted(g.users)}));
+      const width=k=>Math.max(0,...cells.map(c=>size(c[k])));
+      const w={label:width('label'),pct:width('pct'),mem:width('mem'),users:width('users')};
+      // One form for every group (0 whole; 1 without the memory; 2 without the use too; 3 the label alone): the first that lets the widest stand alone.
+      const parts=f=>[w.label&&'label',f<=1&&w.pct&&'pct',f===0&&w.mem&&'mem',f<=2&&w.users&&'users'].filter(Boolean);
+      const full=f=>parts(f).reduce((n,k)=>n+(n?1:0)+w[k],0);
+      let form=0;while(form<3&&2+full(form)>inner)form++;
+      const perRow=Math.max(1,Math.floor(inner/(full(form)+2)));
+      // The gauge: only in the whole form (the memory is there), and only if every GPU has its widths drawn. Of the groups-to-a-row `k` (at most the
+      // section's now) that keep the rows as many, the one that gives the gauge the most; none with 4 cells, no gauge (the rows as they were).
+      let gauge=0,across=perRow;
+      const drawn=cells.length&&w.mem&&resourceData.every(h=>painted(h.gpus).every(g=>painted(g.gauge4).length));
+      if(form===0&&drawn){
+        const counts=resourceData.map(h=>painted(h.gpus).length),rowsAt=k=>counts.reduce((n,c)=>n+Math.ceil(c/k),0),rows0=rowsAt(perRow);
+        for(let k=perRow;k>=1;k--){
+          if(rowsAt(k)!==rows0)break;
+          const room=Math.min(10,Math.floor(inner/k)-2-full(0)-1);
+          if(room>=4&&room>gauge){gauge=room;across=k;}
+        }
+      }
+      if(gauge){w.gauge=gauge;}
+      const order=gauge?['label','pct','gauge','mem','users'].filter(k=>w[k]):parts(form);
+      return {hosts,nameW,cols,kept,w,form,gauge,parts:order,perRow:across};
+    })();
+    const resourceHostRow=h=>{
+      const at=resourceData.indexOf(h),{name,stats}=grid.hosts[at];
+      const cells=grid.cols.slice(0,grid.kept).map(c=>{
+        const st=stats.find(x=>plainOf([x[0]]).trim()===c.key);
+        return st?[...leftIn([st[0]],c.labelW),...rightIn(st.slice(1),c.valueW)]:null;
+      });
+      let last=cells.length;while(last>0&&!cells[last-1])last--;
+      if(!last)return cut(name,inner);   // (no stat to give, or none kept: the name alone, cut to the row)
+      return [...leftIn(name,grid.nameW),...cells.slice(0,last).flatMap((x,i)=>[text('  '),...(x||blank(grid.cols[i].labelW+grid.cols[i].valueW))])];
+    };
+    // One GPU's group: the same columns for every GPU (see above); `end` leaves a group last on its row without its trailing blanks.
+    const resourceGpuGroup=(g,end)=>{
+      const c={label:painted(g.label),pct:painted(g.pct),mem:painted(g.mem),users:painted(g.users),gauge:grid.gauge?painted(g['gauge'+grid.gauge]):[]},{w}=grid;
+      const out=[];
+      for(const k of grid.parts){
+        if(out.length)out.push(text(' '));
+        out.push(...(k==='label'||k==='users'||k==='gauge'?leftIn(c[k],w[k]):rightIn(c[k],w[k])));
+      }
+      return end?trimEnd(out):out;
+    };
+    // The host's GPU rows: `perRow` groups each (the section's), two cells in, two cells between.
+    const resourceGpuRows=h=>{
+      const gpus=painted(h.gpus);
+      const rows=[];
+      for(let i=0;i<gpus.length;i+=grid.perRow){
+        const row=gpus.slice(i,i+grid.perRow).flatMap((g,j,all)=>[text('  '),...resourceGpuGroup(g,j===all.length-1)]);
+        rows.push(row);
+      }
+      return rows.map(r=>cut(r,inner));
+    };
+    const resourceLines=()=>{
+      const out=[];let room=resGpus;
+      resourceData.slice(0,resHosts).forEach(h=>{
+        out.push(resourceHostRow(h));
+        for(const line of resourceGpuRows(h)){if(room<=0)break;out.push(line);room--;}
+      });
+      return out;
+    };
+    const resourceHead=()=>sectionHead([],'RESOURCES',[],[[]],false);
+    const resourceCount=()=>side&&resHosts>0?1+resourceLines().length:0;
+    const resourceGpuTotal=()=>resourceData.reduce((n,h)=>n+resourceGpuRows(h).length,0);
     // The last row beside the buttons: that harness's row when its values fit there.
     const usageShared=u=>u&&usageFit(u,quotaRoom).values;
-    const footRule=()=>{
+    const footBase=()=>{
       if(usageOn){const list=usageLines();return list.length?(keepUsageHead?1:0)+list.length-1+(usageShared(list.at(-1))?0:1):0;}
       return side&&keepFootRule&&(kept.MESSAGES||kept.MEM)?1:0;
     };
+    const footRule=()=>footBase()+resourceCount();
     // 11-16 (the person: "MEM과 가장 하단을 구분하는 줄이 필요"): beside the native area a thin rule (a section
     // head's rule, its color) parts the bottom sections (MESSAGES, MEM) from the last row (5h/7d, the gear and
     // the fold button); short of rows it goes before any content row.
@@ -1543,34 +1999,55 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // MESSAGES the same; QUESTIONS keeps its head and first row to the last; 5h/7d last of all. A step that
     // freed more than it had to gives its rows back, the most important first.
     const gave=[];
-    const give=(can,apply,undo)=>{while(need()>budget&&can()){apply();gave.push(undo);}};
+    // `family`: steps given in a priority order and given back in it (review follow-up 1): once one of them cannot be given back the
+    // ones less important than it stay given, so a taller panel never shows less of the more important one.
+    const give=(can,apply,undo,family=null)=>{while(need()>budget&&can()){apply();gave.push({undo,family});}};
     const lowest=['MEM','MESSAGES'];
+    // RESOURCES gives way first (it is the newest and the least needed of the bottom's sections): the GPU rows, then the host rows.
+    const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
+      keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]);
+    // The give-back's restore: the way back to a state `choices()` recorded.
+    const restore=json=>{const v=JSON.parse(json);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
+      Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead]=v.slice(12,22);keepLine.splice(0,keepLine.length,...v[22]);keepRouteRule=v[23];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(24,30);};
+    resGpus=resourceGpuTotal();
+    give(()=>side&&resHosts>0&&resGpus>0,()=>{resGpus--;},()=>{resGpus++;});
+    give(()=>side&&resHosts>0,()=>{resHosts--;},()=>{resHosts++;});
     give(()=>keepSpacers,()=>{keepSpacers=false;},()=>{keepSpacers=true;});
-    if(!usageOn)give(()=>!!footRule(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
+    if(!usageOn)give(()=>!!footBase(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
     give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
-    for(const down of [2,1])for(const name of ['MEM','QUESTIONS']){
-      // (MEM, 11-16: its headlines take one row before fewer records show.)
-      if(name==='MEM'&&down===2)give(()=>kept.MEM&&memBody>1,()=>{memBody=1;},()=>{memBody=2;});
-      if(name==='QUESTIONS'){if(down===2)give(()=>here&&keepAction,()=>{keepAction=false;},()=>{keepAction=true;});
-        if(down===1){give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});}continue;}
-      give(()=>kept[name]&&take[name]>down,()=>{take[name]--;},()=>{take[name]++;});
-    }
+    // 11-20 (the person: "MESSAGE, MEM은 좀 더 세로길이 따라서 과감하게 표시 줄을 줄여버려 1~2줄 수준으로"): MEM and MESSAGES are the first
+    // sections to go down, before QUESTIONS or the route box give up a row. The messages take their one-row form (a record is
+    // one row already), then MEM shows two records and MESSAGES two messages, then one of each (`+N` on the MESSAGES head counts the rest): from six
+    // rows down to two rows, then one, each.
+    give(()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
+    give(()=>kept.MEM&&take.MEM>2,()=>{take.MEM--;},()=>{take.MEM++;});
+    give(()=>kept.MESSAGES&&take.MESSAGES>2,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
+    give(()=>kept.MEM&&take.MEM>1,()=>{take.MEM--;},()=>{take.MEM++;});
+    give(()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
+    // QUESTIONS: the action row, then the second row of the summary and the guide line.
+    give(()=>here&&keepAction,()=>{keepAction=false;},()=>{keepAction=true;});
+    give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});
+    give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});
     give(()=>keepMetaGap,()=>{keepMetaGap=false;},()=>{keepMetaGap=true;});
     give(()=>keepRules,()=>{keepRules=false;},()=>{keepRules=true;});
     // (11-16: the QUESTIONS box's two border rows go after its content rows above, before the structural rows below.)
     give(()=>kept.QUESTIONS&&keepQuestionBox,()=>{keepQuestionBox=false;},()=>{keepQuestionBox=true;});
-    give(()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
     // The box comes back with its context rows only while the workers stand.
-    give(()=>keepCtx,()=>{keepCtx=false;},()=>{if(keepWorkers||!anyWorkers)keepCtx=true;});
-    give(()=>anyWorkers&&keepWorkers&&!keepCtx,()=>{keepWorkers=false;},()=>{keepWorkers=true;});
-    give(()=>keepPlace,()=>{keepPlace=false;},()=>{keepPlace=true;});
-    give(()=>twoRows,()=>{twoRows=false;},()=>{twoRows=true;});
-    give(()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
+    // The unit rows a worker's calls add are the first of the route's rows to go.
+    give(()=>anyCalled&&keepCalled,()=>{keepCalled=false;},()=>{keepCalled=true;},'route');
+    give(()=>keepBoxEnd,()=>{keepBoxEnd=false;},()=>{keepBoxEnd=true;},'route');
+    give(()=>nowTwo,()=>{nowTwo=false;},()=>{nowTwo=true;},'route');
+    give(()=>keepCtxLine,()=>{keepCtxLine=false;},()=>{keepCtxLine=true;},'route');
+    // The box comes back with its NOW rows only while the workers stand.
+    give(()=>keepNow,()=>{keepNow=false;},()=>{if(keepWorkers||!anyWorkers)keepNow=true;},'route');
+    give(()=>anyWorkers&&keepWorkers&&!keepNow,()=>{keepWorkers=false;},()=>{keepWorkers=true;},'route');
+    give(()=>keepPlace,()=>{keepPlace=false;},()=>{keepPlace=true;},'route');
+    give(()=>twoRows,()=>{twoRows=false;},()=>{twoRows=true;},'route');
     give(()=>routeLimit>1,()=>{routeLimit--;},()=>{routeLimit++;});
     give(()=>kept.ROUTE&&routeRule(),()=>{keepRouteRule=false;},()=>{keepRouteRule=true;});
     give(()=>keepGit,()=>{keepGit=false;},()=>{keepGit=true;});
-    give(()=>kept.ROUTE,()=>{kept.ROUTE=false;},()=>{kept.ROUTE=true;});
-    give(()=>keepOptional,()=>{keepOptional=false;},()=>{keepOptional=true;});
+    // 11-20 (the person: "NOW·QUESTIONS·ROUTE가 MESSAGES·MEM보다 먼저 자리를 받게"): MESSAGES and MEM give their last rows (their
+    // rows, then their heads; the USAGE rows after MEM as before) before the route box goes; the running jobs after it.
     for(const name of lowest){
       give(()=>kept[name]&&take[name]>0,()=>{take[name]--;},()=>{take[name]++;});
       give(()=>kept[name],()=>{kept[name]=false;},()=>{kept[name]=true;});
@@ -1580,20 +2057,23 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         give(()=>keepUsageHead,()=>{keepUsageHead=false;},()=>{keepUsageHead=true;});
       }
     }
+    give(()=>kept.ROUTE,()=>{kept.ROUTE=false;},()=>{kept.ROUTE=true;});
+    give(()=>keepOptional,()=>{keepOptional=false;},()=>{keepOptional=true;});
     give(()=>keepSent&&sentRows.length>0,()=>{keepSent=false;},()=>{keepSent=true;});
     // (11-16: this window's own usage row beside the buttons costs no row, so it stays while no other usage row is left to give.)
     give(()=>keepQuota&&(!usageOn||footRule()>0),()=>{keepQuota=false;},()=>{keepQuota=true;});
-    const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
-      keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule]);
-    for(const undo of gave.reverse()){
+    const stuck=new Set();
+    for(const {undo,family} of gave.reverse()){
+      if(family&&stuck.has(family))continue;
       const was=choices();undo();
-      if(need()>budget){const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepCtx,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);keepRouteRule=v[24];}
+      if(need()>budget){if(family)stuck.add(family);restore(was);}
     }
     const order=[];
-    top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
-      order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});});
+    top.forEach((row,i)=>{
+      if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
+        order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});});
     for(const item of order)add(item.parts,item.action,item.groups);
+    const headRows=content.length;
     // Each section stands whole (its head and the rows it kept), one after another from the top; the
     // rows left over stand between the sections above and MESSAGES·MEM (spec rule 14: those two keep to
     // the panel's bottom, right above the last row), or under the last section when there are none.
@@ -1619,9 +2099,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       const into=['MESSAGES','MEM'].includes(s.name)?(parts,action,groups)=>lower.push({parts,action,groups}):add;
       into(s.head(),s.action,s.groups);
-      sectionRows(s).forEach(row=>into(row,s.action));
+      sectionRows(s).forEach((row,i)=>into(row,s.rowAction?s.rowAction(i):s.action));
     }
     // 11-16: the USAGE rows stand last in the lower block (the last harness's row, where it fits, on the last row below).
+    if(resourceCount()){lower.push({parts:resourceHead()});for(const line of resourceLines())lower.push({parts:line});}
     let lastUsage=[];
     if(usageOn&&usageLines().length){
       const list=usageLines(),own=u=>u.harness===harness?['quota']:[];
@@ -1630,7 +2111,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const end=list.at(-1);
       if(usageShared(end))lastUsage=usageFit(end,quotaRoom).row;else lower.push({parts:usageFit(end,inner).row,groups:own(end)});
     }
-    const ruled=!usageOn&&lower.length&&footRule()?1:0;
+    const ruled=!usageOn&&lower.length&&footBase()?1:0;
     if(fill&&lower.length)while(content.length+lower.length+ruled<height-2-1)add([]);
     for(const row of lower)add(row.parts,row.action,row.groups);
     if(ruled)add([{...text('─'.repeat(inner),'dim'),role:'messages'}]);
@@ -1653,7 +2134,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return join(tries.find(gs=>size(join(gs))<=quotaRoom)||[]);
     })();
     const lastEnd=usageOn?usageLines().at(-1):null;
-    lastRow(keepQuota?quotaRow:[],usageOn?(lastEnd&&lastUsage.length&&lastEnd.harness===harness?['quota']:[]):keepQuota&&quota.length?['quota']:[],order.length,kept.QUESTIONS?0:1);
+    lastRow(keepQuota?quotaRow:[],usageOn?(lastEnd&&lastUsage.length&&lastEnd.harness===harness?['quota']:[]):keepQuota&&quota.length?['quota']:[],headRows,kept.QUESTIONS?0:1);
   }
   const count=fill?height:Math.min(height,content.length+2),rows=[];
   // Spec rules 16-17, 29 (a): the top border carries Fleet's session-row head on the
@@ -1681,13 +2162,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const stewardTag=v=>({...text(v,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})});
   const tag=/^\[[^\]?]{1,16}\]$/.test(String(model.tag||''))?String(model.tag).slice(1,-1):'';
   const harnessName=['claude','codex','opencode'].includes(harness)?harness:'';
-  const glyphPart=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
+  const glyphPart=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[0]==='spin'&&harnessName?'hb_'+harnessName:own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
   const tagPart=tag?[text('[','dim'),steward?stewardTag(tag):{...text(tag,own?own[1]:'dim'),role:'session'},text(']','dim')]:[];
   const harnessPart=harnessName?[text(harnessName,'hb_'+harnessName)]:[];
   const flagPart=steward?[stewardPart('⚑')]:[];
   // Short of cells the steward mark goes first, then the harness, then the number;
   // the glyph stays to the end.
-  const headParts=pieces=>{const shown=pieces.filter(x=>x.length);return shown.length?[frameText(' '),...shown.flatMap((x,i)=>i?[text(' '),...x]:x),frameText(' ')]:[];};
+  // 11-18: a flag at the end of the head is followed by two cells before the line: `⚑` (U+2691) is drawn two cells wide in some
+  // terminals and would touch the line; the width still counts it as one cell and the second cell is counted as a cell.
+  const headParts=pieces=>{const shown=pieces.filter(x=>x.length);return shown.length?[frameText(' '),...shown.flatMap((x,i)=>i?[text(' '),...x]:x),frameText(shown.at(-1)===flagPart?'  ':' ')]:[];};
   // Spec rule 49 (a): right of the head the top border is the line alone; the gear stands
   // inside, at the right end of the last row.
   const room=Math.max(0,width-3);
@@ -1724,7 +2207,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   for(let i=0;i<count-2;i++)rows.push(frameRow(content[i]||[],i+1));
   rows.push(moving?joined([border(H-1,0,'└'),border(H-1,1,'─'),...foot.parts,...borderRun(H-1,2+foot.used,W-2),border(H-1,W-1,'┘')]):
     [frameText('└─'),...foot.parts,frameText('─'.repeat(Math.max(0,width-3-foot.used))+'┘')]);
-  const painted=appearance(rows,cfg,{colors:borderColors,noColor:model.no_color===true,background});
+  const painted=appearance(rows,cfg,{colors:borderColors,noColor:model.no_color===true,background,harness});
   // The rows whose spinner cells turn between paints (the host swaps only those cells).
   const spins=rows.map((row,i)=>row.some(part=>part.spin)?i:-1).filter(i=>i>=0&&i<count);
   // Only a blinking part needs the one-second repaint (a spinner and the frame turn on their own).
@@ -1749,7 +2232,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   if(waitBlinks)cells.push(...blinkCells(rows,measure,clean,1,count-1));
   const blinked=cells.length>framed;
   const motion=cells.length?{cells,
-    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(tick)}:c.rule!==undefined?ruleLook(c.rule,tick):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background})[0],
+    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(tick)}:c.rule!==undefined?ruleLook(c.rule,tick):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background,harness})[0],
     next:tick=>Math.min(blinked?blinkNext(tick):Infinity,framed?frameNext(tick):Infinity)}:null;
   function frameNext(tick){const local=borderTick(tick),shift=Math.trunc(tick)-local;
       if(ruleMoving){const r=ruleTick(tick);return Math.trunc(tick)+scanNext(r,inner)-r;}
@@ -1793,10 +2276,13 @@ function keyRows(pieces,inner,{rows=Infinity,cellWidth}={}){
 // native that paints its own background, or a wide character on the edge, ends there). The top
 // line carries the title and `✕`, the bottom line the sections (the current one bright), and the
 // row above it the keys (the content's last row). Width: text wraps at 76 cells; narrower than 80
-// cells the window less 4; narrower than 28 the whole window. Height: the content's, at most the
+// cells the window less 4; narrower than 28 the whole window. A table popup stands up to 116 cells, the routes popup up to 196, the question popup up to 132. Height: the content's, at most the
 // rows above the strip less 2 (the content then pages inside). Display only: the keys go to the
 // popup's owner (the host) while it stands; nothing here reads input.
-const POPUP_TEXT=76,POPUP_TABLE=116;
+// 11-18: the routes popup alone stands up to 196 cells (`route`: 148, then "더 늘려"; the read for it takes `columns` up to 200), the question
+// popup up to 132 (`question`: "가로 길이를 좀 늘려줘라. 가독성이 안좋다"; 104 was too little for the person), the other table popups at most 116.
+// `text` (76) is no popup's now; a popup asked for with no kind keeps it.
+const POPUP_TEXT=76,POPUP_TABLE=116,POPUP_ROUTE=196,POPUP_QUESTION=132;
 // A foreground's gray level (0 black .. 255 white), or null for a hue or the terminal's own color.
 function grayLevel(fg){
   if(Number.isInteger(fg)){
@@ -1831,13 +2317,13 @@ function popupLook(part,F,light,colors=256){
 function popupWidth(cols,kind='text'){
   if(cols<28)return Math.max(4,cols);
   if(cols<80)return cols-4;
-  return kind==='table'?Math.min(POPUP_TABLE,cols-4):POPUP_TEXT;
+  return kind==='route'?Math.min(POPUP_ROUTE,cols-4):kind==='question'?Math.min(POPUP_QUESTION,cols-4):kind==='table'?Math.min(POPUP_TABLE,cols-4):POPUP_TEXT;
 }
 // The rows the content may take inside the frame. A low window gives up the empty rows round the
 // frame first (under 8 rows), then its bottom line (3 rows or fewer), so the content keeps rows.
 function popupHeight(space){return space>=8?space-2:space;}
 function popupRoom(rows,band=0){const H=popupHeight(Math.max(1,rows-band));return Math.max(0,H>3?H-2:H-1);}
-function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],labels=sections,current=0,model={},configuration,cellWidth,background=''}){
+function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],current=0,model={},configuration,cellWidth,background=''}){
   const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
   const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
   const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
@@ -1861,8 +2347,8 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],labels
   const close=W>=8?[text(' ','dim'),text('✕','dim'),line(' ─╮')]:[line('╮')];
   const top=[...head,line('─'.repeat(Math.max(0,W-size(head)-size(close)))),...close];
   // The bottom line: the sections, the current one bright.
-  // (11-15: a section's name on the line is its label, `현황` for STATUS; its press opens it by its key.)
-  const named=i=>String(labels[i]??sections[i]);
+  // (11-20: a section's name on the line is its own, `STATUS` in English like the rest; its press opens it by its key.)
+  const named=i=>String(sections[i]);
   const names=sections.flatMap((s,i)=>[...(i?[text(' · ','dim')]:[]),{...text(named(i),i===current?'loc_repo':'dim'),role:i===current?'':'title',bold:i===current}]);
   const listed=names.length&&size(names)+6<=W?[line('╰─ '),...names,line(' ')]:[line('╰─')];
   const bottom=[...listed,line('─'.repeat(Math.max(0,W-size(listed)-1))),line('╯')];
@@ -1927,7 +2413,11 @@ function requestForms(q,{text,measure,width,arrow='loc_repo'}){
   const paint=q.paint&&typeof q.paint==='object'?q.paint:{};
   const piece=p=>p&&typeof p==='object'&&clean(p.text).trim()?[{...p,text:clean(p.text)}]:[];
   const mark=text(String(q.glyph||q.way||'→'),q.glyph==='✕'?'lvl_r':q.glyph==='✓'?'lvl_g':arrow);
-  const who=q.who?[text(String(q.who),'dim')]:[];
+  // 11-18 (the person: "세션 id 외에도 repo 위치까지 request는 표시를 해주는게 좋겠네"): the other session's repository name, dim, after its number
+  // (`[c2] other-repo`); the backend sends none for a session of this window's own repository or one whose it does not know. It is part
+  // of who the request is with, so it stays after the harness, model, effort and age have gone, and the title goes before it does.
+  const repo=clean(q.repo||'').trim()?[text(clean(q.repo).trim(),'dim')]:[];
+  const who=q.who?[text(String(q.who),'dim'),...(repo.length?[text(' '),...repo]:[])]:[];
   const H=piece(paint.harness),M=piece(paint.model_text),F=piece(paint.effort);
   const title=[text(String(q.title||q.id),'loc_repo')];
   const status=q.status?[text(String(q.status),q.kind==='request-rejected'?'lvl_r':'dim')]:[];
@@ -1948,14 +2438,17 @@ function requestForms(q,{text,measure,width,arrow='loc_repo'}){
   const statusRow=status.length?[...indent,...cut(status,width-2)]:null;
   const room=width-2-size(joint)-size(status);
   const titled=!status.length?titleRow:room>=3?[...indent,...cut(title,room),...joint,...status]:[...indent,...cut(status,width-2)];
-  const body=(w,t)=>[...lead(w),...(t.length?[text(' '),...t]:[]),...(status.length?[...joint,...status]:[])];
+  // (`→ [c2] other-repo · title`: with no harness or model between them, the repository and the title read as the sketch does.)
+  const body=(w,t,bare=false)=>[...lead(w),...(t.length?[bare&&repo.length?joint[0]:text(' '),...t]:[]),...(status.length?[...joint,...status]:[])];
   const one=(()=>{
     for(const [h,m,f,e] of drops){
-      const left=body(spaced([who,h,m,f]),title),row=e.length?ended(left,e):size(left)<=width?left:null;
+      const left=body(spaced([who,h,m,f]),title,!h.length&&!m.length&&!f.length),row=e.length?ended(left,e):size(left)<=width?left:null;
       if(row)return row;
     }
-    for(const h of [H,[]]){const w=spaced([who,h]),left=width-size(body(w,[]))-1;if(left>=3)return body(w,cut(title,left));}
+    for(const h of [H,[]]){const w=spaced([who,h]),left=width-size(body(w,[]))-(!h.length&&repo.length?size(joint):1);if(left>=3)return body(w,cut(title,left),!h.length);}
     if(size(body(who,[]))<=width)return body(who,[]);
+    // Too narrow for the repository name beside the number and the status: it goes last of all, and the title with the number stays.
+    if(repo.length&&q.who){const tag=[text(String(q.who),'dim')],left=width-size(body(tag,[]))-1;if(left>=0)return left>=3?body(tag,cut(title,left)):body(tag,[]);}
     // 11-17: a status that does not fit even with no title (`awaiting delivery · why`) keeps its first word whole and ends in `…`.
     if(status.length&&typeof q.status_head==='string'&&q.status_head){
       const room=width-size(lead(who))-size(joint);
@@ -1966,15 +2459,10 @@ function requestForms(q,{text,measure,width,arrow='loc_repo'}){
   })();
   return {head,title:titleRow,status:statusRow,titled,one};
 }
-// 11-15 (popup design E): the MESSAGES popup's rows: the requests this session sent or received
-// (their numbers, reports and body) and the recent messages, the newest first, each its head (the
-// direction, the other session, then dim harness, time, kind and a sent one's delivery state) and
-// its whole text under it, two cells in. What the panel's rows cut reads whole here.
-function messagesBody({model={},columns=72,cellWidth}={}){
-  const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
-  const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
-  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
-  const wrapText=(value,key,width,lead='  ')=>{
+// A text wrapped at word boundaries into rows of `width` cells, each led by `lead` (a word wider than a row goes on by grapheme); shared by the
+// MESSAGES popup and the MEM popup (11-20), which draw their rows by one rule.
+function makeWrapText(measure,text,clean){
+  return (value,key,width,lead='  ')=>{
     const out=[];const room=Math.max(4,width-measure(lead));
     for(const paragraph of clean(value).split(/\s*\n\s*/)){
       let row='',used=0;
@@ -1989,6 +2477,39 @@ function messagesBody({model={},columns=72,cellWidth}={}){
     }
     return out;
   };
+}
+// 11-20 (the person: "메모리 내용은 한줄로 바꾸고 ... 메시지 처럼 팝업이 가능하게"): the MEM popup's rows, drawn as the MESSAGES popup's: the records the
+// panel's model holds (`memory_items`, newest first), each its head (`◆ project · decision · 10m`: `◆` durable or `◇` working, its scope, kind and age,
+// dim), its headline whole in the body color two cells in, and its body (the record's snippet the backend carried, never anything else) under it.
+// `rows.starts` is the row each record starts at, for the popup that opens on a pressed record.
+function memoryBody({model={},columns=72,cellWidth}={}){
+  const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
+  const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
+  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
+  const wrapText=makeWrapText(measure,text,clean);
+  const out=[];out.starts=[];
+  for(const m of (Array.isArray(model.memory_items)?model.memory_items:[]).filter(m=>m&&typeof m==='object'&&clean(m.text).trim())){
+    if(out.length)out.push([]);
+    out.starts.push(out.length);
+    const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
+    const head=[mark,...[m.scope,m.kind].map(v=>clean(v).trim()).filter(Boolean),clean(m.age).trim()].filter(Boolean).join(' · ').replace(/^(.) · /,'$1 ');
+    out.push([text(head,'dim')]);
+    const title=clean(m.text).trim(),body=clean(m.body).trim();
+    // (a body that goes on from the headline, a record with no headline of its own, is read once, whole.)
+    if(!body.startsWith(title))out.push(...wrapText(title,'loc_repo',columns));
+    if(body&&body!==title)out.push(...wrapText(body,body.startsWith(title)?'loc_repo':'dim',columns));
+  }
+  return out.length?out:[[text('·')]];
+}
+// 11-15 (popup design E): the MESSAGES popup's rows: the requests this session sent or received
+// (their numbers, reports and body) and the recent messages, the newest first, each its head (the
+// direction, the other session, then dim harness, time, kind and a sent one's delivery state) and
+// its whole text under it, two cells in. What the panel's rows cut reads whole here.
+function messagesBody({model={},columns=72,cellWidth}={}){
+  const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
+  const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
+  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
+  const wrapText=makeWrapText(measure,text,clean);
   const out=[];
   for(const q of (Array.isArray(model.requests)?model.requests:[]).filter(q=>q&&typeof q.id==='string')){
     if(out.length)out.push([]);
@@ -2016,6 +2537,192 @@ function messagesBody({model={},columns=72,cellWidth}={}){
   }
   return out.length?out:[[text('·')]];
 }
-module.exports={render,keyRows,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,veil,
+// 11-18: the ROUTE popup's first screen, before its own reading comes: the panel's route box (this same `render`'s
+// one drawing, from the routes the panel already holds) laid at the popup's width, its box sides and the panel's
+// own sides taken off. The requests and messages are left out of the model (the popup's table has no such rows);
+// the rows are the box's between its top and bottom lines. A press on a route's row is `['route', id]`, as the
+// popup's table gives it; the box's title press and any other are not the popup's. `null` where the box did not
+// draw (no routes) or its rows are not the shape this strips (the popup then keeps its own spinner).
+function routesBody({model={},columns=72,cellWidth,configuration,background=''}={}){
+  columns=Math.max(1,Math.min(200,Math.trunc(Number(columns))||72));
+  const v=render({frame:0,width:columns+8,height:200,side:true,fill:true,model:{...model,requests:[],messages:[]},configuration,cellWidth,background,state:'idle'});
+  const area=v&&v.routeArea;if(!area)return null;
+  const top=area.top+1,source=v.rows.slice(top,area.bottom);
+  if(!source.length)return null;
+  const rows=[];
+  for(const row of source){
+    if(!Array.isArray(row)||row.length<7)return null;
+    // The panel's own sides (`│`, ` `) and the box's (`│ `, ` │`) stand in these pieces; any other shape is not stripped.
+    if(row.slice(0,3).map(part=>part.text).join('')!=='│ │ '||row.slice(-3).map(part=>part.text).join('')!==' │ │')return null;
+    const inner=row.slice(3,-3).map(({beat,spin,blink,...part})=>part);
+    while(inner.length&&/^ *$/.test(inner[inner.length-1].text))inner.pop();
+    rows.push(inner);
+  }
+  const hits=[],routes=[];
+  for(const h of v.hits){
+    if(h.row<top||h.row>=area.bottom||typeof h.action!=='string')continue;
+    const m=/^popup:ROUTE:(.+)$/.exec(h.action);if(!m)continue;
+    hits.push({row:h.row-top,left:0,right:columns-1,action:['route',m[1]]});
+    if(!routes.includes(m[1]))routes.push(m[1]);
+  }
+  return {rows,hits,routes};
+}
+// 11-19 (the person: "라우트를 눌렀을때 fleet에서 처럼 스테이지별 단계가 시각화되었으면 한다"): the ROUTE popup's first screen for
+// a route pressed on the panel, before its own reading (Fleet's route page) comes: the stage boxes of Fleet's page, drawn from the
+// stages the panel already holds for that route (`routes[].stages`, what `session_panel.presentation` made of them). Only the values
+// held are drawn, an empty value is an empty place, and nothing is new: the top rule, the legs' band, then the stages in the rows Fleet
+// lays them (`_stage_grid`: a snake of at most six boxes a row, `▶ ◀ ▼` between), each box as `_stage_box` fills it. What Fleet's page has
+// besides (the task's summary, the visibility line, the route row, the chosen leg's frame) is not here, so the boxes stand higher until
+// the page comes. The boxes stand in Fleet's inner width (`stage_room`: the popup's columns less ten, from cell 4, as the page lays them),
+// an empty `out`/`unit` reads `·`, a value cut to its place ends in `…`, and no value touches the right rail (one cell is left, as Fleet's
+// `_stage_box` leaves it). A route with no stage line (the owner alone, a unit's, no stages) is `null`: the popup keeps the panel's box.
+// Returns `{rows,hits:[],routes}` as `routesBody` does (the popup's table keys use `routes`). It does not move (no beat).
+function routePageFirst({model={},id,columns=72,cellWidth,configuration,background=''}={}){
+  columns=Math.max(1,Math.min(200,Math.trunc(Number(columns))||72));
+  const list=Array.isArray(model.routes)?model.routes.filter(r=>r&&typeof r==='object'&&r.id):[];
+  const route=list.find(r=>String(r.id)===String(id));
+  if(!route)return null;
+  const stages=Array.isArray(route.stages)?route.stages.filter(s=>s&&typeof s==='object'):[];
+  // The panel's own test for a route that reads a stage line (`stageLinedOf`, the one `render` uses too).
+  const shape=String(route.shape||'');
+  if(route.unit_route===true||shape==='one-shot-owner'||!stageLinedOf({...route,stages}))return null;
+  const cfg={...defaults,...configuration},styles=model.styles||{};
+  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
+  const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
+  const hued=model.no_color!==true&&cfg.theme!=='mono'&&(model.colors??256)>=256;
+  const ink=key=>key&&hued?key:'loc_repo';
+  // The drawing is a grid of cells (one character and its style key each), written into by place, read back as parts.
+  const grid=[];
+  const rowAt=y=>{while(grid.length<=y)grid.push(new Array(columns).fill(null));return grid[y];};
+  const put=(x,y,value,key,limit=columns)=>{
+    const row=rowAt(y);
+    for(const c of clean(value)){
+      const w=measure(c);if(x+w>Math.min(limit,columns))break;
+      if(x>=0){row[x]={c,key};for(let i=1;i<w;i++)row[x+i]={c:'',key};}
+      x+=w;
+    }
+    return x;
+  };
+  const size=value=>measure(clean(value));
+  const cut=(value,room)=>{let out='',used=0;for(const c of clean(value)){const w=measure(c);if(used+w>room)break;out+=c;used+=w;}return out;};
+  // Fleet's own cut (`grid.clip_cells`): a value that fits stays, one that does not ends in `…` within the room.
+  const clip=(value,room)=>{const s=clean(value);if(size(s)<=room)return s;let out='',used=0;for(const c of s){const w=measure(c);if(used+w>room-1)break;out+=c;used+=w;}return out+'…';};
+  const outline=(x,y,w,h,key)=>{
+    put(x,y,'┌'+'─'.repeat(Math.max(0,w-2))+'┐',key);put(x,y+h-1,'└'+'─'.repeat(Math.max(0,w-2))+'┘',key);
+    for(let i=1;i<h-1;i++){put(x,y+i,'│',key);put(x+w-1,y+i,'│',key);}
+  };
+  // The top rule: `╔═ <title>  <age> · N legs · <form> ═══╗` (11-19: the route's `kind_form`, the backend's one word for how it runs (`team`, `solo`, `unit`; `route_form` is the only place that
+  // decides it), or, where an older backend sends none, the shape's own word with `staged` left out, as `stageLead` does); the name in the body color, the rest dim.
+  const legs=Array.isArray(route.chain)?route.chain.filter(l=>l&&typeof l==='object'):[];
+  const tail=[route.elapsed,legs.length?legs.length+' leg'+(legs.length===1?'':'s'):'',String(route.kind_form||'').trim()||stageLeadOf(route)].map(v=>clean(v).trim()).filter(Boolean).join(' · ');
+  const tailText=tail?'  '+tail+' ':' ';
+  put(0,0,'╔═ ','dim');
+  const room=Math.max(0,columns-4-size(tailText));
+  const name=cut(route.title||route.id,room);
+  let x=put(3,0,name,'loc_repo');
+  x=put(x,0,tailText,'dim',columns-1);
+  while(x<columns-1)x=put(x,0,'═','dim',columns-1);
+  put(columns-1,0,'╗','dim');
+  // Boxes laid in a snake: even rows go right, odd rows left, `▶`/`◀` between boxes of a row and `▼` between rows.
+  const gap=4;
+  const snake=(count,per,w,h,y0,link,x0=0)=>{
+    const spots=[];
+    for(let i=0;i<count;i++){
+      const r=Math.floor(i/per),k=i%per,col=r%2===0?k:per-1-k;
+      spots.push({x:x0+col*(w+gap),y:y0+r*(h+1),row:r});
+    }
+    for(let i=0;i+1<count;i++){
+      const a=spots[i],b=spots[i+1];
+      if(a.row!==b.row)put(a.x+Math.floor(w/2),a.y+h,'▼',link);
+      else put(Math.min(a.x,b.x)+w+1,a.y+Math.floor(h/2),b.x>a.x?'▶':'◀',link);
+    }
+    return spots;
+  };
+  let y=1;
+  if(legs.length){
+    // The legs' band: a short box a leg, its name and its mark; no value is held for the inside.
+    const per=Math.max(1,Math.min(legs.length,6,Math.floor((columns+gap)/(14+gap)))),w=Math.max(8,Math.min(44,Math.floor((columns-gap*(per-1))/per)));
+    const spots=snake(legs.length,per,w,3,y,'dim');
+    legs.forEach((leg,i)=>{
+      const {x:bx,y:by}=spots[i],st=String(leg.state||'');
+      const mark=st==='done'?['✓','lvl_g']:st==='active'?['●','g_work']:st==='failed'||st==='dead'?['✕','g_dead']:['·','dim'];
+      outline(bx,by,w,3,'dim');
+      const right=' '+mark[0]+' ';
+      put(bx+w-1-size(right),by,right,mark[1]);
+      put(bx+2,by,' '+cut(leg.name||'·',Math.max(0,w-6-size(right)))+' ','loc_repo');
+    });
+    const rowsUsed=Math.floor((legs.length-1)/per)+1;
+    y+=rowsUsed*3+(rowsUsed-1)+1;
+  }
+  const LW=7,lab=(bx,by,word,limit)=>put(bx,by,word.padEnd(LW),'dim',limit);   // (the word too stays inside the box: its right rail is bx+w-1)
+  // Fleet's page lays its boxes from cell 4 (the page's `║` frame at 0, the legs' frame at 2, the box at `panel_left + 2`) in `stage_room`,
+  // the popup's columns less ten; fewer than three stages stand at most 64 cells a stage. Fleet counts flow steps; the panel holds no level,
+  // so the stages count one each (a chain; parallel stages are not told apart here).
+  const X0=4;
+  let stageRoom=Math.max(1,columns-10);
+  if(stages.length<3)stageRoom=Math.min(stageRoom,64*stages.length);
+  const per=Math.min(stages.length,Math.max(3,Math.min(6,Math.floor((stageRoom+gap)/(36+gap)))));
+  const w=Math.floor((stageRoom-gap*(per-1))/per);
+  const vroom=w-4-LW;      // Fleet: the room of a value in a box
+  const linesOf=stage=>{
+    const lines=[];
+    if(stage.harness)lines.push(['by',[[String(stage.harness),'hb_'+String(stage.harness)],...(stage.model?[[' '+stage.model,'loc_repo']]:[])]]);
+    const todo=stage.mark===''&&stage.state!=='active'&&!stage.current;
+    lines.push(['time',[[clip(stage.when||stage.elapsed||'·',vroom),todo?'dim':'loc_repo']]]);
+    if(stage.note)lines.push(['rounds',[[clip(stage.note,vroom),'dim']]]);
+    // The panel's value for a stage's gate is `true` when it passed (`stage_doer`): that is a pass mark, and the box's title already has its ✓.
+    // Only a gate in words is a line.
+    if(typeof stage.gate==='string'&&stage.gate.trim())lines.push(['gate',[[clip(stage.gate,vroom-3),'dim'],...(stage.mark==='✓'?[[' ✓','lvl_g']]:[])]]);
+    lines.push(['out',[[clip(stage.out||'·',vroom),'dim']]]);
+    lines.push(['unit',[[clip(stage.unit||'·',vroom),'dim']]]);
+    if(stage.says)lines.push(['says',[[clip(stage.says,vroom),'dim']]]);
+    return lines;
+  };
+  const h=Math.max(4,Math.min(10,Math.max(...stages.map(s=>linesOf(s).length))+2));
+  const spots=snake(stages.length,per,w,h,y,'dim',X0);
+  stages.forEach((stage,i)=>{
+    const {x:bx,y:by}=spots[i];
+    const mark=stage.mark==='✓'?['✓','lvl_g']:stage.mark==='●'?['●','g_work']:stage.mark==='✕'?['✕','g_dead']:['·','dim'];
+    const word=clean(stage.verdict||stage.state||'').trim();
+    const right=' '+mark[0]+' '+(w<34||!word?'':word+' ');
+    const frame=stage.current?(stage.key||'dim'):stage.mark==='✕'?'lvl_r':'dim';
+    outline(bx,by,w,h,frame);
+    put(bx+w-1-size(right),by,right,'dim');
+    put(bx+w-1-size(right),by,' '+mark[0],mark[1]);
+    put(bx+2,by,' '+clip(stage.name||'·',Math.max(0,w-6-size(right)))+' ',ink(stage.key));
+    // (the values stand one cell short of the right rail, and a box's rows beyond its height are not drawn)
+    linesOf(stage).slice(0,h-2).forEach(([word_,parts],k)=>{
+      lab(bx+2,by+1+k,word_,bx+w-1);let px=bx+2+LW;
+      for(const [value,key] of parts)px=put(px,by+1+k,value,key,bx+w-2);
+    });
+  });
+  y+=Math.floor((stages.length-1)/per+1)*(h+1)-1;
+  const more=Math.trunc(Number(route.stage_more))||0;
+  if(more>0)put(X0,y,'+'+more,'dim');
+  // Cells back to parts (equal keys join), the row's trailing blanks gone.
+  const text=(value,key)=>({text:value,...(key?(styles[key]||{dim:key==='dim'}):{})});
+  const rows=grid.map(cells=>{
+    const out=[];let last=cells.length;
+    while(last>0&&(!cells[last-1]||cells[last-1].c===' '))last--;
+    for(let i=0;i<last;i++){
+      const cell=cells[i]||{c:' ',key:null};
+      const prev=out[out.length-1];
+      if(prev&&prev.key===cell.key)prev.value+=cell.c;else out.push({key:cell.key,value:cell.c});
+    }
+    return out.map(p=>text(p.value,p.key));
+  });
+  while(rows.length&&!rows[rows.length-1].length)rows.pop();
+  const routes=[];for(const r of list)if(!routes.includes(String(r.id)))routes.push(String(r.id));
+  return {rows,hits:[],routes};
+}
+// The shape's own word before a stage line's position (`staged`, `map-reduce`; none for a route that names none), the word `staged` itself
+// never written (11-19: the form `team` says it), and the test for a route that reads a stage line: one each, for `render` and `routePageFirst`.
+function stageWordOf(shape){return /^staged/.test(shape)?'staged':/^(|unknown|framed|one-shot-owner)$/.test(shape)?'':shape;}
+function stageLeadOf(r){const word=stageWordOf(String((r&&r.shape)||''));return word==='staged'?'':word;}
+function stageLinedOf(r){const shape=String((r&&r.shape)||''),n=Array.isArray(r&&r.stages)?r.stages.length:0;
+  return shape!=='framed'&&(/^staged/.test(shape)?n>0:n>1);}
+module.exports={render,keyRows,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,memoryBody,veil,
   RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST,EASE:RULE_EASE},scanAt,WAVE:{COUNT:WAVE_COUNT,LAP:WAVE_LAP,STEPS:WAVE_STEPS,FLOOR:WAVE_FLOOR,MIN:WAVE_MIN},
   BORDER:{LIT:BORDER_LIT,ARC:BORDER_ARC,LAP:BORDER_LAP,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};
+module.exports.routesBody=routesBody;
+module.exports.routePageFirst=routePageFirst;

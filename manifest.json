@@ -3,7 +3,7 @@
   "canonical_manifest": "harness-manifest.json",
   "topology_registry": {
     "source": "capabilities/topologies.json",
-    "digest": "sha256:de3bcb98e71f1008422a1c2620cdb9f7ba3941e0486625952b1778fdd1aeb4c4",
+    "digest": "sha256:6157861cba7a184f7ec95892cbff89aa987c898cf94d4d10429f88d7b3d42d6f",
     "capabilities": 14,
     "recipes": 30
   },
@@ -449,6 +449,12 @@
       "worker_type": "stage",
       "floor": "low"
     },
+    "general/explore": {
+      "family": "general",
+      "role": "fast tool worker",
+      "worker_type": "support",
+      "floor": "low"
+    },
     "material/browser-fetch": {
       "family": "material",
       "role": "fast tool worker",
@@ -635,6 +641,10 @@
     },
     "editorial/translate": {
       "unit": "editorial/translate",
+      "status": "portable-persona"
+    },
+    "general/explore": {
+      "unit": "general/explore",
       "status": "portable-persona"
     },
     "material/browser-fetch": {

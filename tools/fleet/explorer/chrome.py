@@ -6,6 +6,7 @@ from ..config import ui_text
 from .grid import CellGrid, cell_width, clip_cells
 from .tables import ROUTE_WORD, answer_wait_word, repo_label, route_count_label, route_tally
 from .style import steward_flag_key
+from ..palette import harness_spin
 
 NAV_WIDTH = 32
 
@@ -888,7 +889,7 @@ def draw_explorer(grid: CellGrid, vm, state):
                 marker, marker_key = "●", "lvl_r_dim"
             elif session.get("answer_wait_marker") == "◑":
                 marker, marker_key = "◑", "lvl_r_dim"
-            grid.put(hx + 1, y, marker, marker_key)
+            grid.put(hx + 1, y, marker, harness_spin(marker_key, harness))      # 11-18: a working spinner in its harness's color
             if session_lit:
                 for col in range(width):
                     glyph, key, _tint = grid.cells[y][col]
@@ -941,7 +942,7 @@ def draw_explorer(grid: CellGrid, vm, state):
                 grid.put(label_x + cell_width(route_name), y, ": ", "dim", limit=width - 1)
                 harness_x = label_x + cell_width(route_label)
                 grid.put(harness_x, y, str(rh), "h_" + str(rh), limit=width - 1)
-                grid.put(harness_x + cell_width(str(rh)) + 1, y, mark, mark_key,
+                grid.put(harness_x + cell_width(str(rh)) + 1, y, mark, harness_spin(mark_key, str(rh)),
                          limit=width - 1)
                 if scope_kind == "route" and str(route.get("id")) == scope_id:
                     for col in range(width):
@@ -960,7 +961,7 @@ def draw_explorer(grid: CellGrid, vm, state):
                     sub_label = str(name) + ": "
                     grid.put(15 - shift, y, sub_label, "dim", limit=width - 1)
                     grid.put(15 - shift + len(sub_label), y, str(who), "h_" + str(who), limit=width - 1)
-                    sub_mark = "g_spin_dim" if activity == "running" else "g_work_off"
+                    sub_mark = harness_spin("g_spin_dim", str(who)) if activity == "running" else "g_work_off"
                     grid.put(15 - shift + len(sub_label) + len(str(who)) + 1, y, "⠏" if activity == "running" else "●", sub_mark)
                     y += 1
     drag = tuple(getattr(state, "drag", ()) or ())

@@ -7,6 +7,8 @@ from what Hearting already holds, never from a Herdr or tmux answer:
 - ``[xx]`` / ``xx`` is the confirmed Fleet number (``fleet.session_tags``);
 - a name is the session's registry name (Claude's session registry, the
   Hearting ``session_registry`` for Codex/OpenCode), unique among live sessions;
+- a number or a name that finds the viewer of a conversation sent to the background reaches
+  the background session holding it (``_follow_parked``; both Claude facts must agree);
 - a window address (``wB:pB3``, tmux ``%N@socket``) is the pane value a live
   native session process received when its window started it
   (``HERDR_PANE_ID``/``TMUX_PANE`` in its own environment), on the same terminal
@@ -213,6 +215,24 @@ def _identity(harness, sid, **extra):
     return {"harness": harness, "session_id": sid, **extra}
 
 
+def _follow_parked(identity):
+    """A number or a name that finds a window's viewer of a conversation sent to the background
+    reaches the background session that now holds it (``session_registry.parked_successor``:
+    both Claude facts agree, read live; any doubt keeps the exact session found).
+
+    Only a number or a name follows: ``harness:session_id`` is exact and a window address
+    names the window, so neither is moved here."""
+    if not identity or identity.get("harness") != "claude":
+        return identity
+    try:
+        _tools_path()
+        from fleet import session_registry
+        found = session_registry.parked_successor("claude", identity.get("session_id"))
+    except Exception:
+        return identity
+    return _identity("claude", found["session_id"]) if found else identity
+
+
 def _resolve_tag(tag):
     _tools_path()
     try:
@@ -226,7 +246,7 @@ def _resolve_tag(tag):
             and session_tags.assigned_tag(*key) == tag.lower()]
     if len(keys) != 1:
         return None, "fleet-tag-ambiguous" if keys else "fleet-tag-not-found"
-    return _identity(*keys[0]), None
+    return _follow_parked(_identity(*keys[0])), None
 
 
 def _service_hosted(pid):
@@ -288,7 +308,7 @@ def _resolve_name(target):
         return None, "target-name-ambiguous"
     if not seats:
         return None, "target-name-not-found"
-    return _identity(*next(iter(seats))), None
+    return _follow_parked(_identity(*next(iter(seats)))), None
 
 
 def is_pane_address(target):

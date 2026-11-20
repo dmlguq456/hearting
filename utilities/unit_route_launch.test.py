@@ -557,6 +557,75 @@ class UnitPromptTest(UnitLegBase):
         spec.loader.exec_module(module)
         return module
 
+    def test_the_unit_leg_carries_the_users_work_style_records_before_the_brief(self):
+        route, path = self.unit_route()
+        self.assertEqual(route["field"], "code")
+        adapter = self.adapter()
+        args = argparse.Namespace(
+            capability="unit", capability_mode="default", worker_mode="qa/code-review", qa="quick",
+            intensity="quick", dispatch_depth=1, worker_type="review", attempt_id="att-x", assigned_contract="unit",
+            route_node="unit", route_file=str(path), route_id=route["route_id"], owner_route_binding=None,
+            model_role="fast reviewer", model_profile="light", resolved_model_settings={}, parent_slug=None,
+            parent_session_id=None, capability_owner="unit", owner_harness="claude", worktree=route["cwd"],
+            artifact_root=route["artifact_root"], unit="qa/code-review", runtime_dir="", raw_data_dir="",
+            parent_attempt_id=None, route_hash=route["route_hash"], launch_head="0" * 40, diff_attribution=None)
+        jobs = Path(self.root) / "jobs.log"
+        jobs.write_text("")
+        env = dict(T.P.prepare_route_artifact_env(path, start=True, jobs=jobs))
+        store = Path(self.root) / "ws-store"
+        store.mkdir()
+        mem = Path(R.ROOT) / "tools" / "memory" / "mem.py"
+        env["MEM_STORE"] = str(store)
+        with mock.patch.dict(os.environ, env), mock.patch.object(adapter.DISPATCH_MAIN, "dispatch_metadata_prompt",
+                                                                 return_value="Dispatch metadata:\n- unit: x\n"):
+            def prompt():
+                return adapter.DISPATCH_MAIN.unit_leg_prompt(adapter._ADAPTER, args, BRIEF)
+            empty = prompt()
+            self.assertNotIn("Unit bootstrap material", empty)
+            for body, topic in (("WS-UNIT keep comments short.", "unit:qa/code-review"),
+                                ("WS-FIELD name the failing command.", "field:code"),
+                                ("WS-OTHER another unit's habit.", "unit:dev/backend")):
+                subprocess.run([sys.executable, str(mem), "add", "durable", "preference", body, "--scope", "global",
+                                "--topic", topic], cwd=route["cwd"], check=True, capture_output=True, env=dict(os.environ))
+            carried = prompt()
+        self.assertEqual(carried.count("Unit bootstrap material"), 1)
+        self.assertLess(carried.index("WS-UNIT"), carried.index("WS-FIELD"))
+        self.assertNotIn("WS-OTHER", carried)
+        self.assertLess(carried.index("Unit: qa/code-review"), carried.index("Unit bootstrap material"))
+        self.assertLess(carried.index("Unit bootstrap material"), carried.index("Assignment:\n" + BRIEF.rstrip()))
+        self.assertEqual(carried.replace(carried[carried.index("Unit bootstrap material"):
+                                                carried.index("Assignment:\n")], ""), empty)
+
+    def test_the_unit_worker_is_told_no_qa_and_no_intensity_while_the_row_keeps_them(self):
+        # 11-20: a unit route has no intensity, so its worker reads `- qa: -` / `- intensity: -` (an Opus review is not
+        # handed the word `quick`). The args (and so the row, the environment and the budget) keep `quick`; every other
+        # capability's metadata reads as it did.
+        route, path = self.unit_route()
+        adapter = self.adapter()
+        args = argparse.Namespace(
+            capability="unit", capability_mode="default", worker_mode="qa/code-review", qa="quick",
+            intensity="quick", dispatch_depth=1, worker_type="review", attempt_id="att-x", assigned_contract="unit",
+            route_node="unit", route_file=str(path), route_id=route["route_id"], owner_route_binding=None,
+            model_role="fast reviewer", model_profile="light", resolved_model_settings={}, parent_slug=None,
+            parent_session_id=None, capability_owner="unit", owner_harness="claude", worktree=route["cwd"],
+            artifact_root=route["artifact_root"], unit="qa/code-review", runtime_dir="", raw_data_dir="",
+            parent_attempt_id=None, route_hash=route["route_hash"], launch_head="0" * 40, diff_attribution=None)
+        jobs = Path(self.root) / "jobs.log"
+        jobs.write_text("")
+        env = dict(T.P.prepare_route_artifact_env(path, start=True, jobs=jobs))
+        with mock.patch.dict(os.environ, env):
+            prompt = adapter.DISPATCH_MAIN.unit_leg_prompt(adapter._ADAPTER, args, BRIEF)
+            metadata = adapter.DISPATCH_MAIN.dispatch_metadata_prompt(adapter._ADAPTER, args)
+            staged = adapter.DISPATCH_MAIN.dispatch_metadata_prompt(
+                adapter._ADAPTER, argparse.Namespace(**{**vars(args), "capability": "autopilot-code", "intensity": "standard",
+                                                        "qa": "standard"}))
+        for text in (prompt, metadata):
+            self.assertIn("\n- qa: -\n- intensity: -\n", text)
+            self.assertNotIn("- qa: quick", text)
+            self.assertNotIn("- intensity: quick", text)
+        self.assertIn("\n- qa: standard\n- intensity: standard\n", staged)
+        self.assertEqual((args.qa, args.intensity), ("quick", "quick"))
+
     def test_the_first_instruction_is_the_unit_the_brief_and_how_to_end(self):
         route, path = self.unit_route()
         adapter = self.adapter()
@@ -599,7 +668,38 @@ class UnitPromptTest(UnitLegBase):
             self.assertNotIn(owner_only, prompt)
         import worker_bootstrap
         self.assertLess(len(worker_bootstrap.unit_safety_prompt("review").encode()), 2048)
-        self.assertLess(len(prompt), 14_000)
+        self.assertLess(len(prompt), 15_000)   # the unit's own text grew on main; the first instruction stays one short block
+
+    def test_a_lookup_leg_is_not_told_how_to_start_another_worker_and_other_legs_are_unchanged(self):
+        # `general/explore` says "no further workers" and `roles/worker-types/support.md` says a support worker
+        # dispatches none, so its first instruction omits the paragraph that teaches a unit worker how; the
+        # others' instruction keeps it exactly where it was (right after the safety lines).
+        import worker_bootstrap as wb
+        call = wb.unit_call_prompt(R.ROOT) + "\n"
+        prompts = {}
+        for unit, worker_type, role in (("general/explore", "support", "fast tool worker"),
+                                        ("qa/code-review", "review", "fast reviewer")):
+            route, path = self.unit_route(unit=unit)
+            adapter = self.adapter()
+            args = argparse.Namespace(
+                capability="unit", capability_mode="default", worker_mode=unit, qa="quick",
+                intensity="quick", dispatch_depth=1, worker_type=worker_type, attempt_id="att-x",
+                assigned_contract="unit", route_node="unit", route_file=str(path), route_id=route["route_id"],
+                owner_route_binding=None, model_role=role, model_profile="light", resolved_model_settings={},
+                parent_slug=None, parent_session_id=None, capability_owner="unit", owner_harness="claude",
+                worktree=route["cwd"], artifact_root=route["artifact_root"], unit=unit, runtime_dir="",
+                raw_data_dir="", parent_attempt_id=None, route_hash=route["route_hash"], launch_head="0" * 40,
+                diff_attribution=None)
+            jobs = Path(self.root) / "jobs.log"
+            jobs.write_text("")
+            env = dict(T.P.prepare_route_artifact_env(path, start=True, jobs=jobs))
+            with mock.patch.dict(os.environ, env), mock.patch.object(
+                    adapter.DISPATCH_MAIN, "dispatch_metadata_prompt", return_value="Dispatch metadata:\n- unit: x\n"):
+                prompts[unit] = adapter.DISPATCH_MAIN.unit_leg_prompt(adapter._ADAPTER, args, BRIEF)
+        self.assertNotIn("Starting another worker", prompts["general/explore"])
+        self.assertNotIn("--ephemeral", prompts["general/explore"])
+        self.assertIn("No further workers", prompts["general/explore"])
+        self.assertIn(wb.unit_safety_prompt("review") + call, prompts["qa/code-review"])
 
 
 if __name__ == "__main__":
