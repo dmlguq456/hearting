@@ -359,7 +359,7 @@ class GroupsTest(StatusTest):
         self.assertNotIn("\x1b", longest)
 
     def test_the_value_carries_the_groups_and_a_document_is_read_again_only_when_its_stamp_changed(self):
-        folder2 = self.campaign("beta", body=CAMPAIGN)       # (`campaign.md` is read by name once the campaign-document work lands; the page stands in)
+        folder2 = self.campaign("beta", body=CAMPAIGN)
         view = self.read(self.route(2, "beta"))
         self.assertEqual([g["kind"] for g in view["groups"]], ["running", "waiting", "done", "next"])
         calls = []
@@ -374,6 +374,13 @@ class GroupsTest(StatusTest):
             again = self.read(self.route(2, "beta"))
             self.assertEqual(len(calls), 1)
         self.assertEqual(again["groups"][-1]["count"], 2)
+
+    def test_a_campaign_md_document_is_read_by_name_and_gives_the_groups(self):
+        self.campaign("alpha", body=CAMPAIGN, name="campaign.md")
+        view = self.read(self.route(1, "alpha"))
+        self.assertTrue(view["has_doc"])
+        self.assertTrue(view["path"].endswith("2026-11-10_alpha/campaign.md"), view["path"])
+        self.assertEqual([g["kind"] for g in view["groups"]], ["running", "waiting", "done", "next"])
 
     def test_no_document_and_a_document_that_cannot_be_read_give_no_groups(self):
         self.campaign("alpha", doc=False)
