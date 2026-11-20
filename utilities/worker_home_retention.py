@@ -664,7 +664,8 @@ def _delivery_state(root: Path, meta: dict, *, legacy_empty_tombstone: bool = Fa
     ``legacy_empty_tombstone``: the pruner of 2026-09-06 to 10-15 left a
     zero-byte ``<record>.json.pruned`` only for a terminal (acked/expired/rejected)
     record, written before the record was removed. A caller that opts in reads such
-    a tombstone, with its record gone, as resolved. Only log retention opts in.
+    a tombstone, with its record gone, as resolved. Log retention and worktree
+    cleanup's registry duty opt in.
     Worker-home retention keeps refusing it (its folders can hold credentials and
     evidence), and so does the registry archive: moving the row would let the
     orphan-home path retire the home this tombstone still protects."""

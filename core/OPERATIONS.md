@@ -1284,9 +1284,11 @@ A legacy hash collision is diagnostic
      integration ref, main automatically runs
      `utilities/worktree-cleanup.py --check --worktree <path>` and then the
      same command with `--apply` when eligible. The state machine blocks the
-     primary worktree, dirty/untracked state, Git operations, locks, unmerged
+     primary worktree, dirty/untracked state, ignored files other than
+     rebuildable caches, Git operations, locks, unmerged
      HEADs absent from a freshly fetched remote default branch, local
-     integration commits not present in that remote tip, and active exact job
+     integration commits not present in that remote tip, a worktree whose
+     owner cannot be established, and active exact job
      PIDs or process cwd. A local integration branch may be behind the remote
      tip; cleanup does not require switching to or updating that branch. If
      remote evidence cannot be refreshed, cleanup blocks instead of trusting a
@@ -1300,6 +1302,48 @@ A legacy hash collision is diagnostic
      ref without remote evidence and records `integration_upstream=local-only`.
      It does not infer local-only from a missing upstream and does not weaken
      clean, merged, inactive-process, lock, or Git-operation gates.
+   - `git worktree remove` deletes ignored files with the folder, so the clean
+     check also reads them (`status --ignored=matching`, which counts a wholly
+     ignored folder as one entry). Only a short fixed list of rebuildable caches
+     does not count, and each is recognised by what it holds: a `__pycache__/`
+     whose entries (one level down) are all plain `*.pyc` files, a single
+     `*.pyc`, and `.pytest_cache/`, `.mypy_cache/` or `.ruff_cache/` carrying the
+     `CACHEDIR.TAG` those tools write (the tool's own `.gitignore` of `*` makes
+     git list the folder's contents, so an entry under such a folder counts too);
+     names that can hold results (`build/`, `dist/`, `node_modules/`, `.venv/`,
+     checkpoints) are never on it, and nothing selects or extends the list. Any
+     other ignored file blocks with `ignored-files`, `artifact_harvest_required=1`,
+     and the count, total size and largest paths (control characters in a name
+     are escaped); move or delete them, then run `--check` again. The final
+     recheck before removal reads them again. A tracked file marked
+     `skip-worktree` or `assume-unchanged` is hidden from `status` yet deleted
+     with the folder, so one that still exists makes the worktree `dirty`.
+   - The owner check accepts a worktree owned by the running user, or one owned
+     like this repository's shared git directory when the running user can
+     write that directory (network mounts show every file under one foreign
+     uid); any other owner stays `worktree-owner-unknown`. That second form does
+     not apply to root, and on a mount that shows every owner as one uid it
+     cannot tell users apart (the checkout is then protected by candidate
+     selection, not by this check). The process scan looks only at this host's
+     `/proc`: use of the same worktree from another host sharing the storage is
+     not seen. In the process scan, a same-user process whose cwd the kernel
+     refuses to show although its uid and gid (real, effective and saved) all
+     equal the running user's (a non-dumpable login-session process or the user
+     service manager) is counted as `unreadable_pids=N` instead of making the
+     whole scan unknown; it cannot be placed in or out of the worktree, while
+     registry-known worker PIDs and every readable cwd are still checked. A
+     refused process with any different uid or gid (for example one started with
+     `sg` or `newgrp`), an unreadable `/proc/<pid>/status`, and any other read
+     failure still block as `process-scan-unavailable`.
+   - A registry row for the worktree holds it as `retained-work` while its route
+     is open, a readable failed or blocked result is unclosed, a delivery is
+     open, not yet made or unreadable, or an owner input request is unfinished.
+     Two leftovers no longer hold it: an unfinished owner input request once the
+     row's route is closed (no replacement owner can take it; the text stays in
+     the state folder), and a zero-byte `.pruned` marker the 2026-09/10 pruner
+     left where a finished delivery's record had been. An open route, a delivery
+     whose record is still open (its recipient may be alive), and a marker that is
+     not an empty regular file still hold it.
    - Cleanup does not copy or harvest agent artifacts: workers wrote them to
      the canonical root from the start. A stale matching open registry row is
      reconciled to `done,note=cleanup-merged` only after every other safety
