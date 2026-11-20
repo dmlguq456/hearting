@@ -141,13 +141,14 @@ class ListPlaceUpdateTests(unittest.TestCase):
         return json.loads(done.stdout.splitlines()[-1]), time.monotonic() - started
 
     def test_a_pipe_in_every_list_place_gives_the_update_result_without_waiting(self):
+        slug = "gpt-{}-elm".format  # a made-up Codex-shaped name, never a real model id
         self.places["codex"].write_text(json.dumps({"models": [
-            {"slug": "gpt-1-elm", "visibility": "list"}, {"slug": "gpt-2-elm", "visibility": "list"}]}))
+            {"slug": slug(1), "visibility": "list"}, {"slug": slug(2), "visibility": "list"}]}))
         user = self.root / "codex" / "agent-config" / "models.conf"
         user.write_text(user.read_text().replace("CFG_MODEL_PROFILE_DEEP=deep:xhigh",
-                                                 "CFG_MODEL_PROFILE_DEEP=model/gpt-1-elm:high"))
+                                                 f"CFG_MODEL_PROFILE_DEEP=model/{slug(1)}:high"))
         lines, _ = self.update_in_child()  # the same fixture with a regular list does say something
-        self.assertTrue([t for t in lines if "gpt-1-elm -> gpt-2-elm" in t], lines)
+        self.assertTrue([t for t in lines if f"{slug(1)} -> {slug(2)}" in t], lines)
         for place in self.places.values():
             place.unlink(missing_ok=True)
             os.mkfifo(place)
