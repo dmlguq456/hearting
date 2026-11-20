@@ -311,10 +311,11 @@ def held(cwd, claim, now=None):
             return None
         path = ""
         if claim.get("has_doc") is True:
+            import artifact_campaign_documents as documents
             path = claim.get("path")
             if (not isinstance(path, str) or not os.path.isabs(path) or len(path) > 4096 or "\0" in path
                     or os.path.commonpath([root, os.path.realpath(path)]) != root
-                    or _fold(os.path.basename(path)) not in project_status.STATUS_NAMES):
+                    or _fold(os.path.basename(path)) not in (documents.CAMPAIGN_DOCUMENT, *documents.STATUS_NAMES)):
                 return None
             slot = ""
         return {"word": word, "has_doc": bool(path), "campaign": "", "age": "", "title": title, "path": path,

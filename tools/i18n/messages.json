@@ -2670,6 +2670,10 @@
    "en": "[Route] {capability} · {shape}({intensity}) {graph} · route {route_id} · origin compose · human gate {gates}",
    "ko": "[경로] {capability} · {shape}({intensity}) {graph} · route {route_id} · origin compose · 사람 게이트 {gates}"
   },
+  "route.card.header_unit": {
+   "en": "[Route] {capability} · {unit} · route {route_id} · origin compose · human gate {gates}",
+   "ko": "[경로] {capability} · {unit} · route {route_id} · origin compose · 사람 게이트 {gates}"
+  },
   "route.card.inputs": {
    "en": "Inputs {names} ← {cycles} {path}",
    "ko": "입력 {names} ← {cycles} {path}"

@@ -220,6 +220,9 @@ shows.
   with `file-outside-artifacts` and is not read; copies under `_internal/` or
   `versions/`, or deeper inside `artifacts/`, are not read either. A campaign keeps one
   and edits it in place (a finalized cycle still takes writes, D-123).
+- **`campaign.md` first.** A campaign folder's `campaign.md` is opened by name before
+  any older name (no folder listing, no ownership marker required); too large or unreadable,
+  it is unknown and no older name stands in for it.
 - **One selection rule.** Fleet, the close-time stamp updater and the artifact
   entrance use the common campaign-document reader. Conflicting campaign-root
   `STATUS.md` / `현황.md` candidates remain ambiguous; neither mtime nor a legacy

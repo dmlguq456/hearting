@@ -513,8 +513,10 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   work (`unit` one unit called and one thing done, no owner; `solo` the owner alone doing the whole procedure of its kind; `team` the owner and a worker
   for each stage; English in every language, decided once in the backend and carried as `kind_form`; the command's `--shape solo|staged` is the
   `solo` and `team` shown here), and after a `·` the
-  INTENSITY, always written, a unit's too (`● code(unit·quick)`, `● code(solo·quick)`, `● lab(team·strong)`); the color and weight of
-  the whole bracket are the intensity's (as above). A record with no intensity reads the form alone, a route with no form (a frame, an older
+  INTENSITY, always written for `solo` and `team` (`● code(solo·quick)`, `● lab(team·strong)`); the color and weight of
+  the whole bracket are the intensity's (as above). A `unit` route has no intensity on screen (11-20, the person: "unit에는 강도를 표시안하는게 맞겠네": it does one
+  thing and has no procedure to weigh, so `quick` was always the same blank value; the record keeps it, only the text leaves it out): `● code(unit)`, its
+  bracket the plain weight in the field's hue (dim where the field has no hue), as any bracket that holds no intensity. A record with no intensity reads the form alone, a route with no form (a frame, an older
   record) its intensity alone, an older unit route that records no field its bare `unit`, a `direct` route none, and a unit a worker called no
   bracket. Short of cells the `·intensity` tail goes first, then the bracket as before. The stage line never leads with `staged`
   (`code(team·standard) · 3/6: execute`; the stage box's title `3/6: execute`); the route's time stands at the right end of this

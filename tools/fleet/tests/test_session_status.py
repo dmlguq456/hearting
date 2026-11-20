@@ -101,6 +101,18 @@ class ChoiceTest(StatusTest):
         self.assertEqual(self.read()["campaign"], "beta")                       # no route: Fleet's document
         self.assertEqual(self.read()["title"], "현황 beta · 10m ago")
 
+    def test_the_panel_opens_campaign_md_before_the_older_names(self):
+        folder = self.campaign("alpha", age=3 * 3600)          # carries a hand written 현황.md
+        page = folder / "campaign.md"
+        page.write_text("<!-- hearting:campaign-document v1 -->\n" + DOC.format(name="alpha"), encoding="utf-8")
+        os.utime(page, (NOW - 7200, NOW - 7200))
+        view = self.read(self.route(1, "alpha"))
+        self.assertEqual((view["campaign"], view["has_doc"]), ("alpha", True))
+        self.assertTrue(view["path"].endswith("2026-11-10_alpha/campaign.md"))
+        page.write_text("# Large\n" + "x" * 70000, encoding="utf-8")       # too large: no older name stands in
+        os.utime(page, (NOW - 7200, NOW - 7200))
+        self.assertTrue(self.read(self.route(1, "alpha"))["path"].endswith("2026-11-10_alpha/campaign.md"))
+
     def test_routes_in_several_campaigns_show_the_most_recently_changed_document(self):
         self.campaign("alpha", age=7200)
         self.campaign("gamma", age=1200)

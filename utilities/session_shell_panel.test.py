@@ -1140,8 +1140,8 @@ for(const state of ['review','fix'])for(const width of [100,74,44,36,28]){
 
     def test_a_unit_route_leads_with_its_field_and_its_worker_line_names_the_unit(self):
         # 11-18 (the person: "Unit에서는 무슨 작업인지가 안보이잖아"): a unit route (one worker called with no owner) reads its
-        # field on the first line and, in the bracket, its form and the record's intensity `(unit·quick)` (11-19; before: `code` with no
-        # bracket) and the unit's short name stands in the role word's place on its worker line; a route with an owner keeps `owner`
+        # field on the first line and, in the bracket, its form alone `(unit)` (11-20; 11-19 had `(unit·quick)`, before that `code` with no
+        # bracket: a unit has no intensity on screen, the payload still carries it) and the unit's short name stands in the role word's place on its worker line; a route with an owner keeps `owner`
         # and its form and intensity bracket (`one-shot·quick`). An older route that records no field keeps `unit` with no bracket.
         # The name goes whole, never cut, where the row has no room for it.
         script = self.FIXTURE + r'''
@@ -1150,13 +1150,14 @@ const unit={...oneShot,id:'u',title:'PR 독립 검토',kind_word:'code',kind_fie
 const own={...oneShot,kind_word:'code',kind_form:'solo',intensity:'quick',role:'owner',owner_paint:oneShot.paint};
 const first=(rows,re)=>rows.find(s=>s.startsWith('│ │ ')&&re.test(s));
 const w44=draw([unit,own],44,60);
-assert(first(w44,/● code\(unit·quick\) +17m │ │$/),w44.join('\n'));
+assert(first(w44,/● code\(unit\) +17m │ │$/),w44.join('\n'));
+assert(!w44.some(s=>/quick/.test(s)&&/unit/.test(s)),w44.join('\n'));          // (no intensity on a unit's line, whatever the record holds)
 assert(first(w44,/● code\(solo·quick\)/),w44.join('\n'));            // the route with an owner reads its form and intensity too
-assert(w44.filter(s=>/unit/.test(s)).length===1,w44.join('\n'));          // the `(unit·quick)` of the first line is the one `unit` word
+assert(w44.filter(s=>/unit/.test(s)).length===1,w44.join('\n'));          // the `(unit)` of the first line is the one `unit` word
 const w32=draw([unit],32,60);
-assert(first(w32,/● code\(unit·quick\) +17m │ │$/),w32.join('\n'));
+assert(first(w32,/● code\(unit\) +17m │ │$/),w32.join('\n'));
 const w28=draw([unit],28,60);
-assert(first(w28,/● code\(unit\) +17m │ │$/),w28.join('\n'));         // narrower the intensity goes first
+assert(first(w28,/● code\(unit\) +17m │ │$/),w28.join('\n'));         // narrow: the same (nothing left to go first)
 // The worker line: the unit's name where a role word stands, then harness, model, effort; the owner route keeps `owner`.
 assert(w44.some(s=>/⠋ code-review claude Opus 5\.5/.test(s)),w44.join('\n'));
 assert(w44.some(s=>/⠋ owner claude/.test(s)),w44.join('\n'));
@@ -1169,18 +1170,26 @@ assert(!w26.some(s=>/research-s/.test(s))&&w26.some(s=>/⠋ .*Opus 5\.5/.test(s)
 const old=draw([{...unit,kind_word:'unit',kind_field:undefined,kind_form:undefined}],44,60);       // (the backend sends such a route no form)
 assert(first(old,/● unit +17m │ │$/)&&old.some(s=>/⠋ code-review claude/.test(s)),old.join('\n'));
 // Another field: `docs` / `research` read as themselves (only five hues, the rest the body color).
-for(const field of ['docs','research','plan'])assert(first(draw([{...unit,kind_word:field,kind_field:field==='plan'?undefined:field}],44,60),new RegExp('● '+field+'\\(unit·quick\\) +17m')),field);
+for(const field of ['docs','research','plan'])assert(first(draw([{...unit,kind_word:field,kind_field:field==='plan'?undefined:field}],44,60),new RegExp('● '+field+'\\(unit\\) +17m')),field);
 // An ended route's first line reads the same; its `success · title` line is the one it had.
 const ended=draw([{...unit,kind:'done',state:'done',outcome:'success'}],44,60);
-assert(first(ended,/ code\(unit·quick\) +17m/)&&ended.some(s=>/success · PR 독립 검토/.test(s)),ended.join('\n'));
+assert(first(ended,/ code\(unit\) +17m/)&&ended.some(s=>/success · PR 독립 검토/.test(s)),ended.join('\n'));
 // The bottom layout: the kind cell is the field, the unit's name leads the doer column.
 const bottom=draw([unit],140,20,{side:false});
-assert(bottom.some(s=>/code-review claude Opus 5\.5 xhigh .*│ code\(unit·quick\)/.test(s)),bottom.join('\n'));
+assert(bottom.some(s=>/code-review claude Opus 5\.5 xhigh .*│ code\(unit\) +17m/.test(s)),bottom.join('\n'));
+assert(!bottom.some(s=>/unit·|quick/.test(s)&&/code-review/.test(s)),bottom.join('\n'));
+// the inner row (a unit the route's worker called): its row is the one it was, no bracket
+const inner=draw([{...unit,called:[{kind:'working',unit_word:'fact-verify',elapsed:'3m',title:'check',kind_word:'code',kind_field:'code',paint:{glyph:P('⠸'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh')}}]}],44,60);
+assert(first(inner,/● code\(unit\) +17m │ │$/)&&inner.some(s=>/^│ │     ⠋ fact-verify claude Opus 5\.5 3m │ │$/.test(s)),inner.join('\n'));
+const innerBottom=draw([{...unit,called:[{kind:'working',unit_word:'fact-verify',elapsed:'3m',title:'check',kind_word:'code',kind_field:'code',paint:{glyph:P('⠸'),harness:P('claude'),model_text:P('Opus 5.5'),effort:P('xhigh')}}]}],100,30,{side:false});
+assert(innerBottom.some(s=>/fact-verify claude Opus 5\.5 xhigh +│ +│ code +3m │ │$/.test(s)),innerBottom.join('\n'));
 '''
         self.node(script, "panel-view.cjs")
 
 
     def test_the_bracket_holds_the_form_and_the_intensity_and_the_whole_bracket_follows_the_intensitys_color_and_weight(self):
+        # 11-20: a `unit` route's bracket is its form alone, `code(unit)`, in the field's plain weight (a form-only bracket's: not dim, which reads as
+        # `quick`, not bold); the form-and-intensity brackets of `solo`, `team`, a frame and an older record, and the exact lines below, are as they were.
         # 11-19 (the person: "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" / "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" /
         # "강도도 표기해 항상"): the bracket of a route in the dispatch zone holds the backend's form word (`kind_form`) and its intensity after a `·`,
         # always (`code(team·standard)`); a route with no intensity reads the form alone; one with no form (a frame, an older record) its
@@ -1205,20 +1214,20 @@ for(const [width,side] of [[44,true],[36,true],[28,true],[160,false],[130,false]
   const rows=rendered(all,width,side),text=texts(rows),tag=width+(side?' side':' bottom')+'\n'+text.join('\n');
   const has=re=>text.some(s=>re.test(s));
   if(width>=36||!side){
-    assert(has(/code\(unit·quick\)/)&&has(/code\(solo·quick\)/)&&has(/lab\(team·strong\)/)&&has(/code\(team\)/),tag);
+    assert(has(/code\(unit\)/)&&has(/code\(solo·quick\)/)&&has(/lab\(team·strong\)/)&&has(/code\(team\)/),tag);
     assert(side||has(/code\(team·standard\)/),tag);              // (beside the native area the chain and the stage take the room: the tail folds)
     assert(!has(/staged/)&&has(/ \d\/\d: /),tag);                 // (the stage line never leads with `staged`)
-    assert(!has(/unit\(/)&&!has(/\(quick\)|\(standard\)|\(strong\)/),tag);
+    assert(!has(/unit\(/)&&!has(/\(quick\)|\(standard\)|\(strong\)|unit·/),tag);
   }
   assert(has(/(● |│ )unit(?![(·])/),tag);                                  // (the older unit route: bare `unit`)
   // color: the whole bracket follows the intensity (quick dim, standard plain, strong bold) in the field's hue
   const key=(t,fg,dim,bold)=>find(rows,t).forEach(p=>assert(p.foreground===fg&&!!p.dim===dim&&!!p.bold===bold&&p.role==='kind',tag+JSON.stringify(p)));
-  if(width>=36||!side){key('(unit·quick)',69,true,false);key('(solo·quick)',69,true,false);if(!side)key('(team·standard)',69,false,false);key('(team·strong)',214,false,true);}
+  if(width>=36||!side){key('(unit)',69,false,false);key('(solo·quick)',69,true,false);if(!side)key('(team·standard)',69,false,false);key('(team·strong)',214,false,true);}
 }
 // the tail folds first, the colour stays that of the intensity; the form goes after the chain
 const row28=texts(rendered([std],28)).find(s=>/● frame|● code/.test(s));
 assert(/● code\(team\)/.test(row28)||/● frame ✓ → code\(team\)/.test(row28),row28);
-for(const [routes,word,fg,dim,bold] of [[[unit],'(unit)',69,true,false],[[strong],'(team)',214,false,true]]){
+for(const [routes,word,fg,dim,bold] of [[[unit],'(unit)',69,false,false],[[strong],'(team)',214,false,true]]){
   const got=[22,24,26,28,30,32,34,36].flatMap(w=>find(rendered(routes,w),word));
   assert(got.length&&got.every(p=>p.foreground===fg&&!!p.dim===dim&&!!p.bold===bold),word+JSON.stringify(got));}
 // as the width narrows the bracket only ever loses its tail, then itself (never the other way round)
@@ -1234,10 +1243,20 @@ assert(seen.every(v=>v>=0)&&seen.every((v,i)=>i===0||v>=seen[i-1])&&seen.include
 // mono / NO_COLOR / under 256 colors: dim brackets, the same text
 for(const extra of [{no_color:true},{colors:16}]){
   const rows=rendered([unit,std],44,true,extra);
-  assert(texts(rows).some(s=>/code\(unit·quick\)/.test(s)),JSON.stringify(extra));
-  assert(find(rows,'(unit·quick)').every(p=>p.dim===true&&!p.foreground),JSON.stringify(extra));
+  assert(texts(rows).some(s=>/code\(unit\)/.test(s)),JSON.stringify(extra));
+  assert(find(rows,'(unit)').every(p=>p.dim===true&&!p.foreground),JSON.stringify(extra));
   assert(find(rows,'(team·standard)').every(p=>!p.foreground),JSON.stringify(extra));
 }
+// 11-20: every other form's first line is exactly what it was (the unit is the only route whose bracket lost its intensity), at every width
+for(const [width,side,want] of [[44,true,[[quick,/^│ │ ● code\(solo·quick\) +41m │ │$/],[std,/^│ │ ● frame ✓ → code\(team\) · \d\/\d +1h 0m │ │$/]]],[28,true,[[quick,/^│ │ ● code\(solo\) +41m │ │$/],[strong,/^│ │ ● lab\(team\) +1h 0m │ │$/]]],
+  [160,false,[[quick,/│ code\(solo·quick\) +41m │ │$/],[strong,/│ lab\(team·strong\) · \d\/\d: \w+ +1h 0m │ │$/]]]]){
+  const text=texts(rendered([quick,std,strong,none],width,side));
+  for(const [route,re] of want)assert(text.some(s=>re.test(s)),width+' '+re+'\n'+text.join('\n'));
+}
+const frameRow={...own0,id:'f',kind_word:'frame',kind_field:undefined,kind_form:undefined,intensity:'standard',shape:'framed',role:'owner'};
+const directRow={...own0,id:'d',kind_word:'code',kind_field:'code',kind_form:undefined,intensity:'direct',shape:'direct',zone:'direct',role:'owner'};
+{const text=texts(rendered([frameRow,directRow],44));
+ assert(text.some(s=>/● frame\(standard\)/.test(s))&&text.some(s=>/● code +\d+m/.test(s)&&!/\(/.test(s)),text.join('\n'));}
 // a unit a worker called (under the route): no bracket on its row
 const caller={...staged,id:'c',kind_word:'code',kind_field:'code',kind_form:'team',intensity:'standard',role:'owner',workers_live:[{kind:'working',role:'worker',stage:'execute',elapsed:'12m',
  paint:{glyph:P('⠸'),harness:P('claude'),model_text:P('Sonnet 5.5')},called:[{kind:'working',unit_word:'code-review',elapsed:'3m',title:'review',kind_word:'code',kind_field:'code',

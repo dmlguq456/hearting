@@ -159,7 +159,8 @@ def draw_row(row, width, *, folded=0, mark=0):
             right = [(_elapsed(took / 60), "dim")] if isinstance(took, (int, float)) else []
         else:
             glyph, key = "⠏", _glyph_key("working")
-            more = [part for part in (row.get("capability"), row.get("intensity")) if part]
+            # 11-20: a unit route has no intensity to read (`unit`, not `unit · quick`); the story row keeps the record's value.
+            more = [part for part in (row.get("capability"), None if row.get("capability") == "unit" else row.get("intensity")) if part]
             tail = [(" · " + " · ".join(more), "dim")] if more else []
             right = []
         meta["go"] = "routes:" + str(row.get("route_id") or "")
