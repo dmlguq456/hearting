@@ -59,17 +59,28 @@ def _line_key(provider, model, account_scope) -> str:
     return json.dumps([provider, model, account_scope or "unscoped"], separators=(",", ":"))
 
 
-def _load(harness: str):
-    """The file's lines, or None when it is absent or not ours."""
+def _read(harness: str):
+    """The file's parsed JSON, or None when it is absent or unreadable."""
     try:
         with open(_path(harness), encoding="utf-8") as fh:
-            item = json.load(fh)
+            return json.load(fh)
     except (OSError, ValueError, TypeError):
         return None
+
+
+def _load(harness: str):
+    """The file's lines, or None when it is absent or not ours."""
+    item = _read(harness)
     if (not isinstance(item, dict) or item.get("schema_version") != SCHEMA_VERSION
             or item.get("harness") != harness or not isinstance(item.get("providers"), dict)):
         return None
     return item["providers"]
+
+
+def _from_a_newer_version(item) -> bool:
+    """A readable file a later version of this record wrote: its lines are not ours to replace."""
+    version = item.get("schema_version") if isinstance(item, dict) else None
+    return isinstance(version, int) and not isinstance(version, bool) and version > SCHEMA_VERSION
 
 
 def _flock(fd: int, deadline: float) -> bool:
@@ -97,6 +108,8 @@ def _edit(harness: str, deadline: float, edit) -> bool:
         os.makedirs(directory, exist_ok=True)
         fd = os.open(os.path.join(directory, ".%s.lock" % harness), os.O_CREAT | os.O_RDWR, 0o600)
         if not _flock(fd, deadline):
+            return False
+        if _from_a_newer_version(_read(harness)):
             return False
         lines = _load(harness)
         lines = dict(lines) if lines is not None else {}
@@ -263,18 +276,3 @@ def note_row_closed(meta) -> bool:
                                 source="registry-close", deadline=deadline)
     except Exception:  # noqa: BLE001 - a record that cannot be kept never changes the close
         return False
-
-
-def note_attempt_closed(jobs, attempt_id: str) -> bool:
-    """`note_row_closed` for a close whose caller holds no row: read the row, then note it."""
-    try:
-        from dispatch_contract_base import parse_registry_metadata
-        for line in Path(jobs).read_text(encoding="utf-8", errors="replace").splitlines():
-            fields = line.split("\t")
-            if len(fields) == 6 and fields[1] == "done":
-                meta = parse_registry_metadata(fields[5])
-                if meta.get("attempt_id") == attempt_id:
-                    return note_row_closed(meta)
-    except Exception:  # noqa: BLE001
-        pass
-    return False

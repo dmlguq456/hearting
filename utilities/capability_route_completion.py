@@ -334,23 +334,26 @@ def complete_node(
     if pending and supplied_finish and pending.get("intent",{}).get("evidence_sha256"):
         if not inline_finish.evidence_matches(Path(evidence),pending["intent"]["evidence_sha256"]):
             raise ValueError("finish-evidence-drift")
+    closed_row = {}
     marker, row = _complete_node_locked(
         route, node, node_id, evidence,
         jobs=jobs, attempt_id=attempt_id,
         explicit_attempt_metadata=explicit_attempt_metadata,
         review_claim=review_claim,
+        closed_row_out=closed_row,
     )
     if jobs and attempt_id and isinstance(row, dict) and row.get("status") == "closed":
         try:
             materialize_after_terminal_close(Path(jobs), attempt_id)
         except Exception:  # noqa: BLE001 -- a committed close is never unwound by delivery-layer failure
             pass
+    if closed_row and isinstance(row, dict) and row.get("status") == "closed":
         # The marker transaction is this close's own writer: the per-model record the registry's
-        # other closes keep, once, on the one transition (`closed` is never an already-closed row).
+        # other closes keep, once, from the row it just closed -- after every lock is released.
         try:
             import model_outcome_record
-            model_outcome_record.note_attempt_closed(Path(jobs), attempt_id)
-        except Exception:  # noqa: BLE001
+            model_outcome_record.note_row_closed(closed_row)
+        except Exception:  # noqa: BLE001 -- a record that cannot be kept never changes the close
             pass
     if isinstance(artifact_root, str) and isinstance(route_id, str) and route_id:
         try:
@@ -1112,7 +1115,10 @@ def _complete_node_locked(
     attempt_id=None,
     explicit_attempt_metadata=None,
     review_claim=None,
+    closed_row_out=None,
 ):
+    """`closed_row_out`, when given, receives the metadata of the row this call closed
+    (open|running -> done) -- the one transition, not a marker appended to an already-closed row."""
     if review_claim and node.get("kind")!="review-worker":
         raise ValueError("reviewer-claim-on-non-review-node")
     if jobs and not attempt_id:
@@ -1373,6 +1379,8 @@ def _complete_node_locked(
                     row_fields[5] += "".join(f",{key}={value}" for key,value in intent.items())
             lines[row_index]="\t".join(row_fields)
             _atomic_registry_replace(jobs_path,lines)
+            if closed_row_out is not None and not marker_eligible:
+                closed_row_out.update(parse_registry_metadata(row_fields[5]))
             return marker, {
                 "attempt_id":attempt_id,
                 "status":"marker-appended" if marker_eligible else "closed",

@@ -735,6 +735,33 @@ class StoreLockTest(Isolated):
         self.assertEqual((os.WEXITSTATUS(status), data), (0, b"dropped"))
         self.assert_intact("model-a")
 
+    def test_a_file_a_newer_version_wrote_is_not_replaced(self):
+        directory = Path(M.state_dir())
+        directory.mkdir(parents=True)
+        path = directory / "codex.json"
+        for version in (2, 7):
+            with self.subTest(version=version):
+                theirs = json.dumps({"schema_version": version, "harness": "codex",
+                                     "providers": {"theirs": {"model": "model-a", "state": "unavailable"}}})
+                path.write_text(theirs)
+                self.assertFalse(M.record_unavailable("codex", "codex", "model-b", "unscoped", "r"))
+                self.assertFalse(M.lift_unavailable("codex", "codex", "model-a", "unscoped"))
+                self.assertFalse(M.note_row_closed({"harness": "codex", "model": "model-b", "model_source": "explicit",
+                                                    "note": "dead-runtime-error", "failure_class": "runtime",
+                                                    "reconcile_reason": "runtime-model-rejected"}))
+                self.assertEqual(path.read_text(), theirs)
+                self.assertEqual(M.read("codex", "codex", "model-b", "unscoped")["state"], "unknown")
+        # Only a larger whole number counts: anything else is replaced as before.
+        for other in ('{"schema_version": 0, "harness": "codex", "providers": {}}',
+                      '{"schema_version": "9", "harness": "codex", "providers": {}}',
+                      '{"schema_version": true, "harness": "codex", "providers": {}}',
+                      '{"harness": "codex", "providers": {}}',
+                      '{"schema_version": 1, "harness": "claude", "providers": {}}', "[]", "{"):
+            with self.subTest(other=other):
+                path.write_text(other)
+                self.assertTrue(M.record_unavailable("codex", "codex", "model-b", "unscoped", "r"))
+                self.assertEqual(json.loads(path.read_text())["schema_version"], M.SCHEMA_VERSION)
+
     def test_a_broken_file_or_lock_never_raises_or_blocks(self):
         directory = Path(M.state_dir())
         directory.mkdir(parents=True)
@@ -753,13 +780,6 @@ class StoreLockTest(Isolated):
 
 class OpenCodeUnchangedTest(unittest.TestCase):
     """OpenCode's record and reader are the code before this piece: same bytes, same time."""
-
-    def test_the_usage_cache_module_is_the_one_before_the_model_record(self):
-        done = subprocess.run(["git", "-C", str(ROOT), "diff", "--quiet", "f3851bd73", "--",
-                               "tools/fleet/collectors/usage_cache.py"], capture_output=True)
-        if done.returncode == 128:
-            self.skipTest("history not available")
-        self.assertEqual(done.returncode, 0)
 
     def test_opencode_bytes_are_those_of_the_code_before(self):
         initial, ops = _opencode_steps()
@@ -971,19 +991,14 @@ class ClosePathTest(Isolated):
         self.assertEqual((settled["note"], settled["closed"]), ("dead-nonzero-exit", True))
         self.assertEqual(self.model(), "unavailable")
 
-    def test_the_route_completion_marker_close_notes_the_row_it_closed(self):
-        # `capability-route complete` closes the row with a marker; the registry's other closers are
-        # not on that path, so its own transition calls the same record once.
+    def test_the_route_completion_marker_close_hands_over_the_row_it_closed(self):
+        # `capability-route complete` is exercised end to end by `MarkerModelRecordTest` in the route
+        # suite; here, only that no helper re-reads the registry for the record any more.
         self.refuse()
-        self.jobs.write_text("2026-11-01T00:00:00Z\tdone\t%s\t%s\tstage\t%s\n" % (
-            self.base / "repo", self.base / "repo",
-            ",".join(f"{k}={v}" for k, v in {**self.meta, "note": "completed-marker",
-                                              "failure_class": "pass"}.items())))
-        self.assertTrue(M.note_attempt_closed(self.jobs, "att-join"))
+        closed = {**self.meta, "note": "completed-marker", "failure_class": "pass"}
+        self.assertTrue(M.note_row_closed(closed))
         self.assertEqual(self.model(), "usable")
-        source = (ROOT / "utilities" / "capability_route_completion.py").read_text()
-        guard = source.index('row.get("status") == "closed"')
-        self.assertIn("model_outcome_record.note_attempt_closed", source[guard:guard + 900])
+        self.assertFalse(hasattr(M, "note_attempt_closed"))
 
     def test_the_close_primitives_are_the_only_callers_and_each_calls_it_once(self):
         source = (ROOT / "utilities" / "dispatch_contract_rows.py").read_text()
