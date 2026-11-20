@@ -1069,8 +1069,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // bracket), also when the tail is folded away. A route of another shape (a frame, an older record) keeps its intensity bracket alone, an
     // older unit route that records no field keeps its bare `unit`, a `direct` route has no form, and a unit a worker called (`called`)
     // is a row under its caller's with no bracket.
+    // 11-20 (the person: "unit에는 강도를 표시안하는게 맞겠네", after "solo라도 strong은 가능하잖아. unit이어도 마찬가지고": a unit does one
+    // thing and has no procedure, so its intensity means nothing): a unit route's bracket is its form alone, `code(unit)`, whatever intensity
+    // the record keeps (the payload still carries it; only this drawing leaves it out). The bracket's color is the one a form-only bracket
+    // has (the field's hue at the plain weight; dim with no field hue): the weight steps belong to an intensity, so a unit is not dim (that
+    // would still read as `quick`) and not bold. No other form's bracket changes.
     const intensityOf=r=>{
-      if(r.unit_route===true&&(r.called===true||clean(r.kind_word||'').trim()==='unit'))return '';
+      if(r.unit_route===true)return '';
       const word=intensityRaw(r);
       return r.zone==='direct'&&(/^direct$/i.test(word)||word===clean(r.shape||'').trim())?'':word;
     };

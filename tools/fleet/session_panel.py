@@ -132,7 +132,7 @@ def route_kind(row):
     intensity = sanitize_title(str(row.get("intensity") or ""))[:32]
     # 11-19 (the person, in order: "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" / "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" /
     # "강도도 표기해 항상" / "unit과 one-shot의 의미가 딱 들으면 잘 구분이 되나? staged도 그 framed랑 함께 잘 표현이 되는 단어인가? 전반적으로 전향적
-    # 검토가 필요해" / "team도 괜찮은데?"): the intensity of every route is sent, a unit route's too; and the route's FORM (`unit`, `solo`, `team`:
+    # 검토가 필요해" / "team도 괜찮은데?"): the intensity of every route is sent, a unit route's too (11-20: the panel's drawing leaves a unit's out, `code(unit)`; this is the record's value); and the route's FORM (`unit`, `solo`, `team`:
     # who makes the work; `palette.route_form`, decided here once), which the panel draws in the bracket before the intensity (`code(team·standard)`).
     unit_route = str(row.get("capability") or "") == "unit"
     if intensity:
@@ -392,7 +392,7 @@ def route_row(row, now=None, *, cells=None):
             shown["kind_field"] = field
         # A unit route (one worker, no owner): its first word is the route's field (what the work is: `code`, `docs`; an
         # older route that records none keeps `unit`) and the unit's short name (`qa/code-review` reads `code-review`) stands
-        # on the worker's line. It is nobody's leg and has no bracket: its intensity is not a choice.
+        # on the worker's line. It is nobody's leg, and its bracket is its form alone (`code(unit)`, 11-20): its intensity is not a choice.
         if kind_word == "unit":
             shown["unit_route"] = True
             unit = sanitize_title(str(row.get("worker_unit") or "")).rsplit("/", 1)[-1][:48]

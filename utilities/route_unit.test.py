@@ -210,18 +210,41 @@ class UnitComposeTest(F.FramedBase):
 
 
 class UnitCliTest(F.FramedBase):
-    def run_cli(self, *extra, task="Review the change\n"):
+    def run_cli(self, *extra, task="Review the change\n", language=None):
         brief = Path(self._tmp.name) / "brief.md"
         brief.write_text(task, encoding="utf-8")
         evidence = Path(self._tmp.name) / "headless.json"
         evidence.write_text(json.dumps(T.registered_headless()), encoding="utf-8")
         env = {**F.clean_environment(), "AGENT_HOME": str(R.ROOT), "AGENT_DISPATCH_JOBS": str(self.jobs),
                "FLEET_ROUTE_CHAIN_DIR": str(Path(self._tmp.name) / "chains")}
+        if language:
+            env["FLEET_NOW_LANG"] = language
         return subprocess.run(
             [sys.executable, str(HERE / "capability-route.py"), "compose", "--cwd", str(R.ROOT),
              "--artifact-root", str(self.root), "--spec-read", "fixture", "--prompt-file", str(brief),
              "--registered-headless-evidence", str(evidence), "--unassigned", *extra],
             text=True, capture_output=True, env=env, check=False)
+
+    def test_the_card_names_the_unit_and_tells_no_intensity_while_the_record_keeps_it(self):
+        # 11-20 (the person: "unit에는 강도를 표시안하는게 맞겠네"): the `[경로]` header of a unit route was `unit · solo(quick) unit` (shape, intensity
+        # and the node id); it names the unit and its decision lines carry no `intensity=` line; the sealed route keeps `effective_intensity`.
+        # Another form's header and its `intensity=` line are exactly what they were.
+        for language, marker, word in (("en", "[Route]", "human gate"), ("ko", "[경로]", "사람 게이트")):
+            with self.subTest(language=language):
+                opened = self.run_cli("--unit", "qa/code-review", "--explain", language=language)
+                self.assertEqual(opened.returncode, 0, opened.stderr)
+                header = next(line for line in opened.stderr.splitlines() if line.startswith(marker))
+                self.assertRegex(header, r"^\%s unit · qa/code-review · route rt-[0-9a-f]{16} · origin compose · %s " % (marker, word))
+                self.assertNotIn("quick", header)
+                self.assertNotIn("solo", header)
+                self.assertNotIn("intensity=", opened.stderr)
+                self.assertEqual(json.loads(opened.stdout.strip().splitlines()[-1])["effective_intensity"], "quick")
+                for form, shape, shown in (("solo", "solo", "solo(quick) one-shot"), ("direct", "direct", "direct(direct) inline")):
+                    other = self.run_cli("--capability", "autopilot-code", "--shape", shape, "--explain", language=language)
+                    self.assertEqual(other.returncode, 0, other.stderr)
+                    line = next(row for row in other.stderr.splitlines() if row.startswith(marker))
+                    self.assertRegex(line, r"^\%s autopilot-code · %s · route rt-" % (marker, re.escape(shown)), form)
+                    self.assertIn("intensity=%s (source=shape-default" % ("quick" if shape == "solo" else "direct"), other.stderr)
 
     def test_explain_opens_the_unit_alone_and_refuses_in_the_existing_form(self):
         opened = self.run_cli("--unit", "qa/code-review", "--explain")
