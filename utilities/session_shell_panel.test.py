@@ -202,7 +202,7 @@ for(const [harness,states] of Object.entries(models))for(const width of [35,40,8
 
     def test_top_groups_and_quota_stay_while_a_question_takes_the_rows(self):
         # Spec 2026-11-11 rule 6: with too few rows the question and the three top
-        # groups stay; the messages' rows, then the route box's rows give way (11-15: the box again).
+        # groups stay; the messages' rows, then the route box's rows give way (11-15: the box again; 11-20: the messages go first).
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);
 const route=(id,title)=>({id,title,state:'working',kind:'working',elapsed:'42m',flow:'plan ✓ › execute ●',paint:{glyph:{text:'⠏'},harness:{text:'codex'},ctx:{text:'72%'}}});
@@ -229,8 +229,8 @@ for(const [width,side,low] of [[40,true,14],[80,false,10]])for(let height=low;he
  for(const want of ['1 QUESTIONS','◑ Q head'])assert(text.includes(want),'question row lost at '+width+'x'+height+'\n'+text);
  for(const want of ['project','fixture high','42%','SESSION_TITLE'])assert(text.includes(want),width+'x'+height+' lost '+want+'\n'+text);
  // Spec rules 23, 31 (v4.36.4's order, the route box again): the messages fold to one row (the newest
- // stays) before the route box scrolls; the route box goes before the messages section does.
- if(text.includes('ROUTE_0'))assert(text.includes('MESSAGE_TWO'),text);
+ // stays) before the route box scrolls; 11-20: the messages section goes before the route box does.
+ if(text.includes('MESSAGE_TWO'))assert(text.includes('ROUTE_0'),text);
  if(text.includes('MESSAGE_ONE'))assert(!/[↑↓]\d/.test(text),text);
 }
 const r=view.render({width:40,height:30,side:true,model,sid:'exact',configuration:{},questions:()=>[]});
@@ -501,18 +501,19 @@ assert.deepEqual(asked.hits.filter(h=>h.action==='question').map(h=>h.row),[qTop
 assert(asked.rows[qTop].filter(x=>/^[╭─╮ ]+$/.test(x.text)&&x.text.trim()).every(x=>x.dim===true&&x.role==='messages'),'a question not answered here leaves its box line dim');
 for(const s of rows)assert.equal(cells(s),40,s);
 // Short of rows (spec rule 23): two rows fold to one and messages fold to one row
-// before the route box scrolls in place; the messages go last.
+// before the route box scrolls in place; 11-20: the messages go first (before the route box does), the newest one last of them.
 const short=(h,q=question)=>text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model:{...model,answerable:true},state:'idle',brief:()=>q}));
 for(const q of [null,question])for(let h=12;h<=30;h++){
  const rows=short(h,q),all=rows.join('\n'),two=rows.some(s=>/^│ │   \S codex/.test(s));   // (a route in more than one row: its who under its title)
  assert(rows.length<=h,h+'\n'+all);
  // Fewer messages show from the oldest (their head counts the rest, spec rule 58), before the
- // route box scrolls; the newest message goes only with the section, last.
+ // route box scrolls; the newest message goes only with the section.
  const hidden=['MESSAGE_1','MESSAGE_2'].filter(m=>!all.includes(m)).length;
  if(all.includes('MESSAGE_3')&&hidden)assert(new RegExp('│ MESSAGES \\+'+hidden+' ').test(all),h+'\n'+all);
  if(all.includes('MESSAGE_1')&&all.includes('ROUTE_0'))assert(rows.filter(s=>s.includes('ROUTE_')).length===3&&!/[↑↓]\d/.test(all),h+'\n'+all);
  if(/[↑↓]\d/.test(all))assert(!two&&!all.includes('MESSAGE_2')&&!all.includes('MESSAGE_1'),h+'\n'+all);
- if(!all.includes('MESSAGE_3'))assert(!all.includes('╭─ 3 ROUTE'),h+' messages go last\n'+all);
+ // (The route box that went leaves rows over, which a section that fits there takes back: the newest message only, never an older one.)
+ if(!all.includes('╭─ 3 ROUTE'))assert(!all.includes('MESSAGE_1')&&!all.includes('MESSAGE_2'),h+' the messages go before the route box\n'+all);
 }
 // Every box is closed, whatever the height; an empty route list or message list draws no box (nor head).
 for(let h=10;h<=30;h++)for(const q of [null,question]){const rows=text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model,state:'idle',brief:()=>q}));
@@ -1800,7 +1801,7 @@ assert(!wide.includes('>_'),'no command column\n'+wide);   // 11-18
     def test_route_rows_outlast_message_bodies_and_the_rule_outlasts_empty_rows(self):
         # Spec E9 rule 34 (b), (c), 11-15 (the route box again): empty rows, then a value's extra rows,
         # then the structural rows go before the route box gives up anything; 11-16: then every message
-        # folds from its two rows (head, body) to one; then the route box's NOW rows go (11-17: the owner rows take the one-row form), its stage
+        # folds from its two rows (head, body) to one (11-20: before the rule under the metadata goes); then the route box's NOW rows go (11-17: the owner rows take the one-row form), its stage
         # rows go, its owner rows go (11-17: the title row stands alone), and only then it scrolls in place. The rule under the metadata
         # stays while TITLE or NOW takes more than one row; the messages fold all together.
         script = self.FIXTURE + r"""
@@ -1812,9 +1813,9 @@ const nine=[...Array(9)].map((_,i)=>{const r=noted[i%3];return {...r,id:'n'+i,ti
 const place=rows=>rows.filter(s=>/^│ │ {5}(staged )?\d+\/\d+: /.test(s)).length,names=rows=>rows.filter(s=>/^│ │   [⠋●✕] /.test(s)).length,titles=rows=>rows.filter(s=>/^│ │ [⠋●✕] (셸|세션|새 판)/.test(s)).length;
 const ctx=rows=>rows.filter(s=>/^│ │ {5}now step/.test(s)).length,shown=rows=>rows.filter(s=>/^│ │ [⠋●✕] /.test(s)).length;
 const section=rows=>{const m=rows.findIndex(s=>s.startsWith('│ MESSAGES'));return m<0?[]:rows.slice(m+1).filter(s=>/^│ [←→] /.test(s));};
-// 40×60: every route in its whole form (title, who with its context, NOW, stage; the one-shot route has no stage row, the third no NOW) and the five messages, two rows each.
+// 40×60: every route in its whole form (title, who with its context, NOW, stage; the one-shot route has no stage row, the third no NOW) and the three messages (11-20; five before), two rows each.
 const c60=draw(nine,40,60);
-assert(place(c60)===6&&titles(c60)===9&&names(c60)===9&&ctx(c60)===6&&section(c60).length===5&&c60.filter(s=>/^│   \S/.test(s)).length===5,c60.join('\n'));
+assert(place(c60)===6&&titles(c60)===9&&names(c60)===9&&ctx(c60)===6&&section(c60).length===3&&c60.filter(s=>/^│   \S/.test(s)).length===3,c60.join('\n'));   // 11-20: three messages at most
 // The first height (from 72 down) each step is taken.
 const first={};
 for(let h=72;h>=16;h--){
@@ -1828,7 +1829,8 @@ for(let h=72;h>=16;h--){
  // Each route in the box takes the same form; the box never shows more than its rows.
  assert(rows.length<=h&&rows.filter(s=>s.includes('╭─ 9 ROUTE')).length===1,h+'\n'+all);
 }
-assert(first.rule>=first.msg&&first.msg>=first.ctx&&first.ctx>first.place&&first.place>first.names&&first.names>first.scroll,JSON.stringify(first));
+// (11-20: the messages fold first, with MEM's rows, before the rule under the metadata goes.)
+assert(first.msg>=first.rule&&first.rule>=first.ctx&&first.ctx>first.place&&first.place>first.names&&first.names>first.scroll,JSON.stringify(first));
 // Empty rows go before the rule does: with room to spare the rule stands. (11-16: the QUESTIONS box takes two rows
 // where its head row took one, so the height this stood at, 60, is 61 now; 62 leaves the same one spare row.)
 const tall=draw(nine,40,62);
@@ -1865,7 +1867,7 @@ const noGit=view.render({width:40,height:50,side:true,fill:true,model:{...head,g
 assert(noGit[1].includes('hearting/')&&blank(noGit[2])&&noGit[3].includes('claude-fable-5-2 high'),noGit.join('\n'));
 // (c) Six routes and eight messages at 40×58: the question's head, then the route box (every route
 // in its whole form), the one parting row above the first section, and the rows the sections leave
-// stay empty under the box, above MESSAGES (`MESSAGES +3`, five messages of two rows each, at the panel's bottom).
+// stay empty under the box, above MESSAGES (`MESSAGES +5`, three messages of two rows each, at the panel's bottom).
 const more=[...messages,message('←','[52]','08:10','두 번째 검토 — 줄이는 순서를 확인해 주세요, 본문이 길어서 둘째 줄까지 넘어감',6),
  message('→','[73]','08:20','PR 출판 요청 두 번째',7,'전달됨'),message('←','[e7]','08:30','설치 끝',8)];
 const noted=[oneShot,staged,waiting].map(r=>r===waiting?r:{...r,paint:{...r.paint,now:'now step'}});   // (the third has no NOW, so no NOW row)
@@ -1877,10 +1879,10 @@ const rule=rows=>rows.findIndex(s=>s.startsWith('│ MESSAGES'));
 // (11-16: the QUESTIONS section is a thin box too, its name in the top line; `bottom` is the last box's, the route box's.)
 const first=rows=>rows.findIndex(s=>/^│ (\d+ )?QUESTIONS |^│ ╭─/.test(s)),bottom=rows=>rows.findLastIndex(s=>s.startsWith('│ ╰'));
 const full=paint(six,58),m=rule(full),q0=first(full),rb=bottom(full);
-assert(q0>0&&blank(full[q0-1])&&/^│ 1 QUESTIONS ─+ › │$/.test(full[q0])&&full[q0+1].startsWith('│ ╭─ 6 ROUTE ─')&&rb>q0+24&&m>rb&&/^│ MESSAGES \+3 ─+ › │$/.test(full[m]),full.join('\n'));
+assert(q0>0&&blank(full[q0-1])&&/^│ 1 QUESTIONS ─+ › │$/.test(full[q0])&&full[q0+1].startsWith('│ ╭─ 6 ROUTE ─')&&rb>q0+24&&m>rb&&/^│ MESSAGES \+5 ─+ › │$/.test(full[m]),full.join('\n'));   // 11-20: three at most, five of the eight left out
 // MESSAGES keeps to the panel's bottom (spec rule 14): its rows end above the thin rule and the 5h/7d row, the spare rows
 // stand between the route box and it.
-assert([1,3,5,7,9].every(k=>/^│ [←→] \[/.test(full[m+k])&&/^│   \S/.test(full[m+k+1]))&&m+11===full.length-3&&/^│ ─+ │$/.test(full.at(-3))&&full.slice(rb+1,m).every(blank)&&full.at(-2).includes('7d 66%'),full.join('\n'));
+assert([1,3,5].every(k=>/^│ [←→] \[/.test(full[m+k])&&/^│   \S/.test(full[m+k+1]))&&m+7===full.length-3&&/^│ ─+ │$/.test(full.at(-3))&&full.slice(rb+1,m).every(blank)&&full.at(-2).includes('7d 66%'),full.join('\n'));
 // With a question the summary stands in the QUESTIONS box, between its top line and the route box (11-15: right above it).
 const asked=paint([oneShot,staged],44,{q:QUESTION,messages}),q=asked.findIndex(s=>s.includes('1 QUESTIONS ›'));
 assert(q>2&&blank(asked[q-1])&&asked[q+1].startsWith('│ │ ◑ Q_HEAD')&&asked[q+2].startsWith('│ │   1 A · 2 B')&&/^│ ╰─+╯ │$/.test(asked[q+3])&&asked[q+4].startsWith('│ ╭─ 2 ROUTE ─')&&rule(asked)>bottom(asked),asked.join('\n'));
@@ -1903,7 +1905,8 @@ for(let h=72;h>=14;h--){
  for(const [k,v] of Object.entries({spacer:!f.spacer,foot:!f.foot,multi:!f.multi,msgfold:f.msgfold,meta:!f.meta,ruled:!f.ruled,ctx:f.ctx<4,place:f.place<4,shown:f.shown<6}))   // (four NOW rows, four stage rows: the one-shot route has none)
   if(v&&gone[k]===undefined)gone[k]=h;
 }
-assert(gone.spacer>=gone.foot&&gone.foot>=gone.multi&&gone.multi>=gone.meta&&gone.meta>=gone.ruled&&gone.ruled>=gone.msgfold&&gone.msgfold>=gone.ctx&&gone.ctx>gone.place&&gone.place>gone.shown,JSON.stringify(gone));
+// (11-20: the messages fold right after the values on several rows, before the metadata row and the rule go.)
+assert(gone.spacer>=gone.foot&&gone.foot>=gone.multi&&gone.multi>=gone.msgfold&&gone.msgfold>=gone.meta&&gone.meta>=gone.ruled&&gone.ruled>=gone.ctx&&gone.ctx>gone.place&&gone.place>gone.shown,JSON.stringify(gone));
 '''
         self.node(script, "panel-view.cjs")
 
@@ -2056,7 +2059,7 @@ const owned={...oneShot,role:'owner',kind_word:'code'};
 const at=(o={})=>view.render({width:o.width||40,height:60,side:o.side!==false,fill:o.side!==false,model:{...head,routes:[owned,staged],route_count:2,...(o.model||{})},
  state:'working',configuration:{},questions:()=>[],...(o.extra||{})});
 const v=at(),rows=plain(v),all=rows.join('\n');
-assert(rows.some(s=>s.startsWith('│ ╭─ 2 ROUTE ─'))&&rows.some(s=>/^│ MESSAGES ─+ › │$/.test(s))&&!/\broute \d|messages/.test(all),all);
+assert(rows.some(s=>s.startsWith('│ ╭─ 2 ROUTE ─'))&&rows.some(s=>/^│ MESSAGES( \+\d+)? ─+ › │$/.test(s))&&!/\broute \d|messages/.test(all),all);   // 11-20: three at most, `+N` counts the rest
 const count=v.rows.flat().find(p=>p.text==='2 ROUTE');assert(count&&count.beat===true,JSON.stringify(count));
 // (11-17, route row 5: the kind stands alone in the route's first line, `● code`; the owner's line under its title.)
 assert(all.includes('⠋ owner')&&rows.some(s=>/^│ │ \S code +\d+m │ │$/.test(s))&&!all.includes('code · one-shot'),all);
@@ -2065,7 +2068,7 @@ const label=plain(at({model:{routes:[],route_count:0,route_label:'route 3 ⠏2'}
 assert(label.some(s=>s.includes('╭─ 3 ROUTE ⠏2 ─')),label.join('\n'));
 // The bottom layout: `route N`, `messages`.
 const bottom=plain(at({width:120,side:false})).join('\n');
-assert(bottom.includes('╭─ route 2 ')&&/│ messages ─+ › │/.test(bottom)&&!/ROUTE|MESSAGES/.test(bottom),bottom);
+assert(bottom.includes('╭─ route 2 ')&&/│ messages( \+\d+)? ─+ › │/.test(bottom)&&!/ROUTE|MESSAGES/.test(bottom),bottom);
 assert(plain(at({width:120,side:false,model:{routes:[],route_count:0,route_label:'route 3 ⠏2'}})).join('').includes('╭─ route 3 ⠏2 ─'));
 """
         self.node(script, "panel-view.cjs")
@@ -2085,14 +2088,14 @@ for(const height of [50,70,90]){
  const rows=tall(height),r=rows.findIndex(s=>s.startsWith('│ ╭─ 2 ROUTE ')),rb=rows.findIndex((s,i)=>i>r&&s.startsWith('│ ╰')),m=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
  // (11-16: with no row to show inside it, the section stays its head row: an empty box is no box.)
  assert(r>0&&/^│ 1 QUESTIONS /.test(rows[r-1])&&blank(rows[r-2]),height+'\n'+rows.join('\n'));
- // MESSAGES keeps its rows (five at most, two each) above the thin rule and the 5h/7d row; the blank rows stand above its head.
+ // MESSAGES keeps its rows (three at most since 11-20, two each) above the thin rule and the 5h/7d row; the blank rows stand above its head.
  // (11-18: the route box is its top line, the `dispatch` rule, the first route's title, who and CTX row, the second's title, who, CTX row and stage line, then its bottom: `r+9`; no NOW, no row.)
  const last=rows.findLastIndex(s=>/^│ [←→] /.test(s));
- assert(last===rows.length-5&&/^│   \S/.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&/⚙   ▾ │$/.test(rows.at(-2))&&rb===r+9&&m>rb&&m+12===rows.length-2,height+'\n'+rows.join('\n'));
+ assert(last===rows.length-5&&/^│   \S/.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&/⚙   ▾ │$/.test(rows.at(-2))&&rb===r+9&&m>rb&&m+8===rows.length-2,height+'\n'+rows.join('\n'));
  assert(blank(rows[m-1])&&rows.slice(rb+1,m).every(blank)&&rows.slice(r+1,rb).every(s=>/^│ │ /.test(s)),height+'\n'+rows.join('\n'));
  // The press targets went with their rows.
  const v=view.render({width:40,height,side:true,fill:true,model:{...head,routes:[oneShot,staged],route_count:2},state:'idle',configuration:{},questions:()=>[]});
- for(let k=0;k<=10;k++)assert(v.hits.some(h=>h.row===m+k&&h.action==='popup:MESSAGES'),k+JSON.stringify(v.hits));
+ for(let k=0;k<=6;k++)assert(v.hits.some(h=>h.row===m+k&&h.action==='popup:MESSAGES'),k+JSON.stringify(v.hits));
 }
 // MEM under MESSAGES: its last row above the thin rule and 5h/7d, the blank rows above MESSAGES.
 {const rows=tall(50,{model:{memory_items:[{tier:'durable',kind:'decision',age:'3m',text:'MEM_ONE'},{tier:'durable',kind:'fact',age:'1h',text:'MEM_TWO'}]}}),
@@ -2121,10 +2124,10 @@ assert(bottom.some(s=>/^│ messages( \+\d+)? ─+ › │$/.test(s))&&!bottom.s
 """
         self.node(script, "panel-view.cjs")
 
-    def test_messages_show_five_at_most_however_many_rows_are_left(self):
+    def test_messages_show_three_at_most_however_many_rows_are_left(self):
         # 11-14 night ("메시지 뜨는 최대 개수를 좀 줄이자. 세로폭이 아무리 길어도 말이야"): beside the native area
         # no more than five messages show whatever the height (11-16: two rows each again); the head counts
-        # the rest (`MESSAGES +N`). Spare rows never lengthen a body.
+        # the rest (`MESSAGES +N`). Spare rows never lengthen a body. 11-20 (the person: "MESSAGE도 최대 3개 정도로 다시 줄이고"): three.
         script = self.FIXTURE + r"""
 const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
 const more=[...messages,message('←','[52]','08:10','두 번째 검토',6),message('→','[73]','08:20','PR 출판 요청 두 번째',7,'전달됨'),message('←','[e7]','08:30','설치 끝',8)];
@@ -2132,13 +2135,13 @@ const at=(list,height)=>plain(view.render({width:40,height,side:true,fill:true,m
 const heads=rows=>rows.filter(s=>/^│ [←→] \[/.test(s));
 for(const list of [messages,more])for(const height of [60,90,140]){
  const rows=at(list,height),label=rows.find(s=>s.startsWith('│ MESSAGES'));
- assert.equal(heads(rows).length,5,height+'\n'+rows.join('\n'));
- assert(new RegExp('^│ MESSAGES'+(list.length>5?' \\+'+(list.length-5):'')+' ─+ › │$').test(label),label);
- // The newest five, oldest first.
- assert.deepEqual(heads(rows).map(s=>s.slice(4,8)),list.slice(-5).map(m=>m.who),rows.join('\n'));
+ assert.equal(heads(rows).length,3,height+'\n'+rows.join('\n'));
+ assert(new RegExp('^│ MESSAGES'+(list.length>3?' \\+'+(list.length-3):'')+' ─+ › │$').test(label),label);
+ // The newest three, oldest first.
+ assert.deepEqual(heads(rows).map(s=>s.slice(4,8)),list.slice(-3).map(m=>m.who),rows.join('\n'));
 }
-// Five or fewer: all of them, and no count.
-for(const n of [1,3,5]){const rows=at(messages.slice(0,n),90);assert.equal(heads(rows).length,n);assert(rows.some(s=>/^│ MESSAGES ─+ › │$/.test(s)),rows.join('\n'));}
+// Three or fewer: all of them, and no count.
+for(const n of [1,2,3]){const rows=at(messages.slice(0,n),90);assert.equal(heads(rows).length,n);assert(rows.some(s=>/^│ MESSAGES ─+ › │$/.test(s)),rows.join('\n'));}
 // Spare rows never lengthen a body: a long body is one row (under its head) ending in `…`.
 const long=[...messages.slice(0,2),message('←','[52]','08:10','두 번째 검토 — 줄이는 순서를 확인해 주세요, 본문이 길어서 둘째 줄까지 넘어가고 셋째 줄까지 이어지는 긴 본문입니다',6)];
 const rows=at(long,90),i=rows.findIndex(s=>s.startsWith('│ ← [52]'));
@@ -2184,7 +2187,7 @@ const sections=rows=>{const at=HEADS.map(([name,re])=>[name,rows.findIndex(s=>re
  assert(at.every(([,i])=>i>0),rows.join('\n'));assert(at.every(([,i],k)=>!k||i>at[k-1][1]),'order of the heads\n'+rows.join('\n'));
  const out={};at.forEach(([name,i],k)=>{const end=name==='ROUTE'||/^│ ╭/.test(rows[i])?rows.findIndex((s,j)=>j>i&&s.startsWith('│ ╰'))+1:k+1<at.length?at[k+1][1]:rows.findIndex((s,j)=>j>i&&!/^│ [◆◇·] |^│   \S/.test(s));
   const body=rows.slice(i+1,end);while(body.length&&/^│ +│$/.test(body.at(-1)))body.pop();out[name]={head:i,rows:body,from:i+1};});return out;};
-for(const [height,rowsOf] of [[46,{QUESTIONS:2,MESSAGES:8,MEM:4}],[20,{QUESTIONS:1,MESSAGES:1,MEM:2}]]){
+for(const [height,rowsOf] of [[46,{QUESTIONS:2,MESSAGES:6,MEM:4}],[20,{QUESTIONS:1,MESSAGES:1,MEM:1}]]){
  const v=paint(height),rows=v.rows.map(r=>r.map(x=>x.text).join('')),sec=sections(rows),label=height+'\n'+rows.join('\n');
  assert(rows.length<=height&&rows.at(-2).includes('7d 64%'),label);
  assert(!/\bLAB\b|SESSIONS|긴 문맥|분리 모델/.test(rows.join('\n')),label);
@@ -2216,11 +2219,12 @@ for(const [height,rowsOf] of [[46,{QUESTIONS:2,MESSAGES:8,MEM:4}],[20,{QUESTIONS
  assert.deepEqual(act(sec.MESSAGES.head),['popup:MESSAGES']);sec.MESSAGES.rows.forEach((_,k)=>assert.deepEqual(act(sec.MESSAGES.from+k),['popup:MESSAGES']));
  assert.deepEqual(act(sec.MEM.head),[]);sec.MEM.rows.forEach((_,k)=>assert.deepEqual(act(sec.MEM.from+k),[]));
  if(height===46){
-  assert.deepEqual([0,2,4,6].map(k=>sec.MESSAGES.rows[k].slice(2,8)),['← [e7]','→ [73]','← [12]','← [52]'],label);
-  assert.deepEqual([1,3,5,7].map(k=>sec.MESSAGES.rows[k].slice(2,6)),['  CI','  설치','  답 ','  정리'],label);}
+  // (11-20: the newest three of the four.)
+  assert.deepEqual([0,2,4].map(k=>sec.MESSAGES.rows[k].slice(2,8)),['→ [73]','← [12]','← [52]'],label);
+  assert.deepEqual([1,3,5].map(k=>sec.MESSAGES.rows[k].slice(2,6)),['  설치','  답 ','  정리'],label);}
  // MESSAGES and MEM keep to the bottom: MEM's last row, a thin rule (the second thing to go when short of rows), then the 5h/7d row.
  if(height===46)assert(/^│   \S/.test(rows.at(-4))&&/^│ ◆ /.test(rows.at(-5))&&/^│ ─+ │$/.test(rows.at(-3))&&rows.at(-2).includes('7d 64%'),label);
- else assert(/^│   \S/.test(rows.at(-3))&&/^│ ◆ /.test(rows.at(-4))&&rows.at(-2).includes('7d 64%'),label);
+ else assert(/^│ ◆ /.test(rows.at(-3))&&rows.at(-2).includes('7d 64%'),label);   // 11-20: short of rows the record is its one row (mark, age, headline)
 }
 // Taller than the sections need: the blank rows stand between the route box and the MESSAGES head, not under MEM.
 {const v=paint(52),rows=v.rows.map(r=>r.map(x=>x.text).join('')),sec=sections(rows),blank=s=>/^│ +│$/.test(s),label=rows.join('\n');
@@ -2502,7 +2506,7 @@ assert(oneRecord>noRecord&&noRecord>=noHead&&noHead>noMsgRow&&noMsgRow>noMsgHead
 // the title role) and a thin rule in the same color runs on from each to the row's end (to `›` for
 // MESSAGES); nothing stands before a head.
 let lined=at();rows=plain(lined);
-assert(rows.some(s=>/^│ MESSAGES ─+ › │$/.test(s))&&rows.some(s=>/^│ MEM ─+ │$/.test(s))&&!rows.some(s=>/── (MESSAGES|MEM)/.test(s)),rows.join('\n'));
+assert(rows.some(s=>/^│ MESSAGES( \+\d+)? ─+ › │$/.test(s))&&rows.some(s=>/^│ MEM ─+ │$/.test(s))&&!rows.some(s=>/── (MESSAGES|MEM)/.test(s)),rows.join('\n'));
 const ruleOf=word=>lined.rows[rows.findIndex(s=>s.startsWith('│ '+word))].find(p=>/^─+$/.test(p.text));
 const a=ruleOf('MESSAGES'),b=ruleOf('MEM');
 assert(a&&b&&a.role==='messages'&&a.role===b.role&&a.dim===b.dim&&a.foreground===b.foreground,JSON.stringify([a,b]));
@@ -2550,10 +2554,10 @@ for(const state of ['idle','working','blocked'])for(const folded of [false,true]
         self.node(script, "panel-view.cjs")
 
     def test_the_sections_give_way_in_their_order_and_the_question_keeps_its_rows(self):
-        # The panel's order (spec rule 34 (b), 46 (d), 11-15, 11-16): short of rows MEM steps down to two rows
-        # and then to one, every message folds from two rows to one, the route box folds its rows, fewer
-        # messages show down to one, then the route box scrolls in place and (v4.36.4's place) goes before
-        # the others give their last rows; then MEM goes, then MESSAGES' row and head.
+        # The panel's order (spec rule 34 (b), 46 (d), 11-15, 11-16, 11-20): short of rows MESSAGES and MEM go down first, before any
+        # other section gives a row: every message folds from two rows to one, MEM shows two records and then one, MESSAGES two messages
+        # and then one (three messages at most). Only then does the route box fold its rows and scroll in place; then MEM goes, then
+        # MESSAGES' row and head, and last of these the route box (11-20: the person put it before MESSAGES and MEM).
         # The question keeps its head and first row, the fold and settings row stay.
         script = self.FIXTURE + r"""
 const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
@@ -2577,9 +2581,11 @@ for(let h=90;h>=8;h--){
  assert(rows.length<=h,h);
 }
 const label=JSON.stringify(first)+'\n'+seen.join('\n');
-assert(first.mem1>=first.msgfold&&first.msgfold>=first.fold&&first.fold>first.msg4&&first.msg4>first.msg3&&first.msg3>first.msg2&&first.msg2>first.msg1&&first.msg1>first.msg0&&first.msg0>first['msg-1'],label);
-assert(first.msg1>first.scroll&&first.scroll>first.boxGone,label);
-assert(first.boxGone>first.mem0&&first.mem0>first['mem-1']&&first['mem-1']>first.msg0,label);
+// Three messages at most from the start (11-20); MESSAGES and MEM stand at their floor (one message, one record) before the route box folds.
+assert(first.msg3===90&&first.msg4===90&&first.msgfold>first.msg2&&first.msg2>=first.mem1&&first.mem1>=first.msg1&&first.msg1>first.fold,label);
+assert(first.fold>first.scroll&&first.msg1>first.scroll,label);
+// MEM and then MESSAGES go whole before the route box does (11-20); the question keeps its rows to the end.
+assert(first.scroll>first.mem0&&first.mem0>first['mem-1']&&first['mem-1']>first.msg0&&first.msg0>first['msg-1']&&first['msg-1']>first.boxGone,label);
 // With a question: its head and first row stay at every height (its second row goes early, with MEM's rows, before the messages fold).
 const asked=rows=>rows.filter(s=>/1 QUESTIONS|조건을 계속|1 계속 · 2 멈춤/.test(s));
 for(let h=40;h>=10;h--){const rows=sections(h,{q});

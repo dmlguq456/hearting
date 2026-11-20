@@ -363,7 +363,8 @@ dim (none for zero or an unknown count), the status button `현황 ›` (`STATUS
 the section heads' `›` column, no ground and no count; short of cells the word goes first, then
 `· wt N` whole, then the name is cut with `…`, the name and `›` staying; the unlabelled head and the
 bottom layout carry it at their first row's right end; no status document: all of it dim, a press
-still opens it; no artifact root: no button; a press anywhere on the row opens the status popup), and `GIT    main ✓`, all dim with no
+still opens it; no artifact root: no button; a press anywhere on the row opens the status popup; 11-20: while the panel
+draws the STATUS section (below) the button stands in that section's head and the row carries none, so it is drawn once), and `GIT    main ✓`, all dim with no
 parentheses: the branch and dirty mark cut at 20 cells (32 with 60 cells
 inside), then `✓` when ahead and behind are both known to be 0, else `↑N`/`↓N`
 (nothing when unknown: no upstream to compare with), then the existing merge
@@ -427,8 +428,8 @@ layout keeps the metadata row (or rows) first and one content row
 
 Under the head the panel is a few rows per section (11-15, popup design E), each
 a press away from its popup, where the section's own table reads whole: in order
-QUESTIONS, the route box, MESSAGES and MEM (beside the native area all of
-them; under it QUESTIONS, the route box and MESSAGES). The panel draws no LAB and no SESSIONS
+QUESTIONS, STATUS, the route box, MESSAGES and MEM (beside the native area all of
+them; under it QUESTIONS, STATUS, the route box and MESSAGES). The panel draws no LAB and no SESSIONS
 section (11-15, the person: the experiment board and the machine's sessions read in Fleet's own
 LAB and session tables, which stay; the panel no longer reads the board or the session table, nor
 watches their files). Every other section's head has one form:
@@ -589,12 +590,30 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   stands over a `Checking` row, and a known empty list draws no box. The `route line`
   setting picks what a route keeps in its one-row form short of cells: `time` the
   elapsed time, `model` its context.
+- STATUS (11-20, the person: "현황이 사용성이 많아 질 수 있는 부분이니까 좀 더 눈에 띄면 좋겠어" / "패널 공간에 현황은 중요하지. 기본적으로 5줄
+  이상 써서 보이는것도 중요할것 같다"; the 11-15 button on the REPO row had been the whole of it): the section second from the top, right
+  under the question to answer here (a question never gives its place) and above the route box, in both placements. Its head is
+  `현황 ──── ›` (`STATUS`, Fleet's `fleet.repo.status`; a press on it or on any row opens the status popup, and the REPO row's button is
+  gone while the section stands). Under it the lists of this campaign's status document, in the order of the list the person liked
+  (`STATUS-LIST-SIAN`): `하는 중` (in progress), `기다리는 것` (what waits for the person), `최근에 끝난 것`, `나중에 할 것`; each a head row
+  (its name, its count) and its titles under it, two cells in, one row each (`⠋`, `◇`, `✓`, `·`; the waiting count and glyph in the
+  caution color). The lists are the document's own top-level bullets under `## 하는 중`, `## 결정 기다리는 것`, `## 끝난 일`, `## 예정`
+  (and the near spellings an older hand-written page uses: `결정 필요`, `다음`, `최근 마감`; a note in parentheses is no title), read by
+  the backend with the button's value (`session_status.read`'s `groups`, the first 64 KiB, again only when the document's modification
+  time or size changed; no new timer, watch or worker). No document, or none with such a heading: no section, and the button stays on
+  the REPO row. A `## 결정 기다리는 것` with nothing under it is the count 0. Body rows: `STATUS_MIN` = 5 while rows allow, up to
+  `STATUS_MAX` = 12 (four heads and eight titles, two to a group) where they are plentiful. Short of rows the groups give their titles up
+  from the last: `하는 중`, `기다리는 것`, `최근에 끝난 것`, `나중에 할 것` stand as counts, the neighbouring ones on one row
+  (`최근에 끝난 것 4 · 나중에 할 것 3`, the short names `끝난 일 4 · 예정 3` where the full ones do not fit), and the group that waits for the
+  person keeps its title to the last: five rows are `하는 중` with a title, `기다리는 것` with a title and one row of counts; below five
+  rows the whole section is one row of counts.
 - MESSAGES: the recent messages, two rows each as v4.36.4 drew them (spec rule 31, restored 11-16, the
   person: "메시지 형식은 퇴행했네? 최대 5개 정도로 늘리고, 그전에 원래 형식으로 돌려"): the head (the arrow in
   its direction's color, the other session's number, then dim harness, time, kind and a sent one's
   delivery state, which for a message that has not gone in is `awaiting delivery · why` (11-17): the first word stays whole
   and the why goes on as far as the row reaches, ending in `…`; short of cells kind, harness and time go first) and, two cells in, the text's first
-  line in the body color (`…` where it goes on); five at most (`MESSAGES_MAX`), `+N` counts the rest. A message whose
+  line in the body color (`…` where it goes on); three at most (`MESSAGES_MAX`; five until 11-20, the person: "대신 MESSAGE도 최대 3개
+  정도로 다시 줄이고"), `+N` counts the rest. A message whose
   other end is this session itself (a session-tidy notice to its own seat; 11-16, the person: "메시지에 스스로 보내는
   메시지가 잡히는건 좀 불필요하지 않나?") is no message between two sessions: the MESSAGES rows, their popup, the folded
   strip's count and Fleet's session page leave it out (`peer_message_rows`, the one place they read them; Fleet's links
@@ -617,7 +636,8 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   the stored headline (else the start of its snippet) in the body color on up to two
   rows, the second ending in `…` where it goes on. Short of cells the head row loses
   the kind, then the scope (the mark and the age stay); short of rows every headline
-  takes one row, then fewer records show; no section without a journal row.
+  takes one row, then (11-20) each record takes its one-row form (its mark and age dim, then the headline in the body color,
+  `…` where it goes on: `◆ 10m headline`), then two records show, then one; no section without a journal row.
 
 - USAGE (spec rule 59, 11-16, the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을
   USAGE로 해서 넣자"): the section at the panel's bottom, its name row `USAGE ────` (as MESSAGES' and MEM's, no `›`: it
@@ -679,25 +699,24 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
 
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run short they give way in this order:
-RESOURCES (11-18: its GPU rows, then its host rows and name; the idle count goes with its host row); empty rows and a value's further rows (title, NOW, a route's title); every other
-section down to two rows, then to one, the lowest first (MEM: its headlines one row each, then
-down to two records and to one; the question's action row,
-then its summary keeps one row and the guidance line goes); the
-structural rows (the empty row inside the metadata, the head's rule); then every message takes the
-one-row form (`← [e7] text`; 11-16, v4.36.4's places and order: a body keeps its one row, then the one-row
-form, then fewer messages); then the
+RESOURCES (11-18: its GPU rows, then its host rows and name; the idle count goes with its host row); empty rows and a value's further rows
+(title, NOW, a route's title); then (11-20, the person: "MESSAGE, MEM은 좀 더 세로길이 따라서 과감하게 표시 줄을 줄여버려 1~2줄 수준으로" and "현황 5줄과
+NOW·QUESTIONS·ROUTE가 MESSAGES·MEM보다 먼저 자리를 받게") MESSAGES and MEM go down before any other section gives a row, in this order: MEM's
+headlines take one row each; every message takes the one-row form (`← [e7] text`); every record takes its one-row form; MEM shows two records;
+MESSAGES two messages; MEM one record; MESSAGES one message (`+N` on its head counts the rest): from nine and six rows down to two rows, then one;
+then the STATUS section's titles above its five rows; then the question's action row, its summary's second row and the guidance line;
+the structural rows (the empty row inside the metadata, the head's rule; the question box's two border lines); then the
 route box's own steps (11-17: its zone rules are not among them, they stay while a row of the zone shows), every
 route at the same step (v4.36.4, spec rules 34 (b), 38,
 48 (c); 11-18): the workers' closed box becomes the open one, each NOW's second row goes, each `CTX` row goes (its number joins the first row at the right
 edge), each NOW's first row goes, the workers take one row each, the workers go (the kind row ends with
-`· worker N`), the kind rows go, every route takes one row; then fewer messages show, the
-newest staying, down to one; then the box shows fewer
+`· worker N`), the kind rows go, every route takes one row; then the box shows fewer
 routes and scrolls in place (the wheel over it), down to one, its border counting
 what it hides (`↑2`, `↓3`; it takes the rows of its tallest window, so the wheel moves
-nothing else); then Git; then the route box (v4.36.4's place for it, before the running
-jobs); the running jobs; then MEM gives its row, then its head, then (11-16) the USAGE section's rows of the
+nothing else); then Git; then MEM gives its row, then its head, then (11-16) the USAGE section's rows of the
 harnesses that are not this window's (the last first) and its name row, then MESSAGES gives its row and its
-head; the question's head and first row stay to the last (its box's two border lines go after its content
+head; then the STATUS section goes down to its one row of counts; then the route box (11-20: after MESSAGES and MEM; v4.36.4 had it before the
+running jobs and them before MESSAGES); the running jobs; then the STATUS section; the question's head and first row stay to the last (its box's two border lines go after its content
 rows, before the structural rows below them); this window's own usage row last of all. Rows a later step frees beyond its need go back to the steps
 before it, the most important first. A section is placed whole or not at all; the
 rows left over stand above MESSAGES and MEM (which keep to the bottom, with their
@@ -997,7 +1016,7 @@ the popup's width and sends the painted cells, Fleet's row tints left out; narro
 Fleet's columns leave as Fleet leaves them), NOW (11-17, below) and MESSAGES (the requests and messages whole, then
 the peer delivery reading `r`). The bottom line lists the sections with
 something in them in the panel's order, `현황 · NOW · QUESTIONS · ROUTE · MESSAGES` (STATUS by its button's
-word, there while the button stands; NOW while the panel holds a NOW; `Ctrl+]` still opens what it opened before, never NOW), the current one bright; ←→ (or a press on a name) moves to
+word, there while the button or the STATUS section stands; NOW while the panel holds a NOW; `Ctrl+]` still opens what it opened before, never NOW), the current one bright; ←→ (or a press on a name) moves to
 the next or previous one. A popup row reaches the terminal with every control character (C0, DEL and
 C1) as a space. In a table ↑↓, Tab and Shift+Tab unfold the next or
 previous route (Fleet's `▶`) or read on a row; Enter opens the

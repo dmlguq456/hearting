@@ -102,7 +102,7 @@ for(let w=60;w>=14;w--){
 for(const o of [{cfg:{theme:'mono'}},{model:{no_color:true}}]){const m=mem(draw({...o,mem:[MEM[0],MEM[1],MEM[4]]}));assert(m.rows[0].startsWith('│ ◆ ')&&m.rows.some(r=>r.startsWith('│ ◇ '))&&m.rows.some(r=>r.startsWith('│ · ')),JSON.stringify(o));}
 """)
 
-    def test_short_of_rows_headlines_take_one_row_then_fewer_records_and_mem_goes_first(self):
+    def test_short_of_rows_headlines_take_one_row_then_the_one_row_form_then_fewer_records(self):
         out = self.node(r"""
 const seen=[];
 for(let h=70;h>=14;h--){
@@ -115,11 +115,11 @@ for(let h=70;h>=14;h--){
 const firstOne=seen.find(s=>s.records===3&&s.longest===1),firstFewer=seen.find(s=>s.head&&s.records<3);
 assert(firstOne&&firstFewer&&firstOne.h>firstFewer.h,JSON.stringify(seen));
 assert(seen[0].records===3&&seen[0].longest===2,JSON.stringify(seen[0]));
-// Between the sections MEM gives way first: the messages keep their five records in two rows while MEM steps down,
-// and MESSAGES gives up its rows only after MEM's last record went.
-for(const s of seen){if(s.msg<5||!s.two)assert(s.records<=1,JSON.stringify(s));}
-const msgFold=seen.find(s=>!s.two),memOne=seen.find(s=>s.records<=1);
-assert(memOne.h>=msgFold.h,JSON.stringify(seen));
+// 11-20: MEM and MESSAGES are the first sections to go down, together: MEM's headlines take one row, then the messages take the one-row form,
+// then MEM's records do (their mark first, then the age and headline on one row), then fewer records and messages show; three messages at most.
+assert(seen[0].msg===3&&seen[0].two,JSON.stringify(seen[0]));
+const msgFold=seen.find(s=>!s.two);
+assert(firstOne.h>=msgFold.h&&msgFold.h>=firstFewer.h,JSON.stringify(seen));
 console.log(JSON.stringify(seen.map(s=>[s.h,s.records,s.longest,s.msg,s.two?2:1])));
 """)
         self.assertTrue(out.strip())

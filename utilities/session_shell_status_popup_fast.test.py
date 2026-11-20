@@ -284,6 +284,8 @@ const at=async needle=>{await flush();for(let y=0;y<rows;y++){const c=cellsOf(y)
 const until=async(test,what,ms=20000)=>{const began=Date.now();while(Date.now()-began<ms){const s=await screen();if(test(s))return {s,ms:Date.now()-began};await sleep(25);}
   throw Error('never '+what+'\n'+(await screen()).join('\n'));};
 const has=word=>s=>s.some(line=>line.includes(word));
+// 11-20: the button stands on the REPO row (`현황 ›`) or, once the panel draws the STATUS section, in that section's head (`현황 ──── ›`).
+const hasButton=s=>s.some(line=>line.includes('현황 ›')||/현황 ─+ ›/.test(line));
 const press=async(x,y,ms=100)=>{child.write(`\x1b[<0;${x+1};${y+1}M\x1b[<0;${x+1};${y+1}m`);await sleep(ms);};
 const key=async(bytes,ms=250)=>{child.write(bytes);await sleep(ms);};
 const box=s=>{const top=s.findIndex(l=>l.includes('╭─')&&l.includes('✕ ─╮'));if(top<0)return null;
@@ -299,7 +301,8 @@ const drop=name=>{try{fs.unlinkSync(cfg.control+'/'+name);}catch{}};
 const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.renameSync(file+'.new',file);};
 const rename=async title=>{const cache=JSON.parse(fs.readFileSync(cfg.cache,'utf8'));cache.observed_at=Date.now()/1000;
   cache.route_panels[cfg.key][0].title=title;write(cfg.cache,JSON.stringify(cache));};
-const opened=async()=>{const repo=await at('REPO');await press(repo.x+2,repo.y,0);};
+// 11-20: the press that opens the popup stands on the REPO row (its button) or, once the STATUS section stands, on that section's head.
+const opened=async()=>{const spot=await at('현황 ─')||await at('REPO');await press(spot.x+2,spot.y,0);};
 const close=async()=>{await key('\x1b',300);await until(s=>!box(s),'closed');};
 const edit=(from,to)=>fs.writeFileSync(cfg.doc,fs.readFileSync(cfg.doc,'utf8').replace(from,to));
 const checks={};
@@ -307,7 +310,7 @@ const checks={};
   if(cfg.scenario==='open'){
     // The button's read is slow (a scan of a slow disk); Fleet's collection is slower still.
     control('read-delay',1.5);control('vm-delay',4);
-    await until(has('현황 ›'),'the button');await sleep(500);
+    await until(hasButton,'the button');await sleep(500);
     const r0=count('read-start'),v0=count('vm');
     // 100 paints: no read.
     for(let i=0;i<100;i++){child.write('a');await sleep(10);}
@@ -364,7 +367,7 @@ const checks={};
     await until(has('READY_'+cfg.harness),'the panel');
     // The first read's own end in the log (its worker exits right after it), not a fixed wait.
     await until(()=>count('read-end')>=1,'the first read ended');
-    checks.button_after_crash=has('현황 ›')(await screen());checks.reads_failed=count('read-end');
+    checks.button_after_crash=hasButton(await screen());checks.reads_failed=count('read-end');
     // Events while a read is under way: it asks again once it ends, never beside it.
     const started=count('read-start'),ended=count('read-end');
     for(const title of ['표 하나','표 둘','표 셋']){await rename(title);await until(has(title),'the route renamed '+title);await sleep(250);}
@@ -377,7 +380,7 @@ const checks={};
     checks.most_at_once=most;
     // The disk answers again: the next event gives the button.
     drop('read-crash');drop('read-delay');await rename('表 넷');
-    await until(has('현황 ›'),'the button after the read works again');checks.button_after=true;
+    await until(hasButton,'the button after the read works again');checks.button_after=true;
     // That read's end is in the log before the quiet stretch is counted (no read is left under way).
     await until(()=>count('read-end')>=count('read-start'),'the button read ended');
     const r0=count('read-start');await sleep(800);checks.reads_when_quiet=count('read-start')-r0;
@@ -386,7 +389,7 @@ const checks={};
     // Fleet's lines are slow and the window narrows while they are out: rows laid out at the old width are
     // not kept as the new width's; the popup opened again stands with its document, then the new width's lines.
     control('read-delay',0);control('vm-delay',3);
-    await until(has('현황 ›'),'the button');await sleep(300);
+    await until(hasButton,'the button');await sleep(300);
     await opened();await until(popupHas('NEWEST_DOC_LINE'),'the document');
     const v0=count('vm');
     cols=110;term.resize(cols,rows);child.resize(cols,rows);await sleep(300);

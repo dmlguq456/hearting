@@ -286,5 +286,88 @@ class PopupTest(StatusTest):
                 self.assertLessEqual(cell_width(text(row)), width, (width, text(row)))
 
 
+# A campaign document in the shape the campaign-document design gives it (fixture titles only).
+CAMPAIGN = """<!-- hearting:campaign-document v1 -->
+# 시안용 캠페인
+
+갱신 2026-11-20 10:00
+
+**한 줄**: 시험용 문서.
+
+## 결정 기다리는 것
+- 질문판에 열린 질문 2개
+- 시안 B로 갈지 정하기
+
+## 하는 중
+- 시험용 작업 가 · 기록 2
+- 시험용 작업 나 · #1801
+- (하루 넘게 움직임 없는 열린 route 4개는 접어 둠)
+
+## 끝난 일
+- 11-19 시험용 끝난 일 하나 · #1790
+- 11-18 시험용 끝난 일 둘 · #1788 · v4.60.1
+
+## 예정
+- 시험용 예정 하나
+"""
+
+
+class GroupsTest(StatusTest):
+    """11-20: the panel's STATUS section reads the document's lists with the button's value."""
+
+    def kinds(self, text_):
+        return [(g["kind"], g["count"], g["items"]) for g in session_status.parse_groups(text_)]
+
+    def test_the_four_lists_of_a_campaign_document_in_the_panels_order(self):
+        groups = session_status.parse_groups(CAMPAIGN)
+        self.assertEqual([g["kind"] for g in groups], ["running", "waiting", "done", "next"])
+        self.assertEqual([g["name"] for g in groups], ["하는 중", "기다리는 것", "최근에 끝난 것", "나중에 할 것"])
+        self.assertEqual([g["count"] for g in groups], [2, 2, 2, 1])
+        # The note in parentheses is no title; a title keeps what the document wrote.
+        self.assertEqual(groups[0]["items"], ["시험용 작업 가 · 기록 2", "시험용 작업 나 · #1801"])
+        self.assertEqual(groups[2]["items"][1], "11-18 시험용 끝난 일 둘 · #1788 · v4.60.1")
+
+    def test_the_wait_list_with_nothing_under_it_is_a_count_of_zero_and_other_empty_lists_are_left_out(self):
+        text_ = "# t\n\n## 결정 기다리는 것\n지금 없음\n\n## 하는 중\n\n## 끝난 일\n- 하나\n"
+        self.assertEqual(self.kinds(text_), [("waiting", 0, []), ("done", 1, ["하나"])])
+
+    def test_a_hand_written_page_gives_what_it_can_and_a_page_without_lists_gives_none(self):
+        self.assertEqual(self.kinds(DOC.format(name="x")), [("waiting", 1, ["하나"]), ("next", 1, ["둘"])])
+        self.assertEqual(session_status.parse_groups("# 제목\n\n그냥 글\n\n## 판\n- 항목\n"), [])
+        self.assertEqual(session_status.parse_groups(""), [])
+        # A record of what was decided is no list of work; nested bullets are no title of their own.
+        self.assertEqual(self.kinds("# t\n\n## 결정 기록\n- 지난 결정\n\n## 하는 중\n- 하나\n  - 안쪽\n"), [("running", 1, ["하나"])])
+
+    def test_titles_are_capped_and_terminal_safe(self):
+        body = "# t\n\n## 끝난 일\n" + "".join("- 줄 %d\n" % n for n in range(40)) + "- 긴 줄 " + "가" * 500 + "\n"
+        done = session_status.parse_groups(body)[0]
+        self.assertEqual((done["count"], len(done["items"])), (41, session_status.GROUP_ITEMS))
+        longest = session_status.parse_groups("# t\n\n## 끝난 일\n- 긴 줄 " + "가" * 500 + "\x1b[31m\n")[0]["items"][0]
+        self.assertLessEqual(len(longest), session_status.GROUP_TITLE)
+        self.assertNotIn("\x1b", longest)
+
+    def test_the_value_carries_the_groups_and_a_document_is_read_again_only_when_its_stamp_changed(self):
+        folder2 = self.campaign("beta", body=CAMPAIGN)       # (`campaign.md` is read by name once the campaign-document work lands; the page stands in)
+        view = self.read(self.route(2, "beta"))
+        self.assertEqual([g["kind"] for g in view["groups"]], ["running", "waiting", "done", "next"])
+        calls = []
+        real = session_status.read_text
+        with mock.patch.object(session_status, "read_text", side_effect=lambda path: calls.append(path) or real(path)):
+            self.read(self.route(2, "beta"))
+            self.read(self.route(2, "beta"))
+            self.assertEqual(calls, [])                          # the same stamp: no read of the document
+            path = folder2 / "현황.md"
+            path.write_text(CAMPAIGN + "- 하나 더\n", encoding="utf-8")
+            os.utime(path, (NOW - 10, NOW - 10))
+            again = self.read(self.route(2, "beta"))
+            self.assertEqual(len(calls), 1)
+        self.assertEqual(again["groups"][-1]["count"], 2)
+
+    def test_no_document_and_a_document_that_cannot_be_read_give_no_groups(self):
+        self.campaign("alpha", doc=False)
+        self.assertEqual(self.read(self.route(1, "alpha"))["groups"], [])
+        self.assertEqual(session_status.read_groups(str(self.root / "nowhere.md")), [])
+
+
 if __name__ == "__main__":
     unittest.main()

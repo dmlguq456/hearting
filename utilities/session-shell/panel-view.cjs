@@ -26,8 +26,14 @@ const BORDER_ARC=1/4,BORDER_LAP=60;
 // second) in the lit red of `FACES.*.waitBlink`, as many in its other red.
 const WAIT_BLINK=10;
 // 11-16 (the person: "최대 5개 정도로 늘리고, 그전에 원래 형식으로 돌려"): MESSAGES shows the newest MESSAGES_MAX
-// messages at most, each its head row and its first line (spec rule 31).
-const MESSAGES_MAX=5;
+// messages at most, each its head row and its first line (spec rule 31). 11-20 (the person: "대신 MESSAGE도 최대 3개 정도로
+// 다시 줄이고"): three at most.
+const MESSAGES_MAX=3;
+// 11-20 (the person: "패널 공간에 현황은 중요하지. 기본적으로 5줄 이상 써서 보이는것도 중요할것 같다"): the STATUS section's body
+// (under its head row) keeps STATUS_MIN rows while the rows allow, and takes up to STATUS_MAX where they are plentiful: four
+// group heads and eight titles (two to a group, the waiting ones first). Short of rows MESSAGES and MEM go down first, to one
+// or two rows each, before the STATUS section gives up any of its rows.
+const STATUS_MIN=5,STATUS_MAX=12;
 // 11-16 (the person: "메모리도 메시지랑 같은 맥락이야"): MEM shows the newest MEM_MAX records at most, each its
 // dim head row and its headline on up to two rows (spec rule 46 (b)). 11-18 (the person: "MEM는 최대 최근 3개만 띄워도 되겠다"): three at most.
 const MEM_MAX=3;
@@ -765,7 +771,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // the name is cut with `…`; the name and `›` stay to the last. A press anywhere on the row opens the
     // status popup. No artifact root: no button (`status_doc` absent).
     const statusDoc=model.status_doc&&typeof model.status_doc==='object'&&clean(model.status_doc.word).trim()?model.status_doc:null;
-    const topActions=new Map();
+    const topActions=new Map(),withoutButton=new Map();
     const statusButton=whole=>{const arrow=text('›','dim');if(!whole)return [arrow];
       return [text(clean(statusDoc.word).trim(),statusDoc.has_doc===true?'loc_repo':'dim'),text(' '),arrow];};
     // `name` and `count` with the button at the right end of `room` cells, or null without a button.
@@ -800,8 +806,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const room=inner-labelWidth,count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
         const withCount=count.length>0&&size(sideRepo)+size(count)<=room;
         const button=withButton(sideRepo,count,room);
-        if(button)topActions.set(top.length,'popup:STATUS');
-        top.push(labelled('REPO',button||(withCount?[...sideRepo,...count]:cut(sideRepo,room))));mark(0,'head',...(withCount&&!sideGit.length?['git']:[]));
+        const plain=labelled('REPO',withCount?[...sideRepo,...count]:cut(sideRepo,room));
+        if(button){topActions.set(top.length,'popup:STATUS');withoutButton.set(top.length,plain);}
+        top.push(button?labelled('REPO',button):plain);mark(0,'head',...(withCount&&!sideGit.length?['git']:[]));
       }
       // Short of cells the first part (the branch, the model name) gives way so what follows
       // it (the status and a warning, the effort) stays whole.
@@ -858,7 +865,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // content row; the row break parts them (no rule).
       const first=joined([repo,selected,contextParts]);
       // The status button at the first row's right end (the word first gives way, then the row is cut).
-      const atEnd=row=>{if(!statusDoc)return row;topActions.set(0,'popup:STATUS');
+      const atEnd=row=>{if(!statusDoc)return row;topActions.set(0,'popup:STATUS');withoutButton.set(0,row);
         for(const whole of [true,false]){const b=statusButton(whole);if(size(row)+1+size(b)<=inner)return [...row,pad(inner-size(row)-size(b)),...b];}
         return [...cut(row,Math.max(1,inner-2)),pad(Math.max(1,inner-Math.min(size(row),Math.max(1,inner-2))-1)),...statusButton(false)];};
       if(size(first)<=inner){top.push(atEnd(first));mark(0,'head',...(contextParts.length?['context']:[]));}
@@ -1757,7 +1764,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // (`◆ project · decision · 10m`); short of cells the kind leaves, then the scope (the mark and the
     // age stay). Short of rows (below) every headline takes one row, then fewer records show. No popup:
     // its head has no `›`.
-    let memBody=2;
+    let memBody=2,memOne=false;
     const memTop=m=>{
       const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
       for(const words of [[m.scope,m.kind],[m.scope],[]]){
@@ -1766,15 +1773,77 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       return cut([text([mark,m.age].filter(Boolean).join(' '),'dim')],inner);
     };
+    // 11-20 (the person: "MESSAGE, MEM은 좀 더 세로길이 따라서 과감하게 표시 줄을 줄여버려 1~2줄 수준으로"): the one-row form a record takes
+    // when rows run short, as a message's (`messageLine`): its mark and age dim, then the headline in the body color (`…` where it goes on).
+    const memLine=m=>{
+      const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
+      return cut([text([mark,m.age].filter(Boolean).join(' ')+' ','dim'),text(m.text,'loc_repo')],inner);
+    };
     const memRows=m=>{
+      if(memOne)return [memLine(m)];
       let body=wrapAll([text(m.text,'loc_repo')],inner-2);
       if(body.length>memBody)body=[...body.slice(0,memBody-1),ellipsis(body[memBody-1],inner-2)];
       return [memTop(m),...body.map(row=>[text('  '),...row])];
     };
+    // STATUS (11-20, the person: "현황이 사용성이 많아 질 수 있는 부분이니까 좀 더 눈에 띄면 좋겠어" / "기본적으로 5줄 이상 써서 보이는것도
+    // 중요할것 같다"; the 11-15 button on the REPO row stands in this head now): the section's head `현황 ──── ›`, then its groups in the
+    // order of the list the person liked (`STATUS-LIST-SIAN`): what is in progress, what waits for the person, what ended lately, what
+    // comes later; each a head row (its name and its count) and the titles under it (`⠋`, `◇`, `✓`, `·`). The groups are the
+    // campaign document's own (`status_doc.groups`, read by the backend; no document, or none it can read: no section, and the
+    // button stays on the REPO row). Short of rows the later groups give their titles up first and are left as a count (one row
+    // for the groups next to each other: `최근에 끝난 것 5 · 나중에 할 것 3`); the group that waits for the person is the last to.
+    const statusWord=statusDoc?clean(statusDoc.word).trim():'';
+    const STATUS_KINDS=['running','waiting','done','next'],STATUS_FIRST=['waiting','running','done','next'];
+    const STATUS_LOOK={running:['⠋','lvl_g','loc_repo'],waiting:['◇','lvl_y','loc_repo'],done:['✓','lvl_g','dim'],next:['·','dim','dim']};
+    const statusGroups=(()=>{
+      const list=statusDoc&&Array.isArray(statusDoc.groups)?statusDoc.groups:[];
+      return STATUS_KINDS.map(kind=>list.find(g=>g&&typeof g==='object'&&g.kind===kind)).filter(Boolean).map(g=>{
+        const items=(Array.isArray(g.items)?g.items:[]).map(i=>clean(i).trim()).filter(Boolean).slice(0,6),name=clean(g.name).trim()||g.kind;
+        return {kind:g.kind,name,short:clean(g.short).trim()||name,items,count:Math.max(items.length,Math.trunc(Number(g.count))||0)};
+      }).filter(g=>g.count>0||g.kind==='waiting');
+    })();
+    // The groups' rows when `n` rows are all there is: every group starts as a count, then one title at a time goes to the groups in
+    // the order of STATUS_FIRST for as long as the rows hold; neighbouring counts share one row.
+    const statusCounts=(groups,names)=>{
+      const piece=g=>[text(names==='short'?g.short:g.name,'loc_repo'),text(' '),text(String(g.count),g.kind==='waiting'&&g.count>0?'lvl_y':'dim')];
+      const row=joined(groups.map(piece),' · ');
+      return size(row)<=inner?row:null;
+    };
+    const statusCountRow=groups=>statusCounts(groups,'name')||statusCounts(groups,'short')||cut(joined(groups.map(g=>[text(g.short+' '+g.count,'loc_repo')]),' · '),inner);
+    const statusRows=n=>{
+      if(!statusGroups.length||n<1)return [];
+      const shown=new Map(statusGroups.map(g=>[g,0]));
+      const count=()=>{let r=0,run=false;for(const g of statusGroups){if(shown.get(g)>0){r+=1+shown.get(g);run=false;}else{if(!run)r++;run=true;}}return r;};
+      if(count()>n)return [statusCountRow(statusGroups)];
+      // (A title that does not fit blocks its group and every group after it in STATUS_FIRST, the others go on: a group never gets a title
+      // before one that comes earlier there, so the group that waits for the person keeps its title to the last.)
+      let blocked=STATUS_FIRST.length;
+      for(let more=true;more;){more=false;
+        for(const [rank,kind] of STATUS_FIRST.entries()){
+          const g=statusGroups.find(x=>x.kind===kind);
+          if(rank>=blocked||!g||shown.get(g)>=g.items.length)continue;
+          shown.set(g,shown.get(g)+1);
+          if(count()>n){shown.set(g,shown.get(g)-1);blocked=rank;}else more=true;
+        }}
+      const out=[];let run=[];
+      const flush=()=>{if(run.length)out.push(statusCountRow(run));run=[];};
+      for(const g of statusGroups){
+        if(!shown.get(g)){run.push(g);continue;}
+        flush();
+        const [glyph,mark,ink]=STATUS_LOOK[g.kind];
+        out.push(cut([text(g.name,'loc_repo'),text(' '),text(String(g.count),g.kind==='waiting'?'lvl_y':'dim')],inner));
+        for(const title of g.items.slice(0,shown.get(g)))out.push(cut([text('  '),text(glyph+' ',mark),text(title,ink)],inner));
+      }
+      flush();
+      return out;
+    };
+    const statusMax=statusRows(STATUS_MAX).length;
     // The sections in order, each with the most rows it takes and its rows at a given count.
     const SECTIONS=[
       {name:'QUESTIONS',on:asked,max:3,head:()=>sectionHead(questionCount?[{...text(questionCount,'g_blocked'),role:'accent'}]:[],summary?.label||'QUESTIONS'),
         rows:()=>questionRows(),action:'question',groups:model.wait?['wait']:[]},
+      // Second from the top: what the person looks at most, right under the question to answer here (which never gives its place).
+      {name:'STATUS',on:statusGroups.length>0,max:statusMax,head:()=>sectionHead([],statusWord,[],[[]],true),rows:n=>statusRows(n),action:'popup:STATUS'},
       {name:'ROUTE',on:!!routeTitle,box:true},
       {name:'MESSAGES',on:messageTotal>0,max:MESSAGES_MAX,head:()=>messagesHead(take.MESSAGES),rows:n=>messageRows(n),action:'popup:MESSAGES'},
       {name:'MEM',on:memItems.length>0,max:MEM_MAX,head:()=>sectionHead([],'MEM',[],[[]],false),rows:n=>memItems.slice(0,n).flatMap(memRows)}];
@@ -1979,18 +2048,27 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>keepSpacers,()=>{keepSpacers=false;},()=>{keepSpacers=true;});
     if(!usageOn)give(()=>!!footBase(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
     give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
-    for(const down of [2,1])for(const name of ['MEM','QUESTIONS']){
-      // (MEM, 11-16: its headlines take one row before fewer records show.)
-      if(name==='MEM'&&down===2)give(()=>kept.MEM&&memBody>1,()=>{memBody=1;},()=>{memBody=2;});
-      if(name==='QUESTIONS'){if(down===2)give(()=>here&&keepAction,()=>{keepAction=false;},()=>{keepAction=true;});
-        if(down===1){give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});}continue;}
-      give(()=>kept[name]&&take[name]>down,()=>{take[name]--;},()=>{take[name]++;});
-    }
+    // 11-20 (the person: "MESSAGE, MEM은 좀 더 세로길이 따라서 과감하게 표시 줄을 줄여버려 1~2줄 수준으로"): MEM and MESSAGES are the first
+    // sections to go down, before the STATUS section, QUESTIONS or the route box give up a row. MEM's headlines take one row (11-16), then
+    // both take their one-row form (a message: arrow, number, text; a record: mark, age, headline), then they show two of them, then
+    // one (`+N` on the MESSAGES head counts the rest): from nine and six rows down to two rows, then one, each.
+    give(()=>kept.MEM&&memBody>1,()=>{memBody=1;},()=>{memBody=2;});
+    give(()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
+    give(()=>kept.MEM&&!memOne,()=>{memOne=true;},()=>{memOne=false;});
+    give(()=>kept.MEM&&take.MEM>2,()=>{take.MEM--;},()=>{take.MEM++;});
+    give(()=>kept.MESSAGES&&take.MESSAGES>2,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
+    give(()=>kept.MEM&&take.MEM>1,()=>{take.MEM--;},()=>{take.MEM++;});
+    give(()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
+    // The STATUS section's titles above its STATUS_MIN rows go next.
+    give(()=>kept.STATUS&&take.STATUS>STATUS_MIN,()=>{take.STATUS--;},()=>{take.STATUS++;});
+    // QUESTIONS: the action row, then the second row of the summary and the guide line.
+    give(()=>here&&keepAction,()=>{keepAction=false;},()=>{keepAction=true;});
+    give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});
+    give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});
     give(()=>keepMetaGap,()=>{keepMetaGap=false;},()=>{keepMetaGap=true;});
     give(()=>keepRules,()=>{keepRules=false;},()=>{keepRules=true;});
     // (11-16: the QUESTIONS box's two border rows go after its content rows above, before the structural rows below.)
     give(()=>kept.QUESTIONS&&keepQuestionBox,()=>{keepQuestionBox=false;},()=>{keepQuestionBox=true;});
-    give(()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
     // The box comes back with its context rows only while the workers stand.
     // The unit rows a worker's calls add are the first of the route's rows to go.
     give(()=>anyCalled&&keepCalled,()=>{keepCalled=false;},()=>{keepCalled=true;},'route');
@@ -2002,12 +2080,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>anyWorkers&&keepWorkers&&!keepNow,()=>{keepWorkers=false;},()=>{keepWorkers=true;},'route');
     give(()=>keepPlace,()=>{keepPlace=false;},()=>{keepPlace=true;},'route');
     give(()=>twoRows,()=>{twoRows=false;},()=>{twoRows=true;},'route');
-    give(()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
     give(()=>routeLimit>1,()=>{routeLimit--;},()=>{routeLimit++;});
     give(()=>kept.ROUTE&&routeRule(),()=>{keepRouteRule=false;},()=>{keepRouteRule=true;});
     give(()=>keepGit,()=>{keepGit=false;},()=>{keepGit=true;});
-    give(()=>kept.ROUTE,()=>{kept.ROUTE=false;},()=>{kept.ROUTE=true;});
-    give(()=>keepOptional,()=>{keepOptional=false;},()=>{keepOptional=true;});
+    // 11-20 (the person: "현황 5줄과 NOW·QUESTIONS·ROUTE가 MESSAGES·MEM보다 먼저 자리를 받게"): MESSAGES and MEM give their last rows (their
+    // rows, then their heads; the USAGE rows after MEM as before) before the STATUS section goes below its five rows and before the route
+    // box goes; the running jobs after it.
     for(const name of lowest){
       give(()=>kept[name]&&take[name]>0,()=>{take[name]--;},()=>{take[name]++;});
       give(()=>kept[name],()=>{kept[name]=false;},()=>{kept[name]=true;});
@@ -2017,22 +2095,29 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         give(()=>keepUsageHead,()=>{keepUsageHead=false;},()=>{keepUsageHead=true;});
       }
     }
+    // Then the STATUS section goes down to its one row of counts, and the route box goes.
+    give(()=>kept.STATUS&&take.STATUS>1,()=>{take.STATUS--;},()=>{take.STATUS++;});
+    give(()=>kept.ROUTE,()=>{kept.ROUTE=false;},()=>{kept.ROUTE=true;});
+    give(()=>keepOptional,()=>{keepOptional=false;},()=>{keepOptional=true;});
+    give(()=>kept.STATUS,()=>{kept.STATUS=false;},()=>{kept.STATUS=true;});
     give(()=>keepSent&&sentRows.length>0,()=>{keepSent=false;},()=>{keepSent=true;});
     // (11-16: this window's own usage row beside the buttons costs no row, so it stays while no other usage row is left to give.)
     give(()=>keepQuota&&(!usageOn||footRule()>0),()=>{keepQuota=false;},()=>{keepQuota=true;});
     const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
-      keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]);
+      keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled,memOne]);
     const stuck=new Set();
     for(const {undo,family} of gave.reverse()){
       if(family&&stuck.has(family))continue;
       const was=choices();undo();
       if(need()>budget){if(family)stuck.add(family);const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);keepRouteRule=v[24];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(25,31);}
+        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);keepRouteRule=v[24];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(25,31);memOne=v[31];}
     }
     const order=[];
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
-      order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});});
-    for(const item of order)add(item.parts,item.action,item.groups);
+      order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i),plain:withoutButton.get(i)});});
+    // The row that carries the status button, and its place in `content` (the button goes once the STATUS section stands).
+    let buttonAt=-1,buttonPlain=null;
+    for(const item of order){if(item.plain&&buttonAt<0){buttonAt=content.length;buttonPlain=item.plain;}add(item.parts,item.action,item.groups);}
     // Each section stands whole (its head and the rows it kept), one after another from the top; the
     // rows left over stand between the sections above and MESSAGES·MEM (spec rule 14: those two keep to
     // the panel's bottom, right above the last row), or under the last section when there are none.
@@ -2040,6 +2125,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(const s of SECTIONS){
       if(!kept[s.name])continue;
       // QUESTIONS never gives its place to the structural rows above it: those go first (`lastRow`).
+      if(s.name==='STATUS'&&content.length+lower.length+sectionSize(s)+footRule()>budget-1)continue;
       if(s.name!=='QUESTIONS'&&content.length+lower.length+sectionSize(s)+(['MESSAGES','MEM'].includes(s.name)?footRule():0)>budget-1)break;
       if(s.box){
         // The rows the route box takes, for the host's wheel (panel rows, as hits count them).
@@ -2056,6 +2142,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         add(boxBottom(key).parts,'question');
         continue;
       }
+      // 11-20: the section's head carries the button, so the REPO row (the unlabelled head, the bottom layout's first row) does not.
+      if(s.name==='STATUS'&&buttonAt>=0){content[buttonAt]=buttonPlain;for(let i=hits.length-1;i>=0;i--)if(hits[i].row===buttonAt+1&&hits[i].action==='popup:STATUS')hits.splice(i,1);}
       const into=['MESSAGES','MEM'].includes(s.name)?(parts,action,groups)=>lower.push({parts,action,groups}):add;
       into(s.head(),s.action,s.groups);
       sectionRows(s).forEach(row=>into(row,s.action));

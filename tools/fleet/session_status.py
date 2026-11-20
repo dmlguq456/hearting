@@ -11,6 +11,11 @@ No document at all is still a value (``has_doc`` False: the button stands, dim) 
 document would stand.  ``watch`` is for the panel's existing file watch (no poller): the document, and
 each session campaign's folder as one folder target (a trailing separator) so a new document redraws.
 
+``groups`` (11-20, the panel's STATUS section) are the document's lists read from its first 64 KiB: what is in
+progress, what waits for the person, what ended lately, what comes later, each its name, its count and its first
+titles (``read_groups``; a document with none of those headings gives ``[]`` and the panel draws no section).  They
+are read again only when the document's stamp (modification time and size) changed, in the same read as the button.
+
 ``held(cwd, claim)`` is the value the host already holds (its button's) taken for the popup, so the popup
 does not read what the button read: it stands only where the claim names a status document inside this
 folder's own artifact root (else ``None``, and the popup reads).
@@ -47,10 +52,13 @@ _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}_")
 _ROOTS = {}            # session folder -> (resolved at, artifact root or None)
 _KEYS = {}             # (root, route id) -> its campaign key (a route's key never changes)
 _FOLDERS = {}          # (root, campaign key) -> (resolved at, campaign folder or None)
+_GROUPS = {}           # document path -> (mtime, size, its groups); read again only when the stamp changed
+GROUP_ITEMS = 6        # titles kept per group (the panel shows eight at most in all)
+GROUP_TITLE = 200      # cells of a title kept
 
 
 def clear_cache():
-    for cache in (_ROOTS, _KEYS, _FOLDERS):
+    for cache in (_ROOTS, _KEYS, _FOLDERS, _GROUPS):
         cache.clear()
 
 
@@ -166,6 +174,85 @@ def _age(stamp, now):
         return ""
 
 
+# The headings of the campaign document (``## 하는 중`` ...) and the near spellings an older hand-written page uses.  A heading
+# that names a record of what is done (``기록``, ``log`` ...) is no list of work.  The order is the panel's.
+_GROUP_WORDS = (
+    ("running", ("하는 중", "진행 중", "in progress", "in flight", "doing")),
+    ("waiting", ("결정 기다리", "기다리는", "결정 필요", "결정할", "결정 대기", "사용자에게 필요", "decisions needed",
+                 "decision needed", "needs decision", "to decide", "open decision", "pending decision", "needs you", "waiting")),
+    ("done", ("끝난 일", "끝난 것", "최근에 끝", "최근 마감", "recently closed", "recently done", "done")),
+    ("next", ("예정", "나중에", "다음", "next", "later", "할 일", "to do", "todo")),
+)
+_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_BULLET = re.compile(r"^(?:[-*+]|\d+[.)])\s+(.*)$")
+
+
+def _group_kind(title):
+    lowered = title.casefold()
+    if any(word in lowered for word in project_status._RECORD_WORDS):
+        return None
+    for kind, words in _GROUP_WORDS:
+        if any(word in lowered for word in words):
+            return kind
+    return None
+
+
+def parse_groups(text):
+    """The lists of a status document as ``[{kind, name, short, count, items}]`` in the panel's order.
+
+    Read: the top-level bullets under a heading of a list (``하는 중``, ``결정 기다리는 것``, ``끝난 일``, ``예정`` and the near
+    spellings above; one of each kind, the first).  A bullet that is only a note in parentheses (``(… 접어 둠)``) is no title.
+    A list with no title is left out, except the one that waits for the person: its heading with nothing under it says
+    nothing waits (count 0).  Nothing is invented: a document with no such heading gives ``[]``."""
+    found, current, level = {}, None, 0
+    for raw in str(text).splitlines():
+        heading = _HEADING.match(raw.strip())
+        if heading:
+            depth, words = len(heading.group(1)), project_status._plain(heading.group(2))
+            if depth == 1:
+                current = None
+                continue
+            kind = _group_kind(words)
+            if kind is not None and kind not in found:
+                current, level = kind, depth
+                found[kind] = []
+            elif current is not None and depth <= level:
+                current = None
+            continue
+        if current is None or raw[:1] in (" ", "\t"):
+            continue
+        bullet = _BULLET.match(raw)
+        if not bullet:
+            continue
+        title = project_status._plain(bullet.group(1))
+        if title and not (title.startswith(("(", "（")) and title.endswith((")", "）"))):
+            found[current].append(title)
+    groups = []
+    for kind in ("running", "waiting", "done", "next"):
+        titles = found.get(kind)
+        if titles is None or not (titles or kind == "waiting"):
+            continue
+        items = [transcript.clean(title)[:GROUP_TITLE] for title in titles[:GROUP_ITEMS]]
+        groups.append({"kind": kind, "name": ui_text("fleet.status.group." + kind),
+                       "short": ui_text("fleet.status.group." + kind + ".short"), "count": len(titles), "items": items})
+    return groups
+
+
+def read_groups(path):
+    """``parse_groups`` of the document's first 64 KiB, kept while the document's stamp stays; ``[]`` if unreadable."""
+    try:
+        info = os.stat(path)
+        found = _GROUPS.get(path)
+        if found is not None and found[:2] == (info.st_mtime, info.st_size):
+            return found[2]
+        lines, _cut = read_text(path)
+        groups = parse_groups("\n".join(lines)) if lines is not None else []
+        _GROUPS[path] = (info.st_mtime, info.st_size, groups)
+        return groups
+    except Exception:  # noqa: BLE001 -- a document that cannot be read gives no section, never a failed button
+        return []
+
+
 def _title(word, campaign, age):
     if not (campaign or age):
         return word
@@ -179,7 +266,7 @@ def read(cwd, routes=(), now=None):
     Keys: ``word`` (Fleet's ``fleet.repo.status``), ``has_doc``, ``campaign`` (name, '' when not known),
     ``age`` (Fleet's age words, '' when none), ``title`` (the popup's title), ``path`` (the document or
     ''), ``slot`` (where a missing document would stand, '' when no campaign is known), ``watch``
-    (paths for the panel's file watch)."""
+    (paths for the panel's file watch), ``groups`` (the document's lists, above; ``[]`` without one)."""
     if not cwd:
         return None
     now = time.time() if now is None else now
@@ -204,7 +291,7 @@ def read(cwd, routes=(), now=None):
         watch = ([path] if path else []) + [folder.rstrip(os.sep) + os.sep for folder in folders]
         return {"word": word, "has_doc": path is not None, "campaign": campaign, "age": age,
                 "title": _title(word, campaign if path else "", age), "path": path or "",
-                "slot": slot, "watch": list(dict.fromkeys(watch))}
+                "slot": slot, "watch": list(dict.fromkeys(watch)), "groups": read_groups(path) if path else []}
     except Exception:  # noqa: BLE001 -- the panel draws on without a status button
         return None
 
