@@ -12,11 +12,15 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
+import fcntl
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
 import re
 import tempfile
+import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -359,6 +363,509 @@ class RecordTest(unittest.TestCase):
         # Only OpenCode's Fleet view reads provider lines, and it asks for its own file.
         source = (ROOT / "tools" / "fleet" / "collectors" / "__init__.py").read_text()
         self.assertEqual(re.findall(r"usage_cache\.provider_records\(([^,)]*)", source), ['"opencode"'])
+
+
+class ShapeTest(unittest.TestCase):
+    """What an envelope must say, and what it still may not, to be read as a refusal."""
+
+    def read(self, runtime, status, text="", code=""):
+        return T.classify_runtime_failure(runtime, event="x", process_exit=1, status=status,
+                                          text=text, structured_code=code)
+
+    def test_a_typed_codex_code_stands_only_with_a_status_that_does_not_contradict_it(self):
+        for code in ("modelNotFound", "model_not_found"):
+            for status in ("", "400", "404"):
+                with self.subTest(code=code, status=status):
+                    got = self.read("codex", status, code=code)
+                    self.assertEqual((got.note, got.failure_class, got.reconcile_reason),
+                                     ("dead-runtime-error", "runtime", "runtime-model-rejected"))
+            # 5xx and 429 keep the sign they had; 401/403 are account answers, as before.
+            for status, expected in (("500", ("dead-runtime-error", "runtime-error-envelope")),
+                                     ("502", ("dead-runtime-error", "runtime-error-envelope")),
+                                     ("503", ("dead-runtime-error", "runtime-error-envelope")),
+                                     ("529", ("dead-runtime-error", "runtime-error-envelope")),
+                                     ("429", ("dead-capacity", "runtime-capacity-envelope")),
+                                     ("401", ("dead-auth", "runtime-auth-envelope")),
+                                     ("403", ("dead-auth", "runtime-auth-envelope"))):
+                with self.subTest(code=code, status=status):
+                    got = self.read("codex", status, code=code)
+                    self.assertEqual((got.note, got.reconcile_reason), expected)
+        # Through the logged payload: the status rides next to the kind.
+        got = T.codex_turn_failure_terminal(
+            {"codex_error_info": {"kind": "modelNotFound", "http_status": 503}})
+        self.assertEqual(got.reconcile_reason, "runtime-error-envelope")
+        got = T.codex_turn_failure_terminal(
+            {"codex_error_info": {"kind": "modelNotFound", "http_status": 404}})
+        self.assertEqual(got.reconcile_reason, "runtime-model-rejected")
+
+    def test_the_claude_404_object_reads_the_same_in_any_key_order(self):
+        def envelope(obj):
+            return "API Error: 404 " + json.dumps({"type": "error", "error": obj, "request_id": "r"})
+        same = [
+            {"type": "not_found_error", "message": "model: claude-x-1"},
+            {"message": "model: claude-x-1", "type": "not_found_error"},
+            {"type": "not_found_error", "request_id": "r", "message": "model: claude-x-1"},
+            {"message": "model: claude-x-1", "extra": 1, "type": "not_found_error"},
+        ]
+        for obj in same:
+            with self.subTest(obj=obj):
+                got = self.read("claude", "404", envelope(obj))
+                self.assertEqual(got.reconcile_reason, "runtime-model-rejected:claude-x-1")
+        # A truncated log keeps reading as before (no closing braces at all).
+        got = self.read("claude", "404", '..."message":"model: claude-x-1","type":"not_found_error"')
+        self.assertEqual(got.reconcile_reason, "runtime-model-rejected:claude-x-1")
+        # The two keys must belong to one object; a model-free message is no refusal.
+        for text in (
+                'API Error: 404 {"type":"not_found_error","detail":{"message":"model: claude-x-1"}}',
+                'API Error: 404 {"message":"model: claude-x-1"} {"type":"not_found_error"}',
+                'API Error: 404 {"type":"not_found_error","message":"The requested resource"}',
+                'API Error: 404 {"type":"invalid_request_error","message":"model: claude-x-1"}'):
+            with self.subTest(text=text):
+                self.assertEqual(self.read("claude", "404", text).reconcile_reason,
+                                 "runtime-error-envelope")
+        # Other statuses never read it, in either order.
+        reversed_text = envelope({"message": "model: claude-x-1", "type": "not_found_error"})
+        for status in ("500", "400", "403"):
+            self.assertNotEqual(self.read("claude", status, reversed_text).reconcile_reason,
+                                "runtime-model-rejected:claude-x-1")
+
+    def test_a_selected_model_sentence_quoted_inside_another_error_is_pinned_as_it_reads_today(self):
+        # An envelope offers no ground to tell a quotation from the CLI's own sentence: the
+        # result is one string and every string of the envelope is read together. The reading
+        # is therefore left exactly as it was (not widened, not narrowed); these pin it.
+        quote = '"' + SELECTED % "claude-x-1" + '"'
+        cases = [
+            # status decides first: none of these is ever read as a refusal
+            ("claude", "500", "API Error: 500 upstream said " + quote, "runtime-error-envelope"),
+            ("claude", "502", "API Error: 502 gateway relayed " + quote, "runtime-error-envelope"),
+            ("claude", "529", "overloaded_error, last reply " + quote, "runtime-error-envelope"),
+            ("claude", "429", "rate_limit_error, last reply " + quote, "runtime-capacity-envelope"),
+            ("claude", "401", "authentication_error, last reply " + quote, "runtime-auth-envelope"),
+            ("claude", "403", "Attention Required! | Cloudflare " + quote, T.EDGE_BLOCK_REASON),
+            ("claude", "400", "invalid_request_error, relayed " + quote, "runtime-error-envelope"),
+            # a quotation in an envelope with no status, or a 404, cannot be told apart
+            ("claude", "", "Request failed; the log held " + quote, "runtime-model-rejected:claude-x-1"),
+            ("claude", "404", "API Error: 404 route not found; the log held " + quote,
+             "runtime-model-rejected:claude-x-1"),
+            # capacity/auth words in the same text still win, as before
+            ("claude", "", "usage limit reached " + quote, "runtime-capacity-envelope"),
+            ("claude", "", "invalid api key " + quote, "runtime-auth-envelope"),
+        ]
+        for runtime, status, text, reason in cases:
+            with self.subTest(status=status, text=text[:40]):
+                self.assertEqual(self.read(runtime, status, text).reconcile_reason, reason)
+        # Codex never reads the sentence at all, quoted or not.
+        self.assertEqual(self.read("codex", "", "log held " + quote).reconcile_reason,
+                         "runtime-error-envelope")
+
+
+class AnswerAndPlaceholderTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        (self.base / "repo").mkdir()
+        self.jobs = self.base / "jobs.log"
+        self.state = self.base / "usage"
+        patcher = mock.patch.dict(os.environ, {"FLEET_USAGE_STATE_DIR": str(self.state)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.count = 0
+
+    def close(self, harness, model, terminal, scope=""):
+        self.count += 1
+        attempt = f"att-{self.count}"
+        extra = f",quota_scope={scope},quota_scope_kind=claude-subscription-v2" if scope else ""
+        with self.jobs.open("a", encoding="utf-8") as handle:
+            handle.write(REGISTRY_ROW.format(repo=self.base / "repo", harness=harness,
+                                             attempt=attempt, model=model, extra=extra))
+        return T.reconcile_supervisor_terminal(self.jobs, attempt, terminal)
+
+    def lines(self, harness):
+        path = self.state / f"{harness}.json"
+        return json.loads(path.read_text()).get("providers", {}) if path.exists() else {}
+
+    def test_an_unsettled_model_records_nothing_but_the_sign_still_names_the_model(self):
+        refused = T.classify_claude_result(
+            claude_result(404, "API Error: 404 " + NOT_FOUND % "claude-x-1"), 1)
+        self.assertEqual(refused.reconcile_reason, "runtime-model-rejected:claude-x-1")
+        usage_cache._write("claude", {"used": 1}, 1000.0, 1000.0, credential_generation="g")
+        before = (self.state / "claude.json").read_bytes()
+        for placeholder in ("inherit", "Inherit", "default", "runtime-default", "unknown"):
+            with self.subTest(placeholder):
+                self.assertEqual(self.close("claude", placeholder, refused, "scope-a"), "closed")
+                self.assertEqual(self.close("codex", placeholder,
+                                            T.codex_turn_failure_terminal(
+                                                {"codex_error_info": "modelNotFound"})), "closed")
+        self.assertEqual((self.state / "claude.json").read_bytes(), before)
+        self.assertFalse((self.state / "codex.json").exists())
+        # A real name still records.
+        self.close("codex", "gpt-x-1", T.codex_turn_failure_terminal({"codex_error_info": "modelNotFound"}))
+        self.assertEqual(list(self.lines("codex")), ['["codex","gpt-x-1","unscoped"]'])
+
+    def test_a_handoff_of_the_wrong_shape_is_the_model_answering_and_lifts_the_refusal(self):
+        usage_cache._write("claude", {"used": 1}, 1000.0, 1000.0, credential_generation="g")
+        refused = T.classify_claude_result(
+            claude_result(404, "API Error: 404 " + NOT_FOUND % "claude-x-1"), 1)
+        wrong_shape = T.classify_claude_result(
+            {"type": "result", "subtype": "success", "result": "All done, no handoff block."}, 0)
+        self.assertEqual((wrong_shape.note, wrong_shape.failure_class), ("dead-contract", "contract"))
+        self.close("claude", "claude-x-1", refused, "scope-a")
+        self.close("claude", "claude-x-1", wrong_shape, "scope-a")
+        self.assertEqual(usage_cache.read_provider("claude", "claude", "claude-x-1", "scope-a")["state"],
+                         "usable")
+        # The same for a handoff that breaks the PASS rule, and for Codex.
+        bad_pass = T.classify_claude_result(
+            {"type": "result", "subtype": "success",
+             "result": "artifact: -\nverdict: PASS\nblocker: still broken"}, 0)
+        self.assertEqual(bad_pass.note, "dead-contract")
+        self.close("claude", "claude-x-1", refused, "scope-a")
+        self.close("claude", "claude-x-1", bad_pass, "scope-a")
+        self.assertEqual(usage_cache.read_provider("claude", "claude", "claude-x-1", "scope-a")["state"],
+                         "usable")
+        self.close("codex", "gpt-x-1", T.codex_turn_failure_terminal({"codex_error_info": "modelNotFound"}))
+        self.close("codex", "gpt-x-1", T.classify_codex_result("finished", 0))
+        self.assertEqual(usage_cache.read_provider("codex", "codex", "gpt-x-1", "unscoped")["state"], "usable")
+
+    def test_an_end_that_does_not_show_the_model_answered_keeps_the_refusal(self):
+        usage_cache._write("claude", {"used": 1}, 1000.0, 1000.0, credential_generation="g")
+        refused = T.classify_claude_result(
+            claude_result(404, "API Error: 404 " + NOT_FOUND % "claude-x-1"), 1)
+        ends = {
+            "capacity": T.classify_claude_result(claude_result(429, "rate_limit_error"), 1),
+            "auth": T.classify_claude_result(claude_result(401, "authentication_error"), 1),
+            "runtime error": T.classify_claude_result(claude_result(500, "API Error: 500"), 1),
+            "process exit": T.classify_codex_result("x", 1),
+            "supervisor error": T.classify_supervisor_error("claude", "terminal-event-missing"),
+            "protocol": T.classify_supervisor_error("claude", "missing-protocol-json"),
+        }
+        self.close("claude", "claude-x-1", refused, "scope-a")
+        for label, terminal in ends.items():
+            with self.subTest(label):
+                self.close("claude", "claude-x-1", terminal, "scope-a")
+                self.assertEqual(
+                    usage_cache.read_provider("claude", "claude", "claude-x-1", "scope-a")["state"],
+                    "unavailable")
+
+
+def _opencode_steps():
+    initial = [None, "{", "[]", '{"schema_version":1,"harness":"opencode","payload":{}}']
+    ops = [
+        lambda m: m.record_provider("opencode", "p", "m", "a", "unavailable",
+                                    reason="model-unavailable", now=100, source="probe"),
+        lambda m: m.record_attempt("opencode", now=110),
+        lambda m: m._write("opencode", {"usage": 7}, 120, 120),
+        lambda m: m.record_provider("opencode", "p", "m", "a", "usable", now=130,
+                                    source="probe", credential_generation="g"),
+    ]
+    return initial, ops
+
+
+# sha256[:16] of opencode.json after each of the four steps, from the code before the
+# per-model line existed (four starting files: absent, broken, an array, a bare cache).
+OPENCODE_BYTES_BEFORE = [
+    ["bf426caa5cb3dbb6", "4b61625a120f9b39", "7f43c77fe0d77be8", "81775c0b2f141b12"],
+    ["bf426caa5cb3dbb6", "4b61625a120f9b39", "7f43c77fe0d77be8", "81775c0b2f141b12"],
+    ["bf426caa5cb3dbb6", "4b61625a120f9b39", "7f43c77fe0d77be8", "81775c0b2f141b12"],
+    ["e103c9cafc98deec", "4b61625a120f9b39", "7f43c77fe0d77be8", "81775c0b2f141b12"],
+]
+
+
+class CacheLockTest(unittest.TestCase):
+    """Every writer of one cache file reads, edits and replaces it inside one lock."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.state = Path(self.temp.name) / "usage"
+        patcher = mock.patch.dict(os.environ, {"FLEET_USAGE_STATE_DIR": str(self.state)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # Long enough that the lock, not its timeout, decides the order in these schedules.
+        wait = mock.patch.object(usage_cache, "LOCK_WAIT", 10.0)
+        wait.start()
+        self.addCleanup(wait.stop)
+        spec = importlib.util.spec_from_file_location("capacity_probe_x", ROOT / "utilities" / "harness-capacity.py")
+        self.capacity = importlib.util.module_from_spec(spec)
+        sys.modules["capacity_probe_x"] = self.capacity
+        spec.loader.exec_module(self.capacity)
+
+    def schedule(self, first, second):
+        """Run `first` until it reaches os.replace, start `second`, then let both finish.
+
+        Returns whether `second` finished while `first` was still held at the boundary."""
+        entered, release = threading.Event(), threading.Event()
+        real = os.replace
+        errors = []
+
+        def replace(src, dst):
+            if threading.current_thread().name == "first" and not entered.is_set():
+                entered.set()
+                if not release.wait(10):
+                    raise RuntimeError("schedule timed out")
+            return real(src, dst)
+
+        def run(fn):
+            def body():
+                try:
+                    fn()
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(repr(exc))
+            return body
+
+        a = threading.Thread(target=run(first), name="first")
+        b = threading.Thread(target=run(second), name="second")
+        with mock.patch.object(usage_cache.os, "replace", side_effect=replace):
+            a.start()
+            self.assertTrue(entered.wait(5))
+            b.start()
+            b.join(0.3)
+            finished_early = not b.is_alive()
+            release.set()
+            a.join(10)
+            b.join(10)
+        self.assertFalse(a.is_alive() or b.is_alive())
+        self.assertEqual(errors, [])
+        return finished_early
+
+    def usage(self, harness="codex", used=99, at=200):
+        payload = {"windows": [["5h", used], ["7d", used]]}
+        return lambda: usage_cache._write(harness, payload, at, at)
+
+    def record(self, harness="codex", model="model-x", state="unavailable", at=150):
+        return lambda: usage_cache.record_model_outcome(harness, harness, model, "unscoped", state, now=at)
+
+    def cache(self, harness="codex"):
+        return json.loads((self.state / f"{harness}.json").read_text())
+
+    def seed(self, used=1):
+        usage_cache._write("codex", {"windows": [["5h", used], ["7d", used]]}, 100, 100)
+
+    def test_a_per_model_line_does_not_roll_a_newer_usage_reading_back(self):
+        self.seed()
+        self.assertFalse(self.schedule(self.record(), self.usage()))
+        item = self.cache()
+        self.assertEqual(item["payload"], {"windows": [["5h", 99], ["7d", 99]]})
+        self.assertEqual((item["fetched_at"], item["attempted_at"]), (200, 200))
+        self.assertEqual(list(item["providers"]), ['["codex","model-x","unscoped"]'])
+
+    def test_a_usage_writer_does_not_lose_a_per_model_line(self):
+        self.seed()
+        self.assertFalse(self.schedule(self.usage(), self.record()))
+        item = self.cache()
+        self.assertEqual(item["payload"], {"windows": [["5h", 99], ["7d", 99]]})
+        self.assertEqual(list(item["providers"]), ['["codex","model-x","unscoped"]'])
+
+    def test_the_selection_score_is_the_same_before_and_after_a_line_is_recorded(self):
+        usage_cache._write("codex", {"windows": [["5h", 99], ["7d", 99]]}, 200, 200)
+        control = self.capacity._cached_score("codex", 201, 900)
+        self.seed()
+        self.schedule(self.record(), self.usage())
+        self.assertEqual(self.capacity._cached_score("codex", 201, 900), control)
+        self.assertNotEqual(control, (None, None))
+
+    def test_two_different_models_recorded_at_once_both_stay(self):
+        self.seed()
+        self.assertFalse(self.schedule(self.record(model="model-a"), self.record(model="model-b")))
+        self.assertEqual(sorted(self.cache()["providers"]),
+                         ['["codex","model-a","unscoped"]', '["codex","model-b","unscoped"]'])
+
+    def test_lifting_a_refusal_and_the_failed_probe_note_do_not_undo_each_other(self):
+        self.seed()
+        self.record()()
+        # a usage writer racing the lift
+        self.assertFalse(self.schedule(self.record(state="usable", at=170), self.usage()))
+        item = self.cache()
+        self.assertEqual(item["payload"], {"windows": [["5h", 99], ["7d", 99]]})
+        (row,) = item["providers"].values()
+        self.assertEqual(row["state"], "usable")
+        # the failed-probe note races a new refusal
+        self.assertFalse(self.schedule(lambda: usage_cache.record_attempt("codex", now=300),
+                                       self.record(model="model-c", at=310)))
+        item = self.cache()
+        self.assertEqual(item["attempted_at"], 300)
+        self.assertEqual(item["payload"], {"windows": [["5h", 99], ["7d", 99]]})
+        self.assertIn('["codex","model-c","unscoped"]', item["providers"])
+
+    def test_claude_keeps_its_own_lock_and_the_line_with_the_workers_publication(self):
+        usage_cache._write("claude", {"rl_5h": 1}, 100, 100, credential_generation="g")
+        first = lambda: usage_cache.record_model_outcome("claude", "claude", "m", "a", "unavailable", now=150)
+        second = lambda: usage_cache._write("claude", {"rl_5h": 99}, 200, 200, credential_generation="g")
+        self.assertFalse(self.schedule(first, second))
+        item = self.cache("claude")
+        self.assertEqual((item["payload"], item["_credential_generation"]), ({"rl_5h": 99}, "g"))
+        self.assertEqual(list(item["providers"]), ['["claude","m","a"]'])
+
+    def test_a_nested_take_by_the_same_thread_is_the_same_hold(self):
+        # The Claude worker takes the shared mutex, then writes; the write takes it again.
+        with usage_cache._claude_mutex():
+            usage_cache._write("claude", {"rl_5h": 5}, 100, 100, credential_generation="g")
+            self.assertTrue(usage_cache.record_provider("claude", "claude", "m", "a", "unavailable", now=120))
+
+    def test_a_lock_that_is_not_released_never_stalls_a_usage_writer_or_the_close(self):
+        self.seed()
+        holder = os.open(str(self.state / ".codex.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        self.addCleanup(os.close, holder)
+        with mock.patch.object(usage_cache, "LOCK_WAIT", 0.1):
+            started = time.monotonic()
+            usage_cache._write("codex", {"windows": [["5h", 7], ["7d", 7]]}, 200, 200)
+            wrote = time.monotonic() - started
+            started = time.monotonic()
+            kept = usage_cache.record_model_outcome("codex", "codex", "model-x", "unscoped", "unavailable", now=150)
+            dropped = time.monotonic() - started
+            started = time.monotonic()
+            usage_cache.record_attempt("codex", now=250)
+            attempt = time.monotonic() - started
+        # The usage publication happens as it did before the lock; the line is dropped.
+        self.assertEqual(self.cache()["payload"], {"windows": [["5h", 7], ["7d", 7]]})
+        self.assertFalse(kept)
+        self.assertEqual(self.cache()["providers"], {})
+        self.assertEqual(self.cache()["attempted_at"], 250)
+        for took in (wrote, dropped, attempt):
+            self.assertGreaterEqual(took, 0.09)
+            self.assertLess(took, 1.5)
+        # OpenCode's own recorder keeps writing, as it always did.
+        with mock.patch.object(usage_cache, "LOCK_WAIT", 0.05):
+            holder_oc = os.open(str(self.state / ".opencode.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+            self.addCleanup(os.close, holder_oc)
+            fcntl.flock(holder_oc, fcntl.LOCK_EX)
+            self.assertTrue(usage_cache.record_provider("opencode", "p", "m", "a", "unavailable", now=100))
+
+    def test_a_success_with_no_refusal_on_file_takes_no_lock_and_writes_nothing(self):
+        self.seed()
+        before = (self.state / "codex.json").read_bytes()
+        with mock.patch.object(usage_cache, "_cache_mutex", side_effect=AssertionError("locked")), \
+                mock.patch.object(usage_cache.os, "replace", side_effect=AssertionError("wrote")):
+            self.assertFalse(usage_cache.record_model_outcome(
+                "codex", "codex", "model-x", "unscoped", "usable", now=160))
+        self.assertEqual((self.state / "codex.json").read_bytes(), before)
+
+    def test_opencode_bytes_are_those_of_the_code_before_the_lock(self):
+        initial, ops = _opencode_steps()
+        for number, start in enumerate(initial):
+            with self.subTest(start=start):
+                state = self.state / f"oc{number}"
+                state.mkdir(parents=True)
+                with mock.patch.dict(os.environ, {"FLEET_USAGE_STATE_DIR": str(state)}):
+                    if start is not None:
+                        (state / "opencode.json").write_text(start)
+                    seen = []
+                    for op in ops:
+                        op(usage_cache)
+                        seen.append(hashlib.sha256((state / "opencode.json").read_bytes()).hexdigest()[:16])
+                self.assertEqual(seen, OPENCODE_BYTES_BEFORE[number])
+
+
+class JoinRecordTest(unittest.TestCase):
+    """A row the completion join closes carries the same record as one the supervisor closes."""
+
+    rejected = {"type": "result", "subtype": "success", "is_error": True, "api_error_status": 404,
+                "result": 'API Error: 404 {"type":"not_found_error","message":"model: model-x"}'}
+    passed = {"type": "result", "subtype": "success", "is_error": False,
+              "result": "artifact: -\nverdict: PASS\nblocker: none"}
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        (self.base / "repo").mkdir()
+        self.jobs, self.log = self.base / "jobs.log", self.base / "log"
+        patcher = mock.patch.dict(os.environ, {"FLEET_USAGE_STATE_DIR": str(self.base / "usage"),
+                                               "XDG_STATE_HOME": str(self.base / "state")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        import dispatch_completion_join as J
+        self.J = J
+        usage_cache._write("claude", {"used": 1}, 100, 100, credential_generation="g")
+        self.meta = {"worker_type": "owner", "dispatch_depth": "1", "harness": "claude", "model": "model-x",
+                     "model_profile": "deep", "attempt_id": "att-join", "owner_route_id": "rt-fixture",
+                     "launch_started": "1", "supervisor_lease": "flock-v1",
+                     "supervisor_lease_file": str(self.base / "lease"), "registered_worker": "1",
+                     "attempt_schema_version": "2", "transport": "headless",
+                     "execution_surface": "registered-headless", "fallback_hop": "same-harness-headless",
+                     "pid": "999999999", "pid_start": "1", "log_file": str(self.log),
+                     "quota_scope": "scope-a"}
+
+    def open_row(self, log_row, meta=None):
+        meta = {**self.meta, **(meta or {})}
+        self.log.write_text(json.dumps(log_row) + "\n")
+        self.jobs.write_text("2026-11-01T00:00:00Z\topen\t%s\t%s\tstage\t%s\n" % (
+            self.base / "repo", self.base / "repo", ",".join(f"{k}={v}" for k, v in meta.items())))
+        return self.J.exact_attempt_row(self.jobs, meta["attempt_id"])
+
+    def settle(self, log_row):
+        J = self.J
+        row = self.open_row(log_row)
+        quiescent = types.SimpleNamespace(state="quiescent", reason="fixture-exited")
+        with mock.patch.object(dispatch_contract, "supervisor_lease_is_held", return_value=False), \
+                mock.patch.object(J, "attempt_process_quiescence", return_value=quiescent), \
+                mock.patch.object(J, "materialize_after_terminal_close", return_value=None):
+            out = J.settle_exited_owner_terminal(row, jobs=self.jobs)
+        return out, J.exact_attempt_row(self.jobs, "att-join")
+
+    def state(self, scope="scope-a"):
+        return usage_cache.read_provider("claude", "claude", "model-x", scope)["state"]
+
+    def test_a_refusal_closed_by_the_join_is_recorded(self):
+        out, row = self.settle(self.rejected)
+        self.assertEqual((out, row.status, row.metadata["note"], row.metadata["reconcile_reason"]),
+                         ("", "done", "dead-runtime-error", "runtime-model-rejected:model-x"))
+        self.assertEqual(self.state(), "unavailable")
+        self.assertEqual(self.state("scope-b"), "unknown")
+
+    def test_a_success_closed_by_the_join_lifts_the_refusal_and_a_replay_leaves_it_lifted(self):
+        usage_cache.record_model_outcome("claude", "claude", "model-x", "scope-a", "unavailable")
+        self.assertEqual(self.state(), "unavailable")
+        out, row = self.settle(self.passed)
+        self.assertEqual((out, row.metadata["note"]), ("", "completed-supervisor"))
+        self.assertEqual(self.state(), "usable")
+        # Observing the same end again through the supervisor closes nothing and records nothing.
+        with mock.patch.object(usage_cache, "record_model_outcome",
+                               side_effect=AssertionError("recorded twice")):
+            replay = T.reconcile_supervisor_terminal(
+                self.jobs, "att-join", T.classify_claude_result(self.passed, 0))
+        self.assertEqual(replay, "already-terminal")
+        self.assertEqual(self.state(), "usable")
+
+    def test_an_old_refusal_observed_again_after_a_newer_answer_does_not_come_back(self):
+        usage_cache.record_model_outcome("claude", "claude", "model-x", "scope-a", "unavailable")
+        self.settle(self.passed)
+        self.assertEqual(self.state(), "usable")
+        # The refused end of an attempt that was already closed is seen again.
+        with mock.patch.object(usage_cache, "record_model_outcome",
+                               side_effect=AssertionError("recorded twice")):
+            again = T.reconcile_supervisor_terminal(
+                self.jobs, "att-join", T.classify_claude_result(
+                    {**self.rejected, "api_error_status": 404}, 1))
+        self.assertIn(again, {"already-terminal", "terminal-conflict"})
+        self.assertEqual(self.state(), "usable")
+
+    def test_a_record_that_fails_never_changes_what_the_join_closed(self):
+        with mock.patch.object(usage_cache, "record_model_outcome", side_effect=RuntimeError("boom")):
+            out, row = self.settle(self.rejected)
+        self.assertEqual((out, row.status, row.metadata["reconcile_reason"]),
+                         ("", "done", "runtime-model-rejected:model-x"))
+
+    def test_the_support_settlement_writes_the_same_record(self):
+        J = self.J
+        meta = {"worker_type": "worker"}
+        for log_row, expected, prior in ((self.rejected, "unavailable", None), (self.passed, "usable", "unavailable")):
+            if prior:
+                usage_cache.record_model_outcome("claude", "claude", "model-x", "scope-a", prior)
+            row = self.open_row(log_row, meta)
+            terminal = T.classify_supervisor_log(self.log, "claude")
+            classification = J.ExactReviewClassification(
+                "done", terminal.reconcile_reason, terminal.note, "typed-close", terminal.evidence())
+            identity = dispatch_contract.launched_attempt_identity(row.raw.split("\t"))
+            with mock.patch.object(J, "_support_cas_matches", return_value=True), \
+                    mock.patch.object(J, "materialize_after_terminal_close", return_value=None):
+                out = J.apply_exact_route_free_support_classification(
+                    row, jobs=self.jobs, classification=classification, selected_identity=identity,
+                    expected_log_file=str(self.log), expected_pid=999999999, expected_pid_start="1",
+                    expected_pgid=0)
+            self.assertEqual(out, "support-settlement-committed")
+            self.assertEqual(self.state(), expected)
 
 
 if __name__ == "__main__":

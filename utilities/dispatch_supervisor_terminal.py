@@ -71,8 +71,14 @@ _MODEL_REJECTION_CODES = frozenset({"modelNotFound", "model_not_found"})
 _MODEL_NAME = r"[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,79}"
 _CLAUDE_SELECTED_MODEL_RE = re.compile(
     r"There's an issue with the selected model \((" + _MODEL_NAME + r")\)")
-_CLAUDE_NOT_FOUND_RE = re.compile(
-    r'"type"\s*:\s*"not_found_error"\s*,\s*"message"\s*:\s*"model:\s*(' + _MODEL_NAME + r')"')
+# The 404 envelope's `type` and `message` are read as one object whatever order
+# the keys are written in (the span between two braces is one flat object).
+_CLAUDE_NOT_FOUND_TYPE_RE = re.compile(r'"type"\s*:\s*"not_found_error"')
+_CLAUDE_NOT_FOUND_MESSAGE_RE = re.compile(
+    r'"message"\s*:\s*"model:\s*(' + _MODEL_NAME + r')"')
+# A typed Codex refusal code only stands when the envelope's status does not
+# contradict it: the code is raised with no status, 400, 403 or 404, never 5xx/429.
+_MODEL_REJECTION_STATUSES = frozenset({"", "400", "403", "404"})
 _PROTOCOL_REASON_RE = re.compile(
     r"missing|protocol|schema|shape|json|eof|request-failed|result-invalid|"
     r"thread-start|turn-start-response|join-receipt|contract",
@@ -300,24 +306,41 @@ def model_rejection(
 ) -> str | None:
     """The rejected model's name ("" when the envelope names none), or None.
 
-    Only a confirmed refusal of the model counts: a typed Codex code first;
-    then, for Claude, a 404 `not_found_error` naming `model: <id>` or the CLI's
-    own selected-model message (no status, or 404). Any other status, or the
-    word "model" alone, is not evidence.
+    Only a confirmed refusal of the model counts: a typed Codex code first (with
+    no status, or 400/403/404); then, for Claude, a 404 `not_found_error` naming
+    `model: <id>` or the CLI's own selected-model message (no status, or 404).
+    Any other status, or the word "model" alone, is not evidence. The
+    selected-model sentence is read wherever it stands in the text: an envelope
+    gives no ground to tell it from a quotation inside another error's text.
     """
     if runtime not in _MODEL_REJECTION_RUNTIMES:
         return None
     if structured_code:
-        return "" if structured_code in _MODEL_REJECTION_CODES and runtime == "codex" else None
+        return ("" if runtime == "codex" and structured_code in _MODEL_REJECTION_CODES
+                and status in _MODEL_REJECTION_STATUSES else None)
     if runtime != "claude":
         return None
     if status == "404":
-        found = _CLAUDE_NOT_FOUND_RE.search(text) or _CLAUDE_SELECTED_MODEL_RE.search(text)
+        found = _claude_not_found_model(text) or _claude_selected_model(text)
     elif status == "":
-        found = _CLAUDE_SELECTED_MODEL_RE.search(text)
+        found = _claude_selected_model(text)
     else:
         found = None
-    return found.group(1) if found else None
+    return found or None
+
+
+def _claude_not_found_model(text: str) -> str | None:
+    for segment in re.split(r"[{}]", text):
+        if _CLAUDE_NOT_FOUND_TYPE_RE.search(segment):
+            named = _CLAUDE_NOT_FOUND_MESSAGE_RE.search(segment)
+            if named:
+                return named.group(1)
+    return None
+
+
+def _claude_selected_model(text: str) -> str | None:
+    named = _CLAUDE_SELECTED_MODEL_RE.search(text)
+    return named.group(1) if named else None
 
 
 def classify_session_result(
@@ -628,23 +651,35 @@ def reconcile_supervisor_terminal(
         evidence=terminal.evidence(),
     )
     if outcome == "closed":
-        note_model_outcome(jobs, attempt_id, terminal)
+        note_model_outcome(jobs, attempt_id, terminal.note, terminal.failure_class,
+                           terminal.reconcile_reason)
     return outcome
 
 
 # The terminal classes in which the model itself answered: a handed-off result,
-# whether PASS, FAIL or BLOCKED. A later one of these for the same model and
-# account lifts an earlier model rejection.
+# whether PASS, FAIL or BLOCKED, or a final handoff whose shape was wrong
+# (`dead-contract`, only ever read from a finished result). A later one of these
+# for the same model and account lifts an earlier model rejection. Process death,
+# capacity and auth ends say nothing of whether the model answered.
 _MODEL_ANSWERED_CLASSES = frozenset({"pass", "fail", "blocked"})
 _MODEL_VARIANT_RE = re.compile(r"(\[[^\]]*\]|#.*)$")
+# A launch that named no model (`--inherit-model-settings`, a runtime default).
+_UNRESOLVED_MODELS = frozenset({"inherit", "default", "runtime-default", "unknown"})
 
 
 def _model_key(value: object) -> str:
     return _MODEL_VARIANT_RE.sub("", str(value or "").strip()).lower()
 
 
-def note_model_outcome(jobs: str | Path, attempt_id: str, terminal: SupervisorTerminal) -> None:
-    """Keep the per-model record for a Claude/Codex attempt that just closed.
+def note_model_outcome(
+    jobs: str | Path, attempt_id: str, note: str, failure_class: str, reconcile_reason: str
+) -> None:
+    """Keep the per-model record for a Claude/Codex attempt whose row just closed.
+
+    Every path that confirms a terminal sign and wins the close calls this once
+    (the supervisor, the post-exit watcher, the completion join's direct closes);
+    a re-observation of an already closed row never does, so one end is never
+    written twice and an old refusal is not revived over a newer answer.
 
     One line in the existing usage-cache provider record (the file OpenCode
     already uses), on the model the attempt launched and the account scope it
@@ -652,18 +687,20 @@ def note_model_outcome(jobs: str | Path, attempt_id: str, terminal: SupervisorTe
     the next action, or which harness is chosen -- no reader of these lines for
     Claude/Codex exists yet. OpenCode keeps its own classification and record.
     """
-    rejected = terminal.reconcile_reason.startswith(MODEL_REJECTED_REASON)
-    if not rejected and terminal.failure_class not in _MODEL_ANSWERED_CLASSES:
+    rejected = reconcile_reason.startswith(MODEL_REJECTED_REASON)
+    answered = failure_class in _MODEL_ANSWERED_CLASSES or note == "dead-contract"
+    if not rejected and not answered:
         return
     try:
         from dispatch_completion_join import exact_attempt_row
         meta = exact_attempt_row(Path(jobs), attempt_id).metadata
         harness = str(meta.get("harness") or "")
         launched = str(meta.get("model") or "").strip()
-        if harness not in _MODEL_REJECTION_RUNTIMES or not launched:
-            return
+        if (harness not in _MODEL_REJECTION_RUNTIMES or not launched
+                or _model_key(launched) in _UNRESOLVED_MODELS):
+            return  # no settled model to put a line on
         if rejected:
-            named = terminal.reconcile_reason[len(MODEL_REJECTED_REASON) + 1:]
+            named = reconcile_reason[len(MODEL_REJECTED_REASON) + 1:]
             # A refusal that points at another model says nothing about this one.
             if named and _model_key(named) != _model_key(launched):
                 return

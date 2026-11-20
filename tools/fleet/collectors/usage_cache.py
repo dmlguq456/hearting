@@ -26,6 +26,14 @@ FETCHERS = {}
 _LOCK = threading.RLock()
 _THREADS = {}
 _CLAUDE_LOCK = threading.RLock()
+# One cache file, one lock: every writer of <harness>.json reads, edits and
+# replaces it inside `_cache_mutex`. Claude's own blocking waits are unchanged;
+# the other writers wait at most LOCK_WAIT seconds. Past that a usage writer
+# publishes as it did before the lock existed, and a per-model line is dropped.
+LOCK_WAIT = 1.0
+_THREAD_LOCKS = {"claude": _CLAUDE_LOCK}
+_THREAD_LOCKS_GUARD = threading.Lock()
+_HELD = threading.local()
 
 
 def state_dir():
@@ -168,6 +176,13 @@ def _read(harness, now=None, stale_max=None, *, credential=None):
 
 def _write(harness, payload, fetched_at, attempted_at, error_observation=None,
            *, credential_generation=None):
+    with _cache_mutex(harness, LOCK_WAIT):
+        _write_locked(harness, payload, fetched_at, attempted_at, error_observation,
+                      credential_generation=credential_generation)
+
+
+def _write_locked(harness, payload, fetched_at, attempted_at, error_observation=None,
+                  *, credential_generation=None):
     directory = state_dir()
     os.makedirs(directory, exist_ok=True)
     providers = {}
@@ -240,10 +255,11 @@ def record_attempt(harness, now=None):
     if harness == "claude":
         return False
     now = time.time() if now is None else float(now)
-    previous = read(harness, now=now, stale_max=float("inf"))
     try:
-        _write(harness, previous.get("payload") or {}, previous.get("observed_at") or 0.0,
-               now, error_observation=previous.get("error_observation"))
+        with _cache_mutex(harness, LOCK_WAIT):
+            previous = read(harness, now=now, stale_max=float("inf"))
+            _write(harness, previous.get("payload") or {}, previous.get("observed_at") or 0.0,
+                   now, error_observation=previous.get("error_observation"))
         return True
     except OSError:
         return False
@@ -263,14 +279,11 @@ def record_provider(harness, provider, model, account_scope, state, reason=None,
             or not isinstance(model, str) or not model
             or state not in ("usable", "unavailable")):
         return False
-    if harness == "claude":
-        # The Claude file is also rewritten by the lease-owned usage worker
-        # under this mutex; the same lock keeps a line from being lost to it.
-        with _claude_mutex():
-            return _record_provider(harness, provider, model, account_scope, state, reason,
-                                    now, source, credential_generation)
-    return _record_provider(harness, provider, model, account_scope, state, reason,
-                            now, source, credential_generation)
+    with _cache_mutex(harness, LOCK_WAIT) as held:
+        if not held and harness != "opencode":
+            return False  # a per-model line is not worth racing a usage writer
+        return _record_provider(harness, provider, model, account_scope, state, reason,
+                                now, source, credential_generation)
 
 
 def _record_provider(harness, provider, model, account_scope, state, reason, now, source,
@@ -323,27 +336,32 @@ def _record_provider(harness, provider, model, account_scope, state, reason, now
         return False
 
 
+def _unavailable_line(harness, key):
+    try:
+        with open(_path(harness), encoding="utf-8") as fh:
+            row = json.load(fh)["providers"].get(key)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+    return isinstance(row, dict) and row.get("state") == "unavailable"
+
+
 def record_model_outcome(harness, provider, model, account_scope, state, reason=None,
                          now=None, source=None):
     """Claude/Codex per-model line: a rejection is kept; an answer only lifts one.
 
     ``unavailable`` is written as is. ``usable`` is written only over an existing
     ``unavailable`` line for the same model and account scope, so a success never
-    rewrites the file unless there is a rejection to lift.
+    rewrites the file unless there is a rejection to lift. The check and the
+    write share one lock hold, so a concurrent usage writer cannot undo either.
     """
-    if state == "usable":
-        try:
-            with open(_path(harness), encoding="utf-8") as fh:
-                item = json.load(fh)
-            key = json.dumps([provider, model, account_scope or "unscoped"],
-                             separators=(",", ":"))
-            row = item["providers"].get(key)
-            if not isinstance(row, dict) or row.get("state") != "unavailable":
-                return False
-        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+    key = json.dumps([provider, model, account_scope or "unscoped"], separators=(",", ":"))
+    if state == "usable" and not _unavailable_line(harness, key):
+        return False  # the common success: nothing to lift, no lock, no write
+    with _cache_mutex(harness, LOCK_WAIT) as held:
+        if not held or (state == "usable" and not _unavailable_line(harness, key)):
             return False
-    return record_provider(harness, provider, model, account_scope, state, reason=reason,
-                           now=now, source=source)
+        return record_provider(harness, provider, model, account_scope, state, reason=reason,
+                               now=now, source=source)
 
 
 def read_provider(harness, provider, model, account_scope, *, now=None,
@@ -406,19 +424,71 @@ def provider_records(harness, account_scopes=None):
 
 
 @contextmanager
-def _claude_mutex():
-    """Serialize only Claude lease/publication changes across threads/processes.
+def _cache_mutex(harness, wait=None):
+    """Serialize one harness cache file's read-edit-replace across threads/processes.
 
-    Keep the lock inode stable. HTTP and worker joins never run under this lock.
+    Yields whether the lock is held. ``wait=None`` blocks as Claude always did;
+    a number gives up after that many seconds and yields False, leaving the
+    caller to carry on as it did before the lock. A holder is re-entered by its
+    own thread (nested writers share one hold). Keep the lock inode stable. HTTP
+    and worker joins never run under this lock.
     """
-    with _CLAUDE_LOCK:
-        os.makedirs(state_dir(), exist_ok=True)
-        fd = os.open(os.path.join(state_dir(), ".claude.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    nested = getattr(_HELD, "state", None)
+    if nested is None:
+        nested = _HELD.state = {}
+    if harness in nested:
+        nested[harness][0] += 1
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
+            yield nested[harness][1]
         finally:
+            nested[harness][0] -= 1
+        return
+    deadline = None if wait is None else time.monotonic() + wait
+    with _THREAD_LOCKS_GUARD:
+        thread_lock = _THREAD_LOCKS.setdefault(harness, threading.RLock())
+    if not thread_lock.acquire(timeout=-1 if deadline is None
+                               else max(0.0, deadline - time.monotonic())):
+        yield False
+        return
+    fd = None
+    held = False
+    try:
+        try:
+            os.makedirs(state_dir(), exist_ok=True)
+            fd = os.open(os.path.join(state_dir(), ".%s.lock" % harness),
+                         os.O_CREAT | os.O_RDWR, 0o600)
+            held = _flock(fd, deadline)
+        except OSError:
+            if deadline is None:
+                raise
+        nested[harness] = [1, held]
+        try:
+            yield held
+        finally:
+            nested.pop(harness, None)
+    finally:
+        if fd is not None:
             os.close(fd)
+        thread_lock.release()
+
+
+def _flock(fd, deadline):
+    if deadline is None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return True
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.005, remaining))
+
+
+def _claude_mutex():
+    return _cache_mutex("claude")
 
 
 def _claude_lease():

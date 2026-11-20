@@ -128,7 +128,7 @@ from codex_dispatch_terminal import (  # noqa: E402
 )
 from dispatch_degradation import record_degradation  # noqa: E402
 from dispatch_supervisor_terminal import (  # noqa: E402
-    classify_supervisor_log, missing_result_terminal,
+    classify_supervisor_log, missing_result_terminal, note_model_outcome,
 )
 from dispatch_registry_cache import registry_lines, registry_snapshot, registry_view  # noqa: E402
 
@@ -5150,6 +5150,9 @@ def apply_exact_route_free_support_classification(
             or launched_attempt_identity(current.raw.split("\t")) != selected_identity):
         return "support-settlement-commit-unverified"
     materialize_after_terminal_close(Path(jobs), row.attempt_id)
+    # The same per-model record the supervisor writes when it closes a row.
+    note_model_outcome(jobs, row.attempt_id, note or "", str((evidence or {}).get("failure_class") or ""),
+                       str((evidence or {}).get("reconcile_reason") or ""))
     return "support-settlement-committed"
 
 
@@ -5376,6 +5379,9 @@ def settle_exited_owner_terminal(row: ChildRow, *, jobs: str | Path) -> str | No
                                   still_exited, evidence=terminal.evidence())
     if closed:
         materialize_after_terminal_close(Path(jobs), row.attempt_id)
+        # The same per-model record the supervisor writes when it closes a row.
+        note_model_outcome(jobs, row.attempt_id, terminal.note, terminal.failure_class,
+                           terminal.reconcile_reason)
     return "" if closed else "owner-terminal-revalidation-pending"
 
 
