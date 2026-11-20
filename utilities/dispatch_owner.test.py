@@ -66,6 +66,43 @@ CLAUDE_CLI = shutil.which("claude")
 NEEDS_CLAUDE_CLI = "no claude binary: the selector's session-resume probe cannot be proven here"
 
 
+class UnreadGaugeTest(unittest.TestCase):
+    """G2 (11-20): a start does not read the capacity gauge of a harness it can never choose."""
+
+    STATES = {"claude": "ok", "codex": "ok", "opencode": "limited(2026-12-01)"}
+
+    def test_a_limited_harness_is_not_read(self):
+        self.assertEqual(OWNER._unread_gauges(self.STATES, None), {"opencode": "limited"})
+        self.assertEqual(OWNER._unread_gauges({h: "ok" for h in self.STATES}, None), {})
+        self.assertEqual(OWNER._unread_gauges({"claude": "limited", "codex": "limited(unknown-reset)", "opencode": "ok"}, None),
+                         {"claude": "limited", "codex": "limited"})
+
+    def test_a_named_eligible_harness_is_the_only_one_read(self):
+        self.assertEqual(OWNER._unread_gauges({h: "ok" for h in self.STATES}, "codex"),
+                         {"claude": "not-needed", "opencode": "not-needed"})
+        # A limited harness keeps the reason it was ruled out by usage, not the one for the others.
+        self.assertEqual(OWNER._unread_gauges(self.STATES, "claude"), {"opencode": "not-needed", "codex": "not-needed"})
+
+    def test_a_named_harness_that_is_limited_leaves_the_automatic_choice_its_gauges(self):
+        # The named harness cannot be used, so the choice falls to the others and ranks on their headroom.
+        states = {"claude": "limited(2026-12-01)", "codex": "ok", "opencode": "ok"}
+        self.assertEqual(OWNER._unread_gauges(states, "claude"), {"claude": "limited"})
+
+    def test_the_receipt_of_a_run_that_skipped_a_gauge_names_it(self):
+        scores = {"claude": 50.0, "codex": None, "opencode": 80.0}
+        sources = {"claude": "taps", "codex": "skipped:limited", "opencode": "live"}
+        lines = OWNER._audit("eligible", "claude", "configured-balanced", ["claude", "codex", "opencode"], None,
+                             {"claude": "ok", "codex": "limited(2026-12-01)", "opencode": "ok"},
+                             allocation={"strategy": "balanced", "window": 30, "usage_gate_used_percent": 85,
+                                         "depth_affinity": {}, "depth_affinity_weight": 0.5,
+                                         "usage_headroom_exponent": 1},
+                             counts={"claude": 0, "codex": 0, "opencode": 0}, rejected=["codex"],
+                             capacity=scores, capacity_sources=sources, capacity_freshness={})
+        text = "\n".join(lines)
+        self.assertIn("capacity_headroom.codex=unknown", text)
+        self.assertIn("capacity_source.codex=skipped:limited", text)
+
+
 class FrameAlternativeSelectionTest(unittest.TestCase):
     def test_missing_first_attempt_is_pending_until_its_harness_is_recorded(self):
         with tempfile.TemporaryDirectory() as td:

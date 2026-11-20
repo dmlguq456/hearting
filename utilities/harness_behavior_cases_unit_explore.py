@@ -34,6 +34,7 @@ import harness_behavior_cases_unit_route as unit  # noqa: E402
 from harness_behavior_cases_unit_nested import EphemeralScenario  # noqa: E402
 from harness_behavior_cases_e import _base  # noqa: E402
 
+REFUSED = "owner-route-binding-tuple-invalid"
 QUESTION = "SCENARIO-UNIT-WORK: where does the fixture README say what the fixture is for? Answer with the file and line."
 
 
@@ -139,6 +140,12 @@ class ExploreInOwnerScenario(ExploreScenario):
         if verdict == "pass" and not run.evidence["parent_route_bound"]:
             run.note("the parent standard route was not sealed, so no owner environment was carried")
             return "inconclusive"
+        if verdict == "inconclusive" and not self.unit_rows():
+            # The regression this case exists for: the leg inherited its caller's route binding and the start
+            # was refused. No row was written, but the session was handed the refusal by its tool.
+            if any(r["last_kind"] == "tool" and REFUSED in r["last_text"] for r in run.main_requests()):
+                run.note(f"the lookup leg was refused as a non-owner start ({REFUSED}); no worker was registered")
+                return "fail"
         return verdict
 
 

@@ -12,10 +12,12 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import copy
 import importlib.util
 import json
+import pty
 import re
 import subprocess
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -331,20 +333,29 @@ class UnitComposeTest(F.FramedBase):
 
 
 class UnitCliTest(F.FramedBase):
-    def run_cli(self, *extra, task="Review the change\n", language=None):
+    def run_cli(self, *extra, task="Review the change\n", language=None, stdin=None, stdin_bytes=None):
+        """`compose` with the brief as a file, or (`stdin`/`stdin_bytes` given) read once from standard input."""
         brief = Path(self._tmp.name) / "brief.md"
         brief.write_text(task, encoding="utf-8")
+        given = {} if stdin is None and stdin_bytes is None else {
+            "input": stdin_bytes if stdin_bytes is not None else stdin.encode("utf-8")}
+        text = not given
         evidence = Path(self._tmp.name) / "headless.json"
         evidence.write_text(json.dumps(T.registered_headless()), encoding="utf-8")
         env = {**F.clean_environment(), "AGENT_HOME": str(R.ROOT), "AGENT_DISPATCH_JOBS": str(self.jobs),
                "FLEET_ROUTE_CHAIN_DIR": str(Path(self._tmp.name) / "chains")}
         if language:
             env["FLEET_NOW_LANG"] = language
-        return subprocess.run(
+        done = subprocess.run(
             [sys.executable, str(HERE / "capability-route.py"), "compose", "--cwd", str(R.ROOT),
-             "--artifact-root", str(self.root), "--spec-read", "fixture", "--prompt-file", str(brief),
+             "--artifact-root", str(self.root), "--spec-read", "fixture",
+             "--prompt-file", "-" if given else str(brief),
              "--registered-headless-evidence", str(evidence), "--unassigned", *extra],
-            text=True, capture_output=True, env=env, check=False)
+            text=text, capture_output=True, env=env, check=False, **given)
+        if text:
+            return done
+        return subprocess.CompletedProcess(done.args, done.returncode, done.stdout.decode("utf-8", "replace"),
+                                           done.stderr.decode("utf-8", "replace"))
 
     def test_the_card_names_the_unit_and_tells_no_intensity_while_the_record_keeps_it(self):
         # 11-20 (the person: "unit에는 강도를 표시안하는게 맞겠네"): the `[경로]` header of a unit route was `unit · solo(quick) unit` (shape, intensity
@@ -419,6 +430,105 @@ class UnitCliTest(F.FramedBase):
         self.assertEqual(refused.returncode, 64, refused.stderr)
         self.assertIn("capability-route: compose-start-requires-task:", refused.stderr)
         self.assertNotIn("compose-unit-start-unavailable", refused.stderr)
+
+    def test_the_brief_on_standard_input_is_the_brief_a_file_would_be(self):
+        # G2 (11-20): `--prompt-file -` reads standard input once; the route keeps that text exactly as it
+        # keeps a file's, so every later reader (the leg's start, a repeat, a compose-again) finds it there.
+        brief = "Where does the fixture say what it is for?\nAnswer with the file and line.\n"
+        routes = {}
+        for how, kwargs in (("file", {"task": brief}), ("stdin", {"stdin": brief})):
+            done = self.run_cli("--unit", "general/explore", "--slug", f"g2-{how}", language="en", **kwargs)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            routes[how] = json.loads(Path(json.loads(done.stdout.strip().splitlines()[-1])["route_file"])
+                                     .read_text(encoding="utf-8"))
+            self.assertEqual(routes[how]["work_request"]["text"], brief)
+            self.assertIn("[Intent] Where does the fixture say what it is for?", done.stderr)
+        for key in ("capability", "field", "field_source", "effective_intensity"):
+            self.assertEqual(routes["file"].get(key), routes["stdin"].get(key), key)
+        self.assertEqual([(n["id"], n["unit"], n["model_profile"], n["write_scope"]) for n in routes["file"]["nodes"]],
+                         [(n["id"], n["unit"], n["model_profile"], n["write_scope"]) for n in routes["stdin"]["nodes"]])
+
+    def test_every_compose_form_that_takes_a_brief_takes_standard_input_the_same_way(self):
+        brief = "Review the change in the fixture\n"
+        for label, extra in (("solo", ("--shape", "solo", "--capability", "autopilot-code")),
+                             ("unit", ("--unit", "qa/code-review")),
+                             ("unit with a field", ("--unit", "general/explore", "--field", "research"))):
+            with self.subTest(form=label):
+                done = self.run_cli(*extra, "--explain", "--slug", "g2-form", language="en", stdin=brief)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertIn("[Intent] Review the change in the fixture", done.stderr)
+                self.assertNotIn("compose-prompt-stdin", done.stderr)
+
+    def test_standard_input_that_cannot_be_a_brief_ends_the_command_in_one_line_and_starts_nothing(self):
+        cases = {
+            "compose-prompt-stdin-empty": [dict(stdin=""), dict(stdin="  \n\t\n"), dict(stdin_bytes=b"")],
+            "compose-prompt-stdin-too-large": [dict(stdin_bytes=b"a" * (65536 + 1))],
+            "compose-prompt-stdin-not-utf8": [dict(stdin_bytes=b"\xff\xfe\x00")],
+        }
+        before = sorted(p.name for p in Path(self.root).rglob("*") if p.is_file())
+        for reason, inputs in cases.items():
+            for kwargs in inputs:
+                with self.subTest(reason=reason, input=str(kwargs)[:30]):
+                    done = self.run_cli("--unit", "general/explore", "--ephemeral", "--start", **kwargs)
+                    self.assertEqual(done.returncode, 64, done.stderr)
+                    last = [line for line in done.stderr.splitlines() if line.strip()]
+                    self.assertEqual(len(last), 1, done.stderr)
+                    self.assertTrue(last[0].startswith(f"capability-route: {reason}:"), last[0])
+                    self.assertEqual(done.stdout, "")
+        self.assertEqual(sorted(p.name for p in Path(self.root).rglob("*") if p.is_file()), before)   # nothing was sealed or started
+
+    def test_a_closed_or_dev_null_standard_input_is_an_empty_brief_not_a_wait(self):
+        for label, stdin in (("devnull", subprocess.DEVNULL), ("closed", None)):
+            with self.subTest(stdin=label):
+                brief = Path(self._tmp.name) / "brief.md"
+                brief.write_text("x\n", encoding="utf-8")
+                done = subprocess.run(
+                    [sys.executable, str(HERE / "capability-route.py"), "compose", "--cwd", str(R.ROOT),
+                     "--artifact-root", str(self.root), "--spec-read", "fixture", "--prompt-file", "-",
+                     "--unit", "general/explore", "--unassigned", "--explain"],
+                    text=True, capture_output=True, check=False, timeout=30,
+                    env={**F.clean_environment(), "AGENT_HOME": str(R.ROOT)}, stdin=stdin,
+                    **({} if stdin is not None else {"close_fds": True, "preexec_fn": lambda: os.close(0)}))
+                self.assertEqual(done.returncode, 64, done.stderr)
+                self.assertIn("capability-route: compose-prompt-stdin-empty:", done.stderr)
+
+    def test_a_terminal_on_standard_input_is_refused_at_once(self):
+        master, slave = pty.openpty()
+        try:
+            done = subprocess.run(
+                [sys.executable, str(HERE / "capability-route.py"), "compose", "--cwd", str(R.ROOT),
+                 "--artifact-root", str(self.root), "--spec-read", "fixture", "--prompt-file", "-",
+                 "--unit", "general/explore", "--unassigned", "--explain"],
+                text=True, capture_output=True, check=False, timeout=30, stdin=slave,
+                env={**F.clean_environment(), "AGENT_HOME": str(R.ROOT)})
+        finally:
+            os.close(master)
+            os.close(slave)
+        self.assertEqual(done.returncode, 64, done.stderr)
+        self.assertIn("capability-route: compose-prompt-stdin-terminal:", done.stderr)
+
+    def test_a_pipe_that_sends_nothing_is_not_waited_for_without_end(self):
+        import capability_route_compose as C
+        read_end, write_end = os.pipe()
+        try:
+            with mock.patch.object(sys, "stdin", os.fdopen(read_end, "r", closefd=False)), \
+                    mock.patch.object(C, "PROMPT_STDIN_IDLE_SECONDS", 0.2):
+                with self.assertRaises(ValueError) as caught:
+                    C.prompt_from_stdin()
+        finally:
+            os.close(read_end)
+            os.close(write_end)
+        self.assertTrue(str(caught.exception).startswith("compose-prompt-stdin-timeout:"), str(caught.exception))
+
+    def test_the_prepared_worktree_key_does_not_name_a_file_for_standard_input(self):
+        import capability_route_compose as C
+        args = {"work_request": {"text": "same task"}, "cwd": str(R.ROOT), "shape": "solo"}
+        from_stdin = C._compose_preparation_key(args, None, Path("-"))
+        self.assertIsNone(from_stdin["request_path"])
+        again = C._compose_preparation_key(args, None, Path("-"))
+        self.assertEqual(from_stdin, again)        # a retried start of the same brief keeps its identity
+        named = C._compose_preparation_key(args, None, Path(self._tmp.name) / "brief.md")
+        self.assertTrue(named["request_path"].endswith("brief.md"))
 
     def test_stages_shows_the_unit_route_only_when_asked(self):
         shown = subprocess.run([sys.executable, str(HERE / "capability-route.py"), "stages", "--capability", "unit"],

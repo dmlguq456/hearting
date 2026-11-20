@@ -643,6 +643,18 @@ def _usage(jobs, profile=None, recheck=False):
     return states
 
 
+def _unread_gauges(states, explicit):
+    """Harnesses whose capacity gauge this start does not read, with why.
+
+    A harness the usage state already reads as limited is never a candidate, so its headroom never
+    ranks or gates anything; and when the harness is named and eligible, it is the one used, so no
+    other is ranked. The receipt shows such a gauge as `skipped:<why>` instead of an HTTP reading."""
+    skip = {harness: "limited" for harness, state in states.items() if not _eligible(state)}
+    if explicit is not None and _eligible(states.get(explicit, "unknown")):
+        skip.update({harness: "not-needed" for harness in states if harness != explicit})
+    return skip
+
+
 def _resolved_path(value):
     return Path(value).expanduser().resolve(strict=False)
 
@@ -969,7 +981,7 @@ def main(argv):
             )
 
         rejected = [h for h in sorted(states) if not _eligible(states[h])]
-        capacity_report = _capacity.capacity_report()
+        capacity_report = _capacity.capacity_report(skip=_unread_gauges(states, explicit))
         capacity = capacity_report["scores"]
         capacity_sources = capacity_report["sources"]
         capacity_freshness = capacity_report.get("freshness") or {}

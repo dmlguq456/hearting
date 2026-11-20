@@ -355,7 +355,10 @@ A single read-only unit can also be opened as a route of its own, with no owner:
 with the brief, and its end closes the route and returns the sealed summary to the
 session that opened it (`core/OPERATIONS.md` §5.10c). A unit route has no intensity
 (one unit does one job and nothing checks it; `core/CONVENTIONS.md` §1). This adds a
-way to start; it does not change the choices above.
+way to start; it does not change the choices above. `--prompt-file -` reads the brief
+once from standard input (a heredoc), so no file has to be written first; it means the
+same in every `compose` form that takes `--prompt-file`, and an input that is empty, a
+terminal, or too large ends the command in one line before anything starts.
 
 Examples of the same boundary:
 

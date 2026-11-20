@@ -240,6 +240,87 @@ class SharedCacheFallbackTests(unittest.TestCase):
         self.assertTrue(report["sources"]["opencode"].startswith("unknown:"))
         self.assertEqual(report["sources"]["claude"], "unknown:no-fresh-taps")
 
+    def test_the_two_networked_gauges_are_read_side_by_side(self):
+        # Each is its own HTTP call; one start waits for the slower, not for both. Neither can return
+        # until the other has begun, so a sequential read would stop here for the whole wait.
+        import threading
+        begun = {"codex": threading.Event(), "opencode": threading.Event()}
+        other = {"codex": "opencode", "opencode": "codex"}
+
+        def probe(name, score):
+            def read():
+                begun[name].set()
+                if not begun[other[name]].wait(5):
+                    raise AssertionError("the other gauge was not started while this one was read")
+                return score
+            return read
+
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": "", "HARNESS_CAPACITY_SCORES": ""}), \
+                mock.patch.object(C, "_codex_api_score", probe("codex", 60.0)), \
+                mock.patch.object(C, "_opencode_api_score", probe("opencode", 40.0)), \
+                mock.patch.object(C, "_claude_capacity_reading", return_value=(None, None)):
+            report = C.capacity_report(now=0.0)
+        self.assertEqual((report["scores"]["codex"], report["scores"]["opencode"]), (60.0, 40.0))
+        self.assertEqual((report["sources"]["codex"], report["sources"]["opencode"]), ("live", "live"))
+        self.assertEqual(list(report["scores"]), ["codex", "claude", "opencode"])     # the same order as before
+
+    def test_a_probe_that_raises_raises_out_of_the_report_as_it_did_in_turn(self):
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": "", "HARNESS_CAPACITY_SCORES": ""}), \
+                mock.patch.object(C, "_codex_api_score", side_effect=RuntimeError("boom")), \
+                mock.patch.object(C, "_opencode_api_score", return_value=10.0), \
+                mock.patch.object(C, "_claude_capacity_reading", return_value=(None, None)):
+            with self.assertRaises(RuntimeError):
+                C.capacity_report(now=0.0)
+
+    def test_a_skipped_gauge_is_not_probed_and_says_why(self):
+        # A harness the caller has ruled out is never selected on its headroom, so it is neither probed
+        # nor written to the shared cache; the receipt shows `skipped:<why>`. The rest is read as before.
+        asked = []
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": "", "HARNESS_CAPACITY_SCORES": ""}), \
+                mock.patch.object(C, "_codex_api_score", side_effect=lambda: asked.append("codex") or 60.0), \
+                mock.patch.object(C, "_opencode_api_score", side_effect=lambda: asked.append("opencode") or 40.0), \
+                mock.patch.object(C, "_claude_capacity_reading", return_value=(70.0, None)), \
+                mock.patch.object(C, "_claude_cache_score", return_value=(None, None)):
+            report = C.capacity_report(now=0.0, skip={"opencode": "limited"})
+            self.assertEqual(asked, ["codex"])
+            self.assertEqual((report["scores"]["opencode"], report["sources"]["opencode"]),
+                             (None, "skipped:limited"))
+            self.assertEqual((report["scores"]["codex"], report["sources"]["codex"]), (60.0, "live"))
+            self.assertEqual(report["scores"]["claude"], 70.0)
+            asked.clear()
+            report = C.capacity_report(now=0.0, skip={"codex": "not-needed", "opencode": "not-needed"})
+            self.assertEqual(asked, [])
+            self.assertEqual(report["sources"]["claude"], "taps")
+            asked.clear()
+            report = C.capacity_report(now=0.0, skip={"claude": "limited"})
+            self.assertEqual(sorted(asked), ["codex", "opencode"])
+            self.assertEqual((report["scores"]["claude"], report["sources"]["claude"]), (None, "skipped:limited"))
+
+    def test_a_manual_score_stands_over_a_skip_and_a_report_without_skip_is_unchanged(self):
+        with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": "opencode:33", "AGENT_DISPATCH_JOBS": ""}), \
+                mock.patch.object(C, "_codex_api_score", return_value=55.0), \
+                mock.patch.object(C, "_claude_capacity_reading", return_value=(None, None)), \
+                mock.patch.object(C, "_claude_cache_score", return_value=(None, None)):
+            skipped = C.capacity_report(now=0.0, skip={"opencode": "limited"})
+            plain = C.capacity_report(now=0.0)
+        self.assertEqual((skipped["scores"]["opencode"], skipped["sources"]["opencode"]), (33.0, "manual"))
+        self.assertEqual(skipped, plain)
+
+    def test_the_skipped_harness_could_not_have_changed_the_choice(self):
+        # Why the skip is safe: `select` ranks only harnesses whose usage state is not limited, so the
+        # headroom of a limited one (any number, or none) gives the same choice and the same ranks.
+        names = ["claude", "codex", "opencode"]
+        policy = {"primary": names, "relief": [], "last_resort": [], "promote_relief_below": 0}
+        states = {"claude": "ok", "codex": "ok", "opencode": "limited(2026-12-01)"}
+        for strategy in ("balanced", "capacity-aware"):
+            outcomes = set()
+            for opencode in (None, 0.0, 5.0, 100.0):
+                scores = {"claude": 70.0, "codex": 55.0, "opencode": opencode}
+                choice, band, ranks, promoted = C.select(policy, states, {"claude": 3, "codex": 1, "opencode": 0}, names,
+                                                         scores, strategy=strategy, preferred="claude", affinity_weight=0.65)
+                outcomes.add((choice, band, json.dumps(ranks, sort_keys=True), promoted))
+            self.assertEqual(len(outcomes), 1, (strategy, outcomes))
+
     def test_refresh_bumps_attempted_at_on_failure_without_losing_payload(self):
         cache = self._cache()
         cache.record("codex", {"windows": [["7d", 30, None]]}, now=100.0)
