@@ -274,6 +274,32 @@ class MessageQuestionTest(unittest.TestCase):
         self.assertEqual(state._signal_path({"seat_key": seat.key}).stat().st_mode & 0o777, 0o600)
         self.assertEqual(state.state_root().stat().st_mode & 0o777, 0o700)
 
+    def test_ask_says_which_unanswered_question_it_replaced(self):
+        import session_tidy as tidy
+        from fleet import process_identity
+        with mock.patch("dispatch_parent_completion.interactive_parent_identity", return_value=("claude", "native-question-session")), \
+             mock.patch.object(tidy, "resolve_seat", return_value=self.f.seat()), \
+             mock.patch.object(process_identity, "current_launch_context", return_value=None):
+            first = _run("ask", "first line of the old one\nsecond line stays out", "--json")
+            self.assertEqual(first[0], 0)
+            self.assertNotIn("replaced", json.loads(first[1]))
+            old_id = json.loads(first[1])["id"]
+            # Asking the same text again is a retry, not a replacement.
+            retry = _run("ask", "first line of the old one\nsecond line stays out", "--json")
+            self.assertNotIn("replaced", json.loads(retry[1]))
+            text = _run("ask", "the new question")
+            self.assertEqual(text[0], 0)
+            lines = text[1].splitlines()
+            self.assertTrue(lines[0].startswith("S4:") and lines[0] != old_id)
+            self.assertEqual(lines[1], "questions: replaced %s — first line of the old one" % old_id)
+            self.assertEqual(len(lines), 3)
+            self.assertNotIn("second line", text[1])
+            # Each new ask names only the one it closed.
+            third = _run("ask", "a third question", "--json")
+            replaced = json.loads(third[1])["replaced"]
+            self.assertEqual(replaced["first_line"], "the new question")
+            self.assertEqual(state.closed_question(old_id)["status"], "replaced")
+
     def test_registration_notice_names_choice_answers_only_when_choices_exist(self):
         import session_tidy as tidy
         from fleet import process_identity
