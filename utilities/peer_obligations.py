@@ -2914,12 +2914,8 @@ class ObligationStore:
         finally:
             os.close(root_fd)
 
-    def _selected_records(self, states, kinds, cached_terminal, fast_active_only,
-                          remember=True):
-        """The stored records ``list`` selects, uncopied; read once per runner pass.
-
-        ``remember=False`` reuses a pass snapshot that is already there but never
-        stores its own read in it."""
+    def _selected_records(self, states, kinds, cached_terminal, fast_active_only):
+        """The stored records ``list`` selects, uncopied; read once per runner pass."""
         explicit_states = states is not None
         wanted = set(_PENDING_STATES if states is None else states)
         wanted_kinds = None if kinds is None else set(kinds)
@@ -2933,7 +2929,7 @@ class ObligationStore:
                 force_terminal=(explicit_states and not cached_terminal
                                 and bool(wanted & {"complete", "cancelled"})),
                 fast_active_only=fast_active_only)
-            if context is not None and remember:
+            if context is not None:
                 context["records"] = records
         for record in records.values():
             followup = bool(
@@ -2958,11 +2954,12 @@ class ObligationStore:
         """Whether ``list(kinds=kinds, fast_active_only=True)`` would be non-empty.
 
         The runner-start checks need only that answer; this reads the same records
-        without copying them. Inside a runner pass it reuses the pass's snapshot when
-        one is there, but its own fast-only read never becomes the snapshot: a later
-        ``list`` of the same pass still takes the full recovery read."""
-        return any(True for _record in self._selected_records(None, kinds, False, True,
-                                                              remember=False))
+        without copying them. Outside a runner pass it consults only the active markers.
+        Inside one it shares the pass's snapshot, and when that is empty it takes the
+        full read the pass's next ``list`` takes: a fast-only read never becomes the
+        snapshot that a later full recovery read of the same pass would reuse."""
+        fast_only = self._active_list_context is None
+        return any(True for _record in self._selected_records(None, kinds, False, fast_only))
 
     @staticmethod
     def _terminal_time_ns(record):
