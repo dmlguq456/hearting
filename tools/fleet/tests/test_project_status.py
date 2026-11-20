@@ -15,6 +15,7 @@ import time
 import unicodedata
 import unittest
 from dataclasses import replace
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -304,6 +305,27 @@ class FindTest(unittest.TestCase):
         project_status.clear_cache()
         _touch(page, "# Large\n" + "x" * 70000, self.now)
         self.assertEqual(project_status.find_documents(str(self.root), now=self.now), [])  # no older name stands in
+
+    def test_no_campaign_md_is_remembered_with_the_folder_stamp_and_a_new_one_is_seen(self):
+        campaign = self.root / "campaigns/2026-11-06_stream"
+        _touch(campaign / "현황.md", "# Hand written", self.now)
+        _age(campaign, self.now - 60)
+        real, calls = project_status.campaign_documents.campaign_page, []
+
+        def counted(folder):
+            calls.append(folder)
+            return real(folder)
+        with mock.patch.object(project_status.campaign_documents, "campaign_page", counted):
+            for _ in range(3):
+                self.assertEqual(project_status.find_documents(str(self.root), now=self.now),
+                                 [str(campaign / "현황.md")])
+            self.assertEqual(len(calls), 1)      # the same stamp: the folder is not asked again
+            page = campaign / "campaign.md"
+            _touch(page, CAMPAIGN_DOC.format(decisions=DECISIONS_TWO), self.now)
+            _age(campaign, self.now - 30)        # adding the page moved the folder's stamp
+            self.assertEqual(project_status.find_documents(str(self.root), now=self.now), [str(page)])
+            self.assertEqual(project_status.find_documents(str(self.root), now=self.now), [str(page)])
+            self.assertEqual(len(calls), 3)      # a page that is there is read every time
 
     def test_a_campaign_md_inside_a_cycle_folder_is_not_a_status_page(self):
         campaign = self.root / "campaigns/2026-11-06_stream"

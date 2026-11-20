@@ -114,6 +114,14 @@ def campaign_page(folder):
     """
     path = Path(folder) / CAMPAIGN_DOCUMENT
     try:
+        # The common case, no page, costs one stat: the no-follow open below walks every path
+        # component and is far dearer on a network share. Whatever stands there is opened safely.
+        os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        pass
+    try:
         raw, _, coverage = read_document(Path(folder), CAMPAIGN_DOCUMENT)
         if coverage == 'complete':
             raw.decode('utf-8')

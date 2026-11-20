@@ -108,6 +108,13 @@ class CampaignDocumentsTest(unittest.TestCase):
         project_status.clear_cache()
         self.assertEqual(documents.campaign_status(self.campaign)['path'], old)  # nothing left: the old path as before
 
+    def test_a_missing_campaign_md_costs_one_stat_and_no_safe_open(self):
+        old = self.campaign / '현황.md'; old.write_text(PAGE)
+        with mock.patch.object(documents, 'read_document', side_effect=AssertionError('opened')) as opened:
+            self.assertIsNone(documents.campaign_page(self.campaign))
+        opened.assert_not_called()
+        self.assertEqual(documents.campaign_status(self.campaign)['path'], old)
+
     def test_campaign_md_is_looked_for_only_in_the_campaign_folder(self):
         old = self.legacy()
         (old.parent / 'campaign.md').write_text(CAMPAIGN_PAGE)

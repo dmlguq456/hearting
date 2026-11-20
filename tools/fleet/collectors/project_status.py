@@ -36,11 +36,12 @@ _ROOTS = {}               # cwd -> (resolved_at, root or None)
 _SCANS = {}               # root -> (scanned_at, record or None)
 _CYCLES = {}              # campaign dir -> (dir mtime, cycle dirs)
 _LISTED = {}              # folder -> (folder mtime, its status document path or None)
+_NO_PAGE = {}             # campaign folder -> its mtime when it had no campaign.md
 _DOCS = {}                # path -> (mtime, size, parsed)
 
 
 def clear_cache():
-    for cache in (_ROOTS, _SCANS, _CYCLES, _LISTED, _DOCS):
+    for cache in (_ROOTS, _SCANS, _CYCLES, _LISTED, _NO_PAGE, _DOCS):
         cache.clear()
 
 
@@ -157,10 +158,15 @@ def _status_selection(folder, *, canonical=False):
     stamp = _mtime(folder)
     if stamp is None:
         return {'status': 'absent', 'path': None}
-    if canonical:  # a campaign folder: its own page is opened by name, never found by listing
+    if canonical and _NO_PAGE.get(folder) != stamp:
+        # A campaign folder: its own page is opened by name, never found by listing. Adding or
+        # removing it moves the folder's stamp, so "no page" is kept with the stamp and not asked
+        # again while the stamp stands; a page that is there is read every time, like the older names.
         page = campaign_documents.campaign_page(folder)
         if page is not None:
+            _NO_PAGE.pop(folder, None)
             return page
+        _NO_PAGE[folder] = stamp
     known = _LISTED.get(folder)
     if known is None or known[0] != stamp:
         known = (stamp, campaign_documents.status_candidates(folder))
