@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from parent_next_directive import entrypoint
-from route_form import one_shot_owner, one_shot_review_node, one_shot_review_route
+from route_form import one_shot_owner, one_shot_review_node_ids, one_shot_review_nodes, one_shot_review_route
 
 WORKER_TYPES = ("owner", "stage", "review", "support", "frame")
 UNIT_REF_RE = re.compile(r"^[a-z-]+/[a-z-]+$")
@@ -984,12 +984,30 @@ def _review_rounds(route) -> int:
 
 
 def one_shot_review_prompt(route, route_file, jobs=None) -> str:
-    """The middle cell's paragraph for its owner: make the work, then start the declared review with this
-    one command and wait for it. Text only; the runtime still decides every start and every verdict."""
-    node = one_shot_review_node(route)
-    if node is None:
+    """The middle cell's paragraph for its owner: make the work, then start the declared review (from `strong`,
+    the review group) with this one command and wait for it. Text only; the runtime still decides every start
+    and every verdict."""
+    nodes = one_shot_review_nodes(route)
+    if not nodes:
         return ""
-    command = route_start_command(route_file, node["id"], jobs=jobs)
+    node = nodes[0]
+    command = route_start_command(route_file, node.get("parallel_anchor") or node["id"], jobs=jobs)
+    if len(nodes) > 1:
+        legs = ", ".join(f"{n['id']} ({n.get('unit')}, {n.get('perspective')})" for n in nodes)
+        return (f"This route is one session that makes the work and {len(nodes)} independent reviews of it, one review "
+                f"group ({legs}) that a single start command runs together. Make the work, run your own checks, and "
+                f"commit it in this worktree. Once those checks pass, start the review group with exactly this "
+                f"command: `{command}`. When the receipt shows the children started, end the turn with the standalone "
+                "line `runtime_wait: registered-children`; the runtime waits for every review and brings the verdicts "
+                "back to this same session. (A receipt that prints `parent_next=bounded-wait` instead names its own "
+                "wait command: run that printed command once, then read each review's result.) If any verdict "
+                "blocks, fix every blocking finding of every blocking report in this worktree in one pass, run the "
+                "same checks, commit, and start the closure checks with the same command, then wait again. Each "
+                f"review gets {_review_rounds(route)} rounds in all: when its last round still blocks, correct no "
+                "further, write the remaining findings in your report, and end with `verdict: FAIL`. If no review "
+                "blocks, return your final handoff. You cannot review your own work or close any of these reviews "
+                "yourself: do not run `complete --inline` for them, and do not report PASS without every review. "
+                "Do not start the reviews before your work is committed.\n\n")
     return (f"This route is one session that makes the work and one independent review ({node['id']}, "
             f"{node.get('unit')}) of it. Make the work, run your own checks, and commit it in this worktree. "
             f"Once those checks pass, start the independent review with exactly this command: `{command}`. "
@@ -1130,13 +1148,15 @@ def continuation_followup_fields(route, node, metadata, jobs, route_file):
             producers = [n for n in _route_nodes(route) if n.get("kind") == "pipeline-stage"
                          and node["id"] in {n2["id"] for n2 in judging_stages(route, n["id"])}]
             source_review = bool(subject and subject.get("family") == "source")
-            if one_shot_review_node(route) is not None and node["id"] == one_shot_review_node(route)["id"]:
-                # The middle cell: the owner made the work this review blocked, so the owner corrects it.
+            if node["id"] in one_shot_review_node_ids(route):
+                # The middle cell: the owner made the work this review blocked, so the owner corrects it. Every
+                # leg of a review group counts its own rounds, so one leg's spent rounds spend the correction.
                 verdicts = sum(1 for st, m in _lineage_rows(route, jobs).get(node["id"], ())
                                if ROUND.classify_round_row(st, m, worker_type="review") == "verdict")
+                cap = ROUND.max_review_rounds(route["effective_intensity"])
                 return {"kind": "review", "attempt": attempt, "artifact": str(artifact), "target": "",
                         "source": True, "command": command, "producer_command": "", "owner_fixes": True,
-                        "closure_spent": verdicts >= ROUND.max_review_rounds(route["effective_intensity"])}
+                        "closure_spent": verdicts >= cap, "corrections": cap - 1}
             targets = [reviewed["path"]] if reviewed else []
             if (reviewed and subject and any(item.get("path") == "checklist.md"
                     for item in subject.get("manifest", ()) if isinstance(item, dict))):
@@ -1186,6 +1206,19 @@ def continuation_followup_text(fields):
             return ""
         if len(fields) == 1:
             return continuation_followup_text(fields[0])
+        if all(item.get("kind") == "review" and item.get("owner_fixes") for item in fields):
+            # A review group of the owner's own work: several legs blocked. Name every report, give one command.
+            attempts = ", ".join(dict.fromkeys(str(item["attempt"]) for item in fields))
+            artifacts = ", ".join(dict.fromkeys(bounded(item.get("artifact")) for item in fields))
+            commands = "; ".join(dict.fromkeys(command(item.get("command")) for item in fields if item.get("command")))
+            if any(item.get("closure_spent") for item in fields):
+                return (f"Review FAIL {attempts}: a review still blocks, and the correction allowed is spent. "
+                        f"Do not correct further. Write the remaining findings from {artifacts} in your report and "
+                        "end with `verdict: FAIL`.")
+            return (f"Review FAIL {attempts}: the independent reviews of your work block. Fix every blocking finding "
+                    f"in {artifacts} in this worktree in one pass, run the same checks you ran before, commit, then "
+                    f"start the closure checks with the same command: {commands}. "
+                    "Do not review it yourself and do not close any of them inline.")
         if all(item.get("kind") == "review" for item in fields):
             artifacts = list(dict.fromkeys(bounded(item.get("artifact")) for item in fields))
             targets = list(dict.fromkeys(bounded(item.get("target")) for item in fields if item.get("target")))
@@ -1199,8 +1232,10 @@ def continuation_followup_text(fields):
         return "\n".join(dict.fromkeys(filter(None, (continuation_followup_text(item) for item in fields))))
     if fields.get("kind") == "review" and fields.get("owner_fixes"):
         if fields.get("closure_spent"):
-            return (f"Review FAIL {fields['attempt']}: the closure check still blocks, and the one correction "
-                    f"allowed is spent. Do not correct further. Write the remaining findings from "
+            allowed = ("the one correction allowed is" if fields.get("corrections", 1) == 1
+                       else f"the {fields['corrections']} corrections allowed are")
+            return (f"Review FAIL {fields['attempt']}: the closure check still blocks, and {allowed} "
+                    f"spent. Do not correct further. Write the remaining findings from "
                     f"{bounded(fields['artifact'])} in your report and end with `verdict: FAIL`.")
         return (f"Review FAIL {fields['attempt']}: the independent review of your work blocks. Fix every blocking "
                 f"finding in {bounded(fields['artifact'])} in this worktree in one pass, run the same checks you "

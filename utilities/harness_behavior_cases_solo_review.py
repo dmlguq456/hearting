@@ -6,6 +6,11 @@ task gives, waits (the supervisor parks it), and is woken by the review's verdic
 The model is the loopback fixture; the owner and the review are real registered workers started through the
 harness's dispatch wrapper, so the park, the join and the wake are the ones used in operation.
 
+From `strong` the same owner starts the kind's review *group* with the same one command (two legs at `strong`,
+three at `thorough`): ``solo-strong-pass`` / ``solo-strong-fix`` / ``solo-strong-spent`` / ``solo-thorough-pass``
+run the first three scenarios' shapes on the group (one leg blocks, the owner corrects once, every leg is judged
+again, or the rounds are spent and the owner ends `verdict: FAIL`).
+
 ``solo-review-pass``      work, review `mergeable`, final handoff, the route closes, one completion notice.
 ``solo-review-fix``       review `changes requested`: the same owner session fixes, the closure check (second
                           round) is `mergeable`, the route closes.
@@ -37,6 +42,7 @@ import harness_behavior_cases_unit_route as unit  # noqa: E402
 WORK = "SCENARIO-SOLO-WORK"
 START = "SCENARIO-SOLO start the solo route and end your turn"
 SLUG = "hb-solo-review"
+ROUTE_NODE = re.compile(r"- route_node: (\S+)")
 START_COMMAND = re.compile(r"`(python3 [^`]*stage-dispatch-fallback\.py --route [^`]*--node impl-review --start[^`]*)`")
 SID = re.compile(r"guard_session_id: (att-\S+)")
 OUTPUT = re.compile(r"artifact_output_dir: (\S+)")
@@ -49,6 +55,10 @@ class SoloReviewScenario(unit.UnitRouteScenario):
                "waits, and is woken by the verdict in the same session; the route closes after the final handoff.")
     # how the fixture review answers, round by round ('ok' mergeable, 'block' changes requested, 'none' no verdict)
     reviews = ("ok",)
+    intensity = "standard"
+    qa = "standard"                    # the rigor the review workers are told (derived from the intensity)
+    legs = ("impl-review",)            # the review nodes the route seals, in order
+    # how a round answers: one mode for every leg, or {leg node id: mode, "*": the rest}
     owner_skips_review = False
     owner_edits_after_pass = False
     WAIT = 420
@@ -64,6 +74,8 @@ class SoloReviewScenario(unit.UnitRouteScenario):
     def script(self, run):
         self.owner_steps = {}      # owner session id -> the steps it has taken
         self.review_order = []     # review session ids, in the order they first asked
+        self.review_by_node = {}   # review node id -> its session ids, in order (one per round)
+        self.review_counts = {}
         self.requests_by_session = {}
         cell = self
 
@@ -112,10 +124,12 @@ class SoloReviewScenario(unit.UnitRouteScenario):
                 if previous == "poll":
                     # read the review's result as the task says, then act on it
                     steps.append("read")
-                    review_file = (output.group(1) if output else "/nonexistent") + "/_internal/dev_reviews/phase_review.md"
-                    return Reply(shell=f"cat {shlex.quote(review_file)} 2>&1 | head -5")
+                    review_dir = (output.group(1) if output else "/nonexistent") + "/_internal"
+                    # every leg's report (a group has one per leg)
+                    return Reply(shell=f"for f in {shlex.quote(review_dir)}/dev_reviews*/phase_review.md; "
+                                       "do head -5 \"$f\"; done 2>&1")
                 if previous == "read":
-                    if "mergeable" in last or "Final verdict: issues" in last:
+                    if "changes requested" not in last and ("mergeable" in last or "Final verdict: issues" in last):
                         if cell.owner_edits_after_pass and "edit-after-pass" not in steps:
                             steps.append("edit-after-pass")
                             return Reply(shell=shell_edit("changed after the review passed"))
@@ -161,12 +175,19 @@ class SoloReviewScenario(unit.UnitRouteScenario):
 
         def review(record, session):
             text = record["text"]
+            node = ROUTE_NODE.search(text)
+            node = node.group(1) if node else "impl-review"
             if session not in cell.review_order:
                 cell.review_order.append(session)
-            round_number = cell.review_order.index(session)
-            mode = cell.reviews[min(round_number, len(cell.reviews) - 1)]
+            order = cell.review_by_node.setdefault(node, [])
+            if session not in order:
+                order.append(session)
+            round_number = order.index(session)     # each leg counts its own rounds, as the runtime does
+            spec = cell.reviews[min(round_number, len(cell.reviews) - 1)]
+            mode = spec if isinstance(spec, str) else spec.get(node, spec.get("*", "ok"))
             output = OUTPUT.search(text)
-            target = (output.group(1) if output else "/nonexistent") + "/_internal/dev_reviews/phase_review.md"
+            target = ((output.group(1) if output else "/nonexistent")
+                      + f"/_internal/dev_reviews{node.removeprefix('impl-review')}/phase_review.md")
             wrote = f"{session}-wrote" in cell.owner_steps
             if record["last_kind"] != "tool" and not wrote:
                 cell.owner_steps[f"{session}-wrote"] = ["wrote"]
@@ -193,9 +214,12 @@ class SoloReviewScenario(unit.UnitRouteScenario):
                 # OpenCode's task text carries no session id: the owner is the one owner session of the route; a
                 # review process is a new one at each of its first (user-turn) requests
                 if "- worker_type: review" in text:
+                    # concurrent legs of a group: a review process is a new one at each of its node's first requests
+                    node = ROUTE_NODE.search(text)
+                    node = node.group(1) if node else "impl-review"
                     if record["last_kind"] == "user":
-                        cell.review_processes = getattr(cell, "review_processes", 0) + 1
-                    session = f"review-{getattr(cell, 'review_processes', 1)}"
+                        cell.review_counts[node] = cell.review_counts.get(node, 0) + 1
+                    session = f"review-{node}-{cell.review_counts.get(node, 1)}"
                 else:
                     session = "owner"
             if session and "Dispatch metadata:" in text:
@@ -209,7 +233,7 @@ class SoloReviewScenario(unit.UnitRouteScenario):
             if START in record["last_text"] and not any(r["reply"].get("shell") for r in earlier):
                 return Reply(shell=" ".join([
                     sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"), "compose", "--start",
-                    "--shape", "solo", "--intensity", "standard", "--capability", "autopilot-code",
+                    "--shape", "solo", "--intensity", cell.intensity, "--capability", "autopilot-code",
                     "--pin", f"owner={run.harness}", "--pin", f"worker={run.harness}",
                     "--prompt-file", str(run.home.root / "brief.md"), "--cwd", str(run.home.workspace),
                     "--artifact-root", run.home.env["AGENT_ARTIFACT_ROOT"], "--unassigned", "--slug", SLUG]))
@@ -254,6 +278,11 @@ class SoloReviewScenario(unit.UnitRouteScenario):
         route_id = route.get("route_id") or "rt-unknown"
         carriers = [r for r in requests[before:] if route_id in r["last_text"] and "HEARTING_RECEIPT_V1" in r["last_text"]
                     and "Dispatch metadata:" not in r["text"]]
+        # A supervision "Needs attention" notice is not a completion notice: with two review legs finishing a
+        # moment apart, the shared stall observer can see the first leg's process gone before its row closes.
+        # It is counted on its own (`attention_notices`) and never as the route's completion notice.
+        attention = [r for r in carriers if "Needs attention:" in r["last_text"]]
+        carriers = [r for r in carriers if r not in attention]
         ev["route"] = {"effective_intensity": route.get("effective_intensity"),
                        "shape": (route.get("selection") or {}).get("shape"),
                        "nodes": [(n.get("id"), n.get("dispatch_depth"), n.get("model_profile")) for n in route.get("nodes", [])]}
@@ -268,6 +297,7 @@ class SoloReviewScenario(unit.UnitRouteScenario):
         ev["route_closed"] = bool(outcome and outcome.exists())
         ev["outcome"] = json.loads(outcome.read_text(encoding="utf-8")) if ev["route_closed"] else None
         ev["completion_notices"] = len(carriers)
+        ev["attention_notices"] = [r["last_text"][r["last_text"].find("Needs attention:"):][:160] for r in attention]
         ev["notice_tail"] = carriers[0]["last_text"][-900:] if carriers else ""
         ev["notice_full"] = carriers[0]["last_text"][:3500] if carriers else ""
         ev["after_requests"] = [r["last_text"][:260].replace("\n", " | ") for r in requests[before:]]
@@ -283,6 +313,9 @@ class SoloReviewScenario(unit.UnitRouteScenario):
         ev["pending_texts"] = [r["last_text"][r["last_text"].index("[workflow-completion-pending]"):][:2600]
                                for r in owner_requests if "[workflow-completion-pending]" in r["last_text"]]
         ev["owner_requests"] = len(owner_requests)
+        # the rigor each review worker was told (`- qa:`), one entry per distinct value, from its own task text
+        ev["review_qa"] = sorted({m.group(1) for r in run.main_requests() if "- worker_type: review" in r["text"]
+                                  for m in [re.search(r"- qa: (\S+)", r["text"])] if m})
         ev["supervisor_turns"] = [self.supervisor_turns(row) for row in owners]
         # what each start command answered the owner (the receipts that show a refused or degraded start)
         ev["start_results"] = [r["last_text"][-900:] for r in owner_requests
@@ -350,10 +383,12 @@ class SoloReviewScenario(unit.UnitRouteScenario):
 
     def judge(self, run, ev, owners, reviews):
         steps = next(iter(ev["owner_sessions"].values()), [])
-        ok = (len(owners) == 1 and ev["task_paragraph_seen"] and ev["route"]["effective_intensity"] == "standard"
-              and ev["route"]["shape"] == "solo" and [n[0] for n in ev["route"]["nodes"]] == ["impl-review", "one-shot"])
+        ok = (len(owners) == 1 and ev["task_paragraph_seen"] and ev["route"]["effective_intensity"] == self.intensity
+              and ev["route"]["shape"] == "solo"
+              and [n[0] for n in ev["route"]["nodes"]] == [*self.legs, "one-shot"]
+              and ev["review_qa"] in ([self.qa], []))
         # one completion notice reaches the session that started the route (it is watched for QUIET seconds after)
-        return (ok and self.closed(ev) and len(reviews) == 1 and steps[-1] == "final"
+        return (ok and self.closed(ev) and len(reviews) == len(self.legs) and steps[-1] == "final"
                 and ev["completion_notices"] == 1 and ev["session_proof"] != "broken")
 
 
@@ -368,7 +403,7 @@ class SoloReviewFixScenario(SoloReviewScenario):
         # the runtime's verdict text reached the owner and said what to do, and the owner did it in its session
         verdict = any("Fix every blocking finding" in text and "start the closure check with the same command" in text
                       for text in ev["verdict_texts"])
-        return (len(owners) == 1 and len(reviews) == 2 and verdict and ev["session_proof"] != "broken"
+        return (len(owners) == 1 and len(reviews) == 2 * len(self.legs) and verdict and ev["session_proof"] != "broken"
                 and "fix" in steps and steps.count("start") == 2 and steps[-1] == "final"
                 and self.closed(ev))
 
@@ -383,7 +418,7 @@ class SoloReviewSpentScenario(SoloReviewScenario):
         steps = next(iter(ev["owner_sessions"].values()), [])
         # the second verdict text told the owner to stop correcting and end failed, and it did
         verdict = any("Do not correct further" in text and "`verdict: FAIL`" in text for text in ev["verdict_texts"])
-        return (len(owners) == 1 and len(reviews) == 2 and verdict and steps[-1] == "fail"
+        return (len(owners) == 1 and len(reviews) == 2 * len(self.legs) and verdict and steps[-1] == "fail"
                 and ev["session_proof"] != "broken" and not self.closed(ev) and bool(ev["resting_fail_notice"]))
 
 
@@ -437,5 +472,41 @@ class SoloReviewVerdictlessScenario(SoloReviewScenario):
                 and not (ev["route_closed"] and outcome.get("terminal_gate_proven") is True))
 
 
+class SoloStrongPassScenario(SoloReviewScenario):
+    name = "solo-strong-pass"
+    summary = ("`solo·strong`: the owner starts the review group (two legs) with one command, waits, both legs pass, "
+               "and the route closes after the final handoff.")
+    intensity = "strong"
+    legs = ("impl-review", "impl-review-alternative")
+
+
+class SoloStrongFixScenario(SoloReviewFixScenario):
+    name = "solo-strong-fix"
+    summary = ("`solo·strong`: one leg blocks; the same owner session fixes once, the same command runs the group "
+               "again (both legs judged anew, the blocked leg as a closure check), and the route closes.")
+    intensity = "strong"
+    legs = ("impl-review", "impl-review-alternative")
+    reviews = ({"impl-review-alternative": "block", "*": "ok"}, "ok")
+
+
+class SoloStrongSpentScenario(SoloReviewSpentScenario):
+    name = "solo-strong-spent"
+    summary = ("`solo·strong`: the blocked leg blocks its closure check too: no third round, the owner ends "
+               "`verdict: FAIL` and the end reads as a failure.")
+    intensity = "strong"
+    legs = ("impl-review", "impl-review-alternative")
+    reviews = ({"impl-review-alternative": "block", "*": "ok"}, {"impl-review-alternative": "block", "*": "ok"})
+
+
+class SoloThoroughPassScenario(SoloReviewScenario):
+    name = "solo-thorough-pass"
+    summary = ("`solo·thorough`: the review group has three legs (the failure-mode leg too); all pass and the route "
+               "closes.")
+    intensity = "thorough"
+    qa = "thorough"
+    legs = ("impl-review", "impl-review-alternative", "impl-review-failure-mode")
+
+
 SCENARIOS = [SoloReviewScenario, SoloReviewFixScenario, SoloReviewSpentScenario, SoloReviewSkipScenario,
-             SoloReviewStaleScenario, SoloReviewVerdictlessScenario]
+             SoloReviewStaleScenario, SoloReviewVerdictlessScenario, SoloStrongPassScenario, SoloStrongFixScenario,
+             SoloStrongSpentScenario, SoloThoroughPassScenario]

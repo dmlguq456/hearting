@@ -1137,6 +1137,35 @@ for(const state of ['review','fix'])for(const width of [100,74,44,36,28]){
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_a_solo_route_at_strong_and_thorough_reads_its_form_and_intensity_with_its_review_legs_in_boxes(self):
+        # S2: `solo·strong` and `solo·thorough` draw by the rules the panel already has: the form and the intensity in the
+        # bracket, the stage line by node order, and one box for each review leg that has a worker (the rule `staged` routes
+        # use). Nothing new is drawn for them: never `staged`, never an empty or overlong row, at the widths the panel is drawn in.
+        script = self.FIXTURE + r"""
+const D=t=>({text:t,dim:true});
+const legWorker=(stage,h,m,e,elapsed)=>({kind:'working',role:'worker',stage,elapsed,paint:{glyph:P('⠋'),harness:P(h),model_text:P(m),effort:P(e)}});
+const cell=(intensity,legs,state)=>{const names=[...legs,'one-shot'];
+ return {...oneShot,id:'s1',title:'공유 계약 고치기',kind_word:'code',kind_field:'code',kind_form:'solo',intensity,role:'owner',elapsed:'52m',shape:'one-shot-owner',
+  owner_paint:oneShot.paint,
+  stages:names.map((name,i)=>state==='review'?{name,mark:i<legs.length?'●':'',current:i===0}:state==='fix'?{name,mark:i<legs.length?'✓':'●',current:i===legs.length}:{name,mark:''}),
+  workers_live:state==='review'?legs.map((leg,i)=>legWorker(leg,i===1?'codex':'claude',i===1?'gpt-5.5':'Opus 5.5','xhigh','9m')):[]};};
+const legsOf={strong:['impl-review','impl-review-alternative'],thorough:['impl-review','impl-review-alternative','impl-review-failure-mode']};
+for(const intensity of ['strong','thorough'])for(const state of ['review','fix'])for(const width of [100,74,44,36,28]){
+ const rows=draw([cell(intensity,legsOf[intensity],state)],width,40,{side:width<=44}),text=rows.join('\n');
+ for(const row of rows)assert.equal(cells(row),width,intensity+' '+state+' '+width+'\n'+text);
+ assert(!/staged|undefined|\bNaN\b/.test(text),intensity+' '+state+' '+width+'\n'+text);
+ if(width!==74)assert(new RegExp('code\\(solo(·'+intensity+')?\\)').test(text),intensity+' '+state+' '+width+'\n'+text);
+ if(width===44)assert(new RegExp('● code\\(solo·'+intensity+'\\)').test(text),intensity+' '+state+' '+width+'\n'+text);
+ if(width===28)assert(/● code\(solo\)/.test(text),intensity+' '+state+' '+width+'\n'+text);   // narrower the intensity goes first
+ if(state==='review'&&width===44){   // one box for each leg, each with its own worker
+  const legs=legsOf[intensity];
+  for(const [i,leg] of legs.entries())assert(text.includes((i+1)+'/'+(legs.length+1)+': '+leg),leg+'\n'+text);
+  assert.equal(rows.filter(r=>r.includes('⠋ worker')).length,legs.length,text);
+ }
+}
+"""
+        self.node(script, "panel-view.cjs")
+
     def test_a_unit_route_leads_with_its_field_and_its_worker_line_names_the_unit(self):
         # 11-18 (the person: "Unit에서는 무슨 작업인지가 안보이잖아"): a unit route (one worker called with no owner) reads its
         # field on the first line and, in the bracket, its form alone `(unit)` (11-20; 11-19 had `(unit·quick)`, before that `code` with no

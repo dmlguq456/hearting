@@ -107,8 +107,9 @@ class Cell(FORM.FormFixtures):
         quick = self.compose(shape="solo", slug="around-quick")
         self.assertEqual(([n["id"] for n in quick["nodes"]], quick["effective_intensity"], quick["max_dispatch_depth"],
                           quick["owner_model_profile"]), (["one-shot"], "quick", 1, "balanced-deep"))
-        with self.assertRaisesRegex(ValueError, r"compose-shape-intensity-mismatch:solo \(allowed: quick,standard\)"):
-            self.compose(shape="solo", intensity="strong", slug="around-strong")
+        with self.assertRaisesRegex(ValueError, r"compose-shape-intensity-mismatch:solo \(allowed: quick,standard,strong,"
+                                                r"thorough,adversarial\)"):
+            self.compose(shape="solo", intensity="direct", slug="around-direct")
         with self.assertRaisesRegex(ValueError, r"compose-shape-intensity-mismatch:solo \(allowed: quick\)"):
             self.compose(capability="autopilot-lab", capability_mode="setup", shape="solo", intensity="standard",
                          slug="around-lab")

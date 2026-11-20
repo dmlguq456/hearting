@@ -7552,7 +7552,7 @@ class ShapeIntensityDiagnosticTest(unittest.TestCase):
   return R.compose_route(**d)
 
  def test_cli_mismatch_names_allowed_values(self):
-  cases=(("direct", "standard", "direct"), ("solo", "strong", "quick,standard"),
+  cases=(("direct", "standard", "direct"), ("solo", "direct", "quick,standard,strong,thorough,adversarial"),
          ("staged", "quick", "standard,strong,thorough,adversarial"))
   for shape, intensity, allowed in cases:
    with self.subTest(shape=shape):
