@@ -2096,9 +2096,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>kept.MESSAGES&&take.MESSAGES>2,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
     give(()=>kept.MEM&&take.MEM>1,()=>{take.MEM--;},()=>{take.MEM++;});
     give(()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
-    // 11-20 (the person: "GIT PEER 아래로 두고"): the bottom layout's GIT row stays with the STATUS box under it, and its box keeps its rows over MESSAGES (which has
-    // no MEM there), so MESSAGES gives its rows and its head before the box gives a row and before the GIT row goes; beside the native area the order is the one below.
-    if(!side){
+    // 11-20 (the person: "GIT PEER 아래로 두고"): where the bottom layout's STATUS box stands, its GIT row stays with it and the box keeps its rows over MESSAGES (which has
+    // no MEM there), so MESSAGES gives its rows and its head before the box gives a row and before the GIT row goes; with no box (no document, no list, an
+    // older backend) and beside the native area the order is the one below.
+    if(!side&&kept.STATUS){
       give(()=>kept.MESSAGES&&take.MESSAGES>0,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
       give(()=>kept.MESSAGES,()=>{kept.MESSAGES=false;},()=>{kept.MESSAGES=true;});
     }
@@ -2139,8 +2140,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         give(()=>keepUsageHead,()=>{keepUsageHead=false;},()=>{keepUsageHead=true;});
       }
     }
-    // Then the STATUS section goes down to its one row of counts, and the route box goes.
+    // Then the STATUS section goes down to its one row of counts, and the route box goes. In the bottom layout, where the route box can stand once the
+    // box is gone and cannot beside it, the box goes first (11-20: of the two the route box, the job that runs now, stays, and the `STATUS ›` button
+    // comes back on the first row); where the route box cannot stand either way the box stays as it did.
     give(()=>kept.STATUS&&take.STATUS>1,()=>{take.STATUS--;},()=>{take.STATUS++;});
+    if(!side)give(()=>{if(!kept.STATUS||!kept.ROUTE)return false;kept.STATUS=false;const fits=need()<=budget;kept.STATUS=true;return fits;},
+      ()=>{kept.STATUS=false;},()=>{kept.STATUS=true;});
     give(()=>kept.ROUTE,()=>{kept.ROUTE=false;},()=>{kept.ROUTE=true;});
     give(()=>keepOptional,()=>{keepOptional=false;},()=>{keepOptional=true;});
     give(()=>kept.STATUS,()=>{kept.STATUS=false;},()=>{kept.STATUS=true;});

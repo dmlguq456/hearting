@@ -379,6 +379,12 @@ class GroupsTest(StatusTest):
         for heading, kind in (("Done", "done"), ("Next steps", "next"), ("To do", "next"), ("TODO", "next"), ("In progress", "running"),
                               ("Doing now", "running"), ("Waiting on you", "waiting"), ("Decisions needed", "waiting"), ("다음에 할 일", "next")):
             self.assertEqual(self.kinds("# t\n\n## %s\n- 하나\n" % heading), [(kind, 1, ["하나"])], heading)
+        # A number or a picture before the words is not part of the name (closure review 3), and the counter-examples stay counter-examples behind them.
+        for heading, kind in (("1. 하는 중", "running"), ("2) 결정 필요", "waiting"), ("⏳ 하는 중", "running"), ("🔴 결정 필요", "waiting"),
+                              ("3. ✅ 끝난 일", "done"), ("[예정]", "next"), ("4. Next steps", "next"), ("🔴 In progress", "running")):
+            self.assertEqual(self.kinds("# t\n\n## %s\n- 하나\n" % heading), [(kind, 1, ["하나"])], heading)
+        for heading in ("1. Definition of Done", "⏳ Not done yet", "2) Context: what we are doing", "🔴 How to do the release", "3. CI 기다리는 PR"):
+            self.assertEqual(self.kinds("# t\n\n## %s\n- 하나\n- 둘\n" % heading), [], heading)
         # A line in a code fence is no job, and a heading in one starts nothing.
         fenced = "# t\n\n## 하는 중\n- 일 하나\n```\n- code line\n## 끝난 일\n- not a job\n```\n- 일 둘\n"
         self.assertEqual(self.kinds(fenced), [("running", 2, ["일 하나", "일 둘"])])

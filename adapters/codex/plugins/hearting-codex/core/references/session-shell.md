@@ -626,8 +626,10 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   person keeps its title to the last: five rows are `하는 중` with a title, `기다리는 것` with a title and one row of counts; four rows are `하는 중`,
   `기다리는 것` with its first title and one row of counts for the other two; three rows or fewer are one row of counts for all four groups.
   In the bottom layout the box is the same, three rows inside at most (`STATUS_BOTTOM`), and its rows are the first the box gives short of rows,
-  after MESSAGES' and before the route box loses a row: MESSAGES gives its rows and head before the GIT row goes there, and the box goes down to its one
-  row of counts before the route box shrinks. (With four groups three rows still read as the one row of counts, so a four-group document shows titles
+  after MESSAGES' and before the route box loses a row: while the box stands, MESSAGES gives its rows and head before the GIT row goes there, and the box goes down to its one
+  row of counts before the route box shrinks (with no box standing, for want of a document or a list, the order is the general one below, MESSAGES
+  after the route box's steps and Git). Where only one of the box and the route box can stand, the route box, the job that runs now, stays and the
+  box goes first (11-20: the `STATUS ›` button comes back on the first row); beside the native area the order is unchanged. (With four groups three rows still read as the one row of counts, so a four-group document shows titles
   only beside the native area; a document with fewer groups shows them in three rows.)
 - MESSAGES: the recent messages, two rows each as v4.36.4 drew them (spec rule 31, restored 11-16, the
   person: "메시지 형식은 퇴행했네? 최대 5개 정도로 늘리고, 그전에 원래 형식으로 돌려"): the head (the arrow in
@@ -738,8 +740,9 @@ routes and scrolls in place (the wheel over it), down to one, its border countin
 what it hides (`↑2`, `↓3`; it takes the rows of its tallest window, so the wheel moves
 nothing else); then Git; then MEM gives its row, then its head, then (11-16) the USAGE section's rows of the
 harnesses that are not this window's (the last first) and its name row, then MESSAGES gives its row and its
-head; then the STATUS section goes down to its one row of counts; then the route box (11-20: after MESSAGES and MEM; v4.36.4 had it before the
-running jobs and them before MESSAGES); the running jobs; then the STATUS section; the question's head and first row stay to the last (its box's two border lines go after its content
+head; then the STATUS section goes down to its one row of counts; in the bottom layout the STATUS box goes whole here (11-20: before the route box, so
+that of the two the route box stays; the first row's `STATUS ›` button comes back); then the route box (11-20: after MESSAGES and MEM; v4.36.4 had it before the
+running jobs and them before MESSAGES); the running jobs; then the STATUS section (beside the native area); the question's head and first row stay to the last (its box's two border lines go after its content
 rows, before the structural rows below them); this window's own usage row last of all. Rows a later step frees beyond its need go back to the steps
 before it, the most important first. A section is placed whole or not at all; the
 rows left over stand above MESSAGES and MEM (which keep to the bottom, with their

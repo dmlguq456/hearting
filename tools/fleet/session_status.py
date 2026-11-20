@@ -197,8 +197,13 @@ def _begins(lowered, word):
     return not (_ENGLISH_WORD.fullmatch(word) and lowered[len(word):len(word) + 1].isalnum())
 
 
+# What a hand-written heading may carry before its words: a number (``1.``, ``2)``) and pictures or marks (``⏳``, ``🔴``, ``[``).
+_LEAD = re.compile(r"^[\W_]*(?:\d+[.)]\s*)?[\W_]*")
+
+
 def _group_kind(title):
     lowered = title.casefold().lstrip()
+    lowered = lowered[_LEAD.match(lowered).end():]
     if any(word in lowered for word in project_status._RECORD_WORDS):
         return None
     for kind, words in _GROUP_WORDS:

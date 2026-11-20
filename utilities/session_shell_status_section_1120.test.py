@@ -46,7 +46,7 @@ const doc=groups=>({word:'STATUS',has_doc:true,...(groups?{groups}:{})});
 function model(o={}){
   return {styles,colors:256,tag:'[e9]',repo_side:[t('hearting','loc_repo')],worktrees:[t('wt 12')],repo:[t('hearting','loc_repo')],git_side:[t('branch'),t(' ✓','lvl_g')],git:[t('branch')],
     selected:[t('Opus 5.5','hb_claude'),t(' xhigh')],context_side:[t('━━━━','lvl_g'),t('────'),t(' 41%')],context:[t('ctx 41%','lvl_g')],quota:[t('5h ','dim'),t('23%','lvl_g')],
-    session_title:'시험용 세션',now:'시험용 NOW',route_label:'route 2 ⠏2',route_count:2,route_total:2,routes:[route(1),route(2)],
+    session_title:'시험용 세션',now:'시험용 NOW',route_label:o.routes?'route '+o.routes:'route 2 ⠏2',route_count:o.routes??2,route_total:o.routes??2,routes:[1,2,3].slice(0,o.routes??2).map(route),
     messages:MSGS.slice(-(o.messages??5)),memory_items:MEMS.slice(0,o.mem??3),status_doc:o.status,
     ...(o.peers?{peers:{groups:[{steward:{tag:'e9',key:'hb_claude',me:true},members:[{tag:'d4',key:'hb_codex'}]}]}}:{})};
 }
@@ -270,6 +270,32 @@ assert(rows[0].every(p=>p.dim===true)&&rows[1].every(p=>p.dim!==true||!p.text.tr
 // Nothing the panel does not hold: a record with no text is none; no records, one dim dot; control characters become spaces.
 assert.deepEqual(view.memoryBody({model:{styles,memory_items:[]},columns:40,cellWidth:cells}).map(str),['·']);
 assert(!view.memoryBody({model:{styles,memory_items:[{text:'a\u001b[31mb',body:'c\u0007d',tier:'durable'}]},columns:40,cellWidth:cells}).map(str).join('').match(/[\u0000-\u001f]/));
+""")
+
+    def test_a_bottom_panel_with_no_box_keeps_the_order_it_had_and_the_box_gives_way_to_the_route_box(self):
+        self.node(r"""
+// Review round 2, the one that blocked: the rule that MESSAGES go whole before the box gives a row is the box's. No document, no list or an older backend
+// stands no box, and then the bottom panel has the order it had: 100 x 12, three routes, five messages, no document keeps the `messages` head and one message.
+for(const status of [undefined,{word:'STATUS',has_doc:false},doc([])]){
+  const ws=lines(draw({status,side:false,width:100,height:12,routes:3,messages:5}));
+  assert(ws.some(l=>/^│ messages \+4 ─+ › │$/.test(l))&&ws.some(l=>/^│ ← \[75\] /.test(l)),JSON.stringify(status)+'\n'+ws.join('\n'));
+  assert(ws.some(l=>/^│ ╭─ route 3 /.test(l))&&ws.some(l=>/↓2 ─╯ │$/.test(l)),ws.join('\n'));}
+// With the box standing the rule is the box's, as before: MESSAGES go whole first (100 x 14, GIT and PEERS, two routes).
+{const ws=lines(draw({status:doc(GROUPS),side:false,width:100,height:14,routes:2,peers:true}));assert(!ws.some(l=>/^│ messages/.test(l))&&ws.some(l=>/^│ ╭─ STATUS /.test(l)),ws.join('\n'));}
+// Short of rows, where the route box can stand once the box is gone and cannot beside it, the box goes and the route box (the job that runs now) stays; the
+// `STATUS ›` button comes back on the first row. 100 x 8..10 rows, one route, no PEERS (11 and more rows have room for both).
+for(let h=8;h<=14;h++){
+  const v=draw({status:doc(GROUPS),side:false,width:100,height:h,routes:1}),ws=lines(v);
+  const box=ws.some(l=>/^│ ╭─ STATUS /.test(l)),route=ws.some(l=>/^│ ╭─ route /.test(l));
+  assert(ws.length===h&&ws.every(l=>cells(l)===100),h+'\n'+ws.join('\n'));
+  assert(route,h+' the route box stays\n'+ws.join('\n'));
+  if(h<=10){assert(!box&&/STATUS › │$/.test(ws[1])&&v.hits.some(x=>x.row===1&&x.action==='popup:STATUS'),h+' the button is back\n'+ws.join('\n'));}
+  else assert(box&&!/STATUS › │$/.test(ws[1]),h+' both stand\n'+ws.join('\n'));}
+// Where the route box cannot stand either way (8 rows with PEERS and two routes) the box stays, as it did.
+{const ws=lines(draw({status:doc(GROUPS),side:false,width:100,height:8,routes:2,peers:true}));assert(ws.some(l=>/^│ ╭─ STATUS /.test(l))&&!ws.some(l=>/^│ ╭─ route /.test(l)),ws.join('\n'));}
+// With PEERS the box goes at 9..11 rows and both stand from 12.
+for(const [h,box] of [[9,false],[11,false],[12,true]]){const ws=lines(draw({status:doc(GROUPS),side:false,width:100,height:h,routes:2,peers:true}));
+  assert(ws.some(l=>/^│ ╭─ route /.test(l))&&ws.some(l=>/^│ ╭─ STATUS /.test(l))===box,h+'\n'+ws.join('\n'));}
 """)
 
 
