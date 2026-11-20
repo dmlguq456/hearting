@@ -190,6 +190,14 @@ class BackendTest(unittest.TestCase):
         self.assertNotIn('OUTSIDE_SECRET', self.text(result))
         self.assertEqual(self.reads, 1)           # it read the root's own value instead
 
+    def test_a_claim_on_a_campaign_page_is_held_like_the_older_names(self):
+        """The button's value naming a campaign's ``campaign.md`` is taken as it is (the popup reads no more)."""
+        value = self.button()
+        claim = dict(value, path=str(Path(value['path']).parent / 'campaign.md'))
+        held = self.status.held(str(self.project), claim)
+        self.assertIsNotNone(held)
+        self.assertEqual(held['path'], claim['path'])
+
     def test_a_request_that_names_no_part_is_refused(self):
         result, _ = self.popup(part='everything')
         self.assertEqual(result, {'ok': False, 'reason': 'invalid-status'})

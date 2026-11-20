@@ -36,11 +36,12 @@ _ROOTS = {}               # cwd -> (resolved_at, root or None)
 _SCANS = {}               # root -> (scanned_at, record or None)
 _CYCLES = {}              # campaign dir -> (dir mtime, cycle dirs)
 _LISTED = {}              # folder -> (folder mtime, its status document path or None)
+_NO_PAGE = {}             # campaign folder -> its mtime when it had no campaign.md
 _DOCS = {}                # path -> (mtime, size, parsed)
 
 
 def clear_cache():
-    for cache in (_ROOTS, _SCANS, _CYCLES, _LISTED, _DOCS):
+    for cache in (_ROOTS, _SCANS, _CYCLES, _LISTED, _NO_PAGE, _DOCS):
         cache.clear()
 
 
@@ -157,6 +158,15 @@ def _status_selection(folder, *, canonical=False):
     stamp = _mtime(folder)
     if stamp is None:
         return {'status': 'absent', 'path': None}
+    if canonical and _NO_PAGE.get(folder) != stamp:
+        # A campaign folder: its own page is opened by name, never found by listing. Adding or
+        # removing it moves the folder's stamp, so "no page" is kept with the stamp and not asked
+        # again while the stamp stands; a page that is there is read every time, like the older names.
+        page = campaign_documents.campaign_page(folder)
+        if page is not None:
+            _NO_PAGE.pop(folder, None)
+            return page
+        _NO_PAGE[folder] = stamp
     known = _LISTED.get(folder)
     if known is None or known[0] != stamp:
         known = (stamp, campaign_documents.status_candidates(folder))
@@ -216,10 +226,10 @@ _UPDATED = re.compile(r"(?:갱신|updated)\s*[:：]?\s*[0-9]", re.IGNORECASE)
 # Heading words: the convention names "결정 필요" / "Decisions needed" (what waits on the
 # person: a decision or an action) and "다음" / "Next"; a few near spellings are read too.
 # A record of decisions already made is not counted.
-_DECISION_WORDS = ("결정 필요", "결정할", "결정 대기", "사용자에게 필요", "decisions needed", "decision needed",
+_DECISION_WORDS = ("결정 필요", "결정할", "결정 대기", "결정 기다리는", "사용자에게 필요", "decisions needed", "decision needed",
                    "needs decision", "to decide", "open decision", "pending decision", "needs you")
 _RECORD_WORDS = ("기록", "내린", "log", "made", "history")
-_NEXT_WORDS = ("다음", "next", "할 일", "to do", "todo")
+_NEXT_WORDS = ("다음", "예정", "next", "할 일", "to do", "todo")
 
 
 def _plain(text):
