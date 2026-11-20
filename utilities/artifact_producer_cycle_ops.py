@@ -1128,31 +1128,43 @@ def delete_campaign(root: Path, campaign: str, *, reason: Optional[str] = None,
     return dict(done, reparented=reparented) if reparented else done
 
 
-def _is_shell_of_detached_cycle(root: Path, campaign_id: str, name: str, folder: Path,
-                                places: Dict[str, Any]) -> bool:
-    """A folder with no `.cycle.json` and no manifest that is nobody's unknown: the record of a cycle that ended
-    with no output or was deleted (state `abandoned` or `no-lineage`, or `deleted_at`) names it as its own place
-    (this campaign, this folder name), and nothing is in it but empty folders.
+def _records_naming(root: Path, names: Any, skip: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """The cycle records whose `locator` is one of `names`, by that name, in the order of their files.  A cycle
+    whose ID is in `skip` (its folder was found, so it is not one whose folder lost its identity) is not read."""
+    found: Dict[str, List[Dict[str, Any]]] = {}
+    directory = producer_dir(root) / "cycles"
+    for entry in sorted(directory.iterdir(), key=lambda p: p.name) if directory.is_dir() else []:
+        if entry.suffix != ".json" or entry.name.startswith(".") or entry.stem in skip:
+            continue
+        record = _read_json(entry)
+        if record is not None and isinstance(record.get("locator"), str) and record["locator"] in names:
+            found.setdefault(record["locator"], []).append(record)
+    return found
+
+
+def _settle_unknown_folders(root: Path, scan: _LayoutScan, unknown: Sequence[Tuple[int, str, str, Path]]) -> None:
+    """Of the folders with no `.cycle.json` and no manifest (`unknown`: its place among the blockers, its campaign,
+    its name, its path), take back the ones that are nobody's unknown: the record of a cycle that ended with no
+    output or was deleted (state `abandoned` or `no-lineage`, or `deleted_at`) names it as its own place (this
+    campaign, this folder name), no record of a cycle that is still there names it too, and nothing is in it
+    but empty folders.
 
     Only a closed cycle with a published row can be taken for gone, and the identity files of a cycle that
     has a record naming this very place are what this folder lacks: no cycle's work can be what is left here, so
     it does not keep the scan from saying what is gone.  A folder that holds a file, one named by a record of
-    another campaign or by no detached record stays what it was, a blocker."""
-    if "records" not in places:
-        keys: Dict[Tuple[str, str], str] = {}
-        directory = producer_dir(root) / "cycles"
-        for entry in sorted(directory.iterdir(), key=lambda p: p.name) if directory.is_dir() else []:
-            record = _read_json(entry) if entry.suffix == ".json" and not entry.name.startswith(".") else None
-            if record is None:
-                continue
-            locator = record.get("locator")
-            if (isinstance(locator, str) and isinstance(record.get("campaign_id"), str)
-                    and (record.get("state") in artifact_campaign.DETACHED_STATES or record.get("deleted_at"))):
-                keys[(record["campaign_id"], locator)] = record.get("cycle_id")
-        places["records"] = keys
-    if (campaign_id, name) not in places["records"]:
-        return False
-    return _holds_no_file(folder)
+    another campaign or by no detached record stays what it was, a blocker, and so does one that a sealed,
+    superseded or open record names as well: the cycle that record is of may be the one that lost its files."""
+    scan.named = _records_naming(root, {name for _where, _campaign, name, _folder in unknown}, set(scan.cycles))
+    passed = set()
+    for place, campaign_id, name, folder in unknown:
+        mine = [record for record in scan.named.get(name, []) if record.get("campaign_id") == campaign_id]
+        detached = [record for record in mine
+                    if record.get("deleted_at") or record.get("state") in artifact_campaign.DETACHED_STATES]
+        if detached and len(detached) == len(mine) and _holds_no_file(folder):
+            passed.add(place)
+    if passed:
+        scan.blockers = [item for place, item in enumerate(scan.blockers) if place not in passed]
+        scan.complete = not scan.blockers
 
 
 def _holds_no_file(folder: Path, *, limit: int = 1000) -> bool:
@@ -1179,7 +1191,7 @@ def _scan_layout(root: Path) -> _LayoutScan:
     answer `complete=False`: such a scan can say where something moved to, never that something is gone.
     `scan.blockers` names each entry that did so, with its path from the root and the reason."""
     scan = _LayoutScan({}, {}, {}, set(), True)
-    shells: Dict[str, Any] = {}  # the records that name a folder as their place, read once and only if one is asked
+    unknown: List[Tuple[int, str, str, Path]] = []  # the folders with no ID, settled once the folders are all read
     base = Path(root) / "campaigns"
     try:
         names = sorted(os.listdir(str(base)))
@@ -1238,8 +1250,7 @@ def _scan_layout(root: Path) -> _LayoutScan:
                 continue
             cycle_id = _folder_cycle_id(path)
             if cycle_id is None:
-                if _is_shell_of_detached_cycle(root, campaign_id, child, path, shells):
-                    continue
+                unknown.append((len(scan.blockers), campaign_id, child, path))
                 scan.block(root, path, "not-a-cycle")
                 continue
             if cycle_id in scan.cycles or cycle_id in scan.duplicates:
@@ -1261,6 +1272,8 @@ def _scan_layout(root: Path) -> _LayoutScan:
                     continue
                 scan.cycles[member_id] = member
                 scan.folder_campaign[member_id] = campaign_id
+    if unknown:
+        _settle_unknown_folders(root, scan, unknown)
     return scan
 
 

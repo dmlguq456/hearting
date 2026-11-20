@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import shutil
 import unittest
+from unittest import mock
 
 os.environ.setdefault("AGENT_ARTIFACT_CHECKPOINT", "off")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -26,8 +27,8 @@ _spec.loader.exec_module(F)
 
 
 class NamedFolderTest(F.ProducerTestBase):
-    def _member(self, slug, *, campaign=None, key=None, output=True, finalize=True):
-        route = F.compile_for("direct", self.root, slug=slug, gate_source=slug)
+    def _member(self, slug, *, campaign=None, key=None, output=True, finalize=True, gate=None):
+        route = F.compile_for("direct", self.root, slug=slug, gate_source=gate or slug)
         binding = F.L.admit_runtime_route(self.root, route)
         child = P.begin(self.root, route_file=Path(binding.route_file), capability="autopilot-code",
                         intensity="direct", campaign_key=key, campaign_id=campaign)
@@ -144,6 +145,98 @@ class NamedFolderTest(F.ProducerTestBase):
         self.assertIn("would make campaign-close record that cycle as deleted for good", detail)
         self.assertIsNone(P.read_cycle_record(self.root, first["cycle_id"]).get("deleted_at"))
         self.assertEqual(C.campaign_state(self.root, self.c_path).state, "active")
+
+    def _strip_files(self, folder):
+        for path in sorted(Path(folder).rglob("*"), key=lambda p: len(p.parts), reverse=True):
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+
+    def _assert_an_emptied_folder_of_a_live_cycle_holds_back(self, again):
+        """`again` is a cycle that is still there (sealed) and shares its locator with a detached record of its
+        campaign; its folder then loses every file.  That folder is still unknown, the unrelated hand change is
+        still reconciled, and the refusal does not say that nothing holds the close back."""
+        self._strip_files(again["cycle_dir"])
+        self.assertEqual(sorted(p.relative_to(again["cycle_dir"]).as_posix() for p in Path(again["cycle_dir"]).rglob("*")),
+                         ["artifacts", "artifacts/plans", "artifacts/plans/cycle"])
+        locator = P.read_cycle_record(self.root, again["cycle_id"])["locator"]
+        self.assertEqual([(where.split("/")[-1], reason) for where, reason in P._scan_layout(self.root).blockers],
+                         [(locator, "not-a-cycle")])
+        # an unrelated hand-made rename in the same root is carried into the records, not dropped with the scan
+        b_sealed = json.loads(self.b_path.read_text())["cycles"][0]
+        shutil.move(str(self.b_path.parent / P.read_cycle_record(self.root, b_sealed)["locator"]),
+                    str(self.b_path.parent / "renamed-by-hand"))
+        result = P.reconcile_root(self.root)
+        self.assertNotEqual(result.get("status"), "skipped", result)
+        self.assertEqual(P.read_cycle_record(self.root, b_sealed)["locator"], "renamed-by-hand")
+        self.assertIsNone(P.read_cycle_record(self.root, again["cycle_id"]).get("deleted_at"))
+        detail = self._refusal()
+        self.assertIn("held-back-by=campaigns/%s/%s (not-a-cycle)" % (self.c_path.parent.name, locator), detail)
+        self.assertNotIn("nothing under campaigns/ holds it back", detail)
+        self.assertIn("state=sealed", detail)
+        self.assertIn("would make campaign-close record that cycle as deleted for good", detail)
+        self.assertIsNone(P.read_cycle_record(self.root, again["cycle_id"]).get("deleted_at"))
+
+    def test_a_restart_under_the_name_of_a_cycle_that_ended_with_no_output_is_never_passed_over(self):
+        # the first cycle of the name ended with no output (its own folder is gone, its record says no-lineage);
+        # the restart of the same name the same day gets the same locator and is sealed
+        self._member("retry", campaign=self.c_id, output=False)
+        again = self._member("retry", campaign=self.c_id, gate="retry-second")
+        records = [r for r in P.list_cycle_records(self.root) if r.get("campaign_id") == self.c_id
+                   and r["locator"].endswith("_retry")]
+        self.assertEqual(sorted(r["state"] for r in records), ["no-lineage", "sealed"])
+        self.assertEqual(len({r["locator"] for r in records}), 1)
+        self._assert_an_emptied_folder_of_a_live_cycle_holds_back(again)
+
+    def test_a_restart_under_the_name_of_a_deleted_cycle_is_never_passed_over(self):
+        old = self._member("dup", campaign=self.c_id)
+        P.delete_cycle(self.root, old["cycle_id"])
+        again = self._member("dup", campaign=self.c_id, gate="dup-second")
+        records = [r for r in P.list_cycle_records(self.root) if r.get("campaign_id") == self.c_id
+                   and r["locator"].endswith("_dup")]
+        self.assertEqual(sorted(bool(r.get("deleted_at")) for r in records), [False, True])
+        self.assertEqual(len({r["locator"] for r in records}), 1)
+        self._assert_an_emptied_folder_of_a_live_cycle_holds_back(again)
+
+    def test_the_scan_reads_only_the_records_of_cycles_whose_folder_it_did_not_find(self):
+        # a root with many cycles and a folder nobody names: the records of the cycles the scan found by their
+        # folders are not read again for it, and the refusal's named-by lines come from what the scan read
+        import artifact_producer_cycle_ops as OPS
+        read = []
+        real = OPS._read_json
+        with mock.patch.object(OPS, "_read_json", side_effect=lambda path: (read.append(Path(path).name), real(path))[1]):
+            scan = P._scan_layout(self.root)
+        self.assertEqual(scan.blockers, [])
+        # of the cycles of this root only the two without a folder (the empty one, the carried one) were read
+        self.assertEqual(sorted(name for name in read if name.startswith("cyc_")),
+                         sorted([self.empty_id + ".json", self.c_second["cycle_id"] + ".json"]))
+        (self.named / "artifacts" / "plans" / self.locator / "note.txt").write_text("kept\n")
+        scan = P._scan_layout(self.root)
+        self.assertEqual([r["cycle_id"] for r in scan.named[self.locator]], [self.empty_id])
+        with mock.patch.object(OPS, "_read_json", side_effect=AssertionError("read the records again")):
+            phrases = C._named_by_records(scan, scan.blockers)
+        self.assertEqual(len(phrases), 1)
+        self.assertIn(self.empty_id, phrases[0])
+
+    def test_the_words_for_a_deleted_record_do_not_say_it_ended_with_no_output(self):
+        # a folder with a file in it, in the closed campaign, has the name that a deleted cycle of the other
+        # campaign had as its locator (it is there before the delete, which would reconcile the carried folder)
+        name = self.locator.split("_")[0] + "_dup"
+        stray = self.b_path.parent / name
+        (stray / "artifacts" / "plans").mkdir(parents=True)
+        (stray / "artifacts" / "plans" / "note.txt").write_text("kept\n")
+        old = self._member("dup", campaign=self.c_id)
+        self.assertEqual(P.read_cycle_record(self.root, old["cycle_id"])["locator"], name)
+        P.delete_cycle(self.root, old["cycle_id"])
+        detail = self._refusal()
+        self.assertIn("named-by=campaigns/%s/%s: cycle %s state=deleted" % (self.b_path.parent.name, name, old["cycle_id"]), detail)
+        self.assertIn("this cycle is already recorded as deleted; moving the folder out of campaigns/ changes no record", detail)
+        self.assertNotIn("the cycle ended with no output", detail)
+
+    def test_the_general_not_a_cycle_sentence_defers_to_a_named_by_line(self):
+        (self.named / "artifacts" / "plans" / self.locator / "note.txt").write_text("kept\n")
+        detail = self._refusal()
+        self.assertIn("if a named-by line above names this folder, that line says which record it is and what moving it does; "
+                      "with no such line, if it is a cycle that lost its .cycle.json", detail)
 
 
 if __name__ == "__main__":

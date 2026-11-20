@@ -1036,19 +1036,23 @@ def _v_event_payload(value: Any, path: str, violations: List[Violation], members
         member_size = sum(_json_size(rows) for rows in members)
     except (TypeError, ValueError):
         size, member_size = _MAX_PAYLOAD_BYTES + 1, 0
-    if size - member_size > _MAX_PAYLOAD_BYTES:
-        violations.append(
-            Violation("oversized-payload", path,
-                      "serialized payload exceeds 64 KiB" + (
-                          " apart from its member rows: the event's own text is what is large"
-                          if members else ""))
-        )
-    if members and member_size > _MEMBER_ROW_ALLOWANCE_BYTES * len(members[0]):
-        violations.append(
-            Violation("oversized-payload", path,
-                      "member rows take {0} bytes for {1} members, more than {2} bytes each".format(
-                          member_size, len(members[0]), _MEMBER_ROW_ALLOWANCE_BYTES))
-        )
+    # The one rule a payload ever had is the floor: a payload of 64 KiB or less is as valid as it always was.
+    # Only one that is larger is looked at in parts: what is not a member row stays within 64 KiB, and the
+    # member rows within their allowance for each member.
+    if size > _MAX_PAYLOAD_BYTES:
+        if size - member_size > _MAX_PAYLOAD_BYTES:
+            violations.append(
+                Violation("oversized-payload", path,
+                          "serialized payload exceeds 64 KiB" + (
+                              " apart from its member rows: the event's own text is what is large"
+                              if members else ""))
+            )
+        if members and member_size > _MEMBER_ROW_ALLOWANCE_BYTES * len(members[0]):
+            violations.append(
+                Violation("oversized-payload", path,
+                          "member rows take {0} bytes for {1} members, more than {2} bytes each".format(
+                              member_size, len(members[0]), _MEMBER_ROW_ALLOWANCE_BYTES))
+            )
 
 
 def _max_depth(value: Any) -> int:

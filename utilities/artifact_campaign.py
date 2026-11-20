@@ -714,9 +714,10 @@ _BLOCKER_ADVICE = {
                      "does not help, the id is inside it",
     "not-a-cycle": "is inside a campaign folder but has neither a .cycle.json nor a manifest.json naming a cycle, so it "
                    "is not a cycle: if it is not this campaign's work (feedback, notes) move it out of campaigns/; "
-                   "if it is a cycle that lost its .cycle.json, no command writes that file back, and moving the "
-                   "folder out would make campaign-close record that cycle as deleted for good, so do not move it "
-                   "for this and report it to the owner of this root; renaming it changes nothing",
+                   "if a named-by line above names this folder, that line says which record it is and what moving it "
+                   "does; with no such line, if it is a cycle that lost its .cycle.json, no command writes that file "
+                   "back, and moving the folder out would make campaign-close record that cycle as deleted for good, "
+                   "so do not move it for this and report it to the owner of this root; renaming it changes nothing",
     "old-cycles-layout": "is the oldest layout (a cycles/ folder inside a campaign), from which no move is judged. It "
                          "stops holding things back once no cycles/ folder is left under campaigns/, but no command "
                          "settles it today, and moving it out is not the way: campaign-close would then record the "
@@ -725,43 +726,29 @@ _BLOCKER_ADVICE = {
 }
 
 
-def _layout_blockers(root):
-    """`[(path from the root, reason)]` of what keeps the root's layout scan incomplete, read-only; [] when the
-    scan is complete or cannot be taken."""
+def _layout_scan(root):
+    """The root's layout scan, read-only; None when it cannot be taken."""
     try:
         import artifact_producer_cycle_ops as cycle_ops
-        return list(cycle_ops._scan_layout(Path(root)).blockers)
+        return cycle_ops._scan_layout(Path(root))
     except Exception:  # noqa: BLE001 -- naming a blocker never makes the refusal itself fail
-        return []
+        return None
 
 
-def _named_by_records(root, blockers):
+def _named_by_records(scan, blockers):
     """For each `not-a-cycle` folder that a cycle record names as its place (its `locator` is the folder's name),
     one phrase: which record, in which state, and what moving the folder out of campaigns/ does to it.  Said as
-    the scan and the reconcile treat it: only a closed cycle with a published row is taken for gone."""
-    names = {Path(where).name for where, reason in blockers if reason == "not-a-cycle"}
-    if not names:
-        return []
-    named = {}
-    directory = Path(root) / ".runtime/artifact-producer/v1/cycles"
-    try:
-        entries = sorted(directory.glob("[!.]*.json"))
-    except OSError:
-        return []
-    for entry in entries:
-        try:
-            record, _ = read_json(root, entry)
-        except CampaignError:
-            continue
-        if record.get("locator") in names:
-            named.setdefault(record["locator"], []).append(record)
+    the scan and the reconcile treat it: only a closed cycle with a published row is taken for gone.  The records
+    are the ones the scan read for these folders."""
     phrases = []
     for where, reason in blockers:
         if reason != "not-a-cycle":
             continue
-        for record in named.get(Path(where).name, [])[:3]:
+        for record in scan.named.get(Path(where).name, [])[:3]:
             state = "deleted" if record.get("deleted_at") else record.get("state")
-            if state in DETACHED_STATES or state == "deleted":
+            if state == "deleted":
+                effect = "this cycle is already recorded as deleted; moving the folder out of campaigns/ changes no record"
+            elif state in DETACHED_STATES:
                 effect = ("moving it out of campaigns/ leaves that record exactly as it is: the cycle ended with no "
                           "output, so nothing is recorded as deleted")
             elif state in {"sealed", "superseded"}:
@@ -784,12 +771,13 @@ def _bindings_detail(root, ids, directories):
     if unlisted:
         parts.append(f"folder-not-listed={', '.join(unlisted[:10])}" + (f" +{len(unlisted) - 10} more" if len(unlisted) > 10 else ""))
     if missing:
-        blockers = _layout_blockers(root)
+        scan = _layout_scan(root)
+        blockers = list(scan.blockers) if scan is not None else []
         if blockers:
             shown = "; ".join(f"{where} ({reason})" for where, reason in blockers[:5])
             more = f" +{len(blockers) - 5} more" if len(blockers) > 5 else ""
             parts.append(f"held-back-by={shown}{more}")
-            parts.extend(_named_by_records(root, blockers[:5]))
+            parts.extend(_named_by_records(scan, blockers[:5]))
             kinds = list(dict.fromkeys(reason.split(" ", 1)[0] for _where, reason in blockers))
             advice = "; ".join(f"{kind}: {_BLOCKER_ADVICE[kind]}" for kind in kinds if kind in _BLOCKER_ADVICE)
             settleable = any(kind != "old-cycles-layout" for kind in kinds)
@@ -1204,8 +1192,11 @@ def status(root, selection):
                 "projection_pending": folded.projection_pending}
     try:
         snapshot = _snapshot(root, path)
-        # The same limit the close ends with, taken without the closure's own few lines.
-        _refuse_unreadable_size(len(canonical(snapshot)) + 1, "campaign.satisfied", {"snapshot": snapshot})
+        # The closing event itself, judged by the function the close judges it with (the envelope and size rules
+        # of every reader, then the read limit), so what is said closable here is let through there.
+        first = next((row for row in snapshot["cycles"] if row.get("manifest_id")), None)
+        if first is not None:
+            _new_closing_event(root, folded, snapshot, first)
         result = {"status": "active", "state": "active", "campaign_id": record["campaign_id"],
                   "goal": record.get("goal"), "completion_criterion": record.get("completion_criterion"),
                   "cycles": [{**row, "disposition": disposition(row)} for row in snapshot["cycles"]],
@@ -1312,19 +1303,30 @@ def _refuse_unreadable_size(size, event_type, payload):
                      "begin further work under another campaign"})
 
 
-def _new_event(root, path, state, event_type, actor, payload, provenance):
+def _build_event(state, event_type, actor, payload, provenance):
     event = {"stream_id": state.stream_id or identity.IdAllocator().allocate("stream"),
              "stream_sequence": state.last_sequence + 1, "event_type": event_type,
              "target_id": state.record["campaign_id"], "actor": actor,
              "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
              "provenance": provenance, "evidence_ids": [], "payload": payload}
     event["event_id"] = _id("evt", event)
+    return event
+
+
+def _check_event(event):
+    """The one judgment of an event before it is published: the envelope and size rules every reader applies
+    (`_v_event_row`), then the read limit of a record.  `status` asks it of the closing event it would publish,
+    so a campaign is `closable` exactly when this lets the close through."""
     violations = []
     manifest._v_event_row(event, "$", violations)
     if violations:
         raise CampaignError("campaign-event-invalid", violations[:3])
-    _refuse_unreadable_size(len(canonical(event)) + 1, event_type, payload)
+    _refuse_unreadable_size(len(canonical(event)) + 1, event["event_type"], event["payload"])
     return event
+
+
+def _new_event(root, path, state, event_type, actor, payload, provenance):
+    return _check_event(_build_event(state, event_type, actor, payload, provenance))
 
 
 def _reconcile(root):
@@ -1386,28 +1388,33 @@ def _close_locked(root, path, *, reason=None, before_publish=None):
     if state.state != "active":
         raise CampaignError("campaign-not-active", state.state)
     snapshot = _snapshot(root, path)
+    first = next((row for row in snapshot["cycles"] if row.get("manifest_id")), None)
+    if first is None:
+        raise CampaignError("campaign-cycle-not-sealed", {
+            "cycle_id": snapshot["cycles"][0]["cycle_id"],
+            "next_step": "close-one-cycle-of-the-campaign-first"})
+    event = _new_closing_event(root, state, snapshot, first, reason)
+    if before_publish is not None:
+        before_publish(event)
+    return _commit_event(root, path, event, "close")
+
+
+def _new_closing_event(root, state, snapshot, first, reason=None):
+    """The `campaign.satisfied` event a close of `snapshot` publishes, judged by `_check_event`."""
     criterion = snapshot["campaign"].get("completion_criterion", {}).get("statement")
     # §45 D-127: the reason records why the campaign was judged done; it is never a
     # condition.  Without one the criterion sentence (or `campaign-close`) stands in.
     closure_reason = (reason.strip() if isinstance(reason, str) and reason.strip()
                       else criterion if isinstance(criterion, str) and criterion.strip() else "campaign-close")
     actor_id, closed_by = _agent_actor()
-    first = next((row for row in snapshot["cycles"] if row.get("manifest_id")), None)
-    if first is None:
-        raise CampaignError("campaign-cycle-not-sealed", {
-            "cycle_id": snapshot["cycles"][0]["cycle_id"],
-            "next_step": "close-one-cycle-of-the-campaign-first"})
     payload = {"contract": CONTRACT, "root": str(root), "snapshot": snapshot,
                "closure": {"reason": closure_reason, "closed_by": closed_by}}
     provenance = {"source_manifest_id": first["manifest_id"],
                   "source_revision_id": first["manifest_revision_id"],
                   "producer_route_id": first["route_id"], "schema_version": 1,
                   "algorithm_version": CONTRACT, "source_digest": digest(snapshot)}
-    event = _new_event(root, path, state, "campaign.satisfied",
-                       {"kind": "producer", "id": actor_id}, payload, provenance)
-    if before_publish is not None:
-        before_publish(event)
-    return _commit_event(root, path, event, "close")
+    return _check_event(_build_event(state, "campaign.satisfied", {"kind": "producer", "id": actor_id},
+                                     payload, provenance))
 
 
 def close(root, selection, *, reason=None):
