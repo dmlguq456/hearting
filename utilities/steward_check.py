@@ -362,19 +362,29 @@ def _seat_cleared(harness: str, session_id: str, observation=None) -> bool:
     return _session_liveness(harness, session_id, _agents(), observation) != "live"
 
 
+def _release_reason(harness: str, session_id: str, observation):
+    """``session-ended``, ``cleared`` or None from one reading of the session holders."""
+    if _window_closed(harness, session_id, observation):
+        return "session-ended"
+    if _seat_cleared(harness, session_id, observation):
+        return "cleared"
+    return None
+
+
 def _release_if_window_closed(duty, store, harness: str, session_id: str, now: float,
                               observation=None) -> bool:
     """Release a role only on exact native end or confirmed clear evidence.
 
     The release itself is the one ``release_closed_session``; if role resolution is
-    uncertain, keep the duty for the next pass.
+    uncertain, keep the duty for the next pass. The round's shared ``observation`` can
+    predate a resume of this same session, so a release it points to is decided again
+    on a fresh reading, as the message cancel re-checks lifetime before it acts.
     """
     try:
-        if _window_closed(harness, session_id, observation):
-            reason = "session-ended"
-        elif _seat_cleared(harness, session_id, observation):
-            reason = "cleared"
-        else:
+        reason = _release_reason(harness, session_id, observation)
+        if reason is not None and observation is not None:
+            reason = _release_reason(harness, session_id, _end_observation())
+        if reason is None:
             return False
         module = getattr(_collector(), "_peer_message_module", None)
         peer_message = module() if module else None

@@ -99,20 +99,69 @@ class SessionEndTest(f.GrantFixture):
                                          source='explicit', steward_seat=None)
             duties.append((sid, sc.register('claude', sid, store=store, ensure_runner=False)))
 
+        holders = {sid for sid, _duty in duties}
+
         def release_all(observation):
             with mock.patch.object(f.fleet_steward, '_peer_message_module', return_value=f.peer_message), \
                  mock.patch.object(f.fleet_steward, '_registry_record', return_value=None), \
                  mock.patch.object(claude_process_identity, 'claude_session_census',
-                                   return_value=(True, set(), set())) as census:
-                for sid, duty in duties:
-                    sc._release_if_window_closed(duty, store, 'claude', sid, 1e10, observation)
+                                   return_value=(True, holders, set())) as census:
+                released = [sc._release_if_window_closed(duty, store, 'claude', sid, 1e10, observation)
+                            for sid, duty in duties]
+            self.assertEqual(released, [False] * len(duties))
             return census.call_count
 
         # Each check taking its own reading walks the process table every time ...
         alone = release_all(None)
         self.assertGreaterEqual(alone, 3)
-        # ... while one reading shared by the round's checks walks it once.
+        # ... while one reading shared by the round's checks walks it once. (Only a
+        # release the shared reading points to reads the table again; see below.)
         self.assertEqual(release_all(f.fleet_steward.end_observation()), 1)
+
+    def _round_release(self, sid, readings):
+        """One steward check of a granted Claude session against the round's shared
+        reading; ``readings`` answers each process-table census in order. The session
+        has native history, so a complete census that misses it reads as ended."""
+        import claude_process_identity
+        import peer_obligations
+        import recipient_lifetime
+        sc = f._load('steward_check_round_recheck', 'steward_check.py')
+        store = peer_obligations.ObligationStore(f.peer_message.peer_state_root())
+        self.session(sid, self.primary)
+        f.peer_message.grant_steward('claude', sid, f.EXPLICIT_TO, 'explicit', f.TS,
+                                     source='explicit', steward_seat=None)
+        duty = sc.register('claude', sid, store=store, ensure_runner=False)
+        answers = iter(readings)
+
+        def census():
+            answer = next(answers)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        with mock.patch.object(f.fleet_steward, '_peer_message_module', return_value=f.peer_message), \
+             mock.patch.object(f.fleet_steward, '_registry_record', return_value=None), \
+             mock.patch.object(claude_process_identity, 'claude_session_census', side_effect=census), \
+             mock.patch.object(recipient_lifetime, '_has_native_existence_evidence', return_value=True), \
+             mock.patch.object(f.peer_message, 'release_closed_session',
+                               wraps=f.peer_message.release_closed_session) as release:
+            released = sc._release_if_window_closed(duty, store, 'claude', sid, 1e10,
+                                                    f.fleet_steward.end_observation())
+        return released, release.call_count
+
+    def test_a_session_still_ended_on_the_fresh_reading_is_released(self):
+        self.assertEqual(self._round_release('round-ended', [(True, set(), set())] * 2), (True, 1))
+
+    def test_a_session_reopened_after_the_round_reading_keeps_its_role(self):
+        # The round read the process table before this same session id came back in a
+        # new process; the release it pointed to is decided on a fresh reading.
+        sid = 'round-reopened'
+        self.assertEqual(self._round_release(sid, [(True, set(), set()), (True, {sid}, set())]),
+                         (False, 0))
+
+    def test_an_unreadable_fresh_reading_is_unknown_not_ended(self):
+        self.assertEqual(self._round_release('round-unreadable',
+                                             [(True, set(), set()), OSError('proc')]), (False, 0))
 
     def test_other_registry_process_keeps_watch_for_three_harnesses(self):
         import subprocess
