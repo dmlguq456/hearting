@@ -21,6 +21,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utilities"))
 import distribution  # noqa: E402
+import fixture_env  # noqa: E402
 import model_follow  # noqa: E402
 import user_config  # noqa: E402
 
@@ -116,19 +117,19 @@ class ListPlaceUpdateTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory(prefix="mf1u-")
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        self.env = {"HOME": str(self.root), "PATH": "", "CLAUDE_CONFIG_DIR": str(self.root / "claude"),
-                    "CODEX_HOME": str(self.root / "codex"), "XDG_CONFIG_HOME": str(self.root / "config"),
-                    "XDG_CACHE_HOME": str(self.root / "cache"), "XDG_DATA_HOME": str(self.root / "data"),
-                    "XDG_STATE_HOME": str(self.root / "state"), "OPENCODE_RUNTIME_VERSION": "1.19.0"}
-        homes = {"claude": self.root / "claude", "codex": self.root / "codex",
-                 "opencode": self.root / "config" / "opencode"}
-        for harness, home in homes.items():
-            target = home / "agent-config" / "models.conf"
+        # Only the fixture's own roots and an empty PATH (no harness CLI is ever run).
+        self.env = fixture_env.build_environment(self.root, ROOT, base={"PATH": ""})
+        self.env["OPENCODE_RUNTIME_VERSION"] = "1.19.0"
+        home, config, cache = (Path(self.env[key]) for key in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"))
+        homes = {"claude": Path(self.env["CLAUDE_CONFIG_DIR"]), "codex": Path(self.env["CODEX_HOME"]),
+                 "opencode": config / "opencode"}
+        for harness, base in homes.items():
+            target = base / "agent-config" / "models.conf"
             target.parent.mkdir(parents=True)
             target.write_bytes((ROOT / "adapters" / harness / "config" / "models.conf").read_bytes())
-        self.places = {"claude": self.root / "claude/cache/model-catalog/one.json",
-                       "codex": self.root / "codex/models_cache.json",
-                       "opencode": self.root / "cache/opencode/models.json"}
+        self.places = {"claude": homes["claude"] / "cache/model-catalog/one.json",
+                       "codex": homes["codex"] / "models_cache.json",
+                       "opencode": cache / "opencode/models.json"}
         for place in self.places.values():
             place.parent.mkdir(parents=True, exist_ok=True)
 
@@ -144,12 +145,13 @@ class ListPlaceUpdateTests(unittest.TestCase):
         slug = "gpt-{}-elm".format  # a made-up Codex-shaped name, never a real model id
         self.places["codex"].write_text(json.dumps({"models": [
             {"slug": slug(1), "visibility": "list"}, {"slug": slug(2), "visibility": "list"}]}))
-        user = self.root / "codex" / "agent-config" / "models.conf"
+        user = Path(self.env["CODEX_HOME"]) / "agent-config" / "models.conf"
         user.write_text(user.read_text().replace("CFG_MODEL_PROFILE_DEEP=deep:xhigh",
                                                  f"CFG_MODEL_PROFILE_DEEP=model/{slug(1)}:high"))
         lines, _ = self.update_in_child()  # the same fixture with a regular list does say something
         self.assertTrue([t for t in lines if f"{slug(1)} -> {slug(2)}" in t], lines)
         for place in self.places.values():
+            # destructive-ok: reason=swap this fixture's list for a pipe; boundary=file under this test's TemporaryDirectory
             place.unlink(missing_ok=True)
             os.mkfifo(place)
         lines, elapsed = self.update_in_child()
