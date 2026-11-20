@@ -60,11 +60,30 @@ COMPACT_CONFIRM_SEC = 900.0          # compaction of ~950k tokens took 145 s (me
 # No-trailer body used by the exact-native attachment or the sealed pending-ref carrier.
 CONTINUE_TEXT = "이어서해"
 STATUS_ONLY_TEXT = "현재 카드 기준 현황만 짧게 표시하고 새 작업은 시작하지 말고 다음 입력을 기다리세요."
-# The window opens once the compaction is confirmed (``cleared``); the session may still be on a
-# turn of its own then (a notice or result turn took 6-11 minutes in practice), and the helper
-# asks again inside it, so it is as long as the compaction wait itself.
+# The window opens once the compaction is confirmed (``cleared``). The session may still be on a
+# turn of its own then (a notice or result turn); the continue is sent when that turn ends. A
+# hook can come minutes after the compaction (5 of 9 manual tidies recorded 391 s to 49 h before
+# the next one), so the window is as long as the compaction wait itself.
 CONTINUE_WINDOW_SEC = COMPACT_CONFIRM_SEC
+# The one place the harnesses differ for a continue held back while the session works: Claude's
+# Stop/UserPromptSubmit hooks and OpenCode's idle plugin call ``peer-steward.receiver_idle`` at the
+# end of every turn, which asks once more (``_continue`` inside that hook process). Codex has no
+# such callback, so only its helper asks again, inside the window.
+HELPER_ASKS_AGAIN = frozenset({"codex"})
 SCREEN_RETRY_SEC = 5.0
+# A panel host that is being replaced answers nothing for ~15 s (11-20 15:09); an attachment that
+# is gone for good answers the same ``shell-no-answer`` (``attachment-changed`` and a refused
+# connection both read so), and one look cannot tell the two apart. So the doubt is waited out
+# for about a minute (12 looks, 5 s apart), not for the whole booking.
+SCREEN_DOUBT_LOOKS = 12
+# Reasons a continue is held back for the composer or the pane, which pass on their own; the
+# steward answers ``queued`` for them and the helper may ask again. An older shell host does not
+# pass on its own (``shell-host-outdated``), so it is not here.
+CONTINUE_INPUT_WAIT = frozenset({"draft", "draft-unknown", "form-open", "screen-unknown",
+                                 "shell-editor-open", "shell-no-answer", "pane-in-mode",
+                                 "pane-synchronized", "pane-input-off", "pane-state-unknown"})
+# Seconds between asks while the composer or pane holds the continue (each ask starts a steward).
+CONTINUE_INPUT_RETRY_SEC = 15.0
 IDLE_CARD_WINDOW_SEC = 300.0
 
 REASON_TEXT = {
@@ -2004,10 +2023,11 @@ def continue_card_reason(req: dict) -> Optional[str]:
 def settle_unsent_continue(harness: str, sid: str, *, now: Optional[float] = None) -> int:
     """Close a queued continue that will never be sent, with its real reason.
 
-    A continue held back while the session worked (``not-idle-*``) has no transfer ref and
-    no later sender on every harness; once the card reached another turn (``card-taken``) or
-    the continue window ended (``expired``) it is skipped, not left ``pending``. Called from
-    the session's own turn-end observation; nothing is typed and nothing is retried here."""
+    A continue held back while the session worked (``not-idle-*``) has no transfer ref; on
+    Codex nothing but the helper asks again (``HELPER_ASKS_AGAIN``), and the helper ends with
+    its window. Once the card reached another turn (``card-taken``) or the continue window ended
+    (``expired``) it is skipped, not left ``pending``. Called from the session's own turn-end
+    observation; nothing is typed and nothing is retried here."""
     if harness not in ("claude", "codex", "opencode") or not sid:
         return 0
     now = st.now_epoch() if now is None else now
@@ -2266,7 +2286,8 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
             # Written before anything is typed: the new Codex thread's first hook finds its window by it.
             kind = req.get("followup_kind") or "continue"
             req["continued"] = {"state": "pending", "kind": kind,
-                                "deadline": now + _tunable("CONTINUE_WINDOW", CONTINUE_WINDOW_SEC)}
+                                "deadline": now + _tunable(
+                                    "CONTINUE_WINDOW", _tunable("COMPACT_CONFIRM", CONTINUE_WINDOW_SEC))}
         _write_reservation(req)
     if req.get("origin") == "idle":
         if outcome == "compacted":
@@ -2380,10 +2401,19 @@ def _show_on_herdr(req: dict, text: str) -> bool:
     return isinstance(result, dict) and result.get("shown") is True
 
 def _continue(seat_key: str, nonce: str, continuer: Callable[[Path, str, str], dict], *,
-              sleep: Callable[[float], None] = time.sleep) -> str:
-    """After a confirmed clear, ask ``peer-steward.py continue`` once and record its result.
+              sleep: Callable[[float], None] = time.sleep, ask_again: bool = False) -> str:
+    """After a confirmed clear, ask ``peer-steward.py continue`` and record its result.
     ``continued`` means the exact native continuation was confirmed; the clear remains valid
     when continuation is queued, skipped or unverified.
+
+    One ask by default, which is what a hook process (``receiver_idle``) does: Claude and
+    OpenCode call it at the end of every turn, so a continue held back while the session works
+    is asked again there. ``ask_again`` is only for the helper on a harness without such a
+    callback (``HELPER_ASKS_AGAIN``, Codex): while the session works, or its composer or pane
+    holds the input, nothing was sent and nothing bound, so it asks again inside the window (the
+    loop top ends it as ``expired`` once the window has passed). Every ask passes the steward's
+    full checks again. A continue the steward saw taken by another ask (``superseded``) is not
+    settled here: the other ask settles it.
     """
     path = reservation_path(seat_key)
     while True:
@@ -2395,15 +2425,17 @@ def _continue(seat_key: str, nonce: str, continuer: Callable[[Path, str, str], d
             break
         verdict = continuer(path, nonce, str((req.get("seat") or {}).get("pane") or ""))
         reason = str(verdict.get("reason") or "")
+        if verdict.get("continued") == "skipped" and reason == "superseded":
+            return "cleared"            # another ask holds it, or settled it: never overwrite theirs
         if verdict.get("continued") in {"queued", "skipped"} and reason == "idle-card-observation-unavailable":
             continue
-        if (verdict.get("continued") == "queued" and reason.startswith("not-idle-")
-                and not verdict.get("transfer_ref")):
-            # The session is still on a turn of its own and nothing was sent or bound: no later
-            # sender comes for it, so the helper asks again inside the same window (the loop top
-            # ends it as ``expired`` once the window has passed).
-            sleep(COMPACT_POLL_SEC)
-            continue
+        if ask_again and verdict.get("continued") == "queued" and not verdict.get("transfer_ref"):
+            if reason.startswith("not-idle-"):
+                sleep(COMPACT_POLL_SEC)     # the steward already looked for ~18 s
+                continue
+            if reason in CONTINUE_INPUT_WAIT:
+                sleep(CONTINUE_INPUT_RETRY_SEC)
+                continue
         break
     outcome = verdict.get("continued", "failed")
     _finish_continue(seat_key, nonce, outcome, verdict.get("reason", ""),
@@ -2605,7 +2637,8 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
                 return None, "superseded"
             if compact_confirmed(held):
                 _finish(seat_key, nonce, "cleared", observed=sid)
-                return None, _continue(seat_key, nonce, continuer, sleep=sleep)
+                return None, _continue(seat_key, nonce, continuer, sleep=sleep,
+                                       ask_again=str(req.get("harness")) in HELPER_ASKS_AGAIN)
             if compact_preempted(held) and release_unsent_compact(seat_key, nonce, held["clear_claim"]):
                 # A queued turn had started just before the keys and Codex dropped them: no
                 # compaction will come from them, so the booking waits for that turn's end.
@@ -2618,17 +2651,22 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
     req, result = turn_ended(req)
     if req is None:
         return result
-    screen_doubt = ""   # the shell host's last non-answer, kept for the notice if the wait runs out
+    screen_doubt, doubt_looks = "", 0   # the shell host's last non-answer, kept for the notice
     while True:
         verdict = steward(path, nonce, pane)
         outcome, reason = verdict.get("cleared", "failed"), verdict.get("reason", "")
         if reason == "expired" and screen_doubt:
-            reason = screen_doubt
+            reason = screen_doubt           # the last thing seen was the doubt itself
+        elif reason not in ("expired", "shell-no-answer"):
+            screen_doubt, doubt_looks = "", 0
         if reason == "shell-no-answer" and outcome in {"queued", "skipped"}:
             # A panel host taking over (an upgrade, a restart) answers nothing for a moment. The
-            # idle path already waits such a doubt out inside its booking; so does this one.
-            screen_doubt = reason
-            checked, why = reobserve_request(path, nonce, sleep=sleep)
+            # idle path already waits such a doubt out inside its booking; this one waits for
+            # ``SCREEN_DOUBT_LOOKS`` looks, because a host that is gone for good reads the same.
+            # It also covers the idle booking's /compact step (no origin check here).
+            screen_doubt, doubt_looks = reason, doubt_looks + 1
+            checked, why = (reobserve_request(path, nonce, sleep=sleep) if doubt_looks < SCREEN_DOUBT_LOOKS
+                            else (None, "expired"))
             if checked is not None:
                 sleep(min(SCREEN_RETRY_SEC, max(0.0, float(checked.get("deadline", 0)) - st.now_epoch())))
                 continue
@@ -2665,7 +2703,8 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
     sid = str(req.get("sid") or "")
     if outcome == "true":
         _finish(seat_key, nonce, "cleared", observed=sid)
-        return _continue(seat_key, nonce, continuer, sleep=sleep)
+        return _continue(seat_key, nonce, continuer, sleep=sleep,
+                         ask_again=str(req.get("harness")) in HELPER_ASKS_AGAIN)
     final = "skipped" if outcome == "skipped" else "failed"
     return final if _finish(seat_key, nonce, final, reason, detail=str(verdict.get("detail") or "")) else "superseded"
 

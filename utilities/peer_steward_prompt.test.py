@@ -6050,6 +6050,104 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         self.assertIn("transfer_ref=" + ref, second)
         self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "pending")
 
+    def empty_codex_box(self, screen_reason=None, *, reads=None):
+        """The pane reads as an idle Codex screen whose input box is empty (or ``screen_reason``)."""
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(
+            peer_steward, "_read_screen_reason",
+            side_effect=lambda target: (reads.append(target) or ([[]], "")) if reads is not None else ([[]], "")))
+        stack.enter_context(mock.patch.object(peer_steward, "_screen_ready", return_value=screen_reason))
+        return stack
+
+    def test_codex_continue_does_not_start_a_turn_over_what_the_person_is_writing(self):
+        for reason in ("draft", "draft-unknown", "form-open"):
+            with self.subTest(reason=reason):
+                self.cleared(harness="codex", sid="old-thread", new="new-thread")
+                queue = mock.Mock(side_effect=AssertionError("queue delivery over a draft"))
+                reads = []
+                with mock.patch.object(peer_steward.peer_message, "deliver_pending_codex", queue), \
+                     self.empty_codex_box(reason, reads=reads):
+                    rc, line = self.continue_cmd()
+                self.assertEqual(rc, 3, line)
+                self.assertIn("continued=queued", line)
+                self.assertIn("reason=" + reason, line)
+                self.assertNotIn("transfer_ref=", line)                  # nothing was bound to the queue
+                held = self.booking()["continued"]
+                self.assertEqual(held["state"], "pending")               # the helper asks again
+                self.assertNotIn("transfer_ref", held)
+                self.assertEqual(len(reads), 1)
+
+    def test_codex_continue_sees_a_draft_that_appeared_after_the_claim_and_releases_it(self):
+        self.cleared(harness="codex", sid="old-thread", new="new-thread")
+        answers = iter([None, "draft"])
+        with mock.patch.object(peer_steward.peer_message, "deliver_pending_codex",
+                               side_effect=AssertionError("queue delivery over a draft")), \
+             mock.patch.object(peer_steward, "_continue_composer_reason",
+                               side_effect=lambda _t: next(answers)):
+            rc, line = self.continue_cmd()
+        self.assertEqual((rc, "continued=queued" in line, "reason=draft" in line), (3, True, True), line)
+        held = self.booking()["continued"]
+        self.assertEqual(held["state"], "pending")                       # claim released, not sent
+        self.assertNotIn("transfer_ref", held)
+
+    def test_codex_helper_asks_again_with_the_real_command_after_a_busy_ask_and_sends_once(self):
+        # One ask looks 12 times (~18 s) and finds the session working; the helper's next ask
+        # (the real ``continue`` command, claim and queue included) finds it idle and sends.
+        self.cleared(harness="codex", sid="old-thread", new="new-thread")
+        looks = iter(["not-idle-working"] * peer_steward._CONTINUE_LOOK_ROUNDS + [None] * 20)
+        asks, slept = [], []
+
+        def ask(path, nonce, pane):
+            printed = []
+            with mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+                peer_steward.main(["continue", pane, "--request", str(path), "--nonce", nonce])
+            line = printed[-1]
+            asks.append(line)
+            return dict(part.partition("=")[::2] for part in line.split())
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward, "_continue_look", side_effect=lambda *_a: next(looks)), \
+             mock.patch.object(peer_steward, "_run_herdr_wait"), \
+             mock.patch.object(peer_steward.peer_message, "deliver_pending_codex",
+                               return_value={"status": "received", "reason": "exact-native-history"}) as sent, \
+             self.empty_codex_box():
+            outcome = self.clear._continue(self.seat_obj.key, "n0nce", ask, sleep=slept.append,
+                                           ask_again=True)
+        self.assertEqual(outcome, "continued")
+        self.assertEqual(len(asks), 2, asks)
+        self.assertIn("continued=queued", asks[0])
+        self.assertIn("reason=not-idle-working", asks[0])
+        self.assertIn("continued=true", asks[1])
+        self.assertEqual(slept, [self.clear.COMPACT_POLL_SEC])
+        sent.assert_called_once()
+        self.assertEqual(self.booking()["continued"]["state"], "sent")
+
+    def test_the_same_busy_ask_from_the_hook_is_not_repeated(self):
+        self.cleared(harness="codex", sid="old-thread", new="new-thread")
+        asks = []
+
+        def ask(path, nonce, pane):
+            printed = []
+            with mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+                peer_steward.main(["continue", pane, "--request", str(path), "--nonce", nonce])
+            asks.append(printed[-1])
+            return dict(part.partition("=")[::2] for part in printed[-1].split())
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward, "_continue_look", return_value="not-idle-working"), \
+             mock.patch.object(peer_steward, "_run_herdr_wait"):
+            self.assertEqual(self.clear._continue(self.seat_obj.key, "n0nce", ask, sleep=lambda _s: None),
+                             "cleared")
+        self.assertEqual(len(asks), 1)
+        self.assertEqual(self.booking()["continued"]["state"], "pending")
+
+    def test_claude_continue_does_not_read_the_codex_composer_check(self):
+        self.cleared()
+        with mock.patch.object(peer_steward, "_continue_composer_reason",
+                               side_effect=AssertionError("claude has its own guard")), \
+             mock.patch.object(peer_steward, "_native_idle_prompt_guard", return_value=(None, {"pid": 202})), \
+             mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})):
+            rc, line = self.continue_cmd()
+        self.assertEqual(rc, 0, line)
+
     def test_codex_continue_uses_exact_queue_and_receipt_settles_same_booking(self):
         self.cleared(harness="codex", sid="old-thread", new="new-thread")
         observed = []
@@ -6057,7 +6155,7 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
                                side_effect=lambda ref: observed.append(ref)
                                or {"status": "queued", "reason": "native-queue-accepted"}), \
              mock.patch.object(peer_steward, "_herdr_prompt", side_effect=AssertionError("continue PTY send")), \
-             mock.patch.object(peer_steward, "_read_screen", side_effect=AssertionError("composer read")):
+             self.empty_codex_box():
             rc, line = self.continue_cmd()
         self.assertEqual(rc, 3, line)
         ref = line.split("transfer_ref=", 1)[1].split()[0]
@@ -6077,7 +6175,8 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
                     current, state="received", text=None, receipt="exact-native-history"))
             return {"status": "received", "reason": "exact-native-history"}
 
-        with mock.patch.object(peer_steward.peer_message, "deliver_pending_codex", side_effect=consumed):
+        with mock.patch.object(peer_steward.peer_message, "deliver_pending_codex", side_effect=consumed), \
+             self.empty_codex_box():
             rc, line = self.continue_cmd()
         self.assertEqual(rc, 0, line)
         self.assertIn("verify=exact-native-history", line)
