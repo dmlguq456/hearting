@@ -24,6 +24,16 @@ _UTILITIES = str(Path(__file__).resolve().parents[3] / 'utilities')
 if _UTILITIES not in sys.path:
     sys.path.insert(0, _UTILITIES)
 import artifact_campaign_documents as campaign_documents
+try:
+    from .. import mdescape
+except ImportError:
+    # Loaded by its file path outside the ``fleet`` package (``experiment_catalog.root_for_cwd``):
+    # take the shared module from its file too, adding nothing to ``sys.path``.
+    import importlib.util as _importlib_util
+    _spec = _importlib_util.spec_from_file_location(
+        "project_status_mdescape", Path(__file__).resolve().parents[1] / "mdescape.py")
+    mdescape = _importlib_util.module_from_spec(_spec)
+    _spec.loader.exec_module(mdescape)
 
 STATUS_NAMES = campaign_documents.STATUS_NAMES
 RECENT_DAYS = 14
@@ -225,16 +235,22 @@ _ONE_LINE = re.compile(r"^\*\*\s*(?:한\s*줄|one[\s-]*line|summary|요약)\s*[:
 _UPDATED = re.compile(r"(?:갱신|updated)\s*[:：]?\s*[0-9]", re.IGNORECASE)
 # Heading words: the convention names "결정 필요" / "Decisions needed" (what waits on the
 # person: a decision or an action) and "다음" / "Next"; a few near spellings are read too.
+# The generated campaign document names them "기다리는 것" and "나중에 할 것".
 # A record of decisions already made is not counted.
-_DECISION_WORDS = ("결정 필요", "결정할", "결정 대기", "결정 기다리는", "사용자에게 필요", "decisions needed", "decision needed",
+_DECISION_WORDS = ("결정 필요", "결정할", "결정 대기", "결정 기다리는", "기다리는 것", "사용자에게 필요", "decisions needed", "decision needed",
                    "needs decision", "to decide", "open decision", "pending decision", "needs you")
 _RECORD_WORDS = ("기록", "내린", "log", "made", "history")
-_NEXT_WORDS = ("다음", "예정", "next", "할 일", "to do", "todo")
+_NEXT_WORDS = ("다음", "예정", "나중에 할", "next", "할 일", "to do", "todo")
 
 
 def _plain(text):
+    """One line of Markdown as plain words. A backslash escape outside a code span is held first (so
+    ``\\[a\\](x)`` is not a link and ``\\*x\\*`` is not emphasis) and given back as the bare mark last:
+    the campaign document escapes its titles that way, and a hand-written one reads as CommonMark does."""
+    text = mdescape.protect(text)
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
-    return re.sub(r"\s+", " ", text.replace("**", "").replace("__", "").replace("`", "")).strip()
+    text = re.sub(r"\s+", " ", text.replace("**", "").replace("__", "").replace("`", "")).strip()
+    return mdescape.restore(text)
 
 
 def _section_kind(title):

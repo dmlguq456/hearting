@@ -2082,6 +2082,10 @@ def _prune_empty_tree(path: Path) -> None:
         return
     for current, dirs, files in os.walk(path, topdown=False):
         cur = Path(current)
+        if "campaign.md" in files:
+            import campaign_document  # a campaign's derived document never counts as residue
+            campaign_document.remove_generated(cur)
+            files = [name for name in files if name != "campaign.md" or (cur / name).exists()]
         if files:
             raise ResplitError("rollback-residue", str(cur))
         try:

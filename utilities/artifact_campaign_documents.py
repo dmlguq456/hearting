@@ -50,7 +50,18 @@ def status_candidates(folder):
 
 
 def read_document(folder, name):
-    """Bounded bytes and their fd's stat; no payload pathname is reopened."""
+    """Bounded bytes and their fd's stat; no payload pathname is reopened.
+
+    A file replaced while it is read (the generator's atomic write) is read once more."""
+    try:
+        return _read_once(folder, name)
+    except ValueError as error:
+        if str(error) != 'document-changed':
+            raise
+    return _read_once(folder, name)
+
+
+def _read_once(folder, name):
     parent = open_root(folder)
     try:
         fd = open_relative(parent, [name])
@@ -191,9 +202,14 @@ def entrance_snapshot(root):
             except (OSError, RuntimeError, ValueError):
                 errors.append(campaign.relative_to(root).as_posix() + ':documents-unreadable')
                 continue
+            generated = CAMPAIGN_DOCUMENT in names  # the name the readers open, exactly (`Campaign.md` is not that page)
             for name in names:
                 if name.startswith('.') or not name.casefold().endswith('.md'):
                     continue
+                if name == CAMPAIGN_DOCUMENT:
+                    continue  # the campaign's own page is no route report: the campaign line opens it
+                if generated and fold(name) in STATUS_NAMES:
+                    continue  # a hand-written status page beside it is not shown once `campaign.md` is there
                 if len(rows) >= ROW_LIMIT:
                     errors.append('campaign-documents-bounded')
                     break

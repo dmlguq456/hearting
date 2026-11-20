@@ -566,9 +566,3 @@ def publish_views(root, entries=()):
         artifact_entrance.request_refresh(Path(root))
     except Exception:  # noqa: BLE001 -- a derived view is never a completion gate
         pass
-    try:
-        import status_board
-        for row in entries:
-            status_board.note_journal_entry(Path(root), row)
-    except Exception:  # noqa: BLE001 -- optional existing page, never created
-        pass

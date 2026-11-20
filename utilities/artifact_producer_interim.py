@@ -531,6 +531,8 @@ def _remove_empty_cycle(root: Path, record: Mapping[str, Any]) -> None:
             try:
                 campaign_path = campaign_dir(root, campaign["campaign_id"], campaign)
                 _campaign_path(root, campaign["campaign_id"], campaign).unlink()
+                import campaign_document  # its derived document must not keep this folder
+                campaign_document.remove_generated(campaign_path)
                 campaign_path.rmdir()
             except OSError:
                 _write_campaign(root, campaign, exclusive=False)

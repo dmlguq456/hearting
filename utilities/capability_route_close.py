@@ -799,10 +799,10 @@ def close_route(route, route_file, commit=None, summary=None, publication=None,
     finally:
         os.unlink(temporary)
     try:
-        # C-W4: the campaign's status page, when it keeps one, records this close (ARTIFACT_META).
-        import status_board
-        status_board.note_route_closed(route, outcome)
-    except Exception:  # noqa: BLE001 -- the page is optional; a close never waits on it
+        # The campaign's document is kept by the entrance worker: ask for a turn, never wait for it.
+        import artifact_entrance
+        artifact_entrance.request_refresh(Path(str(route["artifact_root"])))
+    except Exception:  # noqa: BLE001 -- the document is derived; a close never waits on it
         pass
     return outcome, True
 
