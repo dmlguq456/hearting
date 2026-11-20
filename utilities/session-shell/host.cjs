@@ -668,10 +668,8 @@ function statusRoutes(panel=panelModel){return [...new Set((Array.isArray(panel.
 // The button's value as the popup's read takes it (so the popup does not read again what the button read).
 function statusHeld(){const v=statusValue;
   return v&&typeof v==='object'?{word:String(v.word||''),title:String(v.title||''),has_doc:v.has_doc===true,path:String(v.path||''),slot:String(v.slot||'')}:null;}
-// 11-20: the panel's STATUS section is drawn from `groups` (the campaign document's groups as the backend read them with the
-// button's value: no second read, no timer); a value without them (an older backend, no document) draws the button alone.
-function statusDoc(){return statusValue&&typeof statusValue.word==='string'?{word:statusValue.word,has_doc:statusValue.has_doc===true,
-  ...(Array.isArray(statusValue.groups)?{groups:statusValue.groups}:{})}:null;}
+// 11-20: the panel draws the button alone (the word, and whether a document stands: dim when none); the document's lists are the popup's.
+function statusDoc(){return statusValue&&typeof statusValue.word==='string'?{word:statusValue.word,has_doc:statusValue.has_doc===true}:null;}
 function askStatus(dirty=false,routes=statusRoutes()){
   if(statusAsking){statusAgain=true;statusAgainDirty=statusAgainDirty||dirty;return;}
   statusAsking=true;statusAgain=false;statusAgainDirty=false;

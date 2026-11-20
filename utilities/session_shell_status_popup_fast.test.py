@@ -292,8 +292,8 @@ const at=async needle=>{await flush();for(let y=0;y<rows;y++){const c=cellsOf(y)
 const until=async(test,what,ms=20000)=>{const began=Date.now();while(Date.now()-began<ms){const s=await screen();if(test(s))return {s,ms:Date.now()-began};await sleep(25);}
   throw Error('never '+what+'\n'+(await screen()).join('\n'));};
 const has=word=>s=>s.some(line=>line.includes(word));
-// 11-20: the button stands on the REPO row (`STATUS ›`) or, once the panel draws the STATUS section, in that section's box (`╭─ STATUS ──── › ─╮`).
-const hasButton=s=>s.some(line=>line.includes('STATUS ›')||/╭─ STATUS ─+ › ─╮/.test(line));
+// 11-20: the button stands on the REPO row (`STATUS ›`), the panel's only drawing of the status.
+const hasButton=s=>s.some(line=>line.includes('STATUS ›'));
 const press=async(x,y,ms=100)=>{child.write(`\x1b[<0;${x+1};${y+1}M\x1b[<0;${x+1};${y+1}m`);await sleep(ms);};
 const key=async(bytes,ms=250)=>{child.write(bytes);await sleep(ms);};
 const box=s=>{const top=s.findIndex(l=>l.includes('╭─')&&l.includes('✕ ─╮'));if(top<0)return null;
@@ -309,8 +309,8 @@ const drop=name=>{try{fs.unlinkSync(cfg.control+'/'+name);}catch{}};
 const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.renameSync(file+'.new',file);};
 const rename=async title=>{const cache=JSON.parse(fs.readFileSync(cfg.cache,'utf8'));cache.observed_at=Date.now()/1000;
   cache.route_panels[cfg.key][0].title=title;write(cfg.cache,JSON.stringify(cache));};
-// 11-20: the press that opens the popup stands on the REPO row (its button) or, once the STATUS section stands, on that section's box.
-const opened=async()=>{const spot=await at('STATUS ─')||await at('REPO');await press(spot.x+2,spot.y,0);};
+// 11-20: the press that opens the popup stands on the REPO row (its button).
+const opened=async()=>{const spot=await at('REPO');await press(spot.x+2,spot.y,0);};
 const close=async()=>{await key('\x1b',300);await until(s=>!box(s),'closed');};
 const edit=(from,to)=>fs.writeFileSync(cfg.doc,fs.readFileSync(cfg.doc,'utf8').replace(from,to));
 const checks={};
