@@ -249,6 +249,9 @@ def record_attempt(harness, now=None):
         return False
 
 
+PROVIDER_HARNESSES = ("opencode", "claude", "codex")
+
+
 def record_provider(harness, provider, model, account_scope, state, reason=None,
                     now=None, source=None, *, credential_generation=None):
     """Persist exact provider eligibility beside usage without refreshing quota age.
@@ -256,11 +259,26 @@ def record_provider(harness, provider, model, account_scope, state, reason=None,
     ``credential_generation`` is an opaque digest of the credential the outcome
     was observed with; readers holding a different one treat the row as unknown.
     """
-    if (harness != "opencode" or not isinstance(provider, str) or not provider
+    if (harness not in PROVIDER_HARNESSES or not isinstance(provider, str) or not provider
             or not isinstance(model, str) or not model
             or state not in ("usable", "unavailable")):
         return False
+    if harness == "claude":
+        # The Claude file is also rewritten by the lease-owned usage worker
+        # under this mutex; the same lock keeps a line from being lost to it.
+        with _claude_mutex():
+            return _record_provider(harness, provider, model, account_scope, state, reason,
+                                    now, source, credential_generation)
+    return _record_provider(harness, provider, model, account_scope, state, reason,
+                            now, source, credential_generation)
+
+
+def _record_provider(harness, provider, model, account_scope, state, reason, now, source,
+                     credential_generation):
     now = time.time() if now is None else float(now)
+    # Only OpenCode's own recorder moves the usage attempt time. For the other
+    # harnesses it is the refresh back-off, and a per-model line must not move it.
+    keep_attempt = harness != "opencode"
     try:
         directory = state_dir()
         os.makedirs(directory, exist_ok=True)
@@ -269,12 +287,16 @@ def record_provider(harness, provider, model, account_scope, state, reason=None,
             with open(path, encoding="utf-8") as fh:
                 item = json.load(fh)
         except (OSError, ValueError, TypeError):
-            item = {"schema_version": SCHEMA_VERSION, "harness": harness,
-                    "fetched_at": 0.0, "attempted_at": now, "payload": {}}
+            item = None
         if (not isinstance(item, dict) or item.get("schema_version") != SCHEMA_VERSION
                 or item.get("harness") != harness):
+            if harness == "claude":
+                # A Claude cache is bound to a credential generation only its
+                # usage worker can state; never invent one here.
+                return False
             item = {"schema_version": SCHEMA_VERSION, "harness": harness,
-                    "fetched_at": 0.0, "attempted_at": now, "payload": {}}
+                    "fetched_at": 0.0, "attempted_at": 0.0 if keep_attempt else now,
+                    "payload": {}}
         providers = item.get("providers") if isinstance(item.get("providers"), dict) else {}
         key = json.dumps([provider, model, account_scope or "unscoped"], separators=(",", ":"))
         providers[key] = {"provider": provider, "model": model,
@@ -283,7 +305,8 @@ def record_provider(harness, provider, model, account_scope, state, reason=None,
         if isinstance(credential_generation, str) and credential_generation:
             providers[key]["credential_generation"] = credential_generation
         item["providers"] = providers
-        item["attempted_at"] = now
+        if not keep_attempt:
+            item["attempted_at"] = now
         fd, temp = tempfile.mkstemp(prefix=".%s." % harness, dir=directory, text=True)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -298,6 +321,29 @@ def record_provider(harness, provider, model, account_scope, state, reason=None,
         return True
     except OSError:
         return False
+
+
+def record_model_outcome(harness, provider, model, account_scope, state, reason=None,
+                         now=None, source=None):
+    """Claude/Codex per-model line: a rejection is kept; an answer only lifts one.
+
+    ``unavailable`` is written as is. ``usable`` is written only over an existing
+    ``unavailable`` line for the same model and account scope, so a success never
+    rewrites the file unless there is a rejection to lift.
+    """
+    if state == "usable":
+        try:
+            with open(_path(harness), encoding="utf-8") as fh:
+                item = json.load(fh)
+            key = json.dumps([provider, model, account_scope or "unscoped"],
+                             separators=(",", ":"))
+            row = item["providers"].get(key)
+            if not isinstance(row, dict) or row.get("state") != "unavailable":
+                return False
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            return False
+    return record_provider(harness, provider, model, account_scope, state, reason=reason,
+                           now=now, source=source)
 
 
 def read_provider(harness, provider, model, account_scope, *, now=None,

@@ -47,6 +47,32 @@ _EDGE_BLOCK_RE = re.compile(
     re.I,
 )
 EDGE_BLOCK_REASON = "runtime-edge-block-envelope"
+# A runtime end whose envelope confirms the provider refused the requested
+# model itself ("this account cannot call this model" / "no such model"). It
+# stays `dead-runtime-error` / `runtime` -- every reader that treats that note
+# alike keeps doing so -- and only the reason column names it, followed by the
+# rejected model when the envelope states one (`runtime-model-rejected:<model>`).
+# Evidence (checked 2026-11-21):
+#   codex  -- typed `CodexErrorInfo::ModelNotFound` (wire `model_not_found`,
+#             app-server `modelNotFound`), openai/codex codex-rs/protocol/src/
+#             codex_error_info.rs and app-server-protocol schema, first released
+#             in rust-v0.166.0.
+#   claude -- the CLI's documented runtime error "There's an issue with the
+#             selected model (<model>)" (code.claude.com/docs/en/errors.md), and
+#             the API's 404 `not_found_error` whose message is `model: <model>`
+#             (platform.claude.com/docs/en/api/errors.md for the 404 type;
+#             message form seen in public anthropics/claude-code issues 6169
+#             and 16387).
+# Capacity, usage limit, overload, auth, 5xx and edge-block envelopes never
+# reach this check: it only refines the final `runtime-error-envelope` fall-through.
+MODEL_REJECTED_REASON = "runtime-model-rejected"
+_MODEL_REJECTION_RUNTIMES = frozenset({"claude", "codex"})
+_MODEL_REJECTION_CODES = frozenset({"modelNotFound", "model_not_found"})
+_MODEL_NAME = r"[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,79}"
+_CLAUDE_SELECTED_MODEL_RE = re.compile(
+    r"There's an issue with the selected model \((" + _MODEL_NAME + r")\)")
+_CLAUDE_NOT_FOUND_RE = re.compile(
+    r'"type"\s*:\s*"not_found_error"\s*,\s*"message"\s*:\s*"model:\s*(' + _MODEL_NAME + r')"')
 _PROTOCOL_REASON_RE = re.compile(
     r"missing|protocol|schema|shape|json|eof|request-failed|result-invalid|"
     r"thread-start|turn-start-response|join-receipt|contract",
@@ -257,14 +283,41 @@ def classify_runtime_failure(
             str(process_exit),
             status,
         )
+    rejected = model_rejection(runtime, status=status, text=text, structured_code=structured_code)
     return SupervisorTerminal(
         "dead-runtime-error",
         "runtime",
         event,
-        "runtime-error-envelope",
+        "runtime-error-envelope" if rejected is None else (
+            MODEL_REJECTED_REASON + (f":{rejected}" if rejected else "")),
         str(process_exit),
         status,
     )
+
+
+def model_rejection(
+    runtime: str, *, status: str = "", text: str = "", structured_code: str = ""
+) -> str | None:
+    """The rejected model's name ("" when the envelope names none), or None.
+
+    Only a confirmed refusal of the model counts: a typed Codex code first;
+    then, for Claude, a 404 `not_found_error` naming `model: <id>` or the CLI's
+    own selected-model message (no status, or 404). Any other status, or the
+    word "model" alone, is not evidence.
+    """
+    if runtime not in _MODEL_REJECTION_RUNTIMES:
+        return None
+    if structured_code:
+        return "" if structured_code in _MODEL_REJECTION_CODES and runtime == "codex" else None
+    if runtime != "claude":
+        return None
+    if status == "404":
+        found = _CLAUDE_NOT_FOUND_RE.search(text) or _CLAUDE_SELECTED_MODEL_RE.search(text)
+    elif status == "":
+        found = _CLAUDE_SELECTED_MODEL_RE.search(text)
+    else:
+        found = None
+    return found.group(1) if found else None
 
 
 def classify_session_result(
@@ -568,12 +621,64 @@ def reconcile_supervisor_terminal(
     # turn output can also precede route/child checks or envelope conversion.
     if emit is not None:
         emit({"type": "dispatch.supervisor.terminal", "terminal": asdict(terminal)})
-    return reconcile_attempt_terminal(
+    outcome = reconcile_attempt_terminal(
         Path(jobs),
         attempt_id,
         terminal.note,
         evidence=terminal.evidence(),
     )
+    if outcome == "closed":
+        note_model_outcome(jobs, attempt_id, terminal)
+    return outcome
+
+
+# The terminal classes in which the model itself answered: a handed-off result,
+# whether PASS, FAIL or BLOCKED. A later one of these for the same model and
+# account lifts an earlier model rejection.
+_MODEL_ANSWERED_CLASSES = frozenset({"pass", "fail", "blocked"})
+_MODEL_VARIANT_RE = re.compile(r"(\[[^\]]*\]|#.*)$")
+
+
+def _model_key(value: object) -> str:
+    return _MODEL_VARIANT_RE.sub("", str(value or "").strip()).lower()
+
+
+def note_model_outcome(jobs: str | Path, attempt_id: str, terminal: SupervisorTerminal) -> None:
+    """Keep the per-model record for a Claude/Codex attempt that just closed.
+
+    One line in the existing usage-cache provider record (the file OpenCode
+    already uses), on the model the attempt launched and the account scope it
+    launched under. Best effort: nothing here can change the terminal result,
+    the next action, or which harness is chosen -- no reader of these lines for
+    Claude/Codex exists yet. OpenCode keeps its own classification and record.
+    """
+    rejected = terminal.reconcile_reason.startswith(MODEL_REJECTED_REASON)
+    if not rejected and terminal.failure_class not in _MODEL_ANSWERED_CLASSES:
+        return
+    try:
+        from dispatch_completion_join import exact_attempt_row
+        meta = exact_attempt_row(Path(jobs), attempt_id).metadata
+        harness = str(meta.get("harness") or "")
+        launched = str(meta.get("model") or "").strip()
+        if harness not in _MODEL_REJECTION_RUNTIMES or not launched:
+            return
+        if rejected:
+            named = terminal.reconcile_reason[len(MODEL_REJECTED_REASON) + 1:]
+            # A refusal that points at another model says nothing about this one.
+            if named and _model_key(named) != _model_key(launched):
+                return
+        tools = str(Path(__file__).resolve().parents[1] / "tools")
+        if tools not in sys.path:
+            sys.path.insert(0, tools)
+        from fleet.collectors import usage_cache
+        scope = str(meta.get("quota_scope") or "") if harness == "claude" else ""
+        usage_cache.record_model_outcome(
+            harness, harness, _model_key(launched), scope or "unscoped",
+            "unavailable" if rejected else "usable",
+            reason="model-unavailable" if rejected else None,
+            source="supervisor-terminal")
+    except Exception:  # noqa: BLE001 - a record that cannot be kept never changes the close
+        return
 
 
 def _tail_rows(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
