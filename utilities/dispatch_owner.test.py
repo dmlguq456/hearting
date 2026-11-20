@@ -1827,6 +1827,34 @@ class FrameModelRoleHandoffTest(unittest.TestCase):
             self.assertEqual(args.dispatch_depth, 1)
             self.assertEqual(adapter.resolve_model_settings(args)["profile"], "light")
 
+    def test_a_lookup_unit_leg_is_launched_as_support_only_from_its_route_node(self):
+        # G1: `general/explore` is a `support` unit; the one leg of its unit route starts at depth 1 through the
+        # same selector, on the three harnesses. Route-free (or without its node) a support tuple stays refused.
+        path = self._route(nodes=[{"id": "unit", "role": "fast tool worker", "model_profile": "light",
+                                 "unit": "general/explore", "dispatch_depth": 1, "worker_type": "support",
+                                 "launch_authority": "depth-0"}])
+        with mock.patch.dict(os.environ, {}, clear=True):
+            _, values, forwarded, _, _ = OWNER._parse([
+                "--start", "--route-evidence", path, "--route-node", "unit", "--prompt-text", "probe"])
+            for argv in (["--start", "--worker-type", "support", "--unit", "general/explore", "--dispatch-depth", "1",
+                          "--route-evidence", path],
+                         ["--start", "--worker-type", "support", "--unit", "general/explore", "--dispatch-depth", "1",
+                          "--route-node", "unit"]):
+                with self.assertRaises(OWNER.OwnerError, msg=argv):
+                    OWNER._parse([*argv, "--prompt-text", "probe"])
+        self.assertEqual((values["--worker-type"], values["--unit"], values["--dispatch-depth"]),
+                         ("support", "general/explore", "1"))
+        for harness in ("codex", "claude", "opencode"):
+            with self.subTest(harness=harness):
+                spec = importlib.util.spec_from_file_location("lookup_leg_" + harness,
+                    ROOT / "adapters" / harness / "bin" / "dispatch-headless.py")
+                adapter = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = adapter
+                spec.loader.exec_module(adapter)
+                args = adapter.parser().parse_args(forwarded)
+                self.assertEqual((args.worker_type, args.dispatch_depth), ("support", 1))
+                self.assertEqual(adapter.resolve_model_settings(args)["profile"], "light")
+
     def test_actual_adapter_parsers_and_resolvers_consume_the_selected_node_role(self):
         for node in ("frame", "frame-alternative"):
             _, values, forwarded, _, _ = OWNER._parse(self._args(node))

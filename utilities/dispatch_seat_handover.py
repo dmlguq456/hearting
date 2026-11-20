@@ -67,7 +67,7 @@ if str(HERE) not in sys.path:
 ROOT = HERE.parent
 SCHEMA = 1
 ROW_EVENT = "handover"
-WORKER_TYPES = frozenset({"owner", "frame", "review"})
+WORKER_TYPES = frozenset({"owner", "frame", "review", "support"})   # support: a lookup unit route's leg (route-bound only: `eligible_row`)
 OPEN_ROW_STATUSES = frozenset({"open", "running"})
 LINE_MAX_BYTES = 520
 KEEP_ROWS = 40

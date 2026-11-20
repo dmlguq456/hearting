@@ -84,6 +84,9 @@ _CAPTURED = _REQUIRED | {"--unit", "--review-output", "--model-role", "--qa",
 # direct owner selection use this selector; the adapter's atomic attempt claim
 # remains the single registration authority.
 _LAUNCHABLE_WORKER_TYPES = {"owner", "review", "frame"}
+# A `support` unit (a lookup: `general/explore`) is launched only as the leg of a route that names it: the unit
+# route's one node. Route-free, it stays refused, as it was.
+_ROUTE_NODE_WORKER_TYPES = {"support"}
 # Legacy route-free frame calls must supply their own scope. Route-bound calls
 # derive it from the producer, so inherited/partial environment is not authority.
 _FRAME_ARTIFACT_ENV = (
@@ -129,7 +132,7 @@ _HINTS = {
     "no-eligible-candidate": "no configured owner harness is usable: usage-limited, gated, or no positive capacity score "
                              "(see eligibility.* and capacity_headroom.* above; utilities/usage-check.sh --harness all)",
     "exactly-one-action-required": "pass exactly one of --dry-run | --register | --start",
-    "owner-tuple-required": "the launchable tuple is --dispatch-depth 1 --worker-type owner|review|frame",
+    "owner-tuple-required": "the launchable tuple is --dispatch-depth 1 --worker-type owner|review|frame (support only as a route node)",
     "invalid-model-profile": "--model-profile deep|balanced-deep|balanced|light (top only from a route that seals it)",
     "profile-top-route-required": "drop --model-profile top: the top exception profile is sealed by a route "
                                   "(compose/compile --profile-demands '{\"__owner__\": …}' --explicit-profiles "
@@ -525,7 +528,9 @@ def _parse(argv):
     if len(actions) != 1:
         raise OwnerError("exactly-one-action-required")
     worker_type = values["--worker-type"]
-    if values["--dispatch-depth"] != "1" or worker_type not in _LAUNCHABLE_WORKER_TYPES:
+    if values["--dispatch-depth"] != "1" or not (
+            worker_type in _LAUNCHABLE_WORKER_TYPES
+            or (worker_type in _ROUTE_NODE_WORKER_TYPES and route_node and route_evidence)):
         raise OwnerError("owner-tuple-required")
     if route_node and worker_type == "owner":
         raise OwnerError("route-node-worker-type-forbidden")

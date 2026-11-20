@@ -32,7 +32,7 @@ The node's unit, role and worker type are the unit head's. The recipe holds only
 
 ## Field
 
-The route records a field like every route. It is the unit head's `field:` (`field_source: preset`), or `--field` (`explicit`). A unit head writes `field:` only where the field is clear (`dev/*`, `qa/code-review`, `qa/security-review` → `code`; `qa/ml-debug` → `lab`; `design/*` → `design`; `editorial/polish`, `editorial/review`, `editorial/translate` → `docs`; `research/research-survey` → `research`). A unit without one is refused, naming what is missing, unless `--field` is given (`compose-field-required`).
+The route records a field like every route. It is the unit head's `field:` (`field_source: preset`), or `--field` (`explicit`). A unit head writes `field:` only where the field is clear (`dev/*`, `qa/code-review`, `qa/security-review` → `code`; `qa/ml-debug` → `lab`; `design/*` → `design`; `editorial/polish`, `editorial/review`, `editorial/translate` → `docs`; `research/research-survey` → `research`; `general/explore` → `other`, which `--field` changes). A unit without one is refused, naming what is missing, unless `--field` is given (`compose-field-required`).
 
 ## Scope
 

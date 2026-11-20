@@ -62,6 +62,9 @@ DEFAULT_ARM_WINDOW_SECONDS = 600
 MAXIMUM_CLOCK_SKEW_SECONDS = 60
 # Depth-1 workers that may wake the interactive parent through this hook.
 DEPTH1_WORKER_TYPES = frozenset({"owner", "frame", "review"})
+# A `support` worker wakes it only as the one leg of a unit route (a lookup, `general/explore`): its row names
+# the route and node. A route-free support row (a tidy worker) never does.
+ROUTE_BOUND_DEPTH1_WORKER_TYPES = frozenset({"support"})
 REGISTRY_DEPTH1_START = {
     "dispatch_depth": "1",
     "parent_completion_delivery": "claude-parent-runtime",
@@ -78,6 +81,14 @@ HOLD_MAX_SECONDS = 60.0  # longest wait between checks while a sibling batch is 
 # drains (dispatch-reap-watch). Exiting at the first missing record made that
 # ordinary lag a permanently lost wake for an idle session (2026-09-17).
 DEFAULT_RECORD_GRACE_SECONDS = 900
+
+
+def _row_is_depth1_waited(metadata: dict) -> bool:
+    """A registry row's worker type may wake the parent: a depth-1 type, or a support leg of a route."""
+    worker_type = metadata.get("worker_type")
+    return _worker_type_is_depth1(worker_type) or (
+        worker_type in ROUTE_BOUND_DEPTH1_WORKER_TYPES
+        and bool(metadata.get("route_id")) and bool(metadata.get("route_node")))
 
 
 def _worker_type_is_depth1(candidate: object) -> bool:
@@ -422,7 +433,7 @@ def _session_owner_states(
                 continue
             if any(metadata.get(key) != value for key, value in REGISTRY_DEPTH1_START.items()):
                 continue
-            if not _worker_type_is_depth1(metadata.get("worker_type")):
+            if not _row_is_depth1_waited(metadata):
                 continue
             # Unknown (an unreadable lineage) is not this session's row yet: the next call looks again.
             if seat_handover.owns(metadata, session, jobs, read_context=read_context) is not True:
@@ -1206,7 +1217,7 @@ def replacement_authority(launch: Launch, claim: ArmClaim, jobs: Path, aid: str,
         and held.get("session_id") == launch.session_id
         and _process_identity(os.getpid()) == claim.holder
         and all(metadata.get(key) == value for key, value in REGISTRY_DEPTH1_START.items())
-        and _worker_type_is_depth1(metadata.get("worker_type"))
+        and _row_is_depth1_waited(metadata)
         and _incarnation_binding_matches(metadata)
     )
 

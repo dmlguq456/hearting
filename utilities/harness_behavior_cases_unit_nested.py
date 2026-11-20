@@ -356,6 +356,8 @@ class EphemeralScenario(unit.UnitRouteScenario):
     answer_lines = 3          # lines of answer the worker writes (the long variant writes more than one notice carries)
     empty = False             # the worker ends with an empty answer
     cap_expected = False
+    unit_name = "qa/code-review"   # the unit the session opens
+    report_head = unit.PASS_HEAD   # the first line of the worker's report
 
     def side_effects(self, run):
         root = Path(run.home.env["AGENT_ARTIFACT_ROOT"])
@@ -374,7 +376,7 @@ class EphemeralScenario(unit.UnitRouteScenario):
             if "Dispatch metadata:" in text and unit.WORK in text:
                 body = "" if self.empty else "{head}\n\n" + "\n".join(
                     f"- {ANSWER} line {n}: " + "x" * (150 if self.cap_expected else 20) for n in range(self.answer_lines)) + "\n"
-                target, shell = _report_shell(record, unit.PASS_HEAD, body)
+                target, shell = _report_shell(record, self.report_head, body)
                 if not any("report.md" in s for s in _shells(earlier, unit.WORK)):
                     return Reply(shell=shell)
                 return Reply(f"artifact: {target}\nverdict: PASS\nblocker: none", gate=self.worker_end)
@@ -383,7 +385,7 @@ class EphemeralScenario(unit.UnitRouteScenario):
             if unit.START in last and not any(r["reply"].get("shell") for r in earlier):
                 return Reply(shell=" ".join([
                     sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"), "compose", "--start",
-                    "--unit", "qa/code-review", "--ephemeral", "--pin", f"worker={run.harness}",
+                    "--unit", self.unit_name, "--ephemeral", "--pin", f"worker={run.harness}",
                     "--prompt-file", str(run.home.root / "brief.md"), "--cwd", str(run.home.workspace),
                     "--slug", "hb-unit-route"]))
             return Reply("Nothing new.")

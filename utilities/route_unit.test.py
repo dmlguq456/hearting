@@ -43,6 +43,7 @@ FIELD_HEADS = {
     "design/critic": "design", "design/maker": "design", "design/verifier": "design",
     "editorial/polish": "docs", "editorial/review": "docs", "editorial/translate": "docs",
     "research/research-survey": "research",
+    "general/explore": "other",     # a lookup has no field of its own: the caller's work does (`--field` changes it)
 }
 
 
@@ -135,6 +136,59 @@ class UnitComposeTest(F.FramedBase):
         self.assertEqual((route["field"], route["field_source"]), ("research", "explicit"))
         self.assertEqual(route["nodes"][0]["model_profile"], "balanced-deep")  # floor: high
         self.sealed(route)
+
+    def test_general_explore_opens_light_in_other_and_needs_no_field(self):
+        # G1 (11-20): the lookup unit is read-only, light by its `low` floor, and its field is `other` unless `--field` says
+        # otherwise; `--field` is not a required input for it, and `--profile` raises the depth. No intensity is recorded
+        # beyond the unit form's own compatibility value.
+        route = self.unit("general/explore")
+        self.assertEqual((route["capability"], route["field"], route["field_source"]), ("unit", "other", "preset"))
+        node, = route["nodes"]
+        self.assertEqual((node["unit"], node["role"], node["worker_type"], node["kind"], node["dispatch_depth"],
+                          node["launch_authority"]),
+                         ("general/explore", "fast tool worker", "support", "map-worker", 1, "depth-0"))
+        self.assertEqual(node["model_profile"], "light")
+        self.assertEqual(node["write_scope"], ["units/unit/**"])     # its own report folder only: it is read-only
+        self.assertNotIn("owner", [n.get("worker_type") for n in route["nodes"]])
+        self.sealed(route)
+        named = self.unit("general/explore", field="research")
+        self.assertEqual((named["field"], named["field_source"]), ("research", "explicit"))
+        self.assertEqual(named["nodes"][0]["model_profile"], "light")
+        self.sealed(named)
+        for profile in ("balanced", "balanced-deep", "deep"):
+            with self.subTest(profile=profile):
+                deeper = self.unit("general/explore", profile=profile)
+                self.assertEqual(deeper["nodes"][0]["model_profile"], profile)
+                self.assertEqual(deeper["field"], "other")
+                self.sealed(deeper)
+        with self.assertRaises(ValueError):
+            self.unit("general/explore", profile="top")              # `top` is not available to a unit leg
+
+    def test_general_explore_head_is_read_only_and_ends_all_three_ways_as_a_finished_job(self):
+        head = CT._unit_frontmatter("general/explore")
+        self.assertEqual((head["role"], head["worker_type"], head["floor"], head["field"], head["read_only"]),
+                         ("fast tool worker", "support", "low", "other", "true"))
+        self.assertEqual(head["verdict"], ["answered", "partial", "not-found"])
+        text = (UNITS / "general" / "explore.md").read_text(encoding="utf-8")
+        self.assertIn("## 지킬 것", text)
+        self.assertIn("## 참고", text)
+        must, advice = text.split("## 지킬 것")[1].split("## 참고")
+        for word in ("answered", "partial", "not-found", "verdict: PASS", "BLOCKED", "Read-only", "No further workers"):
+            self.assertIn(word, must, word)
+        self.assertIn("`tools/memory/recall.sh \"<query>\" --no-touch`", advice)
+        self.assertIn("`mem show <id> --no-touch`", advice)
+        # Nothing here says Hearting runs a session's subagent calls: that is a later piece.
+        self.assertNotRegex(text.lower(), r"native subagent|hook")
+
+    def test_the_three_harnesses_open_the_same_general_explore_leg(self):
+        seen = {}
+        for harness in ("claude", "codex", "opencode"):
+            route = self.unit("general/explore", parent_harness=harness)
+            node, = route["nodes"]
+            seen[harness] = (route["field"], route["field_source"], node["unit"], node["worker_type"], node["kind"],
+                             node["model_profile"], node["write_scope"], node["launch_authority"])
+            self.sealed(route)
+        self.assertEqual(len(set(map(repr, seen.values()))), 1, seen)
 
     def test_a_unit_without_a_default_field_names_what_is_missing(self):
         with self.assertRaises(ValueError) as refused:
@@ -322,6 +376,14 @@ class UnitCliTest(F.FramedBase):
                 refused = self.run_cli(*extra)
                 self.assertEqual(refused.returncode, 64, refused.stderr)
                 self.assertIn(needle, refused.stderr)
+        for extra, shown in ((["--unit", "general/explore", "--explain"], "\n  field other (preset)\n"),
+                             (["--unit", "general/explore", "--field", "research", "--explain"], "\n  field research (explicit)\n"),
+                             (["--unit", "general/explore", "--profile", "deep", "--explain"], "\n  field other (preset)\n")):
+            with self.subTest(extra=extra):
+                lookup = self.run_cli(*extra)
+                self.assertEqual(lookup.returncode, 0, lookup.stderr)
+                self.assertIn(shown, lookup.stderr)
+                self.assertEqual(json.loads(lookup.stdout.strip().splitlines()[-1])["nodes"][0]["unit"], "general/explore")
         named = self.run_cli("--unit", "qa/test", "--field", "code", "--explain")
         self.assertEqual(named.returncode, 0, named.stderr)
         self.assertIn("\n  field code (explicit)\n", named.stderr)
@@ -356,6 +418,7 @@ class UnitCliTest(F.FramedBase):
         self.assertIn("unit_choices=", node)
         self.assertIn("qa/code-review=code", node)
         self.assertIn("qa/test=needs --field", node)
+        self.assertIn("general/explore=other", node)
         self.assertNotIn("dev/backend", node)                      # a writing unit is not offered
         blocks = json.loads(subprocess.run([sys.executable, str(HERE / "capability-route.py"), "stages", "--json"],
                                            text=True, capture_output=True, check=True).stdout)
