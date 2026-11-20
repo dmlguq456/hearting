@@ -1382,6 +1382,35 @@ class TestRunner(unittest.TestCase):
         self.assertIn("smoke-execution-environment-unbound", legacy_outcome.stderr)
         self.assertFalse(self.launch.exists())
 
+    def test_direct_payload_restores_inherited_smoke_path(self):
+        smoke_path = f"{self.base}/smoke-session:/usr/bin:/bin"
+        smoke = self.base / "direct-environment-smoke.json"
+        subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+            str(self.repo / "config"), "--cwd", str(self.repo), "--output", str(smoke),
+            "--", sys.executable, "-c", "pass"], check=True, capture_output=True,
+            env={**CLEAN_ENV, "PATH": smoke_path})
+        args = self.start_args(smoke=smoke, run_id="direct-environment")
+        prefix = args[:args.index("--") + 1]
+        command = (sys.executable, "-c",
+                   "import os, sys; from pathlib import Path; "
+                   "Path(sys.argv[1]).write_bytes(os.environb[b'PATH'])", str(self.launch))
+
+        # A full-run assignment does not match an inherited smoke value.
+        outcome = self.cli(*prefix, "/usr/bin/env", f"PATH={smoke_path}", *command)
+        self.assertIn("smoke-execution-environment-mismatch", outcome.stderr)
+        self.assertNotEqual(outcome.returncode, 0)
+        self.assertFalse(self.launch.exists())
+
+        outcome = self.cli(*prefix, *command, extra_env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(outcome.returncode, 0, outcome.stderr)
+        row = json.loads(self.registry.read_text())["runs"]["direct-environment"]
+        sentinel = Path(row["sentinel"])
+        deadline = time.monotonic() + 5
+        while not sentinel.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertEqual(R.read_sentinel(sentinel), 0)
+        self.assertEqual(self.launch.read_bytes(), os.fsencode(smoke_path))
+
     def test_cleanup_stops_only_its_exact_supervisor(self):
         watch = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"], env=CLEAN_ENV)
@@ -1788,87 +1817,93 @@ class TestRunner(unittest.TestCase):
 
     def test_queued_controller_rechecks_smoke_environment_before_release(self):
         import artifact_producer
-        import importlib.util
-        jobs = self.base / "queued-environment-jobs.log"
-        jobs.write_text("")
-        route = json.loads(self.route.read_text())
-        run_id = "queued-environment"
-        effect = self.base / "queued-environment-payload"
-        command = [sys.executable, "-c",
-                   f"from pathlib import Path; Path({str(effect)!r}).write_text('released')"]
-        smoke_path = self.base / "queued-environment-smoke.json"
+        import dispatch_resource_wait
         smoke_spec = importlib.util.spec_from_file_location("queued_environment_smoke", SMOKE)
         smoke_module = importlib.util.module_from_spec(smoke_spec)
         smoke_spec.loader.exec_module(smoke_module)
-        attestation = smoke_module.payload([self.repo / "config"], [sys.executable, "-c", "pass"], self.repo)
+        base_path = "/usr/bin:/bin"
+        smoke_environment = {**CLEAN_ENV, "PATH": f"{self.base}/codex-arg0-smoke :{base_path}"}
+        smoke_environment.pop("PYTHONPATH", None)
+        attestation_out = self.base / "queued-environment-smoke.json"
+        with mock.patch.dict(os.environ, smoke_environment, clear=True):
+            attestation = smoke_module.payload(
+                [self.repo / "config"], [sys.executable, "-c", "pass"], self.repo)
         attestation.update(status="passed", exit_code=0)
         attestation["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
             attestation, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        smoke_path.write_text(json.dumps(attestation, sort_keys=True))
-        args = SimpleNamespace(jobs=str(jobs), run_id=run_id, node="full-run",
-                               smoke_attestation=str(smoke_path), config_manifest=None)
-        body = {"run_id": run_id, "cwd": str(self.repo), "log": str(self.log),
-            "command": command, "route": str(self.route), "node": "full-run",
-            "status": "launching", "sentinel": str(self.log) + ".exit",
-            "jobs": str(jobs), "parent_attempt_id": "att-parent",
-            "owner_wait": {"session_id": "same-native", "launch_scope": "codex-owner-controller"}}
-        route_watch = mock.Mock(pid=os.getpid())
-        route_watch.poll.return_value = None
-        runner = R
-        payloads=[]
-        real_popen=subprocess.Popen
-        def capture_popen(*args,**kwargs):
-            process=real_popen(*args,**kwargs)
-            payloads.append(process)
-            return process
-        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}), \
-             mock.patch.object(artifact_producer, "prepare_route_artifact_env",
-                return_value={"AGENT_ARTIFACT_OUTPUT_DIR": str(self.base)}), \
-             mock.patch.object(runner, "register_registry"), \
-             mock.patch.object(runner.subprocess, "run"), \
-             mock.patch.object(runner.gpu_leases, "resource_admission",
-                               return_value=(None, None, {"CUDA_VISIBLE_DEVICES": ""})), \
-             mock.patch.object(runner, "start_watch", return_value=(route_watch, runner.proc_identity(os.getpid()))), \
-             mock.patch.object(runner.subprocess, "Popen", side_effect=capture_popen), \
-             mock.patch("sys.stdout"):
-            runner.start_verified(self.registry, args, route, self.route, dict(body))
-            current_registry = json.loads(self.registry.read_text())
-            self.assertIn(run_id, current_registry.get("runs", {}), current_registry)
-            queued = current_registry["runs"][run_id]
-            self.assertEqual(queued["launch_state"], "queued")
-            before = self.registry.read_bytes()
-            controller = SimpleNamespace(expected=queued,
-                identity={**runner.proc_identity(os.getpid()),
-                          "pid_namespace": os.readlink("/proc/self/ns/pid")},
-                command=command, sandbox={"mode": "workspace-write", "enforcement": "os-sandbox"},
-                guard=contextlib.nullcontext, registry=str(self.registry))
-            refused=None
-            with mock.patch.dict(os.environ, {"PYTHONPATH": str(self.base / "different-overlay")}):
-                try:
-                    runner.start_verified(self.registry, args, route, self.route,
-                                          dict(queued), controller=controller)
-                except ValueError as error:
-                    refused=error
-            for process in payloads:
-                process.wait(timeout=5)
-            self.assertIsNotNone(refused,
-                "the controller released payload under an environment different from smoke")
-            self.assertIn("smoke-execution-environment-mismatch", str(refused))
-            self.assertEqual(payloads, [])
-            self.assertEqual(self.registry.read_bytes(), before)
-            self.assertFalse(effect.exists())
-            runner.start_verified(self.registry, args, route, self.route,
-                                  dict(queued), controller=controller)
-            final_registry=json.loads(self.registry.read_text())
-            self.assertIn(run_id, final_registry.get("runs", {}), json.dumps(final_registry, sort_keys=True))
-            self.assertEqual(len(payloads), 1, json.dumps(final_registry["runs"][run_id], sort_keys=True))
-            self.assertEqual(payloads[0].wait(timeout=5), 0)
-            self.assertEqual(effect.read_text(), "released")
-            final_registry=json.loads(self.registry.read_text())
-            self.assertIn(run_id, final_registry.get("runs", {}), json.dumps(final_registry, sort_keys=True))
-            running = final_registry["runs"][run_id]
-            self.assertEqual(running["launch_state"], "started")
-            self.assertEqual(runner.read_sentinel(running["sentinel"]), 0)
+        attestation_out.write_text(json.dumps(attestation, sort_keys=True))
+        route = json.loads(self.route.read_text())
+        next(node for node in route["nodes"] if node["id"] == "full-run")["continuation"] = {
+            "kind": "supervised"}
+        self.route.write_text(json.dumps(route))
+        owner_wait = {"session_id": "same-native", "launch_scope": "codex-owner-controller"}
+        watch = mock.Mock(pid=os.getpid(), **{"poll.return_value": None})
+        identity = {**R.proc_identity(os.getpid()), "pid_namespace": os.readlink("/proc/self/ns/pid")}
+        real_popen = subprocess.Popen
+        controller_path = f"{self.base}/codex-arg0-controller:{base_path}"
+        overlay = str(self.base / "controller-overlay")
+
+        for label, owner_path, launcher_path in (
+                ("controller-differs", smoke_environment["PATH"], controller_path),
+                ("owner-differs", base_path, controller_path),
+                ("sandbox-only-differs", smoke_environment["PATH"], smoke_environment["PATH"])):
+            with self.subTest(launch=label):
+                case_directory = self.base / label
+                case_directory.mkdir()
+                jobs = case_directory / "jobs.log"
+                jobs.write_text("")
+                registry = case_directory / "resource-runs.json"
+                effect = self.base / f"{label}.payload"
+                outer_effect = self.base / f"{label}.wrapper"
+                log = self.base / f"{label}.log"
+                command = [sys.executable, "-c",
+                    "import os, sys; from pathlib import Path; "
+                    "Path(sys.argv[1]).write_bytes(os.environb[b'PATH']); "
+                    "assert b'PYTHONPATH' not in os.environb", str(effect)]
+                argv = ["--registry", str(registry), "start", "--run-id", label,
+                    "--cwd", str(self.repo), "--log", str(log), "--route", str(self.route),
+                    "--node", "full-run", "--jobs", str(jobs), "--parent-attempt-id", "att-parent",
+                    "--smoke-attestation", str(attestation_out), "--", *command]
+                with mock.patch.object(dispatch_resource_wait, "start_binding", return_value=owner_wait), \
+                     mock.patch.object(artifact_producer, "prepare_route_artifact_env",
+                        return_value={"AGENT_ARTIFACT_OUTPUT_DIR": str(self.base)}), \
+                     mock.patch.object(R, "register_registry"), \
+                     mock.patch.object(R, "verify_launch_input"), \
+                     mock.patch.object(R.subprocess, "run"), \
+                     mock.patch.object(R.gpu_leases, "resource_admission",
+                        return_value=(None, None, {"CUDA_VISIBLE_DEVICES": ""})), \
+                     mock.patch.object(R, "start_watch", return_value=(watch, R.proc_identity(os.getpid()))), \
+                     mock.patch.object(R.subprocess, "Popen", wraps=real_popen) as spawn, \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    with mock.patch.dict(os.environ, {**smoke_environment, "PATH": owner_path}, clear=True):
+                        R.main(argv)
+                    queued = json.loads(registry.read_text())["runs"][label]
+                    self.assertEqual(queued["launch_state"], "queued")
+                    spawn.assert_not_called()
+                    self.assertFalse(effect.exists())
+                    wrapper = ["/bin/sh", "-c",
+                        'printf "%s\n%s" "$PATH" "$PYTHONPATH" > "$1"; shift; '
+                        'export PATH="/sandbox-helpers:$PATH"; exec "$@"',
+                        "sandbox", str(outer_effect), *command]
+                    controller = SimpleNamespace(expected=queued, identity=identity, command=wrapper,
+                        sandbox={"mode": "workspace-write", "enforcement": "os-sandbox"},
+                        guard=contextlib.nullcontext, registry=str(registry))
+                    launcher_environment = {**smoke_environment, "PATH": launcher_path}
+                    if label != "sandbox-only-differs":
+                        launcher_environment["PYTHONPATH"] = overlay
+                    with mock.patch.dict(os.environ, launcher_environment, clear=True):
+                        R.main(R.controller_argv(registry, queued), controller=controller)
+                    spawn.assert_called_once()
+                    payload, _ = controller.children
+                    self.addCleanup(payload.wait, timeout=5)
+                    self.assertEqual(payload.wait(timeout=5), 0)
+                    recorded_path = attestation["execution_environment"]["environment"]["PATH"]["value"]
+                    self.assertEqual(effect.read_bytes(), os.fsencode(recorded_path))
+                    self.assertEqual(outer_effect.read_text(),
+                                     f"{launcher_path}\n{launcher_environment.get('PYTHONPATH', '')}")
+                    running = json.loads(registry.read_text())["runs"][label]
+                    self.assertEqual(running["launch_state"], "started")
+                    self.assertEqual(R.read_sentinel(running["sentinel"]), 0)
 
     def _host_route(self):
         """A real lab eval route that borrowed the GPU-free host part (the catalog is the only source)."""

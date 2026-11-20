@@ -102,6 +102,35 @@ def payload_environment(argv):
     return parsed[0]
 
 
+def smoke_payload_environment(argv, recorded, environ, *, pin_inherited=False):
+    """Return the inherited environment for identity checks and its payload prefix.
+
+    The prefix lives inside any launch wrapper. Compute identity from the
+    original command so inherited values keep their original state.
+    """
+    if recorded is None or recorded["kind"] != "local":
+        return environ, []
+    descriptor = payload_environment(argv)
+    if not descriptor or not descriptor["inherit"]:
+        return environ, []
+    inherited = dict(environ)
+    unset, assigned = [], []
+    for name in IDENTITY_ENVIRONMENT_KEYS:
+        if name in descriptor["set"] or name in descriptor["unset"]:
+            continue
+        state = recorded["environment"][name]
+        if state["state"] == "inherit" and "value" in state:
+            value = state["value"]
+            if pin_inherited or inherited.get(name) != value:
+                assigned.append(f"{name}={value}")
+                inherited[name] = value
+        elif state["state"] == "unset" and (pin_inherited or name in inherited):
+            unset.extend(("-u", name))
+            inherited.pop(name, None)
+    prefix = ["/usr/bin/env", *unset, "--", *assigned] if unset or assigned else []
+    return inherited, prefix
+
+
 def _compute_hosts(argv):
     if not argv or Path(argv[0]).name not in {"compute-hosts", "compute-hosts.py"}:
         return None
@@ -159,7 +188,7 @@ def _interpreter(command, environment):
             return str(path.expanduser().resolve(strict=True))
         except (OSError, RuntimeError, ValueError):
             return None
-    found = shutil.which(executable, path=environment.get("PATH"))
+    found = shutil.which(executable, path=environment.get("PATH", os.defpath))
     if not found:
         return None
     try:
