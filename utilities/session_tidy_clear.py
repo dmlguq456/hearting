@@ -60,7 +60,11 @@ COMPACT_CONFIRM_SEC = 900.0          # compaction of ~950k tokens took 145 s (me
 # No-trailer body used by the exact-native attachment or the sealed pending-ref carrier.
 CONTINUE_TEXT = "이어서해"
 STATUS_ONLY_TEXT = "현재 카드 기준 현황만 짧게 표시하고 새 작업은 시작하지 말고 다음 입력을 기다리세요."
-CONTINUE_WINDOW_SEC = 120.0
+# The window opens once the compaction is confirmed (``cleared``); the session may still be on a
+# turn of its own then (a notice or result turn took 6-11 minutes in practice), and the helper
+# asks again inside it, so it is as long as the compaction wait itself.
+CONTINUE_WINDOW_SEC = COMPACT_CONFIRM_SEC
+SCREEN_RETRY_SEC = 5.0
 IDLE_CARD_WINDOW_SEC = 300.0
 
 REASON_TEXT = {
@@ -426,6 +430,8 @@ def compaction_position(seat: "st.Seat", harness: str, sid: str) -> str:
     ledger = str(max((float(r.get("ts", 0)) for r in events), default=0))
     summary = st.session_summary(seat).get((harness, sid)) or {}
     path = summary.get("transcript", "")
+    if harness in ("claude", "codex") and not path:
+        return ledger + ":unknown"      # no history to read yet: a later read is no compaction
     if harness in ("claude", "codex") and path:
         try:
             with open(path, "rb") as f:
@@ -444,6 +450,21 @@ def compaction_position(seat: "st.Seat", harness: str, sid: str) -> str:
         except OSError:
             return ledger + ":unreadable"
     return ledger
+
+
+def compaction_moved(booked: str, current: str) -> bool:
+    """Whether ``current`` shows a compaction after the ``booked`` position.
+
+    The history part is a hash of the last boundary row inside the final 8 MB of the file.
+    A long-running session writes past that tail, so the boundary that was there at booking
+    scrolls out and the part simply disappears: that is no compaction. A boundary newly
+    inside the tail, or a new ledger row, is one; an unreadable or unknown part says nothing."""
+    ledger, _, seen = str(booked).partition(":")
+    now_ledger, _, now_seen = str(current).partition(":")
+    if ledger != now_ledger:
+        return True
+    return (len(now_seen) == 64 and now_seen != seen
+            and (len(seen) == 64 or seen == ""))
 
 
 def note_compaction(seat: "st.Seat", harness: str, sid: str, *, now: float) -> None:
@@ -683,7 +704,7 @@ def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[fl
         reason = _idle_route_reason(req["harness"], req["sid"])
         if reason:
             return None, reason
-        if compaction_position(seat, req["harness"], req["sid"]) != idle.get("compaction", ""):
+        if compaction_moved(idle.get("compaction", ""), compaction_position(seat, req["harness"], req["sid"])):
             return None, "compacted"
         from session_tidy_idle import _tokens_and_provider
         transcript = (st.session_summary(seat).get((req["harness"], req["sid"])) or {}).get("transcript", "")
@@ -1704,8 +1725,8 @@ def validate_request(path, nonce: Optional[str] = None, *, now: Optional[float] 
         if reason:
             return None, reason
     if (req.get("origin") == "idle"
-            and compaction_position(seat, req["harness"], req["sid"])
-            != (req.get("idle") or {}).get("compaction", "")):
+            and compaction_moved((req.get("idle") or {}).get("compaction", ""),
+                                 compaction_position(seat, req["harness"], req["sid"]))):
         return None, "compacted"
     held_claim = req.get("clear_claim") if isinstance(req.get("clear_claim"), dict) else {}
     claimed = (_sending_claim is not None and held_claim.get("state") == "sending"
@@ -2373,9 +2394,17 @@ def _continue(seat_key: str, nonce: str, continuer: Callable[[Path, str, str], d
             verdict = {"continued": "skipped", "reason": reason}
             break
         verdict = continuer(path, nonce, str((req.get("seat") or {}).get("pane") or ""))
-        if (verdict.get("continued") not in {"queued", "skipped"}
-                or verdict.get("reason") != "idle-card-observation-unavailable"):
-            break
+        reason = str(verdict.get("reason") or "")
+        if verdict.get("continued") in {"queued", "skipped"} and reason == "idle-card-observation-unavailable":
+            continue
+        if (verdict.get("continued") == "queued" and reason.startswith("not-idle-")
+                and not verdict.get("transfer_ref")):
+            # The session is still on a turn of its own and nothing was sent or bound: no later
+            # sender comes for it, so the helper asks again inside the same window (the loop top
+            # ends it as ``expired`` once the window has passed).
+            sleep(COMPACT_POLL_SEC)
+            continue
+        break
     outcome = verdict.get("continued", "failed")
     _finish_continue(seat_key, nonce, outcome, verdict.get("reason", ""),
                        claim_id=verdict.get("claim_id", ""), transfer_ref=verdict.get("transfer_ref", ""))
@@ -2589,9 +2618,24 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
     req, result = turn_ended(req)
     if req is None:
         return result
+    screen_doubt = ""   # the shell host's last non-answer, kept for the notice if the wait runs out
     while True:
         verdict = steward(path, nonce, pane)
         outcome, reason = verdict.get("cleared", "failed"), verdict.get("reason", "")
+        if reason == "expired" and screen_doubt:
+            reason = screen_doubt
+        if reason == "shell-no-answer" and outcome in {"queued", "skipped"}:
+            # A panel host taking over (an upgrade, a restart) answers nothing for a moment. The
+            # idle path already waits such a doubt out inside its booking; so does this one.
+            screen_doubt = reason
+            checked, why = reobserve_request(path, nonce, sleep=sleep)
+            if checked is not None:
+                sleep(min(SCREEN_RETRY_SEC, max(0.0, float(checked.get("deadline", 0)) - st.now_epoch())))
+                continue
+            if why == "superseded":
+                return "superseded"
+            return "skipped" if _finish(seat_key, nonce, "skipped",
+                                        reason if why == "expired" else why) else "superseded"
         if reason == "idle-card-observation-unavailable" and outcome in {"queued", "skipped"}:
             checked, why = reobserve_request(path, nonce, sleep=sleep)
             if checked is not None:
