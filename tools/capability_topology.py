@@ -140,6 +140,40 @@ def _validate_fields(registry):
             raise TopologyError(f"field_default_recipes[{field}]: {row['capability']} does not default to {field}")
 
 
+_FIELD_WEIGHT_HARNESSES = ("claude", "codex", "opencode")
+
+
+def _validate_field_harness_weights(registry):
+    """The default gradient of the harness choice by field (core/OPERATIONS.md §5.10).
+
+    Names a field's row only for fields in the vocabulary; a field without a
+    row (admin, other) weighs 1.0. Model names live only in the adapters'
+    models.conf, so the basis points at depth names, never at a model.
+    """
+    table = registry.get("field_harness_weights")
+    if not isinstance(table, dict) or set(table) != {"checked_on", "rule", "basis", "weights"}:
+        raise TopologyError("field_harness_weights must be {checked_on, rule, basis, weights}")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(table["checked_on"])) or not str(table["rule"]).strip():
+        raise TopologyError("field_harness_weights needs a YYYY-MM-DD checked_on and a rule")
+    basis = table["basis"]
+    profiles = basis.get("profiles") if isinstance(basis, dict) else None
+    if (not isinstance(basis, dict) or set(basis) != {"models", "profiles"} or not isinstance(profiles, dict)
+            or set(profiles) != set(_FIELD_WEIGHT_HARNESSES)
+            or any(not isinstance(v, list) or not v or not set(v) <= set(registry["model_profiles"])
+                   for v in profiles.values())):
+        raise TopologyError("field_harness_weights.basis must name each harness's depth profiles "
+                            "from model_profiles (never a vendor model name)")
+    weights = table["weights"]
+    if not isinstance(weights, dict) or not set(weights) <= set(FIELDS):
+        raise TopologyError("field_harness_weights.weights may name only declared fields")
+    for field, row in weights.items():
+        if (not isinstance(row, dict) or set(row) != set(_FIELD_WEIGHT_HARNESSES)
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v <= 1
+                       for v in row.values())):
+            raise TopologyError(f"field_harness_weights.weights[{field}] must give claude, codex "
+                                "and opencode a number above 0 and at most 1")
+
+
 def load_registry(path: Path | str = REGISTRY):
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
@@ -2058,6 +2092,7 @@ def validate_registry(registry, manifest=None):
     if actual != expected:
         raise TopologyError(f"coverage mismatch missing={sorted(expected-actual)} extra={sorted(actual-expected)}")
     _validate_fields(registry)
+    _validate_field_harness_weights(registry)
     for recipe in registry["recipes"]:
         _validate_recipe(recipe, registry, standard_plus_owner_profile)
         _validate_gate_contracts(recipe, registry)

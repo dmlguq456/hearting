@@ -111,6 +111,39 @@ class AllocationReceiptTest(unittest.TestCase):
         row = json.loads(Path(plain["path"]).read_text(encoding="utf-8").splitlines()[0])
         self.assertIsNone(row["harness_weights"])
 
+    def test_the_row_and_its_line_carry_the_field_and_the_weights_the_choice_used(self):
+        sealed = {**self._policy("balanced"), "harness_weights": {"opencode": 0.4, "codex": 0.7},
+                  "field_weights": {"claude": 0.95, "codex": 0.85, "opencode": 1.0}}
+        result = self.receipt.record_allocation_receipt(
+            route_id="rt-field", route_node="execute", writer="stage-dispatch-fallback.py",
+            child_harness="claude", allocation=sealed, field="code", jobs=self.jobs,
+        )
+        row = json.loads(Path(result["path"]).read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(row["field"], "code")
+        self.assertEqual(row["field_weights"], {"claude": 0.95, "codex": 0.85, "opencode": 1.0})
+        self.assertEqual(row["inert_keys"], {})
+        line = self.receipt.format_row(row)
+        self.assertTrue(line.endswith("field=code w=claude:0.95|codex:0.595|opencode:0.4"), line)
+        # a field with no row of its own still names the field and the user's flat weights
+        neutral = self.receipt.record_allocation_receipt(
+            route_id="rt-neutral", route_node="execute", writer="stage-dispatch-fallback.py",
+            child_harness="claude", field="admin",
+            allocation={**self._policy("balanced"), "harness_weights": {"opencode": 0.4}}, jobs=self.jobs,
+        )
+        row = json.loads(Path(neutral["path"]).read_text(encoding="utf-8").splitlines()[0])
+        self.assertIsNone(row["field_weights"])
+        self.assertTrue(self.receipt.format_row(row).endswith("field=admin w=opencode:0.4"))
+        # no field (frame, an older route): `field=-` and the row still reads
+        bare = self.receipt.record_allocation_receipt(
+            route_id="rt-bare", route_node="execute", writer="stage-dispatch-fallback.py",
+            child_harness="claude", allocation=self._policy("balanced"), jobs=self.jobs,
+        )
+        row = json.loads(Path(bare["path"]).read_text(encoding="utf-8").splitlines()[0])
+        self.assertIsNone(row["field"])
+        self.assertTrue(self.receipt.format_row(row).endswith(" field=-"))
+        old_row = {k: v for k, v in row.items() if k not in ("field", "field_weights")}
+        self.assertTrue(self.receipt.format_row(old_row).endswith(" field=-"))
+
     def test_an_observed_affinity_names_its_source_and_a_sealed_one_adds_nothing(self):
         observed = self.receipt.record_allocation_receipt(
             route_id="rt-handover", route_node="test", writer="stage-dispatch-fallback.py",

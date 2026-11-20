@@ -2760,6 +2760,50 @@ class FrameAssignmentIncidentTest(unittest.TestCase):
         # primary (codex, claude) outranks the relief band although opencode has the most headroom
         self.assertEqual(got.wrapper, "codex", got.out)
 
+    def _field_route(self, incident, *, pins="sealed", field="code", row=None, flat=None):
+        path, doc = self._route(incident, pins=pins)
+        doc["field"] = field
+        if row is not None:
+            doc["dispatch_allocation"]["field_weights"] = row
+        if flat is not None:
+            doc["dispatch_allocation"]["harness_weights"] = flat
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return path
+
+    def test_the_start_receipt_names_the_flat_weights_the_field_and_its_row(self):
+        row = {"claude": 0.95, "codex": 0.85, "opencode": 1.0}
+        path = self._field_route("rt_ad3fb", row=row, flat={"opencode": 0.4})
+        got = self._launch(path, "frame")
+        self.assertEqual(got.rc, 0, got.out)
+        lines = got.out.splitlines()
+        self.assertIn("harness_weights=opencode:0.4", lines)
+        self.assertIn("field=code", lines)
+        self.assertIn("field_weights=claude:0.95,codex:0.85,opencode:1.0", lines)
+        # a route with no field and no row says so in the same three lines
+        bare = self._route("rt_ad3fb")[0]
+        out = self._launch(bare, "frame").out.splitlines()
+        self.assertIn("field=-", out)
+        self.assertIn("field_weights=none", out)
+        self.assertTrue(any(line.startswith("harness_weights=") for line in out), out)
+
+    def test_a_field_row_does_not_move_a_route_pin(self):
+        # the sealed pin places the frame on opencode; a row that weighs hard against it changes nothing
+        row = {"claude": 1.0, "codex": 1.0, "opencode": 0.05}
+        path = self._field_route("rt_ad3fb", row=row)
+        got = self._launch(path, "frame")
+        self.assertEqual((got.rc, got.wrapper, got.source), (0, "opencode", "route-pin"), got.out)
+
+    def test_a_field_row_cannot_lift_a_harness_over_the_usage_gate_or_a_band(self):
+        # owner pin only: the frame falls to the automatic selection. Primary (codex, claude) outranks
+        # the relief opencode, and a row that favours opencode cannot change that.
+        _, doc = self._route("rt_ad3fb")
+        owner_only = {"contract_version": 1, "owner": doc["selection_pins"]["owner"]}
+        row = {"claude": 0.05, "codex": 0.05, "opencode": 1.0}
+        path = self._field_route("rt_ad3fb", pins=owner_only, row=row)
+        got = self._launch(path, "frame", scores={"claude": 40.0, "codex": 70.0, "opencode": 95.0})
+        self.assertEqual((got.rc, got.source), (0, "configured-balanced"), got.out)
+        self.assertIn(got.wrapper, {"claude", "codex"}, got.out)
+
     def test_a_frame_pin_on_a_limited_harness_gives_the_choice_back_to_the_selection(self):
         path, _ = self._route("rt_ad3fb")
         got = self._launch(path, "frame", states={"claude": "ok", "codex": "ok", "opencode": "limited(usage-gate)"})

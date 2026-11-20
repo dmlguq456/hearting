@@ -862,7 +862,7 @@ def _note_warning(line):
         DISPATCH_DEFAULTS_WARNINGS.append(line)
 
 
-def _seal_dispatch_defaults(nodes, capability, owner_profile=None):
+def _seal_dispatch_defaults(nodes, capability, owner_profile=None, field=None, field_table=None):
     """Return defaults digest/allocation and stamp each dispatch-depth-2 node's
     harness_affinity, BEFORE route_hash is computed. Absent config -> all
     'unspecified' + digest None. Structurally corrupt config -> fail-loud
@@ -871,7 +871,10 @@ def _seal_dispatch_defaults(nodes, capability, owner_profile=None):
     Each depth-2 node and each depth-1 frame leg carries its profile's sealed
     harness_policy, so a frame launched later reads the same bands the route
     was sealed with instead of re-reading the live file. registry_digest is a
-    separate field and is never touched here."""
+    separate field and is never touched here. A route with a field seals that
+    field's applied weight row beside the allocation (`field_weights`, from the
+    registry's default table plus the user's override); a neutral row or no
+    field seals no key, so those routes keep their bytes."""
     config_path = DEFAULTS.default_config_path()
     if not os.path.exists(config_path):
         for node in nodes:
@@ -899,9 +902,13 @@ def _seal_dispatch_defaults(nodes, capability, owner_profile=None):
             node["harness_policy"] = DEFAULTS.query_profile_policy(
                 cfg, node["model_profile"]
             )
+    allocation = DEFAULTS.query_allocation(cfg)
+    field_weights = DEFAULTS.query_field_weights(cfg, field, field_table)
+    if field_weights:
+        allocation["field_weights"] = field_weights
     return (
         "sha256:" + hashlib.sha256(canonical(cfg)).hexdigest(),
-        DEFAULTS.query_allocation(cfg),
+        allocation,
         DEFAULTS.query_profile_policy(cfg, owner_profile) if owner_profile else None,
     )
 
@@ -1695,8 +1702,13 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
     for node in nodes:
         if _owner_node(node, effective, form) and node["model_profile"] != owner_model_profile:
             raise ValueError("owner-node-profile-selection-conflict:" + node["id"])
+    try:
+        route_field = _sealed_field(registry, recipe, capability, capability_mode, field, field_source).get("field")
+    except ValueError:
+        route_field = None  # the same call below refuses an unknown field
     dispatch_defaults_digest,dispatch_allocation,owner_harness_policy=_seal_dispatch_defaults(
-        nodes, capability, owner_model_profile
+        nodes, capability, owner_model_profile,
+        field=route_field, field_table=registry.get("field_harness_weights"),
     )
     spec_touch=any(_scope_touches_spec(scope) for node in nodes for scope in node["write_scope"])
     # Seal the same finite workload derivation used by legacy bound routes.

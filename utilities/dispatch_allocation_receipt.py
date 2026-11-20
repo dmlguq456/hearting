@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dispatch_allocation import inert_allocation_keys  # noqa: E402
+from dispatch_allocation import effective_harness_weights, inert_allocation_keys  # noqa: E402
 from dispatch_contract import resolve_agent_home as _resolve_agent_home  # noqa: E402
 from dispatch_contract import resolve_dispatch_state_root as _resolve_dispatch_state_root  # noqa: E402
 
@@ -73,6 +73,8 @@ def _policy_fields(allocation) -> dict:
     fields["depth_affinity"] = dict(affinity) if isinstance(affinity, dict) else None
     weights = allocation.get("harness_weights")
     fields["harness_weights"] = dict(weights) if isinstance(weights, dict) else None
+    field_weights = allocation.get("field_weights")
+    fields["field_weights"] = dict(field_weights) if isinstance(field_weights, dict) else None
     fields["inert_keys"] = inert_allocation_keys(allocation)
     return fields
 
@@ -130,6 +132,7 @@ def record_allocation_receipt(
     parallel_group=None,
     parallel_leg_index=None,
     parallel_leg_count=None,
+    field=None,
     agent_home=None,
     jobs=None,
 ):
@@ -172,6 +175,7 @@ def record_allocation_receipt(
             "parallel_group": parallel_group,
             "parallel_leg_index": parallel_leg_index,
             "parallel_leg_count": parallel_leg_count,
+            "field": field if isinstance(field, str) else None,
             **_policy_fields(allocation),
         }
         row["preferred_honored"] = (
@@ -226,6 +230,17 @@ def read_rows(*, route_id=None, since=None, agent_home=None, jobs=None) -> list[
     return rows
 
 
+def _field_segment(row: dict) -> str:
+    """`field=<f> w=<weights>`: the field and the per-harness weight the choice
+    multiplied by (user harness_weights x the field's row); `field=-` without one."""
+    field = row.get("field")
+    if not field:
+        return "field=-"
+    weights = effective_harness_weights(
+        {"harness_weights": row.get("harness_weights"), "field_weights": row.get("field_weights")})
+    return f"field={field} w={_fmt_map(weights, digits=3)}"
+
+
 def _fmt_map(values, *, digits=1) -> str:
     if not isinstance(values, dict):
         return "-"
@@ -251,7 +266,8 @@ def format_row(row: dict) -> str:
         f"rank={'>'.join(row.get('rank') or []) or '-'} "
         f"headroom={_fmt_map(row.get('capacity'))} counts={_fmt_map(row.get('counts'))} "
         f"inert={inert} writer={row.get('writer')} action={row.get('action') or '-'} "
-        f"attempt={row.get('attempt_id') or '-'} event={row.get('event_id')}"
+        f"attempt={row.get('attempt_id') or '-'} event={row.get('event_id')} "
+        f"{_field_segment(row)}"
     )
 
 

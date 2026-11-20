@@ -1386,6 +1386,56 @@ class TestRoute(unittest.TestCase):
    with self.assertRaisesRegex(ValueError,"invalid dispatch_allocation"):
     R.verify_route(bad,R.ROOT)
 
+ # --- field weights: a route with a field seals that field's applied row beside the allocation ---
+ SHIPPED_WEIGHTS="  harness_weights:\n    claude: 0.5\n    opencode: 0.3\n"
+ def _shipped_config(self,weights=None):
+  text=(R.ROOT/"profiles"/"dispatch-defaults.yaml").read_text(encoding="utf-8")
+  self.assertIn(self.SHIPPED_WEIGHTS,text)
+  return text if weights is None else text.replace(self.SHIPPED_WEIGHTS,weights)
+ def _reseal(self,route):
+  route["route_hash"]=R.route_hash(route); route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
+  return route
+ def test_a_field_route_seals_its_applied_row_and_keeps_harness_weights_flat(self):
+  with dispatch_defaults_config(self._shipped_config()):
+   route=self._standard()
+  self.assertEqual(route["field"],"code")
+  allocation=route["dispatch_allocation"]
+  self.assertEqual(allocation["field_weights"],{"claude":0.95,"codex":0.85,"opencode":1.0})
+  self.assertEqual(allocation["harness_weights"],{"claude":0.5,"opencode":0.3})
+  R.verify_route(route,R.ROOT)
+ def test_the_users_field_block_overrides_cell_by_cell_without_touching_harness_weights(self):
+  weights=self.SHIPPED_WEIGHTS+"    code:\n      claude: 1.0\n    design: 0.5\n"
+  with dispatch_defaults_config(self._shipped_config(weights)):
+   route=self._standard()
+  allocation=route["dispatch_allocation"]
+  self.assertEqual(allocation["field_weights"],{"claude":1.0,"codex":0.85,"opencode":1.0})  # unnamed cells keep the default
+  self.assertEqual(allocation["harness_weights"],{"claude":0.5,"opencode":0.3})
+  R.verify_route(route,R.ROOT)
+ def test_a_neutral_row_a_non_balanced_strategy_or_no_field_seal_no_key(self):
+  # code at 1.0 in every cell: nothing to seal, so the allocation is what it was before the key existed
+  with dispatch_defaults_config(self._shipped_config(self.SHIPPED_WEIGHTS+"    code: 1.0\n")):
+   neutral=self._standard()
+  with dispatch_defaults_config(self._shipped_config()):
+   expected=R.DEFAULTS.query_allocation(R.DEFAULTS.load_validated(R.DEFAULTS.default_config_path(),R.DEFAULTS.default_topology_path())[0])
+  self.assertEqual(neutral["dispatch_allocation"],expected)
+  self.assertNotIn("field_weights",neutral["dispatch_allocation"])
+  # the legacy-schema configs these older tests use never read a field row
+  with dispatch_defaults_config(DD_CONFIG_A):
+   legacy=self._standard()
+  self.assertNotIn("field_weights",legacy["dispatch_allocation"])
+ def test_a_route_sealed_before_field_weights_existed_verifies_and_reads_neutral(self):
+  import dispatch_allocation as DA
+  with dispatch_defaults_config(self._shipped_config()):
+   route=self._standard()
+  route["dispatch_allocation"].pop("field_weights")
+  R.verify_route(self._reseal(route),R.ROOT)
+  self.assertEqual(DA.effective_harness_weights(route["dispatch_allocation"]),{"claude":0.5,"opencode":0.3})
+ def test_verify_rejects_invalid_field_weights(self):
+  with dispatch_defaults_config(self._shipped_config()): route=self._standard()
+  for value in (0,1.5,True,{},{"claude":0},{"claude":1.2},{"claude":True},{"gemini":0.5},"claude:0.5"):
+   bad=json.loads(json.dumps(route)); bad["dispatch_allocation"]["field_weights"]=value
+   with self.assertRaisesRegex(ValueError,"invalid dispatch_allocation"):
+    R.verify_route(self._reseal(bad),R.ROOT)
  def test_verify_rejects_short_balanced_window(self):
   with dispatch_defaults_config(DD_CONFIG_A):
    route=self._standard()

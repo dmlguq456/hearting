@@ -173,7 +173,7 @@ this profile" (the shipped `deep` omits OpenCode). Every enabled harness is a
 worker candidate; the optional `allocation.harness_weights` block scales a harness's
 target share of default placements in the `balanced` strategy (the shipped default
 gives the slower OpenCode `0.3`) and does not override explicit selection, a pin or
-hard eligibility.
+hard eligibility. A field name inside that block (`design: {codex: 1.0}` or `docs: 1.0`) overrides that field's row of the registry's default `field_harness_weights` (core/OPERATIONS.md §5.10).
 
 `utilities/dispatch-route.sh` is read-only and emits stable key/value trace, rejected, fallback, and unknown records. It does not register, launch, or mutate caches or worktrees. Without an adapter probe, OpenCode remains `unknown` rather than guessed.
 
