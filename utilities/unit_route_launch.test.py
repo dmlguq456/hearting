@@ -596,6 +596,36 @@ class UnitPromptTest(UnitLegBase):
         self.assertEqual(carried.replace(carried[carried.index("Unit bootstrap material"):
                                                 carried.index("Assignment:\n")], ""), empty)
 
+    def test_the_unit_worker_is_told_no_qa_and_no_intensity_while_the_row_keeps_them(self):
+        # 11-20: a unit route has no intensity, so its worker reads `- qa: -` / `- intensity: -` (an Opus review is not
+        # handed the word `quick`). The args (and so the row, the environment and the budget) keep `quick`; every other
+        # capability's metadata reads as it did.
+        route, path = self.unit_route()
+        adapter = self.adapter()
+        args = argparse.Namespace(
+            capability="unit", capability_mode="default", worker_mode="qa/code-review", qa="quick",
+            intensity="quick", dispatch_depth=1, worker_type="review", attempt_id="att-x", assigned_contract="unit",
+            route_node="unit", route_file=str(path), route_id=route["route_id"], owner_route_binding=None,
+            model_role="fast reviewer", model_profile="light", resolved_model_settings={}, parent_slug=None,
+            parent_session_id=None, capability_owner="unit", owner_harness="claude", worktree=route["cwd"],
+            artifact_root=route["artifact_root"], unit="qa/code-review", runtime_dir="", raw_data_dir="",
+            parent_attempt_id=None, route_hash=route["route_hash"], launch_head="0" * 40, diff_attribution=None)
+        jobs = Path(self.root) / "jobs.log"
+        jobs.write_text("")
+        env = dict(T.P.prepare_route_artifact_env(path, start=True, jobs=jobs))
+        with mock.patch.dict(os.environ, env):
+            prompt = adapter.DISPATCH_MAIN.unit_leg_prompt(adapter._ADAPTER, args, BRIEF)
+            metadata = adapter.DISPATCH_MAIN.dispatch_metadata_prompt(adapter._ADAPTER, args)
+            staged = adapter.DISPATCH_MAIN.dispatch_metadata_prompt(
+                adapter._ADAPTER, argparse.Namespace(**{**vars(args), "capability": "autopilot-code", "intensity": "standard",
+                                                        "qa": "standard"}))
+        for text in (prompt, metadata):
+            self.assertIn("\n- qa: -\n- intensity: -\n", text)
+            self.assertNotIn("- qa: quick", text)
+            self.assertNotIn("- intensity: quick", text)
+        self.assertIn("\n- qa: standard\n- intensity: standard\n", staged)
+        self.assertEqual((args.qa, args.intensity), ("quick", "quick"))
+
     def test_the_first_instruction_is_the_unit_the_brief_and_how_to_end(self):
         route, path = self.unit_route()
         adapter = self.adapter()
