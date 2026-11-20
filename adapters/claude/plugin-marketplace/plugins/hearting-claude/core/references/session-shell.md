@@ -627,9 +627,11 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   `기다리는 것` with its first title and one row of counts for the other two; three rows or fewer are one row of counts for all four groups.
   In the bottom layout the box is the same, three rows inside at most (`STATUS_BOTTOM`), and its rows are the first the box gives short of rows,
   after MESSAGES' and before the route box loses a row: while the box stands, MESSAGES gives its rows and head before the GIT row goes there, and the box goes down to its one
-  row of counts before the route box shrinks (with no box standing, for want of a document or a list, the order is the general one below, MESSAGES
-  after the route box's steps and Git). Where only one of the box and the route box can stand, the route box, the job that runs now, stays and the
-  box goes first (11-20: the `STATUS ›` button comes back on the first row); beside the native area the order is unchanged. (With four groups three rows still read as the one row of counts, so a four-group document shows titles
+  row of counts before the route box shrinks (with no box standing, for want of a document or a list or where it went for want of rows, the order is the general one below, MESSAGES
+  after the route box's steps and Git: a box that goes is laid out again as if none had stood, so the drawing is the one the same window has with no document, the
+  `STATUS ›` button apart, and PEERS where the next rule applies). Where only one of the box and the route box can stand, the route box, the job that runs now, stays and the
+  box goes first (11-20: the `STATUS ›` button comes back on the first row); where the box's drawing shows no PEERS row either, the route box's drawing gives PEERS
+  up too before it, so a PEERS row nobody sees does not decide between them (a PEERS row that shows stays where it stands); beside the native area the order is unchanged. (With four groups three rows still read as the one row of counts, so a four-group document shows titles
   only beside the native area; a document with fewer groups shows them in three rows.)
 - MESSAGES: the recent messages, two rows each as v4.36.4 drew them (spec rule 31, restored 11-16, the
   person: "메시지 형식은 퇴행했네? 최대 5개 정도로 늘리고, 그전에 원래 형식으로 돌려"): the head (the arrow in

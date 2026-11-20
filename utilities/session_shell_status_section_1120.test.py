@@ -283,19 +283,30 @@ for(const status of [undefined,{word:'STATUS',has_doc:false},doc([])]){
 // With the box standing the rule is the box's, as before: MESSAGES go whole first (100 x 14, GIT and PEERS, two routes).
 {const ws=lines(draw({status:doc(GROUPS),side:false,width:100,height:14,routes:2,peers:true}));assert(!ws.some(l=>/^│ messages/.test(l))&&ws.some(l=>/^│ ╭─ STATUS /.test(l)),ws.join('\n'));}
 // Short of rows, where the route box can stand once the box is gone and cannot beside it, the box goes and the route box (the job that runs now) stays; the
-// `STATUS ›` button comes back on the first row. 100 x 8..10 rows, one route, no PEERS (11 and more rows have room for both).
+// `STATUS ›` button comes back on the first row. 100 x 8..10 rows, one route, no PEERS (11 and more rows have room for both). Review round 3: a box that
+// went for want of rows leaves a drawing like the one with no document (`has_doc:false`), the first row's button too: MESSAGES keep the place they have there.
+const same=(o,h)=>{const a=draw({...o,status:doc(GROUPS),side:false,width:100,height:h}),b=draw({...o,status:{word:'STATUS',has_doc:false},side:false,width:100,height:h});
+  assert.equal(lines(a).join('\n'),lines(b).join('\n'),h+' '+JSON.stringify(o)+' as has_doc:false');assert.deepEqual(a.hits,b.hits,h+' presses');};
 for(let h=8;h<=14;h++){
   const v=draw({status:doc(GROUPS),side:false,width:100,height:h,routes:1}),ws=lines(v);
   const box=ws.some(l=>/^│ ╭─ STATUS /.test(l)),route=ws.some(l=>/^│ ╭─ route /.test(l));
   assert(ws.length===h&&ws.every(l=>cells(l)===100),h+'\n'+ws.join('\n'));
   assert(route,h+' the route box stays\n'+ws.join('\n'));
-  if(h<=10){assert(!box&&/STATUS › │$/.test(ws[1])&&v.hits.some(x=>x.row===1&&x.action==='popup:STATUS'),h+' the button is back\n'+ws.join('\n'));}
+  if(h<=10){assert(!box&&/STATUS › │$/.test(ws[1])&&v.hits.some(x=>x.row===1&&x.action==='popup:STATUS'),h+' the button is back\n'+ws.join('\n'));same({routes:1,messages:1},h);same({routes:1},h);}
   else assert(box&&!/STATUS › │$/.test(ws[1]),h+' both stand\n'+ws.join('\n'));}
-// Where the route box cannot stand either way (8 rows with PEERS and two routes) the box stays, as it did.
-{const ws=lines(draw({status:doc(GROUPS),side:false,width:100,height:8,routes:2,peers:true}));assert(ws.some(l=>/^│ ╭─ STATUS /.test(l))&&!ws.some(l=>/^│ ╭─ route /.test(l)),ws.join('\n'));}
-// With PEERS the box goes at 9..11 rows and both stand from 12.
-for(const [h,box] of [[9,false],[11,false],[12,true]]){const ws=lines(draw({status:doc(GROUPS),side:false,width:100,height:h,routes:2,peers:true}));
-  assert(ws.some(l=>/^│ ╭─ route /.test(l))&&ws.some(l=>/^│ ╭─ STATUS /.test(l))===box,h+'\n'+ws.join('\n'));}
+// 100 x 10, one route, one message: no box, the route box, and the message the drawing with no document keeps (the `messages` head and the message).
+{const ws=lines(draw({status:doc(GROUPS),side:false,width:100,height:10,routes:1,messages:1}));assert(!ws.some(l=>/^│ ╭─ STATUS /.test(l))&&ws.some(l=>/^│ messages ─+ › │$/.test(l))&&!ws.some(l=>/^│ branch /.test(l)),ws.join('\n'));}
+// The same where no route stands: 100 x 6..9 rows, no route, a box that goes for want of rows leaves MESSAGES as the drawing with no document has them.
+for(let h=6;h<=9;h++)for(const messages of [1,5]){if(!lines(draw({status:doc(GROUPS),side:false,width:100,height:h,routes:0,messages})).some(l=>/^│ ╭─ STATUS /.test(l)))same({routes:0,messages},h);}
+// Where PEERS stands in no drawing the box shows no longer decides between the box and the route box: 100 x 8 and 10 (a question), two routes, five messages, PEERS
+// - neither the box's drawing nor the route box's showed the PEERS row - the route box stays, as it does with no PEERS, and so does one row more.
+for(const [h,question] of [[8,false],[9,false],[10,true],[11,true]]){
+  const ws=lines(draw({status:doc(GROUPS),side:false,width:100,height:h,routes:2,messages:5,peers:true,question}));
+  assert(ws.some(l=>/^│ ╭─ route /.test(l))&&!ws.some(l=>/^│ ╭─ STATUS /.test(l))&&/STATUS › │$/.test(ws[1])&&ws.length===h,h+' the route box over the box\n'+ws.join('\n'));
+  if(h===8||h===10)assert(!ws.some(l=>/^│ PEERS /.test(l)),h+' no PEERS row\n'+ws.join('\n'));}
+// A PEERS row that shows stays: 100 x 14, two routes, PEERS, a box over MESSAGES, and the drawings that had PEERS and no box (100 x 7, 9).
+for(const h of [7,9]){const ws=lines(draw({status:doc(GROUPS),side:false,width:100,height:h,routes:2,messages:5,peers:true}));assert(ws.some(l=>/^│ PEERS /.test(l))&&!ws.some(l=>/^│ ╭─ STATUS /.test(l)),h+'\n'+ws.join('\n'));}
+{const ws=lines(draw({status:doc(GROUPS),side:false,width:100,height:12,routes:2,peers:true}));assert(ws.some(l=>/^│ PEERS /.test(l))&&ws.some(l=>/^│ ╭─ STATUS /.test(l))&&ws.some(l=>/^│ ╭─ route /.test(l)),ws.join('\n'));}
 """)
 
 

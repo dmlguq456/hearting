@@ -697,7 +697,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const title=clean(model.session_title||'').trim(),now=clean(model.now||'').trim();
     const nowKey=state==='working'||state==='submitting'||state==='blocked'?'loc_repo':'dim';
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
-    const top=[],spacers=new Set(),metaGaps=new Set(),rules=new Set(),optional=new Set(),gitRows=new Set(),jobRows=new Set(),topGroups=new Map();
+    const top=[],spacers=new Set(),metaGaps=new Set(),rules=new Set(),optional=new Set(),peerRows=new Set(),gitRows=new Set(),jobRows=new Set(),topGroups=new Map();
     // A value that runs over several rows (spec rule 29 (c)): its rows after the first go
     // first when rows run short, and the first row then ends in `…`.
     const extra=new Set(),oneRow=new Map();
@@ -906,7 +906,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const joinJobs=jobs.length&&size(top.at(-1))+3+size(jobs)<=inner;
       if(joinJobs){top[top.length-1]=joined([top.at(-1),jobs]);mark(top.length-1,'jobs');}
       putGit();
-      {const peerParts=peerRow(inner-6);if(peerParts.length){optional.add(top.length);top.push([text('PEERS ','dim'),...peerParts]);}}
+      {const peerParts=peerRow(inner-6);if(peerParts.length){optional.add(top.length);peerRows.add(top.length);top.push([text('PEERS ','dim'),...peerParts]);}}
       if(jobs.length&&!joinJobs){optional.add(top.length);jobRows.add(top.length);top.push(cut(jobs,inner));mark(top.length-1,'jobs');}
       // The repo's open work gives way with the running jobs.
       if(work.length){optional.add(top.length);top.push(cut(work,inner));}
@@ -2081,85 +2081,102 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const give=(can,apply,undo,family=null)=>{while(need()>budget&&can()){apply();gave.push({undo,family});}};
     const lowest=['MEM','MESSAGES'];
     // RESOURCES gives way first (it is the newest and the least needed of the bottom's sections): the GPU rows, then the host rows.
-    resGpus=resourceGpuTotal();
-    give(()=>side&&resHosts>0&&resGpus>0,()=>{resGpus--;},()=>{resGpus++;});
-    give(()=>side&&resHosts>0,()=>{resHosts--;},()=>{resHosts++;});
-    give(()=>keepSpacers,()=>{keepSpacers=false;},()=>{keepSpacers=true;});
-    if(!usageOn)give(()=>!!footBase(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
-    give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
-    // 11-20 (the person: "MESSAGE, MEM은 좀 더 세로길이 따라서 과감하게 표시 줄을 줄여버려 1~2줄 수준으로"): MEM and MESSAGES are the first
-    // sections to go down, before the STATUS section, QUESTIONS or the route box give up a row. The messages take their one-row form (a record is
-    // one row already), then MEM shows two records and MESSAGES two messages, then one of each (`+N` on the MESSAGES head counts the rest): from six
-    // rows down to two rows, then one, each.
-    give(()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
-    give(()=>kept.MEM&&take.MEM>2,()=>{take.MEM--;},()=>{take.MEM++;});
-    give(()=>kept.MESSAGES&&take.MESSAGES>2,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
-    give(()=>kept.MEM&&take.MEM>1,()=>{take.MEM--;},()=>{take.MEM++;});
-    give(()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
-    // 11-20 (the person: "GIT PEER 아래로 두고"): where the bottom layout's STATUS box stands, its GIT row stays with it and the box keeps its rows over MESSAGES (which has
-    // no MEM there), so MESSAGES gives its rows and its head before the box gives a row and before the GIT row goes; with no box (no document, no list, an
-    // older backend) and beside the native area the order is the one below.
-    if(!side&&kept.STATUS){
-      give(()=>kept.MESSAGES&&take.MESSAGES>0,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
-      give(()=>kept.MESSAGES,()=>{kept.MESSAGES=false;},()=>{kept.MESSAGES=true;});
-    }
-    // The STATUS section's titles above its STATUS_MIN rows go next (in the bottom layout, where its box takes three rows inside at most, down to the one
-    // row of counts: the box gives its rows before the route box does).
-    give(()=>kept.STATUS&&take.STATUS>(side?STATUS_MIN:1),()=>{take.STATUS--;},()=>{take.STATUS++;});
-    // QUESTIONS: the action row, then the second row of the summary and the guide line.
-    give(()=>here&&keepAction,()=>{keepAction=false;},()=>{keepAction=true;});
-    give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});
-    give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});
-    give(()=>keepMetaGap,()=>{keepMetaGap=false;},()=>{keepMetaGap=true;});
-    give(()=>keepRules,()=>{keepRules=false;},()=>{keepRules=true;});
-    // (11-16: the QUESTIONS box's two border rows go after its content rows above, before the structural rows below.)
-    give(()=>kept.QUESTIONS&&keepQuestionBox,()=>{keepQuestionBox=false;},()=>{keepQuestionBox=true;});
-    // The box comes back with its context rows only while the workers stand.
-    // The unit rows a worker's calls add are the first of the route's rows to go.
-    give(()=>anyCalled&&keepCalled,()=>{keepCalled=false;},()=>{keepCalled=true;},'route');
-    give(()=>keepBoxEnd,()=>{keepBoxEnd=false;},()=>{keepBoxEnd=true;},'route');
-    give(()=>nowTwo,()=>{nowTwo=false;},()=>{nowTwo=true;},'route');
-    give(()=>keepCtxLine,()=>{keepCtxLine=false;},()=>{keepCtxLine=true;},'route');
-    // The box comes back with its NOW rows only while the workers stand.
-    give(()=>keepNow,()=>{keepNow=false;},()=>{if(keepWorkers||!anyWorkers)keepNow=true;},'route');
-    give(()=>anyWorkers&&keepWorkers&&!keepNow,()=>{keepWorkers=false;},()=>{keepWorkers=true;},'route');
-    give(()=>keepPlace,()=>{keepPlace=false;},()=>{keepPlace=true;},'route');
-    give(()=>twoRows,()=>{twoRows=false;},()=>{twoRows=true;},'route');
-    give(()=>routeLimit>1,()=>{routeLimit--;},()=>{routeLimit++;});
-    give(()=>kept.ROUTE&&routeRule(),()=>{keepRouteRule=false;},()=>{keepRouteRule=true;});
-    give(()=>keepGit,()=>{keepGit=false;},()=>{keepGit=true;});
-    // 11-20 (the person: "현황 5줄과 NOW·QUESTIONS·ROUTE가 MESSAGES·MEM보다 먼저 자리를 받게"): MESSAGES and MEM give their last rows (their
-    // rows, then their heads; the USAGE rows after MEM as before) before the STATUS section goes below its five rows and before the route
-    // box goes; the running jobs after it.
-    for(const name of lowest){
-      give(()=>kept[name]&&take[name]>0,()=>{take[name]--;},()=>{take[name]++;});
-      give(()=>kept[name],()=>{kept[name]=false;},()=>{kept[name]=true;});
-      // 11-16: USAGE gives way after MEM does: the harnesses that are not this window's (the last first), then its name row.
-      if(name==='MEM'&&usageOn){
-        for(let i=usageData.length-1;i>=0;i--)if(i!==ownUsage)give(()=>keepLine[i],()=>{keepLine[i]=false;},()=>{keepLine[i]=true;});
-        give(()=>keepUsageHead,()=>{keepUsageHead=false;},()=>{keepUsageHead=true;});
-      }
-    }
-    // Then the STATUS section goes down to its one row of counts, and the route box goes. In the bottom layout, where the route box can stand once the
-    // box is gone and cannot beside it, the box goes first (11-20: of the two the route box, the job that runs now, stays, and the `STATUS ›` button
-    // comes back on the first row); where the route box cannot stand either way the box stays as it did.
-    give(()=>kept.STATUS&&take.STATUS>1,()=>{take.STATUS--;},()=>{take.STATUS++;});
-    if(!side)give(()=>{if(!kept.STATUS||!kept.ROUTE)return false;kept.STATUS=false;const fits=need()<=budget;kept.STATUS=true;return fits;},
-      ()=>{kept.STATUS=false;},()=>{kept.STATUS=true;});
-    give(()=>kept.ROUTE,()=>{kept.ROUTE=false;},()=>{kept.ROUTE=true;});
-    give(()=>keepOptional,()=>{keepOptional=false;},()=>{keepOptional=true;});
-    give(()=>kept.STATUS,()=>{kept.STATUS=false;},()=>{kept.STATUS=true;});
-    give(()=>keepSent&&sentRows.length>0,()=>{keepSent=false;},()=>{keepSent=true;});
-    // (11-16: this window's own usage row beside the buttons costs no row, so it stays while no other usage row is left to give.)
-    give(()=>keepQuota&&(!usageOn||footRule()>0),()=>{keepQuota=false;},()=>{keepQuota=true;});
     const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
       keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]);
-    const stuck=new Set();
-    for(const {undo,family} of gave.reverse()){
-      if(family&&stuck.has(family))continue;
-      const was=choices();undo();
-      if(need()>budget){if(family)stuck.add(family);const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead]=v.slice(12,22);keepLine.splice(0,keepLine.length,...v[22]);keepRouteRule=v[23];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(24,30);}
+    // The give-back's restore, also the way back to a state `choices()` recorded.
+    const restore=json=>{const v=JSON.parse(json);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
+      Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead]=v.slice(12,22);keepLine.splice(0,keepLine.length,...v[22]);keepRouteRule=v[23];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(24,30);};
+    const allocate=peersFirst=>{
+      gave.length=0;
+      resGpus=resourceGpuTotal();
+      give(()=>side&&resHosts>0&&resGpus>0,()=>{resGpus--;},()=>{resGpus++;});
+      give(()=>side&&resHosts>0,()=>{resHosts--;},()=>{resHosts++;});
+      give(()=>keepSpacers,()=>{keepSpacers=false;},()=>{keepSpacers=true;});
+      if(!usageOn)give(()=>!!footBase(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
+      give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
+      // 11-20 (the person: "MESSAGE, MEM은 좀 더 세로길이 따라서 과감하게 표시 줄을 줄여버려 1~2줄 수준으로"): MEM and MESSAGES are the first
+      // sections to go down, before the STATUS section, QUESTIONS or the route box give up a row. The messages take their one-row form (a record is
+      // one row already), then MEM shows two records and MESSAGES two messages, then one of each (`+N` on the MESSAGES head counts the rest): from six
+      // rows down to two rows, then one, each.
+      give(()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
+      give(()=>kept.MEM&&take.MEM>2,()=>{take.MEM--;},()=>{take.MEM++;});
+      give(()=>kept.MESSAGES&&take.MESSAGES>2,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
+      give(()=>kept.MEM&&take.MEM>1,()=>{take.MEM--;},()=>{take.MEM++;});
+      give(()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
+      // 11-20 (the person: "GIT PEER 아래로 두고"): where the bottom layout's STATUS box stands, its GIT row stays with it and the box keeps its rows over MESSAGES (which has
+      // no MEM there), so MESSAGES gives its rows and its head before the box gives a row and before the GIT row goes; with no box (no document, no list, an
+      // older backend) and beside the native area the order is the one below.
+      if(!side&&kept.STATUS){
+        give(()=>kept.MESSAGES&&take.MESSAGES>0,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
+        give(()=>kept.MESSAGES,()=>{kept.MESSAGES=false;},()=>{kept.MESSAGES=true;});
+      }
+      // The STATUS section's titles above its STATUS_MIN rows go next (in the bottom layout, where its box takes three rows inside at most, down to the one
+      // row of counts: the box gives its rows before the route box does).
+      give(()=>kept.STATUS&&take.STATUS>(side?STATUS_MIN:1),()=>{take.STATUS--;},()=>{take.STATUS++;});
+      // QUESTIONS: the action row, then the second row of the summary and the guide line.
+      give(()=>here&&keepAction,()=>{keepAction=false;},()=>{keepAction=true;});
+      give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});
+      give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});
+      give(()=>keepMetaGap,()=>{keepMetaGap=false;},()=>{keepMetaGap=true;});
+      give(()=>keepRules,()=>{keepRules=false;},()=>{keepRules=true;});
+      // (11-16: the QUESTIONS box's two border rows go after its content rows above, before the structural rows below.)
+      give(()=>kept.QUESTIONS&&keepQuestionBox,()=>{keepQuestionBox=false;},()=>{keepQuestionBox=true;});
+      // The box comes back with its context rows only while the workers stand.
+      // The unit rows a worker's calls add are the first of the route's rows to go.
+      give(()=>anyCalled&&keepCalled,()=>{keepCalled=false;},()=>{keepCalled=true;},'route');
+      give(()=>keepBoxEnd,()=>{keepBoxEnd=false;},()=>{keepBoxEnd=true;},'route');
+      give(()=>nowTwo,()=>{nowTwo=false;},()=>{nowTwo=true;},'route');
+      give(()=>keepCtxLine,()=>{keepCtxLine=false;},()=>{keepCtxLine=true;},'route');
+      // The box comes back with its NOW rows only while the workers stand.
+      give(()=>keepNow,()=>{keepNow=false;},()=>{if(keepWorkers||!anyWorkers)keepNow=true;},'route');
+      give(()=>anyWorkers&&keepWorkers&&!keepNow,()=>{keepWorkers=false;},()=>{keepWorkers=true;},'route');
+      give(()=>keepPlace,()=>{keepPlace=false;},()=>{keepPlace=true;},'route');
+      give(()=>twoRows,()=>{twoRows=false;},()=>{twoRows=true;},'route');
+      give(()=>routeLimit>1,()=>{routeLimit--;},()=>{routeLimit++;});
+      give(()=>kept.ROUTE&&routeRule(),()=>{keepRouteRule=false;},()=>{keepRouteRule=true;});
+      give(()=>keepGit,()=>{keepGit=false;},()=>{keepGit=true;});
+      // 11-20 (the person: "현황 5줄과 NOW·QUESTIONS·ROUTE가 MESSAGES·MEM보다 먼저 자리를 받게"): MESSAGES and MEM give their last rows (their
+      // rows, then their heads; the USAGE rows after MEM as before) before the STATUS section goes below its five rows and before the route
+      // box goes; the running jobs after it.
+      for(const name of lowest){
+        give(()=>kept[name]&&take[name]>0,()=>{take[name]--;},()=>{take[name]++;});
+        give(()=>kept[name],()=>{kept[name]=false;},()=>{kept[name]=true;});
+        // 11-16: USAGE gives way after MEM does: the harnesses that are not this window's (the last first), then its name row.
+        if(name==='MEM'&&usageOn){
+          for(let i=usageData.length-1;i>=0;i--)if(i!==ownUsage)give(()=>keepLine[i],()=>{keepLine[i]=false;},()=>{keepLine[i]=true;});
+          give(()=>keepUsageHead,()=>{keepUsageHead=false;},()=>{keepUsageHead=true;});
+        }
+      }
+      // Then the STATUS section goes down to its one row of counts, and the route box goes. In the bottom layout, where the route box can stand once the
+      // box is gone and cannot beside it, the box goes first (11-20: of the two the route box, the job that runs now, stays, and the `STATUS ›` button
+      // comes back on the first row); where the route box cannot stand either way the box stays as it did.
+      give(()=>kept.STATUS&&take.STATUS>1,()=>{take.STATUS--;},()=>{take.STATUS++;});
+      if(!side)give(()=>{if(!kept.STATUS||!kept.ROUTE)return false;kept.STATUS=false;const fits=need()<=budget;kept.STATUS=true;return fits;},
+        ()=>{kept.STATUS=false;},()=>{kept.STATUS=true;});
+      if(peersFirst)give(()=>keepOptional,()=>{keepOptional=false;},()=>{keepOptional=true;});
+      give(()=>kept.ROUTE,()=>{kept.ROUTE=false;},()=>{kept.ROUTE=true;});
+      give(()=>keepOptional,()=>{keepOptional=false;},()=>{keepOptional=true;});
+      give(()=>kept.STATUS,()=>{kept.STATUS=false;},()=>{kept.STATUS=true;});
+      give(()=>keepSent&&sentRows.length>0,()=>{keepSent=false;},()=>{keepSent=true;});
+      // (11-16: this window's own usage row beside the buttons costs no row, so it stays while no other usage row is left to give.)
+      give(()=>keepQuota&&(!usageOn||footRule()>0),()=>{keepQuota=false;},()=>{keepQuota=true;});
+      const stuck=new Set();
+      for(const {undo,family} of gave.reverse()){
+        if(family&&stuck.has(family))continue;
+        const was=choices();undo();
+        if(need()>budget){if(family)stuck.add(family);restore(was);}
+      }
+    };
+    // The bottom panel's order for the STATUS box holds only for a box that stands to the end (11-20, review round 3): a box that went for want of rows is
+    // laid out again as if none had stood (the `STATUS ›` button stays on the first row), so the rest keeps the order a window with no document has. Where
+    // the box stands, the route box gave way and no PEERS row shows, the route box (the job that runs now) is tried in the box's place with PEERS giving way
+    // before it: the same rows show, the one that runs stays; a try that cannot stand the route box leaves the first drawing as it was.
+    const start=choices(),boxAtStart=!side&&kept.STATUS,routeAtStart=kept.ROUTE;
+    allocate(false);
+    if(boxAtStart&&!kept.STATUS){restore(start);kept.STATUS=false;allocate(false);}
+    else if(boxAtStart&&routeAtStart&&!kept.ROUTE&&!keepOptional&&peerRows.size>0&&peerRows.size===optional.size){
+      const boxed=choices();restore(start);kept.STATUS=false;allocate(true);
+      if(!kept.ROUTE||need()>budget)restore(boxed);
     }
     const order=[];
     // (`statusSlot`: where the STATUS box stands, under the REPO group's last row; it stands there whichever rows around it have given way.)
