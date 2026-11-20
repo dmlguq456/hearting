@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 
 from .types import ModelCatalog
@@ -13,13 +14,23 @@ _MAX_BYTES = 16 * 1024 * 1024
 
 
 def _json(path):
+    """One list file as JSON, or None. Only a regular file is read: the kind is checked on
+    the opened file (so a swap after any earlier look cannot matter), and the open itself
+    never waits, so a pipe, socket, or device in a list's place is skipped at once."""
     try:
-        if Path(path).stat().st_size > _MAX_BYTES:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
+    except (OSError, ValueError, TypeError):
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_BYTES:
             return None
-        with open(path, encoding="utf-8") as stream:
+        with os.fdopen(fd, encoding="utf-8", closefd=False) as stream:
             return json.load(stream)
     except (OSError, ValueError, UnicodeError, TypeError):
         return None
+    finally:
+        os.close(fd)
 
 
 def _ids(value):

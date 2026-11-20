@@ -10,6 +10,8 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import hashlib
+import inspect
+import time
 from pathlib import Path
 import tempfile
 import unittest
@@ -18,7 +20,9 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools" / "install"))
 import model_follow  # noqa: E402
+import model_settings  # noqa: E402
 
 HARNESSES = ("claude", "codex", "opencode")
 
@@ -83,7 +87,7 @@ class SuccessorRuleTests(unittest.TestCase):
         low = ("low", "medium", "high")
         cases = (("high", low, "high", None), ("xhigh", low, "high", "xhigh"),
                  ("max", low, "high", "max"), ("low", ("medium", "high"), "medium", "low"),
-                 ("xhigh", None, "xhigh", None), ("odd", low, "odd", None))
+                 ("xhigh", None, "xhigh", None))
         for effort, efforts, expected, was in cases:
             with self.subTest(effort=effort, efforts=efforts):
                 rows = [row("m-1"), row("m-2", version=(2,), efforts=efforts)]
@@ -143,10 +147,11 @@ class SurveyTests(unittest.TestCase):
 
     def run_survey(self, adapter, rows, *, client_version=None, probe=None, state="available"):
         catalog = SimpleNamespace(state=state, rows=tuple(rows), client_version=client_version)
-        return model_follow.survey_harness(
-            adapter, environ=self.env, source_root=self.src,
-            read_catalog=lambda _harness: catalog,
-            probe=probe or (lambda _harness: (None, None)))
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            return model_follow.survey_harness(
+                adapter, source_root=self.src,
+                read_catalog=lambda _harness: catalog,
+                probe=probe or (lambda _harness: (None, None)))
 
     @staticmethod
     def names(adapter):
@@ -187,15 +192,16 @@ class SurveyTests(unittest.TestCase):
                     row(name("top-2"), family="top", version=(2,))])
                 entries = {entry["target"]: entry for entry in result["entries"]}
                 deep = {item["key"]: item for item in entries["tier/deep"]["companions"]}
-                self.assertEqual(deep["CFG_TIER_DEEP_FAILOVER_CASCADE"]["to"],
-                                 f"{name('deep-2')}:xhigh {name('light-1')}:medium")
+                self.assertEqual(deep["CFG_TIER_DEEP_FAILOVER_CASCADE"]["swap"],
+                                 {f"{name('deep-1')}:xhigh": f"{name('deep-2')}:xhigh"})
                 self.assertEqual("CFG_V2_AUTO_FALLBACKS" in deep, adapter == "opencode")
                 top = {item["key"]: item for item in entries["tier/top"]["companions"]}
                 if adapter == "opencode":
                     self.assertEqual(top, {})
                 else:  # the reserved name stays reserved: the new one is added, none removed
-                    self.assertEqual(top["CFG_MAIN_SESSION_ONLY_MODELS"]["to"], "top-1 top-2")
-                    self.assertEqual(top["CFG_MAIN_SESSION_ONLY_MODELS"]["add"], "top-2")
+                    self.assertEqual(top["CFG_MAIN_SESSION_ONLY_MODELS"]["add"], ["top-2"])
+                    self.assertEqual(model_follow.final_lines([entries["tier/top"]])
+                                     ["CFG_MAIN_SESSION_ONLY_MODELS"]["to"], "top-1 top-2")
 
     def test_user_file_is_not_touched_by_a_survey(self):
         for adapter in HARNESSES:
@@ -222,8 +228,9 @@ class SurveyTests(unittest.TestCase):
             with self.subTest(adapter=adapter, case="reader raises"):
                 def broken(_harness):
                     raise ValueError("fixture")
-                result = model_follow.survey_harness(
-                    adapter, environ=self.env, source_root=self.src, read_catalog=broken)
+                with mock.patch.dict(os.environ, self.env, clear=True):
+                    result = model_follow.survey_harness(
+                        adapter, source_root=self.src, read_catalog=broken)
                 self.assertEqual(result["status"], "skipped")
                 self.assertEqual(model_follow.lines([result]), [])
             with self.subTest(adapter=adapter, case="broken file"):
@@ -303,6 +310,25 @@ class SurveyTests(unittest.TestCase):
                 self.assertIsNone(found["cli"])
                 self.assertFalse([t for t in model_follow.lines([found]) if "CLI" in t])
 
+    def test_when_no_candidate_is_usable_the_codex_cli_note_still_shows(self):
+        self.user_file("codex")
+        probe = lambda _harness: ((0, 163, 0), "/usr/bin/codex")  # noqa: E731
+        for case, rows in (("only a marked newer model", [row("deep-1", deprecated=True),
+                                                         row("deep-2", version=(2,), deprecated=True)]),
+                           ("only a hidden newer model", [row("deep-1", deprecated=True),
+                                                          row("deep-2", version=(2,), visible=False)]),
+                           ("a pointer that is itself marked", [row("deep-1", deprecated=True, upgrade="deep-2"),
+                                                                row("deep-2", version=(2,), deprecated=True)]),
+                           ("a pointer into another family that is marked",
+                            [row("deep-1", deprecated=True, upgrade="n-7"),
+                             row("n-7", family="other", version=(7,), deprecated=True)])):
+            with self.subTest(case=case):
+                found = self.run_survey("codex", rows, client_version="0.163.0", probe=probe)
+                self.assertEqual({e["kind"] for e in found["entries"] if e["current"]["model"] == "deep-1"},
+                                 {"none"})
+                self.assertIn("deep-1", found["cli"]["models"])
+                self.assertTrue([t for t in model_follow.lines([found]) if "CLI 0.163.0" in t])
+
     def test_claude_cli_note_names_the_model_and_the_needed_version(self):
         self.user_file("claude")
         rows = [row("deep-1"), row("deep-2", version=(2,), min_cli="9.1.0"),
@@ -333,7 +359,7 @@ class SurveyTests(unittest.TestCase):
         self.assertIsNone(model_follow.upgrade_command("claude", "/usr/local/bin/claude"))
 
     def test_installed_version_comes_from_one_bounded_cli_call_and_failure_is_silent(self):
-        done = SimpleNamespace(stdout="codex-cli 0.163.0\n", stderr="")
+        done = SimpleNamespace(stdout="codex-cli 0.163.0\n", stderr="", returncode=0)
         with mock.patch.object(model_follow.shutil, "which", return_value="/bin/codex"), \
                 mock.patch.object(model_follow.subprocess, "run", return_value=done) as run:
             self.assertEqual(model_follow.installed_cli("codex"), ((0, 163, 0), "/bin/codex"))
@@ -344,6 +370,311 @@ class SurveyTests(unittest.TestCase):
             self.assertEqual(model_follow.installed_cli("codex")[0], None)
         with mock.patch.object(model_follow.shutil, "which", return_value=None):
             self.assertEqual(model_follow.installed_cli("codex"), (None, None))
+
+
+class CandidateRuleTests(unittest.TestCase):
+    """Every candidate, the `upgrade` pointer included, passes one check."""
+
+    def test_a_candidate_marked_previous_generation_is_never_followed(self):
+        same = [row("m-1"), row("m-2", version=(2,), deprecated=True)]
+        self.assertEqual(model_follow.successor(same, "m-1")["kind"], "none")
+        older = [row("m-1"), row("m-2", version=(2,), deprecated=True), row("m-3", version=(1, 5))]
+        self.assertEqual(model_follow.successor(older, "m-1")["model"], "m-3")
+
+    def test_the_upgrade_pointer_is_checked_like_any_other_candidate(self):
+        for pointer in (row("m-2", version=(2,), deprecated=True),
+                        row("m-2", version=(2,), visible=False),
+                        row("m-2", version=(2,), efforts=("minimal",)),
+                        row("m-2", version=(2,), min_cli="9.0.0"),
+                        row("n-7", family="other", version=(7,), deprecated=True),
+                        row("n-7", family="other", version=(7,), visible=False),
+                        row("n-7", family="other", version=(7,), efforts=("none",)),
+                        row("n-7", family="other", version=(7,), min_cli="9.0.0")):
+            with self.subTest(pointer=pointer["id"], fields=sorted(k for k, v in pointer.items() if v and k not in ("id", "family", "version"))):
+                rows = [row("m-1", upgrade=pointer["id"]), pointer]
+                self.assertEqual(model_follow.successor(rows, "m-1", "high")["kind"], "none")
+                rows.append(row("m-3", version=(3,)))
+                self.assertEqual(model_follow.successor(rows, "m-1", "high")["model"], "m-3")
+
+    def test_a_good_pointer_in_another_family_is_still_a_proposal(self):
+        rows = [row("m-1", upgrade="n-7"), row("n-7", family="other", version=(7,), efforts=("high",))]
+        found = model_follow.successor(rows, "m-1", "high")
+        self.assertEqual((found["kind"], found["model"]), ("proposal", "n-7"))
+
+    def test_the_current_models_own_mark_is_kept(self):
+        rows = [row("m-1", deprecated=True), row("m-2", version=(2,), deprecated=True)]
+        found = model_follow.successor(rows, "m-1")
+        self.assertEqual((found["kind"], found["reason"], found["deprecated"]),
+                         ("none", "no-successor", True))
+
+
+class StorableEffortTests(unittest.TestCase):
+    """The effort a line names is one `hearting model set` stores: candidates, the stored
+    set and the printed command agree, on every harness and for a tier and a depth line."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="mf1-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        for adapter in HARNESSES:
+            config = self.root / "src" / "adapters" / adapter / "config"
+            config.mkdir(parents=True)
+            (config / "models.conf").write_text(conf_text(adapter))
+        self.env = {"HOME": str(self.root), "CLAUDE_CONFIG_DIR": str(self.root / "claude"),
+                    "CODEX_HOME": str(self.root / "codex"), "XDG_CONFIG_HOME": str(self.root / "cfg"),
+                    "PATH": ""}
+        self.src = str(self.root / "src")
+        base = {"claude": self.root / "claude", "codex": self.root / "codex",
+                "opencode": self.root / "cfg" / "opencode"}
+        for adapter in HARNESSES:
+            path = base[adapter] / "agent-config" / "models.conf"
+            path.parent.mkdir(parents=True)
+            path.write_text(conf_text(adapter))
+
+    def survey(self, adapter, efforts):
+        prefix = "prov/" if adapter == "opencode" else ""
+        rows = [row(prefix + "deep-1"), row(prefix + "deep-2", version=(2,), efforts=efforts)]
+        catalog = SimpleNamespace(state="available", rows=tuple(rows), client_version=None)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            return model_follow.survey_harness(adapter, source_root=self.src,
+                                               read_catalog=lambda _h: catalog,
+                                               probe=lambda _h: (None, None))
+
+    def plan(self, adapter, entry, efforts):
+        """What `hearting model set` would store for the printed command (nothing is written)."""
+        prefix = "prov/" if adapter == "opencode" else ""
+        words = entry["command"].split()
+        self.assertEqual(words[:3], ["hearting", "model", "set"])
+        observation = ({"variants": {prefix + "deep-2": tuple(efforts)}} if adapter == "opencode" else None)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            return model_settings.set_model(adapter, words[4], words[5], dry_run=True,
+                                            environ=self.env, source_root=self.src,
+                                            variant_observation=observation)
+
+    def test_a_model_that_lists_only_unstorable_efforts_is_not_followed(self):
+        for adapter in HARNESSES:
+            for efforts in (("minimal",), ("none",), ("minimal", "none")):
+                with self.subTest(adapter=adapter, efforts=efforts):
+                    result = self.survey(adapter, efforts)
+                    cells = {e["target"]: e for e in result["entries"]}
+                    for target in ("profile/deep", "tier/deep", "tier/balanced-deep"):
+                        self.assertEqual((cells[target]["kind"], cells[target]["command"]),
+                                         ("none", None))
+                    self.assertEqual(model_follow.lines([result]), [])
+
+    def test_every_printed_command_stores_the_effort_its_line_says(self):
+        cases = ((("minimal", "medium"), {"profile/deep": "medium", "tier/deep": "medium",
+                                          "tier/balanced-deep": "medium"}),
+                 (("high", "xhigh"), {"profile/deep": "high", "tier/deep": "xhigh",
+                                      "tier/balanced-deep": "high"}),
+                 (("none", "low", "high"), {"profile/deep": "high", "tier/deep": "high",
+                                            "tier/balanced-deep": "low"}),
+                 (("minimal", "high"), {"profile/deep": "high", "tier/deep": "high",
+                                        "tier/balanced-deep": "high"}))
+        for adapter in HARNESSES:
+            for efforts, expected in cases:
+                with self.subTest(adapter=adapter, efforts=efforts):
+                    result = self.survey(adapter, efforts)
+                    cells = {e["target"]: e for e in result["entries"]}
+                    for target, effort in expected.items():
+                        entry = cells[target]
+                        self.assertEqual((entry["kind"], entry["successor"]["effort"]), ("follow", effort))
+                        self.assertTrue(entry["command"].endswith("@" + effort), entry["command"])
+                        done = self.plan(adapter, entry, efforts)
+                        self.assertEqual(done["new_budget"], effort)
+                        self.assertEqual(done["new_model"], entry["successor"]["model"])
+                    for text in model_follow.lines([result]):
+                        self.assertNotIn("minimal", text)
+
+    def test_opencode_runtime_default_stays_a_storable_request(self):
+        rows = [row("m-1"), row("m-2", version=(2,), efforts=("minimal",))]
+        self.assertEqual(model_follow.successor(rows, "m-1", "runtime-default")["kind"], "none")
+        found = model_follow.successor(rows, "m-1", "runtime-default",
+                                       settable=model_follow._SETTABLE_OPENCODE)
+        self.assertEqual((found["kind"], found["effort"]), ("follow", "runtime-default"))
+
+    def test_a_cell_with_no_effort_is_followed_without_one(self):
+        rows = [row("m-1"), row("m-2", version=(2,), efforts=("high",))]
+        found = model_follow.successor(rows, "m-1", None)
+        self.assertEqual((found["kind"], found["effort"]), ("follow", None))
+        self.assertEqual(model_follow._command("codex", {"target": "tier/deep", "successor": {
+            "model": "m-2", "effort": None}}), "hearting model set codex tier/deep m-2")
+
+
+class CliObservationTests(unittest.TestCase):
+    """The installed CLI is asked once per survey, and a failed run says nothing."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="mf1-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.counter = self.root / "calls"
+        self.counter.write_text("")
+
+    def fake(self, name, body):
+        path = self.bin / name
+        path.write_text(f"#!/bin/sh\necho x >> {self.counter}\n{body}\n")
+        path.chmod(0o700)
+
+    def calls(self):
+        return len(self.counter.read_text().split())
+
+    def installed(self, name="claude"):
+        with mock.patch.dict(os.environ, {"PATH": str(self.bin)}):
+            return model_follow.installed_cli(name)
+
+    def test_a_failed_cli_gives_no_version_whatever_it_printed(self):
+        self.fake("claude", "echo 'failed: requires 9.0.0' >&2; exit 1")
+        self.assertEqual(self.installed(), (None, str(self.bin / "claude")))
+        self.fake("claude", "echo 'claude 9.0.0'; exit 3")
+        self.assertEqual(self.installed()[0], None)
+        self.fake("claude", "exit 0")
+        self.assertEqual(self.installed()[0], None)
+        self.fake("claude", "echo garbage")
+        self.assertEqual(self.installed()[0], None)
+        self.fake("claude", "echo '2.1.5 (Claude Code)'")
+        self.assertEqual(self.installed()[0], (2, 1, 5))
+
+    def test_a_failed_cli_neither_admits_a_candidate_nor_confirms_a_codex_note(self):
+        helper = SurveyTests("run_survey")
+        helper.setUp()
+        self.addCleanup(helper.doCleanups)
+        self.fake("claude", "echo 'failed: requires 9.0.0' >&2; exit 1")
+        helper.user_file("claude")
+        rows = [row("deep-1"), row("deep-2", version=(2,), min_cli="2.0.0")]
+        found = helper.run_survey("claude", rows, probe=lambda h: self.installed(h))
+        self.assertEqual({e["kind"] for e in found["entries"]}, {"none"})
+        self.assertIsNone(found["cli"])
+        self.fake("codex", "echo 'codex failed 0.163.0' >&2; exit 2")
+        helper.user_file("codex")
+        found = helper.run_survey("codex", [row("deep-1", deprecated=True)], client_version="0.163.0",
+                                  probe=lambda h: self.installed(h))
+        self.assertIsNone(found["cli"])
+
+    def test_one_survey_asks_the_cli_once_even_when_it_hangs(self):
+        helper = SurveyTests("run_survey")
+        helper.setUp()
+        self.addCleanup(helper.doCleanups)
+        helper.user_file("claude")
+        self.fake("claude", "exec /bin/sleep 60")
+        rows = [row("deep-1"), row("deep-2", version=(2,), min_cli="2.0.0"),
+                row("light-1", family="light"), row("light-2", family="light", version=(2,), min_cli="2.0.0")]
+        started = time.monotonic()
+        with mock.patch.object(model_follow, "_CLI_TIMEOUT", 1):
+            found = helper.run_survey("claude", rows, probe=lambda h: self.installed(h))
+        elapsed = time.monotonic() - started
+        self.assertEqual(self.calls(), 1)
+        self.assertLess(elapsed, 1.9)
+        self.assertEqual(model_follow.lines([found]), [])
+
+    def test_a_probe_is_called_once_for_choosing_and_noting_and_a_raise_counts_too(self):
+        helper = SurveyTests("run_survey")
+        helper.setUp()
+        self.addCleanup(helper.doCleanups)
+        helper.user_file("claude")
+        rows = [row("deep-1"), row("deep-2", version=(2,), min_cli="9.0.0"),
+                row("light-1", family="light"), row("light-2", family="light", version=(2,), min_cli="9.0.0")]
+        for answer in (((2, 1, 5), "/bin/claude"), (None, None), RuntimeError("fixture")):
+            with self.subTest(answer=answer):
+                seen = []
+
+                def probe(harness):
+                    seen.append(harness)
+                    if isinstance(answer, Exception):
+                        raise answer
+                    return answer
+
+                found = helper.run_survey("claude", rows, probe=probe)
+                self.assertEqual(seen, ["claude"])
+                self.assertEqual(found["status"], "ok")
+        none_needed = helper.run_survey("claude", [row("deep-1"), row("deep-2", version=(2,))],
+                                        probe=lambda _h: self.fail("no candidate needs the CLI"))
+        self.assertIsNone(none_needed["cli"])
+
+
+class OneEnvironmentTests(unittest.TestCase):
+    def test_a_survey_reads_the_process_environment_and_never_swaps_it(self):
+        self.assertNotIn("environ", inspect.signature(model_follow.survey_harness).parameters)
+        helper = SurveyTests("run_survey")
+        helper.setUp()
+        self.addCleanup(helper.doCleanups)
+        helper.user_file("codex")
+        seen = []
+
+        def reader(_harness):
+            seen.append(dict(os.environ))
+            return SimpleNamespace(state="available", rows=(row("deep-1"),), client_version=None)
+
+        with mock.patch.dict(os.environ, helper.env, clear=True):
+            before = dict(os.environ)
+            model_follow.survey_harness("codex", source_root=helper.src, read_catalog=reader,
+                                        probe=lambda _h: (None, None))
+            self.assertEqual(dict(os.environ), before)
+        self.assertEqual(seen, [before])
+
+
+class FinalLineTests(unittest.TestCase):
+    """Cells give small edits; one final value per line comes from `final_lines`."""
+
+    def entries(self, adapter="codex", values=None, pairs=(("a-1", "a-2"), ("b-1", "b-2"))):
+        values = values or {
+            model_follow.CASCADE_KEY: "a-1:high b-1:high a-1-mini:low",
+            model_follow.OPENCODE_FALLBACK_KEY: "a-1:runtime-default b-1:medium",
+            "CFG_MAIN_SESSION_ONLY_MODELS": "a-1 b-1"}
+        return [{"companions": model_follow.companions(adapter, values, old, new, ("medium", "high"))}
+                for old, new in pairs]
+
+    def test_a_cell_lists_only_its_own_swap_never_a_whole_line(self):
+        first = self.entries()[0]["companions"]
+        self.assertEqual({c["key"]: c.get("swap") or c.get("add") for c in first},
+                         {model_follow.CASCADE_KEY: {"a-1:high": "a-2:high"},
+                          "CFG_MAIN_SESSION_ONLY_MODELS": ["a-2"]})
+        self.assertNotIn("to", first[0])
+
+    def test_two_families_changing_together_give_one_final_value_per_line(self):
+        final = model_follow.final_lines(self.entries())
+        self.assertEqual(final[model_follow.CASCADE_KEY],
+                         {"from": "a-1:high b-1:high a-1-mini:low", "to": "a-2:high b-2:high a-1-mini:low"})
+        self.assertEqual(final["CFG_MAIN_SESSION_ONLY_MODELS"],
+                         {"from": "a-1 b-1", "to": "a-1 b-1 a-2 b-2"})
+        self.assertNotIn(model_follow.OPENCODE_FALLBACK_KEY, final)
+
+    def test_opencode_fallbacks_merge_too_and_keep_runtime_default(self):
+        entries = self.entries("opencode")
+        final = model_follow.final_lines(entries)
+        self.assertEqual(final[model_follow.OPENCODE_FALLBACK_KEY]["to"], "a-2:runtime-default b-2:medium")
+        self.assertNotIn("CFG_MAIN_SESSION_ONLY_MODELS", final)
+
+    def test_order_does_not_matter_and_a_repeated_cell_changes_nothing_more(self):
+        entries = self.entries()
+        forward = model_follow.final_lines(entries)
+        self.assertEqual(model_follow.final_lines(entries[::-1])[model_follow.CASCADE_KEY]["to"],
+                         forward[model_follow.CASCADE_KEY]["to"])
+        self.assertEqual(model_follow.final_lines([*entries, *entries]), forward)
+
+    def test_an_item_two_cells_map_differently_takes_the_first_in_file_order(self):
+        values = {model_follow.CASCADE_KEY: "a-1:high"}
+        one = {"companions": model_follow.companions("codex", values, "a-1", "a-2", None)}
+        two = {"companions": model_follow.companions("codex", values, "a-1", "a-3", None)}
+        self.assertEqual(model_follow.final_lines([one, two])[model_follow.CASCADE_KEY]["to"], "a-2:high")
+
+    def test_a_survey_with_two_families_changing_gives_the_merged_cascade(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                helper = SurveyTests("run_survey")
+                helper.setUp()
+                self.addCleanup(helper.doCleanups)
+                helper.user_file(adapter)
+                name = helper.names(adapter)
+                result = helper.run_survey(adapter, [
+                    row(name("deep-1")), row(name("deep-2"), version=(2,), efforts=("medium", "xhigh")),
+                    row(name("light-1"), family="light"),
+                    row(name("light-2"), family="light", version=(2,), efforts=("low", "medium"))])
+                final = model_follow.final_lines(result["entries"])
+                self.assertEqual(final[model_follow.CASCADE_KEY]["to"],
+                                 f"{name('deep-2')}:xhigh {name('light-2')}:medium")
 
 
 if __name__ == "__main__":

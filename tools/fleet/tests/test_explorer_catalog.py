@@ -7,8 +7,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import socket
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -661,7 +665,9 @@ class ModelCatalogTests(unittest.TestCase):
             " successor · update the Codex CLI yourself"])
         cascade = {e["target"]: e["companions"] for e in result["entries"]}["tier/deep"]
         self.assertEqual([c["key"] for c in cascade], ["CFG_TIER_DEEP_FAILOVER_CASCADE"])
-        self.assertTrue(cascade[0]["to"].startswith("gpt-6.2-sol:high "))
+        import model_follow
+        final = model_follow.final_lines([e for e in result["entries"] if e["target"] == "tier/deep"])
+        self.assertTrue(final["CFG_TIER_DEEP_FAILOVER_CASCADE"]["to"].startswith("gpt-6.2-sol:high "))
         self.assertEqual(path.read_bytes(), before)
 
     def test_claude_files_give_newer_and_cli_lines_and_leave_aliases_alone(self):
@@ -713,6 +719,233 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertTrue(lines[2].endswith(" · hearting model set opencode profile/deep "
                                           "opencode-go/muse-spark-1.3-contributor@high"))
         self.assertIsNone(result["cli"])  # OpenCode never gets the CLI note
+
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def _fixture_env(root):
+    return {"HOME": str(root), "PATH": "", "XDG_STATE_HOME": str(root / "state"),
+            "XDG_CONFIG_HOME": str(root / "config"), "XDG_DATA_HOME": str(root / "data"),
+            "XDG_CACHE_HOME": str(root / "cache"), "CODEX_HOME": str(root / "codex"),
+            "HEARTING_MODEL_CONFIG_HOME": str(root / "claude"), "OPENCODE_RUNTIME_VERSION": "1.19.0"}
+
+
+class ListPlaceTests(unittest.TestCase):
+    """A list's place that is not a regular file is skipped at once, never waited on."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="fleet-place-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.env = _fixture_env(self.root)
+
+    def places(self):
+        return {"claude": self.root / "claude/cache/model-catalog/one.json",
+                "codex": self.root / "codex/models_cache.json",
+                "opencode": self.root / "cache/opencode/models.json"}
+
+    def read_in_child(self, harness):
+        """The catalog state a fresh process reads, with a time limit (a wait would be a failure)."""
+        code = ("import sys; sys.path.insert(0, sys.argv[1]);"
+                "from tools.fleet.explorer import model_catalog;"
+                "print(model_catalog.read_catalog(sys.argv[2]).state)")
+        done = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(ROOT), harness],
+                              env=self.env, capture_output=True, text=True, timeout=10)
+        return done.stdout.strip()
+
+    def test_a_pipe_in_each_harnesss_list_place_is_unknown_and_returns_at_once(self):
+        for harness, place in self.places().items():
+            with self.subTest(harness=harness):
+                place.parent.mkdir(parents=True, exist_ok=True)
+                os.mkfifo(place)
+                started = time.monotonic()
+                self.assertEqual(self.read_in_child(harness), "unknown")
+                self.assertLess(time.monotonic() - started, 5)
+
+    def test_a_socket_or_a_directory_is_skipped_too(self):
+        place = self.places()["codex"]
+        place.parent.mkdir(parents=True)
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(place))
+            self.assertEqual(self.read_in_child("codex"), "unknown")
+        place.unlink()
+        place.mkdir()
+        self.assertEqual(self.read_in_child("codex"), "unknown")
+
+    def test_a_regular_file_and_a_link_to_one_read_as_before(self):
+        document = {"models": [{"slug": "gpt-6-elm", "visibility": "list"}]}
+        place = self.places()["codex"]
+        place.parent.mkdir(parents=True)
+        real = self.root / "real.json"
+        real.write_text(json.dumps(document))
+        place.symlink_to(real)
+        self.assertEqual(model_catalog._json(place), document)
+        self.assertEqual(self.read_in_child("codex"), "available")
+        place.unlink()
+        place.write_text("{broken")
+        self.assertIsNone(model_catalog._json(place))
+        place.write_text(json.dumps(document) + " " * (model_catalog._MAX_BYTES))
+        self.assertIsNone(model_catalog._json(place))
+        self.assertIsNone(model_catalog._json(self.root / "absent.json"))
+
+    def test_a_link_to_a_pipe_is_skipped(self):
+        place = self.places()["codex"]
+        place.parent.mkdir(parents=True)
+        pipe = self.root / "pipe"
+        os.mkfifo(pipe)
+        place.symlink_to(pipe)
+        self.assertEqual(self.read_in_child("codex"), "unknown")
+
+    def test_what_is_opened_is_what_is_judged_even_if_the_place_changed_since(self):
+        place = self.root / "list.json"
+        place.write_text("{}")  # a regular file when anyone looked
+        read, write = os.pipe()  # but a pipe when it is opened
+        self.addCleanup(os.close, write)
+        flags = []
+        real_open = os.open
+
+        def swapped(path, flag, *args):
+            flags.append(flag)
+            return read if str(path) == str(place) else real_open(path, flag, *args)
+
+        with mock.patch.object(model_catalog.os, "open", side_effect=swapped):
+            self.assertIsNone(model_catalog._json(place))
+        self.assertTrue(flags and flags[0] & os.O_NONBLOCK)
+        with self.assertRaises(OSError):  # the descriptor was released by the reader
+            os.fstat(read)
+
+
+class ServiceDeadlineTests(unittest.TestCase):
+    """A service that stops answering never holds the survey past a fixed total time."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="fleet-svc-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        patch = mock.patch.dict(os.environ, _fixture_env(self.root))
+        patch.start()
+        self.addCleanup(patch.stop)
+        patch = mock.patch.object(model_catalog, "_candidates", return_value=())
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def serve(self, handler):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.service(server.server_port)
+        return server
+
+    def service(self, port):
+        path = self.root / "state/opencode/service.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"version": "2.0.32", "url": f"http://127.0.0.1:{port}"}))
+        path.chmod(0o600)
+
+    def timed(self, seconds=1.0):
+        import opencode_runtime
+        started = time.monotonic()
+        with mock.patch.object(opencode_runtime, "SERVICE_READ_SECONDS", seconds):
+            catalog = model_catalog.read_catalog("opencode")
+        return catalog, time.monotonic() - started
+
+    def test_a_service_that_accepts_and_never_answers_ends_in_the_total_time(self):
+        held = []
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        self.addCleanup(listener.close)
+        self.service(listener.getsockname()[1])
+        threading.Thread(target=lambda: held.append(listener.accept()[0]), daemon=True).start()
+        catalog, elapsed = self.timed(1.0)
+        self.assertEqual((catalog.state, catalog.models, catalog.rows), ("unknown", (), ()))
+        self.assertLess(elapsed, 2.5)
+        for conn in held:
+            conn.close()
+
+    def test_a_body_sent_a_few_bytes_at_a_time_ends_in_the_total_time(self):
+        body = json.dumps({"data": []}).encode()
+
+        class Slow(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    for byte in body:
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        time.sleep(0.4)
+                except OSError:
+                    pass
+
+            def log_message(self, *_args):
+                pass
+
+        self.serve(Slow)
+        catalog, elapsed = self.timed(1.0)
+        self.assertEqual((catalog.state, catalog.models), ("unknown", ()))
+        self.assertLess(elapsed, 2.5)
+
+    def test_headers_sent_a_few_bytes_at_a_time_end_in_the_total_time(self):
+        class SlowHeaders(BaseHTTPRequestHandler):
+            def do_GET(self):
+                try:
+                    for byte in b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}":
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        time.sleep(0.2)
+                except OSError:
+                    pass
+
+            def log_message(self, *_args):
+                pass
+
+        self.serve(SlowHeaders)
+        catalog, elapsed = self.timed(1.0)
+        self.assertEqual((catalog.state, catalog.models), ("unknown", ()))
+        self.assertLess(elapsed, 2.5)
+
+    def test_a_prompt_answer_still_reads_and_the_deadline_is_a_few_seconds(self):
+        import opencode_runtime
+
+        class Prompt(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({"data": [{"providerID": "p", "id": "m-1", "enabled": True,
+                                             "status": "active"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        self.serve(Prompt)
+        catalog, _elapsed = self.timed(opencode_runtime.SERVICE_READ_SECONDS)
+        self.assertEqual((catalog.state, catalog.models), ("available", ("p/m-1",)))
+        self.assertLessEqual(opencode_runtime.SERVICE_READ_SECONDS, 5)
+
+    def test_no_way_exists_to_start_the_service_from_a_read(self):
+        starts = [mock.patch.object(subprocess, name) for name in ("Popen", "run", "call", "check_call",
+                                                                  "check_output")]
+        starts += [mock.patch.object(os, name) for name in ("system", "fork", "posix_spawn", "posix_spawnp",
+                                                           "execv", "execve", "spawnv")]
+        mocks = []
+        for patch in starts:
+            mocks.append(patch.start())
+            self.addCleanup(patch.stop)
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+        closed.close()  # nothing listens there
+        self.service(port)
+        self.assertEqual(self.timed(1.0)[0].state, "unknown")
+        (self.root / "state/opencode/service.json").unlink()
+        self.assertEqual(model_catalog.read_catalog("opencode").state, "unknown")  # no record, a v1 runtime, no cache
+        self.assertEqual([m.call_count for m in mocks], [0] * len(mocks))
 
 
 if __name__ == "__main__":

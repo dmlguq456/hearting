@@ -332,6 +332,45 @@ def observed_variants(value):
     return tuple(result)
 
 
+SERVICE_READ_SECONDS = 3.0
+
+
+def _deadline_opener(deadline):
+    """An opener with no redirects or proxies whose whole exchange ends at `deadline`.
+
+    Each socket read waits at most what is left, so a service that accepts and never
+    answers, or sends bytes a few at a time, cannot hold the caller past the deadline
+    (a per-operation timeout alone resets with every byte).
+    """
+    # urllib.request loads platform proxy helpers. Keep that dependency at the HTTP
+    # boundary, away from shared runtime/dispatch-only imports.
+    import socket
+    import urllib.request
+
+    class DeadlineSocket(socket.socket):
+        def recv_into(self, *args, **kwargs):
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError("service read deadline")
+            self.settimeout(min(2.0, left))
+            return super().recv_into(*args, **kwargs)
+
+    class Connection(http.client.HTTPConnection):
+        def connect(self):
+            plain = socket.create_connection((self.host, self.port), self.timeout, self.source_address)
+            self.sock = DeadlineSocket(plain.family, plain.type, plain.proto, fileno=plain.detach())
+
+    class Handler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(Connection, req)
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), Handler, NoRedirect())
+
+
 def read_model_catalog(*, directory=None, environ=None):
     """Read the existing V2 service's catalog without starting or refreshing it.
 
@@ -395,15 +434,9 @@ def read_model_catalog(*, directory=None, environ=None):
             headers["Authorization"] = "Basic " + base64.b64encode(
                 ("opencode:" + password).encode()).decode("ascii")
 
-        # urllib.request loads platform proxy helpers. Keep that dependency at
-        # the HTTP boundary, away from shared runtime/dispatch-only imports.
         import urllib.request
 
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, *args, **kwargs):
-                return None
-
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        opener = _deadline_opener(time.monotonic() + SERVICE_READ_SECONDS)
         query = urlencode({"location[directory]": str(directory)})
         request = urllib.request.Request(url.rstrip("/") + "/api/model?" + query, headers=headers)
         limit = 16 * 1024 * 1024

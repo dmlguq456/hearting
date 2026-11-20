@@ -7,9 +7,13 @@ that each harness's own catalog reader produces (`tools/fleet/explorer/model_cat
 vendor naming patterns stay in those readers. Nothing here writes the user's
 `models.conf`, starts a service, refreshes a catalog, or calls a model.
 
-The result has one entry per cell (a depth line `model/<id>:<effort>` or a tier line),
-each carrying the lines that would have to change with it, so a later step that writes
-only needs to apply what is listed here.
+The result has one entry per cell (a depth line `model/<id>:<effort>` or a tier line).
+A cell lists only the small edits its lines need ("this item for that one", "add this
+name"); `final_lines()` merges the edits of every cell into one final value per line, so
+a later step that writes applies that, never one cell's edit after another's.
+
+One survey reads one environment: the process environment, like every caller. The CLI
+version is asked once per survey, and a failure or a timeout counts as that one answer.
 """
 from __future__ import annotations
 
@@ -33,9 +37,11 @@ OPENCODE_FALLBACK_KEY = "CFG_V2_AUTO_FALLBACKS"
 # A new model priced above PRICE_LIMIT times, or below 1/PRICE_LIMIT of, the current one
 # is shown as a proposal instead of a model to follow (only OpenCode's list has prices).
 PRICE_LIMIT = 2.0
-# Budgets `hearting model set <harness> <target> <model>@<budget>` accepts.
-_SETTABLE = {"low", "medium", "high", "xhigh", "max"}
+# Budgets `hearting model set <harness> <target> <model>@<budget>` accepts. The efforts a
+# new model is fitted to, and the command that names them, both come from this one set.
+_SETTABLE = frozenset({"low", "medium", "high", "xhigh", "max"})
 _SETTABLE_OPENCODE = _SETTABLE | {"runtime-default"}
+_CLI_TIMEOUT = 3
 _CLI_NAME = {"claude": "Claude Code", "codex": "Codex"}
 _VERSION = re.compile(r"\d+(?:\.\d+)+")
 
@@ -47,21 +53,38 @@ def _numbers(text) -> tuple[int, ...] | None:
 
 # ---- the rule ----------------------------------------------------------------------
 
-def _fit(effort, efforts):
-    """The user's effort, or the one just below it when the new model lacks it."""
-    if effort is None or not efforts:
-        return effort, None
-    return opencode_runtime.fit_variant(effort, tuple(efforts))
+def _settable(adapter: str):
+    return _SETTABLE_OPENCODE if adapter == "opencode" else _SETTABLE
+
+
+def _fit(effort, efforts, settable=_SETTABLE):
+    """`(effort, fit_from)` a stored line can carry, or None when there is none.
+
+    The user's effort stays, or moves to the value just below it (the lowest accepted one
+    when nothing is below) among the new model's efforts that `hearting model set` can
+    store. A model whose listed efforts are all unstorable (`minimal`, `none`), or an
+    effort off the storable set, cannot be written, so it is not a model to follow.
+    """
+    if effort is None:
+        return None, None
+    observed = tuple(item for item in efforts or () if item in settable)
+    if efforts and not observed and effort != "runtime-default":
+        return None
+    fitted, was = opencode_runtime.fit_variant(effort, observed)
+    return (fitted, was) if fitted in settable else None
 
 
 def successor(rows: Iterable[Mapping], model: str, effort: str | None = None, *,
-              installed: Callable[[], tuple | None] | None = None) -> dict:
+              installed: Callable[[], tuple | None] | None = None,
+              settable=_SETTABLE) -> dict:
     """Decide what the cell `model` should follow, from catalog rows only.
 
     Returns ``{"kind": "follow"|"proposal"|"none", "reason", "model", "effort",
     "fit_from", "deprecated"}``. ``installed`` lazily gives the installed CLI version
-    (a tuple); a candidate that needs a newer CLI than a known-too-old or unknown one
-    is not followed.
+    (a tuple). Every candidate, the `upgrade` pointer included, must be visible in this
+    account, not marked previous-generation, storable at the cell's effort, and runnable
+    by the installed CLI; a candidate that needs a newer CLI than a known-too-old or
+    unknown one is not followed.
     """
     rows = list(rows)
     by_id = {row["id"]: row for row in rows}
@@ -76,7 +99,7 @@ def successor(rows: Iterable[Mapping], model: str, effort: str | None = None, *,
         return {**result, "reason": "no-pattern"}
 
     def usable(row):
-        if not row.get("visible"):
+        if not row.get("visible") or row.get("deprecated") or _fit(effort, row.get("efforts"), settable) is None:
             return False
         needs = _numbers(row.get("min_cli"))
         if needs is None:
@@ -90,7 +113,7 @@ def successor(rows: Iterable[Mapping], model: str, effort: str | None = None, *,
 
     chosen, reason = None, None
     pointer = by_id.get(current.get("upgrade") or "")
-    if pointer is not None and pointer.get("visible"):
+    if pointer is not None and usable(pointer):
         if pointer.get("family") == family:
             chosen = pointer if newer(pointer) else None
         else:
@@ -107,7 +130,7 @@ def successor(rows: Iterable[Mapping], model: str, effort: str | None = None, *,
             ratio = after / before if before else float("inf")
             if ratio > PRICE_LIMIT or ratio < 1 / PRICE_LIMIT:
                 reason = "price x%.1f" % ratio if ratio != float("inf") else "price from free"
-    fitted, fit_from = _fit(effort, chosen.get("efforts"))
+    fitted, fit_from = _fit(effort, chosen.get("efforts"), settable)
     return {**result, "kind": "proposal" if reason else "follow", "reason": reason or "newer",
             "model": chosen["id"], "effort": fitted, "fit_from": fit_from}
 
@@ -134,58 +157,83 @@ def cells(adapter: str, values: Mapping[str, str]) -> list[dict]:
     return found
 
 
-def _swap(value: str, current: str, replacement: str, efforts) -> str | None:
-    """`model:effort` entries with `current` swapped for `replacement`, or None."""
-    items, changed = [], False
+def _swaps(value: str, current: str, replacement: str, efforts, settable) -> dict[str, str]:
+    """`{old item: new item}` for the `model:effort` items of `value` that name `current`."""
+    found = {}
     for item in value.split():
         name, sep, effort = item.partition(":")
         if sep and name == current:
-            effort = _fit(effort, efforts)[0]
-            item, changed = f"{replacement}:{effort}", True
-        items.append(item)
-    return " ".join(items) if changed else None
+            fitted = _fit(effort, efforts, settable)
+            found[item] = f"{replacement}:{fitted[0] if fitted else effort}"
+    return found
 
 
 def companions(adapter: str, values: Mapping[str, str], current: str, replacement: str,
                efforts) -> list[dict]:
-    """Other lines that name `current` and so must change with its cell."""
+    """The edits other lines need so they follow one cell, never a whole new value.
+
+    `{"key", "from", "swap": {old item: new item}}` for a list of `model:effort` items, and
+    `{"key", "from", "add": [name]}` for the main-session-only list (a name is only added).
+    Two cells can edit the same line; `final_lines()` merges them.
+    """
+    settable = _settable(adapter)
     found = []
-    swapped = _swap(values.get(CASCADE_KEY, ""), current, replacement, efforts)
-    if swapped:
-        found.append({"key": CASCADE_KEY, "from": values[CASCADE_KEY], "to": swapped})
-    if adapter == "opencode":
-        swapped = _swap(values.get(OPENCODE_FALLBACK_KEY, ""), current, replacement, efforts)
-        if swapped:
-            found.append({"key": OPENCODE_FALLBACK_KEY, "from": values[OPENCODE_FALLBACK_KEY],
-                          "to": swapped})
+    for key in (CASCADE_KEY, *((OPENCODE_FALLBACK_KEY,) if adapter == "opencode" else ())):
+        swap = _swaps(values.get(key, ""), current, replacement, efforts, settable)
+        if swap:
+            found.append({"key": key, "from": values[key], "swap": swap})
     reserved = values.get(model_config.MAIN_SESSION_ONLY_KEY, "").split()
     if (adapter in ("claude", "codex") and model_config.restricted_model(current, reserved)
             and not model_config.restricted_model(replacement, reserved)):
         found.append({"key": model_config.MAIN_SESSION_ONLY_KEY,
-                      "from": values[model_config.MAIN_SESSION_ONLY_KEY],
-                      "add": replacement, "to": " ".join([*reserved, replacement])})
+                      "from": values[model_config.MAIN_SESSION_ONLY_KEY], "add": [replacement]})
     return found
 
 
+def final_lines(entries: Iterable[Mapping]) -> dict[str, dict]:
+    """One final value per companion line, from the edits of every given entry.
+
+    `{key: {"from": value now, "to": final value}}`. A swap changes every item equal to its
+    old item once (the first cell in file order wins if two cells map one item differently);
+    an add appends a name that is not there yet, in order. A later step that writes takes
+    `to` as it is and applies nothing else to the line.
+    """
+    found: dict[str, dict] = {}
+    for entry in entries:
+        for item in entry.get("companions", ()):
+            line = found.setdefault(item["key"], {"from": item["from"], "swaps": {}, "adds": []})
+            for old, new in item.get("swap", {}).items():
+                line["swaps"].setdefault(old, new)
+            line["adds"].extend(name for name in item.get("add", ()) if name not in line["adds"])
+    final = {}
+    for key, line in found.items():
+        tokens = [line["swaps"].get(token, token) for token in line["from"].split()]
+        tokens += [name for name in line["adds"] if name not in tokens]
+        final[key] = {"from": line["from"], "to": " ".join(tokens)}
+    return final
+
+
 def _command(adapter, entry) -> str | None:
-    model, effort = entry["successor"]["model"], entry["successor"]["effort"]
-    settable = _SETTABLE_OPENCODE if adapter == "opencode" else _SETTABLE
-    budget = f"@{effort}" if effort in settable else ""
-    return f"hearting model set {adapter} {entry['target']} {model}{budget}"
+    found = entry["successor"]
+    budget = f"@{found['effort']}" if found["effort"] else ""
+    return f"hearting model set {adapter} {entry['target']} {found['model']}{budget}"
 
 
 # ---- reading the installed CLI -----------------------------------------------------
 
 def installed_cli(harness: str) -> tuple[tuple | None, str | None]:
-    """(version, path) of the harness CLI on PATH. One short `--version` call; any
-    failure gives (None, ...) and the CLI notes are simply not shown."""
+    """(version, path) of the harness CLI on PATH. One short `--version` call; a CLI that
+    is missing, fails, times out, or prints no version gives version None (the CLI notes
+    are then not shown), and a failed run's text is never read for a version."""
     path = shutil.which(harness)
     if not path:
         return None, None
     try:
         done = subprocess.run([path, "--version"], capture_output=True, text=True,
-                              stdin=subprocess.DEVNULL, timeout=3)
+                              stdin=subprocess.DEVNULL, timeout=_CLI_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
+        return None, path
+    if done.returncode != 0:
         return None, path
     return _numbers((done.stdout or "") + " " + (done.stderr or "")), path
 
@@ -207,7 +255,7 @@ def upgrade_command(harness: str, path: str | None) -> str | None:
     return None
 
 
-def _cli_note(harness, catalog, entries, probe) -> dict | None:
+def _cli_note(harness, catalog, entries, observe) -> dict | None:
     """The 'CLI is too old to list the next model' signal; needs only local facts."""
     if harness == "codex":
         names = list(dict.fromkeys(e["current"]["model"] for e in entries
@@ -215,7 +263,7 @@ def _cli_note(harness, catalog, entries, probe) -> dict | None:
                                    and e["deprecated"]))
         if not names or not catalog.client_version:
             return None
-        have, path = probe(harness)
+        have, path = observe()
         if have is None or have != _numbers(catalog.client_version):
             return None
         return {"harness": harness, "version": ".".join(map(str, have)), "models": names,
@@ -224,7 +272,7 @@ def _cli_note(harness, catalog, entries, probe) -> dict | None:
         need = [row for row in catalog.rows if row.get("visible") and _numbers(row.get("min_cli"))]
         if not need:
             return None
-        have, path = probe(harness)
+        have, path = observe()
         if have is None:
             return None
         behind = [row for row in need if _numbers(row["min_cli"]) > have]
@@ -247,30 +295,35 @@ def _catalog(harness):
     return model_catalog.read_catalog(harness)
 
 
-def survey_harness(harness: str, *, environ: Mapping[str, str] | None = None,
-                   source_root: str | Path | None = None,
+def survey_harness(harness: str, *, source_root: str | Path | None = None,
                    read_catalog: Callable | None = None,
                    probe: Callable | None = None) -> dict:
     """Read-only survey of one harness; a list that cannot be read is skipped."""
     skipped = {"harness": harness, "status": "skipped", "reason": "", "entries": [], "cli": None}
     probe = probe or installed_cli
+    settable = _settable(harness)
     try:
-        values, receipt = model_config.resolve_config(harness, environ=environ, source_root=source_root)
+        values, receipt = model_config.resolve_config(harness, source_root=source_root)
         if receipt.source != "user":
             return {**skipped, "reason": "no-user-file"}
         catalog = (read_catalog or _catalog)(harness)
         if catalog.state != "available" or not catalog.rows:
             return {**skipped, "reason": "no-catalog"}
-        cache = {}
+        seen = {}
 
-        def installed():
-            if "v" not in cache:
-                cache["v"] = probe(harness)[0]
-            return cache["v"]
+        def observe():
+            """The CLI's (version, path), asked at most once in this survey."""
+            if "cli" not in seen:
+                try:
+                    seen["cli"] = probe(harness)
+                except Exception:
+                    seen["cli"] = (None, None)
+            return seen["cli"]
 
         entries = []
         for cell in cells(harness, values):
-            found = successor(catalog.rows, cell["model"], cell["effort"], installed=installed)
+            found = successor(catalog.rows, cell["model"], cell["effort"],
+                              installed=lambda: observe()[0], settable=settable)
             entry = {"harness": harness, "target": cell["target"],
                      "current": {"model": cell["model"], "effort": cell["effort"]},
                      "successor": None, "kind": found["kind"], "reason": found["reason"],
@@ -284,7 +337,7 @@ def survey_harness(harness: str, *, environ: Mapping[str, str] | None = None,
                 entry["command"] = _command(harness, entry)
             entries.append(entry)
         return {"harness": harness, "status": "ok", "reason": "", "entries": entries,
-                "cli": _cli_note(harness, catalog, entries, probe)}
+                "cli": _cli_note(harness, catalog, entries, observe)}
     except Exception as exc:  # a list that cannot be read never fails update or refresh
         return {**skipped, "reason": f"unreadable: {type(exc).__name__}"}
 

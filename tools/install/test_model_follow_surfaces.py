@@ -9,6 +9,10 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import io
+import json
+import subprocess
+import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -91,6 +95,65 @@ class ConfigStatusTests(unittest.TestCase):
         with mock.patch.object(model_follow, "survey_harness", side_effect=RuntimeError("fixture")):
             rows = user_config.with_model_follow(self.rows())
         self.assertEqual(rows[0]["reading"], "ok")
+
+
+ROOT = Path(__file__).resolve().parents[2]
+CHILD = """
+import json, sys
+from unittest import mock
+for path in sys.argv[1:4]:
+    sys.path.insert(0, path)
+import distribution
+with mock.patch.object(distribution, "_update_release", return_value={"status": "up-to-date"}):
+    print(json.dumps(distribution.update().get("report_lines", [])))
+"""
+
+
+class ListPlaceUpdateTests(unittest.TestCase):
+    """`hearting update` returns at once, with its own result, when a list place is a pipe."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="mf1u-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.env = {"HOME": str(self.root), "PATH": "", "CLAUDE_CONFIG_DIR": str(self.root / "claude"),
+                    "CODEX_HOME": str(self.root / "codex"), "XDG_CONFIG_HOME": str(self.root / "config"),
+                    "XDG_CACHE_HOME": str(self.root / "cache"), "XDG_DATA_HOME": str(self.root / "data"),
+                    "XDG_STATE_HOME": str(self.root / "state"), "OPENCODE_RUNTIME_VERSION": "1.19.0"}
+        homes = {"claude": self.root / "claude", "codex": self.root / "codex",
+                 "opencode": self.root / "config" / "opencode"}
+        for harness, home in homes.items():
+            target = home / "agent-config" / "models.conf"
+            target.parent.mkdir(parents=True)
+            target.write_bytes((ROOT / "adapters" / harness / "config" / "models.conf").read_bytes())
+        self.places = {"claude": self.root / "claude/cache/model-catalog/one.json",
+                       "codex": self.root / "codex/models_cache.json",
+                       "opencode": self.root / "cache/opencode/models.json"}
+        for place in self.places.values():
+            place.parent.mkdir(parents=True, exist_ok=True)
+
+    def update_in_child(self):
+        started = time.monotonic()
+        done = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", CHILD, str(ROOT), str(ROOT / "tools" / "install"),
+             str(ROOT / "utilities")], env=self.env, capture_output=True, text=True, timeout=20)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout.splitlines()[-1]), time.monotonic() - started
+
+    def test_a_pipe_in_every_list_place_gives_the_update_result_without_waiting(self):
+        self.places["codex"].write_text(json.dumps({"models": [
+            {"slug": "gpt-1-elm", "visibility": "list"}, {"slug": "gpt-2-elm", "visibility": "list"}]}))
+        user = self.root / "codex" / "agent-config" / "models.conf"
+        user.write_text(user.read_text().replace("CFG_MODEL_PROFILE_DEEP=deep:xhigh",
+                                                 "CFG_MODEL_PROFILE_DEEP=model/gpt-1-elm:high"))
+        lines, _ = self.update_in_child()  # the same fixture with a regular list does say something
+        self.assertTrue([t for t in lines if "gpt-1-elm -> gpt-2-elm" in t], lines)
+        for place in self.places.values():
+            place.unlink(missing_ok=True)
+            os.mkfifo(place)
+        lines, elapsed = self.update_in_child()
+        self.assertEqual(lines, [])
+        self.assertLess(elapsed, 15)
 
 
 if __name__ == "__main__":
