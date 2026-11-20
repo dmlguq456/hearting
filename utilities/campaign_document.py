@@ -29,6 +29,7 @@ import re
 import stat
 import sys
 import time
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -188,9 +189,27 @@ def link_units(facts, open_routes, titles, *, now, closed_total=None):
             "done_folded": max(0, total - sum(u["routes"] for u in shown))}
 
 
+# What a viewer reads as markup stays escaped: a backslash, `*`, brackets, `<` `>` `&`, and a `_` that
+# is not between two letters or digits (`campaign_document` stays as written). A pair of single
+# backticks is a code span (the panel, Fleet and the viewer all draw it as code) and is left alone,
+# its words too; a backtick with no partner is escaped so the line does not break.
+_MARKUP = re.compile(r"[\\*\[\]<>&]|(?<![^\W_])_|_(?![^\W_])")
+_TICKS = re.compile(r"(`+)")
+
+
 def _escape(value):
-    import artifact_entrance
-    return artifact_entrance._md_summary(value)
+    parts = _TICKS.split(unicodedata.normalize("NFC", str(value)))
+    singles = [i for i in range(1, len(parts), 2) if len(parts[i]) == 1]
+    spans = [(singles[i], singles[i + 1]) for i in range(0, len(singles) - 1, 2)]
+    out = []
+    for index, part in enumerate(parts):
+        if any(start <= index <= end for start, end in spans):
+            out.append(part)
+        elif index % 2:
+            out.append("\\`" * len(part))
+        else:
+            out.append(_MARKUP.sub(lambda found: "\\" + found.group(0), part))
+    return "".join(out)
 
 
 def _clip(value, limit):
@@ -231,9 +250,11 @@ def render_document(title, summary, units, waits, *, now, tz=None):
             out += [f"- {_escape(_clip(item, WAIT_CHARS))}" for item in items]
             if not items:
                 out.append("지금 없음.")
-            out.append("질문판 기준 " + datetime.fromtimestamp(waits["at"], tz).strftime("%H:%M"))
+            seen = datetime.fromtimestamp(waits["at"], tz)
+            today = seen.date() == datetime.fromtimestamp(now, tz).date()
+            out.append("질문판 기준 " + seen.strftime("%H:%M" if today else "%m-%d %H:%M"))
         else:
-            out.append("질문판을 읽지 못함.")
+            out.append("질문판을 읽지 못했습니다.")
         out += ["", "## 최근에 끝난 것"]
         out += [_unit_line(unit, prefix=datetime.fromtimestamp(unit["closed_at"], tz).strftime("%m-%d") + " ")
                 for unit in done]
@@ -262,33 +283,62 @@ def _first_line(value):
     return ""
 
 
+def _open_questions(item_ids):
+    """id -> the private question file, for the `S4:` ids asked about that are still open.
+
+    The board's saved copy carries no question text and no folder; the question file in the
+    board's own state folder does. Read only: the files are never changed."""
+    import human_wait_state
+    found = {}
+    if not item_ids:
+        return found
+    try:
+        paths = sorted(human_wait_state.state_root().glob("*.json"))
+    except OSError:
+        return found
+    for path in paths:
+        value = human_wait_state._read(path)
+        if value and value.get("id") in item_ids and value.get("lifecycle") == "open":
+            found[value["id"]] = value
+    return found
+
+
 def read_waits(root, now):
     """This repo's open questions from the question board's saved copy (never refreshed here).
 
     `{"status": "ok", "at": observed_at, "items": [first lines]}`, or `{"status": "unreadable"}`
-    when there is no copy, it is too old, or reading it fails. An item is open when a person
-    must answer it and it is not folded as old; it belongs here when its route is one of this
-    root's, or its folder resolves to this root. Anything else is left out."""
+    only when there is no copy or reading it fails; a copy of any age is used and its time is
+    shown. An item is open when a person must answer it and it is not folded as old. A route's
+    item belongs here when its route is one of this root's. An `S4` item reads its question and
+    folder from the question file with the same id (open only; none found means left out) and
+    belongs here when that folder resolves to this root. Anything else is left out."""
     try:
         import human_wait_state
-        view = human_wait_state.cached_view(now=now, request=False)
+        view = human_wait_state.cached_view(now=now, request=False, max_age=float("inf"))
         if view is None:
             return {"status": "unreadable"}
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from tools.fleet.collectors import project_status
         root_real = os.path.realpath(str(root))
+        open_items = [item for item in view["items"]
+                      if human_wait_state.person_wait(item) and item.get("stale") not in (True, "older")]
+        files = _open_questions({item.get("id") for item in open_items if str(item.get("source")) == "S4"})
         items = []
-        for item in view["items"]:
-            if not human_wait_state.person_wait(item) or item.get("stale") in (True, "older"):
-                continue
+        for item in open_items:
+            question, cwd = item.get("question"), item.get("cwd")
+            if str(item.get("source")) == "S4":
+                record = files.get(item.get("id"))
+                if record is None:
+                    continue
+                question, cwd = record.get("question"), record.get("cwd")
             route_id = item.get("route_id")
             here = isinstance(route_id, str) and _ROUTE_FILE.match(route_id + ".json") is not None \
                 and (Path(root) / ".runtime" / "routes" / (route_id + ".json")).is_file()
-            if not here and item.get("cwd"):
-                found = project_status.artifact_root(item["cwd"])
+            if not here and cwd:
+                found = project_status.artifact_root(cwd)
                 here = bool(found) and os.path.realpath(str(found)) == root_real
             if here:
-                items.append(_first_line(item.get("question")) or "질문 (본문 없음)")
+                items.append(_first_line(question) or "질문 (본문 없음)")
         return {"status": "ok", "at": float(view["observed_at"]), "items": items}
     except Exception:  # noqa: BLE001 -- an unreadable copy is a stated state, never a failure
         return {"status": "unreadable"}

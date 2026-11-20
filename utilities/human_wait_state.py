@@ -1632,8 +1632,8 @@ def cached_fleet_view(*, now=None, request=True):
     return value
 
 
-def cached_view(*, now=None, request=True):
-    value = _read_cache(now=now)
+def cached_view(*, now=None, request=True, max_age=_DISPLAY_TTL):
+    value = _read_cache(now=now, max_age=max_age)
     if request:
         observed = value.get("observed_at") if value else None
         if observed is None or (time.time() if now is None else float(now)) - float(observed) > _REQUEST_TTL:

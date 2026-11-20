@@ -194,6 +194,8 @@ def entrance_snapshot(root):
             for name in names:
                 if name.startswith('.') or not name.casefold().endswith('.md'):
                     continue
+                if fold(name) == fold(CAMPAIGN_DOCUMENT):
+                    continue  # the campaign's own page is no route report: the campaign line opens it
                 if len(rows) >= ROW_LIMIT:
                     errors.append('campaign-documents-bounded')
                     break

@@ -1068,6 +1068,21 @@ class SectionTests(SectionFixture):
         # the other campaign, which has no document, still opens its folder
         self.assertEqual(self.open_line(2), str(self.root / "campaigns/2026-01-02_one"))
 
+    def test_the_campaign_page_is_not_on_the_recent_route_reports_and_its_line_opens_it(self):
+        self._routes()
+        hand = self.root / "campaigns/2026-01-03_two/현황.md"
+        hand.write_text("# Two status\n\n**한 줄**: hand written.\n", encoding="utf-8")
+        page = self.root / "campaigns/2026-01-03_two/campaign.md"
+        page.write_text("<!-- hearting:campaign-document v1 -->\n# Two\n\n**한 줄**: x\n", encoding="utf-8")
+        self.refresh()
+        for name in ("recent-route-reports.md", "recent-route-reports.html"):
+            text = self.entrance(name)
+            self.assertNotIn("campaign.md", text, name)
+            self.assertIn("Two status", text, name)     # a hand-written status line stays
+        self.assertNotIn("campaign.md", " ".join(row["doc_path"] for row in self.rows()
+                                                  if row.get("kind") == "campaign-document"))
+        self.assertEqual(self.open_line(1), str(page))   # the campaign line opens it
+
     def test_a_campaign_document_that_cannot_be_taken_leaves_the_folder(self):
         self._routes()
         page = self.root / "campaigns/2026-01-03_two/campaign.md"

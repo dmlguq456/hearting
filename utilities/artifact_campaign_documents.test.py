@@ -136,6 +136,14 @@ class CampaignDocumentsTest(unittest.TestCase):
         self.assertEqual(result['totals']['cycles'], 0)
         self.assertTrue(all(not r.get('cycle_id') for r in rows))
 
+    def test_the_campaigns_own_page_is_no_route_report_row_but_the_hand_written_names_stay(self):
+        (self.campaign / 'campaign.md').write_text(CAMPAIGN_PAGE)
+        (self.campaign / '현황.md').write_text(PAGE)
+        (self.campaign / 'HANDOFF-seat.md').write_text('# Handoff\n')
+        rows = [r for r in entrance.scan(self.root)['recent'] if r.get('kind') == 'campaign-document']
+        self.assertEqual({Path(r['doc_path']).name for r in rows}, {'현황.md', 'HANDOFF-seat.md'})
+        self.assertEqual(documents.campaign_status(self.campaign)['path'], self.campaign / 'campaign.md')
+
     def test_normal_writer_links_the_legacy_root_but_read_only_resolution_does_not(self):
         project = self.project / 'legacy-project'; root = project / '.claude_reports'
         root.mkdir(parents=True)

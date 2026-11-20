@@ -105,6 +105,39 @@ _FLOOR = 6              # a column narrows to this (or its own width) before the
 _HEAD_FLOOR = 12        # ... a wider header keeps up to this much
 
 
+_PUNCT = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+_ESCAPED = 0xF0000                   # a protected escape: this plane's private-use character per ASCII mark
+_ESCAPE_BACK = {_ESCAPED + ord(mark): mark for mark in _PUNCT}
+_COMMENT = re.compile(r"^<!--.*-->$")
+
+
+def _protect(text):
+    """``text`` with each Markdown escape (a backslash and an ASCII mark) outside code spans held as
+    one private character, so no later rule reads it as markup; ``_restore`` gives the bare mark."""
+    out, index = [], 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and text[index + 1:index + 2] in tuple(_PUNCT):
+            out.append(chr(_ESCAPED + ord(text[index + 1])))
+            index += 2
+        elif char == "`" and text.find("`", index + 1) > index + 1:
+            end = text.find("`", index + 1)
+            out.append(text[index:end + 1])      # a code span, backslashes and all
+            index = end + 1
+        else:
+            out.append(char)
+            index += 1
+    return "".join(out)
+
+
+def _restore(text):
+    return text.translate(_ESCAPE_BACK)
+
+
+def _unescaped_spans(text, base="soft"):
+    return [(_restore(value), key) for value, key in markdown_spans(text, base)]
+
+
 def _unlink(text):
     """A link is its words (``[a](url)`` -> ``a``); code spans are left as they are."""
     return "".join(part if index % 2 else _LINK.sub(r"\1", part)
@@ -165,7 +198,7 @@ def table_aligns(line, count):
 
 def _cell_spans(text, base):
     return [(value, (base if base != "soft" else "bold") if key == "bold" else key)
-            for value, key in markdown_spans(_unlink(text), base)]
+            for value, key in _unescaped_spans(_unlink(_protect(text)), base)]
 
 
 def _width(segments):
@@ -364,7 +397,7 @@ def doc_rows(lines, width):
         first = next((line for line in prose if line.strip()), "")
         if out and out[-1] and re.match(r"^##\s", first):
             out.append([])               # Fleet's cards part a ``##`` from what came before it
-        for segments, _tint in card_rows(prose, width, spans=markdown_spans):
+        for segments, _tint in card_rows(prose, width, spans=_unescaped_spans):
             out.append([(text, "sect" if key in ("v", "c") else key) for text, key in segments])
         prose.clear()
 
@@ -391,10 +424,13 @@ def doc_rows(lines, width):
             out.append([])                # one empty row parts the table from what follows
             index = end
             continue
+        if _COMMENT.match(text):          # a whole-line HTML comment (a file's own marker) is not drawn
+            index += 1
+            continue
         if not text and prose and not prose[-1].strip():
             index += 1
             continue
-        prose.append(_unlink(line))
+        prose.append(_unlink(_protect(line)))
         index += 1
     flush()
     return [row if _width(row) <= width else _cut(row, width) for row in out]

@@ -142,14 +142,48 @@ class PureTest(unittest.TestCase):
     def test_empty_sections_and_an_unreadable_board(self):
         text = self.render(waits={"status": "unreadable"})
         self.assertEqual(text.count("지금 없음."), 1)
-        self.assertIn("질문판을 읽지 못함.", text)
+        self.assertIn("\n질문판을 읽지 못했습니다.\n", text)
+        self.assertNotIn("- 질문판", text)  # a plain line: it is not a bullet, so it is not a question
         self.assertIn("아직 없음.", text)
         self.assertIn("지금 없음.\n질문판 기준 11:59", self.render())
+
+    def test_a_copy_from_another_day_shows_its_date(self):
+        old = {"status": "ok", "at": NOW - 3 * 24 * HOUR, "items": ["Q?"]}
+        self.assertIn("- Q?\n질문판 기준 11-17 12:00\n", self.render(waits=old))
+        self.assertIn("질문판 기준 11:59\n", self.render(waits=dict(old, at=NOW - 60)))
 
     def test_the_summary_falls_back_to_the_title_and_markup_shows_as_typed(self):
         self.assertIn("**한 줄**: Demo", self.render(summary=""))
         text = self.render(title="a*b_c[d]<e>&`f`", summary="")
-        self.assertIn("# a\\*b\\_c\\[d\\]\\<e\\>\\&\\`f\\`", text)
+        self.assertIn("# a\\*b_c\\[d\\]\\<e\\>\\&`f`", text)
+
+    def test_a_paired_backtick_stays_a_code_span_and_a_lone_one_is_escaped(self):
+        esc = cd._escape
+        self.assertEqual(esc("`campaign.md` fix"), "`campaign.md` fix")
+        self.assertEqual(esc("`a_b` and `<x>`"), "`a_b` and `<x>`")      # nothing inside a code span changes
+        self.assertEqual(esc("fix `a"), "fix \\`a")
+        self.assertEqual(esc("`a` and `b"), "`a` and \\`b")
+        self.assertEqual(esc("a ``b`` c"), "a \\`\\`b\\`\\` c")
+        self.assertEqual(esc("<b> & *c* [d]"), "\\<b\\> \\& \\*c\\* \\[d\\]")
+        self.assertEqual(esc("campaign_document _x_"), "campaign_document \\_x\\_")
+        self.assertEqual(esc("a\\b"), "a\\\\b")
+        text = self.render(title="Fix `campaign.md` and `x", summary="")
+        self.assertIn("# Fix `campaign.md` and \\`x", text)
+        unit = {"key": "rt:x", "pr": None, "v": None, "title": "Write `campaign.md` <now>", "impl": {"slug": "x"},
+                "count": 1, "closed_at": NOW, "routes": 1, "activity": NOW}
+        self.assertIn("- Write `campaign.md` \\<now\\> · 기록 1",
+                      self.render({"active": [unit], "active_folded": 0, "done": [], "done_folded": 0}))
+
+    def test_the_popup_draws_the_generated_document_without_its_marker_or_backslashes(self):
+        from tools.fleet.explorer import transcript
+        text = self.render(title="a*b_c[d]<e>&`f` and `g", summary="")
+        rows = transcript.doc_rows(text.split("\n"), 60)
+        drawn = "\n".join("".join(part for part, _key in row) for row in rows)
+        self.assertNotIn("hearting:campaign-document", drawn)
+        self.assertNotIn("\\", drawn)
+        self.assertIn("a*b_c[d]<e>&f and `g", drawn)
+
+    def test_a_long_title_is_clipped(self):
         long_title = "가" * 200
         unit = {"key": "rt:x", "pr": None, "v": None, "title": long_title, "impl": {"slug": "x"}, "count": 1,
                 "closed_at": NOW, "routes": 1, "activity": NOW}
@@ -549,50 +583,100 @@ class RemovalAndWorkerTest(Fixture):
 
 
 class WaitsTest(Fixture):
-    def view(self, items, observed=NOW - 30):
-        return {"items": items, "observed_at": observed}
+    """The board's saved copy and its question files sit in an isolated state folder."""
 
-    def waits(self, items):
+    def setUp(self):
+        super().setUp()
         import human_wait_state
-        view = self.view(items)
-        with mock.patch.object(human_wait_state, "cached_view", return_value=view):
-            return cd.read_waits(self.root, NOW)
+        self.hws = human_wait_state
+        state = tempfile.TemporaryDirectory(prefix="cd-state-")
+        self.addCleanup(state.cleanup)
+        patch = mock.patch.dict(os.environ, {"XDG_STATE_HOME": state.name})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.other = Path(tempfile.mkdtemp(prefix="cd-other-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.other, ignore_errors=True))
+        (self.other / ".agent_reports").mkdir()
+        self.mine = self.root.parent
 
-    def test_only_this_repos_open_questions_count(self):
+    def copy(self, items, observed=NOW - 30):
+        rows = [dict({"since": NOW - 100, "owner": {}, "stale": False}, **item) for item in items]
+        self.hws._write(self.hws._cache_path(), {
+            "schema_version": 3, "observed_at": observed, "items": rows, "by_session": {},
+            "total": len(rows), "older": 0})
+
+    def question(self, name, cwd, text, lifecycle="open"):
+        item_id = "S4:" + name * 64
+        self.hws._write(self.hws.state_root() / (name * 8 + ".json"), {
+            "schema_version": 1, "mode": "message", "source": "S4", "id": item_id, "harness": "claude",
+            "session_id": "s-" + name, "seat_key": "seat-" + name, "sequence": 1, "question": text,
+            "since": NOW - 100, "lifecycle": lifecycle, "cwd": str(cwd)})
+        return item_id
+
+    def asked(self, name, source="S4"):
+        return {"id": "S4:" + name * 64, "source": source}
+
+    def test_this_repos_open_s4_questions_come_from_their_files_one_line_each(self):
+        self.question("a", self.mine, "Which one?\nsecond line")
+        self.question("b", self.mine, "Second?")
+        self.copy([self.asked("a"), self.asked("b")])
+        waits = cd.read_waits(self.root, NOW)
+        self.assertEqual(waits, {"status": "ok", "at": NOW - 30, "items": ["Which one?", "Second?"]})
+
+    def test_another_repo_an_answered_a_folded_and_a_fileless_question_are_left_out(self):
+        self.question("a", self.other, "Other repo")
+        self.question("b", self.mine, "Answered one", lifecycle="answered")
+        self.question("c", self.mine, "Old one")
+        self.question("d", self.mine, "Blocked owner")
+        self.question("f", self.mine, "No place on the copy")
+        self.copy([self.asked("a"), self.asked("b"),
+                   dict(self.asked("c"), stale=True), dict(self.asked("c"), id="S4:" + "9" * 64, stale="older"),
+                   dict(self.asked("d"), source="S3"),
+                   self.asked("e"),                                   # no file at all
+                   dict(self.asked("g"), cwd=str(self.mine), question="Only on the copy")])  # the copy's own fields are not read
+        self.assertEqual(cd.read_waits(self.root, NOW)["items"], [])
+
+    def test_a_route_item_is_split_by_its_route_as_before(self):
         rid, _ = self.route("alpha-1700")
-        mine = self.root.parent
-        other = Path(tempfile.mkdtemp(prefix="cd-other-"))
-        self.addCleanup(lambda: __import__("shutil").rmtree(other, ignore_errors=True))
-        (other / ".agent_reports").mkdir()
-        items = [
-            {"id": "a", "source": "S1", "route_id": rid, "question": "By route?\nsecond line", "stale": False},
-            {"id": "b", "source": "S4", "cwd": str(mine), "question": "By folder?", "stale": False},
-            {"id": "c", "source": "S4", "cwd": str(other), "question": "Other repo", "stale": False},
-            {"id": "d", "source": "S4", "question": "No place", "stale": False},
-            {"id": "e", "source": "S3", "route_id": rid, "question": "Blocked owner", "stale": False},
+        self.copy([
+            {"id": "a", "source": "S1", "route_id": rid, "question": "By route?\nsecond line"},
+            {"id": "e", "source": "S3", "route_id": rid, "question": "Blocked owner"},
             {"id": "f", "source": "S1", "route_id": rid, "question": "Old one", "stale": True},
             {"id": "g", "source": "S1", "route_id": rid, "question": "Older", "stale": "older"},
-            {"id": "h", "source": "S1", "route_id": rid, "stale": False},
-        ]
-        with mock.patch("tools.fleet.collectors.project_status.artifact_root",
-                        side_effect=lambda cwd: str(Path(cwd) / ".agent_reports") if Path(cwd, ".agent_reports").exists() else None):
-            waits = self.waits(items)
-        self.assertEqual(waits["status"], "ok")
-        self.assertEqual(waits["items"], ["By route?", "By folder?", "질문 (본문 없음)"])
-        self.assertEqual(waits["at"], NOW - 30)
-        self.assertNotIn("Other repo", " ".join(waits["items"]))
+            {"id": "h", "source": "S1", "route_id": rid},
+            {"id": "i", "source": "S1", "route_id": "rt-" + "0" * 16, "question": "Not this root's route"}])
+        self.assertEqual(cd.read_waits(self.root, NOW)["items"], ["By route?", "질문 (본문 없음)"])
+
+    def test_an_old_copy_is_used_and_its_time_is_written(self):
+        self.question("a", self.mine, "Still open?")
+        self.copy([self.asked("a")], observed=NOW - 3 * 24 * HOUR)
+        waits = cd.read_waits(self.root, NOW)
+        self.assertEqual(waits, {"status": "ok", "at": NOW - 3 * 24 * HOUR, "items": ["Still open?"]})
+        text = cd.render_document("Demo", "", {"active": [], "active_folded": 0, "done": [], "done_folded": 0},
+                                  waits, now=NOW, tz=UTC)
+        self.assertIn("- Still open?\n질문판 기준 11-17 12:00\n", text)
 
     def test_no_copy_or_a_failing_read_is_unreadable(self):
-        import human_wait_state
-        with mock.patch.object(human_wait_state, "cached_view", return_value=None):
-            self.assertEqual(cd.read_waits(self.root, NOW), {"status": "unreadable"})
-        with mock.patch.object(human_wait_state, "cached_view", side_effect=OSError):
+        self.assertEqual(cd.read_waits(self.root, NOW), {"status": "unreadable"})
+        with mock.patch.object(self.hws, "cached_view", side_effect=OSError):
             self.assertEqual(cd.read_waits(self.root, NOW), {"status": "unreadable"})
 
+    def test_reading_changes_no_question_file_and_no_copy(self):
+        self.question("a", self.mine, "Q?")
+        self.copy([self.asked("a")])
+        before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.hws.state_root().iterdir()}
+        cd.read_waits(self.root, NOW)
+        after = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.hws.state_root().iterdir()}
+        self.assertEqual(before, after)
+
     def test_the_count_fleet_reads_is_the_number_of_open_questions(self):
-        rid, _ = self.route("alpha-1700", closed=NOW - HOUR)
-        items = [{"id": str(i), "source": "S1", "route_id": rid, "question": f"Q{i}?", "stale": False} for i in range(3)]
-        waits = self.waits(items)
+        self.route("alpha-1700", closed=NOW - HOUR)
+        for name in "abc":
+            self.question(name, self.mine, f"Q{name}?")
+        self.question("d", self.other, "Not ours")
+        self.copy([self.asked(name) for name in "abcd"])
+        waits = cd.read_waits(self.root, NOW)
+        self.assertEqual(waits["items"], ["Qa?", "Qb?", "Qc?"])
         self.catch_up(waits=waits)
         self.assertEqual(len(project_status.parse(self.document())["decisions"]), 3)
 
