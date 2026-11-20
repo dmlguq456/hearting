@@ -24,7 +24,7 @@ import artifact_lifecycle
 import route_identity
 import route_lineage
 from route_plan import is_depth0_leg
-from route_form import one_shot_review_node, serial_attempt_route
+from route_form import one_shot_review_nodes, serial_attempt_route
 import dispatch_contract
 import dispatch_lock_order
 from dispatch_attempt_policy import verdict_pass
@@ -2239,34 +2239,51 @@ def owner_workflow_continuation(jobs, owner_attempt_id, route_file):
         "Return the final handoff after the declared stages finish. If execution cannot proceed, "
         "report the actual blocker and retained report instead of PASS. Runtime settlement owns close/finalize."
     )
-    review = one_shot_review_node(route)
-    if review is not None and review["id"] in missing:
-        text += "\n" + _middle_cell_review_sentence(route, route_file, review, missing[review["id"]], jobs)
+    reviews = [node for node in one_shot_review_nodes(route) if node["id"] in missing]
+    if reviews:
+        text += "\n" + _middle_cell_review_sentence(route, route_file, reviews, missing, jobs)
     return text
 
 
-def _middle_cell_review_sentence(route, route_file, review, reason, jobs):
+def _middle_cell_review_sentence(route, route_file, reviews, missing, jobs):
     """What is true of the middle cell's review when its owner ends without it standing: it has not run, it
     passed work the owner has since changed, it blocked (the verdict text's own instruction), or its rounds are
     spent. The owner cannot close the review itself, so each sentence leads to the one start command or to the end."""
     import review_round_cap as ROUND
     import worker_bootstrap
-    start = (f"`{worker_bootstrap.route_start_command(route_file, review['id'], jobs=jobs)}` and yield "
+    # One command starts the whole review group (any member names it; the anchor is the first).
+    anchor = reviews[0].get("parallel_anchor") or reviews[0]["id"]
+    start = (f"`{worker_bootstrap.route_start_command(route_file, anchor, jobs=jobs)}` and yield "
              "runtime_wait: registered-children")
     no_inline = "You cannot review your own work or close this review inline; do not report PASS without it."
-    rows = [(status, meta) for status, meta in worker_bootstrap._lineage_rows(route, jobs).get(review["id"], ())]
-    verdicts = [(status, meta) for status, meta in rows
-                if ROUND.classify_round_row(status, meta, worker_type="review") == "verdict"]
-    if verdicts and ROUND.last_verdict_blocking(rows, "review"):
-        fields = worker_bootstrap.continuation_followup_fields(route, review, verdicts[-1][1], jobs, route_file)
-        if fields.get("owner_fixes"):
-            return worker_bootstrap.continuation_followup_text(fields)
+    lineage = worker_bootstrap._lineage_rows(route, jobs)
+    blocking, ran_without_verdict = [], False
+    for review in reviews:
+        rows = [(status, meta) for status, meta in lineage.get(review["id"], ())]
+        verdicts = [(status, meta) for status, meta in rows
+                    if ROUND.classify_round_row(status, meta, worker_type="review") == "verdict"]
+        if verdicts and ROUND.last_verdict_blocking(rows, "review"):
+            blocking.append((review, verdicts[-1][1]))
+        elif rows and not verdicts:
+            ran_without_verdict = True
+    if blocking:
+        # Every blocking leg of a review group is named; the owner fixes them in one pass.
+        fixes = [fields for fields in (worker_bootstrap.continuation_followup_fields(route, review, meta, jobs, route_file)
+                                       for review, meta in blocking) if fields.get("owner_fixes")]
+        if fixes:
+            return worker_bootstrap.continuation_followup_text(fixes if len(fixes) > 1 else fixes[0])
         return ("Your route's independent review blocks your current work. Fix the blocking findings in its report, "
                 f"commit, then start it again with exactly: {start}. {no_inline}")
-    if str(reason).startswith("completion-review-source-stale"):
+    stale = [str(missing[review["id"]]).startswith("completion-review-source-stale") for review in reviews]
+    if any(stale) and not all(stale):
+        # Some legs of a group passed before the work changed and the rest gave no verdict or have not run.
+        return ("Part of your route's independent review passed but the work changed after it, and the rest ended "
+                "without a verdict or has not run. Commit your work, then start the review again with exactly: "
+                f"{start}. {no_inline}")
+    if any(stale):
         return ("Your route's independent review passed, but the work changed after it. Commit your work, then start "
                 f"the review again with exactly: {start}. {no_inline}")
-    if rows and not verdicts:
+    if ran_without_verdict:
         return ("Your route's independent review ended without a verdict. Commit your work, then start it again with "
                 f"exactly: {start}. {no_inline}")
     return ("Your route's independent review has not run. Commit your work, then start it with exactly: "

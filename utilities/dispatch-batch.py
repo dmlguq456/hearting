@@ -42,6 +42,7 @@ from dispatch_contract import (  # noqa: E402
     route_state_next_action,
     validate_attempt_metadata,
     validate_dispatch_log_dir,
+    verdict_pass,
 )
 from governor_identity import IdentityCaptureError, create_witness  # noqa: E402
 try:  # ends a detached child with the test that started it; no-op outside tests
@@ -2375,8 +2376,17 @@ def existing_leg_result(
 
 def current_completed_group_peers(jobs: Path, route: dict, nodes: list[dict], group: str,
                                   agent_home: Path, prompt_text: str) -> dict[str, dict]:
-    """Find current legacy design owner-closures before charging pending legs."""
-    if route.get("capability") != "autopilot-design" or group != "visual-verify":
+    """Find current legacy design owner-closures before charging pending legs.
+
+    A solo route's review group (`one_shot_review_node_ids`) also reuses a leg that passed and whose
+    pass still describes the current source: restarting the group for the legs that did not finish
+    must not judge the same bytes again, since every judgment counts as a round of that leg's own
+    lineage. A leg whose source changed since, that blocked, or that ended without a verdict is not
+    reused, and no other kind of route reuses a pass this way."""
+    design = route.get("capability") == "autopilot-design" and group == "visual-verify"
+    from route_form import one_shot_review_node_ids
+    solo_review = bool(nodes) and {str(node["id"]) for node in nodes} <= set(one_shot_review_node_ids(route))
+    if not design and not solo_review:
         return {}
     expected_assignment = "sha256:" + hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
     try:
@@ -2436,11 +2446,14 @@ def current_completed_group_peers(jobs: Path, route: dict, nodes: list[dict], gr
                 continue
             if marker.get("attempt_id") != attempt_id:
                 continue
-            if not (
+            if design and not (
                 (marker.get("review_gate_closure") == "owner-closure"
                  and marker.get("review_independence") == "owner-overridden")
                 or marker.get("stage_authority") == "owner-closure"
             ):
+                continue
+            if not design and not (verdict_pass(metadata) and marker.get("review_gate_closure") != "owner-closure"
+                                   and marker.get("stage_authority") != "owner-closure"):
                 continue
             if not completion_marker_is_current(route, node, marker_path, marker, jobs=jobs):
                 continue
@@ -3057,66 +3070,87 @@ def main(argv: list[str] | None = None) -> int:
             jobs, route, nodes, args.parallel_group, agent_home, args.prompt_text)
             if partial is None else {})
         reusable_peers = current_group_peers
-        # C-14: dispatch-node.py caps plan-check/impl-review/test rounds, but a
-        # realized parallel_group leg bypasses that wrapper entirely -- check
-        # every capped leg here too, before the atomic reservation, so one leg
-        # over budget refuses the whole group (child 0), not just that leg.
-        # SD-153: `admit_round` (budget half) is the one admission decision
-        # every registered launch surface reads -- this pre-check and
-        # dispatch-node.py's own admission (which the leg launch below still
-        # goes through) must agree, so this no longer keeps its own
-        # `len(prior)+1 > max_round` comparison.
-        round_admissions = {}
+
+        def admit_pending(reusable, *, preview=False):
+            # C-14: dispatch-node.py caps plan-check/impl-review/test rounds, but a
+            # realized parallel_group leg bypasses that wrapper entirely -- check
+            # every capped leg here too, before the atomic reservation, so one leg
+            # over budget refuses the whole group (child 0), not just that leg.
+            # SD-153: `admit_round` (budget half) is the one admission decision
+            # every registered launch surface reads -- this pre-check and
+            # dispatch-node.py's own admission (which the leg launch below still
+            # goes through) must agree, so this no longer keeps its own
+            # `len(prior)+1 > max_round` comparison.
+            admissions, errors = {}, {}
+            for capped_node in pending_round_admission_nodes(nodes, reusable):
+                capped_node_id = str(capped_node["id"])
+                if not DISPATCH_NODE.REVIEW_ROUND_CAP.is_round_capped_node(capped_node):
+                    continue
+                if capped_node_id in reusable:
+                    # Exact current completion/readiness was proved above. It is
+                    # already a completed group peer and owes no new verdict budget.
+                    continue
+                if partial is not None and capped_node_id != str(partial["gap_leg_id"]):
+                    # The sealed PASS peers are historical inputs to the partial
+                    # replacement; they do not need a fresh round admission.
+                    continue
+                if partial is not None and partial.get("automatic_replacement_evidence"):
+                    # The claim has already validated the dead exact source. Reused
+                    # peers and its one replacement consume no new semantic round.
+                    continue
+                admission_options = ({"record_auto_revisions": False}
+                                     if preview or args.action == "dry-run" else {})
+                admission = DISPATCH_NODE.admit_round(
+                    route, capped_node, jobs,
+                    owner_attempt_id=os.environ.get("AGENT_DISPATCH_ATTEMPT_ID"),
+                    reviewed_evidence=args.reviewed_evidence if is_review_node(capped_node) else None,
+                    **admission_options,
+                )
+                admissions[capped_node_id] = admission
+                budget = admission.budget
+                choice = decide_continuation(route, action="round", node=capped_node, facts={"budget": budget})
+                if not choice.allowed:
+                    error = BatchError(choice.reason,
+                        f"route_id={route['route_id']} route_node={capped_node_id} "
+                        f"effective_intensity={route['effective_intensity']} "
+                        f"round={budget.next_round} max_round={budget.cap}",
+                        route_node=capped_node_id)
+                    error.next_action, error.retry_when = choice.next_action, choice.retry_when
+                    # Exhaustion can still return an exact successful group. All
+                    # identity/input/readiness checks below must prove that replay
+                    # before any reservation or input publication. Other refusals
+                    # (especially live/unsettled) keep their original priority.
+                    if (budget.state not in {"exhausted", "blocked-live", "review-correction-required"}
+                            or (budget.state == "exhausted" and admission.requires_next_round)):
+                        raise error
+                    errors[capped_node_id] = error
+            return admissions, errors
+
+        def unfinished_for(admissions, reusable):
+            return (None if partial is not None or reusable else unfinished_batch_input(
+                jobs, route, nodes, args.parallel_group,
+                os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", ""), args.prompt_text,
+                admissions, route_file=route_path,
+                producer_managed=producer_managed,
+                producer_generation=producer_generation,
+                current_attempt_ids=producer_current_attempt_ids))
+
+        if reusable_peers and not (route.get("capability") == "autopilot-design"
+                                   and args.parallel_group == "visual-verify"):
+            # A solo review group reuses a passed leg only when no sealed batch of it was left unfinished. A
+            # start cut short (a member reserved but never claimed, or absent from the registry) is resumed
+            # whole, as it was before a passed leg could be reused. Look for that batch first, and reuse the
+            # passed leg only when there is none.
+            try:
+                probe_admissions, _ = admit_pending({}, preview=True)
+                unfinished_probe = unfinished_for(probe_admissions, {})
+            except BatchError:
+                unfinished_probe = None
+            if unfinished_probe is not None:
+                reusable_peers = {}
+        round_admissions, round_errors = admit_pending(reusable_peers)
         replay_budget_errors = []
-        round_errors = {}
-        for capped_node in pending_round_admission_nodes(nodes, reusable_peers):
-            capped_node_id = str(capped_node["id"])
-            if not DISPATCH_NODE.REVIEW_ROUND_CAP.is_round_capped_node(capped_node):
-                continue
-            if capped_node_id in reusable_peers:
-                # Exact current completion/readiness was proved above. It is
-                # already a completed group peer and owes no new verdict budget.
-                continue
-            if partial is not None and capped_node_id != str(partial["gap_leg_id"]):
-                # The sealed PASS peers are historical inputs to the partial
-                # replacement; they do not need a fresh round admission.
-                continue
-            if partial is not None and partial.get("automatic_replacement_evidence"):
-                # The claim has already validated the dead exact source. Reused
-                # peers and its one replacement consume no new semantic round.
-                continue
-            admission_options = {"record_auto_revisions": False} if args.action == "dry-run" else {}
-            admission = DISPATCH_NODE.admit_round(
-                route, capped_node, jobs,
-                owner_attempt_id=os.environ.get("AGENT_DISPATCH_ATTEMPT_ID"),
-                reviewed_evidence=args.reviewed_evidence if is_review_node(capped_node) else None,
-                **admission_options,
-            )
-            round_admissions[capped_node_id] = admission
-            budget = admission.budget
-            choice = decide_continuation(route, action="round", node=capped_node, facts={"budget": budget})
-            if not choice.allowed:
-                error = BatchError(choice.reason,
-                    f"route_id={route['route_id']} route_node={capped_node_id} "
-                    f"effective_intensity={route['effective_intensity']} "
-                    f"round={budget.next_round} max_round={budget.cap}",
-                    route_node=capped_node_id)
-                error.next_action, error.retry_when = choice.next_action, choice.retry_when
-                # Exhaustion can still return an exact successful group. All
-                # identity/input/readiness checks below must prove that replay
-                # before any reservation or input publication. Other refusals
-                # (especially live/unsettled) keep their original priority.
-                if (budget.state not in {"exhausted", "blocked-live", "review-correction-required"}
-                        or (budget.state == "exhausted" and admission.requires_next_round)):
-                    raise error
-                round_errors[capped_node_id] = error
-        unfinished_input = (None if partial is not None or reusable_peers else unfinished_batch_input(
-            jobs, route, nodes, args.parallel_group,
-            os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", ""), args.prompt_text,
-            round_admissions, route_file=route_path,
-            producer_managed=producer_managed,
-            producer_generation=producer_generation,
-            current_attempt_ids=producer_current_attempt_ids))
+        unfinished_input = unfinished_for(round_admissions, reusable_peers)
         for node_id, error in round_errors.items():
             admission = round_admissions[node_id]
             if unfinished_input is not None and args.action == "start":

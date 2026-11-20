@@ -63,7 +63,7 @@ SHAPES = ("direct", "solo", "staged")
 SIZE_SHAPE = {"one-change": "direct", "one-pass": "solo", "multi-stage": "staged"}
 from route_form import (  # noqa: E402,F401
     FORM_INTENSITIES, INTENSITIES, INTENSITY_SHAPE, SHAPE_INTENSITY, UNIT_CAPABILITY, allowed_intensities,
-    form_of, intensity_mismatch, nearest_allowed, one_shot_owner, route_form, serial_attempt_form, serial_attempt_route,
+    INTENSITY_ORDER, form_of, intensity_mismatch, nearest_allowed, one_shot_owner, route_form, serial_attempt_form, serial_attempt_route,
     shape_for_intensity, staged_form,
 )
 APPROVAL_KEYS = ("full-run", "deploy", "handback", "preview")
@@ -750,6 +750,47 @@ def evaluate_brief(path, *, root, node, compile_leg, start_approvals) -> dict:
         if notes + facts["notes"]:
             row["read_notes"] = notes + facts["notes"]
     return row
+
+
+def keep_card_copy(row, recorded, *, compile_leg, start_approvals) -> dict:
+    """`row`, with a lower intensity for a leg when the card the person answered showed one, or `row`
+    itself in every other case.
+
+    The caller has already shown that the brief's bytes are the ones the card was made from. This
+    exists for one drift: a card drawn by an earlier runtime showed a `solo` leg of a kind with a
+    one-shot review as `standard`, where this runtime reads the brief's `strong`, `thorough` or
+    `adversarial`; the person chose what the card showed, so that `standard` starts. The legs that start
+    are the brief's own with only that intensity moved: the copy names the row and the intensity and
+    nothing else (its stages, end conditions and fields are never read). Any other difference leaves
+    `row`, and the choice is then not verified."""
+    own = row.get("proposal")
+    try:
+        legs = [_normal_leg(leg, index) for index, leg in enumerate(recorded["legs"])]
+        if (own is None or len(legs) != len(own["legs"]) or recorded.get("summary") != own["summary"]
+                or recorded.get("execution_scope", own["execution_scope"]) != own["execution_scope"]):
+            return row
+        moved = []
+        for card, mine in zip(legs, own["legs"]):
+            if any(card.get(key) != mine.get(key) for key in (*_LEG_KEYS, "why") if key != "intensity"):
+                return row
+            if card.get("intensity") == mine.get("intensity"):
+                moved.append(mine)
+            elif (mine.get("shape") == "solo" and card.get("intensity") == "standard"
+                  and mine.get("intensity") in ("strong", "thorough", "adversarial")
+                  and one_shot_review_declared(mine.get("capability"))):
+                moved.append({**mine, "intensity": "standard"})
+            else:
+                return row
+        if moved == own["legs"]:
+            return row
+        proposal = {**own, "legs": moved}
+        facts = validate_proposal(proposal, compile_leg=compile_leg, start_approvals=start_approvals)
+    except (ProposalError, AttributeError, KeyError, TypeError, ValueError):
+        return row
+    if len(facts["legs"]) != len(moved):
+        return row
+    return {**row, "proposal": {**proposal, "entry_approvals": facts["entry_approvals"]}, "facts": facts,
+            "read_notes": [*dict.fromkeys([*row.get("read_notes", []), *facts["notes"], "card-copy-kept"])]}
 
 
 def _relative(path, root) -> str:

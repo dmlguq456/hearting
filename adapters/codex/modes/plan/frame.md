@@ -158,7 +158,8 @@ created: {YYYY-MM-DD}
      `one-change` into `one-pass`. A shared contract or a second reader's
      review raises the `intensity` to `standard`, not the shape: a `solo` leg
      at `standard` gets one independent review in the same route where its kind
-     declares one (code does). Where the kind declares no one-shot review, work
+     declares one (code does). Important or risk-bearing one-pass work raises it
+     further (`strong`+: more review legs) and stays `solo` where its kind declares one. Where the kind declares no one-shot review, work
      that needs an independent review opens `staged`.
    - `multi-stage` → `staged`: the work does not fit one session — separable
      durable stages, several modules or adapters, a migration, or a direction
@@ -204,7 +205,7 @@ created: {YYYY-MM-DD}
          size: multi-stage       # one-change | one-pass | multi-stage, judged before the shape
          shape: staged           # direct | solo | staged; omitted, it follows size
          graph: [eval-run, metrics, report]   # staged only; stage ids or capability:stage[:unit] from the catalogue; never a frame stage
-         intensity: standard     # optional; direct fixes direct, solo allows quick or (where its kind declares a one-shot review) standard, and staged allows standard+
+         intensity: standard     # optional; direct fixes direct, solo allows quick, or standard and higher where its kind declares a one-shot review, and staged allows standard+
          cwd: /path/to/task-repository  # optional: existing checkout or requested new repository; relative to the frame's cwd
          why: "one sentence"
          done_when:              # optional, 1-5: what shows this leg is finished (a sentence or {text, check})

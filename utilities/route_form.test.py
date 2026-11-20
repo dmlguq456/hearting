@@ -205,10 +205,10 @@ class AllowanceTableTest(unittest.TestCase):
     def test_the_values_are_the_ones_the_five_places_held(self):
         self.assertEqual(RF.FORM_INTENSITIES["direct"], ("direct",))
         self.assertEqual(RF.FORM_INTENSITIES["unit"], ("quick",))
-        # `solo` carries `standard` only where its kind declares a one-shot review (`allowed_intensities`)
-        self.assertEqual(RF.FORM_INTENSITIES["solo"], ("quick", "standard"))
+        # `solo` carries `standard` and up only where its kind declares a one-shot review (`allowed_intensities`)
+        self.assertEqual(RF.FORM_INTENSITIES["solo"], ("quick", "standard", "strong", "thorough", "adversarial"))
         self.assertEqual(RF.allowed_intensities("solo"), ("quick",))
-        self.assertEqual(RF.allowed_intensities("solo", True), ("quick", "standard"))
+        self.assertEqual(RF.allowed_intensities("solo", True), ("quick", "standard", "strong", "thorough", "adversarial"))
         self.assertEqual(RF.FORM_INTENSITIES["staged"], ("standard", "strong", "thorough", "adversarial"))
         self.assertEqual(RF.SHAPE_INTENSITY, {"direct": "direct", "solo": "quick", "staged": "standard",
                                               "framed": "standard"})
@@ -221,9 +221,13 @@ class AllowanceTableTest(unittest.TestCase):
                          "compose-shape-intensity-mismatch:direct (allowed: direct)")
         self.assertEqual(RF.intensity_mismatch("solo", "standard"),
                          "compose-shape-intensity-mismatch:solo (allowed: quick)")
-        self.assertEqual(RF.intensity_mismatch("solo", "strong", True),
-                         "compose-shape-intensity-mismatch:solo (allowed: quick,standard)")
-        self.assertIsNone(RF.intensity_mismatch("solo", "standard", True))
+        self.assertEqual(RF.intensity_mismatch("solo", "direct", True),
+                         "compose-shape-intensity-mismatch:solo (allowed: quick,standard,strong,thorough,adversarial)")
+        for intensity in ("standard", "strong", "thorough", "adversarial"):
+            self.assertIsNone(RF.intensity_mismatch("solo", intensity, True))
+            # a kind that declares no review keeps its refusal byte for byte
+            self.assertEqual(RF.intensity_mismatch("solo", intensity),
+                             "compose-shape-intensity-mismatch:solo (allowed: quick)")
         self.assertEqual(RF.intensity_mismatch("staged", "quick"),
                          "compose-shape-intensity-mismatch:staged (allowed: standard,strong,thorough,adversarial)")
         self.assertEqual(RF.intensity_mismatch("staged", "direct"),
@@ -232,11 +236,12 @@ class AllowanceTableTest(unittest.TestCase):
                                  ("staged", "adversarial"), ("framed", "quick")):
             self.assertIsNone(RF.intensity_mismatch(shape, intensity))
 
-    def test_solo_opens_standard_only_for_a_kind_that_declares_the_review(self):
+    def test_solo_opens_standard_and_up_only_for_a_kind_that_declares_the_review(self):
         for intensity in ("standard", "strong", "thorough", "adversarial", "direct"):
             self.assertIsNotNone(RF.intensity_mismatch("solo", intensity))
-        for intensity in ("strong", "thorough", "adversarial", "direct"):
-            self.assertIsNotNone(RF.intensity_mismatch("solo", intensity, True))
+        self.assertIsNotNone(RF.intensity_mismatch("solo", "direct", True))
+        for intensity in ("standard", "strong", "thorough", "adversarial"):
+            self.assertIsNone(RF.intensity_mismatch("solo", intensity, True))
         self.assertEqual(RP.one_shot_review_declared("autopilot-code"), True)
         self.assertEqual(RP.one_shot_review_declared("autopilot-lab"), False)
 
@@ -249,9 +254,10 @@ class FrameProposalNormalizationTest(unittest.TestCase):
         return row, notes
 
     def test_an_intensity_a_form_does_not_allow_keeps_the_highest_it_does_below_it_with_the_same_note(self):
-        # code declares the one-shot review, so `solo` allows quick and standard
-        cases = {("solo", "standard"): ("standard", False), ("solo", "strong"): ("standard", True),
-                 ("solo", "adversarial"): ("standard", True), ("solo", "quick"): ("quick", False),
+        # code declares the one-shot review, so `solo` allows quick and standard and up
+        cases = {("solo", "standard"): ("standard", False), ("solo", "strong"): ("strong", False),
+                 ("solo", "adversarial"): ("adversarial", False), ("solo", "quick"): ("quick", False),
+                 ("solo", "direct"): ("quick", True),
                  ("direct", "quick"): ("direct", True), ("staged", "quick"): ("standard", True),
                  ("staged", "strong"): ("strong", False), ("staged", "standard"): ("standard", False)}
         for (shape, intensity), (kept, noted) in cases.items():

@@ -17,6 +17,7 @@ import route_form as ROUTE_FORM
 from capability_route_base import (
     DEFAULTS, ROOT, TOPO,
 )
+from capability_route_dispatch import _expand_parallel_groups
 
 
 def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=None, owner_default=None):
@@ -152,6 +153,27 @@ def one_shot_review_node(recipe):
     node.update({"depends_on": [], "inputs": list(declared["inputs"]),
                  "fallback_hops": list(declared["fallback_hops"]), "model_profile": declared["model_profile"]})
     return node
+
+
+def one_shot_review_nodes(recipe, effective="standard", registry=None, persona_policy=True):
+    """The middle cell's verification nodes at `effective`: the borrowed review node, widened from `strong`
+    into the kind's own declared review group.
+
+    ONE function for the compiler and `verify_route`. The group is the one the team route expands
+    (`parallel_groups`, `_expand_parallel_groups`): the same legs, perspectives and widths. Only the anchor
+    leg differs: it takes the cell's review model (`one_shot_review.model_profile`), so `strong` never
+    reviews more shallowly than `standard` does. The other legs keep the model the group declares."""
+    anchor = one_shot_review_node(recipe)
+    declared = recipe["one_shot_review"]["node"]
+    groups = [g for g in recipe["standard_plus"].get("parallel_groups") or [] if g.get("node") == declared]
+    if not groups:
+        return [anchor]
+    registry = registry or TOPO.load_registry()
+    nodes = _expand_parallel_groups([anchor], groups, effective, recipe["capability"],
+                                    auxiliary_check_units=registry.get("auxiliary_check_units"),
+                                    persona_policy=persona_policy)
+    nodes[0]["model_profile"] = recipe["one_shot_review"]["model_profile"]
+    return nodes
 
 
 def _quick_frame_diversity(candidates):

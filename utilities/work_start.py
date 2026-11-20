@@ -1264,8 +1264,26 @@ def _checkpoint(name):
     return FAULT_HOOK(name) if FAULT_HOOK is not None else None
 
 
-def _proposal_rows(route, jobs, root, record, output):
-    """Each brief's proposal row, every leg validated by a memory compile (nothing written or started)."""
+def _frame_brief_digest(route, jobs, node):
+    """The sha256 of `node`'s brief as its frame leg completed it ("" when the marker does not say).
+
+    The card is made after the frame legs complete, so a brief that still has this digest has the bytes
+    the card was made from, whichever runtime made the card."""
+    try:
+        marker = json.loads((Path(jobs).parent / "completion" / route["route_id"] / (node + ".json")).read_text(encoding="utf-8"))
+        evidence = marker["evidence"]
+        digest = evidence["sha256"]
+        return digest if isinstance(digest, str) and Path(str(evidence.get("path"))).name == "direction-brief.md" else ""
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+
+
+def _proposal_rows(route, jobs, root, record, output, recorded=None):
+    """Each brief's proposal row, every leg validated by a memory compile (nothing written or started).
+
+    With `recorded` (the interview copy of the proposal the person chose), a brief whose bytes are
+    unchanged since its frame leg completed gives that copy as its proposal: the card the person
+    answered showed it (`RP.keep_card_copy`)."""
     module = _route_module()
     readiness = {}
 
@@ -1305,6 +1323,7 @@ def _proposal_rows(route, jobs, root, record, output):
                 parent = path.parent.resolve(strict=True)
                 stamp = parent.stat()
                 binding = {"parent": {"path": str(parent), "device": stamp.st_dev, "inode": stamp.st_ino}}
+            preparations[:] = [item for item in preparations if item["leg"] != index]   # a second compile of the leg replaces the first
             preparations.append({"leg": index, "cwd": proposed, "state": state, **binding,
                                  "existing_destination": target == proposed and os.path.lexists(path)})
         return compiled
@@ -1314,6 +1333,8 @@ def _proposal_rows(route, jobs, root, record, output):
         preparations = []
         row = RP.evaluate_brief(output / "shards" / node / "direction-brief.md", root=root, node=node,
                                 compile_leg=compile_leg, start_approvals=module.route_start_approvals)
+        if recorded is not None and row["proposal"] is not None and row["sha256"] == _frame_brief_digest(route, jobs, node):
+            row = RP.keep_card_copy(row, recorded, compile_leg=compile_leg, start_approvals=module.route_start_approvals)
         if preparations and row["proposal"] is not None:
             row["repository_preparation"] = list(preparations)
             for preparation in preparations:
@@ -1705,12 +1726,13 @@ def _decide(route, jobs, root, record, output, briefs, intent):
         _store_bytes_once(output / AUTOMATIC_DIRECTION_DIR / AUTOMATIC_NOTICE_NAME, (notice + "\n").encode())
     if not isinstance(interview, dict) or not isinstance(answers, dict) or "route_proposals" not in interview:
         return ended(RP.NO_PROPOSAL_READ)
-    rows = _proposal_rows(route, jobs, root, record, output)
-    shown = [{key: row[key] for key in ("node", "proposal", "reason", "brief_path", "sha256", "source", "read_notes")
-              if key in row} for row in rows]
     choice = FI.route_choice(interview, answers)
     if choice is None:
         return ended(RP.NO_PROPOSAL_READ)
+    rows = _proposal_rows(route, jobs, root, record, output,
+                          recorded=choice["proposal"] if choice["state"] == "selected" else None)
+    shown = [{key: row[key] for key in ("node", "proposal", "reason", "brief_path", "sha256", "source", "read_notes")
+              if key in row} for row in rows]
     if choice["state"] != "selected":
         return ended({"declined": "route-declined", "off-menu": "route-off-menu"}.get(choice["state"], "route-unanswered"), shown)
     valid = [row for row in rows if row["proposal"] is not None]

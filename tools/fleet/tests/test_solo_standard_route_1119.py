@@ -50,3 +50,44 @@ class SoloStandardCell(unittest.TestCase):
                     self.assertTrue(text.startswith("code(solo") or "code(solo" in text or width < 28, text)
         self.assertTrue(cell(solo_standard(), 100).startswith("code(solo·standard)"), cell(solo_standard(), 100))
         self.assertTrue(cell(solo_standard(False), 74).startswith("code(solo·standard)"), cell(solo_standard(False), 74))
+
+
+def solo_up(intensity, at):
+    names = (["impl-review", "impl-review-alternative", "impl-review-failure-mode"][:2 if intensity == "strong" else 3]
+             + ["one-shot"])
+    return {"state": "working", "shape": "one-shot-owner", "capability": "code", "intensity": intensity, "field": "code",
+            "stages": [{"name": n, "st": "done" if i < at else "active" if i == at else "todo"}
+                       for i, n in enumerate(names)],
+            "legs": (("code", "active", f"{at + 1}/{len(names)}"),)}
+
+
+class SoloStrongAndThoroughCell(unittest.TestCase):
+    """S2: `solo·strong`, `solo·thorough` and `solo·adversarial` are drawn by the words the cell already has."""
+
+    def setUp(self):
+        env = mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_the_cell_reads_the_form_and_the_intensity_and_the_node_order_and_never_staged(self):
+        for intensity in ("strong", "thorough", "adversarial"):
+            for at in (0, 1, 2):
+                for width in (100, 74, 44):
+                    with self.subTest(intensity=intensity, at=at, width=width):
+                        text = cell(solo_up(intensity, at), width)
+                        self.assertTrue(text.startswith(f"code(solo·{intensity}) · {at + 1}/"), text)
+                        self.assertNotIn("staged", text)
+                        self.assertNotIn("team", text)
+                for width in (28, 20):
+                    text = cell(solo_up(intensity, 0), width)
+                    self.assertTrue(text and "staged" not in text, text)
+        self.assertEqual(cell(solo_up("strong", 0), 100), "code(solo·strong) · 1/3: impl-review")
+        self.assertEqual(cell(solo_up("thorough", 3), 100), "code(solo·thorough) · 4/4: solo")
+        # the lighter cells read as they did
+        self.assertEqual(cell(solo_standard(), 100), "code(solo·standard) · 1/2: impl-review")
+
+    def test_the_kind_cell_wears_the_bold_key_from_strong_up_and_the_plain_key_at_standard(self):
+        row = lambda intensity: {"capability": "code", "field": "code", "shape": "one-shot-owner", "intensity": intensity}  # noqa: E731
+        self.assertEqual(tables._kind_cell(row("standard"))[1], ("(solo·standard)", "kinds_code"))
+        for intensity in ("strong", "thorough", "adversarial"):
+            self.assertEqual(tables._kind_cell(row(intensity)), [("code", "kind_code"), (f"(solo·{intensity})", "kindb_code")])
