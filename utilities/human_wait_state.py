@@ -566,7 +566,8 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
                      recommended=None, secret=False, cwd=None, incarnation=None, replace=True):
     """Register one explicit question on the caller's current prompt, without waiting.
 
-    A new question replaces this session's earlier waiting one. `replace=False` leaves a
+    A new question replaces this session's earlier waiting one; the returned value then carries
+    `replaced` (that question's id and text) so the caller can say so. `replace=False` leaves a
     different open question in place and refuses instead (`question-open-elsewhere`)."""
     import session_tidy as tidy
     if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
@@ -650,6 +651,10 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
     if prior:
         _queue_message_decision(prior)
     _request_producer()
+    if (prior and prior.get("id") != item_id and prior.get("mode") == "message"
+            and prior.get("lifecycle") == "open"):
+        # The earlier unanswered question of this session was just closed as replaced.
+        return {**value, "replaced": {"id": prior["id"], "question": str(prior.get("question") or "")}}
     return value
 
 
