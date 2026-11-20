@@ -439,6 +439,36 @@ class HumanWaitStateTests(unittest.TestCase):
                          [FI.UNDERSTANDING_SLOT, "scope", "speed"])
         self.assertEqual([question.get("recommended") for question in questions], [0, 1, None])
 
+    def test_frame_interview_detail_carries_the_route_scope_line_in_the_choice_means_only(self):
+        import frame_interview as FI
+        leg = {"capability": "autopilot-code", "shape": "solo"}
+        options = [{"label": "Go", "means": "Run it"}, {"label": "Go bare"}, {"label": "Later", "means": "Not now"}]
+        interview = {"understanding": "Restated task", "questions": [
+            {"id": "go", "question": "Proceed?", "recommended": 0, "options": options},
+            {"id": "other", "question": "Also?", "options": [{"label": "Go", "means": "x"}]}],
+            "route_proposals": {"question": "go", "by_option": {
+                "Go": {"legs": [leg, leg], "execution_scope": "complete"},
+                "Go bare": {"legs": [leg, leg, leg], "execution_scope": "report"},
+                "Later": {"legs": [leg]}}}}
+        binding = {"route": {"route_id": "rt-x", "nodes": [],
+                             "human_gate_bindings": [{"gate": "frame-review", "node": "owner"}]},
+                   "resolution": {}}
+        for lang, first, second in (
+                ("en", "Run it Runs all 2 legs through to the end, without asking again in between.",
+                 "Stops each time a leg ends; the next leg starts when you say so."),
+                ("ko", "Run it leg 2개를 끝까지 이어서 진행합니다. 중간에 다시 묻지 않습니다.",
+                 "leg가 하나 끝날 때마다 멈춥니다. 다음 leg는 말씀하시면 시작합니다.")):
+            with self.subTest(lang=lang), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}), \
+                    mock.patch.object(state, "_workflow_gate_interview", return_value=(interview, None)):
+                detail, error = state._workflow_gate_detail(binding, {"gate_id": "frame-review"})
+            self.assertIsNone(error)
+            route, other = detail["detail"]["questions"][1:]
+            self.assertEqual([choice["value"] for choice in route["choices"]], ["Go", "Go bare", "Later"])
+            self.assertEqual([choice["label"] for choice in route["choices"]], ["Go", "Go bare", "Later"])
+            self.assertEqual([choice.get("means") for choice in route["choices"]], [first, second, "Not now"])
+            self.assertEqual(other["choices"], [{"value": "Go", "label": "Go", "means": "x"}])
+            self.assertEqual(route["question"], "Proceed?")
+
     def test_absent_herdr_does_not_leave_a_dedupe_marker(self):
         with mock.patch("human_wait_state.shutil.which", return_value=None):
             self.assertFalse(state._notify_item({"id": "S4:missing", "question": "확인"},

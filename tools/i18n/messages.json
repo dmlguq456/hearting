@@ -2234,6 +2234,14 @@
    "en": "…(truncated)",
    "ko": "…(잘림)"
   },
+  "frame.route_scope_complete": {
+   "en": "Runs all {legs} legs through to the end, without asking again in between.",
+   "ko": "leg {legs}개를 끝까지 이어서 진행합니다. 중간에 다시 묻지 않습니다."
+  },
+  "frame.route_scope_report": {
+   "en": "Stops each time a leg ends; the next leg starts when you say so.",
+   "ko": "leg가 하나 끝날 때마다 멈춥니다. 다음 leg는 말씀하시면 시작합니다."
+  },
   "install.entrance": {
    "en": "Results land in each project's `.agent_reports/`; open its `README.md` or run `hearting reports`.",
    "ko": "결과는 각 프로젝트의 `.agent_reports/`에 쌓입니다. 그 안의 `README.md`를 열거나 `hearting reports`를 실행하세요."

@@ -260,6 +260,42 @@ def _frame_decision_result(decision, question, question_path, answer_path):
     return result
 
 
+def _store_frame_intent(question, response, directory, frame_dir):
+    """The one place the agreed intent is rendered: the round's copy once, then the shared copy."""
+    import frame_interview as FI
+    import workflow_state as WS
+    rendered = FI.render_intent(
+        question, response, now=question["created"],
+        **({"approval_scope": _approval_scope(question, response)} if "route_proposals" in question else {}))
+    _store_bytes_once(directory / "intent.md", rendered.encode())
+    _checkpoint("after-intent-render")
+    intent = frame_dir / "intent.md"
+    if not intent.exists() or intent.read_text() != rendered:
+        WS._atomic_write(intent, rendered)
+
+
+def _intent_placed(frame_dir):
+    """Whether the shared intent exists (a file the cycle recorded as moved still counts)."""
+    import artifact_producer
+    path = frame_dir / "intent.md"
+    return os.path.lexists(path) or artifact_producer.resolve_placed_output(path) != path
+
+
+def released_without_intent(route, jobs):
+    """A `proceed` recorded with its question and answer, and no intent rendered yet.
+
+    The question board releases the gate with the person's answer and writes nothing else; the
+    next plain start fills in the one missing step."""
+    import workflow_state as WS
+    resolution = WS.human_gate_resolution(
+        WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs).journal(), "frame-review")
+    artifact = resolution.get("artifact")
+    # The fill needs the recorded question and the answer both readable: a cycle folder that was moved
+    # or removed leaves nothing to fill, and that start goes on past the released gate as it always did.
+    return bool(resolution["status"] == "proceed" and artifact and resolution.get("answers")
+                and os.path.isfile(artifact) and not _intent_placed(Path(artifact).parent.parent))
+
+
 def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
                          decision="proceed", runtime_root=ROOT, run=subprocess.run, automatic=False):
     """Own raise -> actual answers -> intent -> release through existing commands.
@@ -318,8 +354,10 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
     if not answers and not next_round and decision == "proceed" and resolution["status"] in {"revise", "stop"}:
         decision = resolution["status"]  # A plain resume cannot replace the person's decision.
     if resolution["status"] in {"proceed", "revise", "stop"} and not next_round:
-        # A submitted answer remains readable after its cycle is sealed. Do not
-        # reopen the producer or write into a completed cycle on a lost reply.
+        # A submitted answer remains readable after its cycle is sealed. A lost reply does not reopen
+        # the producer. The one write below (the intent a board answer left unrendered) may land in a
+        # sealed cycle: closed cycles accept writes, their proofs and the campaign close ignore later
+        # files, and the next refresh adds them to the manifest (artifact_seal_abolition.test.py).
         recorded_path = Path(resolution["artifact"])
         recorded = FI.load_json_file(recorded_path)
         if "repository_preparation" in recorded and "repository_preparation" not in supplied:
@@ -343,7 +381,13 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
             raise ValueError("frame-input-invalid: answers do not match the recorded interview")
         if response != recorded_answer:
             raise ValueError("frame-input-conflict: preserve the recorded answer")
-        return _frame_decision_result(decision, recorded, recorded_path, recorded_path.parent / "answers.json")
+        directory = recorded_path.parent
+        if decision == "proceed" and response is not None and not _intent_placed(directory.parent):
+            # Released without a render (the board's answer path): write what the conversation would have.
+            response = FI.recorded_answer_context(response, resolution.get("actor_kind"))
+            _store_once(directory / "answers.json", response)
+            _store_frame_intent(recorded, response, directory, directory.parent)
+        return _frame_decision_result(decision, recorded, recorded_path, directory / "answers.json")
     context = prepare_route_artifact_env(Path(path), start=False, jobs=Path(jobs))
     output = context.get("AGENT_ARTIFACT_OUTPUT_DIR")
     if not output:
@@ -377,6 +421,13 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
     refused_answer = None
     if not answers and not next_round and resolution["status"] == "blocked" and native.is_file():
         answers = native                    # the person's native reply, recorded when it arrived
+    elif (not answers and not next_round and not automatic and resolution["status"] == "blocked"
+            and answer_path.is_file() and (directory / "intent.md").is_file()):
+        # The answer file holds no decision. The round's intent is written only for a `proceed`, just
+        # before its release, so it is the record that this answer's proceed flow reached the render.
+        saved_answers = FI.load_json_file(answer_path, max_bytes=FI.MAX_ANSWERS_BYTES, kind="answers")
+        if isinstance(saved_answers, dict) and saved_answers.get("basis") != FI.AUTOMATIC_BASIS:
+            answers = answer_path           # saved by this flow before the release it did not reach
     response = (FI.load_json_file(answers, max_bytes=FI.MAX_ANSWERS_BYTES, kind="answers")
                 if answers else None)
     # A native timeout/acknowledgement is not an answer file. Keep the same
@@ -490,16 +541,8 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
             raise ValueError("frame-answer-conflict: the recorded decision cannot be replaced")
     elif resolution["status"] != "blocked":
         raise ValueError("frame-raise-pending: the gate was not durably registered")
-    intent = frame_dir / "intent.md"
     if decision == "proceed":
-        rendered = FI.render_intent(
-            question, response, now=question["created"],
-            **({"approval_scope": _approval_scope(question, response)} if "route_proposals" in question else {}))
-        saved = directory / "intent.md"
-        _store_bytes_once(saved, rendered.encode())
-        _checkpoint("after-intent-render")
-        if not intent.exists() or intent.read_text() != rendered:
-            WS._atomic_write(intent, rendered)
+        _store_frame_intent(question, response, directory, frame_dir)
     if resolution["status"] == "blocked":
         command("release", "--decision", decision, *(["--answers", str(answer_path)] if response is not None else []))
     current = WS.human_gate_resolution(ledger.journal(), "frame-review")
@@ -2684,6 +2727,8 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
         except DispatchContractError as exc:
             if exc.reason not in {"human-gate-not-raised", "human-gate-unreleased"}:
                 raise
+            gate_pending = True
+        if not gate_pending and released_without_intent(route, jobs):
             gate_pending = True
         if gate_pending or interview or answers:
             step = frame_interview_step(route, path, jobs, interview=interview, answers=answers, decision=decision)
