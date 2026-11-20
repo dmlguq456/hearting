@@ -196,7 +196,7 @@ from capability_route_compose import (  # noqa: F401
     _versioned_subgraph, _without_implicit_frame_briefs, COMPOSE_DEFAULT_CAPABILITY,
     COMPOSE_DEFAULT_CHILDREN, COMPOSE_SHAPES, compose_spec_read, compose_subgraph_recipe,
     DECIDED_SHAPES, DEFAULT_ARTIFACT_GUARD, DEFAULT_DRIFT_VERDICT, INTENSITY_SHAPE,
-    parse_graph_spec, proposal_readiness, ROUTE_FRAME_CAPABILITY, ROUTE_ORIGINS,
+    parse_graph_spec, proposal_readiness, read_compose_task, ROUTE_FRAME_CAPABILITY, ROUTE_ORIGINS,
     shape_for_intensity, SHAPE_INTENSITY, SPEC_READ_MARKER_PREFIX, SPEC_READ_SHARED_PREFIX,
 )
 from capability_route_scope import (  # noqa: F401
@@ -1876,7 +1876,7 @@ def main():
     cp=sub.add_parser("compose",help="preset-free work route: name the shape (and stage subgraph), defaults fill the rest")
     cp.add_argument("--slug",default=None,help="default: named from the task's first line with ASCII words")
     cp.add_argument("--start",action="store_true",help="prepare and start the selected work; the runtime owns frame launches and waiting")
-    cp.add_argument("--prompt-file",type=Path,help="the user's task, stored with the route for frame and owner execution")
+    cp.add_argument("--prompt-file",type=Path,help="the user's task, stored with the route for frame and owner execution; `-` (and `./-`) reads it once from standard input (a pipe or a heredoc), with no file to write first; a file named `-` cannot be given here")
     cp.add_argument("--owner",choices=("claude","codex","opencode"),help="explicit owner runtime; otherwise use normal selection (same as --pin owner=<harness>)")
     cp.add_argument("--pin",action="append",default=[],metavar="TARGET=HARNESS[:MODEL[@EFFORT]]",
                     help="choose the tool (and optionally model and effort) once; the route seals it for the owner, "
@@ -2072,7 +2072,7 @@ def main():
         shape=a.shape or ("solo" if a.unit is not None else "framed")
         if a.start and (a.explain or a.prompt_file is None):
             raise ValueError("compose-start-requires-task: use --start --prompt-file <task>, without --explain")
-        compose_task = a.prompt_file.read_text() if a.prompt_file else ""
+        compose_task = read_compose_task(a.prompt_file)
         cwd_was_explicit = a.cwd is not None
         cwd=a.cwd or os.getcwd()
         promotion_cwd = cwd
