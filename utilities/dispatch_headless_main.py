@@ -228,11 +228,13 @@ def unit_leg_prompt(h, args, task: str, *, commit_clause: str = "") -> str | Non
     # The kernel's closing contract, without the paragraph that only a supervised owner reads.
     contract = "\n\n".join(paragraph for paragraph in wb.worker_terminal_contract(h.ROOT).split("\n\n")
                             if "supervised owner" not in paragraph)
+    # A support leg (a lookup) starts no other worker, as `roles/worker-types/support.md` says: it is not told how.
+    call = "" if args.worker_type == "support" else f"{wb.unit_call_prompt(h.ROOT)}\n"
     return (f"{unit_text}\n\n"
             f"{dispatch_metadata_prompt(h, args)}\n"
             f"{commit_clause}"
             f"{wb.unit_safety_prompt(args.worker_type)}"
-            f"{wb.unit_call_prompt(h.ROOT)}\n"
+            f"{call}"
             f"{wb.unit_bootstrap_prompt(args, task, os.environ)}"
             f"Assignment:\n{task.rstrip()}\n\n"
             f"{wb.node_scope_prompt(scope)}\n"

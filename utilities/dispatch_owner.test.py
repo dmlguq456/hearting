@@ -1827,6 +1827,75 @@ class FrameModelRoleHandoffTest(unittest.TestCase):
             self.assertEqual(args.dispatch_depth, 1)
             self.assertEqual(adapter.resolve_model_settings(args)["profile"], "light")
 
+    def test_a_lookup_unit_leg_is_launched_as_support_only_from_its_route_node(self):
+        # G1: `general/explore` is a `support` unit; the one leg of its unit route starts at depth 1 through the
+        # same selector, on the three harnesses. Route-free (or without its node) a support tuple stays refused.
+        path = self._route(nodes=[{"id": "unit", "role": "fast tool worker", "model_profile": "light",
+                                 "unit": "general/explore", "dispatch_depth": 1, "worker_type": "support",
+                                 "launch_authority": "depth-0"}])
+        with mock.patch.dict(os.environ, {}, clear=True):
+            _, values, forwarded, _, _ = OWNER._parse([
+                "--start", "--route-evidence", path, "--route-node", "unit", "--prompt-text", "probe"])
+            for argv in (["--start", "--worker-type", "support", "--unit", "general/explore", "--dispatch-depth", "1",
+                          "--route-evidence", path],
+                         ["--start", "--worker-type", "support", "--unit", "general/explore", "--dispatch-depth", "1",
+                          "--route-node", "unit"]):
+                with self.assertRaises(OWNER.OwnerError, msg=argv):
+                    OWNER._parse([*argv, "--prompt-text", "probe"])
+        self.assertEqual((values["--worker-type"], values["--unit"], values["--dispatch-depth"]),
+                         ("support", "general/explore", "1"))
+        for harness in ("codex", "claude", "opencode"):
+            with self.subTest(harness=harness):
+                spec = importlib.util.spec_from_file_location("lookup_leg_" + harness,
+                    ROOT / "adapters" / harness / "bin" / "dispatch-headless.py")
+                adapter = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = adapter
+                spec.loader.exec_module(adapter)
+                args = adapter.parser().parse_args(forwarded)
+                self.assertEqual((args.worker_type, args.dispatch_depth), ("support", 1))
+                self.assertEqual(adapter.resolve_model_settings(args)["profile"], "light")
+
+    def test_a_route_leg_never_inherits_its_callers_route_environment(self):
+        # A unit route opened from inside an owner: the caller's route variables are in the selector's
+        # environment, and the wrapper reads them as "this is an owner bundle" and refuses any other start. The
+        # frame, review and lookup (`support`) legs all start without them; the owner's own start keeps them.
+        import artifact_producer
+        parent = {"AGENT_OWNER_ROUTE_FILE": "/parent/owner-route.json", "AGENT_OWNER_ROUTE_ID": "rt-parent",
+                  "AGENT_OWNER_ROUTE_HASH": "sha256:parent", "AGENT_ROUTE_FILE": "/parent/route.json",
+                  "AGENT_ROUTE_ID": "rt-parent", "AGENT_ROUTE_NODE": "one-shot"}
+        for worker_type, unit in (("frame", "plan/frame"), ("review", "qa/code-review"),
+                                  ("support", "general/explore")):
+            with self.subTest(worker_type=worker_type):
+                path = self._route(nodes=[{"id": "unit", "role": "fast tool worker", "model_profile": "light",
+                                         "unit": unit, "dispatch_depth": 1, "worker_type": worker_type,
+                                         "launch_authority": "depth-0"}])
+                jobs = Path(path).parent / "jobs.log"
+                jobs.touch()
+                binding = SimpleNamespace(route_file=path, route_id="rt-x", route_hash="sha256:x",
+                                          route_node="unit", registry_digest="sha256:test",
+                                          write_scope=str(Path(path).parent), completion_gate="test")
+                harnesses = ("claude", "codex", "opencode")
+                with mock.patch.object(OWNER, "_load_defaults", return_value={
+                         "schema_version": 3, "harnesses": {"enabled": list(harnesses)}}), \
+                     mock.patch.object(OWNER._defaults, "query_profile_policy", return_value={
+                         "primary": list(harnesses), "relief": [], "last_resort": [], "promote_relief_below": 0}), \
+                     mock.patch.object(OWNER, "_usage", return_value={h: "ok" for h in harnesses}), \
+                     mock.patch.object(OWNER._allocation, "attempt_counts", return_value={h: 0 for h in harnesses}), \
+                     mock.patch.object(OWNER._capacity, "capacity_report", return_value={
+                         "scores": {h: 80.0 for h in harnesses}, "sources": {h: "test" for h in harnesses}}), \
+                     mock.patch.object(OWNER, "derive_frame_route_binding", return_value=binding), \
+                     mock.patch.object(artifact_producer, "prepare_route_artifact_env", return_value={}), \
+                     mock.patch.object(OWNER, "select_launch_lifecycle", return_value="detached"), \
+                     mock.patch.object(OWNER, "run_owner_wrapper", return_value=0) as wrapper, \
+                     mock.patch.dict(os.environ, _isolated_env({"AGENT_DISPATCH_JOBS": str(jobs), **parent}),
+                                     clear=True), \
+                     contextlib.redirect_stdout(io.StringIO()) as out:
+                    rc = OWNER.main(["--start", "--route-evidence", path, "--route-node", "unit",
+                                     "--prompt-text", "probe"])
+                self.assertEqual(rc, 0, out.getvalue())
+                env = wrapper.call_args.args[1]
+                self.assertEqual({key for key in parent if key in env}, set(), env)
+
     def test_actual_adapter_parsers_and_resolvers_consume_the_selected_node_role(self):
         for node in ("frame", "frame-alternative"):
             _, values, forwarded, _, _ = OWNER._parse(self._args(node))

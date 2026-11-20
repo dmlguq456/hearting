@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness_behavior_scenarios import Reply, Scenario, wait_for  # noqa: E402
 import harness_behavior_cases_a as ca  # noqa: E402
 import harness_behavior_cases_c as cc  # noqa: E402
+from harness_behavior_cases_tidy_compact import summary_reply  # noqa: E402
 
 CARD_MARK = "TIDYC-CARD-MARK"
 CARD_BODY = (f"원래 목표: {CARD_MARK} 창 비우기 뒤 이어가기 검증\n"
@@ -352,6 +353,10 @@ class TidyContinue(Scenario):
         def answer(record, earlier):
             last, kind = record["last_text"], record["last_kind"]
             done_next = any(NEXT in (r["reply"].get("shell") or "") for r in earlier)
+            if "<template>" in record["text"] and "## Objective" in record["text"]:
+                # OpenCode's own compaction request: it rejects a summary that does not follow
+                # its template and asks again, so the window would never be cleared.
+                return summary_reply(record, record["main_index"])
             if kind == "tool":
                 return Reply("Next action finished." if NEXT in last else "정리 요청 완료")
             if self.attempt in record["text"] and not done_next:

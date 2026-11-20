@@ -16,7 +16,7 @@ roles/units/
     memory-flow.md      # authorized-memory closing wrapper
     dual-io.md          # direct-call vs pipeline return switch
   <family>/<unit>.md    # one unit per file; family ∈ {qa, research, dev, design,
-                        #   material, editorial, plan}
+                        #   material, editorial, plan, general}
   <family>/_NOTES.md    # authoring residue: content mined from legacy sources that
                         #   found no home — must be reviewed, never silently dropped
 ```

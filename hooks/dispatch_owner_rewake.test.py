@@ -4939,6 +4939,19 @@ class FrameWorkerTypeArmingTest(unittest.TestCase):
                 self.assertIsNone(stdout_launch)
 
 
+    def test_a_support_leg_of_a_unit_route_arms_but_a_route_free_support_row_does_not(self) -> None:
+        # G1: `general/explore` is a support unit; the one leg of its route wakes the session like a review leg.
+        self.jobs.write_text(self.row(worker_type="support", route_id="rt-0123456789abcdef", route_node="unit",
+                                      attempt_id="att-lookup-1"), encoding="utf-8")
+        rows = rewake._session_owner_rows(self.jobs, "session-1")
+        self.assertEqual([attempt_id for attempt_id, _age in rows], ["att-lookup-1"])
+        self.jobs.write_text(self.row(worker_type="support", attempt_id="att-tidy-1"), encoding="utf-8")
+        self.assertEqual(rewake._session_owner_rows(self.jobs, "session-1"), [])
+        self.jobs.write_text(self.row(worker_type="support", route_id="rt-0123456789abcdef", attempt_id="att-no-node"),
+                             encoding="utf-8")
+        self.assertEqual(rewake._session_owner_rows(self.jobs, "session-1"), [])
+
+
 class SeatHandoverRewakeTest(unittest.TestCase):
     """After a /clear the same pane's successor takes over an owner's wake; the old hook goes quiet."""
 

@@ -78,6 +78,7 @@ shared-utility-deferred	harness_behavior_cases_solo_review.py
 shared-utility-deferred	harness_behavior_cases_unit_route.py
 shared-utility-deferred	harness_behavior_cases_unit_nested.py
 shared-utility-deferred	harness_behavior_cases_unit_continue.py
+shared-utility-deferred	harness_behavior_cases_unit_explore.py
 shared-utility-deferred	harness_behavior_cases_request.py
 shared-utility-deferred	harness_behavior_cases_parked.py
 shared-utility-deferred	harness_behavior_scenarios.py
