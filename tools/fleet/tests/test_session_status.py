@@ -389,6 +389,17 @@ class GroupsTest(StatusTest):
         fenced = "# t\n\n## 하는 중\n- 일 하나\n```\n- code line\n## 끝난 일\n- not a job\n```\n- 일 둘\n"
         self.assertEqual(self.kinds(fenced), [("running", 2, ["일 하나", "일 둘"])])
 
+    def test_the_documents_three_escapes_show_bare_and_other_backslashes_stay(self):
+        """The campaign document escapes only ``<``, ``>`` and ``&`` (``\\<``, ``\\>``, ``\\&``); a title shows them without the backslash."""
+        doc = ("<!-- hearting:campaign-document v1 -->\n# t\n\n## 하는 중\n"
+               "- 넓이 \\< 32 인 패널 \\& 좁은 창 \\> 다음 · #1 · v1.0.0 · 기록 2\n"
+               "- 다른 것 \\\\ 와 \\* 와 글자 \\n 와 `code` \\\\< 끝\n")
+        groups = session_status.parse_groups(doc)
+        self.assertEqual([g["kind"] for g in groups], ["running"])        # the comment marker line belongs to no group
+        self.assertEqual(groups[0]["items"], ["넓이 < 32 인 패널 & 좁은 창 > 다음 · #1 · v1.0.0 · 기록 2",
+                                              "다른 것 \\\\ 와 \\* 와 글자 \\n 와 code \\\\< 끝"])
+        self.assertEqual(groups[0]["count"], 2)
+
     def test_the_value_carries_the_groups_and_every_read_reads_the_document(self):
         folder2 = self.campaign("beta", body=CAMPAIGN)
         view = self.read(self.route(2, "beta"))

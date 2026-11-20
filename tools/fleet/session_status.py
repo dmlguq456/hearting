@@ -186,6 +186,12 @@ _GROUP_WORDS = (
 )
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _BULLET = re.compile(r"^(?:[-*+]|\d+[.)])\s+(.*)$")
+_ESCAPE = re.compile(r"\\(.)")
+
+
+def _unescaped(title):
+    """The campaign document escapes ``<``, ``>`` and ``&`` with a backslash for the viewer; a title shows them bare.  Any other backslash stays."""
+    return _ESCAPE.sub(lambda m: m.group(1) if m.group(1) in "<>&" else m.group(0), title)
 
 
 _ENGLISH_WORD = re.compile(r"[a-z][a-z ]*")
@@ -244,7 +250,7 @@ def parse_groups(text):
         bullet = _BULLET.match(raw)
         if not bullet:
             continue
-        title = project_status._plain(bullet.group(1))
+        title = _unescaped(project_status._plain(bullet.group(1)))
         if title and not (title.startswith(("(", "（")) and title.endswith((")", "）"))):
             found[current].append(title)
     groups = []
