@@ -1262,6 +1262,14 @@ def previous_harvest_wording(text: str) -> str:
     return text.replace(current, previous)
 
 
+def _child_note(jobs: str, child) -> str | None:
+    """The registry note of one receipt child (None when the row cannot be read)."""
+    try:
+        return exact_attempt_row(Path(jobs), child["attempt_id"]).metadata.get("note")
+    except (OSError, ValueError, KeyError, JoinContractError):
+        return None
+
+
 def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
     """`Next ready:` lines for an owner's depth-2 stage/review row that just finished; [] when unsure.
 
@@ -1292,9 +1300,12 @@ def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
                     from route_form import one_shot_review_route
                     if one_shot_review_route(route) and node.get("id") == "one-shot":
                         # The middle cell: the review is done; the owner's end is its own final handoff, unless
-                        # the verdict blocks (then the verdict text above is the instruction).
+                        # a verdict blocks (then the verdict text above is the instruction). A review group is
+                        # one batch: any blocking leg blocks it.
                         import review_round_cap
-                        if meta.get("note") == review_round_cap.REVIEW_BLOCKING_NOTE:
+                        if any(_child_note(jobs, other) == review_round_cap.REVIEW_BLOCKING_NOTE
+                               for other in receipt.get("children") or []) or (
+                                meta.get("note") == review_round_cap.REVIEW_BLOCKING_NOTE):
                             lines.append("Next ready: nothing to start; the independent review has finished and "
                                          "blocks. Follow the Review FAIL instruction above; do not return a final "
                                          "handoff before you have.")

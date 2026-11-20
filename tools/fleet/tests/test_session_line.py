@@ -467,10 +467,17 @@ class CommonSessionLineTest(unittest.TestCase):
         recent = [{**row, "type": "user-correction"}, {**row, "ts": "2026-11-12T08:00:00", "type": "completion", "headline": ""},
                   {**row, "type": "decision"}]
         self.assertEqual(session_panel.session_memory_items({"memory_recent": recent}, now),
-                         [{"kind": "correction", "age": "3m", "text": "route rows read who first", "tier": "", "scope": ""},
-                          {"kind": "done", "age": "2h 3m", "text": "body line", "tier": "", "scope": ""},
-                          {"kind": "decision", "age": "3m", "text": "route rows read who first", "tier": "", "scope": ""}])
+                         [{"kind": "correction", "age": "3m", "text": "route rows read who first", "tier": "", "scope": "", "body": "body line"},
+                          {"kind": "done", "age": "2h 3m", "text": "body line", "tier": "", "scope": "", "body": ""},
+                          {"kind": "decision", "age": "3m", "text": "route rows read who first", "tier": "", "scope": "", "body": "body line"}])
         self.assertEqual(len(session_panel.session_memory_items({"memory_recent": recent * 3}, now)), 3)   # (11-18: the newest three)
+        # 11-20 (the MEM popup): the record's body is the snippet the journal keeps, 600 characters at most and one line of printable text;
+        # nothing where it is the headline itself, a `superseded_by=` pointer or empty.
+        long_row = {**row, "snippet": "줄 하나\n줄 둘\x07 " + "가" * 700}
+        body = session_panel.session_memory_items({"memory_recent": [long_row]}, now)[0]["body"]
+        self.assertEqual((len(body), body.startswith("줄 하나 줄 둘"), "\n" in body, "\x07" in body), (session_panel.MEMORY_BODY, True, False, False))
+        for snippet in ("route rows read who first", "superseded_by=x", ""):
+            self.assertEqual(session_panel.session_memory_items({"memory_recent": [{**row, "snippet": snippet}]}, now)[0]["body"], "")
         # 11-15 (panel polish 5): the record's own tier and scope names; any other value is none.
         named = [{**row, "tier": "durable", "scope": "project"}, {**row, "tier": "working", "scope": "global"},
                  {**row, "tier": "permanent", "scope": "repo"}]

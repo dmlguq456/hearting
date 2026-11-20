@@ -334,8 +334,9 @@ leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first; an
 omitted shape follows it. Direct has no review-worker path of its own: work that
 needs an independent review is not direct. Open it with `--shape solo --intensity standard`
 (one session and one independent review, where the kind declares a one-shot review;
-the owner starts the route's declared review node with the command its task gives, and
-cannot close that review itself), or omit `--shape` and let the frame choose, or use
+`--intensity strong` or higher adds review legs: two at `strong`, three at `thorough`
+and `adversarial`; the owner starts the route's declared review nodes with the command
+its task gives, and cannot close any of them itself), or omit `--shape` and let the frame choose, or use
 `staged` when the size of the work calls for stages (`staged` is chosen for size, not to
 obtain a review where the kind declares a one-shot review; where it declares none, work that
 needs an independent review opens `staged`). A light check of a direct change may use the harness's own native
@@ -508,7 +509,10 @@ leg's approval question may be left out, and that leg then keeps its gate. When
 the interview is submitted the runtime builds `route_proposals`
 `{question, by_option}` from the marks and the validated proposals and records
 it with the question. An interview that writes `route_proposals` itself is read
-as written and offers only routes a brief proposed. After the answers, the
+as written and offers only routes a brief proposed, started as the brief wrote them;
+the one exception is a `solo` leg of a kind that declares one review, whose card says
+`standard` where the brief reads `strong`, `thorough` or `adversarial` (a card an
+earlier version drew), which starts at `standard`. After the answers, the
 same `start` records the decision, compiles and starts the first leg only
 (`--route-plan <record>#0`, `--parent-cycle <frame cycle>`), and closes the frame
 route once that start receipt exists; its receipt is the first leg's own.
@@ -1579,6 +1583,8 @@ Autopilot entrypoints choose `intensity`; verification rigor is derived from it 
 | Important multi-file or risk-bearing work | `strong` | A `deep` owner plus the declared plan/review groups; selected high-value anchors may widen to a third profile/perspective leg while other groups remain width two |
 | Complex cross-domain or cross-harness work | `thorough` | Bounded dispatch-depth-2 perspective and verifier workers |
 | High-stakes, irreversible, security, or external-facing work | `adversarial` | Thorough plus an explicit adversary, failure-mode, or security pass |
+
+The rows from `standard` up describe the `staged` (team) form. A `solo` route (`--shape solo`, one owner that makes the work) can carry `standard` through `adversarial` where its kind declares a one-shot review (code does): it keeps its `balanced` owner and adds only that kind's review legs after the work (one at `standard`, two at `strong`, three at `thorough` and `adversarial`), with no frame bootstrap, plan or plan check.
 
 The quick row describes the lighter procedure, not a smaller deliverable. The original request, approved endpoint, and assigned scope remain the completion boundary: examples and concise reports do not replace requested investigation, results, or verification. A report endpoint ends with the approved report; a bounded stage finishes only its assigned work and reports any actual unfinished duty through the existing outcome semantics.
 

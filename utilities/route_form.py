@@ -18,12 +18,12 @@ the recorded shape (a `solo` shape with a signal still seals a team route, so th
   `max_dispatch_depth 2` and the owner's wait on its children hang on it.
 
 In today's routes the two answers move together (quick: A only; team: B only). The middle cell
-`solo·standard` -- one owner that makes the work and starts its kind's one declared review node -- is
-the route where both are true.
+`solo·standard` and above -- one owner that makes the work and starts its kind's declared review nodes
+(one review at `standard`; the kind's review legs from `strong`) -- is the route where both are true.
 
 `form_of` / `route_form` (the recorded capability, shape and intensity) say what to *build* at the
-compile entrance and name a record for display; the middle cell is the one `solo` intensity a kind
-must declare (`one_shot_review` in `capabilities/topologies.json`). `FORM_INTENSITIES` is the one table
+compile entrance and name a record for display; the middle cell is the `solo` intensities (`standard`
+and up) a kind must declare (`one_shot_review` in `capabilities/topologies.json`). `FORM_INTENSITIES` is the one table
 of what a form may carry; compose, the frame proposal normalizer and the compiler all read it. Stdlib
 only, so every module can import it.
 """
@@ -42,12 +42,12 @@ UNIT_RECORDED_INTENSITY = "quick"
 # intensity. `unit` is the kind-`unit` route (one depth-0 leg, no owner); its recorded shape is `solo` and it is
 # listed here only for the value its record carries (`UNIT_RECORDED_INTENSITY`), not as an intensity to choose.
 # `framed` is the internal frame route: compose checks no intensity for it, so it reads like `staged`.
-# `solo` carries `standard` only where its kind declares a one-shot review (`allowed_intensities`).
+# `solo` carries `standard` and up only where its kind declares a one-shot review (`allowed_intensities`).
 _STAGED = ("standard", "strong", "thorough", "adversarial")
 FORM_INTENSITIES = {
     "direct": ("direct",),
     "unit": (UNIT_RECORDED_INTENSITY,),
-    "solo": ("quick", "standard"),
+    "solo": ("quick", *_STAGED),
     "staged": _STAGED,
     "framed": _STAGED,
 }
@@ -61,10 +61,10 @@ def shape_for_intensity(effective):
 
 
 def allowed_intensities(form, review_declared=False):
-    """The intensities `form` may carry; `solo` carries `standard` only for a kind that declares a one-shot review."""
+    """The intensities `form` may carry; `solo` carries `standard` and up only for a kind that declares a one-shot review."""
     values = FORM_INTENSITIES[form]
     if form == "solo" and not review_declared:
-        return tuple(value for value in values if value != "standard")
+        return tuple(value for value in values if value == "quick")
     return values
 
 
@@ -87,7 +87,7 @@ def form_of(capability, effective, shape=None, review_declared=False):
     """The route form (`direct`, `unit`, `solo`, `staged`, `framed`) a capability, intensity and shape make.
 
     This names what the compile entrance builds. A declared shape counts when its intensity is one that
-    form allows (`solo` + `standard` only where the kind declares the one-shot review); otherwise (an
+    form allows (`solo` + `standard` and up only where the kind declares the one-shot review); otherwise (an
     older record with no shape, or one whose shape and intensity disagree) the form follows the
     intensity as it always did. A *sealed* route is read by its nodes (`one_shot_owner`,
     `starts_depth2_nodes`), not by this."""
@@ -121,7 +121,7 @@ def _record_form(route):
 def route_form(route):
     """A route record's form label, from its capability, `selection.shape` and nodes.
 
-    A recorded `solo` at `standard` is the middle cell only when its nodes say one owner makes it; the
+    A recorded `solo` above `quick` is the middle cell only when its nodes say one owner makes it; the
     team route that `compose --shape solo --signal ...` seals (shape `solo`, team nodes) reads `staged`."""
     if not isinstance(route, dict):
         return None
@@ -148,7 +148,7 @@ def one_shot_owner(route):
     """A: whether one owner process (the `one-shot` node) makes this route's work itself.
 
     Read from the nodes: a depth-1 `_kernel/owner` node `one-shot`. True for solo·quick, a preset quick's
-    frame pair, a resource resume and the middle cell `solo·standard`; false for a unit route, direct, and
+    frame pair, a resource resume and the middle cell (`solo` at `standard` and up); false for a unit route, direct, and
     every team route (including the one `solo` + a signal seals). A record with no node list falls back to
     the form its capability, shape and intensity name."""
     if not isinstance(route, dict):
@@ -193,12 +193,24 @@ def alone_without_stages(route):
 
 
 def one_shot_review_route(route):
-    """The middle cell `solo·standard`: one owner makes the work (A) and starts its declared review (B)."""
+    """The middle cell (`solo` at `standard` and up): one owner makes the work (A) and starts the
+    verification nodes its kind declares (B)."""
     return one_shot_owner(route) and starts_depth2_nodes(route)
 
 
-def one_shot_review_node(route):
-    """The middle cell's review node (the depth-2 node the `one-shot` end node depends on), or None."""
+def one_shot_review_nodes(route):
+    """The middle cell's verification nodes (every depth-2 node the `one-shot` end node waits on): one review
+    at `standard`, the review group's legs from `strong`. An empty list for any other route."""
     if not one_shot_review_route(route):
-        return None
-    return next((node for node in _node_list(route) if isinstance(node, dict) and node.get("dispatch_depth") == 2), None)
+        return []
+    return [node for node in _node_list(route) if isinstance(node, dict) and node.get("dispatch_depth") == 2]
+
+
+def one_shot_review_node(route):
+    """The middle cell's first verification node (the review's anchor leg), or None."""
+    return next(iter(one_shot_review_nodes(route)), None)
+
+
+def one_shot_review_node_ids(route):
+    """The ids of every verification node of the middle cell."""
+    return [node.get("id") for node in one_shot_review_nodes(route)]
