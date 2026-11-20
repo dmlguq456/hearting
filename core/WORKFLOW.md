@@ -506,7 +506,10 @@ leg's approval question may be left out, and that leg then keeps its gate. When
 the interview is submitted the runtime builds `route_proposals`
 `{question, by_option}` from the marks and the validated proposals and records
 it with the question. An interview that writes `route_proposals` itself is read
-as written and offers only routes a brief proposed. After the answers, the
+as written and offers only routes a brief proposed, started as the brief wrote them;
+the one exception is a `solo` leg whose card says `standard` where the brief reads
+`strong`, `thorough` or `adversarial` (a card an earlier version drew), which starts
+at `standard`. After the answers, the
 same `start` records the decision, compiles and starts the first leg only
 (`--route-plan <record>#0`, `--parent-cycle <frame cycle>`), and closes the frame
 route once that start receipt exists; its receipt is the first leg's own.

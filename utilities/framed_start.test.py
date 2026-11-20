@@ -450,6 +450,90 @@ class CardCopyTest(StartBase):
         self.interview["route_proposals"]["by_option"][ROUTE_LABELS[0]]["legs"][0]["why"] = "another reason"
         self.assert_not_started()
 
+    # -- the copy names the row and the intensity, never the stages -------------------------------
+    EXTRA_STAGE = [{"id": "measure", "unit": "qa/test", "after": "test", "verify": "run the latency script"}]
+
+    def answer_copy(self, brief_leg, copy_leg):
+        self.set_briefs(brief_leg, brief_leg)
+        self.mark_briefs()
+        self.set_interview({"legs": [copy_leg]})
+
+    def started_leg(self):
+        result = self.settle()
+        self.assertEqual(result["state"], "running", result)
+        (leg_path,) = self.leg_routes()
+        return self.record()["decision"], json.loads(leg_path.read_text(encoding="utf-8"))
+
+    def test_a_copy_that_adds_stages_or_fields_to_the_briefs_leg_starts_the_briefs_leg(self):
+        field = RP.field_vocabulary()[0]
+        for label, copy in (("extra-stages", {**CODE_STAGED, "extra_stages": self.EXTRA_STAGE}),
+                            ("done-when", {**CODE_STAGED, "done_when": ["the bug no longer reproduces"]}),
+                            ("field", {**CODE_STAGED, "field": field})):
+            with self.subTest(label):
+                self.tearDown()
+                self.setUp()
+                self.answer_copy(CODE_STAGED, copy)
+                decision, route = self.started_leg()
+                self.assertEqual(decision["proposal"]["legs"], RP.parse_proposal(brief([CODE_STAGED]))["legs"])
+                self.assertNotIn("extra_stages", decision["first_leg_compose"])
+                self.assertEqual([n["id"] for n in route["nodes"]], ["plan", "execute", "test", "report"])
+                self.assertNotIn("card-copy-kept", {n for row in decision["proposals"] for n in row.get("read_notes", [])})
+
+    def test_a_copy_that_leaves_out_the_briefs_extra_stage_starts_the_briefs_stage(self):
+        extra = {**CODE_STAGED, "extra_stages": self.EXTRA_STAGE}
+        self.answer_copy(extra, CODE_STAGED)
+        decision, route = self.started_leg()
+        self.assertEqual(decision["proposal"]["legs"][0]["extra_stages"][0]["id"], "measure")
+        self.assertEqual([n["id"] for n in route["nodes"]], ["plan", "execute", "test", "plan-measure", "report"])
+
+    def test_the_card_intensity_moves_and_the_briefs_stages_and_end_conditions_stay(self):
+        brief_leg = {**self.STRONG, "done_when": ["it works"], "verify": "run it"}
+        self.answer_copy(brief_leg, {**self.STRONG, "intensity": "standard", "done_when": ["another end"],
+                                     "extra_stages": self.EXTRA_STAGE, "field": RP.field_vocabulary()[0]})
+        decision, route = self.started_leg()
+        mine = RP.parse_proposal(brief([brief_leg]))["legs"][0]
+        self.assertEqual(decision["proposal"]["legs"], [{**mine, "intensity": "standard"}])
+        self.assertEqual(route["effective_intensity"], "standard")
+        self.assertIn("card-copy-kept", {n for row in decision["proposals"] for n in row.get("read_notes", [])})
+
+    def test_a_lower_card_intensity_stands_only_for_a_solo_leg_the_card_showed_as_standard(self):
+        staged = {**CODE_STAGED, "intensity": "strong"}
+        for label, leg, card in (("staged-strong", staged, "standard"), ("staged-thorough", {**staged, "intensity": "thorough"}, "strong"),
+                                 ("solo-thorough-card-quick", {**self.STRONG, "intensity": "thorough"}, "quick"),
+                                 ("solo-adversarial-card-strong", {**self.STRONG, "intensity": "adversarial"}, "strong")):
+            with self.subTest(label):
+                self.tearDown()
+                self.setUp()
+                self.answer_copy(leg, {**leg, "intensity": card})
+                self.assert_not_started()
+        for label, intensity in (("thorough", "thorough"), ("adversarial", "adversarial")):
+            with self.subTest("solo-" + label):
+                self.tearDown()
+                self.setUp()
+                self.answer_copy({**self.STRONG, "intensity": intensity}, {**self.STRONG, "intensity": "standard"})
+                self.assertEqual(self.started_leg()[0]["proposal"]["legs"][0]["intensity"], "standard")
+
+    def test_the_note_is_only_on_a_decision_that_used_the_exception(self):
+        solo_standard = dict(self.STRONG, intensity="standard")
+        for label, leg in (("solo-standard", solo_standard), ("solo-strong", self.STRONG), ("staged", CODE_STAGED)):
+            with self.subTest(label):
+                self.tearDown()
+                self.setUp()
+                self.answer_copy(leg, dict(leg))
+                decision, _ = self.started_leg()
+                self.assertNotIn("card-copy-kept", {n for row in decision["proposals"] for n in row.get("read_notes", [])})
+                self.assertEqual(decision["proposal"]["legs"][0]["intensity"], RP.parse_proposal(brief([leg]))["legs"][0]["intensity"])
+
+    def test_each_read_note_is_listed_once(self):
+        # A solo leg has no stage to put an extra stage after: the brief's compile names it, and the kept copy must not name it again.
+        leg = {**self.STRONG, "extra_stages": self.EXTRA_STAGE}
+        self.answer_copy(leg, {**self.STRONG, "intensity": "standard"})
+        decision, _ = self.started_leg()
+        notes = [n for row in decision["proposals"] for n in row.get("read_notes", [])]
+        self.assertIn("card-copy-kept", notes)
+        for row in decision["proposals"]:
+            self.assertEqual(len(row.get("read_notes", [])), len(set(row.get("read_notes", []))), row)
+
     def assert_not_started(self):
         result = self.settle()
         self.assertEqual((result["state"], result["selected"]), ("completed", "none"), result)

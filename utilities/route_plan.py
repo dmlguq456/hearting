@@ -753,35 +753,44 @@ def evaluate_brief(path, *, root, node, compile_leg, start_approvals) -> dict:
 
 
 def keep_card_copy(row, recorded, *, compile_leg, start_approvals) -> dict:
-    """`row` with the proposal the person's card showed (`recorded`, the interview's copy of it) in place
-    of the one this runtime reads from the same brief, or `row` itself when the card says something else.
+    """`row`, with a lower intensity for a leg when the card the person answered showed one, or `row`
+    itself in every other case.
 
-    The caller has already shown that the brief's bytes are the ones the card was made from. A later
-    runtime may read a brief differently than the one that drew the card (the allowed intensities
-    changed), and the person approved what the card showed, so that copy is what starts. It stands in
-    only as the same proposal with legs no stronger than this runtime reads: same kind, mode, shape,
-    graph, folder and wording, a lower or equal intensity, and the copy must compile as a proposal."""
+    The caller has already shown that the brief's bytes are the ones the card was made from. This
+    exists for one drift: a card drawn by an earlier runtime showed a `solo` leg of a kind with a
+    one-shot review as `standard`, where this runtime reads the brief's `strong`, `thorough` or
+    `adversarial`; the person chose what the card showed, so that `standard` starts. The legs that start
+    are the brief's own with only that intensity moved: the copy names the row and the intensity and
+    nothing else (its stages, end conditions and fields are never read). Any other difference leaves
+    `row`, and the choice is then not verified."""
     own = row.get("proposal")
     try:
         legs = [_normal_leg(leg, index) for index, leg in enumerate(recorded["legs"])]
         if (own is None or len(legs) != len(own["legs"]) or recorded.get("summary") != own["summary"]
                 or recorded.get("execution_scope", own["execution_scope"]) != own["execution_scope"]):
             return row
+        moved = []
         for card, mine in zip(legs, own["legs"]):
-            same = [card.get(key) == mine.get(key) for key in (*_LEG_KEYS, "why") if key != "intensity"]
-            weaker = card.get("intensity") == mine.get("intensity") or (
-                card.get("intensity") in INTENSITY_ORDER and mine.get("intensity") in INTENSITY_ORDER
-                and INTENSITY_ORDER.index(card["intensity"]) <= INTENSITY_ORDER.index(mine["intensity"]))
-            if not all(same) or not weaker:
+            if any(card.get(key) != mine.get(key) for key in (*_LEG_KEYS, "why") if key != "intensity"):
                 return row
-        proposal = {**own, "legs": legs}
+            if card.get("intensity") == mine.get("intensity"):
+                moved.append(mine)
+            elif (mine.get("shape") == "solo" and card.get("intensity") == "standard"
+                  and mine.get("intensity") in ("strong", "thorough", "adversarial")
+                  and one_shot_review_declared(mine.get("capability"))):
+                moved.append({**mine, "intensity": "standard"})
+            else:
+                return row
+        if moved == own["legs"]:
+            return row
+        proposal = {**own, "legs": moved}
         facts = validate_proposal(proposal, compile_leg=compile_leg, start_approvals=start_approvals)
     except (ProposalError, AttributeError, KeyError, TypeError, ValueError):
         return row
-    if len(facts["legs"]) != len(legs):
+    if len(facts["legs"]) != len(moved):
         return row
     return {**row, "proposal": {**proposal, "entry_approvals": facts["entry_approvals"]}, "facts": facts,
-            "read_notes": [*row.get("read_notes", []), *facts["notes"], "card-copy-kept"]}
+            "read_notes": [*dict.fromkeys([*row.get("read_notes", []), *facts["notes"], "card-copy-kept"])]}
 
 
 def _relative(path, root) -> str:

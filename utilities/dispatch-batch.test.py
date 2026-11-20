@@ -509,11 +509,11 @@ class DispatchBatchTest(unittest.TestCase):
     def write_existing(
         self, leg, *, status="open", note="", claimed="1", append=True,
         live_identity=True, parent_attempt="att-parent-fixture",
-        all_legs=None,
+        all_legs=None, group_key="replica_group",
     ):
         all_legs = all_legs or self.legs()
         _manifest, manifest_digest, leg_digests = BATCH.build_manifest(
-            replica_group="plan",
+            **{group_key: "plan"},
             route_id=self.route["route_id"],
             parent_attempt_id=parent_attempt,
             independence="cross-harness",
@@ -4367,6 +4367,75 @@ class DispatchBatchTest(unittest.TestCase):
         receipt = json.loads(output.getvalue())
         self.assertEqual(receipt["state"], "idempotent-mixed")
         self.assertEqual((receipt["admitted"], receipt["existing"]), (1, 1))
+
+    def restart_receipt(self, *, review_group):
+        """`--action start` again for a group whose first leg ended `PASS` on the current source and whose
+        second leg is still running, both of one sealed batch: the exit code and the receipt it prints."""
+        self._configure_lab_review()           # capped review legs: each restarted leg is admitted a round
+        stack, assignments = self.common_patches()
+        output = io.StringIO()
+        passed, running = self.legs(assignments)
+        self.write_existing(passed, status="done", note="completed-marker,failure_class=pass", live_identity=False,
+                            group_key="parallel_group")
+        self.write_existing(running, group_key="parallel_group")
+        self.jobs.write_text(self.jobs.read_text(encoding="utf-8").replace(
+            "route_id=rt-fixture,", "route_id=rt-fixture,route_hash=" + self.route["route_hash"] + ","), encoding="utf-8")
+        state = self.base / "state"
+        (state / "completion" / self.route["route_id"]).mkdir(parents=True)
+        (state / "completion" / self.route["route_id"] / "independent-verify.json").write_text(
+            json.dumps({"route_id": self.route["route_id"], "node_id": "independent-verify", "attempt_id": passed["attempt_id"]}),
+            encoding="utf-8")
+        self.seal_original_input()
+        with stack:
+            stack.enter_context(mock.patch.object(BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect))
+            stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
+            stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {"families_considered": [], "usable_families": [], "family_exclusions": {}, "capacity": {}, "degradation_cause": ""})))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
+            stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
+            popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
+            reserve = stack.enter_context(mock.patch.object(BATCH, "reserve_batch"))
+            stack.enter_context(mock.patch.object(BATCH, "dispatch_state_roots", return_value=[state]))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_dispatch_state_root", return_value=state))
+            stack.enter_context(mock.patch.object(BATCH, "completion_marker_is_current", return_value=True))
+            stack.enter_context(mock.patch.object(BATCH, "completion_attempt_readiness",
+                                                  return_value=SimpleNamespace(state="ready", reason="settled")))
+            if review_group:
+                import route_form
+                stack.enter_context(mock.patch.object(route_form, "one_shot_review_node_ids", return_value=["independent-verify", "independent-verify-alternative"]))
+            reused = []
+            real_peers = BATCH.current_completed_group_peers
+            stack.enter_context(mock.patch.object(BATCH, "current_completed_group_peers",
+                side_effect=lambda *a, **k: reused.append(real_peers(*a, **k)) or reused[-1]))
+            stack.enter_context(mock.patch.dict(os.environ, {
+                "AGENT_DISPATCH_SELF_SLUG": "owner",
+                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
+            }))
+            with contextlib.redirect_stdout(output):
+                rc = BATCH.main(self.argv())
+        self.reused_nodes = sorted(reused[0]) if reused else None
+        return rc, json.loads(output.getvalue()), popen, reserve
+
+    def test_a_restart_with_one_leg_passed_and_the_other_running_gives_the_receipt_a_group_without_reuse_gives(self):
+        # Reusing the passed leg of a review group changes nothing about a restart while the other leg runs:
+        # the live leg is refused as it was before that reuse existed, and nothing is reserved or started.
+        receipts = {}
+        for review_group in (False, True):
+            self.tearDown()
+            self.setUp()
+            rc, receipt, popen, reserve = self.restart_receipt(review_group=review_group)
+            popen.assert_not_called()
+            reserve.assert_not_called()
+            self.assertEqual(self.reused_nodes, ["independent-verify"] if review_group else [])   # only the review group reuses the passed leg
+            receipts[review_group] = (rc, receipt)
+        self.assertEqual(receipts[True][0], 78, receipts[True])
+        self.assertEqual((receipts[True][1]["state"], receipts[True][1]["reason"]), ("blocked", "prior-attempt-still-live"))
+        self.assertEqual(receipts[True], receipts[False])
 
     def test_terminal_failed_duplicate_is_not_reported_as_existing(self):
         stack, assignments = self.common_patches()
