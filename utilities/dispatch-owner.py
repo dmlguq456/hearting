@@ -288,6 +288,7 @@ def _sealed_owner_context(path, *, worker_type="owner", route_node=None):
         "harnesses": harnesses,
         "policy": policy,
         "allocation": route.get("dispatch_allocation"),
+        "field": route.get("field"),
     }
 
 
@@ -739,7 +740,7 @@ def _audit(
     status, adapter, source, configured, explicit, states, *, allocation=None,
     counts=None, rejected=(), fallback=None, reason="none", capacity=None,
     quality_band=None, relief_promoted=False, capacity_sources=None,
-    capacity_freshness=None, top_excluded=(),
+    capacity_freshness=None, top_excluded=(), field=None,
 ):
     lines = [
         f"status={status}", f"adapter={adapter or '-'}", f"selection_source={source}",
@@ -758,6 +759,13 @@ def _audit(
         if "owner_order" in allocation:
             lines.append("owner_order=" + ",".join(allocation["owner_order"]))
         lines.append(f"usage_headroom_exponent={allocation.get('usage_headroom_exponent', 1)}")
+        # Why this harness: the user's flat weights, the route's field, and the field's
+        # applied row the selection multiplied them by (`none` / `-` when there is none).
+        flat = allocation.get("harness_weights") or {}
+        row = allocation.get("field_weights") or {}
+        lines.append("harness_weights=" + (",".join(f"{key}:{flat[key]}" for key in sorted(flat)) or "none"))
+        lines.append(f"field={field or '-'}")
+        lines.append("field_weights=" + (",".join(f"{key}:{row[key]}" for key in sorted(row)) or "none"))
     for harness in _allocation.HARNESSES:
         if counts is not None:
             lines.append(f"attempt_count.{harness}={counts.get(harness, 0)}")
@@ -1009,7 +1017,7 @@ def main(argv):
                 preferred=_capacity.preferred_for_depth(allocation, 1),
                 affinity_weight=allocation.get("depth_affinity_weight", 0.5),
                 headroom_exponent=allocation.get("usage_headroom_exponent", 1),
-                harness_weights=allocation.get("harness_weights"),
+                harness_weights=_allocation.effective_harness_weights(allocation),
                 preference_order=(allocation.get("owner_order")
                                   if values["--worker-type"] in {"owner", "frame"} else None),
             )
@@ -1050,6 +1058,7 @@ def main(argv):
                 capacity=capacity, capacity_sources=capacity_sources,
                 capacity_freshness=capacity_freshness,
                 relief_promoted=relief_promoted, top_excluded=top_excluded,
+                field=(sealed_context or {}).get("field"),
             )))
             if dropped and not configured:
                 # Every candidate was left out for not declaring `top`; say that
@@ -1164,7 +1173,8 @@ def main(argv):
                                       reason=reason, capacity=capacity, capacity_sources=capacity_sources,
                                       capacity_freshness=capacity_freshness,
                                       quality_band=quality_band,
-                                      relief_promoted=relief_promoted, top_excluded=top_excluded)))
+                                      relief_promoted=relief_promoted, top_excluded=top_excluded,
+                                      field=(sealed_context or {}).get("field"))))
             print("check=failed\nreason=wrapper-unavailable\nchild_spawned=0")
             return 65
         print("\n".join(_audit("eligible", selected, source, configured, requested, states,
@@ -1174,7 +1184,8 @@ def main(argv):
                                   reason=reason, capacity=capacity, capacity_sources=capacity_sources,
                                   capacity_freshness=capacity_freshness,
                                   quality_band=quality_band,
-                                  relief_promoted=relief_promoted, top_excluded=top_excluded)), flush=True)
+                                  relief_promoted=relief_promoted, top_excluded=top_excluded,
+                                  field=(sealed_context or {}).get("field"))), flush=True)
         if pair_model_reason != "not-applicable":
             print(f"model_diversity_proposal={pair_model_reason}", flush=True)
             print(f"model_diversity_proposal_profile={pair_model_profile or values.get('--model-profile', '-')}", flush=True)

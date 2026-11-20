@@ -776,6 +776,60 @@ class CapacityPolicyTests(unittest.TestCase):
             states, counts, order, scores, strategy="balanced", harness_weights={"opencode": 0.3})
         self.assertNotEqual(name, "opencode")
 
+    # --- field weights: the product `harness_weights x field row` is just `harness_weights` here ---
+
+    FIELD_ROW = {"claude": 0.95, "codex": 0.85, "opencode": 1.0}
+    BAND = {"primary": ["claude", "codex", "opencode"], "relief": [], "last_resort": [],
+            "promote_relief_below": 0}
+
+    def _sequence(self, weights, *, picks=12, scores=None, states=None, policy=None):
+        names = ["claude", "codex", "opencode"]
+        states = states or {h: "ok" for h in names}
+        scores = scores or {h: 80.0 for h in names}
+        window, out = [], []
+        for _ in range(picks):
+            counts = {h: window[-30:].count(h) for h in names}
+            name, *_rest = C.select(policy or self.BAND, states, counts, names, scores,
+                                    strategy="balanced", usage_gate_used_percent=85,
+                                    headroom_exponent=2, harness_weights=weights)
+            window.append(name); out.append(name)
+        return out
+
+    def test_a_neutral_field_row_cycles_exactly_as_no_weights_do(self):
+        plain = self._sequence(None)
+        self.assertEqual(plain[:6], ["claude", "codex", "opencode", "claude", "codex", "opencode"])
+        for neutral in ({}, {"claude": 1.0, "codex": 1.0, "opencode": 1.0}):
+            self.assertEqual(self._sequence(neutral), plain)
+
+    def test_a_field_row_tilts_the_share_inside_the_band(self):
+        tilted = self._sequence(self.FIELD_ROW, picks=300)
+        flat = self._sequence(None, picks=300)
+        self.assertLess(tilted.count("codex"), flat.count("codex"))
+        self.assertGreater(tilted.count("opencode"), flat.count("opencode"))
+
+    def test_a_field_row_never_lifts_a_gated_harness_over_an_ungated_peer(self):
+        # claude is past the 85% gate: its class stays behind whatever the field row says
+        row = {"claude": 1.0, "codex": 0.2, "opencode": 0.2}
+        scores = {"claude": 10.0, "codex": 80.0, "opencode": 80.0}
+        ranked = C.rank_band(["claude", "codex", "opencode"], {h: "ok" for h in scores},
+            {"claude": 0, "codex": 9, "opencode": 9}, ["claude", "codex", "opencode"], scores,
+            strategy="balanced", usage_gate_used_percent=85, headroom_exponent=2, harness_weights=row)
+        self.assertEqual(ranked[-1], "claude")
+        for pick in self._sequence(row, picks=20, scores=scores):
+            self.assertNotEqual(pick, "claude")
+
+    def test_a_field_row_never_returns_a_limited_harness(self):
+        row = {"claude": 0.1, "codex": 0.1, "opencode": 1.0}
+        states = {"claude": "ok", "codex": "ok", "opencode": "limited(2026-11-28)"}
+        for pick in self._sequence(row, picks=20, states=states):
+            self.assertIn(pick, {"claude", "codex"})
+
+    def test_a_field_row_never_moves_a_harness_across_quality_bands(self):
+        policy = {"primary": ["claude"], "relief": [], "last_resort": ["codex", "opencode"],
+                  "promote_relief_below": 0}
+        row = {"claude": 0.05, "codex": 1.0, "opencode": 1.0}
+        self.assertEqual(set(self._sequence(row, picks=20, policy=policy)), {"claude"})
+
     def test_single_candidate_is_neutral_for_all_weights(self):
         for weight in (0, .5, 1.0):
             for exponent in (1, 2):

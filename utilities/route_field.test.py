@@ -80,12 +80,45 @@ class FieldRegistryTest(unittest.TestCase):
                 plan={"capability": "autopilot-code"}), r"field_default_recipes\[plan\]"),
             ("default recipe unknown", lambda r: r["field_default_recipes"].update(
                 lab={"capability": "autopilot-lab", "mode": "nope"}), "unknown recipe"),
+            ("weights table missing", lambda r: r.pop("field_harness_weights"), "field_harness_weights must be"),
+            ("weights table extra key", lambda r: r["field_harness_weights"].update(note="x"),
+             "field_harness_weights must be"),
+            ("weights checked_on malformed", lambda r: r["field_harness_weights"].update(checked_on="Nov 20"),
+             "checked_on"),
+            ("weights name an unknown field", lambda r: r["field_harness_weights"]["weights"].update(
+                misc={"claude": 1.0, "codex": 1.0, "opencode": 1.0}), "declared fields"),
+            ("weights row misses a harness", lambda r: r["field_harness_weights"]["weights"]["code"].pop("codex"),
+             r"weights\[code\]"),
+            ("weights cell is zero", lambda r: r["field_harness_weights"]["weights"]["code"].update(codex=0),
+             r"weights\[code\]"),
+            ("weights cell above one", lambda r: r["field_harness_weights"]["weights"]["code"].update(codex=1.1),
+             r"weights\[code\]"),
+            ("weights cell is a bool", lambda r: r["field_harness_weights"]["weights"]["code"].update(codex=True),
+             r"weights\[code\]"),
+            ("basis names a vendor model", lambda r: r["field_harness_weights"]["basis"]["profiles"].update(
+                claude=["opus"]), "never a vendor model"),
+            ("basis misses a harness", lambda r: r["field_harness_weights"]["basis"]["profiles"].pop("codex"),
+             "never a vendor model"),
         )
         for label, mutate, message in cases:
             registry = self.registry()
             mutate(registry)
             with self.subTest(label), self.assertRaisesRegex(CT.TopologyError, message):
                 CT.validate_registry(registry)
+
+
+    def test_the_shipped_default_table_is_the_chosen_one(self):
+        table = self.registry()["field_harness_weights"]
+        self.assertEqual(table["checked_on"], "2026-11-20")
+        self.assertEqual(table["weights"], {
+            "code": {"claude": 0.95, "codex": 0.85, "opencode": 1.0},
+            "design": {"claude": 1.0, "codex": 0.95, "opencode": 0.85},
+            "docs": {"claude": 0.95, "codex": 1.0, "opencode": 0.95},
+            "research": {"claude": 0.9, "codex": 1.0, "opencode": 1.0},
+            "lab": {"claude": 1.0, "codex": 1.0, "opencode": 0.9},
+            "plan": {"claude": 0.9, "codex": 0.8, "opencode": 1.0}})
+        self.assertNotIn("admin", table["weights"])
+        self.assertNotIn("other", table["weights"])
 
 
 class FieldComposeTest(F.FramedBase):
@@ -98,6 +131,21 @@ class FieldComposeTest(F.FramedBase):
 
     def basis(self, route, axis):
         return next(row for row in route["selection"]["selection_basis"] if row["axis"] == axis)
+
+    def test_a_route_seals_the_default_row_of_its_field_and_a_field_without_a_row_seals_none(self):
+        table = R.TOPO.load_registry()["field_harness_weights"]["weights"]
+        for capability, mode, field in (("autopilot-code", "dev", "code"), ("autopilot-spec", None, "plan"),
+                                        ("autopilot-design", None, "design"), ("autopilot-draft", None, "docs"),
+                                        ("autopilot-research", None, "research"), ("autopilot-lab", "setup", "lab"),
+                                        ("analyze-user", "init", "other")):
+            with self.subTest(field=field):
+                route = self.decided(capability=capability, capability_mode=mode)
+                self.assertEqual(route["field"], field)
+                allocation = route["dispatch_allocation"]
+                if field in table:
+                    self.assertEqual(allocation["field_weights"], table[field])
+                else:
+                    self.assertNotIn("field_weights", allocation)
 
     def test_a_kind_alone_records_its_default_field_as_preset(self):
         for capability, mode, field in (("autopilot-code", "dev", "code"), ("autopilot-spec", None, "plan"),

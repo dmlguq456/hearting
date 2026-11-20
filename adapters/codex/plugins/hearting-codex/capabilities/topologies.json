@@ -100,6 +100,26 @@
     "admin": null,
     "other": null
   },
+  "field_harness_weights": {
+    "checked_on": "2026-11-20",
+    "rule": "keep-some v1: comparative advantage only, no cell below 0.6, a field without a row (admin, other) is 1.0",
+    "basis": {
+      "models": "the shipped adapters/<harness>/config/models.conf tier table",
+      "profiles": {
+        "claude": ["deep", "balanced-deep", "balanced", "light", "mini"],
+        "codex": ["deep", "balanced-deep", "balanced", "light", "mini"],
+        "opencode": ["light", "mini"]
+      }
+    },
+    "weights": {
+      "code": {"claude": 0.95, "codex": 0.85, "opencode": 1.0},
+      "design": {"claude": 1.0, "codex": 0.95, "opencode": 0.85},
+      "docs": {"claude": 0.95, "codex": 1.0, "opencode": 0.95},
+      "research": {"claude": 0.9, "codex": 1.0, "opencode": 1.0},
+      "lab": {"claude": 1.0, "codex": 1.0, "opencode": 0.9},
+      "plan": {"claude": 0.9, "codex": 0.8, "opencode": 1.0}
+    }
+  },
   "recipes": [
     {
       "capability": "autopilot-apply",

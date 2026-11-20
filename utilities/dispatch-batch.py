@@ -70,6 +70,7 @@ from stage_session_contract import StageSessionError, validate_subdivision_or_fa
 from dispatch_allocation import (  # noqa: E402
     STRATEGY as ALLOCATION_STRATEGY,
     attempt_counts,
+    effective_harness_weights,
 )
 import subdivision_batch_admission as SUBDIVISION_ADMISSION  # noqa: E402
 from route_authority import (  # noqa: E402
@@ -880,6 +881,7 @@ def _persist_leg_allocations(
             parallel_group=leg.get("parallel_group"),
             parallel_leg_index=leg.get("parallel_leg_index"),
             parallel_leg_count=leg.get("parallel_leg_count") or len(results),
+            field=route.get("field"),
             agent_home=agent_home,
         )
         if receipt:
@@ -1298,7 +1300,7 @@ def assign_harnesses(
                     preferred=CAPACITY.preferred_for_depth(allocation, 2),
                     affinity_weight=allocation.get("depth_affinity_weight", 0.5),
                     headroom_exponent=allocation.get("usage_headroom_exponent", 1),
-                    harness_weights=allocation.get("harness_weights"),
+                    harness_weights=effective_harness_weights(allocation),
                 )
                 gate_order = (gated_legs, 0.0)
                 allocation_order = (

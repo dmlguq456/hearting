@@ -90,7 +90,7 @@ from codex_dispatch_terminal import REVIEW_BLOCKING_NOTE  # noqa: E402
 from review_round_cap import classify_round_row  # noqa: E402
 from dispatch_degradation import record_degradation  # noqa: E402
 from dispatch_allocation_receipt import record_allocation_receipt  # noqa: E402
-from dispatch_allocation import inert_allocation_keys  # noqa: E402
+from dispatch_allocation import effective_harness_weights, inert_allocation_keys  # noqa: E402
 import dispatch_launch_tuple as LAUNCH_TUPLE  # noqa: E402
 from dispatch_quality_peer import quality_peer_families  # noqa: E402
 from dispatch_allocation import (  # noqa: E402
@@ -764,7 +764,7 @@ def ordered_fallback_hops(
             preferred=CAPACITY.preferred_for_depth(allocation, int(node.get("dispatch_depth", 2))),
             affinity_weight=allocation.get("depth_affinity_weight", 0.5),
             headroom_exponent=allocation.get("usage_headroom_exponent", 1),
-            harness_weights=allocation.get("harness_weights"),
+            harness_weights=effective_harness_weights(allocation),
         )
         band_order = ("relief", "primary", "last_resort") if relief_promoted else (
             "primary", "relief", "last_resort"
@@ -968,7 +968,7 @@ def _persist_allocation_receipt(args, route, node, context, row, *, attempt_id=N
         parent_cross=context.get("parent_cross"), sole_gate=context.get("sole_gate"),
         affinity=context.get("affinity"), handed_over_affinity=context.get("handed_over_affinity"),
         affinity_source=context.get("affinity_source"), owner_family=context.get("owner_family"),
-        jobs=getattr(args, "jobs", None),
+        field=route.get("field"), jobs=getattr(args, "jobs", None),
     )
 
 

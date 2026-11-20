@@ -26,6 +26,7 @@ MODEL_PROFILES = ("deep", "balanced-deep", "balanced", "light", "mini")
 # `profiles.top` mapping in the user file stays an unknown-profile error.
 EXCEPTION_PROFILE_POLICY = {"top": "deep"}
 QUALITY_BANDS = ("primary", "relief", "last_resort")
+HARNESS_ORDER = ("claude", "codex", "opencode")
 ALLOCATION_STRATEGIES = {"least-recent-attempts", "capacity-aware", "balanced"}
 DEFAULT_USAGE_GATE_USED_PERCENT = 90
 TOP_LEVEL_KEYS = {
@@ -104,6 +105,10 @@ def _int_in_range(value, bounds):
     )
 
 
+def _valid_weight(value):
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and 0.0 < value <= 1.0
+
+
 def _repo_root():
     # realpath, not abspath: the helper is projected into
     # adapters/<harness>/utilities/ as a symlink, and the shipped config and
@@ -133,6 +138,16 @@ def default_config_path(environ=None):
 
 def default_topology_path():
     return os.path.join(_repo_root(), "capabilities", "topologies.json")
+
+
+def field_vocabulary(topology_path=None):
+    """Field names the registry declares (`fields`); empty when unreadable."""
+    try:
+        with open(topology_path or default_topology_path(), encoding="utf-8") as f:
+            names = json.load(f).get("fields")
+    except (OSError, ValueError):
+        return ()
+    return tuple(n for n in names if isinstance(n, str)) if isinstance(names, list) else ()
 
 
 SHIPPED_CONFIG_PATH = os.path.join(_repo_root(), "profiles", "dispatch-defaults.yaml")
@@ -287,8 +302,10 @@ def load_topology_capabilities(topology_path):
     return capmap
 
 
-def validate(config, capmap):
-    """Return a list of error strings; empty list means valid."""
+def validate(config, capmap, topology_path=None):
+    """Return a list of error strings; empty list means valid.
+
+    `topology_path` is the registry the field names come from (default: the installed one)."""
     errors = []
     if not isinstance(config, dict):
         return ["config root must be a mapping"]
@@ -459,10 +476,24 @@ def validate(config, capmap):
                         "(inline {a: 1} mappings are not supported by this parser)"
                     )
                 else:
+                    fields = field_vocabulary(topology_path)
                     for name, value in weights.items():
-                        if name not in DISPATCHABLE_HARNESSES:
-                            errors.append(f"allocation.harness_weights names an unknown harness: {name!r}")
-                        elif isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 < value <= 1.0:
+                        if name in fields:
+                            # A field name overrides that field's row of the registry's
+                            # default table: a number sets all three cells, a block sets cells.
+                            where = f"allocation.harness_weights.{name}"
+                            cells = value if isinstance(value, dict) else {None: value}
+                            for cell, cell_value in cells.items():
+                                if cell is not None and cell not in DISPATCHABLE_HARNESSES:
+                                    errors.append(f"{where} names an unknown harness: {cell!r}")
+                                elif not _valid_weight(cell_value):
+                                    errors.append(
+                                        f"{where if cell is None else where + '.' + cell} "
+                                        "must be a number above 0 and at most 1"
+                                    )
+                        elif name not in DISPATCHABLE_HARNESSES:
+                            errors.append(f"allocation.harness_weights names an unknown harness or field: {name!r}")
+                        elif not _valid_weight(value):
                             errors.append(
                                 f"allocation.harness_weights.{name} must be a number above 0 and at most 1"
                             )
@@ -744,7 +775,10 @@ def normalize_policy(config):
                 del depth_affinity[key]
         weights = allocation.get("harness_weights")
         if isinstance(weights, dict):
-            for name in [n for n in weights if n not in enabled]:
+            # A field-name entry (a per-field override) is not a harness: only
+            # harness names the user disabled are dropped here.
+            for name in [n for n in weights
+                         if n in DISPATCHABLE_HARNESSES and n not in enabled]:
                 del weights[name]
             if not weights:
                 del allocation["harness_weights"]
@@ -761,7 +795,7 @@ def load_validated(config_path, topology_path):
         text = f.read()
     config = parse_yaml_subset(text)
     capmap = load_topology_capabilities(topology_path)
-    errors = validate(config, capmap)
+    errors = validate(config, capmap, topology_path)
     if errors:
         raise DefaultsConfigError("; ".join(errors))
     warnings = policy_warnings(config)
@@ -885,6 +919,46 @@ def valid_owner_order(value):
             and len(set(value)) == len(value))
 
 
+def flat_harness_weights(weights):
+    """The harness-name entries of `allocation.harness_weights` (field-name
+    entries are per-field overrides, read by `query_field_weights`)."""
+    if not isinstance(weights, dict):
+        return {}
+    return {name: value for name, value in weights.items() if name in DISPATCHABLE_HARNESSES}
+
+
+def query_field_weights(config, field, table):
+    """The applied row for `field`: the registry's default row with the user's
+    per-field override on top, as `{harness: weight}` in a fixed harness order.
+
+    `table` is the registry's `field_harness_weights`. A number override sets
+    all three cells; a block sets the cells it names. Returns None for no
+    field or a row whose cells are all equal (across the enabled harnesses),
+    because the same factor on every cell cancels in the share and cannot change
+    the choice: a neutral route seals no key at all, so a number override only
+    ever switches its field's row off. Only
+    the `balanced` strategy reads field rows (like `harness_weights`), so any
+    other strategy, or a config with no allocation block, gets None too.
+    """
+    if not isinstance(field, str):
+        return None
+    if (config.get("allocation") or {}).get("strategy") != "balanced":
+        return None
+    row = {name: 1.0 for name in HARNESS_ORDER}
+    default = ((table or {}).get("weights") or {}).get(field)
+    if isinstance(default, dict):
+        row.update({name: float(default[name]) for name in HARNESS_ORDER if name in default})
+    allocation = config.get("allocation")
+    override = (allocation.get("harness_weights") or {}).get(field) if isinstance(allocation, dict) \
+        and isinstance(allocation.get("harness_weights"), dict) else None
+    if isinstance(override, dict):
+        row.update({name: float(override[name]) for name in HARNESS_ORDER if name in override})
+    elif override is not None and not isinstance(override, bool):
+        row = {name: float(override) for name in HARNESS_ORDER}
+    enabled = [name for name in HARNESS_ORDER if name in query_owners(config)] or list(HARNESS_ORDER)
+    return None if len({row[name] for name in enabled}) == 1 else row
+
+
 def query_allocation(config):
     neutral = {"depth_affinity": {}, "depth_affinity_weight": 0.5, "usage_headroom_exponent": 1}
     allocation = config.get("allocation")
@@ -898,8 +972,9 @@ def query_allocation(config):
         result.update({key: allocation.get(key, value) for key, value in neutral.items()})
         # Optional and absent by default, so a config without weights seals
         # the same allocation bytes as before this key existed.
-        if isinstance(allocation.get("harness_weights"), dict):
-            result["harness_weights"] = dict(allocation["harness_weights"])
+        flat = flat_harness_weights(allocation.get("harness_weights"))
+        if flat:
+            result["harness_weights"] = flat
         if "owner_order" in allocation:
             result["owner_order"] = list(allocation["owner_order"])
         return result

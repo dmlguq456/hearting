@@ -539,7 +539,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     if allocation is not None:
         required = {"strategy", "window", "harness_order"}
         optional = {"usage_gate_used_percent", "depth_affinity", "depth_affinity_weight", "usage_headroom_exponent",
-                    "harness_weights", "owner_order"}
+                    "harness_weights", "field_weights", "owner_order"}
         if not isinstance(allocation, dict) or not required <= set(allocation) or set(allocation) - required - optional:
             raise ValueError("invalid dispatch_allocation shape")
         if allocation.get("strategy") not in {
@@ -580,6 +580,16 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
                 for name, value in weights.items()
             ):
                 raise ValueError("invalid dispatch_allocation harness weights")
+        if "field_weights" in allocation:
+            # The applied row of the route's field (same value rule as harness_weights).
+            row = allocation["field_weights"]
+            if not isinstance(row, dict) or not row or any(
+                name not in DEFAULTS.DISPATCHABLE_HARNESSES
+                or isinstance(value, bool) or not isinstance(value, (int, float))
+                or not 0.0 < value <= 1.0
+                for name, value in row.items()
+            ):
+                raise ValueError("invalid dispatch_allocation field weights")
         order = allocation.get("harness_order")
         if (
             not isinstance(order, list)
