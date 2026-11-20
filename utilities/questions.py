@@ -446,10 +446,18 @@ def _ask(args):
     except (OSError, ValueError, RuntimeError) as exc:
         print("questions: " + str(exc), file=sys.stderr)
         return 2
+    replaced = value.get("replaced")
+    if replaced:
+        first = (replaced["question"].strip().splitlines() or [""])[0].strip()
+        replaced = {"id": replaced["id"], "first_line": first if len(first) <= 80 else first[:79] + "…"}
     if args.json:
-        print(json.dumps({"id": value["id"], "state": value["lifecycle"]}))
+        print(json.dumps({"id": value["id"], "state": value["lifecycle"],
+                          **({"replaced": replaced} if replaced else {})}, ensure_ascii=False))
     else:
         print(value["id"])
+        if replaced:
+            # One session keeps one open question: say which earlier unanswered one this closed.
+            print("questions: replaced %s — %s" % (replaced["id"], replaced["first_line"]))
         print(HWS.ui_translator()("questions.registered_choices" if args.choice
                                   else "questions.registered"))
     return 0
