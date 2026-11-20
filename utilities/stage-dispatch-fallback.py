@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 from model_config import ModelConfigError, resolve_config  # noqa: E402
 from route_authority import decide_continuation, harness_admitted, new_owner_request, retry_predecessor, route_in_force, sealed_pin_harness  # noqa: E402
-from route_form import one_shot_review_node  # noqa: E402
+from route_form import one_shot_review_node_ids  # noqa: E402
 
 
 def _unit_role(unit):
@@ -536,9 +536,8 @@ def load_node(route_path: Path, node_id: str, launch_phase: str) -> tuple[dict, 
         raise ValueError(f"unknown route node: {node_id}")
     chain = node.get("fallback_hops")
     hops = [row.get("fallback_hop") for row in chain] if isinstance(chain, list) else None
-    if hops != ORDER and not (hops == ORDER[:2] and one_shot_review_node(route) is not None
-                              and one_shot_review_node(route)["id"] == node_id):
-        # The middle cell's review declares its own chain: registered headless hops only. Neither `inline` nor a
+    if hops != ORDER and not (hops == ORDER[:2] and node_id in one_shot_review_node_ids(route)):
+        # The middle cell's reviews declare their own chain: registered headless hops only. Neither `inline` nor a
         # native subagent (whose completion is recorded as inline) can close the review of the owner's own work.
         raise ValueError("route node lacks checked ordered fallback")
     return route, node

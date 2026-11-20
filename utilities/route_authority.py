@@ -26,7 +26,7 @@ from typing import Mapping, NamedTuple
 
 from dispatch_attempt_policy import committed_outcome, readable_result, verdict_pass
 import review_round_cap as _ROUND
-from route_form import one_shot_review_node, serial_attempt_route
+from route_form import one_shot_review_node_ids, serial_attempt_route
 from session_identity import identity as session_identity, session_label
 
 
@@ -883,7 +883,7 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
                     raise _contract_error("owner-closure-intensity-unknown", "owner-closure-intensity-unknown:" + route["effective_intensity"])
                 raise
         worker_type = node.get("worker_type") or ("review" if node.get("kind") == "review-worker" else "test")
-        # The middle cell's review (`solo·standard`): the owner both makes the work and starts this review,
+        # The middle cell's review (`solo` at `standard` and up): the owner both makes the work and starts this review,
         # so the review's rounds are counted on its lineage, not once per reviewed content.
         review_cell = _is_one_shot_review(route, node)
         same_content_rows = None
@@ -1042,9 +1042,9 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
 
 
 def _is_one_shot_review(route, node) -> bool:
-    """Whether `node` is the middle cell's review node (the owner makes the work and starts this review)."""
-    declared = one_shot_review_node(route)
-    return (declared is not None and isinstance(node, dict) and node.get("id") == declared.get("id")
+    """Whether `node` is one of the middle cell's review nodes (the owner makes the work and starts this
+    review; from `strong` the review is a group of legs, and every leg counts its rounds on its own lineage)."""
+    return (isinstance(node, dict) and node.get("id") in one_shot_review_node_ids(route)
             and node.get("kind") == "review-worker")
 
 

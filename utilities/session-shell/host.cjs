@@ -649,7 +649,9 @@ let table=null,tableAsking=false,tableAgain=false;
 // own route box laid at the popup's width (`panelView.routesBody`); a reading follows either way and replaces it.
 let routePopup=null;
 // 11-15 (design 2): the status popup first, as its button stands at the panel's head (the REPO row).
-const SECTIONS=['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES'];
+// 11-20 (the person: "메모리 ... 메시지 처럼 팝업이 가능하게"): MEM opens a popup of the same frame and keys as MESSAGES', its rows drawn from the
+// records the panel already holds (`panelView.memoryBody`): no reading, no new kind of popup.
+const SECTIONS=['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES','MEM'];
 const POPUP_KIND={ROUTE:'routes',STATUS:'status',NOW:'now'};
 // 11-18: the width kind of a table popup: the routes popup stands wider (`panelView.popupWidth`), the others as a table; the question popup is `question`.
 const tableKind=name=>name==='ROUTE'?'route':'table';
@@ -666,7 +668,10 @@ function statusRoutes(panel=panelModel){return [...new Set((Array.isArray(panel.
 // The button's value as the popup's read takes it (so the popup does not read again what the button read).
 function statusHeld(){const v=statusValue;
   return v&&typeof v==='object'?{word:String(v.word||''),title:String(v.title||''),has_doc:v.has_doc===true,path:String(v.path||''),slot:String(v.slot||'')}:null;}
-function statusDoc(){return statusValue&&typeof statusValue.word==='string'?{word:statusValue.word,has_doc:statusValue.has_doc===true}:null;}
+// 11-20: the panel's STATUS section is drawn from `groups` (the campaign document's groups as the backend read them with the
+// button's value: no second read, no timer); a value without them (an older backend, no document) draws the button alone.
+function statusDoc(){return statusValue&&typeof statusValue.word==='string'?{word:statusValue.word,has_doc:statusValue.has_doc===true,
+  ...(Array.isArray(statusValue.groups)?{groups:statusValue.groups}:{})}:null;}
 function askStatus(dirty=false,routes=statusRoutes()){
   if(statusAsking){statusAgain=true;statusAgainDirty=statusAgainDirty||dirty;return;}
   statusAsking=true;statusAgain=false;statusAgainDirty=false;
@@ -692,14 +697,12 @@ function observeStatus(panel){
   const key=JSON.stringify([process.cwd(),statusRoutes(panel)]);
   if(key!==statusKey||statusDirty){const dirty=statusDirty;statusKey=key;statusDirty=false;askStatus(dirty,statusRoutes(panel));}
 }
-// The name a section has on a popup's bottom line: STATUS goes by its button's word (`현황`).
-function sectionLabel(name){return name==='STATUS'?String(statusValue?.word||'STATUS'):name;}
 function popupShown(){return (block.focused||!!table)&&activated&&!relay&&!ended&&!fleetView&&!settings&&!succeeding;}
 // The sections with something in them, in the panel's order (the one standing always).
 function sections(){
   const m=panelModel,list=v=>Array.isArray(v)&&v.length>0;
   const has={STATUS:!!statusDoc(),NOW:!!m.now,QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
-    MESSAGES:list(m.messages)||list(m.requests)};
+    MESSAGES:list(m.messages)||list(m.requests),MEM:list(m.memory_items)};
   const current=table?table.kind:'QUESTIONS';
   return SECTIONS.filter(name=>has[name]||name===current);
 }
@@ -722,11 +725,12 @@ function tableTitle(kind){
   if(kind==='ROUTE'){const r=/^route (\d+)(.*)$/.exec(String(m.route_label||'').trim()),head=r?[{text:r[1]},dim(' ROUTE'+r[2])]:[dim('ROUTE')];
     // A first screen that is not this reading's says so at the end of the title, which stands whatever the scroll.
     return table?.kind==='ROUTE'&&table.loaded&&table.stale?[...head,dim(' · '+staleWords(table.stale))]:head;}
-  // `현황 <campaign> · <age>` (the word as the button's, dim; `현황` alone without a document).
-  if(kind==='STATUS'){const word=sectionLabel('STATUS'),whole=String(table?.title||statusValue?.title||word);
+  // `STATUS <campaign> · <age>` (the word as the button's, dim; `STATUS` alone without a document).
+  if(kind==='STATUS'){const word='STATUS',whole=String(table?.title||statusValue?.title||word);
     return whole.startsWith(word)&&whole.length>word.length?[dim(word),{text:whole.slice(word.length)}]:[dim(whole)];}
   // `NOW · <counts>` for the list; `NOW · <time> <kind>` for the part being read.
   if(kind==='NOW'){const v=table?.page?table.read:table?.list,more=String(v?.title||'');return more?[dim('NOW · '),{text:more}]:[dim('NOW')];}
+  if(kind==='MEM')return [dim('MEM')];
   return [dim('MESSAGES')];
 }
 // `as read at 14:05 · reading again` (the words are the panel's; no time known: what follows the ` · `).
@@ -742,6 +746,7 @@ function staleWords(stale){
 function tableRows(inner){
   const t=table;
   if(t.kind==='MESSAGES')return [...panelView.messagesBody({model:panelModel,columns:inner,cellWidth}),...actionLines];
+  if(t.kind==='MEM')return panelView.memoryBody({model:panelModel,columns:inner,cellWidth});
   if(t.kind==='NOW')return nowRows(t);
   if(!t.loaded)return [[{text:t.error?label('popup_unread','could not read'):'⠏',dim:true}]];
   return t.rows;
@@ -787,7 +792,7 @@ function popupNow(){
     table.space=space;
     title=tableTitle(table.kind);
     body=[...all.slice(table.scroll,table.scroll+space),...guide];
-    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,labels:names.map(sectionLabel),current,model:panelModel,configuration:displayConfiguration,cellWidth,background:terminalBackground});
+    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,current,model:panelModel,configuration:displayConfiguration,cellWidth,background:terminalBackground});
     // The table's own press targets, moved to where its rows stand on the screen.
     const first=view.frame.top+1,left=view.frame.left+2;
     view.tableHits=(table.hits||[]).filter(h=>h.row>=table.scroll&&h.row<table.scroll+space)
@@ -799,7 +804,7 @@ function popupNow(){
     if(actionLines.length)body=actionLines.slice(0,room);
     else if(block.question){const all=block.detail({budget:room+1,columns:inner});title=all[0]||label;body=all.slice(1);}
     else body=block.detail({budget:room,columns:inner});
-    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,labels:names.map(sectionLabel),current,model:panelModel,
+    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,current,model:panelModel,
       configuration:displayConfiguration,cellWidth,background:terminalBackground});
   }
   // OpenCode paints its own background: every popup row starts from the terminal's own look. The cell
@@ -1021,6 +1026,11 @@ function openPopup(name,open='',page=false){
   if(name==='ROUTE'&&!table.loaded)Object.assign(table,routeFirst(table)||{});
   if(block.focused)block.leave();
   if(name==='MESSAGES')blockAction('r');
+  else if(name==='MEM'){
+    // The popup opens on the record pressed (`popup:MEM:<n>`): its head is the first row on screen.
+    const at=Number(open),starts=panelView.memoryBody({model:panelModel,columns:Math.max(1,table.width-4),cellWidth}).starts||[];
+    if(Number.isInteger(at)&&at>0&&at<starts.length)table.scroll=starts[at];
+  }
   else if(!kept)askTable();
   queueDisplay();
 }

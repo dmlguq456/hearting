@@ -176,7 +176,7 @@ from capability_route_nodes import (  # noqa: F401
     _capture_unit_frontmatter, _expected_nodes_under_frame_policy, _frame_node,
     _frameless_recipe, _load_sd160_snapshots, _no_model_node, _one_leg_frame_recipe,
     _owner_node, _profile_input_maps, _quick_frame_diversity, _quick_gate_bindings,
-    one_shot_owner_default, one_shot_review_declared, one_shot_review_node,
+    one_shot_owner_default, one_shot_review_declared, one_shot_review_node, one_shot_review_nodes,
     _recipe_has_frame, _resolve_owner_profile, _sd160_snapshot_path, _seal_confirmation_mode,
     _seal_profile_demands, _seal_small_work_confirmation, _seal_terminal_commit_support,
     _stamp_frame_profiles, _unit_blocks_digest, _verify_profile_contract, unit_leg_node,
@@ -1207,8 +1207,10 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         elif unit is not None:
             nodes = [{"id": TOPO.UNIT_NODE_ID, "write_scope": list(base["quick"]["write_scope"])}]
         elif middle_cell:
-            # The middle cell: the kind's declared review node, then the owner's end node.
-            nodes = [one_shot_review_node(base), {"id": "one-shot", "write_scope": list(base["quick"]["write_scope"])}]
+            # The middle cell: the kind's declared verification nodes at this intensity, then the owner's end node.
+            cell_intensity = max((requested, "standard" if signals else "quick"), key=ORDER.get)
+            nodes = [*one_shot_review_nodes(base, cell_intensity, registry),
+                     {"id": "one-shot", "write_scope": list(base["quick"]["write_scope"])}]
         elif shape == "solo" and not signals:
             if resume_graph and RESOURCE_RESUME.recipe_selected(base):
                 nodes = RESOURCE_RESUME.nodes(base, registry["owner_profile_by_intensity"]["quick"])
@@ -1621,11 +1623,13 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
             nodes = RESOURCE_RESUME.nodes(recipe, owner_model_profile)
             gates = ["resource-exit", "quick-complete"]
         if review_cell:
-            # The middle cell `solo·standard`: the kind's declared review node, then the owner's end node,
-            # which waits on it (the review never waits on the owner). No frame pair (a decided shape).
-            nodes = [one_shot_review_node(recipe), nodes[-1]]
-            nodes[1]["depends_on"] = [nodes[0]["id"]]
-            gates = [nodes[0]["completion_gate"], "quick-complete"]
+            # The middle cell (`solo` at `standard` and up): the kind's declared verification nodes at this
+            # intensity (one review, or its review legs from `strong`), then the owner's end node, which waits
+            # on all of them (a review never waits on the owner). No frame pair (a decided shape).
+            review_nodes = one_shot_review_nodes(recipe, effective, registry)
+            nodes = [*review_nodes, nodes[-1]]
+            nodes[-1]["depends_on"] = [n["id"] for n in review_nodes]
+            gates = [review_nodes[0]["completion_gate"], "quick-complete"]
         selection_basis=[{"axis":"direct-predicate-gap","signal":p,"source":"compiler"} for p in sorted(known_pred-set(predicates))]
     else:
         if transport not in (None, "headless"):
@@ -1908,7 +1912,7 @@ def main():
     cp.add_argument("--unit",default=None,metavar="FAMILY/NAME",help="open one read-only unit as a route of its own (the kind unit, one leg, no owner, no intensity); its field is the unit head's `field:`, or name --field; with --start --prompt-file the unit's one worker starts with the brief and its end closes the route")
     cp.add_argument("--ephemeral",action="store_true",help="with --unit: leave nothing in the project's artifact folder or campaign records; the route's files stay in a scratch root under the runtime directory and the worker's answer comes back with its completion")
     cp.add_argument("--field",default=None,help="the field of the work (plan, design, code, lab, research, docs, admin, other); alone it opens that field's default recipe, and admin or other also need --capability; a hint only with --shape framed")
-    cp.add_argument("--intensity",default=None,help="default by shape: direct/quick/standard; framed defaults to two frame legs, while explicit quick/direct may use one for unprotected work; staged accepts strong+")
+    cp.add_argument("--intensity",default=None,help="default by shape: direct/quick/standard; framed defaults to two frame legs, while explicit quick/direct may use one for unprotected work; solo accepts standard and higher where the kind declares a one-shot review; staged accepts standard and higher")
     cp.add_argument("--cwd",default=None,help="default: current directory"); cp.add_argument("--artifact-root",default=None,help="default: utilities/artifact-root.sh for cwd")
     cp.add_argument("--signal",action="append",default=[],
                     help="promotion signal (repeatable), e.g. shared-contract: promotes shared spec/contract "
