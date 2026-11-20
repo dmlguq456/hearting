@@ -19,7 +19,8 @@ Three layers:
 
 Cost: routes are not read one by one. Listing the routes folder and the cycle folder with `stat`
 picks what changed since the last pass; only the cycle records written after it (about 1 KB each)
-and the small close results are read, and no index is rebuilt. What was read is kept in
+and the small close results are read, and no index is rebuilt (only a close that no saved list holds
+is looked up by route id). What was read is kept in
 `<root>/.runtime/campaign-document/<campaign_id>.json`; deleting it only starts the campaign
 again from its newest 20 pieces of work (nothing is backfilled).
 """
@@ -53,6 +54,8 @@ HEAD_BYTES = 16 * 1024
 TITLE_CHARS = 90
 WAIT_CHARS = 120
 SIZE_LIMIT = 60 * 1024
+HEADING_CHARS = 200
+SUMMARY_CHARS = 400
 CACHE_REL = Path(".runtime") / "campaign-document"
 
 _ROUTE_FILE = re.compile(r"^(rt-[0-9a-f]+)\.json$")
@@ -65,7 +68,7 @@ _PUBLISH_HEAD = re.compile(r"^#\s+(v\d+\.\d+\.\d+\S*)\s*[—–-]\s*(.*)$")
 _PR_NUMBER = re.compile(r"#(\d+)")
 _REVIEW_SLUG = re.compile(r"^(rv|review|audit)[-_]|[-_]close[-_]unit$")
 _UPDATED_LINE = re.compile(r"^갱신 \d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
-_CONTROLS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")   # C0 and C1, but not tab or line breaks
+_CONTROLS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff]")   # C0, C1 (not tab or line breaks) and unpaired surrogates, which UTF-8 cannot write
 _INTENT_PR = re.compile(r"(?<![A-Za-z])PR\s*#(\d{1,5})(?!\d)")
 
 
@@ -234,27 +237,37 @@ def _unit_line(unit, *, prefix=""):
 
 def render_document(title, summary, units, waits, *, now, tz=None):
     """The campaign document's text. Description lines are never bullets, so a reader counting
-    bullets under `## 기다리는 것` counts open questions and nothing else."""
+    bullets under `## 기다리는 것` counts open questions and nothing else.
+
+    The text always fits `SIZE_LIMIT`, which is under the readers' limit: the title and the one-line
+    summary are clipped, and when the lines still do not fit, finished lines are folded first, then
+    questions, then the oldest open work. Each fold is counted on a line that is not a bullet."""
     stamp = datetime.fromtimestamp(now, tz).strftime("%Y-%m-%d %H:%M")
-    heading = _escape(" ".join(_CONTROLS.sub("", str(title or "")).split()))
-    one_line = _escape(" ".join(_CONTROLS.sub("", str(summary or "")).split())) or heading
+    heading = _escape(_clip(title, HEADING_CHARS))
+    one_line = _escape(_clip(summary, SUMMARY_CHARS)) or heading
     active = list(units.get("active") or [])
     done = list(units.get("done") or [])
     done_folded = int(units.get("done_folded") or 0)
+    items = list(waits.get("items") or []) if waits and waits.get("status") == "ok" else []
 
-    def build():
+    def build(keep_done, keep_waits, keep_active):
+        shown_done = done[:keep_done]
+        folded = done_folded + sum(unit["routes"] or 1 for unit in done[keep_done:])
         out = [MARKER, f"# {heading}", "", f"갱신 {stamp}", "", f"**한 줄**: {one_line}", "", "## 하는 중"]
-        out += [_unit_line(unit) for unit in active]
+        out += [_unit_line(unit) for unit in active[:keep_active]]
         if not active:
             out.append("지금 없음.")
         if units.get("active_folded"):
             out.append(f"6시간 넘게 움직임 없는 열린 일 {units['active_folded']:,}개는 접어 둠.")
+        if len(active) > keep_active:
+            out.append(f"크기 한도로 접은 열린 일 {len(active) - keep_active:,}개.")
         out += ["", "## 기다리는 것"]
         if waits and waits.get("status") == "ok":
-            items = waits.get("items") or []
-            out += [f"- {_escape(_clip(item, WAIT_CHARS))}" for item in items]
+            out += [f"- {_escape(_clip(item, WAIT_CHARS))}" for item in items[:keep_waits]]
             if not items:
                 out.append("지금 없음.")
+            if len(items) > keep_waits:
+                out.append(f"크기 한도로 접은 질문 {len(items) - keep_waits:,}개.")
             seen = datetime.fromtimestamp(waits["at"], tz)
             today = seen.date() == datetime.fromtimestamp(now, tz).date()
             out.append("질문판 기준 " + seen.strftime("%H:%M" if today else "%m-%d %H:%M"))
@@ -262,18 +275,31 @@ def render_document(title, summary, units, waits, *, now, tz=None):
             out.append("질문판을 읽지 못했습니다.")
         out += ["", "## 최근에 끝난 것"]
         out += [_unit_line(unit, prefix=datetime.fromtimestamp(unit["closed_at"], tz).strftime("%m-%d") + " ")
-                for unit in done]
-        if done_folded:
-            out.append(f"앞서 끝난 기록 {done_folded:,}개는 접어 둠.")   # routes, as each line's `기록 N`
+                for unit in shown_done]
+        if folded:
+            out.append(f"앞서 끝난 기록 {folded:,}개는 접어 둠.")   # routes, as each line's `기록 N`
         elif not done:
             out.append("아직 없음.")
         return "\n".join(out) + "\n"
 
-    text = build()
-    while len(text.encode("utf-8")) > SIZE_LIMIT and done:
-        done_folded += done.pop()["routes"] or 1
-        text = build()
-    return text
+    def fits(*counts):
+        return len(build(*counts).encode("utf-8")) <= SIZE_LIMIT
+
+    def most(limit, fit):   # the most lines kept (0..limit) that still fit; `fit` only gets easier with fewer
+        low, high = 0, limit
+        while low < high:
+            middle = (low + high + 1) // 2
+            low, high = (middle, high) if fit(middle) else (low, middle - 1)
+        return low
+
+    counts = [len(done), len(items), len(active)]
+    for index, fit in enumerate((lambda k: fits(k, counts[1], counts[2]),
+                                 lambda k: fits(counts[0], k, counts[2]),
+                                 lambda k: fits(counts[0], counts[1], k))):
+        if fits(*counts):
+            break
+        counts[index] = most(counts[index], fit)   # 0 when even none of them would make it fit
+    return build(*counts)
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +342,9 @@ def read_waits(root, now):
     shown. An item is open when a person must answer it and it is not folded as old. A route's
     item belongs here when its route is one of this root's. An `S4` item reads its question and
     folder from the question file with the same id (open only; none found means left out) and
-    belongs here when that folder resolves to this root. Anything else is left out."""
+    belongs here when that folder resolves to this root. An open `S4` question file made after the
+    copy (its `since` is later than the copy's `observed_at`) and not on it is added when its folder
+    resolves to this root. Anything else is left out."""
     try:
         import human_wait_state
         view = human_wait_state.cached_view(now=now, request=False, max_age=float("inf"))
@@ -344,7 +372,19 @@ def read_waits(root, now):
                 here = bool(found) and os.path.realpath(str(found)) == root_real
             if here:
                 items.append(_first_line(question) or "질문 (본문 없음)")
-        return {"status": "ok", "at": float(view["observed_at"]), "items": items}
+        # A question asked after the copy was made is not on it yet: its own file says it is open.
+        observed, listed = float(view["observed_at"]), {item.get("id") for item in view["items"]}
+        for path in sorted(human_wait_state.state_root().glob("*.json")):
+            value = human_wait_state._read(path)
+            if (not value or value.get("mode") != "message" or value.get("lifecycle") != "open"
+                    or value.get("id") in listed or not value.get("cwd")
+                    or not isinstance(value.get("since"), (int, float)) or value["since"] <= observed
+                    or human_wait_state.wait_fold(value["since"], now) is not None):
+                continue
+            found = project_status.artifact_root(value["cwd"])
+            if found and os.path.realpath(str(found)) == root_real:
+                items.append(_first_line(value.get("question")) or "질문 (본문 없음)")
+        return {"status": "ok", "at": observed, "items": items}
     except Exception:  # noqa: BLE001 -- an unreadable copy is a stated state, never a failure
         return {"status": "unreadable"}
 
@@ -722,7 +762,8 @@ def _waits_signature(board):
 
 def _records_of_closes(root, listing, mark, have):
     """Records for routes whose close result changed after `mark` but whose cycle record did not (a close
-    promoted later): found through the saved campaign lists, which hold each route's cycle id."""
+    promoted later): found through the saved campaign lists, which hold each route's cycle id, and for
+    the ones no list holds (a campaign without a document yet) by route id."""
     need = {rid for rid, (_route, closed) in listing.items() if closed and closed > mark} - have
     rows = []
     if not need:
@@ -734,6 +775,10 @@ def _records_of_closes(root, listing, mark, have):
             record = store.read_cycle_record(root, held["members"][rid]["cy"]) if _cache_member(held["members"][rid]) else None
             if record is not None:
                 rows.append(record)
+    if need:
+        # Not in any saved list: a campaign with no document yet. Looked up by route id, which is
+        # rare (only a close whose route no list holds), so a pass does not read every record.
+        rows += store.list_cycle_records(root, route_ids=need)
     return rows
 
 
@@ -775,8 +820,8 @@ def _former_campaigns(root, rid, record, mark):
 def catch_up(root, cycle_id=None, *, now=None, waits=None):
     """Bring the documents of the campaigns that moved since the last pass up to date.
 
-    A campaign moved when one of its routes was written or closed after the saved mark (the
-    first pass looks back ten minutes), or when `cycle_id` is its cycle. Only campaigns that are
+    A campaign moved when one of its cycle records was written or one of its routes closed after the
+    saved mark (the first pass looks back ten minutes), or when `cycle_id` is its cycle. Only campaigns that are
     still active are written, and so is each one that already has a document when the repo's
     question list changed since the last pass. One campaign failing never stops another. Returns the names of
     the campaign folders whose document was written or already current."""

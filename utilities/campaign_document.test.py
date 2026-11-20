@@ -198,6 +198,62 @@ class PureTest(unittest.TestCase):
         self.assertLessEqual(len(big.encode()), cd.SIZE_LIMIT)
         self.assertIn("앞서 끝난 기록", big)
 
+    def unit(self, index, title="가" * 89):
+        return {"key": f"rt:{index}", "pr": None, "v": None, "title": title, "impl": {"slug": "x"}, "count": 1,
+                "closed_at": NOW - index, "routes": 1, "activity": NOW - index}
+
+    def test_a_document_never_passes_the_limit_whatever_section_is_long(self):
+        """Review round 2 (11-21): 330 open routes with long titles made 72 KB, which the readers (65,536) refuse."""
+        for label, args in {
+            "doing": ({"active": [self.unit(i) for i in range(330)], "active_folded": 0, "done": [], "done_folded": 0},
+                      WAITS_OK, "Demo", "One line."),
+            "waiting": ({"active": [], "active_folded": 0, "done": [], "done_folded": 0},
+                        {"status": "ok", "at": NOW, "items": ["질" * 300] * 600}, "Demo", "One line."),
+            "everything": ({"active": [self.unit(i) for i in range(500)], "active_folded": 0,
+                            "done": [self.unit(i) for i in range(400)], "done_folded": 9},
+                           {"status": "ok", "at": NOW, "items": ["질" * 300] * 600}, "제" * 5000, "요" * 30000),
+        }.items():
+            with self.subTest(label):
+                units, waits, title, summary = args
+                text = cd.render_document(title, summary, units, waits, now=NOW, tz=UTC)
+                self.assertLessEqual(len(text.encode("utf-8")), cd.SIZE_LIMIT)
+                self.assertLess(cd.SIZE_LIMIT, 65536)
+                self.assertTrue(text.startswith(cd.MARKER + "\n# "))
+                self.assertEqual([line for line in text.split("\n") if line.startswith("## ")],
+                                 ["## 하는 중", "## 기다리는 것", "## 최근에 끝난 것"])
+
+    def test_what_is_folded_is_counted_on_a_line_that_is_not_a_bullet(self):
+        units = {"active": [self.unit(i) for i in range(330)], "active_folded": 0, "done": [], "done_folded": 0}
+        text = cd.render_document("Demo", "One line.", units, WAITS_OK, now=NOW, tz=UTC)
+        shown = len([line for line in text.split("\n") if line.startswith("- ")])
+        folded = re.search(r"^크기 한도로 접은 열린 일 ([\d,]+)개\.$", text, re.MULTILINE)
+        self.assertIsNotNone(folded)
+        self.assertEqual(shown + int(folded.group(1).replace(",", "")), 330)
+        self.assertIn("- " + "가" * 89 + " · 기록 1", text)   # the freshest lines stay
+        waits = {"status": "ok", "at": NOW, "items": ["질" * 300] * 600}
+        text = cd.render_document("Demo", "One line.", {"active": [], "done": []}, waits, now=NOW, tz=UTC)
+        shown = len(self.bullets_of(text, "기다리는 것"))
+        folded = re.search(r"^크기 한도로 접은 질문 ([\d,]+)개\.$", text, re.MULTILINE)
+        self.assertEqual(shown + int(folded.group(1).replace(",", "")), 600)
+        self.assertEqual(len(self.bullets_of(text, "기다리는 것")), shown)   # the folded count adds no bullet
+
+    def bullets_of(self, text, section):
+        body = text.split("## " + section + "\n", 1)[1].split("\n## ", 1)[0]
+        return [line for line in body.split("\n") if line.startswith("- ")]
+
+    def test_a_title_and_a_summary_are_clipped(self):
+        text = cd.render_document("제" * 5000, "요" * 30000, {"active": [], "done": []}, WAITS_OK, now=NOW, tz=UTC)
+        self.assertEqual(text.split("\n")[1], "# " + "제" * (cd.HEADING_CHARS - 1) + "…")
+        self.assertIn("**한 줄**: " + "요" * (cd.SUMMARY_CHARS - 1) + "…\n", text)
+
+    def test_an_unpaired_surrogate_is_dropped_and_the_text_can_be_written_as_utf8(self):
+        unit = self.unit(1, title="앞\ud800뒤")
+        text = cd.render_document("제\udc00목", "요\ud83d약", {"active": [unit], "done": []},
+                                  {"status": "ok", "at": NOW, "items": ["질\udfff문?"]}, now=NOW, tz=UTC)
+        text.encode("utf-8")
+        for word in ("제목", "요약", "앞뒤", "질문?"):
+            self.assertIn(word, text)
+
 
 class Fixture(unittest.TestCase):
     def setUp(self):
@@ -732,6 +788,43 @@ class ReviewFixesTest(Fixture):
         self.assertEqual((self.folder / cd.DOCUMENT).stat().st_mode & 0o777, 0o644)
 
 
+    def test_a_close_alone_makes_the_first_document_of_a_campaign_that_has_none(self):
+        """On e31cf21 this wrote nothing: the record is old and no saved list held the route yet."""
+        rid, _cycle = self.route("late-1701", closed=None)           # begun and sealed long ago
+        (self.runtime / "campaign-document" / "watermark.json").write_text(json.dumps({"v": 1, "ns": int(NOW * 10 ** 9)}))
+        self.assertFalse((self.folder / "campaign.md").exists())
+        self.close(rid, NOW + 100)                                   # after the mark only the close is written
+        self.assertEqual(self.catch_up(now=NOW + 120), ["2026-11-01_demo"])
+        self.assertEqual(self.bullets(self.document(), "최근에 끝난 것"), ["- 11-20 late-1701 · #1701 · 기록 1"])
+
+    def test_a_close_that_a_saved_list_holds_does_not_search_by_route_id(self):
+        rid, _cycle = self.route("late-1701", closed=None)
+        self.catch_up(now=NOW)
+        self.close(rid, NOW + 100)
+        with mock.patch.object(cd.store, "list_cycle_records", side_effect=AssertionError("found through the list")):
+            self.catch_up(now=NOW + 120)
+        self.assertIn("late-1701", self.document())
+
+    def test_330_open_routes_with_long_titles_write_a_document_the_readers_can_read(self):
+        for index in range(330):
+            self.route(f"open-{index}", started=NOW - HOUR, touched=NOW - 600)
+        (self.folder / "meta.json").write_text(json.dumps({
+            "schema_version": 1, "campaign": {"title": "제" * 89, "summary": "요" * 23000}, "cycles": {}}))
+        self.catch_up(now=NOW)
+        raw = (self.folder / "campaign.md").read_bytes()
+        self.assertLessEqual(len(raw), cd.SIZE_LIMIT)
+        import artifact_campaign_documents as documents
+        self.assertEqual(documents.campaign_status(self.folder)["status"], "known")
+
+    def test_a_title_with_an_unpaired_surrogate_does_not_stop_the_document(self):
+        self.route("alpha-1700", closed=NOW - 3 * HOUR)
+        (self.folder / "meta.json").write_text(json.dumps({
+            "schema_version": 1, "campaign": {"title": "제\udc00목", "summary": "요\ud800약"}, "cycles": {}}))
+        self.assertEqual(self.catch_up(now=NOW), ["2026-11-01_demo"])
+        self.assertNotIn("skipped", self.err)
+        self.assertIn("# 제목", self.document())
+
+
 class WaitsTest(Fixture):
     """The board's saved copy and its question files sit in an isolated state folder."""
 
@@ -755,12 +848,12 @@ class WaitsTest(Fixture):
             "schema_version": 3, "observed_at": observed, "items": rows, "by_session": {},
             "total": len(rows), "older": 0})
 
-    def question(self, name, cwd, text, lifecycle="open"):
+    def question(self, name, cwd, text, lifecycle="open", since=NOW - 100):
         item_id = "S4:" + name * 64
         self.hws._write(self.hws.state_root() / (name * 8 + ".json"), {
             "schema_version": 1, "mode": "message", "source": "S4", "id": item_id, "harness": "claude",
             "session_id": "s-" + name, "seat_key": "seat-" + name, "sequence": 1, "question": text,
-            "since": NOW - 100, "lifecycle": lifecycle, "cwd": str(cwd)})
+            "since": since, "lifecycle": lifecycle, "cwd": str(cwd)})
         return item_id
 
     def asked(self, name, source="S4"):
@@ -829,6 +922,41 @@ class WaitsTest(Fixture):
         self.assertEqual(waits["items"], ["Qa?", "Qb?", "Qc?"])
         self.catch_up(waits=waits)
         self.assertEqual(len(project_status.parse(self.document())["decisions"]), 3)
+
+
+    def test_an_open_question_of_this_repo_asked_after_the_copy_is_added_and_others_are_not(self):
+        self.question("a", self.mine, "On the copy?")
+        self.copy([self.asked("a")], observed=NOW - 30)
+        self.question("b", self.mine, "Asked after the copy?", since=NOW - 10)
+        self.question("c", self.other, "Another repo, after the copy", since=NOW - 10)
+        self.question("d", self.mine, "Answered after the copy", since=NOW - 10, lifecycle="answered")
+        self.question("e", self.mine, "Before the copy and not on it", since=NOW - 100)
+        waits = cd.read_waits(self.root, NOW)
+        self.assertEqual(waits["items"], ["On the copy?", "Asked after the copy?"])
+        self.assertEqual(waits["at"], NOW - 30)
+
+    def test_a_question_on_the_copy_follows_the_copy_and_is_not_added_twice(self):
+        self.question("a", self.mine, "Folded as old", since=NOW - 10)
+        self.copy([dict(self.asked("a"), stale="older")], observed=NOW - 30)   # the copy says old: it stays out
+        self.assertEqual(cd.read_waits(self.root, NOW)["items"], [])
+        self.question("b", self.mine, "Listed once", since=NOW - 10)
+        self.copy([dict(self.asked("a"), stale="older"), self.asked("b")], observed=NOW - 30)
+        self.assertEqual(cd.read_waits(self.root, NOW)["items"], ["Listed once"])
+
+    def test_a_question_asked_after_the_copy_reaches_the_document_and_leaves_it_when_answered(self):
+        self.route("alpha-1700", closed=NOW - 3 * HOUR)
+        self.copy([], observed=NOW - 30)
+        self.catch_up(now=NOW, waits=None)
+        self.assertEqual(self.bullets(self.document(), "기다리는 것"), [])
+        self.question("b", self.mine, "Just asked?", since=NOW + 5)
+        self.route("beta-1701", closed=NOW + 10)                      # a route event: the question list is read
+        self.catch_up(now=NOW + 60, waits=None)
+        self.assertEqual(self.bullets(self.document(), "기다리는 것"), ["- Just asked?"])
+        self.hws._write(self.hws.state_root() / ("b" * 8 + ".json"), dict(
+            self.hws._read(self.hws.state_root() / ("b" * 8 + ".json")), lifecycle="answered"))
+        self.route("gamma-1702", closed=NOW + 100)                    # again only a route event
+        self.catch_up(now=NOW + 120, waits=None)
+        self.assertEqual(self.bullets(self.document(), "기다리는 것"), [])
 
 
 if __name__ == "__main__":

@@ -562,33 +562,6 @@ def _prune_selected(overlay, needed=1):
     return len(overlay) + needed <= _SELECTED_RESPONSE_MAX
 
 
-def _refresh_campaign_documents(value):
-    """Ask for a campaign-document refresh after this question was registered or answered.
-
-    The question's own folder resolves to the artifact root whose campaign document lists it under
-    "기다리는 것"; `request_refresh` is the entrance's one request (detached, coalesced, never
-    waited on). Best effort and silent: the question's path never waits on, or fails for, a document.
-    A test process asks only for a root inside its temp folder, never the checkout's real one."""
-    try:
-        cwd = value.get("cwd") if isinstance(value, dict) else None
-        if value.get("mode") != "message" or not cwd:
-            return
-        project_root = str(Path(__file__).resolve().parents[1])
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
-        from tools.fleet.collectors import project_status
-        root = project_status.artifact_root(cwd)
-        if not root:
-            return
-        if "unittest" in sys.modules or "pytest" in sys.modules:
-            if not os.path.realpath(root).startswith(os.path.realpath(tempfile.gettempdir()) + os.sep):
-                return
-        import artifact_entrance
-        artifact_entrance.request_refresh(Path(root))
-    except Exception:  # noqa: BLE001 -- a derived document is never part of a question
-        pass
-
-
 def register_message(harness, session_id, seat, text, *, sequence, choices=(),
                      recommended=None, secret=False, cwd=None, incarnation=None, replace=True):
     """Register one explicit question on the caller's current prompt, without waiting.
@@ -678,9 +651,6 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
     if prior:
         _queue_message_decision(prior)
     _request_producer()
-    _refresh_campaign_documents(value)
-    if prior and prior.get("id") != item_id:
-        _refresh_campaign_documents(prior)   # the replaced question leaves its folder's list
     if (prior and prior.get("id") != item_id and prior.get("mode") == "message"
             and prior.get("lifecycle") == "open"):
         # The earlier unanswered question of this session was just closed as replaced.
@@ -929,8 +899,6 @@ def complete_message_answer(receipt, recipient):
                              "progress": "unknown"})
         if not _store_selected_entry(envelope, entry):
             raise OSError("message-answer-result-storage-unavailable")
-    if won:
-        _refresh_campaign_documents(signal)
     return won
 
 
@@ -1147,10 +1115,7 @@ def close_signal(seat_key: str, *, sequence: int | None = None,
             answer = message_prompt_answer(current, answer)
             if answer is None or message_answer_pending(current):
                 return False
-            done = _complete_message_locked(current, answer, "direct", sequence=sequence)
-            if done:
-                _refresh_campaign_documents(current)
-            return done
+            return _complete_message_locked(current, answer, "direct", sequence=sequence)
         _remove_signal_source(current, path)
         return True
     except (OSError, ValueError, TypeError):

@@ -136,13 +136,39 @@ class CampaignDocumentsTest(unittest.TestCase):
         self.assertEqual(result['totals']['cycles'], 0)
         self.assertTrue(all(not r.get('cycle_id') for r in rows))
 
-    def test_the_campaigns_own_page_is_no_route_report_row_but_the_hand_written_names_stay(self):
+    def test_the_campaigns_own_page_is_no_route_report_row_and_hides_the_hand_written_status_names(self):
         (self.campaign / 'campaign.md').write_text(CAMPAIGN_PAGE)
+        (self.campaign / '현황.md').write_text(PAGE)
+        (self.campaign / 'status.md').write_text(PAGE)
+        (self.campaign / 'HANDOFF-seat.md').write_text('# Handoff\n')
+        rows = [r for r in entrance.scan(self.root)['recent'] if r.get('kind') == 'campaign-document']
+        self.assertEqual({Path(r['doc_path']).name for r in rows}, {'HANDOFF-seat.md'})
+        self.assertEqual(documents.campaign_status(self.campaign)['path'], self.campaign / 'campaign.md')
+        self.assertEqual(PAGE, (self.campaign / '현황.md').read_text())   # hidden, never touched
+
+    def test_a_campaign_without_campaign_md_still_lists_its_hand_written_status_page(self):
         (self.campaign / '현황.md').write_text(PAGE)
         (self.campaign / 'HANDOFF-seat.md').write_text('# Handoff\n')
         rows = [r for r in entrance.scan(self.root)['recent'] if r.get('kind') == 'campaign-document']
         self.assertEqual({Path(r['doc_path']).name for r in rows}, {'현황.md', 'HANDOFF-seat.md'})
-        self.assertEqual(documents.campaign_status(self.campaign)['path'], self.campaign / 'campaign.md')
+
+    def test_a_document_replaced_while_it_is_read_is_read_once_more(self):
+        (self.campaign / 'campaign.md').write_text(CAMPAIGN_PAGE)
+        real, calls = documents._read_once, []
+
+        def once(folder, name):
+            calls.append(name)
+            if len(calls) == 1:
+                raise ValueError('document-changed')
+            return real(folder, name)
+        with mock.patch.object(documents, '_read_once', once):
+            raw, _info, coverage = documents.read_document(self.campaign, 'campaign.md')
+        self.assertEqual((len(calls), coverage, raw.decode()), (2, 'complete', CAMPAIGN_PAGE))
+        calls.clear()
+        with mock.patch.object(documents, '_read_once', side_effect=ValueError('document-changed')) as always:
+            with self.assertRaises(ValueError):
+                documents.read_document(self.campaign, 'campaign.md')
+        self.assertEqual(always.call_count, 2)   # one more read, not a loop
 
     def test_normal_writer_links_the_legacy_root_but_read_only_resolution_does_not(self):
         project = self.project / 'legacy-project'; root = project / '.claude_reports'

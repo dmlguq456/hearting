@@ -1078,10 +1078,14 @@ class SectionTests(SectionFixture):
         for name in ("recent-route-reports.md", "recent-route-reports.html"):
             text = self.entrance(name)
             self.assertNotIn("campaign.md", text, name)
-            self.assertIn("Two status", text, name)     # a hand-written status line stays
+            self.assertNotIn("Two status", text, name)  # a hand-written status page beside it is not listed
         self.assertNotIn("campaign.md", " ".join(row["doc_path"] for row in self.rows()
                                                   if row.get("kind") == "campaign-document"))
         self.assertEqual(self.open_line(1), str(page))   # the campaign line opens it
+        page.unlink()                                    # without a `campaign.md` the hand-written line stays
+        self.refresh()
+        for name in ("recent-route-reports.md", "recent-route-reports.html"):
+            self.assertIn("Two status", self.entrance(name), name)
 
     def test_a_campaign_document_that_cannot_be_taken_leaves_the_folder(self):
         self._routes()

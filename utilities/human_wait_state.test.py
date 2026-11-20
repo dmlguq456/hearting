@@ -4032,34 +4032,18 @@ class MessageCompletionTests(unittest.TestCase):
                           prompt_text=text, env=os.environ, render_context=True, emit=lines.append)
         return "\n".join(lines)
 
-    def test_a_question_asked_or_answered_asks_the_campaign_document_for_one_refresh(self):
+    def test_a_question_asked_replaced_or_answered_never_asks_the_entrance_for_a_refresh(self):
+        """The prompt hook holds the seat lock: the campaign document follows the question list on its own."""
         import artifact_entrance
-        reports = self.f.root / ".agent_reports"
-        reports.mkdir()
-        want = os.path.realpath(reports)
-        with mock.patch.object(artifact_entrance, "request_refresh") as refresh:
+        (self.f.root / ".agent_reports").mkdir()
+        with mock.patch.object(artifact_entrance, "request_refresh", side_effect=AssertionError("asked")) as refresh:
             signal, envelope = self.f.ask(text="Which one?", choices=["Alpha", "Beta"])
-            self.assertEqual([call.args for call in refresh.call_args_list], [(Path(want),)])
-            refresh.reset_mock()
             self.prompt(signal, "2")                                    # answered at the prompt
-            self.assertEqual([call.args for call in refresh.call_args_list], [(Path(want),)])
-            refresh.reset_mock()
-            replaced, _ = self.f.ask(text="First?")
-            refresh.reset_mock()
-            self.f.ask(text="Second?")                                  # the replaced one leaves its list too
-            self.assertEqual(len(refresh.call_args_list), 2)
-
-    def test_a_refresh_that_fails_or_has_no_root_never_fails_or_waits_the_question(self):
-        import artifact_entrance
-        with mock.patch.object(artifact_entrance, "request_refresh", side_effect=OSError("no")) as refresh:
-            (self.f.root / ".agent_reports").mkdir()
-            signal, _ = self.f.ask(text="Still registered?")
-            self.assertEqual(self.source(signal)["lifecycle"], "open")
-            self.assertTrue(refresh.called)
-        (self.f.root / ".agent_reports").rmdir()
-        with mock.patch.object(artifact_entrance, "request_refresh") as refresh:
-            self.f.ask(text="No folder?")
-            refresh.assert_not_called()                                 # no artifact root for its folder: no request
+            self.assertEqual(self.source(signal)["lifecycle"], "answered")
+            self.f.ask(text="First?")
+            self.f.ask(text="Second?")                                  # the first is replaced
+            refresh.assert_not_called()
+        self.assertFalse(hasattr(state, "_refresh_campaign_documents"))
 
     def test_choice_question_closes_only_on_one_exact_choice_prompt(self):
         choices = ["Alpha plan", "Beta plan", "Gamma plan"]
