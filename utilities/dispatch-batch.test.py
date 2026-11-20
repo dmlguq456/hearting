@@ -4368,16 +4368,18 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertEqual(receipt["state"], "idempotent-mixed")
         self.assertEqual((receipt["admitted"], receipt["existing"]), (1, 1))
 
-    def restart_receipt(self, *, review_group):
+    def restart_receipt(self, *, review_group, claimed="1"):
         """`--action start` again for a group whose first leg ended `PASS` on the current source and whose
-        second leg is still running, both of one sealed batch: the exit code and the receipt it prints."""
+        second leg is still running (`claimed="0"`: reserved but never claimed, the start was cut short),
+        both of one sealed batch: the exit code and the receipt it prints."""
         self._configure_lab_review()           # capped review legs: each restarted leg is admitted a round
         stack, assignments = self.common_patches()
         output = io.StringIO()
         passed, running = self.legs(assignments)
         self.write_existing(passed, status="done", note="completed-marker,failure_class=pass", live_identity=False,
                             group_key="parallel_group")
-        self.write_existing(running, group_key="parallel_group")
+        self.write_existing(running, group_key="parallel_group", claimed=claimed,
+                            live_identity=claimed == "1")
         self.jobs.write_text(self.jobs.read_text(encoding="utf-8").replace(
             "route_id=rt-fixture,", "route_id=rt-fixture,route_hash=" + self.route["route_hash"] + ","), encoding="utf-8")
         state = self.base / "state"
@@ -4435,6 +4437,20 @@ class DispatchBatchTest(unittest.TestCase):
             receipts[review_group] = (rc, receipt)
         self.assertEqual(receipts[True][0], 78, receipts[True])
         self.assertEqual((receipts[True][1]["state"], receipts[True][1]["reason"]), ("blocked", "prior-attempt-still-live"))
+        self.assertEqual(receipts[True], receipts[False])
+
+    def test_a_restart_cut_short_before_the_other_leg_was_claimed_resumes_the_same_batch_with_or_without_reuse(self):
+        # A start that stopped with the second leg reserved but never claimed is resumed whole, as it was
+        # before a passed review leg could be reused: the group that reuses a pass takes the same path and
+        # prints the same receipt as the group that does not, and the passed leg is not reused.
+        receipts = {}
+        for review_group in (False, True):
+            self.tearDown()
+            self.setUp()
+            rc, receipt, popen, reserve = self.restart_receipt(review_group=review_group, claimed="0")
+            self.assertEqual(self.reused_nodes, ["independent-verify"] if review_group else [])
+            receipts[review_group] = (rc, receipt, reserve.call_count)
+        self.assertNotEqual(receipts[True][1].get("reason"), "prior-attempt-still-live", receipts[True])
         self.assertEqual(receipts[True], receipts[False])
 
     def test_terminal_failed_duplicate_is_not_reported_as_existing(self):
