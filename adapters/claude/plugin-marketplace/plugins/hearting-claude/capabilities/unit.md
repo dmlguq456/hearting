@@ -15,7 +15,7 @@ This is the portable contract for `unit`, the compiler-internal capability behin
 
 ## Shape
 
-The route is sealed at intensity `quick` with one node. There is no owner node:
+The route has no intensity: one unit does one job and nothing checks it (its record keeps `quick` as a compatibility value, so the route reads as it always did). It is sealed with one node and no owner node:
 
 | Node | Kind | Runs as | Model |
 |---|---|---|---|
@@ -25,7 +25,7 @@ The node's unit, role and worker type are the unit head's. The recipe holds only
 
 ## Arguments
 
-- `--unit <family/name>` names the kind itself. Nothing else has to be typed; an argument that contradicts it (`--capability` other than `unit`, `--shape` other than `solo`, `--intensity` other than `quick`, `--graph`, `--route-plan`, `--signal`, `--execution-scope`) is refused by name (`compose-unit-conflict`).
+- `--unit <family/name>` names the kind itself. Nothing else has to be typed; an argument that contradicts it (`--capability` other than `unit`, `--shape` other than `solo`, `--intensity` (a unit route has no intensity; an old command's `--intensity quick` is accepted and ignored), `--graph`, `--route-plan`, `--signal`, `--execution-scope`) is refused by name (`compose-unit-conflict`). To have the work checked, open `--shape solo` or `staged` with `--intensity`; to judge more deeply, raise the model depth with `--profile`.
 - A name that is not a unit of the catalog is refused with the list (`compose-unit-unknown`).
 - v1 opens read-only units (`read_only: true`). A unit that writes is refused with its reason (`compose-unit-writes`).
 - `--start --prompt-file <brief>` starts the unit's one worker with the brief (see Launch and end). Without `--start` the route is only planned and sealed.

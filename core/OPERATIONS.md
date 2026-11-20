@@ -1641,7 +1641,7 @@ denial has exited; a still-live denied environment remains unobservable.
 ### §5.10c. Unit Route — One Unit, No Owner
 
 `capability-route.py compose --start --unit <family/name> --prompt-file <brief>` opens one
-read-only unit as a route of its own (kind `unit`, quick, one leg, no owner). The depth-0 session
+read-only unit as a route of its own (kind `unit`, one leg, no owner, no intensity; its record keeps `quick` as a compatibility value). The depth-0 session
 launches the leg through the path that launches a frame leg: the route seals the leg
 (`launch_authority: depth-0`), `dispatch-owner.py --start --route-evidence <route> --route-node unit`
 starts one registered depth-1 attempt, and `capability-route.py start --route <id>` follows it again

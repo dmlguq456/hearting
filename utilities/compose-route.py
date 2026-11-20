@@ -513,10 +513,11 @@ def main() -> int:
     route_json = run_compile(args, recipe, evidence)
 
     route = json.loads(route_json)
+    # 11-20: a unit route has no intensity, so its summary does not tell one (the record keeps it).
+    tail = "" if route.get("capability") == "unit" else f", effective={route['effective_intensity']}"
     summary = (
         f"compose-route: sealed {route['route_id']} "
-        f"({args.capability}/{args.capability_mode}, {len(recipe['standard_plus']['nodes'])} nodes, "
-        f"effective={route['effective_intensity']})"
+        f"({args.capability}/{args.capability_mode}, {len(recipe['standard_plus']['nodes'])} nodes{tail})"
     )
     if args.output:
         summary += f" -> {args.output}"
