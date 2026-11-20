@@ -42,6 +42,7 @@ from dispatch_contract import (  # noqa: E402
     route_state_next_action,
     validate_attempt_metadata,
     validate_dispatch_log_dir,
+    verdict_pass,
 )
 from governor_identity import IdentityCaptureError, create_witness  # noqa: E402
 try:  # ends a detached child with the test that started it; no-op outside tests
@@ -2375,8 +2376,17 @@ def existing_leg_result(
 
 def current_completed_group_peers(jobs: Path, route: dict, nodes: list[dict], group: str,
                                   agent_home: Path, prompt_text: str) -> dict[str, dict]:
-    """Find current legacy design owner-closures before charging pending legs."""
-    if route.get("capability") != "autopilot-design" or group != "visual-verify":
+    """Find current legacy design owner-closures before charging pending legs.
+
+    A solo route's review group (`one_shot_review_node_ids`) also reuses a leg that passed and whose
+    pass still describes the current source: restarting the group for the legs that did not finish
+    must not judge the same bytes again, since every judgment counts as a round of that leg's own
+    lineage. A leg whose source changed since, that blocked, or that ended without a verdict is not
+    reused, and no other kind of route reuses a pass this way."""
+    design = route.get("capability") == "autopilot-design" and group == "visual-verify"
+    from route_form import one_shot_review_node_ids
+    solo_review = bool(nodes) and {str(node["id"]) for node in nodes} <= set(one_shot_review_node_ids(route))
+    if not design and not solo_review:
         return {}
     expected_assignment = "sha256:" + hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
     try:
@@ -2436,11 +2446,14 @@ def current_completed_group_peers(jobs: Path, route: dict, nodes: list[dict], gr
                 continue
             if marker.get("attempt_id") != attempt_id:
                 continue
-            if not (
+            if design and not (
                 (marker.get("review_gate_closure") == "owner-closure"
                  and marker.get("review_independence") == "owner-overridden")
                 or marker.get("stage_authority") == "owner-closure"
             ):
+                continue
+            if not design and not (verdict_pass(metadata) and marker.get("review_gate_closure") != "owner-closure"
+                                   and marker.get("stage_authority") != "owner-closure"):
                 continue
             if not completion_marker_is_current(route, node, marker_path, marker, jobs=jobs):
                 continue

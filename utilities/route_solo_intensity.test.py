@@ -357,6 +357,23 @@ class SoloIntensity(Base):
         self.verify(strong)
         self.verify(thorough)
 
+    def test_verify_refuses_a_review_leg_whose_model_was_changed_with_its_selection(self):
+        # A leg the route chose no profile for runs the model its kind declares, whichever way the seal is redone.
+        for intensity in ("standard", "strong", "thorough"):
+            route = self.solo(intensity)
+            for at, node in enumerate(route["nodes"][:-1]):
+                self.assertEqual((node.get("profile_selection") or {}).get("source"), "legacy", node["id"])
+                other = "light" if node["model_profile"] != "light" else "deep"
+                with self.subTest(intensity=intensity, leg=node["id"]):
+                    edited = json.loads(json.dumps(route))
+                    edited["nodes"][at]["model_profile"] = other
+                    edited["nodes"][at]["profile_selection"]["resolved_profile"] = other
+                    with self.assertRaisesRegex(ValueError, "one-shot review model differs"):
+                        self.verify(CELL.reseal(edited))
+        # a profile the person chose is sealed as theirs and still verifies
+        self.verify(self.solo("strong", profile="light"))
+        self.verify(self.solo("standard", profile="light"))
+
     # -- the legs count their rounds on their own lineage; the owner closes none of them ------------------------------
     def decide(self, route, node, rows, digest, action="round"):
         return AUTH.decide_continuation(route, action=action, node=node, rows=rows,
@@ -504,6 +521,16 @@ class SoloIntensityTexts(Base):
         self.assertIn("the one correction allowed is spent", W.continuation_followup_text({**one, "closure_spent": True}))
         self.assertIn("the 2 corrections allowed are spent",
                       W.continuation_followup_text({**one, "closure_spent": True, "corrections": 2}))
+        # a group's spent text says what is true of its legs and counts the corrections of its intensity
+        self.assertIn("a review still blocks, and the correction allowed is spent",
+                      W.continuation_followup_text([{**one, "closure_spent": True}, two]))
+        self.assertIn("a review still blocks, and the 2 corrections allowed are spent",
+                      W.continuation_followup_text([{**one, "closure_spent": True, "corrections": 2},
+                                                    {**two, "corrections": 2}]))
+        self.assertIn(": a review still blocks, and the one correction allowed is spent.",
+                      W.continuation_followup_text({**one, "closure_spent": True, "group": True}))
+        self.assertIn(": the closure check still blocks, and the one correction allowed is spent.",
+                      W.continuation_followup_text({**one, "closure_spent": True}))   # one review: the bytes it was
         # the team text is the bytes it was
         team = {"kind": "review", "attempt": "att-r1", "artifact": "/c/report.md", "target": "", "source": True,
                 "command": "python3 start-review", "producer_command": "python3 start-execute"}
@@ -512,10 +539,11 @@ class SoloIntensityTexts(Base):
                          "through the bounded producing stage. First use python3 start-execute. "
                          "Then run the same start for the closure check: python3 start-review")
 
-    def wake(self, route, reason="completion-marker-absent", lineage=None, fields=None):
+    def wake(self, route, reason="completion-marker-absent", lineage=None, fields=None, reasons=None):
         path = self.route_file(route)
         row = SimpleNamespace(status="open", metadata={"attempt_id": "att-owner"})
         gaps = {n["id"]: reason for n in route["nodes"] if n.get("dispatch_depth") == 2}
+        gaps.update(reasons or {})
         with mock.patch.object(JOIN, "exact_attempt_row", return_value=row), \
              mock.patch.object(DTC, "_completion_owner_choice", return_value=SimpleNamespace(allowed=True)), \
              mock.patch.object(DTC, "owner_workflow_gaps", return_value=gaps), \
@@ -544,6 +572,16 @@ class SoloIntensityTexts(Base):
                              lineage={"impl-review": [passed], "impl-review-alternative": [passed]})
         self.assertIn("passed, but the work changed after it", stale)
         self.assertNotIn("has not run", stale)
+        # one leg's pass is stale while the other gave no verdict or has not run: both are said, not only the pass
+        stale_reason = "completion-review-source-stale"
+        for other in ({"impl-review-alternative": [dead]}, {}):
+            mixed, _ = self.wake(route, lineage={"impl-review": [passed], **other},
+                                 reasons={"impl-review": stale_reason})
+            self.assertIn("Part of your route's independent review passed but the work changed after it, and the rest "
+                          "ended without a verdict or has not run.", mixed)
+            self.assertEqual(mixed.count("stage-dispatch-fallback.py"), 1)
+        alone = self.wake(self.solo("standard"), reason=stale_reason)[0]       # one review: the bytes it was
+        self.assertIn("Your route's independent review passed, but the work changed after it.", alone)
         again, _ = self.wake(route, lineage={"impl-review": [passed], "impl-review-alternative": [dead]})
         self.assertIn("ended without a verdict", again)
         # one leg blocks and the other passed: the blocking leg's own instruction, never "has not run"
@@ -588,6 +626,119 @@ class SoloIntensityTexts(Base):
         self.assertEqual(lines, ["Next ready: nothing to start; the independent review has finished. "
                                  "Act on its verdict as your task describes, then return your final handoff."])
 
+
+
+class SoloGroupRestart(Base):
+    """Starting the review group again for a leg that gave no verdict does not judge the same bytes again
+    for a leg that already passed on them: that leg's pass is used as it stands."""
+
+    def setUp(self):
+        super().setUp()
+        import replica_batch_contract as CONTRACT
+        from recovery_history import INPUT_SCHEMA, batch_input_path
+        self.batch = _load("dispatch_batch_for_solo_group_restart", "dispatch-batch.py")
+        self.route = self.solo("strong")
+        self.nodes = [n for n in self.route["nodes"] if n["id"] in RF.one_shot_review_node_ids(self.route)]
+        self.group = self.nodes[0]["parallel_group"]
+        self.base = Path(self.root) / "restart"
+        self.jobs = self.base / "dispatch" / "jobs.log"
+        self.jobs.parent.mkdir(parents=True)
+        self.prompt = "Review the current work."
+        digest = "sha256:" + __import__("hashlib").sha256(self.prompt.encode()).hexdigest()
+        self.attempts = ("att-anchor", "att-alternative")
+        members = [{"assignment_sha256": digest, "attempt_id": attempt, "route_node": node["id"], "harness": harness,
+                    "fallback_hop": "same-harness-headless", "fallback_ordinal": 1, "model_profile": node["model_profile"],
+                    "perspective": node["perspective"], "parallel_leg_index": index, "leg_class": "peer"}
+                   for index, (node, attempt, harness) in enumerate(zip(self.nodes, self.attempts, ("codex", "claude")))]
+        manifest, manifest_digest, leg_digests = CONTRACT.build_manifest(
+            parallel_group=self.group, route_id=self.route["route_id"], parent_attempt_id="att-owner",
+            independence="cross-harness", members=members,
+            required_independence_axes=["cross-harness", "model-profile", "perspective"],
+            realized_independence_axes=["cross-harness", "model-profile", "perspective"])
+        self.members, self.manifest_digest, self.leg_digests = members, manifest_digest, leg_digests
+        input_path = batch_input_path(self.jobs, manifest_digest)
+        input_path.parent.mkdir(parents=True, exist_ok=True)
+        input_path.write_text(json.dumps({
+            "schema": INPUT_SCHEMA, "jobs": str(self.jobs.resolve()), "route_id": self.route["route_id"],
+            "route_hash": self.route["route_hash"], "manifest": manifest, "manifest_digest": manifest_digest,
+            "options": {"parallel_group": self.group, "route": str(self.base / "route.json"), "parent": "owner",
+                        "prompt_text": self.prompt}}, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+        self.state = self.base / "state"
+        (self.state / "completion" / self.route["route_id"]).mkdir(parents=True)
+
+    def rows(self, *outcomes):
+        """One finished row per leg: `pass`, `blocking`, or `none` (ended without a verdict)."""
+        lines = []
+        for node, attempt, member, outcome in zip(self.nodes, self.attempts, self.members, outcomes):
+            note, failure = {"pass": ("completed-marker", "pass"), "blocking": ("completed-review-blocking", "review"),
+                             "none": ("dead-worker-fail", "fail")}[outcome]
+            meta = {"attempt_schema_version": 2, "dispatch_depth": 2, "transport": "headless",
+                    "execution_surface": "registered-headless", "registered_worker": "1", "attempt_id": attempt,
+                    "route_id": self.route["route_id"], "route_hash": self.route["route_hash"], "route_node": node["id"],
+                    "parent_attempt_id": "att-owner", "parent": "owner", "harness": member["harness"],
+                    "child_harness": member["harness"], "fallback_hop": member["fallback_hop"], "fallback_ordinal": 1,
+                    "reservation_kind": "parallel-batch", "batch_declared_size": len(self.nodes),
+                    "parallel_group": self.group, "replica_group": self.group, "batch_group": self.group,
+                    "batch_route_id": self.route["route_id"], "batch_parent_attempt_id": "att-owner",
+                    "batch_attempt_id": attempt, "batch_route_node": node["id"], "batch_harness": member["harness"],
+                    "batch_fallback_hop": member["fallback_hop"], "batch_fallback_ordinal": 1,
+                    "batch_independence": "cross-harness", "batch_assignment_sha256": member["assignment_sha256"],
+                    "batch_manifest_sha256": self.manifest_digest, "batch_leg_sha256": self.leg_digests[attempt],
+                    "batch_model_profile": member["model_profile"], "batch_perspective": member["perspective"],
+                    "batch_parallel_leg_index": member["parallel_leg_index"], "batch_leg_class": "peer",
+                    "batch_auxiliary_check": "-", "note": note, "failure_class": failure, "launch_claimed": "1",
+                    "launch_outcome": "reaped-before-publish"}
+            lines.append("\t".join(["fixture", "done", str(self.base), str(self.base), attempt,
+                                    ",".join(f"{k}={v}" for k, v in meta.items())]))
+            (self.state / "completion" / self.route["route_id"] / f"{node['id']}.json").write_text(
+                json.dumps({"route_id": self.route["route_id"], "node_id": node["id"], "attempt_id": attempt}),
+                encoding="utf-8")
+        self.jobs.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def peers(self, current=lambda attempt: True, route=None, nodes=None, prompt=None):
+        """The legs a group start reuses; `current(attempt)` says whether that leg's marker describes the current source."""
+        with mock.patch.object(self.batch, "dispatch_state_roots", return_value=[self.state]), \
+                mock.patch.object(self.batch, "resolve_dispatch_state_root", return_value=self.state), \
+                mock.patch.object(self.batch, "completion_marker_is_current",
+                                  side_effect=lambda _r, _n, _p, marker, **_kw: current(marker["attempt_id"])), \
+                mock.patch.object(self.batch, "completion_attempt_readiness",
+                                  return_value=SimpleNamespace(state="ready", reason="settled")):
+            return self.batch.current_completed_group_peers(
+                self.jobs, route or self.route, nodes or self.nodes, self.group, self.base, prompt or self.prompt)
+
+    def test_a_leg_that_passed_on_the_current_source_is_reused_and_owes_no_round(self):
+        self.rows("pass", "none")
+        peers = self.peers()
+        self.assertEqual(set(peers), {"impl-review"})
+        self.assertEqual(peers["impl-review"]["attempt_id"], "att-anchor")
+        self.assertEqual([n["id"] for n in self.batch.pending_round_admission_nodes(self.nodes, peers)],
+                         ["impl-review-alternative"])
+
+    def test_every_leg_that_passed_is_reused_so_a_start_with_nothing_changed_launches_nothing(self):
+        self.rows("pass", "pass")
+        self.assertEqual(set(self.peers()), {"impl-review", "impl-review-alternative"})
+
+    def test_a_pass_the_source_has_moved_past_is_not_used(self):
+        self.rows("pass", "none")
+        self.assertEqual(self.peers(current=lambda attempt: False), {})
+        self.rows("pass", "pass")
+        self.assertEqual(set(self.peers(current=lambda attempt: attempt == "att-alternative")), {"impl-review-alternative"})
+
+    def test_a_blocking_leg_a_leg_without_a_verdict_and_another_request_are_not_reused(self):
+        self.rows("blocking", "none")
+        self.assertEqual(self.peers(), {})
+        self.rows("pass", "pass")
+        self.assertEqual(self.peers(prompt="a different review request"), {})
+
+    def test_a_team_groups_pass_and_an_owner_closure_are_not_reused(self):
+        self.rows("pass", "pass")
+        team = self.compose(shape="staged", intensity="strong", graph="execute,impl-review,test,report", slug="s2-team-restart")
+        team_nodes = [n for n in team["nodes"] if n["id"] in ("impl-review", "impl-review-alternative")]
+        self.assertEqual(self.peers(route=team, nodes=team_nodes), {})
+        (self.state / "completion" / self.route["route_id"] / "impl-review.json").write_text(json.dumps({
+            "route_id": self.route["route_id"], "node_id": "impl-review", "attempt_id": "att-anchor",
+            "review_gate_closure": "owner-closure", "review_independence": "owner-overridden"}), encoding="utf-8")
+        self.assertEqual(set(self.peers()), {"impl-review-alternative"})
 
 
 if __name__ == "__main__":

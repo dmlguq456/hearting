@@ -280,8 +280,9 @@ class SoloReviewScenario(unit.UnitRouteScenario):
                     and "Dispatch metadata:" not in r["text"]]
         # A supervision "Needs attention" notice is not a completion notice: with two review legs finishing a
         # moment apart, the shared stall observer can see the first leg's process gone before its row closes.
-        # It is counted on its own (`attention_notices`) and never as the route's completion notice.
-        attention = [r for r in carriers if "Needs attention:" in r["last_text"]]
+        # It is counted on its own (`attention_notices`) and never as the route's completion notice. A route with
+        # one review leg has no such moment, so its notices stay exactly as they were: the one completion notice.
+        attention = [r for r in carriers if "Needs attention:" in r["last_text"]] if len(self.legs) > 1 else []
         carriers = [r for r in carriers if r not in attention]
         ev["route"] = {"effective_intensity": route.get("effective_intensity"),
                        "shape": (route.get("selection") or {}).get("shape"),

@@ -2274,7 +2274,13 @@ def _middle_cell_review_sentence(route, route_file, reviews, missing, jobs):
             return worker_bootstrap.continuation_followup_text(fixes if len(fixes) > 1 else fixes[0])
         return ("Your route's independent review blocks your current work. Fix the blocking findings in its report, "
                 f"commit, then start it again with exactly: {start}. {no_inline}")
-    if any(str(missing[review["id"]]).startswith("completion-review-source-stale") for review in reviews):
+    stale = [str(missing[review["id"]]).startswith("completion-review-source-stale") for review in reviews]
+    if any(stale) and not all(stale):
+        # Some legs of a group passed before the work changed and the rest gave no verdict or have not run.
+        return ("Part of your route's independent review passed but the work changed after it, and the rest ended "
+                "without a verdict or has not run. Commit your work, then start the review again with exactly: "
+                f"{start}. {no_inline}")
+    if any(stale):
         return ("Your route's independent review passed, but the work changed after it. Commit your work, then start "
                 f"the review again with exactly: {start}. {no_inline}")
     if ran_without_verdict:

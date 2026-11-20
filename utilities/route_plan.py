@@ -63,7 +63,7 @@ SHAPES = ("direct", "solo", "staged")
 SIZE_SHAPE = {"one-change": "direct", "one-pass": "solo", "multi-stage": "staged"}
 from route_form import (  # noqa: E402,F401
     FORM_INTENSITIES, INTENSITIES, INTENSITY_SHAPE, SHAPE_INTENSITY, UNIT_CAPABILITY, allowed_intensities,
-    form_of, intensity_mismatch, nearest_allowed, one_shot_owner, route_form, serial_attempt_form, serial_attempt_route,
+    INTENSITY_ORDER, form_of, intensity_mismatch, nearest_allowed, one_shot_owner, route_form, serial_attempt_form, serial_attempt_route,
     shape_for_intensity, staged_form,
 )
 APPROVAL_KEYS = ("full-run", "deploy", "handback", "preview")
@@ -750,6 +750,38 @@ def evaluate_brief(path, *, root, node, compile_leg, start_approvals) -> dict:
         if notes + facts["notes"]:
             row["read_notes"] = notes + facts["notes"]
     return row
+
+
+def keep_card_copy(row, recorded, *, compile_leg, start_approvals) -> dict:
+    """`row` with the proposal the person's card showed (`recorded`, the interview's copy of it) in place
+    of the one this runtime reads from the same brief, or `row` itself when the card says something else.
+
+    The caller has already shown that the brief's bytes are the ones the card was made from. A later
+    runtime may read a brief differently than the one that drew the card (the allowed intensities
+    changed), and the person approved what the card showed, so that copy is what starts. It stands in
+    only as the same proposal with legs no stronger than this runtime reads: same kind, mode, shape,
+    graph, folder and wording, a lower or equal intensity, and the copy must compile as a proposal."""
+    own = row.get("proposal")
+    try:
+        legs = [_normal_leg(leg, index) for index, leg in enumerate(recorded["legs"])]
+        if (own is None or len(legs) != len(own["legs"]) or recorded.get("summary") != own["summary"]
+                or recorded.get("execution_scope", own["execution_scope"]) != own["execution_scope"]):
+            return row
+        for card, mine in zip(legs, own["legs"]):
+            same = [card.get(key) == mine.get(key) for key in (*_LEG_KEYS, "why") if key != "intensity"]
+            weaker = card.get("intensity") == mine.get("intensity") or (
+                card.get("intensity") in INTENSITY_ORDER and mine.get("intensity") in INTENSITY_ORDER
+                and INTENSITY_ORDER.index(card["intensity"]) <= INTENSITY_ORDER.index(mine["intensity"]))
+            if not all(same) or not weaker:
+                return row
+        proposal = {**own, "legs": legs}
+        facts = validate_proposal(proposal, compile_leg=compile_leg, start_approvals=start_approvals)
+    except (ProposalError, AttributeError, KeyError, TypeError, ValueError):
+        return row
+    if len(facts["legs"]) != len(legs):
+        return row
+    return {**row, "proposal": {**proposal, "entry_approvals": facts["entry_approvals"]}, "facts": facts,
+            "read_notes": [*row.get("read_notes", []), *facts["notes"], "card-copy-kept"]}
 
 
 def _relative(path, root) -> str:

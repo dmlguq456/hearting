@@ -1156,7 +1156,8 @@ def continuation_followup_fields(route, node, metadata, jobs, route_file):
                 cap = ROUND.max_review_rounds(route["effective_intensity"])
                 return {"kind": "review", "attempt": attempt, "artifact": str(artifact), "target": "",
                         "source": True, "command": command, "producer_command": "", "owner_fixes": True,
-                        "closure_spent": verdicts >= cap, "corrections": cap - 1}
+                        "closure_spent": verdicts >= cap, "corrections": cap - 1,
+                        **({"group": True} if node.get("parallel_group") else {})}
             targets = [reviewed["path"]] if reviewed else []
             if (reviewed and subject and any(item.get("path") == "checklist.md"
                     for item in subject.get("manifest", ()) if isinstance(item, dict))):
@@ -1212,7 +1213,9 @@ def continuation_followup_text(fields):
             artifacts = ", ".join(dict.fromkeys(bounded(item.get("artifact")) for item in fields))
             commands = "; ".join(dict.fromkeys(command(item.get("command")) for item in fields if item.get("command")))
             if any(item.get("closure_spent") for item in fields):
-                return (f"Review FAIL {attempts}: a review still blocks, and the correction allowed is spent. "
+                n = min(item.get("corrections", 1) for item in fields)
+                allowed = "the correction allowed is" if n == 1 else f"the {n} corrections allowed are"
+                return (f"Review FAIL {attempts}: a review still blocks, and {allowed} spent. "
                         f"Do not correct further. Write the remaining findings from {artifacts} in your report and "
                         "end with `verdict: FAIL`.")
             return (f"Review FAIL {attempts}: the independent reviews of your work block. Fix every blocking finding "
@@ -1234,7 +1237,9 @@ def continuation_followup_text(fields):
         if fields.get("closure_spent"):
             allowed = ("the one correction allowed is" if fields.get("corrections", 1) == 1
                        else f"the {fields['corrections']} corrections allowed are")
-            return (f"Review FAIL {fields['attempt']}: the closure check still blocks, and {allowed} "
+            # A leg of a review group may have its last round as the first judgment of changed work, not a closure check.
+            blocks = "a review still blocks" if fields.get("group") else "the closure check still blocks"
+            return (f"Review FAIL {fields['attempt']}: {blocks}, and {allowed} "
                     f"spent. Do not correct further. Write the remaining findings from "
                     f"{bounded(fields['artifact'])} in your report and end with `verdict: FAIL`.")
         return (f"Review FAIL {fields['attempt']}: the independent review of your work blocks. Fix every blocking "

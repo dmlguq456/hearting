@@ -844,6 +844,12 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
                            != {k: v for k, v in expected.items() if k not in own}
                            for review, expected in zip(reviews, expected_reviews))):
                 raise ValueError("one-shot review node differs from the declared recipe")
+            # A leg the route chose no profile for runs the model its kind declares; a profile the person
+            # chose (`--profile`, `--explicit-profiles`) is checked against the sealed choice instead.
+            if any((review.get("profile_selection") or {}).get("source") == "legacy"
+                   and review.get("model_profile") != expected.get("model_profile")
+                   for review, expected in zip(reviews, expected_reviews)):
+                raise ValueError("one-shot review model differs from the declared recipe")
         frame_legs=[n for n in route["nodes"] if _frame_node(n)]
         if sorted(n.get("id") for n in frame_legs) != (
                 ["frame","frame-alternative"] if _recipe_has_frame(route_recipe) else []):
