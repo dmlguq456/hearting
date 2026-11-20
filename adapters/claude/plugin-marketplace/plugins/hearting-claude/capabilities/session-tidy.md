@@ -160,10 +160,12 @@ two are not told apart, and this also covers the `/compact` step of a rest-time 
 `utilities/peer-steward.py continue` for the same session inside a window as long as
 the compaction wait (900 seconds from the confirmation). Every ask passes the same checks
 again and sends at most once; nothing already handed to the receiver is asked twice. A
-session still on a turn of its own holds the continue back: Claude and OpenCode ask once
-more from the end-of-turn callback they already have, and only Codex, which has no such
-callback, has its helper ask again inside the window (15 seconds apart while a draft or an
-open form holds the input box, which a Codex continue never starts a turn over). It preserves the
+session still on a turn of its own holds the continue back, and the helper, the one process
+that lives through the window on every harness, asks again inside it (a hook process, Claude's
+Stop or UserPromptSubmit or a peer receive, asks once and ends; OpenCode has no end-of-turn
+callback that asks again). A Claude continue is typed only into an empty prompt; a Codex or
+OpenCode continue starts its turn only over an empty input box, read before and after the claim
+(15 seconds between asks while a draft or an open form holds the input box). It preserves the
 booking, claim, card generation, seat, unchanged prompt count and expiry. An
 exact-native seat with a supported attachment keeps that bounded path: it
 rechecks the booked process, idle state, form and empty input, then writes the

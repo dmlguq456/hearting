@@ -8843,20 +8843,22 @@ def _continue_look(target, req):
     return None
 
 
-def _continue_composer_reason(target):
-    """Why a Codex continue must not start a turn now: the input box holds the person's
-    writing, a form is open, or the screen cannot be read; else None.
+def _continue_composer_reason(target, harness="codex"):
+    """Why a Codex or OpenCode continue must not start a turn now: the input box holds the
+    person's writing, a form is open, or the screen cannot be read; else None.
 
     Claude's continue types into the pane behind the same judgement
-    (`_native_idle_prompt_guard`); Codex's goes through its native queue, which starts the turn
-    at the moment the session is idle, so the box is read before the continue is bound to it."""
+    (`_native_idle_prompt_guard`); Codex's goes through its native queue and OpenCode's through
+    its idle plugin, which start the turn at the moment the session is idle (not by typing, so
+    the writing is never overwritten, but never started over either), so the box is read before
+    the continue is bound to either."""
     refusal = _tmux_input_refusal(target)
     if refusal:
         return refusal
     lines, why = _read_screen_reason(target)
     if lines is None:
         return why or "screen-unknown"
-    return _screen_ready("codex", lines)
+    return _screen_ready(harness, lines)
 
 
 def cmd_continue(args):
@@ -8928,7 +8930,7 @@ def cmd_continue(args):
         if reason.startswith("not-idle-") or reason == "new-session-unknown" and (
                 transfer_ref or str(req.get("new_session") or "-") == "-"):
             return "queued"
-        if harness == "codex" and reason in clear.CONTINUE_INPUT_WAIT:
+        if harness in ("codex", "opencode") and reason in clear.CONTINUE_INPUT_WAIT:
             return "queued"     # the writing in the box or a passing doubt; nothing was bound
         return _look_outcome(reason)
 
@@ -8953,8 +8955,8 @@ def cmd_continue(args):
     if req is None:
         return finish("skipped", why)
     reason = _continue_look(target, req)
-    if not reason and harness == "codex":
-        reason = _continue_composer_reason(target)
+    if not reason and harness in ("codex", "opencode"):
+        reason = _continue_composer_reason(target, harness)
     if reason:
         return finish(held(reason), reason)
     req, why = clear.claim_continue(args.request, args.nonce)
@@ -8962,8 +8964,8 @@ def cmd_continue(args):
         return finish("skipped", why)
     claim_id = (req.get("continued") or {}).get("claim_id")
     reason = _continue_look(target, req)
-    if not reason and harness == "codex":
-        reason = _continue_composer_reason(target)
+    if not reason and harness in ("codex", "opencode"):
+        reason = _continue_composer_reason(target, harness)
     if reason:
         clear.release_unsent_continue(req)
         return finish(held(reason), reason)

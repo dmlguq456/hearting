@@ -9,6 +9,7 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
+import itertools
 import sys
 import unittest
 from pathlib import Path
@@ -6059,10 +6060,10 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         stack.enter_context(mock.patch.object(peer_steward, "_screen_ready", return_value=screen_reason))
         return stack
 
-    def test_codex_continue_does_not_start_a_turn_over_what_the_person_is_writing(self):
-        for reason in ("draft", "draft-unknown", "form-open"):
-            with self.subTest(reason=reason):
-                self.cleared(harness="codex", sid="old-thread", new="new-thread")
+    def test_codex_and_opencode_continue_do_not_start_a_turn_over_what_the_person_is_writing(self):
+        for harness, reason in itertools.product(("codex", "opencode"), ("draft", "draft-unknown", "form-open")):
+            with self.subTest(harness=harness, reason=reason):
+                self.cleared(harness=harness, sid="old-thread", new="new-thread")
                 queue = mock.Mock(side_effect=AssertionError("queue delivery over a draft"))
                 reads = []
                 with mock.patch.object(peer_steward.peer_message, "deliver_pending_codex", queue), \
@@ -6077,18 +6078,21 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
                 self.assertNotIn("transfer_ref", held)
                 self.assertEqual(len(reads), 1)
 
-    def test_codex_continue_sees_a_draft_that_appeared_after_the_claim_and_releases_it(self):
-        self.cleared(harness="codex", sid="old-thread", new="new-thread")
-        answers = iter([None, "draft"])
-        with mock.patch.object(peer_steward.peer_message, "deliver_pending_codex",
-                               side_effect=AssertionError("queue delivery over a draft")), \
-             mock.patch.object(peer_steward, "_continue_composer_reason",
-                               side_effect=lambda _t: next(answers)):
-            rc, line = self.continue_cmd()
-        self.assertEqual((rc, "continued=queued" in line, "reason=draft" in line), (3, True, True), line)
-        held = self.booking()["continued"]
-        self.assertEqual(held["state"], "pending")                       # claim released, not sent
-        self.assertNotIn("transfer_ref", held)
+    def test_codex_and_opencode_continue_see_a_draft_that_appeared_after_the_claim_and_release_it(self):
+        for harness in ("codex", "opencode"):
+            with self.subTest(harness=harness):
+                self.cleared(harness=harness, sid="old-thread", new="new-thread")
+                answers = iter([None, "draft"])
+                with mock.patch.object(peer_steward.peer_message, "deliver_pending_codex",
+                                       side_effect=AssertionError("queue delivery over a draft")), \
+                     mock.patch.object(peer_steward, "_continue_composer_reason",
+                                       side_effect=lambda _t, *_a: next(answers)):
+                    rc, line = self.continue_cmd()
+                self.assertEqual((rc, "continued=queued" in line, "reason=draft" in line),
+                                 (3, True, True), line)
+                held = self.booking()["continued"]
+                self.assertEqual(held["state"], "pending")               # claim released, not sent
+                self.assertNotIn("transfer_ref", held)
 
     def test_codex_helper_asks_again_with_the_real_command_after_a_busy_ask_and_sends_once(self):
         # One ask looks 12 times (~18 s) and finds the session working; the helper's next ask
@@ -6120,6 +6124,46 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(slept, [self.clear.COMPACT_POLL_SEC])
         sent.assert_called_once()
         self.assertEqual(self.booking()["continued"]["state"], "sent")
+
+    def test_claude_and_opencode_helper_ask_again_with_the_real_command_after_a_busy_ask(self):
+        # The same busy first ask on the other two harnesses: the helper's next ask finds the session
+        # idle and goes the harness's own way (Claude types into its empty prompt, OpenCode hands the
+        # ref to its idle plugin), once.
+        for harness in ("claude", "opencode"):
+            with self.subTest(harness=harness):
+                self.cleared(harness=harness, sid="old-sid", new="new-sid")
+                looks = iter(["not-idle-working"] * peer_steward._CONTINUE_LOOK_ROUNDS + [None] * 20)
+                asks, slept = [], []
+
+                def ask(path, nonce, pane):
+                    printed = []
+                    with mock.patch("builtins.print",
+                                    side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+                        peer_steward.main(["continue", pane, "--request", str(path), "--nonce", nonce])
+                    asks.append(printed[-1])
+                    return dict(part.partition("=")[::2] for part in printed[-1].split())
+                typed = mock.Mock(return_value=(0, {}))
+                with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+                     mock.patch.object(peer_steward, "_continue_look", side_effect=lambda *_a: next(looks)), \
+                     mock.patch.object(peer_steward, "_run_herdr_wait"), \
+                     mock.patch.object(peer_steward, "_native_idle_prompt_guard",
+                                       return_value=(None, {"pid": 202})), \
+                     mock.patch.object(peer_steward, "_herdr_prompt", typed), \
+                     self.empty_codex_box():
+                    outcome = self.clear._continue(self.seat_obj.key, "n0nce", ask, sleep=slept.append,
+                                                   ask_again=True)
+                self.assertEqual(len(asks), 2, asks)
+                self.assertIn("reason=not-idle-working", asks[0])
+                self.assertEqual(slept, [self.clear.COMPACT_POLL_SEC])
+                held = self.booking()["continued"]
+                if harness == "claude":
+                    self.assertEqual((outcome, held["state"]), ("continued", "sent"))
+                    typed.assert_called_once()
+                else:
+                    self.assertIn("reason=awaiting-native-receiver", asks[1])
+                    self.assertEqual((outcome, held["state"]), ("cleared", "pending"))
+                    self.assertTrue(held["transfer_ref"])
+                    typed.assert_not_called()
 
     def test_the_same_busy_ask_from_the_hook_is_not_repeated(self):
         self.cleared(harness="codex", sid="old-thread", new="new-thread")

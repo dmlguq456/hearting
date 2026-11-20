@@ -63,13 +63,10 @@ STATUS_ONLY_TEXT = "현재 카드 기준 현황만 짧게 표시하고 새 작�
 # The window opens once the compaction is confirmed (``cleared``). The session may still be on a
 # turn of its own then (a notice or result turn); the continue is sent when that turn ends. A
 # hook can come minutes after the compaction (5 of 9 manual tidies recorded 391 s to 49 h before
-# the next one), so the window is as long as the compaction wait itself.
+# the next one), so the window is as long as the compaction wait itself. A continue held back
+# while the session works is asked again by the helper, the one process that lives through the
+# window on every harness; a hook process (``receiver_idle``) asks once and ends.
 CONTINUE_WINDOW_SEC = COMPACT_CONFIRM_SEC
-# The one place the harnesses differ for a continue held back while the session works: Claude's
-# Stop/UserPromptSubmit hooks and OpenCode's idle plugin call ``peer-steward.receiver_idle`` at the
-# end of every turn, which asks once more (``_continue`` inside that hook process). Codex has no
-# such callback, so only its helper asks again, inside the window.
-HELPER_ASKS_AGAIN = frozenset({"codex"})
 SCREEN_RETRY_SEC = 5.0
 # A panel host that is being replaced answers nothing for ~15 s (11-20 15:09); an attachment that
 # is gone for good answers the same ``shell-no-answer`` (``attachment-changed`` and a refused
@@ -2024,8 +2021,8 @@ def settle_unsent_continue(harness: str, sid: str, *, now: Optional[float] = Non
     """Close a queued continue that will never be sent, with its real reason.
 
     A continue held back while the session worked (``not-idle-*``) has no transfer ref; on
-    Codex nothing but the helper asks again (``HELPER_ASKS_AGAIN``), and the helper ends with
-    its window. Once the card reached another turn (``card-taken``) or the continue window ended
+    every harness the helper asks again inside the window and ends with it (a hook process asks
+    once). Once the card reached another turn (``card-taken``) or the continue window ended
     (``expired``) it is skipped, not left ``pending``. Called from the session's own turn-end
     observation; nothing is typed and nothing is retried here."""
     if harness not in ("claude", "codex", "opencode") or not sid:
@@ -2406,14 +2403,14 @@ def _continue(seat_key: str, nonce: str, continuer: Callable[[Path, str, str], d
     ``continued`` means the exact native continuation was confirmed; the clear remains valid
     when continuation is queued, skipped or unverified.
 
-    One ask by default, which is what a hook process (``receiver_idle``) does: Claude and
-    OpenCode call it at the end of every turn, so a continue held back while the session works
-    is asked again there. ``ask_again`` is only for the helper on a harness without such a
-    callback (``HELPER_ASKS_AGAIN``, Codex): while the session works, or its composer or pane
-    holds the input, nothing was sent and nothing bound, so it asks again inside the window (the
-    loop top ends it as ``expired`` once the window has passed). Every ask passes the steward's
-    full checks again. A continue the steward saw taken by another ask (``superseded``) is not
-    settled here: the other ask settles it.
+    One ask by default, which is what a hook process (``receiver_idle``, from Claude's Stop and
+    UserPromptSubmit hooks or a peer receive) does: it ends with that call and must not linger.
+    ``ask_again`` is for the helper, the one process that lives through the window on every
+    harness (OpenCode has no end-of-turn callback that asks again): while the session works, or
+    its composer or pane holds the input, nothing was sent and nothing bound, so it asks again
+    inside the window (the loop top ends it as ``expired`` once the window has passed). Every
+    ask passes the steward's full checks again. A continue the steward saw taken by another ask
+    (``superseded``) is not settled here: the other ask settles it.
     """
     path = reservation_path(seat_key)
     while True:
@@ -2637,8 +2634,7 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
                 return None, "superseded"
             if compact_confirmed(held):
                 _finish(seat_key, nonce, "cleared", observed=sid)
-                return None, _continue(seat_key, nonce, continuer, sleep=sleep,
-                                       ask_again=str(req.get("harness")) in HELPER_ASKS_AGAIN)
+                return None, _continue(seat_key, nonce, continuer, sleep=sleep, ask_again=True)
             if compact_preempted(held) and release_unsent_compact(seat_key, nonce, held["clear_claim"]):
                 # A queued turn had started just before the keys and Codex dropped them: no
                 # compaction will come from them, so the booking waits for that turn's end.
@@ -2703,8 +2699,7 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
     sid = str(req.get("sid") or "")
     if outcome == "true":
         _finish(seat_key, nonce, "cleared", observed=sid)
-        return _continue(seat_key, nonce, continuer, sleep=sleep,
-                         ask_again=str(req.get("harness")) in HELPER_ASKS_AGAIN)
+        return _continue(seat_key, nonce, continuer, sleep=sleep, ask_again=True)
     final = "skipped" if outcome == "skipped" else "failed"
     return final if _finish(seat_key, nonce, final, reason, detail=str(verdict.get("detail") or "")) else "superseded"
 

@@ -5070,31 +5070,23 @@ class ContinueHelperTest(TidyCase):
         held = self.booking(seat)
         self.assertAlmostEqual(held["continued"]["deadline"] - held["finished"], 200, delta=5)
 
-    def test_codex_still_on_its_own_turn_is_asked_again_for_the_continue_inside_the_window(self):
-        # Codex has no end-of-turn callback that asks again, so its helper does, inside the window
-        # (a notice or result turn after the compaction; 5 of 10 manual tidies expired this way).
-        seat, req = self.booked(harness="codex", sid="sid-cx")
-        cont = lambda n: ({"continued": "queued", "reason": "not-idle-working"} if n < 3
-                          else {"continued": "true"})
-        self.assertEqual(self.run_helper(seat, req, cont=cont), "continued")
-        self.assertEqual([c if c == "clear" else "continue" for c in self.calls],
-                         ["clear", "continue", "continue", "continue"])
-        self.assertEqual(self.booking(seat)["continued"]["state"], "sent")
-        self.assertEqual(self.notices(seat), [])
-
-    def test_claude_and_opencode_are_asked_once_by_the_helper_and_again_by_their_own_hook(self):
-        # Their Stop/UserPromptSubmit hook and idle plugin call ``receiver_idle`` at the end of every
-        # turn, which asks again; the helper must not also loop.
-        self.assertEqual(clear.HELPER_ASKS_AGAIN, frozenset({"codex"}))
-        for harness in ("claude", "opencode"):
+    def test_a_session_still_on_its_own_turn_is_asked_again_for_the_continue_inside_the_window(self):
+        # The helper is the one process that lives through the window on every harness: OpenCode has
+        # no end-of-turn callback that asks again, and a Claude hook comes only if a turn runs after
+        # the compaction. A notice or result turn after the compaction (5 of 10 manual tidies expired
+        # this way) must not leave the continue unsent.
+        self.assertFalse(hasattr(clear, "HELPER_ASKS_AGAIN"))
+        for harness in ("claude", "codex", "opencode"):
             with self.subTest(harness=harness):
                 self.calls = []
                 seat, req = self.booked(harness=harness, sid=f"sid-{harness}")
-                busy = {"continued": "queued", "reason": "not-idle-working"}
-                self.assertEqual(self.run_helper(seat, req, cont=busy), "cleared")
-                self.assertEqual(len([c for c in self.calls if c != "clear"]), 1)
-                held = self.booking(seat)["continued"]
-                self.assertEqual((held["state"], held["reason"]), ("pending", "not-idle-working"))
+                cont = lambda n: ({"continued": "queued", "reason": "not-idle-working"} if n < 3
+                                  else {"continued": "true"})
+                self.assertEqual(self.run_helper(seat, req, cont=cont), "continued")
+                self.assertEqual([c if c == "clear" else "continue" for c in self.calls],
+                                 ["clear", "continue", "continue", "continue"])
+                self.assertEqual(self.booking(seat)["continued"]["state"], "sent")
+                self.assertEqual(self.notices(seat), [])
 
     def test_the_hook_process_asks_once_even_when_the_session_is_busy(self):
         # ``receiver_idle`` runs ``_continue`` inside a hook process with a time limit.
