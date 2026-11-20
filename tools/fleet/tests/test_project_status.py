@@ -212,7 +212,7 @@ class FindTest(unittest.TestCase):
         self.assertEqual(project_status.newest(str(self.root), self.now)["relative"],
                          "campaigns/2026-11-02_v4/2026-11-02_status/artifacts/현황.md")
 
-    def test_research_log_is_not_a_status_board_without_campaign_or_cycle_pages(self):
+    def test_research_log_is_not_a_status_page_without_campaign_or_cycle_pages(self):
         _touch(self.root / "research" / "2026-10-01_old" / "STATUS.md", STATUS_EN, self.now)
         self.assertIsNone(project_status.newest(str(self.root), self.now))
 
@@ -331,6 +331,125 @@ class FindTest(unittest.TestCase):
         campaign = self.root / "campaigns/2026-11-06_stream"
         _touch(campaign / "2026-11-06_old" / "artifacts/campaign.md", "# Not a campaign page", self.now)
         self.assertEqual(project_status.find_documents(str(self.root), now=self.now), [])
+
+
+GENERATED_NOW = 1_763_640_000.0
+
+
+def _generated(waits, *, summary="한 줄 요약입니다.", done=1):
+    """A campaign document as the generator writes it."""
+    sys.path.insert(0, str(ROOT / "utilities"))
+    import campaign_document
+    from datetime import timezone
+    unit = {"key": "pr:7", "pr": 7, "v": "v4.1.0", "title": "무언가를 고침", "impl": {"slug": "x"}, "count": 3,
+            "closed_at": GENERATED_NOW - 3600, "routes": 2, "activity": GENERATED_NOW}
+    units = {"active": [unit], "active_folded": 2, "done": [unit] * done, "done_folded": 1354}
+    return campaign_document.render_document("캠페인", summary, units, waits, now=GENERATED_NOW, tz=timezone.utc)
+
+
+class GeneratedDocumentTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="project-status-generated-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = self.tmp / ".agent_reports"
+        project_status.clear_cache()
+        self.addCleanup(project_status.clear_cache)
+
+    def test_the_four_headings_read_as_none_decisions_none_next_and_no_record_word_catches_them(self):
+        kinds = [project_status._section_kind(title) for title in
+                 ("하는 중", "기다리는 것", "최근에 끝난 것", "나중에 할 것")]
+        self.assertEqual(kinds, [None, "decisions", None, "next"])
+        for title in ("하는 중", "기다리는 것", "최근에 끝난 것", "나중에 할 것"):
+            self.assertFalse(any(word in title.casefold() for word in project_status._RECORD_WORDS), title)
+
+    def test_the_earlier_headings_still_read_the_same(self):
+        for title, kind in (("결정 기다리는 것", "decisions"), ("결정 필요", "decisions"), ("예정", "next"),
+                            ("다음", "next"), ("Decisions needed", "decisions"), ("Next", "next"),
+                            ("사용자 결정 기록", None), ("끝난 일", None)):
+            self.assertEqual(project_status._section_kind(title), kind, title)
+
+    def test_a_generated_document_gives_its_one_line_and_one_decision_per_open_question(self):
+        waits = {"status": "ok", "at": GENERATED_NOW, "items": ["첫째?", "둘째?", "셋째?"]}
+        parsed = project_status.parse(_generated(waits))
+        self.assertEqual(parsed["title"], "캠페인")
+        self.assertEqual(parsed["line"], "한 줄 요약입니다.")
+        self.assertEqual(parsed["decisions"], ["첫째?", "둘째?", "셋째?"])
+        self.assertEqual(parsed["next"], [])           # no 나중에 할 것 section yet
+        for waits in ({"status": "ok", "at": GENERATED_NOW, "items": []}, {"status": "unreadable"}):
+            self.assertEqual(project_status.parse(_generated(waits))["decisions"], [])
+        later = _generated({"status": "ok", "at": GENERATED_NOW, "items": []}) + "\n## 나중에 할 것\n- 다음 일\n"
+        self.assertEqual(project_status.parse(later)["next"], ["다음 일"])
+
+    ESCAPES = [
+        ("\\[4c\\] 산출물 논의 \\*중요\\* a\\_b\\_ \\<x\\> \\& \\\\ \\# \\!", "[4c] 산출물 논의 *중요* a_b_ <x> & \\ # !"),
+        ("코드 칸은 그대로: `a\\_b\\*c`", "코드 칸은 그대로: a\\_b\\*c"),
+        ("링크 \\[a\\](http://x) \\& \\<tag\\>", "링크 [a](http://x) & <tag>"),
+        ("경로 C:\\\\Users\\\\x 와 a\\\\b", "경로 C:\\Users\\x 와 a\\b"),
+        ("[진짜 링크](http://x) 와 **굵게**", "진짜 링크 와 굵게"),
+    ]
+
+    def test_a_backslash_escape_outside_code_is_the_bare_mark_on_the_line_and_in_the_decisions(self):
+        for written, shown in self.ESCAPES:
+            with self.subTest(written=written):
+                self.assertEqual(project_status._plain(written), shown)
+                parsed = project_status.parse("# 제목\n\n**한 줄**: %s\n\n## 기다리는 것\n- %s\n" % (written, written))
+                self.assertEqual(parsed["line"], shown)
+                self.assertEqual(parsed["decisions"], [shown])
+
+    def test_the_module_loads_by_its_file_path_outside_the_package(self):
+        # experiment_catalog.root_for_cwd loads this file without its package (the experiment guide and the
+        # session card ride on it): the load must work and read escapes the same way.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("standalone_project_status_test", project_status.__file__)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for written, shown in self.ESCAPES:
+            with self.subTest(written=written):
+                self.assertEqual(module._plain(written), shown)
+
+    def test_the_generators_own_escapes_come_back_as_the_titles_it_was_given(self):
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import campaign_document
+        from datetime import timezone
+        titles = ["[4c] 산출물 논의 *중요* a_b_ <x> & \\ # !", "링크 [a](http://x) & <tag>", "경로 C:\\Users\\x 와 a\\b",
+                  "_remove_empty_cycle 와 __init__ 정리", "`코드 a_b*c` 와 `짝 없는"]
+        waits = {"status": "ok", "at": GENERATED_NOW, "items": titles}
+        text = campaign_document.render_document(titles[0], titles[1], {"active": [], "done": []}, waits,
+                                                 now=GENERATED_NOW, tz=timezone.utc)
+        parsed = project_status.parse(text)
+        shown = titles[:4] + ["코드 a_b*c 와 `짝 없는"]                  # a code span's ticks are not drawn; a lone one is
+        self.assertEqual(parsed["title"], shown[0])
+        self.assertEqual(parsed["line"], shown[1])
+        self.assertEqual(parsed["decisions"], shown)
+
+    def test_a_marker_never_becomes_the_one_line_even_without_a_summary(self):
+        parsed = project_status.parse(_generated({"status": "unreadable"}, summary=""))
+        self.assertEqual(parsed["line"], "캠페인")
+
+    def test_a_campaign_with_campaign_md_is_not_walked_for_cycle_folders(self):
+        campaigns = self.root / "campaigns"
+        mine, plain = campaigns / "2026-11-06_mine", campaigns / "2026-11-06_plain"
+        _touch(mine / "campaign.md", _generated({"status": "unreadable"}), GENERATED_NOW)
+        for number in range(300):
+            (mine / ("2026-11-06_c%03d" % number)).mkdir()
+            (plain / ("2026-11-06_c%03d" % number)).mkdir(parents=True, exist_ok=True)
+        walked, listed = [], []
+        real_subdirs, real_candidates = project_status._subdirs, project_status.campaign_documents.status_candidates
+
+        def subdirs(path):
+            walked.append(os.path.basename(path))
+            return real_subdirs(path)
+
+        def candidates(folder):
+            listed.append(os.path.basename(str(folder)))
+            return real_candidates(folder)
+        with mock.patch.object(project_status, "_subdirs", subdirs), \
+                mock.patch.object(project_status.campaign_documents, "status_candidates", candidates):
+            found = project_status.find_documents(str(self.root), now=GENERATED_NOW)
+        self.assertEqual(found, [str(mine / "campaign.md")])
+        self.assertNotIn("2026-11-06_mine", walked + listed)    # the campaign with a document is not listed or walked
+        self.assertIn("2026-11-06_plain", walked)               # the one without is, as before
+        self.assertEqual(walked.count("campaigns"), 1)
 
 
 class ProjectionTest(unittest.TestCase):

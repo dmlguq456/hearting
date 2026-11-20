@@ -217,6 +217,29 @@ class PopupTest(StatusTest):
         self.assertTrue([line for line in lines if "rt-0123456789abcdef" in line])  # a long id is kept
         self.assertTrue(all(cell_width(line) <= 60 for line in lines))
 
+    def test_a_generated_campaign_document_opens_from_the_button_and_the_popup_draws_all_of_it(self):
+        import campaign_document
+        from datetime import timezone
+        unit = {"key": "pr:7", "pr": 7, "v": "v4.1.0", "title": "무언가를 고침", "impl": {"slug": "x"}, "count": 3,
+                "closed_at": NOW - 3600, "routes": 2, "activity": NOW}
+        waits = {"status": "ok", "at": NOW, "items": ["첫째?", "둘째?"]}
+        doc = campaign_document.render_document(
+            "alpha 캠페인", "알파 작업 중.", {"active": [unit], "active_folded": 0, "done": [unit],
+                                         "done_folded": 12}, waits, now=NOW, tz=timezone.utc)
+        folder = self.campaign("alpha", doc=False)
+        page = folder / "campaign.md"
+        page.write_text(doc, encoding="utf-8")
+        os.utime(page, (NOW - 600, NOW - 600))
+        view = self.read(self.route(1, "alpha"))
+        self.assertTrue(view["has_doc"])
+        self.assertTrue(view["path"].endswith("2026-11-10_alpha/campaign.md"))
+        lines = [text(row) for row in session_status.popup_rows(view, self.status(), 60)]
+        shown = "\n".join(lines)
+        for part in ("하는 중", "기다리는 것", "최근에 끝난 것", "무언가를 고침", "첫째?", "앞서 끝난 기록 12개는 접어 둠."):
+            self.assertIn(part, shown)
+        self.assertEqual(len(project_status.parse(doc)["decisions"]), 2)     # Fleet's decision count = open questions
+        self.assertTrue(all(cell_width(line) <= 60 for line in lines))
+
     def test_the_top_lines_without_a_campaign_document_are_the_four_line_block(self):
         self.campaign("alpha")
         status = {"routes": 2, "questions": 1, "done": None, "changed": "3h"}

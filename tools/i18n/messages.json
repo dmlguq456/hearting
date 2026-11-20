@@ -339,8 +339,8 @@
    "ko": "입구로 돌아가기"
   },
   "entrance.campaigns_note": {
-   "en": "One line per stream of work.",
-   "ko": "일의 흐름 하나에 한 줄."
+   "en": "One document per stream of work. No new document appears; this one is rewritten.",
+   "ko": "일의 흐름 하나에 문서 한 장. 새 문서가 생기지 않고 이 문서가 고쳐집니다."
   },
   "entrance.cycles": {
    "en": "routes {count}",

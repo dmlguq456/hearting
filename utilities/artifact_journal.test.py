@@ -1067,20 +1067,17 @@ class MigrationTest(turns.EndToEndTest):
         self.assertEqual(len(automatic), 1)
         self.assertEqual(automatic[0]["session"], {"harness": "claude", "sid": turns.SID})
 
-    def test_A12_recently_closed_keeps_user_text_and_links_exact_journal_entries(self):
+    def test_A12_recording_never_edits_a_hand_written_status_page(self):
         record = self.legacy()
         page = P.cycle_dir(self.root, record["campaign_id"], record["cycle_id"]) / "artifacts/STATUS.md"
-        page.write_text("# Project status\nUpdated 2026-11-01 09:00\n\n## Next\n- person's judgment\n")
+        text = "# Project status\nUpdated 2026-11-01 09:00\n\n## Next\n- person's judgment\n"
+        page.write_text(text)
         for n in range(2):
             turns.T.turn_start("codex", "journal-writer", str(self.repo), self.env)
             (self.repo / "README.md").write_text("result " + str(n))
             result = turns.T.turn_end("codex", "journal-writer", str(self.repo), self.env)
             self.assertIn(result["state"], {"recorded", "appended"})
-        text = page.read_text()
-        self.assertIn("## Next\n- person's judgment", text)
-        self.assertIn("View record", text)
-        self.assertIn("Open result", text)
-        self.assertIn("#art_", text)
+        self.assertEqual(page.read_text(), text)
 
     def test_M16_late_end_during_restore_resolves_target_after_original_record_lock(self):
         record = self.legacy(); cid = record["cycle_id"]

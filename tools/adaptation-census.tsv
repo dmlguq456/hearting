@@ -135,7 +135,6 @@ shared-utility-deferred	frame_repository.py
 shared-utility-deferred	work_intent.py
 shared-utility-deferred	unit_continue.py
 shared-utility-deferred	unit_ephemeral.py
-shared-utility-deferred	status_board.py
 shared-utility-deferred	start_receipt.py
 shared-utility-deferred	recipient_lifetime.py
 shared-utility-deferred	verification_runtime.py
@@ -150,6 +149,8 @@ utility-deferred	artifact_cutover.py
 utility-deferred	artifact_cross_root_move.py
 utility-deferred	artifact_entrance.py
 utility-deferred	artifact_entrance.test.py
+utility-deferred	campaign_document.py
+utility-deferred	campaign_document.test.py
 utility-deferred	artifact_history.py
 utility-deferred	artifact_identity.py
 utility-deferred	artifact_index.py
