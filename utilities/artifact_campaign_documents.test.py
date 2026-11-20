@@ -54,6 +54,51 @@ class CampaignDocumentsTest(unittest.TestCase):
         return status_board.note_route_closed(self.route, {'terminal_gate_proven': True, 'summary': 'done'},
                                              now=datetime(2026, 11, 7, 22, 0))
 
+    def fill(self, count=1100):
+        for index in range(count):
+            (self.campaign / ('2026-11-%04d_route' % index)).mkdir()
+
+    def test_status_page_is_found_in_a_campaign_folder_with_over_a_thousand_entries(self):
+        self.fill()
+        page = self.campaign / '현황.md'; page.write_text(PAGE)
+        selected = documents.select_status(self.campaign)
+        self.assertEqual((selected['status'], selected['path']), ('known', page))
+        self.assertEqual(documents.campaign_status(self.campaign)['path'], page)
+
+    def test_status_name_spellings_are_still_recognized_in_a_large_folder(self):
+        self.fill()
+        page = self.campaign / unicodedata.normalize('NFD', '현황.md'); page.write_text(PAGE)
+        self.assertEqual(documents.select_status(self.campaign)['path'], page)
+        page.unlink()
+        upper = self.campaign / 'STATUS.md'; upper.write_text(PAGE)
+        self.assertEqual(documents.select_status(self.campaign)['path'], upper)
+
+    def test_two_different_status_pages_stay_ambiguous_in_a_large_folder(self):
+        self.fill()
+        (self.campaign / '현황.md').write_text(PAGE)
+        (self.campaign / 'STATUS.md').write_text(PAGE + 'other\n')
+        selected = documents.select_status(self.campaign)
+        self.assertEqual((selected['status'], selected['path']), ('ambiguous', None))
+
+    def test_entries_past_the_scan_limit_are_asked_for_by_name_and_never_read_as_absent(self):
+        self.fill(30)
+        with mock.patch.object(documents, 'SCAN_LIMIT', 10):
+            self.assertEqual(documents.select_status(self.campaign)['status'], 'unknown')
+            (self.campaign / 'Status.md').write_text(PAGE)
+            self.assertEqual(documents.select_status(self.campaign)['path'], self.campaign / 'Status.md')
+            (self.campaign / '현황.md').write_text(PAGE + 'other\n')
+            self.assertEqual(documents.select_status(self.campaign)['status'], 'ambiguous')
+            (self.campaign / '현황.md').unlink(); (self.campaign / 'Status.md').unlink()
+            (self.campaign / '현황.md').symlink_to(self.project)
+            self.assertEqual(documents.select_status(self.campaign)['status'], 'unknown')
+
+    def test_a_large_campaign_folder_keeps_its_status_row_in_the_entrance(self):
+        self.fill()
+        (self.campaign / '현황.md').write_text(PAGE)
+        rows = documents.entrance_snapshot(self.root)
+        self.assertEqual([r['doc_path'] for r in rows['rows']], ['campaigns/2026-11-01_demo/현황.md'])
+        self.assertEqual(rows['errors'], [])
+
     def test_campaign_page_wins_over_a_newer_legacy_page_without_moving_it(self):
         canonical = self.campaign / '현황.md'; canonical.write_text(PAGE)
         old = self.legacy()

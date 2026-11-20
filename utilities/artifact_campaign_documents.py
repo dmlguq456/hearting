@@ -18,6 +18,8 @@ STATUS_NAMES = ('현황.md', 'status.md')
 CAMPAIGN_DOCUMENT = 'campaign.md'
 READ_LIMIT = 65536
 LIST_LIMIT = 1000
+SCAN_LIMIT = 100000
+STATUS_PROBES = ('현황.md', 'status.md', 'STATUS.md', 'Status.md')
 ROW_LIMIT = 300
 
 
@@ -25,12 +27,24 @@ def fold(name):
     return unicodedata.normalize('NFC', name).casefold()
 
 
-def _names(folder):
+def _names(folder, keep=None):
+    """Names below ``folder`` that ``keep`` accepts (all when None), sorted.
+
+    The folder is streamed and only accepted names are held, so a campaign
+    folder with one cycle directory per route is never "too big" for the few
+    files it is asked about. ``SCAN_LIMIT`` bounds the pass itself and
+    ``LIST_LIMIT`` the names held; either overrun raises ``document-list-bounded``.
+    """
     fd = open_root(folder)
     try:
         with os.scandir(fd) as entries:
-            names = []
+            names, seen = [], 0
             for entry in entries:
+                seen += 1
+                if seen > SCAN_LIMIT:
+                    raise ValueError('document-list-bounded')
+                if keep is not None and not keep(entry.name):
+                    continue
                 if len(names) >= LIST_LIMIT:
                     raise ValueError('document-list-bounded')
                 names.append(entry.name)
@@ -39,10 +53,51 @@ def _names(folder):
         os.close(fd)
 
 
-def status_candidates(folder):
-    """All matching names, including unsafe entries that must block a fallback."""
+def _is_status_name(name):
+    return fold(name) in STATUS_NAMES
+
+
+def _is_document_name(name):
+    return not name.startswith('.') and name.casefold().endswith('.md')
+
+
+def _probe_status(folder):
+    """The known spellings of the status pages, by direct lookup, without listing.
+
+    Used only when the folder is too large to list. A link or any other entry
+    still counts as a candidate (a lookup never follows it), so an unsafe
+    entry blocks a fallback exactly as it does in a listing.
+    """
+    fd = open_root(folder)
     try:
-        return [Path(folder) / name for name in _names(folder) if fold(name) in STATUS_NAMES]
+        found = []
+        for name in dict.fromkeys(
+                unicodedata.normalize(form, base) for base in STATUS_PROBES for form in ('NFC', 'NFD')):
+            try:
+                os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            found.append(name)
+        return sorted(found)
+    finally:
+        os.close(fd)
+
+
+def status_candidates(folder):
+    """All matching names, including unsafe entries that must block a fallback.
+
+    A folder too large to list is asked for the known spellings directly. A
+    page found that way is a candidate; finding none there cannot prove the
+    page absent (another casing may exist), so that stays unknown.
+    """
+    try:
+        try:
+            names = _names(folder, _is_status_name)
+        except ValueError:
+            names = _probe_status(folder)
+            if not names:
+                return None
+        return [Path(folder) / name for name in names]
     except FileNotFoundError:
         return []
     except (OSError, RuntimeError, ValueError):
@@ -187,8 +242,11 @@ def entrance_snapshot(root):
             if selected['status'] in ('ambiguous', 'unknown'):
                 errors.append(campaign.relative_to(root).as_posix() + ':status-' + selected['status'])
             try:
-                names = _names(campaign)
-            except (OSError, RuntimeError, ValueError):
+                names = _names(campaign, _is_document_name)
+            except ValueError:  # too many entries to list: the status pages still show
+                errors.append(campaign.relative_to(root).as_posix() + ':documents-unreadable')
+                names = [path.name for path in selected['candidates']]
+            except (OSError, RuntimeError):
                 errors.append(campaign.relative_to(root).as_posix() + ':documents-unreadable')
                 continue
             for name in names:
