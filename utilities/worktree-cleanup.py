@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import stat
+import unicodedata
 import importlib.util
 import signal
 import uuid
@@ -581,7 +582,11 @@ def parse_registry(jobs: Path, target: Path, *, rows=None) -> tuple[int, list[in
 
 
 def registry_duty(jobs, target, rows):
-    """A dead PID is not release of a route, paused result or retained answer."""
+    """A dead PID is not release of a route, paused result or retained answer.
+    Two kinds of leftover no longer hold a worktree forever: an owner input
+    request still unfinished once its route is closed (no replacement owner can
+    take it; the text stays in the state folder), and the zero-byte tombstone
+    the 2026-09/10 pruner left where a finished delivery's record had been."""
     from dispatch_attempt_policy import readable_result, terminal_conflict_pending
     from worker_home_retention import _route_evidence, _delivery_state
     import dispatch_owner_input as owner_input
@@ -597,7 +602,8 @@ def registry_duty(jobs, target, rows):
             return True
         if readable_result(meta) and route_state != "closed":
             return True
-        if _delivery_state(dispatch_state_root(jobs), meta)[0] in {"open", "pending", "unknown"}:
+        if _delivery_state(dispatch_state_root(jobs), meta,
+                           legacy_empty_tombstone=True)[0] in {"open", "pending", "unknown"}:
             return True
         if meta.get("attempt_id"):
             path = owner_input._path(jobs, meta["attempt_id"])
@@ -613,9 +619,10 @@ def registry_duty(jobs, target, rows):
                     or value.get("attempt_id") != meta["attempt_id"]):
                 return True
             requests = value.get("requests", [])
-            if not isinstance(requests, list) or any(
-                    not isinstance(item, dict) or item.get("state") != "turn-completed"
-                    for item in requests):
+            if not isinstance(requests, list) or any(not isinstance(item, dict) for item in requests):
+                return True
+            if route_state != "closed" and any(
+                    item.get("state") != "turn-completed" for item in requests):
                 return True
     return False
 
@@ -672,11 +679,29 @@ def proc_is_gone(entry):
         return False
 
 
+def same_credentials(entry) -> bool:
+    """True when /proc/<pid>/status shows our uid and gid as real, effective and
+    saved. A read failure or odd status is False: the caller then follows the
+    ordinary gone-or-unknown rule."""
+    try:
+        text = (entry / "status").read_text()
+    except OSError:
+        return False
+    found = {}
+    for line in text.splitlines():
+        key, _, rest = line.partition(":")
+        if key in ("Uid", "Gid"):
+            found[key] = rest.split()[:3]
+    expected = {"Uid": str(os.geteuid()), "Gid": str(os.getegid())}
+    return all(found.get(key) == [value] * 3 for key, value in expected.items())
+
+
 def process_snapshot():
     """(kind, rows, unreadable): `unreadable` counts same-user processes whose
-    cwd the kernel will not show us (EACCES/EPERM: login-session processes and
-    the user service manager, which dropped privileges). Only that refusal is
-    counted instead of being "unknown"; every other failure still is."""
+    cwd the kernel will not show us although their uid and gid (real, effective,
+    saved) equal ours: non-dumpable login-session processes and the user service
+    manager. Only that refusal is counted instead of being "unknown"; a process
+    with another gid (sg/newgrp) and every other failure still is."""
     proc = Path("/proc")
     if proc.is_dir():
         rows = []
@@ -702,7 +727,13 @@ def process_snapshot():
                 try:
                     raw_cwd = os.readlink(entry / "cwd")
                 except PermissionError:
-                    unreadable += 1
+                    # Only a process that holds exactly our uid and gid and is
+                    # still refused is non-dumpable. A different gid (sg/newgrp)
+                    # is refused the same way but may sit in the worktree.
+                    if same_credentials(entry):
+                        unreadable += 1
+                    elif not proc_is_gone(entry):
+                        unknown = True
                     continue
                 after = read_proc_start(pid)
                 if after is None and proc_is_gone(entry):
@@ -745,8 +776,11 @@ def process_cwds(target: Path, *, snapshot=None) -> tuple[str, list[int], int]:
 
 # Rebuildable caches only. A short fixed list on purpose: names such as
 # build/, dist/, node_modules/ or .venv/ can hold real output, so they are not
-# here, and nothing selects or extends the list.
-CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+# here, and nothing selects or extends the list. A cache name alone is not
+# enough: __pycache__/ must hold only *.pyc files, and the tool caches must
+# carry the CACHEDIR.TAG that pytest, mypy and ruff all write.
+PYCACHE_DIR = "__pycache__"
+TAGGED_CACHE_DIRS = frozenset({".pytest_cache", ".mypy_cache", ".ruff_cache"})
 MEASURE_FILE_LIMIT = 100_000
 LARGEST_SHOWN = 5
 
@@ -772,10 +806,48 @@ def parse_status(raw: str) -> tuple[bool, list[str]]:
     return dirty, ignored
 
 
-def is_rebuildable_cache(path: str) -> bool:
-    """A directory whose own name is a cache name, or a single *.pyc file."""
-    if path.endswith("/"):
-        return Path(path.rstrip("/")).name in CACHE_DIRS
+def _has_cache_tag(directory: Path) -> bool:
+    try:
+        return stat.S_ISREG(os.lstat(directory / "CACHEDIR.TAG").st_mode)
+    except OSError:
+        return False
+
+
+def _only_pyc_files(directory: Path) -> bool:
+    """One level only: every entry is a plain *.pyc file."""
+    try:
+        with os.scandir(directory) as entries:
+            return all(item.name.endswith(".pyc") and item.is_file(follow_symlinks=False)
+                       for item in entries)
+    except OSError:
+        return False
+
+
+def hidden_tracked_files(target: Path) -> bool:
+    """True when a tracked file that still exists in the worktree is marked
+    skip-worktree or assume-unchanged (`ls-files -v`: `S`, or a lowercase tag).
+    A marked file that is absent (sparse checkout) holds no edits."""
+    listing = run(["git", "-C", str(target), "ls-files", "-v", "-z"],
+                  env={**os.environ, **git_optional_locks_env()}).stdout
+    for item in listing.split("\0"):
+        if item[:1] and (item[0] == "S" or item[0].islower()) and os.path.lexists(target / item[2:]):
+            return True
+    return False
+
+
+def is_rebuildable_cache(path: str, target: Path) -> bool:
+    """`path` is one `!!` entry of `status --ignored=matching`, relative to the
+    worktree `target`. It is a cache when it, or a directory above it, is a
+    tool cache folder holding CACHEDIR.TAG (a tool's own `.gitignore` of `*`
+    makes git list the folder's contents instead of the folder), when it is a
+    `__pycache__/` of only *.pyc files, or when it is a single *.pyc file."""
+    parts = path.rstrip("/").split("/")
+    is_dir = path.endswith("/")
+    for depth in range(len(parts) if is_dir else len(parts) - 1):
+        if parts[depth] in TAGGED_CACHE_DIRS and _has_cache_tag(target.joinpath(*parts[:depth + 1])):
+            return True
+    if is_dir:
+        return parts[-1] == PYCACHE_DIR and _only_pyc_files(target.joinpath(*parts))
     return path.endswith(".pyc")
 
 
@@ -824,6 +896,8 @@ def owner_is_known(target: Path, common: Path) -> bool:
     info = target.stat()
     if info.st_uid == os.geteuid():
         return True
+    if os.geteuid() == 0:
+        return False  # root can write anywhere: that proves nothing about whose checkout it is
     try:
         return info.st_uid == common.stat().st_uid and os.access(common, os.W_OK, effective_ids=True)
     except OSError:
@@ -910,9 +984,12 @@ def evaluate(
         env={**os.environ, **git_optional_locks_env()},
     ).stdout
     dirty, ignored = parse_status(status)
+    # `status` never lists a tracked file marked skip-worktree/assume-unchanged,
+    # yet `git worktree remove` deletes it with its edits: that is dirt too.
+    dirty = dirty or hidden_tracked_files(target)
     if dirty:
         verdict.reasons.append("dirty")
-    blocking = [path for path in ignored if not is_rebuildable_cache(path)]
+    blocking = [path for path in ignored if not is_rebuildable_cache(path, target)]
     if blocking:
         verdict.reasons.append("ignored-files")
         (verdict.ignored_files, verdict.ignored_bytes,
@@ -1141,6 +1218,14 @@ def append_audit(audit: Path, record: dict[str, object]) -> None:
         Path(temp_name).replace(audit)
 
 
+def printable(text: str) -> str:
+    """Control characters in a file name must not split or rewrite an output line."""
+    return "".join(
+        ch if unicodedata.category(ch) not in ("Cc", "Zl", "Zp")
+        else {"\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(ch, f"\\x{ord(ch):02x}" if ord(ch) < 256 else f"\\u{ord(ch):04x}")
+        for ch in text)
+
+
 def emit(verdict: Verdict, status: str, reconciled: int = 0) -> None:
     print(f"status={status}")
     print(f"worktree={verdict.path}")
@@ -1167,7 +1252,7 @@ def emit(verdict: Verdict, status: str, reconciled: int = 0) -> None:
         print(f"ignored_files={verdict.ignored_files}{more}")
         print(f"ignored_bytes={verdict.ignored_bytes}{more}")
         for size, rel in verdict.ignored_largest:
-            print(f"ignored_path={size} {rel}")
+            print(f"ignored_path={size} {printable(rel)}")
     print("reasons=" + (",".join(verdict.reasons) if verdict.reasons else "-"))
 
 
