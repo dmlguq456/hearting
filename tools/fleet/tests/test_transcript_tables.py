@@ -112,6 +112,31 @@ class TableTest(unittest.TestCase):
         # an unmatched backtick does not swallow the bars after it
         self.assertEqual(transcript.split_cells("| `a | b |"), ["`a", "b"])
 
+    def test_a_whole_line_html_comment_is_not_drawn_and_a_comment_in_code_or_text_is(self):
+        doc = ["<!-- hearting:campaign-document v1 -->", "# 제목", "", "본문 <!-- 안 --> 끝", "```", "<!-- 코드 -->", "```"]
+        rows = drawn(doc, 60)
+        self.assertEqual(rows[0], "제목")
+        self.assertNotIn("hearting:campaign-document", "\n".join(rows))
+        self.assertIn("본문 <!-- 안 --> 끝", rows)
+        self.assertIn("  <!-- 코드 -->", rows)
+
+    def test_two_comments_with_text_between_them_are_one_line_of_text_not_one_comment(self):
+        rows = drawn(["<!-- 메모 --> 보여야 할 글 <!-- 끝 -->", "<!-- 한 줄 전체가 주석 -->"], 60)
+        self.assertEqual(rows, ["<!-- 메모 --> 보여야 할 글 <!-- 끝 -->"])
+
+    def test_a_backslash_escape_outside_code_shows_its_mark_and_inside_code_stays(self):
+        rows = drawn(["# a\\<b\\> \\*c\\* \\_d\\_ \\[e\\](f) \\`g\\`", "",
+                      "- 항목 \\*\\*굵게 아님\\*\\* 와 `코드 \\< 안`", "", "경로 C:\\dir 와 \\\\ 둘"], 80)
+        self.assertEqual(rows[0], "a<b> *c* _d_ [e](f) `g`")
+        self.assertEqual(rows[1], "• 항목 **굵게 아님** 와 코드 \\< 안")
+        self.assertEqual(rows[2], "경로 C:\\dir 와 \\ 둘")
+        marked = keys(["\\*\\*x\\*\\* **y**"], 40)[0]
+        self.assertEqual([(t, k) for t, k in marked], [("**x** ", "soft"), ("y", "bold")])
+        # a code fence keeps every backslash; a table cell shows the mark, and \| is the cell's bar as before
+        self.assertEqual(drawn(["```", "a\\<b", "```"], 40), ["  a\\<b"])
+        cells = drawn(["| 명령 | 뜻 |", "|---|---|", "| `a\\<b` | 뜻\\<\\*\\|끝 |"], 60)
+        self.assertEqual(cells[2], "a\\<b  뜻<*|끝")
+
     def test_prose_keeps_long_ids_and_headings_use_the_section_key(self):
         rows = keys(["# 제목", "", "최근 마감: rt-0123456789abcdef 끝", "", "## 다음", "- 하나"], 80)
         self.assertEqual(rows[0], [("제목", "sect")])

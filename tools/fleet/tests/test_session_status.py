@@ -217,6 +217,29 @@ class PopupTest(StatusTest):
         self.assertTrue([line for line in lines if "rt-0123456789abcdef" in line])  # a long id is kept
         self.assertTrue(all(cell_width(line) <= 60 for line in lines))
 
+    def test_a_generated_campaign_document_opens_from_the_button_and_the_popup_draws_all_of_it(self):
+        import campaign_document
+        from datetime import timezone
+        unit = {"key": "pr:7", "pr": 7, "v": "v4.1.0", "title": "무언가를 고침", "impl": {"slug": "x"}, "count": 3,
+                "closed_at": NOW - 3600, "routes": 2, "activity": NOW}
+        waits = {"status": "ok", "at": NOW, "items": ["첫째?", "둘째?"]}
+        doc = campaign_document.render_document(
+            "alpha 캠페인", "알파 작업 중.", {"active": [unit], "active_folded": 0, "done": [unit],
+                                         "done_folded": 12}, waits, now=NOW, tz=timezone.utc)
+        folder = self.campaign("alpha", doc=False)
+        page = folder / "campaign.md"
+        page.write_text(doc, encoding="utf-8")
+        os.utime(page, (NOW - 600, NOW - 600))
+        view = self.read(self.route(1, "alpha"))
+        self.assertTrue(view["has_doc"])
+        self.assertTrue(view["path"].endswith("2026-11-10_alpha/campaign.md"))
+        lines = [text(row) for row in session_status.popup_rows(view, self.status(), 60)]
+        shown = "\n".join(lines)
+        for part in ("하는 중", "기다리는 것", "최근에 끝난 것", "무언가를 고침", "첫째?", "앞서 끝난 기록 12개는 접어 둠."):
+            self.assertIn(part, shown)
+        self.assertEqual(len(project_status.parse(doc)["decisions"]), 2)     # Fleet's decision count = open questions
+        self.assertTrue(all(cell_width(line) <= 60 for line in lines))
+
     def test_the_top_lines_without_a_campaign_document_are_the_four_line_block(self):
         self.campaign("alpha")
         status = {"routes": 2, "questions": 1, "done": None, "changed": "3h"}
@@ -325,7 +348,7 @@ CAMPAIGN = """<!-- hearting:campaign-document v1 -->
 
 
 class GroupsTest(StatusTest):
-    """11-20: the panel's STATUS section reads the document's lists with the button's value."""
+    """11-20: the document's lists (``parse_groups`` / ``read_groups``) are kept for the popup's coming list; the panel's value does not read them."""
 
     def kinds(self, text_):
         return [(g["kind"], g["count"], g["items"]) for g in session_status.parse_groups(text_)]
@@ -395,28 +418,34 @@ class GroupsTest(StatusTest):
         groups = session_status.parse_groups(doc)
         self.assertEqual([(g["kind"], g["count"], g["items"]) for g in groups], [("running", 1, ["일 하나"])])
 
-    def test_the_value_carries_the_groups_and_every_read_reads_the_document(self):
+    def test_the_value_does_not_read_the_document_and_carries_no_groups(self):
+        """11-20 (the panel has the button alone): the value is the document's place, title and age; the panel's refresh never opens the document."""
         folder2 = self.campaign("beta", body=CAMPAIGN)
-        view = self.read(self.route(2, "beta"))
-        self.assertEqual([g["kind"] for g in view["groups"]], ["running", "waiting", "done", "next"])
-        # Nothing is kept between reads (each read of the value is a process of its own): a changed document shows at the next read.
+        with mock.patch.object(session_status, "read_text", side_effect=AssertionError("the value read the document")), \
+                mock.patch.object(session_status, "read_groups", side_effect=AssertionError("the value read the groups")):
+            view = self.read(self.route(2, "beta"))
+        self.assertTrue(view["has_doc"])
+        self.assertNotIn("groups", view)
+        self.assertTrue(view["path"].endswith("현황.md"), view["path"])
+        # A changed document shows at the next read (its age), still without being opened.
         path = folder2 / "현황.md"
-        path.write_text(CAMPAIGN + "- 하나 더\n", encoding="utf-8")
         os.utime(path, (NOW - 10, NOW - 10))
-        again = self.read(self.route(2, "beta"))
-        self.assertEqual(again["groups"][-1]["count"], 2)
+        with mock.patch.object(session_status, "read_text", side_effect=AssertionError("the value read the document")):
+            again = self.read(self.route(2, "beta"))
+        self.assertNotEqual(again["age"], "")
+        self.assertNotIn("groups", again)
 
-    def test_a_campaign_md_document_is_read_by_name_and_gives_the_groups(self):
+    def test_a_campaign_md_document_is_read_by_name_and_read_groups_gives_its_lists(self):
         self.campaign("alpha", body=CAMPAIGN, name="campaign.md")
         view = self.read(self.route(1, "alpha"))
         self.assertTrue(view["has_doc"])
         self.assertTrue(view["path"].endswith("2026-11-10_alpha/campaign.md"), view["path"])
-        self.assertEqual([g["kind"] for g in view["groups"]], ["running", "waiting", "done", "next"])
+        self.assertEqual([g["kind"] for g in session_status.read_groups(view["path"])], ["running", "waiting", "done", "next"])
 
-    def test_no_document_and_a_document_that_cannot_be_read_give_no_groups(self):
-        self.campaign("alpha", doc=False)
-        self.assertEqual(self.read(self.route(1, "alpha"))["groups"], [])
+    def test_read_groups_gives_none_for_a_document_that_cannot_be_read(self):
         self.assertEqual(session_status.read_groups(str(self.root / "nowhere.md")), [])
+        self.campaign("alpha", doc=False)
+        self.assertNotIn("groups", self.read(self.route(1, "alpha")))
 
 
 if __name__ == "__main__":

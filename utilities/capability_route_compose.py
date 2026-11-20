@@ -12,6 +12,8 @@ import importlib.util
 import json
 import os
 import re
+import select
+import sys
 from pathlib import Path
 
 import harness_state_roots as HARNESS_STATE_ROOTS
@@ -1359,6 +1361,65 @@ def _route_plan_preparation_key(binding):
             "frame_route_id": frame_route.get("route_id")}
 
 
+# `--prompt-file -`: the task comes from standard input. It is read once, here, into the same text a
+# task file gives; the route keeps that text (`work_request`), and nothing after this reads the path
+# again, so no later place can read standard input a second time. The refusals are one line each and
+# never wait: a terminal, an empty or closed input, a producer that sends nothing for a while, and an
+# input larger than a brief needs all end the command before anything starts.
+# The size limit keeps a brief typed in the command small (it is a few lines, not a document); a task
+# given as a file has no such limit, which is why the refusal points there.
+PROMPT_STDIN_LIMIT = 65536
+PROMPT_STDIN_IDLE_SECONDS = 10.0
+
+
+def prompt_from_stdin():
+    """The task text on standard input, or a one-line `compose-prompt-stdin-*` refusal."""
+    try:
+        fd = sys.stdin.fileno()
+    except (AttributeError, ValueError, OSError):
+        raise ValueError("compose-prompt-stdin-empty: standard input is closed; pipe the task in "
+                         "(`--prompt-file - <<'EOF'`) or pass --prompt-file <file>") from None
+    if os.isatty(fd):
+        raise ValueError("compose-prompt-stdin-terminal: standard input is a terminal, not a pipe; pipe the "
+                         "task in (`--prompt-file - <<'EOF'`) or pass --prompt-file <file>")
+    chunks, size = [], 0
+    while True:
+        try:
+            ready, _, _ = select.select([fd], [], [], PROMPT_STDIN_IDLE_SECONDS)
+            data = os.read(fd, 65536) if ready else None
+        except OSError:
+            data = b""
+        if data is None:
+            raise ValueError(f"compose-prompt-stdin-timeout: no input for {int(PROMPT_STDIN_IDLE_SECONDS)} seconds; "
+                             "pipe the task in (`--prompt-file - <<'EOF'`) or pass --prompt-file <file>")
+        if not data:
+            break
+        chunks.append(data)
+        size += len(data)
+        if size > PROMPT_STDIN_LIMIT:
+            raise ValueError(f"compose-prompt-stdin-too-large: standard input is over {PROMPT_STDIN_LIMIT} bytes; "
+                             "put the task in a file and pass --prompt-file <file>")
+    try:
+        # A file's `read_text()` turns `\r\n` and `\r` into `\n`; standard input gives the same text.
+        text = b"".join(chunks).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    except UnicodeDecodeError:
+        raise ValueError("compose-prompt-stdin-not-utf8: standard input is not UTF-8 text; "
+                         "pass --prompt-file <file>") from None
+    if not text.strip():
+        raise ValueError("compose-prompt-stdin-empty: standard input holds no task; pipe the task in "
+                         "(`--prompt-file - <<'EOF'`) or pass --prompt-file <file>")
+    return text
+
+
+def read_compose_task(prompt_file):
+    """The task text of `--prompt-file`: the file's text, or standard input for `-` (read once)."""
+    if prompt_file is None:
+        return ""
+    if str(prompt_file) == "-":
+        return prompt_from_stdin()
+    return Path(prompt_file).read_text()
+
+
 def _compose_preparation_key(compose_args, route_plan_binding, prompt_file=None):
     if route_plan_binding is not None:
         return _route_plan_preparation_key(route_plan_binding)
@@ -1372,7 +1433,7 @@ def _compose_preparation_key(compose_args, route_plan_binding, prompt_file=None)
     # and its ordinary retry. They describe current launch eligibility, not the
     # identity of the user's prepared worktree allocation.
     return {"kind": "compose-start", "caller": caller,
-            "request_path": str(Path(prompt_file).resolve()) if prompt_file else None,
+            "request_path": str(Path(prompt_file).resolve()) if prompt_file and str(prompt_file) != "-" else None,
             "request_sha256": hashlib.sha256(str(text or "").encode("utf-8")).hexdigest(),
             "capability": compose_args.get("capability"),
             "mode": compose_args.get("capability_mode"), "shape": compose_args.get("shape"),

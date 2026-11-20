@@ -18,6 +18,8 @@ What this module never does: it never creates, moves, renames, or deletes a
 campaign, a cycle, a manifest, or any document, and it never creates a symbolic
 link. Refresh writes the eight entrance files above plus, once ever,
 `<root>/.runtime/artifact-entrance.json` (the first user-facing cycle record).
+One worker turn may also write a campaign's `campaign.md` (see `campaign_document`; it
+replaces only a file whose first line is its own marker) before it refreshes the entrance.
 Seal requests also use two locks and one coalesced pending record under
 `<root>/.runtime/`; the finite refresh worker consumes that record and exits.
 
@@ -85,6 +87,16 @@ SUMMARY_CHARS = 120
 MARKER = "<!-- hearting:artifact-entrance v1 -->"
 
 # Hook for rows that are not cycle folders (see the module header).
+def _campaign_target_path(folder: str, campaign_path: Path) -> str:
+    """`<folder>/campaign.md` when the campaign has a readable one, else the folder itself."""
+    try:
+        from artifact_campaign_documents import CAMPAIGN_DOCUMENT, campaign_page
+        page = campaign_page(campaign_path)
+    except Exception:  # noqa: BLE001 -- a document that cannot be taken leaves the folder
+        return folder
+    return folder + "/" + CAMPAIGN_DOCUMENT if page is not None and page.get("status") == "known" else folder
+
+
 def _daily_journals(root):
     from artifact_journal import entrance_snapshot
     return entrance_snapshot(root)
@@ -137,7 +149,7 @@ def _fallback_translator(message: str, /, **fields: Any) -> str:
         "entrance.section_records": "Records",
         "entrance.recent_routes": "Recent route reports",
         "entrance.spec_note": "How this repo works now. {count} topics; each change edits the same document.",
-        "entrance.campaigns_note": "One line per stream of work.",
+        "entrance.campaigns_note": "One document per stream of work. No new document appears; this one is rewritten.",
         "entrance.records_note": "Reports left by routes. Not usually opened.",
         "entrance.all_spec": "All spec topics",
         "entrance.spec_rest": "{count} more",
@@ -470,9 +482,12 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
             entries.append((key, campaign_locator, cycle_locator, cycle_path, campaign_path))
         totals["campaigns"] += 1
         totals["cycles"] += len(cycles)
+        folder = _nfc(campaign_path.relative_to(root).as_posix())
         campaign_rows.append({
             "title": "",
-            "path": _nfc(campaign_path.relative_to(root).as_posix()),
+            "path": folder,
+            # The campaign's own document when it has one, else the folder.
+            "target": _campaign_target_path(folder, campaign_path),
             "cycles": len(cycles),
             "date": max(dates) if dates else "",
             "locator": campaign_locator,
@@ -747,6 +762,11 @@ def _md_summary(value: str) -> str:
     return re.sub(r"([\\`*_\[\]<>&])", r"\\\1", _nfc(value))
 
 
+def _campaign_target(row: Mapping[str, Any]) -> str:
+    """Where a campaign line opens: its document when it has one, else its folder."""
+    return str(row.get("target") or row["path"])
+
+
 def _md_href(path: str) -> str:
     return _nfc(path).replace("<", "%3C").replace(">", "%3E")
 
@@ -842,8 +862,9 @@ def entrance_sections(snapshot: Dict[str, Any], t) -> List[Dict[str, Any]]:
                               SPEC_MD, SPEC_HTML, SPEC_HTML))
         sections.append({"key": "spec", "title": t("entrance.section_spec"),
                          "note": t("entrance.spec_note", count=_count(len(components))), "lines": lines})
-    lines = [line("campaign", row["title"], _md_href(row["path"]), _href(row["path"]), row["path"],
-                  date=row["date"], summary=row.get("summary") or "", directory=True)
+    lines = [line("campaign", row["title"], _md_href(_campaign_target(row)), _href(_campaign_target(row)),
+                  _campaign_target(row), date=row["date"], summary=row.get("summary") or "",
+                  directory=_campaign_target(row) == row["path"])
              for row in snapshot["campaigns"][:ENTRANCE_CAMPAIGN_LINES]]
     if not lines:
         lines.append(line("text", t("entrance.empty"), None, None, None))
@@ -916,7 +937,7 @@ def render_all_markdown(snapshot: Dict[str, Any], t) -> str:
         parts = [t("entrance.cycles", count=_count(row["cycles"]))]
         if row["date"]:
             parts.append(t("entrance.latest", date=row["date"]))
-        lines.append(f"- [{_md_text(row['title'])}](<{_md_href(row['path'])}>) — " + " · ".join(parts))
+        lines.append(f"- [{_md_text(row['title'])}](<{_md_href(_campaign_target(row))}>) — " + " · ".join(parts))
     if not snapshot["all_campaigns"]:
         lines.append(t("entrance.empty"))
     lines.extend(["", t("entrance.rewrite"), ""])
@@ -1056,7 +1077,7 @@ def render_all_html(snapshot: Dict[str, Any], t) -> str:
         parts = [t("entrance.cycles", count=_count(row["cycles"]))]
         if row["date"]:
             parts.append(t("entrance.latest", date=row["date"]))
-        body.append(f'<li><a href="{_href(row["path"])}">{_escape(row["title"])}</a> '
+        body.append(f'<li><a href="{_href(_campaign_target(row))}">{_escape(row["title"])}</a> '
                     f'<span class="meta">&#183; {_escape(" · ".join(parts))}</span></li>')
     if not snapshot["all_campaigns"]:
         body.append(f"<li>{_escape(t('entrance.empty'))}</li>")
@@ -1082,7 +1103,7 @@ def request_refresh(root: Path, cycle_id: Optional[str] = None) -> None:
     if in_test_process():
         # A test process never spawns a detached child (the checkpoint trigger's
         # rule); refreshing in place keeps its fixtures free of stray writers.
-        refresh(root, cycle_id=cycle_id)
+        _worker_pass(root, cycle_id)
         return
     runtime = root / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -1109,6 +1130,19 @@ def request_refresh(root: Path, cycle_id: Optional[str] = None) -> None:
             os.close(fd)
 
 
+def _worker_pass(root: Path, cycle_id: Optional[str] = None) -> None:
+    """One worker turn: bring the campaign documents up to date, then refresh the entrance.
+
+    The documents come first so that the entrance written next already points at a document
+    this turn created. A failing generator never stops the entrance."""
+    try:
+        import campaign_document
+        campaign_document.catch_up(root, cycle_id)
+    except Exception as exc:  # noqa: BLE001 -- the entrance never waits on the documents
+        print(f"campaign_document skipped error={type(exc).__name__}", file=sys.stderr)
+    refresh(root, cycle_id=cycle_id)
+
+
 def _refresh_requested(root: Path, fd: int) -> None:
     """Consume pending requests without sleeping or holding the request lock over a refresh."""
     runtime = root / ".runtime"
@@ -1125,7 +1159,7 @@ def _refresh_requested(root: Path, fd: int) -> None:
                 demand = store._read_json(pending) or {}
                 pending.unlink()
             try:
-                refresh(root, cycle_id=demand.get("cycle_id"))
+                _worker_pass(root, demand.get("cycle_id"))
             except Exception as exc:  # best effort, including a follow-up request
                 print(f"artifact_entrance skipped error={type(exc).__name__}", file=sys.stderr)
     finally:
@@ -1192,8 +1226,9 @@ def _refresh_and_snapshot(root: Path, cycle_id: Optional[str] = None):
         renderer_revision = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     except OSError:
         renderer_revision = None  # no reliable identity: render normally
-    pages_input = [{key: row[key] for key in ("title", "path", "cycles", "date")}
-                   for row in snapshot["all_campaigns"]]  # the four cells the page renders
+    pages_input = [{"title": row["title"], "path": row["path"], "target": _campaign_target(row),
+                    "cycles": row["cycles"], "date": row["date"]}
+                   for row in snapshot["all_campaigns"]]  # the cells the page renders
     fingerprint = json.dumps([pages_input, getattr(t, "lang", "en"),
         [t(k, **fields) for k, fields in (
             ("entrance.all_campaigns", {}), ("entrance.back", {}),

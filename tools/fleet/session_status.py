@@ -3,7 +3,7 @@
 ``read(cwd, route_ids)`` is the panel's one value (``None`` when the folder has no artifact root: no
 button then).  The document is the one of this session's own campaign (route -> its record's campaign
 key -> ``route_autoclose.campaign_of_route`` -> the campaign folder -> ``artifact_campaign_documents.
-campaign_status``, the selection Fleet, ``status_board`` and the entrance share); a session whose
+campaign_status``, the selection Fleet and the entrance share); a session whose
 routes span several campaigns shows the most recently changed document among them (Fleet's own rule).
 A session with no route, no campaign key, a campaign Fleet does not list (closed, or not yet named) or
 a campaign without a document shows the document Fleet's project line picks (``project_status.collect``).
@@ -11,10 +11,9 @@ No document at all is still a value (``has_doc`` False: the button stands, dim) 
 document would stand.  ``watch`` is for the panel's existing file watch (no poller): the document, and
 each session campaign's folder as one folder target (a trailing separator) so a new document redraws.
 
-``groups`` (11-20, the panel's STATUS section) are the document's lists read from its first 64 KiB: what is in
-progress, what waits for the person, what ended lately, what comes later, each its name, its count and its first
-titles (``read_groups``; a document with none of those headings gives ``[]`` and the panel draws no section).  They
-are read with the button's value (each read of the value reads the document's first 64 KiB once; nothing is kept between reads).
+The value does not read the document (11-20: the panel has the button alone, no preview): it is whether a document stands, its
+title and its age.  ``parse_groups`` / ``read_groups`` (the document's lists: what is in progress, what waits for the person,
+what ended lately, what comes later) are kept for the popup's coming list and are not called on the panel's refresh path.
 
 ``held(cwd, claim)`` is the value the host already holds (its button's) taken for the popup, so the popup
 does not read what the button read: it stands only where the claim names a status document inside this
@@ -24,8 +23,8 @@ folder's own artifact root (else ``None``, and the popup reads).
 its project page draws them (``pages.repo_status_lines``), an empty row, then the whole document
 (``transcript.doc_rows``: Fleet cards, fences as written, markdown tables aligned).  Rows are lists of
 ``(text, key)`` segments; ``key`` is a Fleet palette key (``None`` for padding).  Nothing here writes,
-asks, gates or starts a process; ``project_status``, ``artifact_campaign_documents`` and
-``status_board`` are called, not changed.
+asks, gates or starts a process; ``project_status`` and ``artifact_campaign_documents``
+are called, not changed.
 """
 from collections.abc import Mapping
 import json
@@ -211,7 +210,7 @@ def _group_kind(title):
 
 
 def parse_groups(text):
-    """The lists of a status document as ``[{kind, name, short, count, items}]`` in the panel's order.
+    """The lists of a status document as ``[{kind, name, count, items}]`` in the panel's order.
 
     Read: the top-level bullets under a heading of a list (``하는 중``, ``결정 기다리는 것``, ``끝난 일``, ``예정`` and the near
     spellings above; one of each kind, the first).  A bullet that is only a note in parentheses (``(… 접어 둠)``) is no title.
@@ -251,13 +250,12 @@ def parse_groups(text):
         if titles is None or not (titles or kind == "waiting"):
             continue
         items = [transcript.clean(title)[:GROUP_TITLE] for title in titles[:GROUP_ITEMS]]
-        groups.append({"kind": kind, "name": ui_text("fleet.status.group." + kind),
-                       "short": ui_text("fleet.status.group." + kind + ".short"), "count": len(titles), "items": items})
+        groups.append({"kind": kind, "name": ui_text("fleet.status.group." + kind), "count": len(titles), "items": items})
     return groups
 
 
 def read_groups(path):
-    """``parse_groups`` of the document's first 64 KiB; ``[]`` if unreadable."""
+    """``parse_groups`` of the document's first 64 KiB; ``[]`` if unreadable.  (Kept for the popup's list; the panel's refresh does not call it.)"""
     try:
         lines, _cut = read_text(path)
         return parse_groups("\n".join(lines)) if lines is not None else []
@@ -283,7 +281,7 @@ def read(cwd, routes=(), now=None):
     Keys: ``word`` (the section's name, ``STATUS``), ``has_doc``, ``campaign`` (name, '' when not known),
     ``age`` (Fleet's age words, '' when none), ``title`` (the popup's title), ``path`` (the document or
     ''), ``slot`` (where a missing document would stand, '' when no campaign is known), ``watch``
-    (paths for the panel's file watch), ``groups`` (the document's lists, above; ``[]`` without one)."""
+    (paths for the panel's file watch).  The document itself is not read."""
     if not cwd:
         return None
     now = time.time() if now is None else now
@@ -308,7 +306,7 @@ def read(cwd, routes=(), now=None):
         watch = ([path] if path else []) + [folder.rstrip(os.sep) + os.sep for folder in folders]
         return {"word": word, "has_doc": path is not None, "campaign": campaign, "age": age,
                 "title": _title(word, campaign if path else "", age), "path": path or "",
-                "slot": slot, "watch": list(dict.fromkeys(watch)), "groups": read_groups(path) if path else []}
+                "slot": slot, "watch": list(dict.fromkeys(watch))}
     except Exception:  # noqa: BLE001 -- the panel draws on without a status button
         return None
 

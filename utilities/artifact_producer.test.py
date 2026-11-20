@@ -975,7 +975,8 @@ class BootstrapTest(ProducerTestBase):
 
     def test_bootstrap_creates_no_legacy_bucket_directory(self):
         self.begin()
-        names = sorted(p.name for p in self.root.iterdir())
+        import artifact_entrance  # a begin also asks for the derived entrance
+        names = sorted(p.name for p in self.root.iterdir() if p.name not in artifact_entrance.ENTRANCE_NAMES)
         self.assertEqual(names, [".runtime", "campaigns"])
 
     def test_bootstrapped_root_denies_legacy_top_level_write(self):
@@ -1478,7 +1479,8 @@ class FinalizeTest(ProducerTestBase):
         again = P.finalize(self.root, cycle_id=result["cycle_id"])
         self.assertIn(again["status"], {"sealed", "already-sealed", "refreshed"}, again)
         import artifact_entrance
-        self.assertEqual(artifact_entrance.recent_rows(self.root)[0]["extra"], 1)
+        row = next(r for r in artifact_entrance.recent_rows(self.root) if r.get("cycle_id") == result["cycle_id"])
+        self.assertEqual(row["extra"], 1)
 
     def test_an_entrance_failure_never_changes_the_seal(self):
         self.activate()
@@ -1486,12 +1488,14 @@ class FinalizeTest(ProducerTestBase):
         self.write_output(result, "final_report.md", b"# Result\n\nBody.\n")
         self.close(route, route_file)
         stderr = io.StringIO()
+        entrance = self.root / "README.md"
+        before = entrance.read_bytes() if entrance.exists() else None  # the begin's own request may have written it
         with mock.patch("artifact_entrance.request_refresh", side_effect=RuntimeError("boom")), \
                 contextlib.redirect_stderr(stderr):
             sealed = P.finalize(self.root, cycle_id=result["cycle_id"])
         self.assertEqual(sealed["status"], "sealed", sealed)
         self.assertIn("artifact_entrance skipped error=RuntimeError", stderr.getvalue())
-        self.assertFalse((self.root / "README.md").exists())
+        self.assertEqual(entrance.read_bytes() if entrance.exists() else None, before)
 
     def test_finalize_returns_before_a_slow_entrance_refresh(self):
         import artifact_entrance
@@ -1515,6 +1519,8 @@ class FinalizeTest(ProducerTestBase):
                     child.kill()
                     child.wait(timeout=5)
         self.addCleanup(settle)
+        for name in artifact_entrance.ENTRANCE_NAMES:  # what the begin and the close asked for is derived: start clean
+            (self.root / name).unlink(missing_ok=True)
         # Also delay an accidental in-process call, so the original synchronous
         # finalize cannot pass this regression by avoiding the child entirely.
         original = artifact_entrance.refresh

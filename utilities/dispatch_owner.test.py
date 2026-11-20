@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from datetime import datetime, timezone
@@ -64,6 +65,151 @@ _OWNER_SPEC.loader.exec_module(OWNER)
 # already skips its codex runtime discovery.
 CLAUDE_CLI = shutil.which("claude")
 NEEDS_CLAUDE_CLI = "no claude binary: the selector's session-resume probe cannot be proven here"
+
+
+class UnreadGaugeTest(unittest.TestCase):
+    """G2 (11-20): a start does not read the capacity gauge of a harness it can never choose, unless that read
+    refreshes the shared usage cache (codex, opencode): the next start's limit judgment depends on it."""
+
+    STATES = {"claude": "ok", "codex": "ok", "opencode": "limited(2026-12-01)"}
+
+    def test_a_limited_harness_is_not_read_unless_its_read_refreshes_the_shared_cache(self):
+        self.assertEqual(OWNER._unread_gauges({**self.STATES, "claude": "limited(2026-12-01)"}, None), {"claude": "limited"})
+        self.assertEqual(OWNER._unread_gauges(self.STATES, None), {})
+        self.assertEqual(OWNER._unread_gauges({h: "ok" for h in self.STATES}, None), {})
+        self.assertEqual(OWNER._unread_gauges({"claude": "limited", "codex": "limited(unknown-reset)", "opencode": "ok"}, None),
+                         {"claude": "limited"})
+
+    def test_a_named_eligible_harness_leaves_only_the_read_only_gauge_unread(self):
+        self.assertEqual(OWNER._unread_gauges({h: "ok" for h in self.STATES}, "codex"), {"claude": "not-needed"})
+        self.assertEqual(OWNER._unread_gauges({h: "ok" for h in self.STATES}, "claude"), {})
+
+    def test_a_named_harness_that_is_limited_leaves_the_automatic_choice_its_gauges(self):
+        # The named harness cannot be used, so the choice falls to the others and ranks on their headroom.
+        states = {"claude": "limited(2026-12-01)", "codex": "ok", "opencode": "ok"}
+        self.assertEqual(OWNER._unread_gauges(states, "claude"), {"claude": "limited"})
+        self.assertEqual(OWNER._unread_gauges({**states, "claude": "ok", "codex": "limited"}, "codex"), {})
+
+    def test_the_receipt_of_a_run_that_skipped_a_gauge_names_it(self):
+        scores = {"claude": None, "codex": 50.0, "opencode": 80.0}
+        sources = {"claude": "skipped:limited", "codex": "live", "opencode": "live"}
+        lines = OWNER._audit("eligible", "codex", "configured-balanced", ["claude", "codex", "opencode"], None,
+                             {"claude": "limited(2026-12-01)", "codex": "ok", "opencode": "ok"},
+                             allocation={"strategy": "balanced", "window": 30, "usage_gate_used_percent": 85,
+                                         "depth_affinity": {}, "depth_affinity_weight": 0.5,
+                                         "usage_headroom_exponent": 1},
+                             counts={"claude": 0, "codex": 0, "opencode": 0}, rejected=["claude"],
+                             capacity=scores, capacity_sources=sources, capacity_freshness={})
+        text = "\n".join(lines)
+        self.assertIn("capacity_headroom.claude=unknown", text)
+        self.assertIn("capacity_source.claude=skipped:limited", text)
+
+
+class GaugeCacheChainTest(unittest.TestCase):
+    """Two consecutive starts: the second reads the usage cache the first left behind.
+
+    The gauge reads of codex and opencode write the shared cache that `usage_states` (`gauge_limits`) turns
+    into the next start's limit judgment, so a start that leaves them unread changes the next start's choice.
+    Real `usage_states`, `_unread_gauges`, `capacity_report` and `select`; only the two HTTP readers are fakes.
+    """
+
+    HOUR = 3600.0
+
+    def setUp(self):
+        from importlib import import_module
+        self.addCleanup(mock.patch.stopall)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / "usage"
+        self.jobs = Path(self.tmp.name) / "jobs.log"
+        self.jobs.write_text("", encoding="utf-8")
+        mock.patch.dict(os.environ, {"FLEET_USAGE_STATE_DIR": str(self.state), "AGENT_DISPATCH_JOBS": str(self.jobs),
+                                     "HARNESS_CAPACITY_SCORES": "", "HOME": self.tmp.name,
+                                     "CODEX_HOME": self.tmp.name}).start()
+        self.cap = OWNER._capacity
+        self.cap._fleet_collectors()
+        self.cache = import_module("fleet.collectors.usage_cache")
+        self.codex_calls = 0
+        self.live = {}
+        mock.patch.object(import_module("fleet.collectors.codex"), "_api_usage_detail", self._fake_codex).start()
+        mock.patch.object(import_module("fleet.collectors.zen_go_usage"), "account_usage",
+                          return_value={"error": "no-key"}).start()
+        mock.patch.object(self.cap, "_claude_cache_score", return_value=(None, None)).start()
+        mock.patch.object(self.cap, "_claude_capacity_reading", return_value=(None, None)).start()
+        import dispatch_capacity_evidence
+        self.dce = dispatch_capacity_evidence
+
+    def _fake_codex(self):
+        self.codex_calls += 1
+        return dict(self.live), None
+
+    def _start(self, now, explicit=None):
+        """What `dispatch-owner` does at one start: the usage states, then the gauges not ruled out by them."""
+        states = self.dce.usage_states(self.jobs, now=now, recheck=False)
+        report = self.cap.capacity_report(now=now, skip=OWNER._unread_gauges(states, explicit))
+        return states, report
+
+    def _pick(self, states, report, primary):
+        policy = {"primary": primary, "relief": [], "last_resort": [], "promote_relief_below": 0}
+        return self.cap.select(policy, states, {h: 0 for h in self.cap.HARNESSES}, primary, report["scores"],
+                               strategy="balanced", usage_gate_used_percent=90)[0]
+
+    def _limited_until_reset(self, now):
+        return {"windows": [["5h", 100, now + 3 * self.HOUR], ["7d", 40, now + 5 * 86400]]}
+
+    def test_a_recovery_the_cache_has_not_seen_is_seen_by_the_start_that_is_pinned_elsewhere(self):
+        # The cache says codex is at 100% until a reset 3 h away; since then the account got credits and the
+        # live endpoint says it is usable. A start that names claude must still read codex, or the next
+        # start keeps reading `limited` for up to an hour.
+        now = time.time()
+        self.cache._write("codex", self._limited_until_reset(now), now - 120, now - 120)
+        self.live = {**self._limited_until_reset(now), "credits": {"has_credits": True}}
+        states, _ = self._start(now, explicit="claude")
+        self.assertTrue(states["codex"].startswith("limited("), states)
+        self.assertEqual(self.codex_calls, 1)
+        states, report = self._start(now + 60)
+        self.assertEqual(states["codex"], "ok", states)
+        self.assertEqual(self._pick(states, report, ["codex"]), "codex")
+
+    def test_a_limit_that_is_still_real_does_not_lapse_between_two_starts(self):
+        # codex really is at 100% for 3 more hours, the cache was written 50 minutes ago by someone else, and
+        # starts come every 30 minutes: the first start's read keeps the limit judgment alive for the second.
+        now = time.time()
+        self.cache._write("codex", {"windows": [["5h", 100, now + 3 * self.HOUR]]}, now - 3000, now - 3000)
+        self.live = {"windows": [["5h", 100, now + 3 * self.HOUR]]}
+        with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": "claude:0"}):
+            states, report = self._start(now, explicit="claude")
+            self.assertTrue(states["codex"].startswith("limited("), states)
+            self.assertEqual(self._pick(states, report, ["codex"]), None)
+            states, report = self._start(now + 1800)
+        self.assertTrue(states["codex"].startswith("limited("), states)
+        self.assertEqual(self._pick(states, report, ["codex"]), None)
+        self.assertEqual(self._pick(states, report, ["codex", "claude"]), "claude")
+
+    def test_the_gauge_wiring_of_one_start_shows_in_its_receipt(self):
+        # The start passes the unread gauges to `capacity_report`: a pinned, eligible harness leaves only the
+        # read-only gauge (claude) unread; the two that refresh the shared cache are read.
+        buf = io.StringIO()
+        route = RouteOwnerPinTest._route(self, pin="codex")
+        self.jobs.touch()
+        binding = SimpleNamespace(route_file=str(route), route_id="rt-x", route_hash="sha256:x")
+        self.live = self._limited_until_reset(time.time())
+        self.live["windows"][0][1] = 20
+        with mock.patch.object(OWNER.subprocess, "run", return_value=SimpleNamespace(returncode=0)), \
+             mock.patch.object(OWNER, "_usage", return_value={"claude": "ok", "codex": "ok", "opencode": "ok"}), \
+             mock.patch.object(OWNER, "validate_owner_route_binding", return_value=binding), \
+             mock.patch.object(OWNER, "export_owner_route_env", return_value=None), \
+             mock.patch("artifact_producer.prepare_route_artifact_env", return_value={}), \
+             mock.patch.dict(os.environ, _isolated_env({"AGENT_DISPATCH_JOBS": str(self.jobs),
+                                                        "FLEET_USAGE_STATE_DIR": str(self.state),
+                                                        "HARNESS_CAPACITY_SCORES": ""}), clear=True), \
+             contextlib.redirect_stdout(buf):
+            rc = OWNER.main(["--dry-run", "--route-evidence", str(route), "--prompt-text", "probe"])
+        out = buf.getvalue()
+        self.assertEqual(rc, 0, out)
+        self.assertRegex(out, r"(?m)^capacity_source\.claude=skipped:not-needed$")
+        self.assertRegex(out, r"(?m)^capacity_source\.codex=live$")
+        self.assertEqual(self.codex_calls, 1)
 
 
 class FrameAlternativeSelectionTest(unittest.TestCase):

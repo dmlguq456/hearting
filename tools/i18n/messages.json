@@ -339,8 +339,8 @@
    "ko": "입구로 돌아가기"
   },
   "entrance.campaigns_note": {
-   "en": "One line per stream of work.",
-   "ko": "일의 흐름 하나에 한 줄."
+   "en": "One document per stream of work. No new document appears; this one is rewritten.",
+   "ko": "일의 흐름 하나에 문서 한 장. 새 문서가 생기지 않고 이 문서가 고쳐집니다."
   },
   "entrance.cycles": {
    "en": "routes {count}",
@@ -2234,33 +2234,17 @@
    "en": "Recently done",
    "ko": "최근에 끝난 것"
   },
-  "fleet.status.group.done.short": {
-   "en": "Done",
-   "ko": "끝난 일"
-  },
   "fleet.status.group.next": {
    "en": "Later",
    "ko": "나중에 할 것"
-  },
-  "fleet.status.group.next.short": {
-   "en": "Later",
-   "ko": "예정"
   },
   "fleet.status.group.running": {
    "en": "In progress",
    "ko": "하는 중"
   },
-  "fleet.status.group.running.short": {
-   "en": "Doing",
-   "ko": "하는 중"
-  },
   "fleet.status.group.waiting": {
    "en": "Waiting for you",
    "ko": "기다리는 것"
-  },
-  "fleet.status.group.waiting.short": {
-   "en": "Waiting",
-   "ko": "기다림"
   },
   "frame.note_truncated": {
    "en": "…(truncated)",
