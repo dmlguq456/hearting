@@ -33,13 +33,13 @@ const MESSAGES_MAX=3;
 // (the rows inside its box) keeps STATUS_MIN rows while the rows allow, and takes up to STATUS_MAX where they are plentiful: four
 // group heads and eight titles (two to a group, the waiting ones first). Short of rows MESSAGES and MEM go down first, to one
 // or two rows each, before the STATUS section gives up any of its rows.
-const STATUS_MIN=5,STATUS_MAX=12;
-// 11-20 (the person: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" / "REPO ---- SESSION ----"): the panel beside the native area has two groups: REPO
-// (the repository's: its row and, right under it, the STATUS section) and SESSION (this session's: MODEL, CTX, TITLE, NOW, QUESTIONS, the route
-// box, MESSAGES, MEM). Each group's head is one row `REPO ────` / `SESSION ────`. REPO's head is the REPO row itself (`merged`: `REPO   hearting
-// · wt 12 ────`, no row more); `separate` puts a head row of its own over the REPO row (kept for the pictures). SESSION's head stands where the
-// empty row between the two groups' metadata stood, so it costs no row either, and goes with it short of rows.
-const GROUP_HEAD='merged';
+const STATUS_MIN=5,STATUS_MAX=12,STATUS_BOTTOM=3,REPO_NAME_MIN=8;
+// 11-20 (the person: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" / "REPO ---- SESSION ----"; then "GIT PEER 아래로 두고" / "박스를 REPO의 하단으로 두자는거야"):
+// the panel beside the native area has two groups: REPO (the repository's: its row, GIT, PEERS and, under them, the STATUS box) and SESSION (this
+// session's: MODEL, CTX, TITLE, NOW, QUESTIONS, the route box, MESSAGES, MEM). Each group's head is one row `REPO ────` / `SESSION ────`. REPO's head
+// is the REPO row itself (`REPO   hearting · wt 12 ────`, no row more). SESSION's head stands where the empty row between the two groups'
+// metadata stood, so it costs no row either, and goes with it short of rows. The bottom layout has no group heads: first row, GIT, PEERS, the
+// STATUS box (three rows inside at most), then the title and NOW row and the route box.
 // 11-16 (the person: "메모리도 메시지랑 같은 맥락이야"): MEM shows the newest MEM_MAX records at most, each its
 // dim head row and its headline on up to two rows (spec rule 46 (b)). 11-18 (the person: "MEM는 최대 최근 3개만 띄워도 되겠다"): three at most.
 const MEM_MAX=3;
@@ -773,11 +773,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-15 (the person: "현황은 REPO 옆에 버튼을 만드는게 나을거 같은데", design 2 as recommended): the status
     // button `STATUS ›` (11-20: English, as the section's other names) at the right end of the REPO row: the word in
     // the body color, `›` dim as a section head's, no ground, no count; no status document: all of it dim
-    // (a press still opens it). Short of cells the word goes first (`›` stays), then `· wt N` whole, then
-    // the name is cut with `…`; the name and `›` stay to the last. A press anywhere on the row opens the
+    // (a press still opens it). Short of cells the name is cut (to eight cells at least) before the word goes,
+    // then `· wt N`, then the word (`›` stays); the name and `›` stay to the last. A press anywhere on the row opens the
     // status popup. No artifact root: no button (`status_doc` absent).
     const statusDoc=model.status_doc&&typeof model.status_doc==='object'&&clean(model.status_doc.word).trim()?model.status_doc:null;
-    const topActions=new Map(),withoutButton=new Map(),groupHeads=new Set(),foldedRepo=new Map();
+    const topActions=new Map(),withoutButton=new Map();let statusSlot=0;
     const statusButton=whole=>{const arrow=text('›','dim');if(!whole)return [arrow];
       return [text(clean(statusDoc.word).trim(),statusDoc.has_doc===true?'loc_repo':'dim'),text(' '),arrow];};
     // `name` and `count` with the button at the right end of `room` cells, or null without a button.
@@ -787,9 +787,17 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const fillEnd=n=>n>=3?[text(' '),ruleRun(n-1)]:[pad(n)];
     const withButton=(name,count,room)=>{
       if(!statusDoc)return null;
-      // In order: the whole button, `›` alone, then `› ` without the count; the word does not come back.
-      for(const [lead,whole] of [[[...name,...count],true],[[...name,...count],false],...(count.length?[[name,false]]:[])]){
-        const b=statusButton(whole);if(size(lead)+1+size(b)<=room)return [...lead,...fillMid(room-size(lead)-size(b)),...b];
+      // 11-20 (the word is `STATUS`, six cells): the name is cut (down to REPO_NAME_MIN cells) before the word goes, and the count goes before the name
+      // is cut below that; only then the word goes (`›` stays), with the count and then without it.
+      const word=statusButton(true);
+      for(const keep of count.length?[count,[]]:[[]]){
+        const left=room-size(word)-1-size(keep);
+        if(left<Math.min(size(name),REPO_NAME_MIN))continue;
+        const lead=[...(size(name)<=left?name:cut(name,left)),...keep];
+        return [...lead,...fillMid(room-size(lead)-size(word)),...word];
+      }
+      for(const lead of [[...name,...count],...(count.length?[name]:[])]){
+        const b=statusButton(false);if(size(lead)+1+size(b)<=room)return [...lead,...fillMid(room-size(lead)-size(b)),...b];
       }
       return [...cut(name,Math.max(1,room-2)),...fillMid(Math.max(1,room-Math.min(size(name),Math.max(1,room-2))-1)),...statusButton(false)];
     };
@@ -817,19 +825,17 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(sideRepo.length){
         // The name keeps its color; the count (dim) shows whole or not at all.
         // 11-20: the REPO group's head is this row: `REPO   hearting · wt 12 ────` (narrower than 30 cells inside the word stands first, `REPO `,
-        // as the other labels do not); the `separate` form has a head row of its own over it and this row keeps its value alone, and where that
-        // head row has gone short of rows this row is the merged form again (`folded`).
+        // as the other labels do not).
         const count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
-        const repoForm=separate=>{
-          const word=labelWidth||separate?null:text('REPO ','dim'),room=inner-labelWidth-(word?5:0);
+        const repoForm=()=>{
+          const word=labelWidth?null:text('REPO ','dim'),room=inner-labelWidth-(word?5:0);
           const withCount=count.length>0&&size(sideRepo)+size(count)<=room;
           const button=withButton(sideRepo,count,room),value=withCount?[...sideRepo,...count]:cut(sideRepo,room);
-          const lead=parts=>word?[word,...parts]:labelled(separate?'':'REPO',parts);
-          const plain=lead(separate?value:[...value,...fillEnd(room-size(value))]);
+          const lead=parts=>word?[word,...parts]:labelled('REPO',parts);
+          const plain=lead([...value,...fillEnd(room-size(value))]);
           return {row:button?lead(button):plain,plain,button:!!button,withCount};
         };
-        const separate=(model.group_head||GROUP_HEAD)==='separate',form=repoForm(separate);
-        if(separate){groupHeads.add(top.length);top.push(groupHead('REPO'));foldedRepo.set(top.length,repoForm(false));}
+        const form=repoForm();
         if(form.button){topActions.set(top.length,'popup:STATUS');withoutButton.set(top.length,form.plain);}
         top.push(form.row);mark(top.length-1,'head',...(form.withCount&&!sideGit.length?['git']:[]));
       }
@@ -842,7 +848,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       };
       if(sideGit.length){gitRows.add(top.length);top.push(labelled('GIT',firstGives(sideGit,inner-labelWidth)));mark(top.length-1,'git');}
       {const peerParts=peerRow(inner-labelWidth);if(peerParts.length){gitRows.add(top.length);top.push(labelled('PEERS',peerParts));}}
-      // 11-20: the SESSION group's head stands where the empty row between the two groups of metadata stood (and goes with it).
+      // 11-20: the STATUS box stands here, under the REPO group's last row; the SESSION group's head stands where the empty row between the two
+      // groups of metadata stood (and goes with it).
+      statusSlot=top.length;
       metaGaps.add(top.length);top.push(groupHead('SESSION'));
       if(labelWidth){
         // Spec rule 42: `MODEL` and `CTX` as REPO's and GIT's; `CTX` stands for the word
@@ -910,6 +918,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         if(rows.length>kept.length){const fit=clip(kept[0],inner-1);kept[0]=[...fit.parts,text('…',key)];}
         top.push(...kept);
       }
+      statusSlot=top.length;
       if(title||now){
         // Title and NOW share what the answer wait leaves: each keeps at least half of it.
         const nowParts=now?[text('NOW ','dim'),text(now,nowKey)]:[],titleParts=title?line(title,'loc_repo'):[];
@@ -1866,7 +1875,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     // The section stands in a box of the route box's frame, so its rows are laid out at the box's inner width.
     const statusRowsIn=n=>within(()=>statusRows(n));
-    const statusMax=statusRowsIn(STATUS_MAX).length;
+    const statusMax=statusRowsIn(side?STATUS_MAX:STATUS_BOTTOM).length;
     // The sections in order, each with the most rows it takes and its rows at a given count.
     const SECTIONS=[
       {name:'QUESTIONS',on:asked,max:3,head:()=>sectionHead(questionCount?[{...text(questionCount,'g_blocked'),role:'accent'}]:[],summary?.label||'QUESTIONS'),
@@ -1889,8 +1898,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const questionRowsIn=()=>boxedQuestions()?within(questionRows):questionRows();
     const sectionRows=s=>s.name==='QUESTIONS'?questionRowsIn():s.rows(take[s.name]);
     const sectionSize=s=>!kept[s.name]?0:s.box?routeBox():(s.boxed||s.name==='QUESTIONS'&&boxedQuestions()?2:1)+sectionRows(s).length;
-    const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size-groupHeads.size;
-    let keepGroupHeads=true,keepGit=true,keepSpacers=true,keepMetaGap=true,keepRules=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0,keepFootRule=true,keepQuestionBox=true;
+    const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size;
+    let keepGit=true,keepSpacers=true,keepMetaGap=true,keepRules=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0,keepFootRule=true,keepQuestionBox=true;
     // 11-16 (the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을 USAGE로 해서 넣자"): the
     // panel's bottom is the USAGE section: its name row (the thin rule above the last row, now named), then
     // one row for each harness (Claude, Codex, OpenCode, Fleet's header order): the harness's name dim, then the
@@ -2051,7 +2060,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-16 (the person: "MEM과 가장 하단을 구분하는 줄이 필요"): beside the native area a thin rule (a section
     // head's rule, its color) parts the bottom sections (MESSAGES, MEM) from the last row (5h/7d, the gear and
     // the fold button); short of rows it goes before any content row.
-    const need=()=>core+(keepGroupHeads?groupHeads.size:0)+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)
+    const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)
       +(keepRules?rules.size:0)+(keepOptional?optional.size:0)+SECTIONS.reduce((n,s)=>n+sectionSize(s),0)+footRule()+1;
     const budget=rows;
     // Short of rows (spec rule 34 (b), 11-15): the empty rows, the rule above the last row (11-16) and a
@@ -2075,8 +2084,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     resGpus=resourceGpuTotal();
     give(()=>side&&resHosts>0&&resGpus>0,()=>{resGpus--;},()=>{resGpus++;});
     give(()=>side&&resHosts>0,()=>{resHosts--;},()=>{resHosts++;});
-    // 11-20: a REPO head row of its own (the `separate` form) is decoration: it goes with the empty rows, before any content row does.
-    give(()=>keepGroupHeads&&groupHeads.size>0,()=>{keepGroupHeads=false;},()=>{keepGroupHeads=true;});
     give(()=>keepSpacers,()=>{keepSpacers=false;},()=>{keepSpacers=true;});
     if(!usageOn)give(()=>!!footBase(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
     give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
@@ -2089,8 +2096,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>kept.MESSAGES&&take.MESSAGES>2,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
     give(()=>kept.MEM&&take.MEM>1,()=>{take.MEM--;},()=>{take.MEM++;});
     give(()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
-    // The STATUS section's titles above its STATUS_MIN rows go next.
-    give(()=>kept.STATUS&&take.STATUS>STATUS_MIN,()=>{take.STATUS--;},()=>{take.STATUS++;});
+    // 11-20 (the person: "GIT PEER 아래로 두고"): the bottom layout's GIT row stays with the STATUS box under it, and its box keeps its rows over MESSAGES (which has
+    // no MEM there), so MESSAGES gives its rows and its head before the box gives a row and before the GIT row goes; beside the native area the order is the one below.
+    if(!side){
+      give(()=>kept.MESSAGES&&take.MESSAGES>0,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
+      give(()=>kept.MESSAGES,()=>{kept.MESSAGES=false;},()=>{kept.MESSAGES=true;});
+    }
+    // The STATUS section's titles above its STATUS_MIN rows go next (in the bottom layout, where its box takes three rows inside at most, down to the one
+    // row of counts: the box gives its rows before the route box does).
+    give(()=>kept.STATUS&&take.STATUS>(side?STATUS_MIN:1),()=>{take.STATUS--;},()=>{take.STATUS++;});
     // QUESTIONS: the action row, then the second row of the summary and the guide line.
     give(()=>here&&keepAction,()=>{keepAction=false;},()=>{keepAction=true;});
     give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});
@@ -2134,21 +2148,25 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // (11-16: this window's own usage row beside the buttons costs no row, so it stays while no other usage row is left to give.)
     give(()=>keepQuota&&(!usageOn||footRule()>0),()=>{keepQuota=false;},()=>{keepQuota=true;});
     const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
-      keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepGroupHeads,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]);
+      keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]);
     const stuck=new Set();
     for(const {undo,family} of gave.reverse()){
       if(family&&stuck.has(family))continue;
       const was=choices();undo();
       if(need()>budget){if(family)stuck.add(family);const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepGroupHeads,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);keepRouteRule=v[24];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(25,31);}
+        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead]=v.slice(12,22);keepLine.splice(0,keepLine.length,...v[22]);keepRouteRule=v[23];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(24,30);}
     }
     const order=[];
-    top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i))&&(keepGroupHeads||!groupHeads.has(i)))
-      {const folded=!keepGroupHeads&&foldedRepo.get(i);
-        order.push({parts:folded?folded.row:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i),plain:folded?folded.plain:withoutButton.get(i)});}});
+    // (`statusSlot`: where the STATUS box stands, under the REPO group's last row; it stands there whichever rows around it have given way.)
+    top.forEach((row,i)=>{
+      if(i===statusSlot)order.push({status:true});
+      if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
+        order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i),plain:withoutButton.get(i)});});
+    if(statusSlot>=top.length)order.push({status:true});
     // The row that carries the status button, and its place in `content` (the button goes once the STATUS section stands).
-    // 11-20: beside the native area the STATUS section is the REPO group's: it stands right under the REPO row (a window with no REPO row
-    // starts with it); in the bottom layout, which has no group heads, it stays second among the sections.
+    // 11-20 (the person: "GIT PEER 아래로 두고" / "박스를 REPO의 하단으로 두자는거야"): the STATUS section is the REPO group's and stands at its bottom, under
+    // the REPO row, GIT and PEERS (a window with none of them starts with it); in the bottom layout it stands under the first row, GIT and PEERS too,
+    // over the title and NOW row.
     let buttonAt=-1,buttonPlain=null,statusPlaced=false;
     const statusSection=SECTIONS.find(x=>x.name==='STATUS');
     // 11-20 (the person: "현황은 영어로" / "그리고 박스로 감싸고"): the section is a box of the route box's frame in its quiet color, its name
@@ -2160,19 +2178,16 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         ...sectionRows(statusSection).map(parts=>boxRow({parts,action},key)),boxBottom(key,[],action)];
     };
     const placeStatus=()=>{
-      if(statusPlaced||!side||!kept.STATUS)return;
+      if(statusPlaced||!kept.STATUS)return;
       statusPlaced=true;
+      // The box carries the press now, so the row that had the button does not.
+      if(buttonAt>=0){content[buttonAt]=buttonPlain;for(let i=hits.length-1;i>=0;i--)if(hits[i].row===buttonAt+1&&hits[i].action==='popup:STATUS')hits.splice(i,1);}
       for(const item of statusBlock())add(item.parts,item.action);
     };
-    if(!order.some(item=>item.plain))placeStatus();
     for(const item of order){
+      if(item.status){placeStatus();continue;}
       if(item.plain&&buttonAt<0){buttonAt=content.length;buttonPlain=item.plain;}
       add(item.parts,item.action,item.groups);
-      if(item.plain&&kept.STATUS&&side){
-        // The section's head carries the button now, so the REPO row (the head of the group) does not.
-        content[buttonAt]=buttonPlain;for(let i=hits.length-1;i>=0;i--)if(hits[i].row===buttonAt+1&&hits[i].action==='popup:STATUS')hits.splice(i,1);
-        placeStatus();
-      }
     }
     const headRows=content.length;
     // Each section stands whole (its head and the rows it kept), one after another from the top; the
@@ -2182,8 +2197,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(const s of SECTIONS){
       if(!kept[s.name])continue;
       // QUESTIONS never gives its place to the structural rows above it: those go first (`lastRow`).
-      if(s.name==='STATUS'&&statusPlaced)continue;
-      if(s.name==='STATUS'&&content.length+lower.length+sectionSize(s)+footRule()>budget-1)continue;
+      if(s.boxed)continue;
       if(s.name!=='QUESTIONS'&&content.length+lower.length+sectionSize(s)+(['MESSAGES','MEM'].includes(s.name)?footRule():0)>budget-1)break;
       if(s.box){
         // The rows the route box takes, for the host's wheel (panel rows, as hits count them).
@@ -2200,9 +2214,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         add(boxBottom(key).parts,'question');
         continue;
       }
-      // 11-20: the section's head carries the button, so the bottom layout's first row does not.
-      if(s.name==='STATUS'&&buttonAt>=0){content[buttonAt]=buttonPlain;for(let i=hits.length-1;i>=0;i--)if(hits[i].row===buttonAt+1&&hits[i].action==='popup:STATUS')hits.splice(i,1);}
-      if(s.boxed){for(const item of statusBlock())add(item.parts,item.action);continue;}
       const into=['MESSAGES','MEM'].includes(s.name)?(parts,action,groups)=>lower.push({parts,action,groups}):add;
       into(s.head(),s.action,s.groups);
       sectionRows(s).forEach((row,i)=>into(row,s.rowAction?s.rowAction(i):s.action));

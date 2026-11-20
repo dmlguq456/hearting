@@ -2,8 +2,8 @@
 "질문만"; review RV-PR1652-A A5): the panel's status button, the waiting blink and the folded strip at 30-32 cells.
 
 1. `STATUS ›` (11-20: English whatever the declared language; it was `현황 ›`) at the right end of the REPO row: the word in the body color, `›` dim in the section
-   heads' column, no ground, no count. Short of cells the word goes first, then `· wt N` whole, then the name
-   is cut with `…`; the name and `›` stay. The unlabelled head and the bottom layout carry it at the first
+   heads' column, no ground, no count. Short of cells (11-20, the word is six cells) the name is cut down to eight cells, then `· wt N` goes, then the
+   word; `›` stays. The unlabelled head and the bottom layout carry it at the first
    row's end; the folded strip has none. No document: all of it dim. No artifact root: no button. A press on
    the row opens the status popup.
 2. What waits for the person's answer goes between two reds (`FACES.*.waitBlink`) on the waiting breath's
@@ -65,26 +65,36 @@ for(const name of names)for(const wt of [true,false])for(let w=24;w<=60;w++){
  assert(arrow&&arrow.at===w-3&&arrow.dim===true,tag);
  assert(v.rows[1].every(x=>x.background===undefined),tag);
  if(label)assert(row.startsWith('│ REPO   '),tag);
- // The stage this width shows, and the order: the word goes before the count, the count before the name is cut.
+ // The stage this width shows, and the order (11-20, the word being `STATUS`): the name is cut (to eight cells at least) before the word goes, the count goes
+ // before the name is cut below that, and the word goes last (down to `›`, then the name cut with `…`).
  const word=value.includes('STATUS ›'),count=value.includes('· wt 12'),cut=value.includes('…'),whole=value.includes(name);
  assert(whole||cut,tag);
- if(word)assert(!wt||count,tag+' (the word stands only with the count)');
- if(cut)assert(!count&&!word,tag+' (the name is cut last)');
- if(!count&&wt)assert(!word,tag);
+ if(w>=26)assert(word,tag+' (the word stands while the name keeps eight cells)');
+ if(word&&cut)assert(cells(value.slice(0,value.indexOf('…')+1))>=Math.min(cells(name),8),tag+' (the name keeps eight cells)');
  stages.add([word,count,cut].join());
  // The press: the whole row opens the status popup; no other press on it.
  const hits=v.hits.filter(h=>h.row===1);
  assert.deepEqual(hits.map(h=>[h.left,h.right,h.action]),[[2,w-3,'popup:STATUS']],tag);
 }
-// Each stage is reached somewhere: whole, `›` with the count, `›` alone, the name cut.
-for(const s of ['true,true,false','false,true,false','false,false,false','false,false,true'])assert(stages.has(s),[...stages].join(' | '));
+// Each stage is reached somewhere: whole, the name cut with the count kept, the count gone (name whole, then cut), and below 26 cells the word goes.
+for(const s of ['true,true,false','true,true,true','true,false,false','true,false,true'])assert(stages.has(s),[...stages].join(' | '));
+assert([...stages].some(x=>x.startsWith('false')),[...stages].join(' | '));
 // The design's 40-cell rows (the name's room 29 cells).
 const at40=name=>str(render({width:40,model:{repo_side:[p(name)],status_doc:{word:'STATUS',has_doc:true}}}).rows[1]);
 // (11-20: the REPO row is the REPO group's head, its free cells a thin rule.)
 assert.equal(at40('hearting'),'│ REPO   hearting · wt 12 ─── STATUS › │');
-assert.equal(at40('shell-tools-kit'),'│ REPO   shell-tools-kit · wt 12 ─── › │');
-assert.equal(at40('speech-separation-bench'),'│ REPO   speech-separation-bench ─── › │');
-assert.equal(at40('very-long-project-name-for-tests'),'│ REPO   very-long-project-name-for… › │');
+// (11-20: the word is `STATUS`, six cells: a name too long for it is cut, down to eight cells, before the word goes.)
+assert.equal(at40('shell-tools-kit'),'│ REPO   shell-tools… · wt 12 STATUS › │');
+assert.equal(at40('speech-separation-bench'),'│ REPO   speech-sepa… · wt 12 STATUS › │');
+assert.equal(at40('very-long-project-name-for-tests'),'│ REPO   very-long-p… · wt 12 STATUS › │');
+// Narrow panels (32 to 36 cells; the side panel is never narrower in the product): the name is cut first, then the count goes, and the word stays.
+const atW=(w,name)=>str(render({width:w,model:{repo_side:[p(name)],status_doc:{word:'STATUS',has_doc:true}}}).rows[1]);
+assert.equal(atW(32,'my-project'),'│ REPO my-project ─── STATUS › │');
+assert.equal(atW(32,'shell-tools-kit'),'│ REPO shell-tools-k… STATUS › │');
+assert.equal(atW(34,'speech-separation-bench'),'│ REPO   speech-separa… STATUS › │');
+assert.equal(atW(36,'my-project'),'│ REPO   my-proj… · wt 12 STATUS › │');
+for(const w of [32,33,34,35,36])for(const n of ['a','my-project','speech-separation-bench','very-long-project-name-for-tests']){const r=atW(w,n);
+  assert(cells(r)===w&&r.includes('STATUS ›'),w+' '+r);}
 // The word in the body color (Fleet's `soft`, the panel's `loc_repo`: 253), `›` dim.
 {const v=render({width:54,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true}}});
  assert.equal(str(v.rows[1]),'│ REPO   hearting · wt 12 ───────────────── STATUS › │');
@@ -112,7 +122,7 @@ for(const status_doc of [undefined,null,{word:'',has_doc:true}]){
         self.node(r"""
 // Narrower than 30 cells inside (the 32-cell side panel): the first row, unlabelled, the same order.
 {const v=render({width:32,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true}}});
- assert.equal(str(v.rows[1]),'│ REPO hearting · wt 12 ──── › │');assert(v.hits.some(h=>h.row===1&&h.action==='popup:STATUS'));}
+ assert.equal(str(v.rows[1]),'│ REPO hearting ───── STATUS › │');assert(v.hits.some(h=>h.row===1&&h.action==='popup:STATUS'));}
 // The bottom layout: the right end of the first row (`repo │ model │ context`); short of cells the word goes, then the row is cut.
 for(const [w,want] of [[80,/│ hearting │ Opus 5\.5 │ ctx 46% +STATUS › │$/],[34,/│ hearting │ Opus 5\.5 │ ctx 4… › │$/]]){
  const v=render({width:w,side:false,height:8,model:{repo:[p('hearting')],context:[p('ctx 46%')],status_doc:{word:'STATUS',has_doc:true}}});

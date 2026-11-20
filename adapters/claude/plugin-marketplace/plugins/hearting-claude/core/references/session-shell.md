@@ -360,8 +360,8 @@ narrower than 30 cells inside the labels go first): `REPO   hearting · wt 12`,
 the repository name in its color with no trailing `/` and the worktree count
 dim (none for zero or an unknown count), the status button `STATUS ›` (11-20: English, the panel's section names are, whatever the
 declared language; it was `현황 ›`) at the row's right end (11-15, design 2: the word in the body color, `›` dim in
-the section heads' `›` column, no ground and no count; short of cells the word goes first, then
-`· wt N` whole, then the name is cut with `…`, the name and `›` staying; the unlabelled head and the
+the section heads' `›` column, no ground and no count; short of cells (11-20, the word being the six cells of `STATUS`) the name is cut with `…`
+down to eight cells before the word goes, then `· wt N` goes before the name is cut below that, and only then the word, with `›` staying; the unlabelled head and the
 bottom layout carry it at their first row's right end; no status document: all of it dim, a press
 still opens it; no artifact root: no button; a press anywhere on the row opens the status popup; 11-20: while the panel
 draws the STATUS section (below) the button stands in that section's head and the row carries none, so it is drawn once), and `GIT    main ✓`, all dim with no
@@ -429,15 +429,15 @@ layout keeps the metadata row (or rows) first and one content row
 Two groups (11-20, the person: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" / "REPO ---- SESSION ----"), beside the native area. REPO is the repository's: the
 REPO row, which is the group's head (`REPO   hearting · wt 12 ────`: the word in the label column, the rule dim in a section head's color running to the row's end,
 the status button, where there is no STATUS section, at its end; no row more than before; narrower than 30 cells inside the word stands first as `REPO `), and under
-it the STATUS section, then GIT and PEERS where they stood. SESSION is this session's: its head `SESSION ────` stands where the empty row between the two groups of
+it GIT, PEERS and, at the group's bottom, the STATUS box (11-20, the person: "GIT PEER 아래로 두고" / "박스를 REPO의 하단으로 두자는거야"). SESSION is this session's: its head `SESSION ────` stands where the empty row between the two groups of
 metadata stood and goes with it short of rows, then MODEL, CTX, TITLE, NOW, QUESTIONS, the route box, MESSAGES, MEM. RESOURCES and USAGE keep their own heads, place and shape
-at the panel's bottom (they read under SESSION; they belong to neither group). The bottom layout has no group heads: its first row carries the repository and the session together.
-(`panel-view`'s `GROUP_HEAD` is `merged`; `separate`, a head row of its own over the REPO row, is the other form, one row more, the first row to go short of rows.)
+at the panel's bottom (they read under SESSION; they belong to neither group). The bottom layout has no group heads: its first row carries the repository and the session together,
+then GIT, PEERS and the STATUS box, then the title and NOW row and the route box. The REPO row is the group's head in every width; there is no head row of its own over it.
 
 Under the head the panel is a few rows per section (11-15, popup design E), each
 a press away from its popup, where the section's own table reads whole: in order
 QUESTIONS, the route box, MESSAGES and MEM (beside the native area all of
-them; under it QUESTIONS, STATUS, the route box and MESSAGES; beside the native area the STATUS section stands in the REPO group, under the REPO row). The panel draws no LAB and no SESSIONS
+them; under it QUESTIONS, the route box and MESSAGES, the STATUS box standing among the metadata rows; beside the native area the STATUS box stands at the REPO group's bottom, under GIT and PEERS). The panel draws no LAB and no SESSIONS
 section (11-15, the person: the experiment board and the machine's sessions read in Fleet's own
 LAB and session tables, which stay; the panel no longer reads the board or the session table, nor
 watches their files). Every other section's head has one form:
@@ -601,9 +601,9 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   setting picks what a route keeps in its one-row form short of cells: `time` the
   elapsed time, `model` its context.
 - STATUS (11-20, the person: "현황이 사용성이 많아 질 수 있는 부분이니까 좀 더 눈에 띄면 좋겠어" / "패널 공간에 현황은 중요하지. 기본적으로 5줄
-  이상 써서 보이는것도 중요할것 같다"; the 11-15 button on the REPO row had been the whole of it): the section second from the top, right
-  under the REPO row (11-20, below: the section is the REPO group's) beside the native area, and second among the sections in the bottom layout
-  (under the question to answer here, which never gives its place, and above the route box). It is a box of the route
+  이상 써서 보이는것도 중요할것 같다"; the 11-15 button on the REPO row had been the whole of it): beside the native area the box stands at the bottom of
+  the REPO group, under the REPO row, GIT and PEERS (and over the SESSION head); in the bottom layout under the first row, GIT and PEERS and over the title and
+  NOW row (11-20, the person: "GIT PEER 아래로 두고" / "박스를 REPO의 하단으로 두자는거야"). It is a box of the route
   box's frame (`boxTop`, `boxRow`, `boxBottom`) in the route box's quiet color, its name and `›` in the top border,
   `╭─ STATUS ──── › ─╮`, no head row of its own, `╰──╯` under the rows (11-20, the person: "현황은 영어로" / "그리고 박스로 감싸고"; the name is
   English whatever the declared language, as the panel's other section names are; the groups' names are the document's words and stay Korean;
@@ -613,8 +613,9 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   (its name, its count) and its titles under it, two cells in, one row each (`⠋`, `◇`, `✓`, `·`; the waiting count and glyph in the
   caution color). The lists are the document's own top-level bullets under `## 하는 중`, `## 결정 기다리는 것`, `## 끝난 일`, `## 예정`
   (and the near spellings an older hand-written page uses: `결정 필요`, `다음`, `최근 마감`; a note in parentheses is no title), read by
-  the backend with the button's value (`session_status.read`'s `groups`, the first 64 KiB, again only when the document's modification
-  time or size changed; no new timer, watch or worker). No document, or none with such a heading: no section, and the button stays on
+  the backend with the button's value (`session_status.read`'s `groups`, the first 64 KiB of the document at each read of the value; nothing is kept
+  between reads, and no new timer, watch or worker). A heading is read by how it begins (an English word whole), so `## Definition of Done`, `## Not done yet` and
+  `## How to do the release` name no list, and a line or heading inside a code fence is no job and no heading. No document, or none with such a heading: no section, and the button stays on
   the REPO row. A `## 결정 기다리는 것` with nothing under it is the count 0. Body rows: `STATUS_MIN` = 5 while rows allow, up to
   `STATUS_MAX` = 12 (four heads and eight titles, two to a group) where they are plentiful (rows inside the box, laid out at its inner width, four cells
   narrower than the panel's; the box's two borders come on top, so the section takes one row more than its head row did, and the rows that give it, in the order
@@ -622,8 +623,12 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   기록 N`, a finished one's date first): short of cells the tail goes first, piece by piece from its end (the tail dim), then the title is cut with `…`. Short of rows the groups give their titles up
   from the last: `하는 중`, `기다리는 것`, `최근에 끝난 것`, `나중에 할 것` stand as counts, the neighbouring ones on one row
   (`최근에 끝난 것 4 · 나중에 할 것 3`, the short names `끝난 일 4 · 예정 3` where the full ones do not fit), and the group that waits for the
-  person keeps its title to the last: five rows are `하는 중` with a title, `기다리는 것` with a title and one row of counts; below five
-  rows the whole section is one row of counts.
+  person keeps its title to the last: five rows are `하는 중` with a title, `기다리는 것` with a title and one row of counts; four rows are `하는 중`,
+  `기다리는 것` with its first title and one row of counts for the other two; three rows or fewer are one row of counts for all four groups.
+  In the bottom layout the box is the same, three rows inside at most (`STATUS_BOTTOM`), and its rows are the first the box gives short of rows,
+  after MESSAGES' and before the route box loses a row: MESSAGES gives its rows and head before the GIT row goes there, and the box goes down to its one
+  row of counts before the route box shrinks. (With four groups three rows still read as the one row of counts, so a four-group document shows titles
+  only beside the native area; a document with fewer groups shows them in three rows.)
 - MESSAGES: the recent messages, two rows each as v4.36.4 drew them (spec rule 31, restored 11-16, the
   person: "메시지 형식은 퇴행했네? 최대 5개 정도로 늘리고, 그전에 원래 형식으로 돌려"): the head (the arrow in
   its direction's color, the other session's number, then dim harness, time, kind and a sent one's

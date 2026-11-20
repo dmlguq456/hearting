@@ -370,21 +370,28 @@ class GroupsTest(StatusTest):
         self.assertLessEqual(len(longest), session_status.GROUP_TITLE)
         self.assertNotIn("\x1b", longest)
 
-    def test_the_value_carries_the_groups_and_a_document_is_read_again_only_when_its_stamp_changed(self):
+    def test_a_heading_is_read_by_how_it_begins_and_a_code_fence_is_no_list(self):
+        """Hand-written pages (the review's counter-examples): a word inside a heading names no list, and a fence holds no heading and no job."""
+        for heading in ("Definition of Done", "Not done yet", "Context: what we are doing", "How to do the release", "CI 기다리는 PR", "Where to look next",
+                        "Backlog (to do later)", "Work done so far"):
+            self.assertEqual(self.kinds("# t\n\n## %s\n- 하나\n- 둘\n" % heading), [], heading)
+        # The words the near spellings begin with still read, in either case, with a word after them.
+        for heading, kind in (("Done", "done"), ("Next steps", "next"), ("To do", "next"), ("TODO", "next"), ("In progress", "running"),
+                              ("Doing now", "running"), ("Waiting on you", "waiting"), ("Decisions needed", "waiting"), ("다음에 할 일", "next")):
+            self.assertEqual(self.kinds("# t\n\n## %s\n- 하나\n" % heading), [(kind, 1, ["하나"])], heading)
+        # A line in a code fence is no job, and a heading in one starts nothing.
+        fenced = "# t\n\n## 하는 중\n- 일 하나\n```\n- code line\n## 끝난 일\n- not a job\n```\n- 일 둘\n"
+        self.assertEqual(self.kinds(fenced), [("running", 2, ["일 하나", "일 둘"])])
+
+    def test_the_value_carries_the_groups_and_every_read_reads_the_document(self):
         folder2 = self.campaign("beta", body=CAMPAIGN)
         view = self.read(self.route(2, "beta"))
         self.assertEqual([g["kind"] for g in view["groups"]], ["running", "waiting", "done", "next"])
-        calls = []
-        real = session_status.read_text
-        with mock.patch.object(session_status, "read_text", side_effect=lambda path: calls.append(path) or real(path)):
-            self.read(self.route(2, "beta"))
-            self.read(self.route(2, "beta"))
-            self.assertEqual(calls, [])                          # the same stamp: no read of the document
-            path = folder2 / "현황.md"
-            path.write_text(CAMPAIGN + "- 하나 더\n", encoding="utf-8")
-            os.utime(path, (NOW - 10, NOW - 10))
-            again = self.read(self.route(2, "beta"))
-            self.assertEqual(len(calls), 1)
+        # Nothing is kept between reads (each read of the value is a process of its own): a changed document shows at the next read.
+        path = folder2 / "현황.md"
+        path.write_text(CAMPAIGN + "- 하나 더\n", encoding="utf-8")
+        os.utime(path, (NOW - 10, NOW - 10))
+        again = self.read(self.route(2, "beta"))
         self.assertEqual(again["groups"][-1]["count"], 2)
 
     def test_a_campaign_md_document_is_read_by_name_and_gives_the_groups(self):

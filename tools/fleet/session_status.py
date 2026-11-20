@@ -14,7 +14,7 @@ each session campaign's folder as one folder target (a trailing separator) so a 
 ``groups`` (11-20, the panel's STATUS section) are the document's lists read from its first 64 KiB: what is in
 progress, what waits for the person, what ended lately, what comes later, each its name, its count and its first
 titles (``read_groups``; a document with none of those headings gives ``[]`` and the panel draws no section).  They
-are read again only when the document's stamp (modification time and size) changed, in the same read as the button.
+are read with the button's value (each read of the value reads the document's first 64 KiB once; nothing is kept between reads).
 
 ``held(cwd, claim)`` is the value the host already holds (its button's) taken for the popup, so the popup
 does not read what the button read: it stands only where the claim names a status document inside this
@@ -52,13 +52,12 @@ _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}_")
 _ROOTS = {}            # session folder -> (resolved at, artifact root or None)
 _KEYS = {}             # (root, route id) -> its campaign key (a route's key never changes)
 _FOLDERS = {}          # (root, campaign key) -> (resolved at, campaign folder or None)
-_GROUPS = {}           # document path -> (mtime, size, its groups); read again only when the stamp changed
 GROUP_ITEMS = 6        # titles kept per group (the panel shows eight at most in all)
 GROUP_TITLE = 200      # cells of a title kept
 
 
 def clear_cache():
-    for cache in (_ROOTS, _KEYS, _FOLDERS, _GROUPS):
+    for cache in (_ROOTS, _KEYS, _FOLDERS):
         cache.clear()
 
 
@@ -175,7 +174,9 @@ def _age(stamp, now):
 
 
 # The headings of the campaign document (``## 하는 중`` ...) and the near spellings an older hand-written page uses.  A heading
-# that names a record of what is done (``기록``, ``log`` ...) is no list of work.  The order is the panel's.
+# that names a record of what is done (``기록``, ``log`` ...) is no list of work.  The order is the panel's.  A heading is read by how it
+# BEGINS (as ``project_status._section_kind`` reads ``다음``/``예정``), an English word whole (``Definition of Done``, ``Not done yet``,
+# ``How to do the release`` name no list).
 _GROUP_WORDS = (
     ("running", ("하는 중", "진행 중", "in progress", "in flight", "doing")),
     ("waiting", ("결정 기다리", "기다리는", "결정 필요", "결정할", "결정 대기", "사용자에게 필요", "decisions needed",
@@ -187,12 +188,21 @@ _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _BULLET = re.compile(r"^(?:[-*+]|\d+[.)])\s+(.*)$")
 
 
+_ENGLISH_WORD = re.compile(r"[a-z][a-z ]*")
+
+
+def _begins(lowered, word):
+    if not lowered.startswith(word):
+        return False
+    return not (_ENGLISH_WORD.fullmatch(word) and lowered[len(word):len(word) + 1].isalnum())
+
+
 def _group_kind(title):
-    lowered = title.casefold()
+    lowered = title.casefold().lstrip()
     if any(word in lowered for word in project_status._RECORD_WORDS):
         return None
     for kind, words in _GROUP_WORDS:
-        if any(word in lowered for word in words):
+        if any(_begins(lowered, word) for word in words):
             return kind
     return None
 
@@ -204,8 +214,13 @@ def parse_groups(text):
     spellings above; one of each kind, the first).  A bullet that is only a note in parentheses (``(… 접어 둠)``) is no title.
     A list with no title is left out, except the one that waits for the person: its heading with nothing under it says
     nothing waits (count 0).  Nothing is invented: a document with no such heading gives ``[]``."""
-    found, current, level = {}, None, 0
+    found, current, level, fence = {}, None, 0, False
     for raw in str(text).splitlines():
+        if raw.strip().startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence:                       # what a code fence holds is no heading and no job
+            continue
         heading = _HEADING.match(raw.strip())
         if heading:
             depth, words = len(heading.group(1)), project_status._plain(heading.group(2))
@@ -239,16 +254,10 @@ def parse_groups(text):
 
 
 def read_groups(path):
-    """``parse_groups`` of the document's first 64 KiB, kept while the document's stamp stays; ``[]`` if unreadable."""
+    """``parse_groups`` of the document's first 64 KiB; ``[]`` if unreadable."""
     try:
-        info = os.stat(path)
-        found = _GROUPS.get(path)
-        if found is not None and found[:2] == (info.st_mtime, info.st_size):
-            return found[2]
         lines, _cut = read_text(path)
-        groups = parse_groups("\n".join(lines)) if lines is not None else []
-        _GROUPS[path] = (info.st_mtime, info.st_size, groups)
-        return groups
+        return parse_groups("\n".join(lines)) if lines is not None else []
     except Exception:  # noqa: BLE001 -- a document that cannot be read gives no section, never a failed button
         return []
 
