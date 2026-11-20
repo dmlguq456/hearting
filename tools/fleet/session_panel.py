@@ -876,6 +876,19 @@ RESULT_SECONDS = 600
 PASSED = re.compile(r"(?i)pass(ed)?|success(ful)?|succeeded|ok|done|complete(d)?")
 
 
+def route_bands(items):
+    """Fleet's leg band for a route, as the first screen of its page draws it (see ``live._panel_bands``): text only, bounded."""
+    import re
+    # (a piece keeps its own spaces, which the band's lines lay their words by: only control characters go)
+    pieces = lambda parts, limit: [[re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(part[0]))[:80], str(part[1])[:24]] for part in (parts or ())
+                                   if isinstance(part, (list, tuple)) and len(part) >= 2][:limit]
+    return [{"n": sanitize_title(str(item.get("n") or ""))[:64], "st": str(item.get("st") or "")[:16],
+             "verdict": sanitize_title(str(item.get("verdict") or ""))[:16], "kind": str(item.get("kind") or "")[:8],
+             "lines": [pieces(line, 8) for line in (item.get("lines") or ())[:2] if isinstance(line, (list, tuple))],
+             "title": pieces(item.get("title"), 10)}
+            for item in (items if isinstance(items, list) else ())[:6] if isinstance(item, dict)]
+
+
 def presentation(values, view, harness, sid, columns, *, native_owned=(), display=None, now=None):
     """``display`` and ``now`` (the session's prompt display and the clock) let a finished
     route's result leave the ROUTE box after the person's next input or ten minutes."""
@@ -906,7 +919,8 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         visibility = row.get("visibility") if isinstance(row.get("visibility"), dict) else {}
         routes.append({**route_row(row, cells=route_gauge_cells(columns)), "id": clean(row.get("id")), "title": clean(row.get("title")),
                        "state": clean(row.get("state")), "state_label": state_label(row.get("state")), "stage": clean(row.get("worker_stage")),
-                       "stages": stages, "stage_more": row.get("stage_more", 0),
+                       "stages": stages, "stage_more": row.get("stage_more", 0), "bands": route_bands(row.get("bands")),
+                       "head_repo": clean(row.get("head_repo")), "session_tag": clean(row.get("session_tag")),
                        "visibility": route_evidence(visibility, unit=str(row.get("capability") or "") == "unit"),
                        "reason": clean(reason), "outcome": clean(row.get("outcome")),
                        "owner": owner_text, "owner_line": "" if runs_itself else owner_text,

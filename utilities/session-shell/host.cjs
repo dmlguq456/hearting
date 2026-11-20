@@ -787,7 +787,8 @@ function popupNow(){
     table.space=space;
     title=tableTitle(table.kind);
     body=[...all.slice(table.scroll,table.scroll+space),...guide];
-    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,labels:names.map(sectionLabel),current,model:panelModel,configuration:displayConfiguration,cellWidth,background:terminalBackground});
+    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,labels:names.map(sectionLabel),current,model:panelModel,configuration:displayConfiguration,cellWidth,background:terminalBackground,
+      fixedTop:table.kind==='ROUTE'&&!!table.page});
     // The table's own press targets, moved to where its rows stand on the screen.
     const first=view.frame.top+1,left=view.frame.left+2;
     view.tableHits=(table.hits||[]).filter(h=>h.row>=table.scroll&&h.row<table.scroll+space)
@@ -1025,14 +1026,14 @@ function openPopup(name,open='',page=false){
   queueDisplay();
 }
 // What a routes popup shows before its own reading comes: what was read last for this session (same width, same
-// route, table or page as it opens, the panel's route values unchanged since), else for a route's page the stage boxes
+// route, table or page as it opens, the panel's route values unchanged since), else for a route's page the page's frame
 // the panel's values draw (`panelView.routePageFirst`), else the panel's route box at the popup's width; nothing
 // where there is neither (the popup's spinner). Its rows are not this reading's, so it carries `stale`.
 function routeFirst(t){
   const r=routePopup;
   if(r&&r.sid===sid&&r.width===t.width&&r.open===t.open&&r.key===popupKeys.ROUTE&&!!r.page===!!t.page)return {rows:r.rows,hits:r.hits,routes:r.routes,loaded:true,stale:{at:r.at,failed:false}};
   const args={model:panelModel,columns:Math.max(20,Math.min(200,t.width-4)),cellWidth,configuration:displayConfiguration,background:terminalBackground};
-  // A route with no stage line (the owner alone, a unit's) has no stage boxes: its first screen stays the panel's box.
+  // (11-19: every form's page, unit, solo and team, draws its frame from the panel's values; only a route the panel holds no leg band for stays the panel's box.)
   const b=(t.page&&panelView.routePageFirst({...args,id:t.open}))||panelView.routesBody(args);
   return b?{rows:b.rows,hits:b.hits,routes:b.routes,loaded:true,stale:{at:Number(panelModel.route_read_at)||0,failed:false}}:null;
 }

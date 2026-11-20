@@ -67,8 +67,9 @@ sections step down to one row first (`RESOURCES` before any of them), then the r
 (the closed workers' box becomes the open one, each NOW's second row goes, the `CTX` row folds into the first row, each NOW's first row goes, then the kind row, then one row each; a zone's rule stays while one row of the zone shows) and scrolls
 in place under the wheel, its border counting what it hides. A press on a
 section's head or rows opens its popup (below); a press on any row of a route
-opens the routes popup on that route's page (Fleet's stage boxes; until its own
-reading comes, the stage boxes the panel's values already draw (its top rule ends in the route's form word, `team` or `solo`, as in the route's bracket, never `staged`)), a press on the
+opens the routes popup on that route's page (Fleet's route page: the frame first, then the route row, then the lines about it). From the press on, the popup shows that frame at once for every form (unit, solo, team), drawn from the
+values the panel already holds, in the cells the reading fills (only values come in; no border, title or name moves), and the frame stands to its content (no empty rows under the stage
+boxes). The popup's top edge stays where it is while the page loads and grows downward only. No word of the frame changes: the stage boxes, the head and their titles are Fleet's own), a press on the
 section's head (or Ctrl+], ←→) the routes table, a request's row the MESSAGES
 popup. Values the host could not refresh for a while are shown, not claimed:
 nothing spins, and the frame takes no route state. A value that cannot be read

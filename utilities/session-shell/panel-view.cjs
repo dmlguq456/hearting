@@ -2287,7 +2287,9 @@ function popupWidth(cols,kind='text'){
 // frame first (under 8 rows), then its bottom line (3 rows or fewer), so the content keeps rows.
 function popupHeight(space){return space>=8?space-2:space;}
 function popupRoom(rows,band=0){const H=popupHeight(Math.max(1,rows-band));return Math.max(0,H>3?H-2:H-1);}
-function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],labels=sections,current=0,model={},configuration,cellWidth,background=''}){
+// `fixedTop` (11-19: a route's page) stands the popup's top edge where the tallest popup's would be, whatever its content, so the page grows downward only:
+// the reading that replaces the first screen moves no row of it, only the bottom edge.
+function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],labels=sections,current=0,model={},configuration,cellWidth,background='',fixedTop=false}){
   const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
   const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
   const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
@@ -2300,7 +2302,7 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],labels
   const cut=(parts,limit)=>size(parts)<=limit?parts:limit<1?[]:[...clip(parts,limit-1).parts,{...text('…','dim')}];
   const space=Math.max(1,rows-band),W=Math.min(cols,popupWidth(cols,kind)),inner=Math.max(0,W-4);
   const maxH=popupHeight(space),shut=maxH>3,list=body.slice(0,Math.max(0,shut?maxH-2:maxH-1)),H=Math.min(maxH,list.length+(shut?2:1));
-  const x=Math.floor((cols-W)/2),y=Math.max(0,Math.round((space-H)/2));
+  const x=Math.floor((cols-W)/2),y=Math.max(0,Math.round((space-(fixedTop?maxH:H))/2));
   // 11-15 (panel polish 3): where nothing behind it is veiled (mono, eight colors, NO_COLOR) the
   // frame's line is bright instead of the messages' gray.
   const bright=veil(configuration,{colors:model.colors??256,noColor:model.no_color===true,background})===null;
@@ -2503,25 +2505,23 @@ function routesBody({model={},columns=72,cellWidth,configuration,background=''}=
   }
   return {rows,hits,routes};
 }
-// 11-19 (the person: "라우트를 눌렀을때 fleet에서 처럼 스테이지별 단계가 시각화되었으면 한다"): the ROUTE popup's first screen for
-// a route pressed on the panel, before its own reading (Fleet's route page) comes: the stage boxes of Fleet's page, drawn from the
-// stages the panel already holds for that route (`routes[].stages`, what `session_panel.presentation` made of them). Only the values
-// held are drawn, an empty value is an empty place, and nothing is new: the top rule, the legs' band, then the stages in the rows Fleet
-// lays them (`_stage_grid`: a snake of at most six boxes a row, `▶ ◀ ▼` between), each box as `_stage_box` fills it. What Fleet's page has
-// besides (the task's summary, the visibility line, the route row, the chosen leg's frame) is not here, so the boxes stand higher until
-// the page comes. The boxes stand in Fleet's inner width (`stage_room`: the popup's columns less ten, from cell 4, as the page lays them),
-// an empty `out`/`unit` reads `·`, a value cut to its place ends in `…`, and no value touches the right rail (one cell is left, as Fleet's
-// `_stage_box` leaves it). A route with no stage line (the owner alone, a unit's, no stages) is `null`: the popup keeps the panel's box.
-// Returns `{rows,hits:[],routes}` as `routesBody` does (the popup's table keys use `routes`). It does not move (no beat).
+// 11-19 (the person: "라우트를 눌렀을때 fleet에서 처럼 스테이지별 단계가 시각화되었으면 한다"; then "그 대기 시간동안 그냥 라우트 목록이 뜨는데?? 그리고 로딩되서 스테이지 같은
+// 기록이 뜰때 아래에 여백이 붕뜨면서 상하로 꽉차버리는 문제가 있어"): the ROUTE popup's first screen for a route pressed on the panel, before its own reading (Fleet's
+// route page, `_route_page` with `whole`) comes. It is that page's frame, `draw_route_detail(fit=True)`, drawn from the values the panel already holds for the route
+// (`routes[]`, what `session_panel.presentation` made of them: the leg band `bands`, the stages, the form's one line `form_note`), in the same cells: the top rule, the
+// form's line, the legs' band, the panel's title and the stage boxes (`_stage_grid`: a snake of at most six boxes a row, `▶ ◀ ▼` between), each box as `_stage_lines` /
+// `_stage_box` fill it, the frame ending one row under the last box. A value the panel does not hold is an empty place (`·`) and the reading fills it; no border, title, name
+// or arrow moves. What the page has under the frame (the route row, the task's summary, the visibility lines) comes with the reading. The boxes stand in Fleet's inner
+// width (`stage_room`), a value cut to its place ends in `…`, and no value touches the right rail. A route the panel holds no leg band for (an older backend, an unknown
+// route) is `null`: the popup keeps the panel's box. Returns `{rows,hits:[],routes}` as `routesBody` does (the popup's table keys use `routes`). It does not move (no beat).
 function routePageFirst({model={},id,columns=72,cellWidth,configuration,background=''}={}){
   columns=Math.max(1,Math.min(200,Math.trunc(Number(columns))||72));
   const list=Array.isArray(model.routes)?model.routes.filter(r=>r&&typeof r==='object'&&r.id):[];
   const route=list.find(r=>String(r.id)===String(id));
   if(!route)return null;
+  const bands=Array.isArray(route.bands)?route.bands.filter(b=>b&&typeof b==='object'):[];
+  if(!bands.length)return null;
   const stages=Array.isArray(route.stages)?route.stages.filter(s=>s&&typeof s==='object'):[];
-  // The panel's own test for a route that reads a stage line (`stageLinedOf`, the one `render` uses too).
-  const shape=String(route.shape||'');
-  if(route.unit_route===true||shape==='one-shot-owner'||!stageLinedOf({...route,stages}))return null;
   const cfg={...defaults,...configuration},styles=model.styles||{};
   const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
   const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
@@ -2540,101 +2540,145 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
     return x;
   };
   const size=value=>measure(clean(value));
-  const cut=(value,room)=>{let out='',used=0;for(const c of clean(value)){const w=measure(c);if(used+w>room)break;out+=c;used+=w;}return out;};
   // Fleet's own cut (`grid.clip_cells`): a value that fits stays, one that does not ends in `…` within the room.
   const clip=(value,room)=>{const s=clean(value);if(size(s)<=room)return s;let out='',used=0;for(const c of s){const w=measure(c);if(used+w>room-1)break;out+=c;used+=w;}return out+'…';};
+  // Python's `round` (half to even), as the stage rule's fill uses it.
+  const pyRound=v=>{const r=Math.round(v);return Math.abs(v%1)===0.5&&r%2!==0?r-1:r;};
+  const segs=(x,y,parts,limit)=>{for(const [value,key] of parts)x=put(x,y,value,key,limit);return x;};
   const outline=(x,y,w,h,key)=>{
     put(x,y,'┌'+'─'.repeat(Math.max(0,w-2))+'┐',key);put(x,y+h-1,'└'+'─'.repeat(Math.max(0,w-2))+'┘',key);
     for(let i=1;i<h-1;i++){put(x,y+i,'│',key);put(x+w-1,y+i,'│',key);}
   };
-  // The top rule: `╔═ <title>  <age> · N legs · <form> ═══╗` (11-19: the route's `kind_form`, the backend's one word for how it runs (`team`, `solo`, `unit`; `route_form` is the only place that
-  // decides it), or, where an older backend sends none, the shape's own word with `staged` left out, as `stageLead` does); the name in the body color, the rest dim.
-  const legs=Array.isArray(route.chain)?route.chain.filter(l=>l&&typeof l==='object'):[];
-  const tail=[route.elapsed,legs.length?legs.length+' leg'+(legs.length===1?'':'s'):'',String(route.kind_form||'').trim()||stageLeadOf(route)].map(v=>clean(v).trim()).filter(Boolean).join(' · ');
-  const tailText=tail?'  '+tail+' ':' ';
-  put(0,0,'╔═ ','dim');
-  const room=Math.max(0,columns-4-size(tailText));
-  const name=cut(route.title||route.id,room);
-  let x=put(3,0,name,'loc_repo');
-  x=put(x,0,tailText,'dim',columns-1);
-  while(x<columns-1)x=put(x,0,'═','dim',columns-1);
-  put(columns-1,0,'╗','dim');
-  // Boxes laid in a snake: even rows go right, odd rows left, `▶`/`◀` between boxes of a row and `▼` between rows.
-  const gap=4;
-  const snake=(count,per,w,h,y0,link,x0=0)=>{
-    const spots=[];
-    for(let i=0;i<count;i++){
-      const r=Math.floor(i/per),k=i%per,col=r%2===0?k:per-1-k;
-      spots.push({x:x0+col*(w+gap),y:y0+r*(h+1),row:r});
-    }
-    for(let i=0;i+1<count;i++){
-      const a=spots[i],b=spots[i+1];
-      if(a.row!==b.row)put(a.x+Math.floor(w/2),a.y+h,'▼',link);
-      else put(Math.min(a.x,b.x)+w+1,a.y+Math.floor(h/2),b.x>a.x?'▶':'◀',link);
-    }
-    return spots;
+  const form=String(route.kind_form||'').trim();
+  const stageTitle=s=>clean(s.name||'·');
+  const stat=s=>s.mark==='✓'?'done':s.mark==='●'?'active':s.mark==='✕'?'failed':'todo';
+  const use=columns-2,right=Math.min(columns-1,use);
+  // The top rule: `╔═ <title>  <age> · N legs · <form> ═══╗`: the title in the body color, the rest dim. The route's form closes it, else the shape's own word where it names one.
+  const legs=Number.isInteger(route.legs)?route.legs:Array.isArray(route.chain)?route.chain.length:0;
+  const gated=bands.some(b=>b.kind==='gate');
+  const chain=Array.isArray(route.chain)?route.chain:[];
+  const trailer=gated?'  '+(clean(route.age).trim()||'·')+' · '+chain.filter(l=>l&&String(l.name)!=='frame').length+' leg · human gate answered'
+    :'  '+(clean(route.age).trim()||'·')+' · '+legs+' leg'+(legs===1?'':'s');
+  // The word that closes the head: the one the reading draws (the route's shape) for a unit or solo route; a team route's first screen keeps its form word and a route with no form its shape's lead word, as before.
+  const word=form==='team'?'team':form?clean(route.shape||'').trim():stageLeadOf(route);
+  const repo=clean(route.head_repo).trim(),tag=clean(route.session_tag).trim();
+  const headParts=[[' ',null],...(repo?[[repo,'dim'],[' › ','dim']]:[]),...(tag?[['[','dim'],[tag,'loc_repo'],[']','dim'],[' › ','dim']]:[]),
+    [clean(route.title||route.id||'·'),'loc_repo'],[trailer,'dim'],...(word?[[' · '+word,'dim']]:[]),[' ',null]];
+  const titleStart=2,titleEnd=Math.min(right-1,titleStart+headParts.reduce((n,[t])=>n+size(t),0));
+  for(let xx=1;xx<right;xx++)if(xx<titleStart||xx>=titleEnd)put(xx,0,'═','dim');
+  put(0,0,'╔','dim');put(right,0,'╗','dim');
+  segs(titleStart,0,headParts,right-1);
+  const bandY=1,BAND_H=4,gap=4,LW=7;
+  const found=bands.findIndex(b=>b.st==='active');
+  const selected=found>=0?found:bands.length-1;
+  const room=use-6,bandW=Math.min(44,Math.floor((room-gap*(bands.length-1))/bands.length));
+  let centre=3+Math.floor(bandW/2);
+  // The stage rule under a leg's band: the stage that matters now (an active or failed one, else the first not done), its n/m and a thin progress rule.
+  const currentLeg=(x0,y,room_)=>{
+    const sts=stages.map(stat);
+    let cur=sts.findIndex(v=>v==='active'||v==='failed');
+    if(cur<0)cur=sts.findIndex(v=>v!=='done');
+    if(cur<0)cur=stages.length-1;
+    const st=sts[cur],limit=x0+Math.max(0,room_);
+    let x=put(x0,y,clip(stageTitle(stages[cur]),Math.max(0,room_)),st==='failed'?'lvl_r':ink(stages[cur].key),limit);
+    if(st!=='active')x=put(x+1,y,st==='done'?'✓':st==='failed'?'✕':'·',st==='done'?'lvl_g':st==='failed'?'g_dead':'dim',limit);
+    x+=2;
+    const done=sts.filter(v=>v==='done').length;
+    x=put(x,y,done+'/'+stages.length,'loc_repo',limit)+1;
+    const cells=Math.max(0,Math.min(12,limit-x)),fill=pyRound(cells*done/stages.length);
+    for(let i=0;i<cells;i++)x=put(x,y,i<fill?'━':'─',i<fill?ink(stages[cur].key):'dim');
   };
-  let y=1;
-  if(legs.length){
-    // The legs' band: a short box a leg, its name and its mark; no value is held for the inside.
-    const per=Math.max(1,Math.min(legs.length,6,Math.floor((columns+gap)/(14+gap)))),w=Math.max(8,Math.min(44,Math.floor((columns-gap*(per-1))/per)));
-    const spots=snake(legs.length,per,w,3,y,'dim');
-    legs.forEach((leg,i)=>{
-      const {x:bx,y:by}=spots[i],st=String(leg.state||'');
-      const mark=st==='done'?['✓','lvl_g']:st==='active'?['●','g_work']:st==='failed'||st==='dead'?['✕','g_dead']:['·','dim'];
-      outline(bx,by,w,3,'dim');
-      const right=' '+mark[0]+' ';
-      put(bx+w-1-size(right),by,right,mark[1]);
-      put(bx+2,by,' '+cut(leg.name||'·',Math.max(0,w-6-size(right)))+' ','loc_repo');
+  bands.forEach((band,index)=>{
+    const bx=3+index*(bandW+gap),status=String(band.st||'todo'),gate=band.kind==='gate',picked=index===selected;
+    const edge=picked?'loc_repo':gate||status==='active'?'dim':'dim';
+    const mark=status==='done'?['✓','lvl_g']:status==='failed'?['✕','g_dead']:['·','dim'];
+    const tail=status==='active'?[[' ',null],['●','g_work'],[' running ','loc_repo']]:[[' '+mark[0]+' ',mark[1]],[(clean(band.verdict).trim()||status)+' ','loc_repo']];
+    const tw=tail.reduce((n,[t])=>n+size(t),0),nameRoom=bandW-6-(gate?3:1)-tw,tailX=bx+bandW-1-tw;
+    outline(bx,bandY,bandW,BAND_H,edge);
+    segs(bx+2,bandY,[...(gate?[[' ◑ ','tag_steward']]:[[' ',null]]),[clip(band.n,Math.max(4,nameRoom)),'loc_repo'],[' ',null]],tailX);
+    segs(tailX,bandY,tail);
+    const lines=(Array.isArray(band.lines)?band.lines:[]);
+    const bandLines=[...(band.kind==='leg'&&stages.length?[null]:[]),...lines].slice(0,BAND_H-2);
+    bandLines.forEach((parts,k)=>{
+      if(parts===null){
+        const end=bx+bandW-2,labelRoom=Math.max(0,end-(bx+2));
+        const labelEnd=put(bx+2,bandY+1+k,labelRoom>=LW?'stage'.padEnd(LW):clip('stage',labelRoom),'dim',end);
+        currentLeg(labelEnd,bandY+1+k,Math.max(0,end-labelEnd));
+      }else segs(bx+2,bandY+1+k,(parts||[]).map(([t,key])=>[t,key]),bx+bandW-1);
     });
-    const rowsUsed=Math.floor((legs.length-1)/per)+1;
-    y+=rowsUsed*3+(rowsUsed-1)+1;
-  }
-  const LW=7,lab=(bx,by,word,limit)=>put(bx,by,word.padEnd(LW),'dim',limit);   // (the word too stays inside the box: its right rail is bx+w-1)
-  // Fleet's page lays its boxes from cell 4 (the page's `║` frame at 0, the legs' frame at 2, the box at `panel_left + 2`) in `stage_room`,
-  // the popup's columns less ten; fewer than three stages stand at most 64 cells a stage. Fleet counts flow steps; the panel holds no level,
-  // so the stages count one each (a chain; parallel stages are not told apart here).
-  const X0=4;
-  let stageRoom=Math.max(1,columns-10);
-  if(stages.length<3)stageRoom=Math.min(stageRoom,64*stages.length);
+    if(index)put(bx-Math.floor(gap/2)-1,bandY+Math.floor(BAND_H/2),'▶','dim');
+    if(picked){centre=bx+Math.floor(bandW/2);put(centre,bandY+BAND_H-1,'┬',edge);put(centre,bandY+BAND_H,'│',edge);}
+  });
+  const bandEnd=3+bands.length*(bandW+gap)-gap;
+  if(clean(route.after).trim())put(bandEnd+3,bandY+1,String(route.after).trim(),'dim',right);
+  // The selected leg's panel: its title on the top edge, the stage boxes inside.
+  const panelLeft=2,panelRight=right-2,panelY=bandY+BAND_H+1;
+  const sel=bands[selected];
+  const titleParts=[[' ',null],...(Array.isArray(sel.title)?sel.title:[]).map(([t,key])=>[t,key]),[' ',null]];
+  const tw=titleParts.reduce((n,[t])=>n+size(t),0);
+  const tx=panelLeft+2+tw<centre-1?panelLeft+2:centre+2,tEnd=Math.min(panelRight-1,tx+tw);
+  put(panelLeft,panelY,'┌','dim');put(panelRight,panelY,'┐','dim');
+  for(let xx=panelLeft+1;xx<panelRight;xx++)if(xx!==centre&&(xx<tx||xx>=tEnd))put(xx,panelY,'─','dim');
+  segs(tx,panelY,titleParts,panelRight-1);
+  put(centre,panelY,'┴','loc_repo');
+  // Boxes laid in a snake: even rows go right, odd rows left, `▶`/`◀` between boxes of a row and `▼` between rows. Fleet counts flow steps; the panel holds no level, so the
+  // stages count one each (a chain; parallel stages are not told apart here).
+  const X0=panelLeft+2;
+  let stageRoom=panelRight-panelLeft-4;
+  if(stages.length&&stages.length<3)stageRoom=Math.min(stageRoom,64*stages.length);
   const per=Math.min(stages.length,Math.max(3,Math.min(6,Math.floor((stageRoom+gap)/(36+gap)))));
-  const w=Math.floor((stageRoom-gap*(per-1))/per);
+  const w=per?Math.floor((stageRoom-gap*(per-1))/per):0;
   const vroom=w-4-LW;      // Fleet: the room of a value in a box
+  const lab=(bx,by,name,limit)=>put(bx,by,name.padEnd(LW),'dim',limit);   // (the word too stays inside the box: its right rail is bx+w-1)
+  // `_stage_lines`: by, time, rounds, gate, out, unit, says (a gate of the panel's value `true` is the pass mark: the box's title has its ✓, so only a gate in words is a line).
   const linesOf=stage=>{
     const lines=[];
-    if(stage.harness)lines.push(['by',[[String(stage.harness),'hb_'+String(stage.harness)],...(stage.model?[[' '+stage.model,'loc_repo']]:[])]]);
+    if(stage.harness)lines.push(['by',[[String(stage.harness),'hb_'+String(stage.harness)],...(stage.model?[[' '+stage.model+(stage.effort?' '+stage.effort:''),'loc_repo']]:[])]]);
     const todo=stage.mark===''&&stage.state!=='active'&&!stage.current;
     lines.push(['time',[[clip(stage.when||stage.elapsed||'·',vroom),todo?'dim':'loc_repo']]]);
     if(stage.note)lines.push(['rounds',[[clip(stage.note,vroom),'dim']]]);
-    // The panel's value for a stage's gate is `true` when it passed (`stage_doer`): that is a pass mark, and the box's title already has its ✓.
-    // Only a gate in words is a line.
     if(typeof stage.gate==='string'&&stage.gate.trim())lines.push(['gate',[[clip(stage.gate,vroom-3),'dim'],...(stage.mark==='✓'?[[' ✓','lvl_g']]:[])]]);
     lines.push(['out',[[clip(stage.out||'·',vroom),'dim']]]);
     lines.push(['unit',[[clip(stage.unit||'·',vroom),'dim']]]);
     if(stage.says)lines.push(['says',[[clip(stage.says,vroom),'dim']]]);
     return lines;
   };
-  const h=Math.max(4,Math.min(10,Math.max(...stages.map(s=>linesOf(s).length))+2));
-  const spots=snake(stages.length,per,w,h,y,'dim',X0);
-  stages.forEach((stage,i)=>{
-    const {x:bx,y:by}=spots[i];
-    const mark=stage.mark==='✓'?['✓','lvl_g']:stage.mark==='●'?['●','g_work']:stage.mark==='✕'?['✕','g_dead']:['·','dim'];
-    const word=clean(stage.verdict||stage.state||'').trim();
-    const right=' '+mark[0]+' '+(w<34||!word?'':word+' ');
-    const frame=stage.current?(stage.key||'dim'):stage.mark==='✕'?'lvl_r':'dim';
-    outline(bx,by,w,h,frame);
-    put(bx+w-1-size(right),by,right,'dim');
-    put(bx+w-1-size(right),by,' '+mark[0],mark[1]);
-    put(bx+2,by,' '+clip(stage.name||'·',Math.max(0,w-6-size(right)))+' ',ink(stage.key));
-    // (the values stand one cell short of the right rail, and a box's rows beyond its height are not drawn)
-    linesOf(stage).slice(0,h-2).forEach(([word_,parts],k)=>{
-      lab(bx+2,by+1+k,word_,bx+w-1);let px=bx+2+LW;
-      for(const [value,key] of parts)px=put(px,by+1+k,value,key,bx+w-2);
+  let end=panelY+1;
+  if(stages.length){
+    // A box as tall as its own value lines (a popup has no window's height to fill).
+    const h=Math.max(4,2+Math.max(...stages.map(s=>linesOf(s).length)));
+    const spots=stages.map((_,i)=>{const r=Math.floor(i/per),k=i%per,col=r%2===0?k:per-1-k;return {x:X0+col*(w+gap),y:panelY+1+r*(h+1),row:r};});
+    for(let i=0;i+1<stages.length;i++){
+      const a=spots[i],b=spots[i+1];
+      if(a.row!==b.row){put(a.x+Math.floor(w/2),a.y+h,'▼','dim');}
+      else put(Math.min(a.x,b.x)+w+1,a.y+Math.floor(h/2),b.x>a.x?'▶':'◀','dim');
+    }
+    stages.forEach((stage,i)=>{
+      const {x:bx,y:by}=spots[i],st=stat(stage);
+      const mark=st==='done'?['✓','lvl_g']:st==='active'?['●','g_work']:st==='failed'?['✕','g_dead']:['·','dim'];
+      const word=clean(stage.verdict||stage.state||'').trim();
+      const right_=' '+mark[0]+' '+(w<34||!word?'':word+' ');
+      const frame=stage.current?(stage.key||'dim'):st==='failed'?'lvl_r':'dim';
+      outline(bx,by,w,h,frame);
+      put(bx+w-1-size(right_),by,right_,'dim');
+      put(bx+w-1-size(right_),by,' '+mark[0],mark[1]);
+      put(bx+2,by,' '+clip(stageTitle(stage),Math.max(0,w-6-size(right_)))+' ',ink(stage.key));
+      // (a cut value ends in `…` one cell short of the right rail; the `by` line is cut at the rail itself, as Fleet's; a box's rows beyond its height are not drawn)
+      linesOf(stage).slice(0,h-2).forEach(([word_,parts],k)=>{
+        lab(bx+2,by+1+k,word_,bx+w-1);let px=bx+2+LW;
+        for(const [value,key] of parts)px=put(px,by+1+k,value,key,bx+w-1);
+      });
     });
-  });
-  y+=Math.floor((stages.length-1)/per+1)*(h+1)-1;
-  const more=Math.trunc(Number(route.stage_more))||0;
-  if(more>0)put(X0,y,'+'+more,'dim');
+    end=Math.max(...spots.map(s=>s.y))+h;
+    const more=Math.trunc(Number(route.stage_more))||0;
+    if(more>0)put(X0,end,'+'+more,'dim');
+  }
+  // The frame to its content: one row under the last box.
+  const bottom=end+1;
+  for(let yy=1;yy<bottom;yy++){put(0,yy,'║','dim');put(right,yy,'║','dim');}
+  for(let yy=panelY+1;yy<bottom;yy++){put(panelLeft,yy,'│','dim');put(panelRight,yy,'│','dim');}
+  put(0,bottom,'╚'+'═'.repeat(Math.max(0,right-1))+'╝','dim');
+  put(panelLeft,bottom,'╧','dim');put(panelRight,bottom,'╧','dim');
   // Cells back to parts (equal keys join), the row's trailing blanks gone.
   const text=(value,key)=>({text:value,...(key?(styles[key]||{dim:key==='dim'}):{})});
   const rows=grid.map(cells=>{
