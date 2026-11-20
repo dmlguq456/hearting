@@ -679,7 +679,7 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
                 grid.put(cursor, box_top + 7 + extra, "  " + note, "dim", limit=right - 2)
         else:
             grid.put(box_left + 12, box_top + 7 + extra, "route-sealed explicit choice only", "dim", limit=right - 2)
-    foot = "models.conf → .bak backup · new sessions and launches only · sealed routes keep their choice"
+    foot = "models.conf → .bak backup · new sessions and launches only · routes keep their depth, launches read this table"
     grid.put(box_left + 2, box_bottom, " ", "branch_s")
     grid.put(box_left + 3, box_bottom, foot, "dim", limit=right)
     grid.put(min(right - 1, x + 96), box_bottom, " ", "branch_s")

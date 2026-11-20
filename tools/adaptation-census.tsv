@@ -317,6 +317,7 @@ utility-deferred	launch_receipt.py
 utility-deferred	model-config.sh
 utility-deferred	model-worker-governor.py
 utility-deferred	model_config.py
+utility-deferred	model_follow.py
 utility-deferred	model_profile.py
 utility-deferred	native_agents.py
 utility-deferred	model_worker_governor.test.py
