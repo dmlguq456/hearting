@@ -102,6 +102,39 @@ class PureTest(unittest.TestCase):
         self.assertEqual([(u["key"], u["count"]) for u in units["active"]], [("pr:7", 2)])
         self.assertEqual(units["done"], [])
 
+    def test_a_published_piece_is_finished_though_a_review_route_of_its_pr_stays_open(self):
+        """Round 3 (11-21): `#1785 · v4.66.2` and `#1775 · v4.66.3` stood under "하는 중" with a blocked review left open."""
+        facts = [self.fact("impl85", pr=1785, c=NOW - 3 * HOUR, st=1),
+                 self.fact("pub85", kind="publish", prs=[1785], v="v4.66.2", c=NOW - 2 * HOUR),
+                 self.fact("pub75", kind="publish", prs=[1775], v="v4.66.3", c=NOW - HOUR)]
+        opened = [self.open_route("rv85", NOW - 600, pr=1785, kind="review", st=5),
+                  self.open_route("rv75", NOW - 600, pr=1775, kind="review", st=5)]
+        units = cd.link_units(facts, opened, {}, now=NOW)
+        self.assertEqual(units["active"], [])
+        self.assertEqual(units["active_folded"], 0)
+        # listed by the latest close, else by the publish's close; the order is the done order as ever
+        self.assertEqual([(u["key"], u["v"], u["closed_at"], u["count"]) for u in units["done"]],
+                         [("pr:1775", "v4.66.3", NOW - HOUR, 2), ("pr:1785", "v4.66.2", NOW - 3 * HOUR, 3)])
+        self.assertEqual(units["done_folded"], 0)
+
+    def test_a_published_piece_stays_doing_only_for_work_opened_after_the_publish(self):
+        publish = self.fact("pub", kind="publish", prs=[7], v="v1.0.0", c=NOW - 2 * HOUR)
+        done = self.fact("impl", pr=7, c=NOW - 3 * HOUR)
+        next_piece = self.open_route("next", NOW - 600, pr=7, st=NOW - HOUR)       # started after the publish closed
+        older = self.open_route("stuck", NOW - 600, pr=7, st=NOW - 5 * HOUR)       # started before it
+        unknown = self.open_route("nostart", NOW - 600, pr=7, st=None)
+        for label, opened, doing in (("next piece", [next_piece], True), ("stuck older work", [older], False),
+                                     ("start unknown", [unknown], True), ("work and review", [older, dict(
+                                         next_piece, rid="rv", kind="review")], False)):
+            with self.subTest(label):
+                units = cd.link_units([done, publish], opened, {}, now=NOW)
+                self.assertEqual([u["key"] for u in units["active"]], ["pr:7"] if doing else [])
+                self.assertEqual([u["key"] for u in units["done"]], [] if doing else ["pr:7"])
+        # no published version: an open review is still doing (nothing says it is over)
+        bare = self.fact("pub", kind="publish", prs=[7], v=None, c=NOW - 2 * HOUR)
+        units = cd.link_units([done, bare], [dict(older, kind="review")], {}, now=NOW)
+        self.assertEqual([u["key"] for u in units["active"]], ["pr:7"])
+
     def test_twenty_lines_of_done_and_a_count_of_the_rest(self):
         facts = [self.fact(f"r{i:02d}", c=NOW - i * 60) for i in range(21)]
         units = cd.link_units(facts, [], {}, now=NOW, closed_total=1500)
@@ -236,6 +269,26 @@ class PureTest(unittest.TestCase):
         folded = re.search(r"^크기 한도로 접은 질문 ([\d,]+)개\.$", text, re.MULTILINE)
         self.assertEqual(shown + int(folded.group(1).replace(",", "")), 600)
         self.assertEqual(len(self.bullets_of(text, "기다리는 것")), shown)   # the folded count adds no bullet
+
+    def test_the_size_limit_folds_finished_lines_then_open_work_and_the_questions_last(self):
+        """Review round 3: 400 open lines folded every question first (waiting 0 for the readers)."""
+        waits = {"status": "ok", "at": NOW, "items": [f"질문 {i}?" for i in range(60)]}
+        units = {"active": [self.unit(i) for i in range(400)], "active_folded": 0,
+                 "done": [self.unit(i) for i in range(20)], "done_folded": 3}
+        text = cd.render_document("Demo", "One line.", units, waits, now=NOW, tz=UTC)
+        self.assertLessEqual(len(text.encode("utf-8")), cd.SIZE_LIMIT)
+        self.assertEqual(len(self.bullets_of(text, "기다리는 것")), 60)
+        self.assertNotIn("크기 한도로 접은 질문", text)
+        self.assertEqual(self.bullets_of(text, "최근에 끝난 것"), [])             # the finished lines went first
+        shown = len(self.bullets_of(text, "하는 중"))
+        self.assertLess(shown, 400)
+        self.assertIn(f"크기 한도로 접은 열린 일 {400 - shown}개.", text)
+        # the questions alone too long: they fold last, after the others are gone
+        waits = {"status": "ok", "at": NOW, "items": ["질" * 300] * 600}
+        text = cd.render_document("Demo", "One line.", units, waits, now=NOW, tz=UTC)
+        self.assertLessEqual(len(text.encode("utf-8")), cd.SIZE_LIMIT)
+        self.assertEqual((self.bullets_of(text, "하는 중"), self.bullets_of(text, "최근에 끝난 것")), ([], []))
+        self.assertTrue(self.bullets_of(text, "기다리는 것"))
 
     def bullets_of(self, text, section):
         body = text.split("## " + section + "\n", 1)[1].split("\n## ", 1)[0]
@@ -825,6 +878,18 @@ class ReviewFixesTest(Fixture):
         self.assertIn("# 제목", self.document())
 
 
+class RoundThreeFixesTest(Fixture):
+    def test_a_published_pr_with_a_review_route_left_open_is_under_the_recent_ones(self):
+        self.route("work-1785", closed=NOW - 3 * HOUR)
+        self.route("rv-1785-close-unit", started=NOW - 2 * HOUR, touched=NOW - 600)            # never closed
+        self.route("publish-v4-66-2", capability="autopilot-ship", closed=NOW - 2 * HOUR,
+                   evidence="# v4.66.2 — #1785\n\n병합된 PR: #1785\n")
+        self.catch_up()
+        text = self.document()
+        self.assertEqual(self.bullets(text, "하는 중"), [])
+        self.assertEqual(self.bullets(text, "최근에 끝난 것"), ["- 11-20 work-1785 · #1785 · v4.66.2 · 기록 3"])
+
+
 class WaitsTest(Fixture):
     """The board's saved copy and its question files sit in an isolated state folder."""
 
@@ -850,7 +915,7 @@ class WaitsTest(Fixture):
 
     def question(self, name, cwd, text, lifecycle="open", since=NOW - 100):
         item_id = "S4:" + name * 64
-        self.hws._write(self.hws.state_root() / (name * 8 + ".json"), {
+        self.hws._write(self.hws.state_root() / (name * 64 + ".json"), {
             "schema_version": 1, "mode": "message", "source": "S4", "id": item_id, "harness": "claude",
             "session_id": "s-" + name, "seat_key": "seat-" + name, "sequence": 1, "question": text,
             "since": since, "lifecycle": lifecycle, "cwd": str(cwd)})
@@ -943,6 +1008,55 @@ class WaitsTest(Fixture):
         self.copy([dict(self.asked("a"), stale="older"), self.asked("b")], observed=NOW - 30)
         self.assertEqual(cd.read_waits(self.root, NOW)["items"], ["Listed once"])
 
+    def test_the_state_folder_is_looked_at_once_and_only_question_file_names_are_read(self):
+        self.question("a", self.mine, "First?")
+        self.question("b", self.mine, "After the copy?", since=NOW - 10)
+        self.copy([self.asked("a")], observed=NOW - 30)
+        self.hws._write(self.hws.state_root() / "extra.json", {"schema_version": 1})
+        self.hws._write(self.hws._fleet_cache_path(), {"schema_version": 1, "items": []})
+        read = []
+        real = self.hws._read
+        with mock.patch.object(self.hws, "_read", side_effect=lambda path: read.append(Path(path).name) or real(path)):
+            waits = cd.read_waits(self.root, NOW)
+        self.assertEqual(waits["items"], ["First?", "After the copy?"])
+        self.assertEqual(sorted(read), ["a" * 64 + ".json", "b" * 64 + ".json"])   # neither the copies nor a stray file, each once
+
+    def test_two_files_with_one_id_add_one_question(self):
+        item_id = self.question("a", self.mine, "Moved midway?", since=NOW - 10)
+        twin = dict(self.hws._read(self.hws.state_root() / ("a" * 64 + ".json")))
+        self.hws._write(self.hws.state_root() / ("9" * 64 + ".json"), twin)
+        self.copy([], observed=NOW - 30)
+        self.assertEqual(cd.read_waits(self.root, NOW)["items"], ["Moved midway?"])
+        self.assertEqual(twin["id"], item_id)
+
+    def test_a_folder_that_is_not_absolute_is_not_this_repos(self):
+        """A relative folder would resolve against the worker's own folder, whichever repo that is."""
+        self.question("a", ".", "On the copy, relative")
+        self.question("b", ".", "After the copy, relative", since=NOW - 10)
+        self.copy([self.asked("a"), {"id": "x", "source": "S1", "cwd": ".", "question": "Route-less, relative"}],
+                  observed=NOW - 30)
+        here = os.getcwd()
+        os.chdir(self.mine)
+        try:
+            self.assertEqual(cd.read_waits(self.root, NOW)["items"], [])
+        finally:
+            os.chdir(here)
+
+    def test_an_unpaired_surrogate_in_a_question_file_stops_no_document(self):
+        self.route("alpha-1700", closed=NOW - 3 * HOUR)
+        self.hws.state_root().mkdir(parents=True, exist_ok=True)
+        raw = json.dumps({"schema_version": 1, "mode": "message", "source": "S4", "id": "S4:" + "c" * 64,
+                          "harness": "claude", "session_id": "s-c", "seat_key": "seat-c", "sequence": 1,
+                          "question": "Pick one \ud83d please?", "since": NOW + 5, "lifecycle": "open",
+                          "cwd": str(self.mine)})                  # ASCII escapes: the one way such a file exists
+        (self.hws.state_root() / ("c" * 64 + ".json")).write_text(raw)
+        os.chmod(self.hws.state_root() / ("c" * 64 + ".json"), 0o600)
+        self.copy([], observed=NOW - 30)
+        self.assertEqual(self.catch_up(now=NOW + 60, waits=None), ["2026-11-01_demo"])
+        self.assertNotIn("skipped", self.err)
+        self.assertEqual(self.bullets(self.document(), "기다리는 것"), ["- Pick one please?"])
+        self.assertEqual(len(cd._waits_signature({"status": "ok", "items": ["a\ud800b"]})), 16)   # any text can be signed
+
     def test_a_question_asked_after_the_copy_reaches_the_document_and_leaves_it_when_answered(self):
         self.route("alpha-1700", closed=NOW - 3 * HOUR)
         self.copy([], observed=NOW - 30)
@@ -952,8 +1066,8 @@ class WaitsTest(Fixture):
         self.route("beta-1701", closed=NOW + 10)                      # a route event: the question list is read
         self.catch_up(now=NOW + 60, waits=None)
         self.assertEqual(self.bullets(self.document(), "기다리는 것"), ["- Just asked?"])
-        self.hws._write(self.hws.state_root() / ("b" * 8 + ".json"), dict(
-            self.hws._read(self.hws.state_root() / ("b" * 8 + ".json")), lifecycle="answered"))
+        self.hws._write(self.hws.state_root() / ("b" * 64 + ".json"), dict(
+            self.hws._read(self.hws.state_root() / ("b" * 64 + ".json")), lifecycle="answered"))
         self.route("gamma-1702", closed=NOW + 100)                    # again only a route event
         self.catch_up(now=NOW + 120, waits=None)
         self.assertEqual(self.bullets(self.document(), "기다리는 것"), [])

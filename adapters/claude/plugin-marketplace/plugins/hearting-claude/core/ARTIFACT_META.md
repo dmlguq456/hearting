@@ -210,7 +210,9 @@ not yet written), one line per piece of work, routes of one PR joined. It create
 replaces one whose first line is its marker `<!-- hearting:campaign-document v1 -->`; a
 `campaign.md` without the marker, a link, a directory and a hand-written `현황.md` /
 `STATUS.md` are never written. Nothing waits on it: without a document, Fleet builds the line
-from the routes, questions and results it already shows.
+from the routes, questions and results it already shows. What `## 기다리는 것` lists is as of the
+document's last refresh: besides a worker turn, the question board's producer asks for one when
+the set of open questions changes (never from a question's own hook path).
 
 - **Where.** `campaigns/<campaign-locator>/campaign.md`, directly in the campaign
   folder, made by the code above. Fleet prefers these campaign pages, reads up to three

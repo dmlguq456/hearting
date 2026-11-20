@@ -1383,6 +1383,45 @@ def resources_view(snapshot, sampled_at, index):
     return _valid_resources({"observed_at": sampled_at, "hosts": hosts})
 
 
+def _open_wait_rows(rows):
+    """id -> row for the waits a person must answer now (the set the campaign document lists)."""
+    return {row["id"]: row for row in rows or ()
+            if isinstance(row, dict) and isinstance(row.get("id"), str) and not row.get("stale") and person_wait(row)}
+
+
+def _request_documents_for_changed_waits(before_rows, after_rows):
+    """Ask each artifact root whose open questions changed to refresh its campaign documents.
+
+    Called by the detached producer after it wrote the copy, outside the hook path and every seat
+    lock, and only when the set of open questions differs from the copy it replaced. A root is the
+    one a changed question's folder resolves to (an `S4` question's folder is in its own file, which
+    is read only now that something changed). A failure is dropped: the copy is already written."""
+    before, after = _open_wait_rows(before_rows), _open_wait_rows(after_rows)
+    changed = {key: after.get(key) or before[key] for key in before.keys() ^ after.keys()}
+    if not changed:
+        return
+    cwds = {key: row.get("cwd") for key, row in changed.items() if row.get("cwd")}
+    lost = {key for key in changed if key not in cwds and key.startswith("S4:")}
+    if lost:
+        for path in state_root().glob("*.json"):
+            if re.fullmatch(r"[0-9a-f]{64}", path.stem):
+                value = _read(path)
+                if value and value.get("id") in lost and isinstance(value.get("cwd"), str):
+                    cwds[value["id"]] = value["cwd"]
+    from tools.fleet.collectors import project_status
+    import artifact_entrance
+    roots = set()
+    for cwd in cwds.values():
+        found = project_status.artifact_root(cwd) if isinstance(cwd, str) and os.path.isabs(cwd) else None
+        if found:
+            roots.add(os.path.realpath(str(found)))
+    for root in sorted(roots):
+        try:
+            artifact_entrance.request_refresh(Path(root))
+        except Exception:  # noqa: BLE001 -- a refresh that cannot be asked for never touches the copy
+            pass
+
+
 def publish_cache(result: dict) -> bool:
     """Publish private and question-free Fleet views atomically per projection."""
     if not isinstance(result, dict) or not isinstance(result.get("items"), list):
@@ -1482,6 +1521,7 @@ def publish_cache(result: dict) -> bool:
                                   for row in result.get("health", ()) if isinstance(row, dict)]}
         with _cache_write_lock():
             previous = _read_cache_file()
+            before_rows = (previous or {}).get("items")
             if previous and previous.get("closed_questions"):
                 value["closed_questions"] = previous["closed_questions"]
             selected = previous.get("selected_responses", {}) if previous else {}
@@ -1562,6 +1602,11 @@ def publish_cache(result: dict) -> bool:
             if not _write_cache_value(value):
                 return False
             _write(_fleet_cache_path(), fleet_value)
+        if value["complete"] or value["items"]:   # a pass that failed and saw nothing is no answer
+            try:
+                _request_documents_for_changed_waits(before_rows, value["items"])
+            except Exception:  # noqa: BLE001 -- the copy is written; the documents catch up on their next turn
+                pass
         return True
     except (OSError, ValueError, TypeError):
         return False

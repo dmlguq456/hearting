@@ -146,6 +146,14 @@ class CampaignDocumentsTest(unittest.TestCase):
         self.assertEqual(documents.campaign_status(self.campaign)['path'], self.campaign / 'campaign.md')
         self.assertEqual(PAGE, (self.campaign / '현황.md').read_text())   # hidden, never touched
 
+    def test_a_campaign_md_of_another_case_is_not_the_page_and_hides_nothing(self):
+        """Round 3: the readers open the exact name `campaign.md`; `Campaign.md` is an ordinary document."""
+        (self.campaign / 'Campaign.md').write_text(CAMPAIGN_PAGE)
+        (self.campaign / '현황.md').write_text(PAGE)
+        rows = [r for r in entrance.scan(self.root)['recent'] if r.get('kind') == 'campaign-document']
+        self.assertEqual({Path(r['doc_path']).name for r in rows}, {'Campaign.md', '현황.md'})
+        self.assertEqual(documents.campaign_status(self.campaign)['path'], self.campaign / '현황.md')
+
     def test_a_campaign_without_campaign_md_still_lists_its_hand_written_status_page(self):
         (self.campaign / '현황.md').write_text(PAGE)
         (self.campaign / 'HANDOFF-seat.md').write_text('# Handoff\n')

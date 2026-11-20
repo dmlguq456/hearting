@@ -202,11 +202,11 @@ def entrance_snapshot(root):
             except (OSError, RuntimeError, ValueError):
                 errors.append(campaign.relative_to(root).as_posix() + ':documents-unreadable')
                 continue
-            generated = any(fold(name) == fold(CAMPAIGN_DOCUMENT) for name in names)
+            generated = CAMPAIGN_DOCUMENT in names  # the name the readers open, exactly (`Campaign.md` is not that page)
             for name in names:
                 if name.startswith('.') or not name.casefold().endswith('.md'):
                     continue
-                if fold(name) == fold(CAMPAIGN_DOCUMENT):
+                if name == CAMPAIGN_DOCUMENT:
                     continue  # the campaign's own page is no route report: the campaign line opens it
                 if generated and fold(name) in STATUS_NAMES:
                     continue  # a hand-written status page beside it is not shown once `campaign.md` is there

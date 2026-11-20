@@ -70,6 +70,7 @@ _REVIEW_SLUG = re.compile(r"^(rv|review|audit)[-_]|[-_]close[-_]unit$")
 _UPDATED_LINE = re.compile(r"^갱신 \d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
 _CONTROLS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff]")   # C0, C1 (not tab or line breaks) and unpaired surrogates, which UTF-8 cannot write
 _INTENT_PR = re.compile(r"(?<![A-Za-z])PR\s*#(\d{1,5})(?!\d)")
+_QUESTION_FILE = re.compile(r"[0-9a-f]{64}")
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +143,11 @@ def link_units(facts, open_routes, titles, *, now, closed_total=None):
     it to the other routes of that number; without one it stands alone. Frames do no work and a
     close that is not proven is not finished work: neither is a line or a count. Publish routes
     have no line of their own; they add their version and a record to the PRs they name.
+
+    A piece of work that carries a published version is finished even when routes of its PR are still
+    open, unless one of them is work (not a review) that started after the publish closed: that is the
+    next piece. A review route left open by a blocking verdict or an attention is not "doing". Such a
+    piece is listed by when its latest close happened, else by when its publish closed.
     """
     units = {}
 
@@ -173,15 +179,26 @@ def link_units(facts, open_routes, titles, *, now, closed_total=None):
         versions = [p for p in item["pubs"] if p.get("v")]
         version = max(versions, key=lambda p: (p.get("c") or 0, p["rid"]))["v"] if versions else None
         title = (titles or {}).get(impl.get("cy")) or impl.get("t") or None
+        closed_at = max((m.get("c") or 0 for m in item["closed"]), default=0)
+        if not closed_at and versions:
+            closed_at = max((p.get("c") or 0 for p in versions), default=0)
         return {"key": item["key"], "pr": item["pr"], "v": version, "title": title, "impl": impl,
                 "count": len(members) + len(item["pubs"]),
-                "closed_at": max((m.get("c") or 0 for m in item["closed"]), default=0),
+                "closed_at": closed_at,
                 "activity": max((m.get("activity") or 0 for m in item["open"]), default=0),
                 "routes": len(item["closed"])}
 
+    def published(item):
+        """The version-carrying publish closed and no work route opened after it."""
+        closes = [p.get("c") or 0 for p in item["pubs"] if p.get("v")]
+        return bool(closes) and not any(
+            route.get("kind") != "review" and _start(route) > max(closes) for route in item["open"])
+
     active, active_folded, done = [], 0, []
     for item in units.values():
-        if item["open"]:
+        if item["open"] and published(item):
+            done.append(finish(item))
+        elif item["open"]:
             line = finish(item)
             if now - line["activity"] < ACTIVE_SECONDS:
                 active.append(line)
@@ -241,7 +258,7 @@ def render_document(title, summary, units, waits, *, now, tz=None):
 
     The text always fits `SIZE_LIMIT`, which is under the readers' limit: the title and the one-line
     summary are clipped, and when the lines still do not fit, finished lines are folded first, then
-    questions, then the oldest open work. Each fold is counted on a line that is not a bullet."""
+    the oldest open work, and questions last (they are what a person must answer). Each fold is counted on a line that is not a bullet."""
     stamp = datetime.fromtimestamp(now, tz).strftime("%Y-%m-%d %H:%M")
     heading = _escape(_clip(title, HEADING_CHARS))
     one_line = _escape(_clip(summary, SUMMARY_CHARS)) or heading
@@ -292,13 +309,11 @@ def render_document(title, summary, units, waits, *, now, tz=None):
             low, high = (middle, high) if fit(middle) else (low, middle - 1)
         return low
 
-    counts = [len(done), len(items), len(active)]
-    for index, fit in enumerate((lambda k: fits(k, counts[1], counts[2]),
-                                 lambda k: fits(counts[0], k, counts[2]),
-                                 lambda k: fits(counts[0], counts[1], k))):
+    counts = [len(done), len(items), len(active)]   # build's order: done, waits, active
+    for index in (0, 2, 1):   # finished lines first, then open work, and the questions last
         if fits(*counts):
             break
-        counts[index] = most(counts[index], fit)   # 0 when even none of them would make it fit
+        counts[index] = most(counts[index], lambda k, i=index: fits(*[k if j == i else c for j, c in enumerate(counts)]))   # 0 when even none of them would make it fit
     return build(*counts)
 
 
@@ -308,30 +323,36 @@ def render_document(title, summary, units, waits, *, now, tz=None):
 
 
 def _first_line(value):
-    for line in str(value or "").split("\n"):
+    for line in _CONTROLS.sub("", str(value or "")).split("\n"):   # an unpaired surrogate cannot be written
         if line.strip():
             return line.strip()
     return ""
 
 
-def _open_questions(item_ids):
-    """id -> the private question file, for the `S4:` ids asked about that are still open.
+def _open_question_files():
+    """The open question files of the board's own state folder, read once: a list of their values.
 
-    The board's saved copy carries no question text and no folder; the question file in the
-    board's own state folder does. Read only: the files are never changed."""
+    Only names the board writes (64 hexadecimal digits) are read, so the board's copies in the same
+    folder are not; a file that cannot be read, or whose `id` is not text, is left out. Read only."""
     import human_wait_state
-    found = {}
-    if not item_ids:
-        return found
-    try:
-        paths = sorted(human_wait_state.state_root().glob("*.json"))
-    except OSError:
-        return found
-    for path in paths:
+    found = []
+    for path in sorted(human_wait_state.state_root().glob("*.json")):
+        if not _QUESTION_FILE.fullmatch(path.stem):
+            continue
         value = human_wait_state._read(path)
-        if value and value.get("id") in item_ids and value.get("lifecycle") == "open":
-            found[value["id"]] = value
+        if value and isinstance(value.get("id"), str) and value.get("lifecycle") == "open":
+            found.append(value)
     return found
+
+
+def _folder_root(cwd, root_real):
+    """Whether an absolute folder resolves to the artifact root `root_real` (a relative one would
+    resolve against the worker's own folder, so it never does)."""
+    if not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return False
+    from tools.fleet.collectors import project_status
+    found = project_status.artifact_root(cwd)
+    return bool(found) and os.path.realpath(str(found)) == root_real
 
 
 def read_waits(root, now):
@@ -344,18 +365,19 @@ def read_waits(root, now):
     folder from the question file with the same id (open only; none found means left out) and
     belongs here when that folder resolves to this root. An open `S4` question file made after the
     copy (its `since` is later than the copy's `observed_at`) and not on it is added when its folder
-    resolves to this root. Anything else is left out."""
+    resolves to this root, once however many files carry its id. Anything else is left out."""
     try:
         import human_wait_state
         view = human_wait_state.cached_view(now=now, request=False, max_age=float("inf"))
         if view is None:
             return {"status": "unreadable"}
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        from tools.fleet.collectors import project_status
         root_real = os.path.realpath(str(root))
         open_items = [item for item in view["items"]
                       if human_wait_state.person_wait(item) and item.get("stale") not in (True, "older")]
-        files = _open_questions({item.get("id") for item in open_items if str(item.get("source")) == "S4"})
+        wanted = {item.get("id") for item in open_items if str(item.get("source")) == "S4"}
+        opened = _open_question_files()   # the one look at the state folder
+        files = {value["id"]: value for value in opened if value["id"] in wanted}
         items = []
         for item in open_items:
             question, cwd = item.get("question"), item.get("cwd")
@@ -368,22 +390,19 @@ def read_waits(root, now):
             here = isinstance(route_id, str) and _ROUTE_FILE.match(route_id + ".json") is not None \
                 and (Path(root) / ".runtime" / "routes" / (route_id + ".json")).is_file()
             if not here and cwd:
-                found = project_status.artifact_root(cwd)
-                here = bool(found) and os.path.realpath(str(found)) == root_real
+                here = _folder_root(cwd, root_real)
             if here:
                 items.append(_first_line(question) or "질문 (본문 없음)")
         # A question asked after the copy was made is not on it yet: its own file says it is open.
         observed, listed = float(view["observed_at"]), {item.get("id") for item in view["items"]}
-        for path in sorted(human_wait_state.state_root().glob("*.json")):
-            value = human_wait_state._read(path)
-            if (not value or value.get("mode") != "message" or value.get("lifecycle") != "open"
-                    or value.get("id") in listed or not value.get("cwd")
+        for value in opened:
+            if (value.get("mode") != "message" or value["id"] in listed or not value.get("cwd")
                     or not isinstance(value.get("since"), (int, float)) or value["since"] <= observed
                     or human_wait_state.wait_fold(value["since"], now) is not None):
                 continue
-            found = project_status.artifact_root(value["cwd"])
-            if found and os.path.realpath(str(found)) == root_real:
+            if _folder_root(value["cwd"], root_real):
                 items.append(_first_line(value.get("question")) or "질문 (본문 없음)")
+                listed.add(value["id"])
         return {"status": "ok", "at": observed, "items": items}
     except Exception:  # noqa: BLE001 -- an unreadable copy is a stated state, never a failure
         return {"status": "unreadable"}
@@ -757,7 +776,7 @@ def _waits_signature(board):
     """What the question list says, apart from the time it was read."""
     if not isinstance(board, dict) or board.get("status") != "ok":
         return "unreadable"
-    return hashlib.sha256(json.dumps(board.get("items") or [], ensure_ascii=False).encode()).hexdigest()[:16]
+    return hashlib.sha256(json.dumps(board.get("items") or []).encode()).hexdigest()[:16]   # ASCII escapes: any text, even an unpaired surrogate
 
 
 def _records_of_closes(root, listing, mark, have):
