@@ -224,8 +224,8 @@ def final_lines(entries: Iterable[Mapping]) -> dict[str, dict]:
     `{key: {"from": value now, "to": final value}}`. A swap changes every item equal to its
     old item once (the first cell in file order wins if two cells map one item differently);
     an add appends a name that is not there yet, in file order. The file order is each
-    entry's `order` (the survey sets it), so entries may come in any order; entries without
-    one count in the order given. Every item of `to` is one its model accepts, because an
+    entry's `order` (the survey sets it), so entries may come in any order; an entry without
+    `order` counts as 0, so it ties with an explicit 0 and ties keep the order given. Every item of `to` is one its model accepts, because an
     entry carries only swaps that the survey checked. A later step that writes takes `to`
     as it is and applies nothing else to the line.
     """

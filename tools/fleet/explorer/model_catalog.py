@@ -250,6 +250,19 @@ def _opencode_cache_rows(document):
     return tuple(rows)
 
 
+def _rows_of(build, source):
+    """The follow rows `build(source)` makes, or none at all when any listed model's row
+    cannot be made (a version or price too large to read, say). The rows only feed the
+    model-follow rule and the list itself is read apart from them, so a list that cannot
+    make rows reads as it always did and follows nothing. All of a list's rows go, not
+    just the unreadable one: a newest model whose number cannot be read must not let an
+    older one pass for the newest."""
+    try:
+        return build(source)
+    except Exception:
+        return ()
+
+
 def _candidates(harness):
     home = Path.home()
     if harness == "claude":
@@ -285,7 +298,7 @@ def read_catalog(harness, *, deadline=None):
         native = opencode_runtime.read_model_catalog(deadline=deadline)
         if native is not None:
             fields = {key: value for key, value in native.items() if key != "records"}
-            return ModelCatalog(harness=harness, rows=_opencode_native_rows(native), **fields)
+            return ModelCatalog(harness=harness, rows=_rows_of(_opencode_native_rows, native), **fields)
     for candidate in _candidates(harness):
         path = Path(candidate)
         document = _json(path)
@@ -306,12 +319,8 @@ def read_catalog(harness, *, deadline=None):
             models = _ids([item for item in document["models"]
                            if isinstance(item, dict) and item.get("visibility") == "list"])
         if models:
-            if harness == "claude":
-                rows = _claude_rows(document)
-            elif harness == "codex":
-                rows = _codex_rows(document)
-            else:
-                rows = _opencode_cache_rows(document)
+            rows = _rows_of({"claude": _claude_rows, "codex": _codex_rows}.get(
+                harness, _opencode_cache_rows), document)
             client = document.get("client_version") if isinstance(document, dict) else None
             return ModelCatalog(harness=harness, state="available", source=str(path),
                                 models=models, observed_at=path.stat().st_mtime, rows=rows,

@@ -609,6 +609,79 @@ class ModelCatalogTests(unittest.TestCase):
         self._codex_cache([])
         self.assertEqual(model_catalog.read_catalog("codex").rows, ())
 
+    # --- a list that cannot make follow rows still reads as it always did ---
+
+    def _broken_list_cases(self):
+        digits, price = "9" * 5000, int("9" * 401)  # a version past the integer-string limit; a price past float
+        cache = lambda models: {"p": {"models": models}}  # noqa: E731
+        return {
+            "codex-normal": ("codex", {"models": [{"slug": "gpt-6-astra", "visibility": "list"}]},
+                             ("gpt-6-astra",), True),
+            "codex-long-version": ("codex", {"models": [{"slug": f"gpt-{digits}-astra", "visibility": "list"}]},
+                                   (f"gpt-{digits}-astra",), False),
+            "claude-normal": ("claude", {"catalog": {"config": {"models": [{"id": "claude-opus-5-5"}]}}},
+                              ("claude-opus-5-5",), True),
+            "claude-long-version": ("claude", {"catalog": {"config": {"models": [{"id": f"claude-opus-{digits}"}]}}},
+                                    (f"claude-opus-{digits}",), False),
+            "opencode-normal": ("opencode", cache({"elm-1": {"id": "elm-1", "family": "elm", "cost": {"input": 1.5}}}),
+                                ("p/elm-1",), True),
+            "opencode-long-version": ("opencode", cache({f"elm-{digits}": {"id": f"elm-{digits}", "family": "elm"}}),
+                                      (f"p/elm-{digits}",), False),
+            "opencode-big-input-price": ("opencode", cache({"elm-1": {"id": "elm-1", "family": "elm",
+                                                                      "cost": {"input": price}}}),
+                                         ("p/elm-1",), False),
+            "opencode-big-flat-price": ("opencode", cache({"elm-1": {"id": "elm-1", "family": "elm", "cost": price}}),
+                                        ("p/elm-1",), False),
+        }
+
+    def _write_list(self, harness, document):
+        path = {"codex": self.root / "codex/models_cache.json",
+                "claude": self.root / "claude/cache/model-catalog/one.json",
+                "opencode": self.root / "cache/opencode/models.json"}[harness]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(document))
+        if harness == "opencode":
+            auth = self.root / "data/opencode/auth.json"
+            auth.parent.mkdir(parents=True, exist_ok=True)
+            auth.write_text(json.dumps({"p": {"type": "api"}}))
+
+    def test_a_list_whose_rows_cannot_be_made_reads_as_before_and_follows_nothing(self):
+        for name, (harness, document, models, has_rows) in self._broken_list_cases().items():
+            with self.subTest(case=name):
+                for stale in self.root.rglob("*.json"):
+                    stale.unlink()
+                self._write_list(harness, document)
+                for catalog in (model_catalog.read_catalog(harness), model_catalog.read_catalogs()[harness]):
+                    self.assertEqual((catalog.state, catalog.models), ("available", models))
+                    self.assertEqual(bool(catalog.rows), has_rows)
+                # the other harnesses' lists are not lost with it
+                self.assertEqual({h: c.state for h, c in model_catalog.read_catalogs().items()},
+                                 {h: ("available" if h == harness else "unknown")
+                                  for h in ("claude", "codex", "opencode")})
+
+    def test_a_broken_list_gives_the_survey_no_line_and_no_error(self):
+        utilities = str(ROOT / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        for name, (harness, document, _models, has_rows) in self._broken_list_cases().items():
+            if has_rows:
+                continue
+            with self.subTest(case=name):
+                for stale in self.root.rglob("*.json"):
+                    stale.unlink()
+                self._write_list(harness, document)
+                self._user_conf(harness)
+                result, lines = self._follow(harness)
+                self.assertEqual((result["status"], result["reason"], result["entries"], lines),
+                                 ("skipped", "no-catalog", [], []))
+
+    def test_a_service_list_whose_rows_cannot_be_made_reads_as_before_and_follows_nothing(self):
+        name = "elm-" + "9" * 5000
+        self._native_service({"location": {"directory": str(self.root)}, "data": [
+            {"providerID": "ready", "id": name, "enabled": True, "status": "active", "family": "elm"}]})
+        catalog = model_catalog.read_catalog("opencode")
+        self.assertEqual((catalog.state, catalog.models, catalog.rows), ("available", (f"ready/{name}",), ()))
+
 
     # --- harness files -> rows -> model-follow lines, on a fixture home, nothing written ---
 
