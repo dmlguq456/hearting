@@ -24,6 +24,7 @@ _UTILITIES = str(Path(__file__).resolve().parents[3] / 'utilities')
 if _UTILITIES not in sys.path:
     sys.path.insert(0, _UTILITIES)
 import artifact_campaign_documents as campaign_documents
+from .. import mdescape
 
 STATUS_NAMES = campaign_documents.STATUS_NAMES
 RECENT_DAYS = 14
@@ -234,8 +235,13 @@ _NEXT_WORDS = ("다음", "예정", "나중에 할", "next", "할 일", "to do", 
 
 
 def _plain(text):
+    """One line of Markdown as plain words. A backslash escape outside a code span is held first (so
+    ``\\[a\\](x)`` is not a link and ``\\*x\\*`` is not emphasis) and given back as the bare mark last:
+    the campaign document escapes its titles that way, and a hand-written one reads as CommonMark does."""
+    text = mdescape.protect(text)
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
-    return re.sub(r"\s+", " ", text.replace("**", "").replace("__", "").replace("`", "")).strip()
+    text = re.sub(r"\s+", " ", text.replace("**", "").replace("__", "").replace("`", "")).strip()
+    return mdescape.restore(text)
 
 
 def _section_kind(title):

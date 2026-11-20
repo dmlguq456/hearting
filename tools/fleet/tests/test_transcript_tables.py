@@ -120,6 +120,10 @@ class TableTest(unittest.TestCase):
         self.assertIn("본문 <!-- 안 --> 끝", rows)
         self.assertIn("  <!-- 코드 -->", rows)
 
+    def test_two_comments_with_text_between_them_are_one_line_of_text_not_one_comment(self):
+        rows = drawn(["<!-- 메모 --> 보여야 할 글 <!-- 끝 -->", "<!-- 한 줄 전체가 주석 -->"], 60)
+        self.assertEqual(rows, ["<!-- 메모 --> 보여야 할 글 <!-- 끝 -->"])
+
     def test_a_backslash_escape_outside_code_shows_its_mark_and_inside_code_stays(self):
         rows = drawn(["# a\\<b\\> \\*c\\* \\_d\\_ \\[e\\](f) \\`g\\`", "",
                       "- 항목 \\*\\*굵게 아님\\*\\* 와 `코드 \\< 안`", "", "경로 C:\\dir 와 \\\\ 둘"], 80)

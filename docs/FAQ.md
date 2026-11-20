@@ -91,7 +91,7 @@ records go to the campaign's daily journal (`journals/YYYY-MM-DD.md`) instead;
 small cycles that could be folded into it, and explicit `apply --cycle <id>` /
 `restore --cycle <id>` back them up and restore them. Hearting itself writes
 each campaign's `campaign.md`; a hand-written `STATUS.md` is never created or edited by
-it, and Fleet shows either on the project page.
+it. When a campaign has both, Fleet shows only `campaign.md`.
 
 ## hearting or fleet is not found
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from .. import mdescape
 from .grid import cell_width
 
 
@@ -105,33 +106,8 @@ _FLOOR = 6              # a column narrows to this (or its own width) before the
 _HEAD_FLOOR = 12        # ... a wider header keeps up to this much
 
 
-_PUNCT = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
-_ESCAPED = 0xF0000                   # a protected escape: this plane's private-use character per ASCII mark
-_ESCAPE_BACK = {_ESCAPED + ord(mark): mark for mark in _PUNCT}
-_COMMENT = re.compile(r"^<!--.*-->$")
-
-
-def _protect(text):
-    """``text`` with each Markdown escape (a backslash and an ASCII mark) outside code spans held as
-    one private character, so no later rule reads it as markup; ``_restore`` gives the bare mark."""
-    out, index = [], 0
-    while index < len(text):
-        char = text[index]
-        if char == "\\" and text[index + 1:index + 2] in tuple(_PUNCT):
-            out.append(chr(_ESCAPED + ord(text[index + 1])))
-            index += 2
-        elif char == "`" and text.find("`", index + 1) > index + 1:
-            end = text.find("`", index + 1)
-            out.append(text[index:end + 1])      # a code span, backslashes and all
-            index = end + 1
-        else:
-            out.append(char)
-            index += 1
-    return "".join(out)
-
-
-def _restore(text):
-    return text.translate(_ESCAPE_BACK)
+_protect, _restore = mdescape.protect, mdescape.restore
+_COMMENT = re.compile(r"^<!--(?:(?!-->).)*-->$")   # one comment spanning the whole line, not two with text between
 
 
 def _unescaped_spans(text, base="soft"):

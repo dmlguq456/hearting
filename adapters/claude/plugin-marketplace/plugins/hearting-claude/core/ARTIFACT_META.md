@@ -203,8 +203,8 @@ One short page a person reads first to see where a project stands. Fleet puts it
 line on the project's OVERVIEW rule and its parts at the top of the project page.
 
 **The campaign document is made by code. A main session does not edit it by hand.** The
-entrance refresh worker (`utilities/campaign_document.py`, one turn after a begin, a
-proven close or a seal) writes `campaigns/<campaign>/campaign.md` for each campaign that
+entrance refresh worker (`utilities/campaign_document.py`, one turn after a begin, any
+close or a seal; the generator leaves a close that is not proven out of the document) writes `campaigns/<campaign>/campaign.md` for each campaign that
 moved: the sections `## 하는 중` → `## 기다리는 것` → `## 최근에 끝난 것` (→ `## 나중에 할 것`,
 not yet written), one line per piece of work, routes of one PR joined. It creates the file or
 replaces one whose first line is its marker `<!-- hearting:campaign-document v1 -->`; a
@@ -212,10 +212,12 @@ replaces one whose first line is its marker `<!-- hearting:campaign-document v1 
 `STATUS.md` are never written. Nothing waits on it: without a document, Fleet builds the line
 from the routes, questions and results it already shows.
 
-- **Where.** `campaigns/<campaign-locator>/현황.md` (or `STATUS.md`), directly in
-  the campaign folder. Fleet prefers these campaign pages, reads up to three newest
-  summaries on the repo page, and keeps the newest summary on OVERVIEW. Editing a
-  page in place is observed even when the campaign directory's timestamp is old.
+- **Where.** `campaigns/<campaign-locator>/campaign.md`, directly in the campaign
+  folder, made by the code above. Fleet prefers these campaign pages, reads up to three
+  newest summaries on the repo page, and keeps the newest summary on OVERVIEW. A
+  hand-written `현황.md` / `STATUS.md` left in the same folder stays but is not shown once
+  a `campaign.md` is there, and nothing edits it. Editing a page in place is observed even
+  when the campaign directory's timestamp is old.
 - **Legacy documents.** With no campaign page, Fleet reads status documents directly
   in a cycle's `artifacts/`, not the chronological research folders. When
   `finalize` picks the
@@ -225,8 +227,8 @@ from the routes, questions and results it already shows.
   (`core/CORE.md` §3, primary selection). Names match NFC-normalized and case-folded. A
   file at the cycle root (`campaigns/<campaign>/<cycle>/현황.md`) makes the seal fail
   with `file-outside-artifacts` and is not read; copies under `_internal/` or
-  `versions/`, or deeper inside `artifacts/`, are not read either. A campaign keeps one
-  and edits it in place (a finalized cycle still takes writes, D-123).
+  `versions/`, or deeper inside `artifacts/`, are not read either. These cycle documents
+  are legacy: nothing keeps them current now (a finalized cycle still takes writes, D-123).
 - **`campaign.md` first.** A campaign folder's `campaign.md` is opened by name before
   any older name (no folder listing, no ownership marker required); too large or unreadable,
   it is unknown and no older name stands in for it.

@@ -380,6 +380,37 @@ class GeneratedDocumentTest(unittest.TestCase):
         later = _generated({"status": "ok", "at": GENERATED_NOW, "items": []}) + "\n## 나중에 할 것\n- 다음 일\n"
         self.assertEqual(project_status.parse(later)["next"], ["다음 일"])
 
+    ESCAPES = [
+        ("\\[4c\\] 산출물 논의 \\*중요\\* a\\_b\\_ \\<x\\> \\& \\\\ \\# \\!", "[4c] 산출물 논의 *중요* a_b_ <x> & \\ # !"),
+        ("코드 칸은 그대로: `a\\_b\\*c`", "코드 칸은 그대로: a\\_b\\*c"),
+        ("링크 \\[a\\](http://x) \\& \\<tag\\>", "링크 [a](http://x) & <tag>"),
+        ("경로 C:\\\\Users\\\\x 와 a\\\\b", "경로 C:\\Users\\x 와 a\\b"),
+        ("[진짜 링크](http://x) 와 **굵게**", "진짜 링크 와 굵게"),
+    ]
+
+    def test_a_backslash_escape_outside_code_is_the_bare_mark_on_the_line_and_in_the_decisions(self):
+        for written, shown in self.ESCAPES:
+            with self.subTest(written=written):
+                self.assertEqual(project_status._plain(written), shown)
+                parsed = project_status.parse("# 제목\n\n**한 줄**: %s\n\n## 기다리는 것\n- %s\n" % (written, written))
+                self.assertEqual(parsed["line"], shown)
+                self.assertEqual(parsed["decisions"], [shown])
+
+    def test_the_generators_own_escapes_come_back_as_the_titles_it_was_given(self):
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import campaign_document
+        from datetime import timezone
+        titles = ["[4c] 산출물 논의 *중요* a_b_ <x> & \\ # !", "링크 [a](http://x) & <tag>", "경로 C:\\Users\\x 와 a\\b",
+                  "_remove_empty_cycle 와 __init__ 정리", "`코드 a_b*c` 와 `짝 없는"]
+        waits = {"status": "ok", "at": GENERATED_NOW, "items": titles}
+        text = campaign_document.render_document(titles[0], titles[1], {"active": [], "done": []}, waits,
+                                                 now=GENERATED_NOW, tz=timezone.utc)
+        parsed = project_status.parse(text)
+        shown = titles[:4] + ["코드 a_b*c 와 `짝 없는"]                  # a code span's ticks are not drawn; a lone one is
+        self.assertEqual(parsed["title"], shown[0])
+        self.assertEqual(parsed["line"], shown[1])
+        self.assertEqual(parsed["decisions"], shown)
+
     def test_a_marker_never_becomes_the_one_line_even_without_a_summary(self):
         parsed = project_status.parse(_generated({"status": "unreadable"}, summary=""))
         self.assertEqual(parsed["line"], "캠페인")

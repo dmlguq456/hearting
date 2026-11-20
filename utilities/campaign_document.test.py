@@ -128,7 +128,7 @@ class PureTest(unittest.TestCase):
         self.assertIn("- Do a thing · #7 · v4.1.0 · 기록 3", lines)
         self.assertIn("- 11-20 Do a thing · #7 · v4.1.0 · 기록 3".replace("11-20", "11-20"), lines)
         self.assertIn("6시간 넘게 움직임 없는 열린 일 2개는 접어 둠.", lines)
-        self.assertIn("앞서 끝난 것 1,354개는 접어 둠.", lines)
+        self.assertIn("앞서 끝난 기록 1,354개는 접어 둠.", lines)
         self.assertIn("- Which one?", lines)
         self.assertIn("질문판 기준 11:58", lines)
         self.assertNotIn("나중에 할 것", text)
@@ -196,7 +196,7 @@ class PureTest(unittest.TestCase):
                   "closed_at": NOW - i, "routes": 1, "activity": 0} for i in range(400)]
         big = self.render({"active": [], "active_folded": 0, "done": units, "done_folded": 5})
         self.assertLessEqual(len(big.encode()), cd.SIZE_LIMIT)
-        self.assertIn("앞서 끝난 것", big)
+        self.assertIn("앞서 끝난 기록", big)
 
 
 class Fixture(unittest.TestCase):
@@ -238,7 +238,8 @@ class Fixture(unittest.TestCase):
                   "locator": f"2026-11-20_{slug}", "title": slug}
         record_file = self.runtime / "artifact-producer/v1/cycles" / f"{cycle_id}.json"
         record_file.write_text(json.dumps(record))
-        os.utime(record_file, (touched or started, touched or started))
+        written = touched or closed or started   # the record is written at the begin, or again at the seal
+        os.utime(record_file, (written, written))
         route_file = self.runtime / "routes" / f"{rid}.json"
         route_file.write_text(json.dumps({"route_id": rid, "slug": slug}))
         os.utime(route_file, (touched or started, touched or started))
@@ -362,7 +363,7 @@ class GeneratorTest(Fixture):
             self.catch_up()
         text = self.document()
         self.assertEqual(len(self.bullets(text, "최근에 끝난 것")), 20)
-        self.assertIn("앞서 끝난 것 10개는 접어 둠.", text)
+        self.assertIn("앞서 끝난 기록 10개는 접어 둠.", text)
         self.assertEqual(len(reads), 20)
         self.assertLessEqual(len(reads), cd.READ_CAP)
         cache = json.loads((self.runtime / "campaign-document" / f"{self.campaign_id}.json").read_text())
@@ -372,7 +373,7 @@ class GeneratorTest(Fixture):
         with mock.patch.object(cd, "_read_fact", side_effect=lambda *a: reads.append(a[1]) or original(*a)):
             self.catch_up(now=NOW + HOUR)
         self.assertEqual(len(reads), 1)
-        self.assertIn("앞서 끝난 것 11개는 접어 둠.", self.document())
+        self.assertIn("앞서 끝난 기록 11개는 접어 둠.", self.document())
 
     def test_a_piece_of_work_still_open_does_not_use_up_the_twenty_lines(self):
         for i in range(26):
@@ -580,6 +581,155 @@ class RemovalAndWorkerTest(Fixture):
         self.assertTrue((self.folder / "campaign.md").exists())
         self.assertIn("campaigns/2026-11-01_demo/campaign.md", (self.root / "README.md").read_text())
         self.assertFalse((self.runtime / "artifact-entrance-pending.json").exists())
+
+
+class ReviewFixesTest(Fixture):
+    """The independent review of PR #1784 (11-19): each fix has a test that fails on the code before it."""
+
+    def other_campaign(self):
+        self.other_id = "camp_" + "2" * 32
+        return self.campaign("2026-11-02_other", self.other_id, "Other")
+
+    def record_path(self, cycle):
+        return self.runtime / "artifact-producer/v1/cycles" / f"{cycle}.json"
+
+    def test_a_route_moved_to_another_campaign_leaves_the_old_document(self):
+        other = self.other_campaign()
+        self.route("another-a", closed=NOW - 4 * HOUR)
+        _moved, cycle = self.route("moved-work", closed=NOW - 3 * HOUR)
+        self.catch_up(now=NOW)
+        self.assertIn("moved-work", self.document())
+        record = json.loads(self.record_path(cycle).read_text())
+        self.record_path(cycle).write_text(json.dumps(dict(record, campaign_id=self.other_id)))
+        os.utime(self.record_path(cycle), (NOW + 60, NOW + 60))
+        os.utime(self.runtime / "routes" / f"{record['route_id']}.json", (NOW + 60, NOW + 60))
+        self.catch_up(now=NOW + 120)
+        self.assertIn("moved-work", self.document(other))
+        self.assertNotIn("moved-work", self.document())          # the old document is written again in that pass
+        self.assertIn("another-a", self.document())
+
+    def test_a_move_seen_before_the_old_campaign_has_any_event_is_still_dropped_from_it(self):
+        other = self.other_campaign()
+        self.route("another-a", closed=NOW - 4 * HOUR)
+        _moved, cycle = self.route("moved-work", closed=NOW - 3 * HOUR)
+        self.catch_up(now=NOW)
+        record = json.loads(self.record_path(cycle).read_text())
+        self.record_path(cycle).write_text(json.dumps(dict(record, campaign_id=self.other_id)))
+        os.utime(self.record_path(cycle), (NOW + 60, NOW + 60))
+        self.catch_up(now=NOW + 120)
+        self.route("another-a2", closed=NOW + 300)               # a later event of the old campaign
+        self.catch_up(now=NOW + 400)
+        self.assertNotIn("moved-work", self.document())
+        self.assertIn("another-a2", self.document())
+
+    def test_a_pass_reads_the_cycle_records_that_changed_and_no_others(self):
+        for index in range(60):
+            self.route(f"old-{index}", closed=NOW - 5 * HOUR - index)
+        self.catch_up(now=NOW)
+        self.route("fresh-work", closed=NOW + 100)
+        reads = []
+        real = cd.store._read_json
+        cycles = str(self.runtime / "artifact-producer/v1/cycles")
+        with mock.patch.object(cd.store, "_read_json", side_effect=lambda path, *a, **k: (reads.append(str(path)), real(path, *a, **k))[1]):
+            self.catch_up(now=NOW + 120)
+        self.assertEqual(len([path for path in reads if path.startswith(cycles)]), 1, reads)
+        self.assertIn("fresh-work", self.document())
+
+    def test_a_close_that_changed_no_record_still_reaches_the_document(self):
+        rid, _cycle = self.route("late-1701", closed=None)
+        self.catch_up(now=NOW)
+        self.assertEqual(self.bullets(self.document(), "최근에 끝난 것"), [])
+        self.close(rid, NOW + 100)                               # only the close result is written; the record is not
+        self.catch_up(now=NOW + 120)
+        self.assertEqual(self.bullets(self.document(), "최근에 끝난 것"), ["- 11-20 late-1701 · #1701 · 기록 1"])
+
+    def test_an_answered_question_leaves_the_list_on_the_next_refresh_with_no_route_event(self):
+        self.route("alpha-1700", closed=NOW - 3 * HOUR)
+        self.catch_up(now=NOW, waits={"status": "ok", "at": NOW, "items": ["Which one?", "And this?"]})
+        self.assertEqual(self.bullets(self.document(), "기다리는 것"), ["- Which one?", "- And this?"])
+        self.catch_up(now=NOW + 60, waits={"status": "ok", "at": NOW + 60, "items": ["And this?"]})
+        self.assertEqual(self.bullets(self.document(), "기다리는 것"), ["- And this?"])
+        self.catch_up(now=NOW + 120, waits={"status": "ok", "at": NOW + 120, "items": ["And this?"]})
+        self.assertEqual(self.bullets(self.document(), "기다리는 것"), ["- And this?"])
+
+    def test_the_same_questions_write_nothing_again(self):
+        self.route("alpha-1700", closed=NOW - 3 * HOUR)
+        waits = {"status": "ok", "at": NOW, "items": ["Which one?"]}
+        self.catch_up(now=NOW, waits=waits)
+        with mock.patch.object(cd, "collect", side_effect=AssertionError("nothing moved and nothing changed")):
+            self.assertEqual(self.catch_up(now=NOW + 60, waits=dict(waits, at=NOW + 60)), [])
+
+    def test_a_still_moving_route_that_names_a_pr_in_its_intent_is_one_line_with_the_closed_one(self):
+        self.route("closed-work", closed=NOW - 2 * HOUR, evidence="# r\n\nPR #1779 opened\n")
+        rid, _cycle = self.route("continue-pieces", state="open")
+        os.utime(self.runtime / "routes" / f"{rid}.json", (NOW - 60, NOW - 60))
+        with mock.patch.object(cd, "_intent_title", return_value="조각 S2 PR #1779 이어가기"), \
+                mock.patch.object(cd, "_activity", return_value=NOW - 60):
+            self.catch_up(now=NOW)
+        text = self.document()
+        self.assertEqual(self.bullets(text, "하는 중"), ["- 조각 S2 PR #1779 이어가기 · #1779 · 기록 2"])
+        self.assertEqual(self.bullets(text, "최근에 끝난 것"), [])
+
+    def test_a_date_or_a_bare_number_in_an_intent_is_not_a_pr_and_two_prs_are_none(self):
+        for text, expected in [("PR #1779 이어가기", 1779), ("PR #1779의 이어가기", 1779), ("PR#12 고침", 12), ("PR #123456", None), ("XPR #5", None), ("2026-11-20 정리 #1120", None),
+                               ("11-20 PR 정리", None), ("PR #1 과 PR #2", None), ("PR #7 와 PR #7", 7), ("", None), (None, None)]:
+            with self.subTest(text=text):
+                self.assertEqual(cd.pr_from_title(text), expected)
+
+    def test_a_long_idle_open_route_does_not_read_its_intent(self):
+        rid, _cycle = self.route("idle-work", state="open")
+        with mock.patch.object(cd, "_intent_title", side_effect=AssertionError("folded work reads nothing")), \
+                mock.patch.object(cd, "_activity", return_value=NOW - 7 * HOUR):
+            self.catch_up(now=NOW)
+        self.assertIn("6시간 넘게 움직임 없는 열린 일 1개는 접어 둠.", self.document())
+
+    def test_the_folded_count_says_records_because_it_counts_routes(self):
+        text = cd.render_document("T", "s", {"active": [], "active_folded": 0, "done": [], "done_folded": 1354}, WAITS_OK, now=NOW, tz=UTC)
+        self.assertIn("앞서 끝난 기록 1,354개는 접어 둠.", text)
+        self.assertNotIn("앞서 끝난 것", text)
+
+    def test_control_characters_are_not_written_to_the_document(self):
+        title = "고침\x1b[31m 빨강\x07\x00 끝\x85\x9f"
+        text = cd.render_document(title, "요약\x1b 줄", {"active": [], "done": []},
+                                  {"status": "ok", "at": NOW, "items": ["질문\x1b[0m?\x7f"]}, now=NOW, tz=UTC)
+        self.assertEqual(re.findall("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", text), [])
+        self.assertIn("# 고침\\[31m 빨강 끝", text)
+        self.assertIn("- 질문\\[0m?", text)
+        unit = {"key": "rt:x", "pr": None, "v": "v1\x1b", "title": "t\x1bu", "impl": {"slug": "x"}, "count": 1,
+                "closed_at": NOW, "routes": 1, "activity": NOW}
+        drawn = cd.render_document("T", "s", {"active": [unit], "done": []}, WAITS_OK, now=NOW, tz=UTC)
+        self.assertEqual(re.findall("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", drawn), [])
+        self.assertIn("- tu · v1 · 기록 1", drawn)
+
+    def test_a_campaign_md_that_appears_between_the_look_and_the_write_is_never_overwritten(self):
+        page = self.folder / cd.DOCUMENT
+        real_link = os.link
+
+        def late_link(source, target, *args, **kwargs):
+            Path(target).write_text("# written by hand, no marker\n")      # the other file appears first
+            return real_link(source, target, *args, **kwargs)
+
+        with mock.patch.object(cd.os, "link", side_effect=late_link):
+            self.assertFalse(cd._write_document(self.folder, cd.MARKER + "\n# generated\n"))
+        self.assertEqual(page.read_text(), "# written by hand, no marker\n")
+        self.assertEqual([p.name for p in self.folder.iterdir() if p.name.startswith(".campaign.md.tmp")], [])
+
+    def test_one_that_is_the_generators_own_when_it_appears_meanwhile_is_judged_as_any_other(self):
+        page = self.folder / cd.DOCUMENT
+        real_link = os.link
+
+        def late_link(source, target, *args, **kwargs):
+            Path(target).write_text(cd.MARKER + "\n# older generated\n")
+            return real_link(source, target, *args, **kwargs)
+
+        with mock.patch.object(cd.os, "link", side_effect=late_link):
+            self.assertTrue(cd._write_document(self.folder, cd.MARKER + "\n# generated\n"))
+        self.assertEqual(page.read_text(), cd.MARKER + "\n# generated\n")
+
+    def test_a_new_document_is_made_whole_and_a_fresh_folder_has_no_temporary_file_left(self):
+        self.assertTrue(cd._write_document(self.folder, cd.MARKER + "\n# generated\n"))
+        self.assertEqual(sorted(p.name for p in self.folder.iterdir() if p.name != "campaign.json"), ["campaign.md"])
+        self.assertEqual((self.folder / cd.DOCUMENT).stat().st_mode & 0o777, 0o644)
 
 
 class WaitsTest(Fixture):

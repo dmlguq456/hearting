@@ -17,13 +17,16 @@ Three layers:
   is `MARKER`. A same-named file without the marker, a link, a directory, and the hand-written
   `현황.md` / `status.md` are never changed.
 
-Cost: routes are not read one by one. Listing the routes folder with `stat`, one cycle record
-(about 1 KB) per route and the small close result are what is read. What was read is kept in
+Cost: routes are not read one by one. Listing the routes folder and the cycle folder with `stat`
+picks what changed since the last pass; only the cycle records written after it (about 1 KB each)
+and the small close results are read, and no index is rebuilt. What was read is kept in
 `<root>/.runtime/campaign-document/<campaign_id>.json`; deleting it only starts the campaign
 again from its newest 20 pieces of work (nothing is backfilled).
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import stat
@@ -62,6 +65,8 @@ _PUBLISH_HEAD = re.compile(r"^#\s+(v\d+\.\d+\.\d+\S*)\s*[—–-]\s*(.*)$")
 _PR_NUMBER = re.compile(r"#(\d+)")
 _REVIEW_SLUG = re.compile(r"^(rv|review|audit)[-_]|[-_]close[-_]unit$")
 _UPDATED_LINE = re.compile(r"^갱신 \d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+_CONTROLS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")   # C0 and C1, but not tab or line breaks
+_INTENT_PR = re.compile(r"(?<![A-Za-z])PR\s*#(\d{1,5})(?!\d)")
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +203,7 @@ _TICKS = re.compile(r"(`+)")
 
 
 def _escape(value):
-    parts = _TICKS.split(unicodedata.normalize("NFC", str(value)))
+    parts = _TICKS.split(unicodedata.normalize("NFC", _CONTROLS.sub("", str(value))))
     singles = [i for i in range(1, len(parts), 2) if len(parts[i]) == 1]
     spans = [(singles[i], singles[i + 1]) for i in range(0, len(singles) - 1, 2)]
     out = []
@@ -213,7 +218,7 @@ def _escape(value):
 
 
 def _clip(value, limit):
-    value = " ".join(str(value or "").split())
+    value = " ".join(_CONTROLS.sub("", str(value or "")).split())
     return value if len(value) <= limit else value[:limit - 1] + "…"
 
 
@@ -231,8 +236,8 @@ def render_document(title, summary, units, waits, *, now, tz=None):
     """The campaign document's text. Description lines are never bullets, so a reader counting
     bullets under `## 기다리는 것` counts open questions and nothing else."""
     stamp = datetime.fromtimestamp(now, tz).strftime("%Y-%m-%d %H:%M")
-    heading = _escape(" ".join(str(title or "").split()))
-    one_line = _escape(" ".join(str(summary or "").split())) or heading
+    heading = _escape(" ".join(_CONTROLS.sub("", str(title or "")).split()))
+    one_line = _escape(" ".join(_CONTROLS.sub("", str(summary or "")).split())) or heading
     active = list(units.get("active") or [])
     done = list(units.get("done") or [])
     done_folded = int(units.get("done_folded") or 0)
@@ -259,7 +264,7 @@ def render_document(title, summary, units, waits, *, now, tz=None):
         out += [_unit_line(unit, prefix=datetime.fromtimestamp(unit["closed_at"], tz).strftime("%m-%d") + " ")
                 for unit in done]
         if done_folded:
-            out.append(f"앞서 끝난 것 {done_folded:,}개는 접어 둠.")
+            out.append(f"앞서 끝난 기록 {done_folded:,}개는 접어 둠.")   # routes, as each line's `기록 N`
         elif not done:
             out.append("아직 없음.")
         return "\n".join(out) + "\n"
@@ -458,6 +463,12 @@ def _intent_title(root, rid):
     return (match.group(1) if match else intent) or None
 
 
+def pr_from_title(text):
+    """The one PR number a first sentence names as `PR #N`, else None. A bare `#N` or a date is not one."""
+    found = {int(number) for number in _INTENT_PR.findall(str(text or ""))}
+    return found.pop() if len(found) == 1 else None
+
+
 def _load_cache(root, campaign_id):
     value = store._read_json(Path(root) / CACHE_REL / f"{campaign_id}.json")
     if (not isinstance(value, dict) or value.get("v") != 1 or not isinstance(value.get("members"), dict)
@@ -484,6 +495,7 @@ def collect(root, campaign_dir, *, now, waits, cache=None, persist=False, listin
     fresh = cache is None
     cache = {"v": 1, "horizon_ns": None, "members": {}, "facts": {}, "titles": {}} if fresh else cache
     members, facts, cached_titles = cache["members"], cache["facts"], cache.setdefault("titles", {})
+    cached_prs = cache.setdefault("prs", {})   # open route -> the PR its intent's first sentence names (0: none)
 
     records = store.list_cycle_records(root) if fresh else (new_records or [])
     for rid, record in _choose(records).items():
@@ -507,8 +519,22 @@ def collect(root, campaign_dir, *, now, waits, cache=None, persist=False, listin
                   if rid not in facts and (horizon is None or closed[rid] > horizon)),
                  key=lambda rid: (-closed[rid], rid))
 
-    doing = {f"pr:{pr}" for pr in (pr_from_slug(members[rid]["slug"]) for rid in opened
-                                   if kinds[rid] not in ("frame", "publish")) if pr}
+    activity = {rid: _activity(root, rid, members[rid]) for rid in opened if kinds[rid] not in ("frame", "publish")}
+
+    def open_pr(rid):
+        """The PR of an open route: its slug's, else the one its intent's first sentence names. Only a
+        route still moving reads its intent, once; a long-idle one is folded and keeps its own line."""
+        found = pr_from_slug(members[rid]["slug"])
+        if found is not None or now - activity[rid] >= ACTIVE_SECONDS:
+            return found
+        if rid not in cached_prs:
+            title = cached_titles.get(rid) or _intent_title(root, rid)
+            if title:
+                cached_titles[rid] = title
+            cached_prs[rid] = pr_from_title(title) or 0
+        return cached_prs[rid] or None
+
+    doing = {f"pr:{pr}" for pr in (open_pr(rid) for rid in activity) if pr}
 
     def distinct():
         """Pieces of work already in hand for the done section (one still being worked on is not)."""
@@ -549,10 +575,13 @@ def collect(root, campaign_dir, *, now, waits, cache=None, persist=False, listin
             continue
         member = members[rid]
         open_rows.append({"rid": rid, "kind": kinds[rid], "slug": member["slug"], "cy": member["cy"],
-                          "st": member["st"], "pr": pr_from_slug(member["slug"]), "t": cached_titles.get(rid),
-                          "activity": _activity(root, rid, member)})
+                          "st": member["st"], "pr": open_pr(rid), "t": cached_titles.get(rid),
+                          "activity": activity[rid]})
+    for rid in [rid for rid in cached_prs if rid not in members]:
+        del cached_prs[rid]
     for row in fact_rows:
         row["t"] = cached_titles.get(row["rid"])
+        row["pr"] = row["pr"] or cached_prs.get(row["rid"]) or None   # a close keeps what its open route named
 
     titles = {}
     cycles = meta.get("cycles") if isinstance(meta.get("cycles"), dict) else {}
@@ -587,15 +616,41 @@ def _body(text):
     return "\n".join(line for line in text.split("\n") if not _UPDATED_LINE.match(line))
 
 
+def _create_document(path, text):
+    """Make `path` with `text` only when nothing is there: written whole beside it, then linked in, so a
+    `campaign.md` that appeared meanwhile is never overwritten. False when one did."""
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}-{os.urandom(4).hex()}")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(text.encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(str(tmp), str(path))
+    except FileExistsError:
+        return False
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    store._fsync_dir(path.parent)
+    return True
+
+
 def _write_document(campaign_dir, text):
     """Create `campaign.md`, or replace it when it is a regular file that starts with MARKER.
     True when this campaign's folder holds the generator's document afterwards."""
     path = Path(campaign_dir) / DOCUMENT
-    try:
-        meta = os.lstat(path)
-    except FileNotFoundError:
-        meta = None
-    if meta is not None:
+    for _attempt in range(2):
+        try:
+            meta = os.lstat(path)
+        except FileNotFoundError:
+            meta = None
+        if meta is None:
+            if _create_document(path, text):
+                return True
+            continue   # one appeared between the look and the link: judge it like any other file
         if not stat.S_ISREG(meta.st_mode):
             return False
         try:
@@ -608,8 +663,9 @@ def _write_document(campaign_dir, text):
             return False
         if _body(before) == _body(text):
             return True
-    store._write_atomic(path, text.encode("utf-8"), 0o644)
-    return True
+        store._write_atomic(path, text.encode("utf-8"), 0o644)
+        return True
+    return False
 
 
 def remove_generated(campaign_dir):
@@ -629,6 +685,58 @@ def remove_generated(campaign_dir):
         pass
 
 
+def _records_since(root, mark):
+    """Cycle records written after `mark` (ns), chosen by one `stat` each on the `cycles/` listing, as
+    the routes listing is. Only those are read; no index is built, so a pass reads what changed."""
+    directory = store.producer_dir(root) / "cycles"
+    rows = []
+    try:
+        with os.scandir(directory) as entries:
+            names = sorted(entry.name for entry in entries
+                           if entry.name.endswith(".json") and not entry.name.startswith(".")
+                           and entry.stat().st_mtime_ns > mark)
+    except OSError:
+        return rows
+    for name in names:
+        value = store._read_json(directory / name)
+        if isinstance(value, dict):
+            rows.append(value)
+    return rows
+
+
+def _cached_campaigns(root):
+    """The ids of the campaigns this generator has kept a saved list for (so, a document)."""
+    try:
+        names = sorted(os.listdir(root / CACHE_REL))
+    except OSError:
+        return []
+    return [name[:-len(".json")] for name in names if name.endswith(".json") and name != "watermark.json"]
+
+
+def _waits_signature(board):
+    """What the question list says, apart from the time it was read."""
+    if not isinstance(board, dict) or board.get("status") != "ok":
+        return "unreadable"
+    return hashlib.sha256(json.dumps(board.get("items") or [], ensure_ascii=False).encode()).hexdigest()[:16]
+
+
+def _records_of_closes(root, listing, mark, have):
+    """Records for routes whose close result changed after `mark` but whose cycle record did not (a close
+    promoted later): found through the saved campaign lists, which hold each route's cycle id."""
+    need = {rid for rid, (_route, closed) in listing.items() if closed and closed > mark} - have
+    rows = []
+    if not need:
+        return rows
+    for other in _cached_campaigns(root):
+        held = _load_cache(root, other)
+        for rid in sorted(need & set(held["members"] if held else ())):
+            need.discard(rid)
+            record = store.read_cycle_record(root, held["members"][rid]["cy"]) if _cache_member(held["members"][rid]) else None
+            if record is not None:
+                rows.append(record)
+    return rows
+
+
 def _write_state(root, name, value):
     folder = Path(root) / CACHE_REL
     store._ensure_dir(folder)
@@ -644,12 +752,33 @@ def _campaign_folder(root, campaign_id):
     return found
 
 
+def _former_campaigns(root, rid, record, mark):
+    """The other campaigns whose saved list still holds `rid` when its record, older than this pass's
+    window, now names a campaign that does not (a route moved). A route that only began or closed is
+    already in its campaign's list, so this reads nothing more for it."""
+    target, started = record.get("campaign_id"), _epoch(record.get("started_on"))
+    if not isinstance(target, str) or started is None or started * 10 ** 9 >= mark:
+        return []
+    cache = _load_cache(root, target)
+    if cache is not None and rid in cache["members"]:
+        return []
+    found = []
+    for other in _cached_campaigns(root):
+        if other == target:
+            continue
+        held = _load_cache(root, other)
+        if held is not None and rid in held["members"]:
+            found.append(other)
+    return found
+
+
 def catch_up(root, cycle_id=None, *, now=None, waits=None):
     """Bring the documents of the campaigns that moved since the last pass up to date.
 
     A campaign moved when one of its routes was written or closed after the saved mark (the
     first pass looks back ten minutes), or when `cycle_id` is its cycle. Only campaigns that are
-    still active are written. One campaign failing never stops another. Returns the names of
+    still active are written, and so is each one that already has a document when the repo's
+    question list changed since the last pass. One campaign failing never stops another. Returns the names of
     the campaign folders whose document was written or already current."""
     root = Path(root)
     if not (root / ".runtime" / "routes").is_dir():
@@ -657,10 +786,11 @@ def catch_up(root, cycle_id=None, *, now=None, waits=None):
     started = time.time_ns() if now is None else int(now * 10 ** 9)  # `now` is the pass's clock
     now = time.time() if now is None else now
     listing = _list_routes(root)
-    mark = (store._read_json(root / CACHE_REL / "watermark.json") or {}).get("ns")
+    saved = store._read_json(root / CACHE_REL / "watermark.json") or {}
+    mark = saved.get("ns")
     mark = mark if isinstance(mark, int) and not isinstance(mark, bool) else started - FIRST_WINDOW_NS
-    changed = {rid for rid, (route, closed) in listing.items() if max(route, closed or 0) > mark}
-    records = store.list_cycle_records(root, route_ids=changed) if changed else []
+    records = _records_since(root, mark)
+    records += _records_of_closes(root, listing, mark, {r.get("route_id") for r in records})
     if isinstance(cycle_id, str) and cycle_id:
         hinted = store.read_cycle_record(root, cycle_id)
         if hinted is not None and all(r.get("cycle_id") != cycle_id for r in records):
@@ -669,9 +799,18 @@ def catch_up(root, cycle_id=None, *, now=None, waits=None):
     for record in records:
         if isinstance(record.get("campaign_id"), str):
             by_campaign.setdefault(record["campaign_id"], []).append(record)
+    for rid, record in _choose(records).items():
+        for other in _former_campaigns(root, rid, record, mark):
+            by_campaign.setdefault(other, [])   # its document is written again, and drops the route
+    board = waits if waits is not None else read_waits(root, now)
+    signature = _waits_signature(board)
+    if signature != saved.get("waits"):
+        # The questions are the repo's, the same on every document: when they changed (one answered,
+        # one asked) each campaign that has a document is written again, with no route event needed.
+        for campaign_id in _cached_campaigns(root):
+            by_campaign.setdefault(campaign_id, [])
     written = []
     if by_campaign:
-        board = waits if waits is not None else read_waits(root, now)
         for campaign_id, rows in sorted(by_campaign.items()):
             try:
                 folder = _campaign_folder(root, campaign_id)
@@ -679,7 +818,7 @@ def catch_up(root, cycle_id=None, *, now=None, waits=None):
                 if not record or record.get("campaign_id") != campaign_id or record.get("state") != "active":
                     continue
                 text, cache = collect(root, folder, now=now, waits=board, cache=_load_cache(root, campaign_id),
-                                      persist=True, listing=listing, new_records=rows)
+                                      persist=True, listing=listing, new_records=records)
                 if _write_document(folder, text):
                     written.append(folder.name)
                 else:
@@ -688,7 +827,7 @@ def catch_up(root, cycle_id=None, *, now=None, waits=None):
             except Exception as exc:  # noqa: BLE001 -- one campaign never stops the others
                 print(f"campaign_document skipped error={type(exc).__name__}", file=sys.stderr)
     try:
-        _write_state(root, "watermark.json", {"v": 1, "ns": started - WATERMARK_SLACK_NS})
+        _write_state(root, "watermark.json", {"v": 1, "ns": started - WATERMARK_SLACK_NS, "waits": signature})
     except OSError:
         pass
     return written

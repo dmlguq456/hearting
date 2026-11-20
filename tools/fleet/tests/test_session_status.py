@@ -235,7 +235,7 @@ class PopupTest(StatusTest):
         self.assertTrue(view["path"].endswith("2026-11-10_alpha/campaign.md"))
         lines = [text(row) for row in session_status.popup_rows(view, self.status(), 60)]
         shown = "\n".join(lines)
-        for part in ("하는 중", "기다리는 것", "최근에 끝난 것", "무언가를 고침", "첫째?", "앞서 끝난 것 12개는 접어 둠."):
+        for part in ("하는 중", "기다리는 것", "최근에 끝난 것", "무언가를 고침", "첫째?", "앞서 끝난 기록 12개는 접어 둠."):
             self.assertIn(part, shown)
         self.assertEqual(len(project_status.parse(doc)["decisions"]), 2)     # Fleet's decision count = open questions
         self.assertTrue(all(cell_width(line) <= 60 for line in lines))
