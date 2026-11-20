@@ -89,8 +89,9 @@ dev and test logs, evidence, final report), `research/`, `analysis_project/`,
 records go to the campaign's daily journal (`journals/YYYY-MM-DD.md`) instead;
 `hearting run artifact-journal dry-run --artifact-root <root>` previews older
 small cycles that could be folded into it, and explicit `apply --cycle <id>` /
-`restore --cycle <id>` back them up and restore them. A campaign can keep a
-`STATUS.md`; Hearting never creates it, and Fleet shows it on the project page.
+`restore --cycle <id>` back them up and restore them. Hearting itself writes
+each campaign's `campaign.md`; a hand-written `STATUS.md` is never created or edited by
+it, and Fleet shows either on the project page.
 
 ## hearting or fleet is not found
 

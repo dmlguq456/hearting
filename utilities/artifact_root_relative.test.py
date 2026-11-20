@@ -55,7 +55,8 @@ def tree(base):
 # Caches that carry file-system inode numbers and history lines whose ids hash the real clock: they differ
 # between any two runs of the same command, however the root was typed.
 RUN_SPECIFIC = (".runtime/artifact-admission/v1/index.json.head.json", ".runtime/routes/.route-children-index.json",
-                ".runtime/artifact-producer/v1/cycles/.cycle-routes-index.json")
+                ".runtime/artifact-producer/v1/cycles/.cycle-routes-index.json",
+                ".runtime/campaign-document/watermark.json")  # the campaign documents' pass mark is a clock reading
 HISTORY = ".runtime/artifact-producer/v1/history/"
 
 

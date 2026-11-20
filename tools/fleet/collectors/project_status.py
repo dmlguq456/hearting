@@ -225,11 +225,12 @@ _ONE_LINE = re.compile(r"^\*\*\s*(?:한\s*줄|one[\s-]*line|summary|요약)\s*[:
 _UPDATED = re.compile(r"(?:갱신|updated)\s*[:：]?\s*[0-9]", re.IGNORECASE)
 # Heading words: the convention names "결정 필요" / "Decisions needed" (what waits on the
 # person: a decision or an action) and "다음" / "Next"; a few near spellings are read too.
+# The generated campaign document names them "기다리는 것" and "나중에 할 것".
 # A record of decisions already made is not counted.
-_DECISION_WORDS = ("결정 필요", "결정할", "결정 대기", "결정 기다리는", "사용자에게 필요", "decisions needed", "decision needed",
+_DECISION_WORDS = ("결정 필요", "결정할", "결정 대기", "결정 기다리는", "기다리는 것", "사용자에게 필요", "decisions needed", "decision needed",
                    "needs decision", "to decide", "open decision", "pending decision", "needs you")
 _RECORD_WORDS = ("기록", "내린", "log", "made", "history")
-_NEXT_WORDS = ("다음", "예정", "next", "할 일", "to do", "todo")
+_NEXT_WORDS = ("다음", "예정", "나중에 할", "next", "할 일", "to do", "todo")
 
 
 def _plain(text):

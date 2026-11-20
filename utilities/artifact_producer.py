@@ -1668,6 +1668,12 @@ def _observe_after_begin(root: Path, result: Mapping[str, Any]) -> None:
                                                artifact_root=str(root), cycle_id=observed)
     except Exception:  # noqa: BLE001 -- observing other cycles never fails a begin
         pass
+    try:
+        import artifact_entrance  # the new cycle's campaign document is kept by the entrance worker
+
+        artifact_entrance.request_refresh(root, result.get("cycle_id"))
+    except Exception:  # noqa: BLE001 -- a derived document never fails a begin
+        pass
 
 
 def begin(root: Path, *, _reconcile: bool = True, _deliver_history: bool = True, **kwargs: Any) -> Dict[str, Any]:

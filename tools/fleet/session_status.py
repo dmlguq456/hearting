@@ -3,7 +3,7 @@
 ``read(cwd, route_ids)`` is the panel's one value (``None`` when the folder has no artifact root: no
 button then).  The document is the one of this session's own campaign (route -> its record's campaign
 key -> ``route_autoclose.campaign_of_route`` -> the campaign folder -> ``artifact_campaign_documents.
-campaign_status``, the selection Fleet, ``status_board`` and the entrance share); a session whose
+campaign_status``, the selection Fleet and the entrance share); a session whose
 routes span several campaigns shows the most recently changed document among them (Fleet's own rule).
 A session with no route, no campaign key, a campaign Fleet does not list (closed, or not yet named) or
 a campaign without a document shows the document Fleet's project line picks (``project_status.collect``).
@@ -19,8 +19,8 @@ folder's own artifact root (else ``None``, and the popup reads).
 its project page draws them (``pages.repo_status_lines``), an empty row, then the whole document
 (``transcript.doc_rows``: Fleet cards, fences as written, markdown tables aligned).  Rows are lists of
 ``(text, key)`` segments; ``key`` is a Fleet palette key (``None`` for padding).  Nothing here writes,
-asks, gates or starts a process; ``project_status``, ``artifact_campaign_documents`` and
-``status_board`` are called, not changed.
+asks, gates or starts a process; ``project_status`` and ``artifact_campaign_documents``
+are called, not changed.
 """
 from collections.abc import Mapping
 import json

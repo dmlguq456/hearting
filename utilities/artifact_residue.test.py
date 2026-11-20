@@ -33,7 +33,10 @@ def _sha(path: Path) -> str:
 
 
 def _files(root: Path, skip=(".runtime/artifact-producer/v1/journal", ".runtime/artifact-producer/v1/migrations",
-                              ".runtime/artifact-admission", "campaigns/INDEX", ".runtime/routes")):
+                              ".runtime/artifact-admission", "campaigns/INDEX", ".runtime/routes",
+                              ".runtime/campaign-document",  # the campaign documents' own disposable cache
+                              "README.md", "index.html", "all-campaigns.", "all-spec.",
+                              "recent-route-reports.")):  # the derived entrance, refreshed by a begin
     out = {}
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.is_symlink():
@@ -48,7 +51,7 @@ def _files(root: Path, skip=(".runtime/artifact-producer/v1/journal", ".runtime/
                    f".runtime/artifact-producer/v1/{P.CONTROL_MEMO_NAME}",
                    f".runtime/artifact-producer/v1/{P.HISTORY_QUIET_NAME}"}:
             continue
-        if any(rel.startswith(s) for s in skip):
+        if any(rel.startswith(s) for s in skip) or rel.endswith("/campaign.md"):  # a campaign's derived document
             continue
         out[rel] = _sha(path)
     return out

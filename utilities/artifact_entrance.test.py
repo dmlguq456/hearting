@@ -1042,6 +1042,57 @@ class SectionTests(SectionFixture):
         self.cycle("2026-01-03_two", "2026-01-03_beta",
                    [("artifacts/final_report.md", "# Beta result\n\nSecond body.\n")])
 
+    def _written(self):
+        return {name: self.entrance(name) for name in ("README.md", "index.html", "all-campaigns.md", "all-campaigns.html")}
+
+    def test_a_campaign_line_opens_its_document_when_it_has_one_and_the_folder_otherwise(self):
+        self._routes()
+        self.refresh()
+        before, terminal_before = self._written(), self.reports()
+        self.assertIn("campaigns/2026-01-03_two", before["README.md"])
+        self.assertNotIn("campaign.md", " ".join(before.values()) + terminal_before)
+        self.assertEqual(self.open_line(1), str(self.root / "campaigns/2026-01-03_two"))
+        page = self.root / "campaigns/2026-01-03_two/campaign.md"
+        page.write_text("<!-- hearting:campaign-document v1 -->\n# Two\n\n**한 줄**: x\n", encoding="utf-8")
+        self.refresh()
+        after, terminal_after = self._written(), self.reports()
+        for name, text in after.items():
+            self.assertIn("campaigns/2026-01-03_two/campaign.md", text, name)
+            # only the link target changed
+            self.assertEqual(text.replace("campaigns/2026-01-03_two/campaign.md", "campaigns/2026-01-03_two"),
+                             before[name], name)
+        self.assertEqual(terminal_after.replace("campaigns/2026-01-03_two/campaign.md", "campaigns/2026-01-03_two"),
+                         terminal_before)
+        self.assertIn("campaigns/2026-01-03_two/campaign.md", terminal_after)
+        self.assertEqual(self.open_line(1), str(page))
+        # the other campaign, which has no document, still opens its folder
+        self.assertEqual(self.open_line(2), str(self.root / "campaigns/2026-01-02_one"))
+
+    def test_a_campaign_document_that_cannot_be_taken_leaves_the_folder(self):
+        self._routes()
+        page = self.root / "campaigns/2026-01-03_two/campaign.md"
+        page.write_text("x" * 70000, encoding="utf-8")
+        self.refresh()
+        self.assertNotIn("campaign.md", self.entrance())
+        page.unlink()
+        outside = self.base / "outside.md"
+        outside.write_text("# outside\n", encoding="utf-8")
+        page.symlink_to(outside)
+        self.refresh()
+        self.assertNotIn("campaign.md", self.entrance())
+        self.assertEqual(self.open_line(1), str(self.root / "campaigns/2026-01-03_two"))
+
+    def test_the_all_campaigns_page_is_rewritten_when_a_document_appears(self):
+        self._routes()
+        self.refresh()
+        first = self.entrance("all-campaigns.html")
+        self.refresh()  # the second pass reuses what it wrote
+        self.assertEqual(self.entrance("all-campaigns.html"), first)
+        (self.root / "campaigns/2026-01-02_one/campaign.md").write_text("# One\n", encoding="utf-8")
+        self.refresh()
+        self.assertIn("campaigns/2026-01-02_one/campaign.md", self.entrance("all-campaigns.html"))
+        self.assertIn("campaigns/2026-01-02_one/campaign.md", self.entrance("all-campaigns.md"))
+
     def test_the_top_has_spec_campaigns_and_records_and_no_route_reports(self):
         self.spec()
         self._routes()
@@ -1193,7 +1244,7 @@ class SectionTests(SectionFixture):
         self._routes()
         self.refresh()
         notes = ("How this repo works now. 12 topics; each change edits the same document.",
-                 "One line per stream of work.", "Reports left by routes. Not usually opened.")
+                 "One document per stream of work. No new document appears; this one is rewritten.", "Reports left by routes. Not usually opened.")
         readme, page, terminal = self.entrance(), self.entrance("index.html"), self.reports()
         self.assertIn("## spec\n\n" + notes[0] + "\n\n1. ", readme)
         self.assertIn("## Campaigns\n\n" + notes[1] + "\n\n5. ", readme)
@@ -1210,7 +1261,7 @@ class SectionTests(SectionFixture):
         self.refresh()
         readme = self.entrance()
         for note in ("이 repo가 지금 어떻게 동작하는지. 주제 12개, 고칠 때마다 같은 문서를 고칩니다.",
-                     "일의 흐름 하나에 한 줄.", "route가 남긴 보고입니다. 평소에는 열지 않습니다."):
+                     "일의 흐름 하나에 문서 한 장. 새 문서가 생기지 않고 이 문서가 고쳐집니다.", "route가 남긴 보고입니다. 평소에는 열지 않습니다."):
             self.assertIn(note, readme)
         self.assertIn("[전체 캠페인 2개](<all-campaigns.md>)", readme)
 

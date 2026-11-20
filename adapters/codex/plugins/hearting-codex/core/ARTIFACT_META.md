@@ -201,9 +201,16 @@ the goal and deciding metric are. One file per project root, next to `project-me
 
 One short page a person reads first to see where a project stands. Fleet puts its one
 line on the project's OVERVIEW rule and its parts at the top of the project page.
-Writing one is optional and nothing waits on it:
-without one, Fleet builds the line from the routes, questions and results it already
-shows.
+
+**The campaign document is made by code. A main session does not edit it by hand.** The
+entrance refresh worker (`utilities/campaign_document.py`, one turn after a begin, a
+proven close or a seal) writes `campaigns/<campaign>/campaign.md` for each campaign that
+moved: the sections `## 하는 중` → `## 기다리는 것` → `## 최근에 끝난 것` (→ `## 나중에 할 것`,
+not yet written), one line per piece of work, routes of one PR joined. It creates the file or
+replaces one whose first line is its marker `<!-- hearting:campaign-document v1 -->`; a
+`campaign.md` without the marker, a link, a directory and a hand-written `현황.md` /
+`STATUS.md` are never written. Nothing waits on it: without a document, Fleet builds the line
+from the routes, questions and results it already shows.
 
 - **Where.** `campaigns/<campaign-locator>/현황.md` (or `STATUS.md`), directly in
   the campaign folder. Fleet prefers these campaign pages, reads up to three newest
@@ -223,51 +230,24 @@ shows.
 - **`campaign.md` first.** A campaign folder's `campaign.md` is opened by name before
   any older name (no folder listing, no ownership marker required); too large or unreadable,
   it is unknown and no older name stands in for it.
-- **One selection rule.** Fleet, the close-time stamp updater and the artifact
-  entrance use the common campaign-document reader. Conflicting campaign-root
-  `STATUS.md` / `현황.md` candidates remain ambiguous; neither mtime nor a legacy
-  copy resolves that conflict. Unreadable, oversized or symlinked canonical
-  candidates remain unknown and are not edited. Legacy-only pages retain their
-  read compatibility. Automatic updates change only their existing stamp and
-  runtime closure lines, preserving the person's decisions and prose.
+- **One selection rule.** Fleet and the artifact entrance use the common campaign-document
+  reader. Conflicting campaign-root `STATUS.md` / `현황.md` candidates remain ambiguous;
+  neither mtime nor a legacy copy resolves that conflict. Unreadable, oversized or symlinked
+  canonical candidates remain unknown. Legacy-only pages (a hand-written `현황.md` /
+  `STATUS.md`, or one in a cycle's `artifacts/`) keep their read compatibility; the runtime
+  never edits them.
 - **Other campaign documents.** Optional handoffs and topic Markdown documents
   also live directly under the campaign. The common entrance lists them as
   campaign documents, with their existing ownership and locator; it creates no
   cycle or authority ID for them. Missing identity remains unknown. This does
   not move historical research/cycle documents or require a new page.
-- **Shape.** Markdown in the reader's language. Only the parts below are read; other
-  sections are free.
-
-  ```markdown
-  # <project or campaign> 현황
-
-  갱신 2026-11-02 21:50 · optional pointers
-
-  **한 줄**: where the work stands, in one sentence.
-
-  ## 결정 필요
-  - one bullet per thing that waits on the person: a decision or an action
-
-  ## 다음
-  - the next step first
-  ```
-
-  English headings read the same: `**One line**:`, `## Decisions needed`, `## Next`.
-  Readers take the one-line paragraph (else the first paragraph above the first section
-  that is not the `갱신`/`Updated` stamp, else the title), count the top-level bullets
-  under the decisions heading, and take the first bullet under the next heading. A
-  section that records decisions already made (`## 사용자 결정 기록`, `## Decision log`)
-  is not counted. The file's modification time is when the status last changed.
-- **Refresh.** Whoever runs the work edits it when the state changes. A route's proven
-  close (`capability-route finish`, or an owner's runtime close) also refreshes the
-  campaign's page when one exists (`utilities/status_board.py`): it sets the `갱신`/`Updated` stamp
-  and puts one line first under `## 최근 마감` / `## Recently closed` (at most five:
-  when, the route's intent, the route id and any PR link in the close summary). The
-  one line, `## 결정 필요`, `## 다음` and anything else a person writes, inside that
-  section too, stay the person's; a page is never created and a
-  failure leaves it as it was. A PR merge has no Hearting event, so nothing refreshes
-  on it, and nothing checks freshness. Fleet shows the age in front of a document older
-  than three days.
+- **Reading.** Readers take the one-line paragraph (else the first paragraph above the first
+  section that is not the `갱신`/`Updated` stamp, else the title), count the top-level
+  bullets under the decisions heading (`## 기다리는 것`, `## 결정 필요`, `## Decisions needed`)
+  and take the first bullet under the next heading (`## 나중에 할 것`, `## 다음`, `## Next`).
+  A section that records decisions already made (`## 사용자 결정 기록`, `## Decision log`) is
+  not counted. The file's modification time is when the status last changed. Fleet shows the
+  age in front of a document older than three days.
 
 ### Root `README.md` / `index.html` — the read entrance
 

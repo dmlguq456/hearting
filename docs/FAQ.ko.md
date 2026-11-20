@@ -81,8 +81,8 @@ Code 작업자에만 적용됩니다. Codex 작업자는 Codex의 `workspace-wri
 campaign의 하루 일지(`journals/YYYY-MM-DD.md`)에 모입니다.
 `hearting run artifact-journal dry-run --artifact-root <루트>`로 일지에 합칠 수 있는
 예전 작은 cycle을 미리 보고, 명시적인 `apply --cycle <ID>`와 `restore --cycle <ID>`로
-백업·통합·복원합니다. campaign은 `STATUS.md`를 둘 수 있으며, 하팅이 만들지는 않고
-Fleet가 프로젝트 화면에 보여 줍니다.
+백업·통합·복원합니다. 하팅은 캠페인마다 `campaign.md`를 직접 만들고 고칩니다. 손으로 쓴
+`STATUS.md`는 하팅이 만들거나 고치지 않으며, Fleet가 둘 다 프로젝트 화면에 보여 줍니다.
 
 ## hearting이나 fleet를 찾을 수 없다고 나옵니다
 
