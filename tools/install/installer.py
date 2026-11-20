@@ -1332,6 +1332,18 @@ def _runtime_emit_shape(command, reports, exit_code, lines):
     }
 
 
+def _model_follow_lines(harnesses):
+    """Read-only notes on newer models the user's table could follow (never raises)."""
+    try:
+        utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        import model_follow
+        return model_follow.follow_lines(harnesses)
+    except Exception:
+        return []
+
+
 def cmd_runtime(args):
     first_install = args.runtime_command == "activate" and _new_global_install(args.scope)
     targets = _runtime_targets(args.runtime, args.runtime_command, args.scope)
@@ -1528,6 +1540,8 @@ def cmd_runtime(args):
             lines.append("compute-hosts-config: " + inventory["status"] + " " + inventory["path"])
             for report in reports:
                 report["compute_hosts_config"] = inventory
+            if args.runtime_command == "refresh":
+                lines.extend(_model_follow_lines(targets))
     except Exception as exc:
         rollback_errors = []
         for snapshot in reversed(snapshots):
@@ -1720,7 +1734,7 @@ def cmd_auto_update(args):
 
 def cmd_config(args):
     """Read-only view of the user-owned configuration registry."""
-    rows = user_config.status()
+    rows = user_config.with_model_follow(user_config.status())
     ok = all(row["ok"] for row in rows)
     return {
         "operation": f"config {args.config_command}",

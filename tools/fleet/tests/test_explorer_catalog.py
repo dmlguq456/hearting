@@ -496,5 +496,224 @@ class ModelCatalogTests(unittest.TestCase):
             self.assertEqual(overridden, {"file-provider", "inline-provider"})
 
 
+    # --- chosen-shape rows for the model-follow rule: vendor patterns live in each reader ---
+
+    def _codex_cache(self, models, client_version="0.163.0"):
+        path = self.root / "codex" / "models_cache.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"client_version": client_version, "models": models}))
+
+    def test_codex_rows_carry_family_version_visibility_mark_levels_and_upgrade(self):
+        self._codex_cache([
+            {"slug": "gpt-6.1-sol", "visibility": "list", "supported_in_api": True,
+             "description": "Previous generation coding model",
+             "supported_reasoning_levels": [{"effort": "high"}, {"effort": "xhigh"}],
+             "upgrade": {"model": "gpt-6.2-sol"}},
+            {"slug": "gpt-6.2-sol", "visibility": "list", "description": "Newest",
+             "supported_reasoning_levels": ["low", "high"]},
+            {"slug": "gpt-6-luna", "visibility": "hide", "description": "Legacy small model"},
+            {"slug": "gpt-6.1-terra", "visibility": "list", "supported_in_api": False},
+            {"slug": "gpt-6.2-sol-codex", "visibility": "list"},
+            {"slug": "o9-mini", "visibility": "list"}])
+        catalog = model_catalog.read_catalog("codex")
+        self.assertEqual(catalog.client_version, "0.163.0")
+        rows = {row["id"]: row for row in catalog.rows}
+        self.assertEqual((rows["gpt-6.1-sol"]["family"], rows["gpt-6.1-sol"]["version"]), ("sol", (6, 1)))
+        self.assertEqual((rows["gpt-6.2-sol"]["family"], rows["gpt-6.2-sol"]["version"]), ("sol", (6, 2)))
+        self.assertEqual(rows["gpt-6.1-sol"]["efforts"], ("high", "xhigh"))
+        self.assertEqual(rows["gpt-6.2-sol"]["efforts"], ("low", "high"))
+        self.assertEqual(rows["gpt-6.1-sol"]["upgrade"], "gpt-6.2-sol")
+        self.assertTrue(rows["gpt-6.1-sol"]["deprecated"])
+        self.assertFalse(rows["gpt-6.2-sol"]["deprecated"])
+        self.assertEqual((rows["gpt-6-luna"]["visible"], rows["gpt-6-luna"]["deprecated"],
+                          rows["gpt-6-luna"]["version"]), (False, True, (6,)))
+        self.assertFalse(rows["gpt-6.1-terra"]["visible"])
+        # names off the gpt-<version>-<name> pattern get no family and are never followed
+        for odd in ("gpt-6.2-sol-codex", "o9-mini"):
+            self.assertEqual((rows[odd]["family"], rows[odd]["version"]), (None, None))
+
+    def test_claude_rows_carry_family_version_section_levels_and_cli_floor(self):
+        document = self._claude_v2([("claude-opus-5-5", "opus", "main"),
+                                    ("claude-haiku-5-5", "haiku", "main"),
+                                    ("claude-opus-4-6", "opus", "overflow"),
+                                    ("claude-sonnet-4-5-20250929", "sonnet", "main"),
+                                    ("odd-name", "opus", "main")])
+        records = document["catalog"]["config"]["models"]
+        records[0]["effort_levels"] = ["low", {"id": "high"}, "max"]
+        records[0]["min_claude_code_version"] = "2.1.280"
+        records[1]["runtime"]["min_claude_code_version"] = "2.1.293"
+        self._claude_cache("one.json", document)
+        catalog = model_catalog.read_catalog("claude")
+        rows = {row["id"]: row for row in catalog.rows}
+        self.assertEqual((rows["claude-opus-5-5"]["family"], rows["claude-opus-5-5"]["version"],
+                          rows["claude-opus-5-5"]["visible"]), ("opus", (5, 5), True))
+        self.assertEqual(rows["claude-opus-5-5"]["efforts"], ("low", "high", "max"))
+        self.assertEqual(rows["claude-opus-5-5"]["min_cli"], "2.1.280")
+        self.assertEqual(rows["claude-haiku-5-5"]["min_cli"], "2.1.293")
+        self.assertEqual((rows["claude-opus-4-6"]["visible"], rows["claude-opus-4-6"]["deprecated"]),
+                         (False, True))
+        self.assertEqual(rows["claude-sonnet-4-5-20250929"]["version"], (4, 5))
+        self.assertEqual((rows["odd-name"]["family"], rows["odd-name"]["version"]), (None, None))
+        # the aliases the runtime accepts are choices, not rows: they follow the runtime themselves
+        self.assertNotIn("opus", rows)
+
+    def test_opencode_cache_rows_group_by_provider_family_and_name_stem(self):
+        cache = self.root / "cache/opencode/models.json"
+        cache.parent.mkdir(parents=True)
+        cache.write_text(json.dumps({"ready": {"models": {
+            "muse-spark-1.3-contributor": {"family": "muse", "status": "active",
+                                           "cost": {"input": 0.1, "output": 0.4}},
+            "muse-spark-1.2-contributor": {"family": "muse", "status": "deprecated", "cost": {"input": 0.1}},
+            "deepseek-v4.1-flash": {"family": "deepseek"}, "unversioned": {"family": "muse"},
+            "no-family-2": {}}}, "unused": {"models": {"hidden-3": {"family": "x"}}}}))
+        auth = self.root / "data/opencode/auth.json"
+        auth.parent.mkdir(parents=True)
+        auth.write_text(json.dumps({"ready": {}}))
+        rows = {row["id"]: row for row in model_catalog.read_catalog("opencode").rows}
+        self.assertEqual(set(rows), {"ready/muse-spark-1.3-contributor", "ready/muse-spark-1.2-contributor",
+                                     "ready/deepseek-v4.1-flash", "ready/unversioned", "ready/no-family-2"})
+        new, old = rows["ready/muse-spark-1.3-contributor"], rows["ready/muse-spark-1.2-contributor"]
+        self.assertEqual(new["family"], old["family"])  # the same product line, only the version differs
+        self.assertEqual((new["version"], old["version"]), ((1, 3), (1, 2)))
+        self.assertEqual((new["cost"], old["deprecated"], old["visible"]), (0.1, True, False))
+        self.assertNotEqual(rows["ready/deepseek-v4.1-flash"]["family"], new["family"])
+        for odd in ("ready/unversioned", "ready/no-family-2"):
+            self.assertEqual((rows[odd]["family"], rows[odd]["version"]), (None, None))
+
+    def test_opencode_service_rows_carry_family_status_price_and_variants(self):
+        self._native_service({"location": {"directory": str(self.root)}, "data": [
+            {"providerID": "ready", "id": "muse-spark-1.3-contributor", "enabled": True,
+             "status": "active", "family": "muse", "cost": {"input": 0.1},
+             "variants": [{"id": "low"}, {"id": "high"}]},
+            {"providerID": "ready", "id": "muse-spark-1.2-contributor", "enabled": True,
+             "status": "deprecated", "family": "muse", "cost": 0.5},
+            {"providerID": "ready", "id": "disabled-9", "enabled": False, "status": "active", "family": "x"},
+        ]})
+        catalog = model_catalog.read_catalog("opencode")
+        rows = {row["id"]: row for row in catalog.rows}
+        self.assertEqual(set(rows), {"ready/muse-spark-1.3-contributor", "ready/muse-spark-1.2-contributor"})
+        self.assertEqual(rows["ready/muse-spark-1.3-contributor"]["efforts"], ("low", "high"))
+        self.assertEqual((rows["ready/muse-spark-1.3-contributor"]["cost"], rows["ready/muse-spark-1.2-contributor"]["cost"]),
+                         (0.1, 0.5))
+        self.assertEqual((rows["ready/muse-spark-1.2-contributor"]["deprecated"],
+                          rows["ready/muse-spark-1.2-contributor"]["visible"]), (True, False))
+        self.assertNotIn("fixture-private-password", repr(catalog))
+
+    def test_rows_are_empty_when_the_cache_names_models_only(self):
+        self._claude_cache("flat.json", {"models": [{"id": "claude-opus-5-5"}]})
+        self.assertEqual(model_catalog.read_catalog("claude").rows, ())
+        self._codex_cache([])
+        self.assertEqual(model_catalog.read_catalog("codex").rows, ())
+
+
+    # --- harness files -> rows -> model-follow lines, on a fixture home, nothing written ---
+
+    SHIPPED = Path(__file__).resolve().parents[3] / "adapters"
+
+    def _user_conf(self, harness, *replacements):
+        base = {"claude": self.root / "claude", "codex": self.root / "codex",
+                "opencode": self.root / "config" / "opencode"}[harness]
+        text = (self.SHIPPED / harness / "config" / "models.conf").read_text()
+        for old, new in replacements:
+            self.assertIn(old, text)
+            text = text.replace(old, new)
+        path = base / "agent-config" / "models.conf"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    def _follow(self, harness, installed=(None, None)):
+        utilities = str(Path(__file__).resolve().parents[3] / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        import model_follow
+        tree = sorted(p for p in self.root.rglob("*"))
+        sizes = {p: p.stat().st_size for p in tree if p.is_file()}
+        # A worker's masked home pins every harness's model config to one directory;
+        # this fixture is an ordinary user home, where each harness has its own.
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.root / "claude")}):
+            os.environ.pop("HEARTING_MODEL_CONFIG_HOME", None)
+            result = model_follow.survey_harness(harness, probe=lambda _h: installed)
+        self.assertEqual(sorted(self.root.rglob("*")), tree)  # nothing created, not even a backup
+        self.assertEqual({p: p.stat().st_size for p in tree if p.is_file()}, sizes)
+        return result, model_follow.lines([result])
+
+    def test_codex_files_give_newer_proposal_and_cli_lines(self):
+        path = self._user_conf("codex",
+                               ("CFG_MODEL_PROFILE_DEEP=deep:xhigh", "CFG_MODEL_PROFILE_DEEP=model/gpt-6-astra:high"))
+        before = path.read_bytes()
+        self._codex_cache([
+            {"slug": "gpt-6-astra", "visibility": "list", "upgrade": {"model": "gpt-6.2-sol"},
+             "description": "Previous generation"},
+            {"slug": "gpt-6.1-sol", "visibility": "list", "description": "Previous generation"},
+            {"slug": "gpt-6.2-sol", "visibility": "list", "description": "Newest",
+             "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}]},
+            {"slug": "gpt-6-luna", "visibility": "list", "description": "Previous generation"}])
+        result, lines = self._follow("codex", installed=((0, 163, 0), "/opt/bin/codex"))
+        self.assertEqual(lines, [
+            "model follow: proposal codex tier/top gpt-6-astra -> gpt-6.2-sol (other family)"
+            " · hearting model set codex tier/top gpt-6.2-sol@high",
+            "model follow: newer codex tier/deep gpt-6.1-sol -> gpt-6.2-sol (high, was xhigh)"
+            " · hearting model set codex tier/deep gpt-6.2-sol@high",
+            "model follow: proposal codex profile/deep gpt-6-astra -> gpt-6.2-sol (other family)"
+            " · hearting model set codex profile/deep gpt-6.2-sol@high",
+            "model follow: codex CLI 0.163.0 lists gpt-6-luna as previous generation with no"
+            " successor · update the Codex CLI yourself"])
+        cascade = {e["target"]: e["companions"] for e in result["entries"]}["tier/deep"]
+        self.assertEqual([c["key"] for c in cascade], ["CFG_TIER_DEEP_FAILOVER_CASCADE"])
+        self.assertTrue(cascade[0]["to"].startswith("gpt-6.2-sol:high "))
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_claude_files_give_newer_and_cli_lines_and_leave_aliases_alone(self):
+        self._user_conf("claude",
+                        ("CFG_TIER_LIGHT_MODEL=sonnet", "CFG_TIER_LIGHT_MODEL=claude-sonnet-4-5"),
+                        ("CFG_MODEL_PROFILE_DEEP=deep:xhigh", "CFG_MODEL_PROFILE_DEEP=model/claude-opus-4-6:xhigh"))
+        document = self._claude_v2(
+            [("claude-sonnet-4-5", "sonnet", "main"), ("claude-sonnet-5-5", "sonnet", "main"),
+             ("claude-opus-4-6", "opus", "main"), ("claude-opus-5-5", "opus", "main"),
+             ("claude-fable-9-0", "fable", "main")],
+            {"opus": {"default": "claude-opus-5-5"}})
+        records = {r["id"]: r for r in document["catalog"]["config"]["models"]}
+        records["claude-opus-5-5"]["effort_levels"] = ["low", "medium", "high"]
+        records["claude-fable-9-0"]["min_claude_code_version"] = "9.0.0"
+        self._claude_cache("one.json", document)
+        result, lines = self._follow("claude", installed=((2, 1, 5), "/h/.local/share/claude/versions/2.1.5"))
+        self.assertEqual(lines, [
+            "model follow: newer claude tier/light claude-sonnet-4-5 -> claude-sonnet-5-5 (medium)"
+            " · hearting model set claude tier/light claude-sonnet-5-5@medium",
+            "model follow: newer claude profile/deep claude-opus-4-6 -> claude-opus-5-5 (high, was xhigh)"
+            " · hearting model set claude profile/deep claude-opus-5-5@high",
+            "model follow: claude CLI 2.1.5 is older than claude-fable-9-0 (needs 9.0.0) · claude update"])
+        # the alias cells name no listed id: nothing to do for them
+        aliases = [e for e in result["entries"] if e["current"]["model"] in ("opus", "sonnet", "fable")]
+        self.assertTrue(aliases and {e["kind"] for e in aliases} == {"none"})
+
+    def test_opencode_files_give_newer_and_price_proposal_lines(self):
+        self._user_conf("opencode",
+                        ("CFG_MODEL_PROFILE_DEEP=balanced-deep:xhigh",
+                         "CFG_MODEL_PROFILE_DEEP=model/opencode-go/muse-spark-1.2-contributor:high"))
+        cache = self.root / "cache/opencode/models.json"
+        cache.parent.mkdir(parents=True)
+        cache.write_text(json.dumps({"opencode-go": {"models": {
+            "muse-spark-1.2-contributor": {"family": "muse", "cost": {"input": 0.1}},
+            "muse-spark-1.3-contributor": {"family": "muse", "cost": {"input": 0.1}},
+            "deepseek-v4.1-flash": {"family": "deepseek", "cost": {"input": 0.1}},
+            "deepseek-v4.2-flash": {"family": "deepseek", "cost": {"input": 0.5}}}}}))
+        auth = self.root / "data/opencode/auth.json"
+        auth.parent.mkdir(parents=True)
+        auth.write_text(json.dumps({"opencode-go": {}}))
+        result, lines = self._follow("opencode", installed=((2, 0, 32), None))
+        self.assertEqual([line.split(" · ")[0] for line in lines], [
+            "model follow: proposal opencode tier/light opencode-go/deepseek-v4.1-flash -> "
+            "opencode-go/deepseek-v4.2-flash (price x5.0)",
+            "model follow: proposal opencode tier/mini opencode-go/deepseek-v4.1-flash -> "
+            "opencode-go/deepseek-v4.2-flash (price x5.0)",
+            "model follow: newer opencode profile/deep opencode-go/muse-spark-1.2-contributor -> "
+            "opencode-go/muse-spark-1.3-contributor (high)"])
+        self.assertTrue(lines[2].endswith(" · hearting model set opencode profile/deep "
+                                          "opencode-go/muse-spark-1.3-contributor@high"))
+        self.assertIsNone(result["cli"])  # OpenCode never gets the CLI note
+
+
 if __name__ == "__main__":
     unittest.main()

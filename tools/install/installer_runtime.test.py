@@ -281,6 +281,30 @@ class LauncherCommitBoundaryTest(unittest.TestCase):
         install.assert_called_once_with(dry_run=True)
         ensure.assert_called_once_with(str(target), dry_run=False)
 
+    def test_refresh_prints_model_follow_lines_and_a_failing_survey_never_fails_it(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utilities"))
+        import model_follow
+        launchers = [{"name": "hearting", "target": str(self.home / ".local/bin/hearting"),
+                      "status": "unchanged"}]
+        history = {"status": "unchanged", "changed": False}
+        for command, wanted in (("refresh", True), ("activate", False)):
+            with self.subTest(command=command), _stubbed_runtime_projection(), \
+                 mock.patch.object(bootstrap, "install_launchers", return_value=launchers), \
+                 mock.patch.object(herdr_integration, "ensure_history_key", return_value=history), \
+                 mock.patch.object(model_follow, "follow_lines",
+                                   return_value=["model follow: fixture line"]) as survey:
+                result = installer.cmd_runtime(self._args(command))
+            self.assertEqual(result["exit"], installer.EXIT_OK)
+            self.assertEqual("model follow: fixture line" in result["lines"], wanted)
+            self.assertEqual([call.args for call in survey.call_args_list], [(["codex"],)] if wanted else [])
+        with _stubbed_runtime_projection(), \
+             mock.patch.object(bootstrap, "install_launchers", return_value=launchers), \
+             mock.patch.object(herdr_integration, "ensure_history_key", return_value=history), \
+             mock.patch.object(model_follow, "follow_lines", side_effect=RuntimeError("fixture")):
+            result = installer.cmd_runtime(self._args("refresh"))
+        self.assertEqual(result["exit"], installer.EXIT_OK)
+        self.assertFalse([line for line in result["lines"] if line.startswith("model follow")])
+
     def test_activation_reconnects_once_and_rollback_never_reconnects(self):
         with _stubbed_runtime_projection() as mocks, \
              mock.patch.object(runtime_activation, "reconnect_peer_obligations") as reconnect, \

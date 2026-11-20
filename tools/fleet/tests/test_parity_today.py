@@ -238,7 +238,7 @@ def _r14_residual_record(state, width, row, *, hits=None):
                              "    weights:         codex ▮▮▮▮▮▮▮▮▮▮ 1.0    o"),
         ("MODELS", 80, 32): (" ── CONTEXT & TIDY  input tokens · new sessions",
                              " ── CONTEXT & TIDY  input tokens · new sessio"),
-        ("MODELS", 100, 22): ("  └─ models.conf → .bak backup · new sessions and launches only · s",
+        ("MODELS", 100, 22): ("  └─ models.conf → .bak backup · new sessions and launches only · r",
                               "  └─ models.conf → .bak backup · new sessions and launches only  ┘"),
         ("MODELS", 100, 26): ("    weights:         codex ▮▮▮▮▮▮▮▮▮▮ 1.0    opencode ▮▮▮▮ 0.4    c",
                               "    weights:         codex ▮▮▮▮▮▮▮▮▮▮ 1.0    opencode ▮▮▮▮ 0.4"),

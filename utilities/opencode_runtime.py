@@ -420,6 +420,7 @@ def read_model_catalog(*, directory=None, environ=None):
         models = []
         seen = set()
         variants = {}
+        records = {}
         for row in rows:
             if not isinstance(row, dict):
                 return unknown
@@ -438,8 +439,18 @@ def read_model_catalog(*, directory=None, environ=None):
                 ids = observed_variants(row.get("variants"))
                 if ids:
                     variants[identifier] = ids
+                family = row.get("family")
+                cost = row.get("cost")
+                cost = cost.get("input") if isinstance(cost, dict) else cost
+                records[identifier] = {
+                    "family": family if isinstance(family, str) else None,
+                    "status": row["status"],
+                    "cost": float(cost) if isinstance(cost, (int, float))
+                    and not isinstance(cost, bool) else None,
+                }
         return {"state": "available" if models else "empty", "source": source,
-                "models": tuple(models), "variants": variants, "observed_at": time.time()}
+                "models": tuple(models), "variants": variants, "records": records,
+                "observed_at": time.time()}
     except (OSError, ValueError, TypeError, RuntimeError, http.client.HTTPException):
         return unknown
 

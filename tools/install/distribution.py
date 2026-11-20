@@ -5489,7 +5489,32 @@ def bootstrap(
     return result
 
 
+def _model_follow_lines() -> list[str]:
+    """Read-only notes on newer models the user's table could follow (never raises)."""
+    try:
+        utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        import model_follow
+        return model_follow.follow_lines()
+    except Exception:
+        return []
+
+
 def update(
+    version: Optional[str] = None,
+    runtimes: Optional[Iterable[str]] = None,
+    automatic: bool = False,
+    force_prune_unproven: bool = False,
+) -> dict:
+    result = _update_release(version, runtimes, automatic, force_prune_unproven)
+    lines = _model_follow_lines()
+    if lines and isinstance(result, dict):
+        result["report_lines"] = [*result.get("report_lines", []), *lines]
+    return result
+
+
+def _update_release(
     version: Optional[str] = None,
     runtimes: Optional[Iterable[str]] = None,
     automatic: bool = False,

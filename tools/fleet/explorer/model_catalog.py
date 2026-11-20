@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 from .types import ModelCatalog
@@ -109,6 +110,135 @@ def _claude_ids(document):
     return tuple(dict.fromkeys((*aliases, *listed)))
 
 
+# --- Chosen-shape rows for the model-follow rule (utilities/model_follow.py). ---
+# The rule only sees rows; the vendor naming patterns that make a family and a
+# version out of a model name stay here, in each harness's own reader. A name that
+# does not match its pattern gets no family, and the rule never follows it.
+
+def _version(text):
+    match = re.search(r"\d+(?:\.\d+)*", text)
+    return tuple(int(part) for part in match.group(0).split(".")) if match else None
+
+
+def _levels(value):
+    """Effort or variant names a listed model accepts, or None when not stated."""
+    if isinstance(value, dict):
+        value = list(value)
+    if not isinstance(value, (list, tuple)):
+        return None
+    found = []
+    for item in value:
+        if isinstance(item, dict):
+            item = next((item.get(key) for key in ("effort", "id", "level", "name", "value")
+                         if isinstance(item.get(key), str)), None)
+        if isinstance(item, str) and item.strip() and item.strip() not in found:
+            found.append(item.strip())
+    return tuple(found) or None
+
+
+def _row(identifier, family, version, *, visible=True, deprecated=False, efforts=None,
+         cost=None, upgrade=None, min_cli=None):
+    return {"id": identifier, "family": family, "version": version, "visible": bool(visible),
+            "deprecated": bool(deprecated), "efforts": efforts, "cost": cost,
+            "upgrade": upgrade, "min_cli": min_cli}
+
+
+_CLAUDE_ID = re.compile(r"^claude-([a-z][a-z0-9]*)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$")
+
+
+def _claude_rows(document):
+    catalog = document.get("catalog") if isinstance(document, dict) else None
+    config = catalog.get("config") if isinstance(catalog, dict) else None
+    records = config.get("models") if isinstance(config, dict) else None
+    rows = []
+    for record in records if isinstance(records, list) else ():
+        identifier = record.get("id") if isinstance(record, dict) else None
+        if not isinstance(identifier, str) or not identifier.strip():
+            continue
+        identifier = identifier.strip()
+        runtime = record.get("runtime") if isinstance(record.get("runtime"), dict) else {}
+        match = _CLAUDE_ID.match(identifier)
+        family = runtime.get("family") if isinstance(runtime.get("family"), str) else None
+        family = (family or (match.group(1) if match else "")).strip().lower() or None
+        version = (int(match.group(2)), int(match.group(3) or 0)) if match else None
+        section = record.get("section")
+        min_cli = record.get("min_claude_code_version", runtime.get("min_claude_code_version"))
+        rows.append(_row(
+            identifier, family if version else None, version,
+            visible=section == "main", deprecated=section == "overflow",
+            efforts=_levels(record.get("effort_levels", runtime.get("effort_levels"))),
+            min_cli=min_cli if isinstance(min_cli, str) else None))
+    return tuple(rows)
+
+
+_CODEX_SLUG = re.compile(r"^gpt-(\d+(?:\.\d+)*)-([a-z][a-z0-9]*)$")
+
+
+def _codex_rows(document):
+    records = document.get("models") if isinstance(document, dict) else None
+    rows = []
+    for record in records if isinstance(records, list) else ():
+        slug = record.get("slug") if isinstance(record, dict) else None
+        if not isinstance(slug, str) or not slug.strip():
+            continue
+        slug = slug.strip()
+        match = _CODEX_SLUG.match(slug)
+        description = record.get("description")
+        upgrade = record.get("upgrade")
+        upgrade = upgrade.get("model") if isinstance(upgrade, dict) else upgrade
+        rows.append(_row(
+            slug, match.group(2) if match else None,
+            tuple(int(part) for part in match.group(1).split(".")) if match else None,
+            visible=record.get("visibility") == "list" and record.get("supported_in_api") is not False,
+            deprecated=isinstance(description, str) and description.strip().lower().startswith(
+                ("previous generation", "legacy")),
+            efforts=_levels(record.get("supported_reasoning_levels")),
+            upgrade=upgrade if isinstance(upgrade, str) and upgrade.strip() else None))
+    return tuple(rows)
+
+
+def _opencode_row(identifier, family, status, cost, efforts):
+    provider, _, model = identifier.partition("/")
+    number = re.search(r"\d+(?:\.\d+)*", model)
+    if not (isinstance(family, str) and family.strip() and number):
+        family_key, version = None, None
+    else:
+        stem = model[:number.start()] + "#" + model[number.end():]
+        family_key = f"{provider}|{family.strip().lower()}|{stem}"
+        version = _version(number.group(0))
+    cost = cost.get("input") if isinstance(cost, dict) else cost
+    cost = float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
+    return _row(identifier, family_key, version, visible=status != "deprecated",
+                deprecated=status == "deprecated", efforts=efforts, cost=cost)
+
+
+def _opencode_native_rows(native):
+    records = native.get("records")
+    variants = native.get("variants") or {}
+    return tuple(_opencode_row(identifier, record.get("family"), record.get("status"),
+                               record.get("cost"), variants.get(identifier))
+                 for identifier, record in (records.items() if isinstance(records, dict) else ())
+                 if isinstance(record, dict))
+
+
+def _opencode_cache_rows(document):
+    records = _opencode_provider_records(document)
+    connected = _opencode_connected_providers(document)
+    rows = []
+    for provider, record in records.items():
+        models = record.get("models") if provider in connected and isinstance(record, dict) else None
+        if not isinstance(models, dict):
+            continue
+        for key, item in models.items():
+            if not isinstance(item, dict):
+                continue
+            model = _opencode_model_identifier(item, key)
+            if model:
+                rows.append(_opencode_row(f"{provider}/{model}", item.get("family"),
+                                          item.get("status"), item.get("cost"), None))
+    return tuple(rows)
+
+
 def _candidates(harness):
     home = Path.home()
     if harness == "claude":
@@ -139,7 +269,8 @@ def read_catalog(harness):
         import opencode_runtime
         native = opencode_runtime.read_model_catalog()
         if native is not None:
-            return ModelCatalog(harness=harness, **native)
+            fields = {key: value for key, value in native.items() if key != "records"}
+            return ModelCatalog(harness=harness, rows=_opencode_native_rows(native), **fields)
     for candidate in _candidates(harness):
         path = Path(candidate)
         document = _json(path)
@@ -160,8 +291,16 @@ def read_catalog(harness):
             models = _ids([item for item in document["models"]
                            if isinstance(item, dict) and item.get("visibility") == "list"])
         if models:
+            if harness == "claude":
+                rows = _claude_rows(document)
+            elif harness == "codex":
+                rows = _codex_rows(document)
+            else:
+                rows = _opencode_cache_rows(document)
+            client = document.get("client_version") if isinstance(document, dict) else None
             return ModelCatalog(harness=harness, state="available", source=str(path),
-                                models=models, observed_at=path.stat().st_mtime)
+                                models=models, observed_at=path.stat().st_mtime, rows=rows,
+                                client_version=client if isinstance(client, str) else None)
         return ModelCatalog(harness=harness, state="empty", source=str(path),
                             observed_at=path.stat().st_mtime)
     return ModelCatalog(harness=harness)
