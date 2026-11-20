@@ -1567,6 +1567,9 @@ class _LayoutScan:
     complete: bool                    # every folder was read and every entry was one this scan understands
     # What made `complete` false: `(folder relative to the root, reason)` for each entry in the way, in the order met.
     blockers: List[Tuple[str, str]] = field(default_factory=list)
+    # The cycle records read for the folders that carry no ID (a `not-a-cycle` entry): those whose `locator` is the
+    # name of such a folder, by that name.  Read once by the scan, so that no one reads the records again for them.
+    named: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
     def block(self, root: Path, path: Path, reason: str) -> None:
         self.complete = False
