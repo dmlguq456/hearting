@@ -2230,6 +2230,38 @@
    "en": "{count} seconds",
    "ko": "{count}초"
   },
+  "fleet.status.group.done": {
+   "en": "Recently done",
+   "ko": "최근에 끝난 것"
+  },
+  "fleet.status.group.done.short": {
+   "en": "Done",
+   "ko": "끝난 일"
+  },
+  "fleet.status.group.next": {
+   "en": "Later",
+   "ko": "나중에 할 것"
+  },
+  "fleet.status.group.next.short": {
+   "en": "Later",
+   "ko": "예정"
+  },
+  "fleet.status.group.running": {
+   "en": "In progress",
+   "ko": "하는 중"
+  },
+  "fleet.status.group.running.short": {
+   "en": "Doing",
+   "ko": "하는 중"
+  },
+  "fleet.status.group.waiting": {
+   "en": "Waiting for you",
+   "ko": "기다리는 것"
+  },
+  "fleet.status.group.waiting.short": {
+   "en": "Waiting",
+   "ko": "기다림"
+  },
   "frame.note_truncated": {
    "en": "…(truncated)",
    "ko": "…(잘림)"

@@ -477,10 +477,10 @@ class ProposalValidationTest(ValidationBase):
              "ignored:legs[0].intensity:standard-for-direct"),
             ({"capability": "autopilot-code", "shape": "direct", "intensity": "strong"}, "direct",
              "ignored:legs[0].intensity:strong-for-direct"),
-            # solo carries quick, and standard where its kind declares a one-shot review (code does): a
-            # proposal above that keeps the highest intensity the form allows at or below it.
-            ({"capability": "autopilot-code", "shape": "solo", "intensity": "strong"}, "standard",
-             "ignored:legs[0].intensity:strong-for-solo"),
+            # solo carries quick, and standard and up where its kind declares a one-shot review (code does): a
+            # proposal below what the form allows keeps its default (direct is no solo intensity).
+            ({"capability": "autopilot-code", "shape": "solo", "intensity": "direct"}, "quick",
+             "ignored:legs[0].intensity:direct-for-solo"),
             ({"capability": "autopilot-code", "shape": "staged", "intensity": "quick", "graph": ["execute"]},
              "standard", "ignored:legs[0].intensity:quick-for-staged"),
             ({"capability": "autopilot-code", "shape": "staged", "intensity": "direct", "graph": ["execute"]},
@@ -492,6 +492,10 @@ class ProposalValidationTest(ValidationBase):
                 self.assertEqual(row["reason"], "valid", row)
                 self.assertEqual(row["facts"]["legs"][0]["intensity"], effective)
                 self.assertEqual(row["read_notes"], [note])
+        for kept in ("strong", "thorough", "adversarial"):
+            solo_up = self.evaluate([{"capability": "autopilot-code", "shape": "solo", "intensity": kept}])
+            self.assertEqual((solo_up["reason"], solo_up["facts"]["legs"][0]["intensity"], solo_up.get("read_notes", [])),
+                             ("valid", kept, []))
         solo_standard = self.evaluate([{"capability": "autopilot-code", "shape": "solo", "intensity": "standard"}])
         self.assertEqual(solo_standard["reason"], "valid", solo_standard)
         self.assertEqual(solo_standard["facts"]["legs"][0]["intensity"], "standard")
