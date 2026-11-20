@@ -228,8 +228,12 @@ def capability_registry_digest(registry, capability, extra_recipes=()):
     # The part catalog is never part of the shared projection: a route that uses
     # no catalog data keeps the digest it had before the catalog existed. Only
     # the rows a composed recipe actually used (`compose.parts`) are added.
+    # `field_harness_weights` is a default the route seals into its own allocation
+    # (`dispatch_allocation.field_weights`), like the user's dispatch defaults: editing the
+    # table does not make a sealed graph stale.
     projection = {k: v for k, v in registry.items()
-                  if k not in ("recipes", "completion_gate_contracts", "part_catalog")}
+                  if k not in ("recipes", "completion_gate_contracts", "part_catalog",
+                               "field_harness_weights")}
     projection["recipes"] = recipes
     projection["completion_gate_contracts"] = {k: v for k, v in contracts.items() if k in referenced}
     if used_parts:

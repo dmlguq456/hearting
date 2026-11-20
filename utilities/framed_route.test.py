@@ -524,6 +524,11 @@ class RegistryRegistrationTest(unittest.TestCase):
             "plan": "autopilot-spec", "design": "autopilot-design", "code": "autopilot-code",
             "lab": "autopilot-lab", "research": "autopilot-research", "docs": "autopilot-draft",
             "admin": None, "other": None})
+        # The per-field harness weights table is one more top-level table; it is sealed into each
+        # route's own allocation and sits outside every capability's registry digest.
+        table = registry.pop("field_harness_weights")
+        self.assertEqual(set(table), {"checked_on", "rule", "basis", "weights"})
+        self.assertTrue(set(table["weights"]) <= set(CT.FIELDS))
         for recipe in registry["recipes"]:
             if recipe["capability"] in ("route-frame", "unit"):
                 self.assertNotIn("field", recipe)   # the frame proposes it; a unit's comes from its head
