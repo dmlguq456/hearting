@@ -102,33 +102,59 @@ def payload_environment(argv):
     return parsed[0]
 
 
-def smoke_payload_environment(argv, recorded, environ, *, pin_inherited=False):
-    """Return the inherited environment for identity checks and its payload prefix.
+def _inherits(descriptor, name):
+    return descriptor["inherit"] and name not in descriptor["set"] and name not in descriptor["unset"]
 
-    The prefix lives inside any launch wrapper. Compute identity from the
-    original command so inherited values keep their original state.
-    """
-    if recorded is None or recorded["kind"] != "local":
+
+def smoke_payload_environment(argv, attestation, environ, *, pin_inherited=False):
+    """Return the inherited environment for identity checks and its payload prefix."""
+    if attestation is None or attestation["execution_environment"]["kind"] != "local":
         return environ, []
     descriptor = payload_environment(argv)
-    if not descriptor or not descriptor["inherit"]:
+    if descriptor is None:
         return environ, []
+    smoke_command = attestation.get("command")
+    smoke_descriptor = payload_environment(smoke_command) if isinstance(smoke_command, list) else None
     inherited = dict(environ)
-    unset, assigned = [], []
-    for name in IDENTITY_ENVIRONMENT_KEYS:
-        if name in descriptor["set"] or name in descriptor["unset"]:
+    unset, assigned = [], {}
+    for name, state in attestation["execution_environment"]["environment"].items():
+        inherits = _inherits(descriptor, name)
+        if state["state"] == "unset" and smoke_descriptor is not None:
+            if inherits != _inherits(smoke_descriptor, name):
+                raise ValueError("smoke-execution-environment-mismatch")
+        if not inherits:
             continue
-        state = recorded["environment"][name]
         if state["state"] == "inherit" and "value" in state:
             value = state["value"]
             if pin_inherited or inherited.get(name) != value:
-                assigned.append(f"{name}={value}")
+                assigned[name] = value
                 inherited[name] = value
-        elif state["state"] == "unset" and (pin_inherited or name in inherited):
-            unset.extend(("-u", name))
-            inherited.pop(name, None)
-    prefix = ["/usr/bin/env", *unset, "--", *assigned] if unset or assigned else []
-    return inherited, prefix
+        elif state["state"] == "unset" and smoke_descriptor is not None:
+            if pin_inherited or name in inherited:
+                unset.append(name)
+                inherited.pop(name, None)
+    return inherited, _environment_prefix(argv[0], unset, assigned, inherited)
+
+
+def _environment_prefix(executable, unset, assigned, inherited):
+    if not unset and not assigned:
+        return []
+    if "=" not in executable:
+        options = [token for name in unset for token in ("-u", name)]
+        return ["/usr/bin/env", *options, "--", *(f"{name}={value}" for name, value in assigned.items())]
+    # env treats even its executable operand as an assignment if it contains "=".
+    # Use shell builtins with fixed selector names and pass values as literal argv.
+    setup = [f"unset {name}" for name in unset]
+    setup.extend(f'export {name}="$1"; shift' for name in assigned)
+    if "PATH" not in inherited and "/" not in executable:
+        # Bash stops searching PATH after unset. Resolve using exec's default
+        # search path and keep the original executable name in argv[0].
+        setup.append(f'path=$(PATH={shlex.quote(os.defpath)} command -v -- "$1") || exit 127')
+        setup.append('exec -a "$1" -- "$path" "${@:2}"')
+    else:
+        setup.append('exec -- "$@"')
+    script = "; ".join(setup)
+    return ["/bin/bash", "-p", "-c", script, "resource-payload", *assigned.values()]
 
 
 def _compute_hosts(argv):
@@ -178,7 +204,7 @@ def _environment_values(descriptor, inherited, *, remote):
     return effective, selected
 
 
-def _interpreter(command, environment):
+def _interpreter(command, environment, *, fallback_path=None):
     if not command:
         return None
     executable = command[0]
@@ -188,7 +214,7 @@ def _interpreter(command, environment):
             return str(path.expanduser().resolve(strict=True))
         except (OSError, RuntimeError, ValueError):
             return None
-    found = shutil.which(executable, path=environment.get("PATH", os.defpath))
+    found = shutil.which(executable, path=environment.get("PATH", fallback_path))
     if not found:
         return None
     try:
@@ -241,7 +267,10 @@ def execution_identity(argv, cwd, *, environ=None, remote=None):
     except (OSError, RuntimeError, ValueError, TypeError):
         return None
     effective, selected = _environment_values(descriptor, inherited, remote=False)
-    interpreter = _interpreter(payload, effective)
+    # Preserve the old identity of commands that explicitly clear PATH. For
+    # inherited absence, lookup must also ignore a launcher PATH we will remove.
+    fallback_path = os.defpath if _inherits(descriptor, "PATH") else None
+    interpreter = _interpreter(payload, effective, fallback_path=fallback_path)
     if not interpreter:
         return None
     return {"schema_version": 1, "kind": "local", "cwd": resolved_cwd,

@@ -1403,13 +1403,102 @@ class TestRunner(unittest.TestCase):
 
         outcome = self.cli(*prefix, *command, extra_env={"PATH": "/usr/bin:/bin"})
         self.assertEqual(outcome.returncode, 0, outcome.stderr)
-        row = json.loads(self.registry.read_text())["runs"]["direct-environment"]
+        self.assert_payload_exit_zero("direct-environment")
+        self.assertEqual(self.launch.read_bytes(), os.fsencode(smoke_path))
+
+    def assert_payload_exit_zero(self, run_id):
+        row = json.loads(self.registry.read_text())["runs"][run_id]
         sentinel = Path(row["sentinel"])
         deadline = time.monotonic() + 5
         while not sentinel.exists() and time.monotonic() < deadline:
             time.sleep(.02)
-        self.assertEqual(R.read_sentinel(sentinel), 0)
-        self.assertEqual(self.launch.read_bytes(), os.fsencode(smoke_path))
+        self.assertEqual(R.read_sentinel(sentinel), 0, Path(row["log"]).read_text())
+
+    def test_direct_payload_with_equals_in_executable_runs(self):
+        smoke_dir = self.base / "smoke-session"
+        smoke_dir.mkdir()
+        smoke_env = {**CLEAN_ENV, "PATH": f"{smoke_dir}:/usr/bin:/bin"}
+        smoke_env.pop("PYTHONPATH", None)
+        executable = smoke_dir / "payload=check"
+        executable.write_text(
+            "#!/bin/sh\n"
+            'test -z "${PYTHONPATH+x}" || exit 2\n'
+            f'printf "%s" "${{1-ran}}" > {shlex.quote(str(self.launch))}\n')
+        executable.chmod(0o755)
+        for label, command in (("absolute", [str(executable)]),
+                               ("path", [executable.name, "argument with spaces=1"])):
+            with self.subTest(executable=label):
+                proof = self.base / f"{label}-equals-smoke.json"
+                subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+                    str(self.repo / "config"), "--cwd", str(self.repo), "--output",
+                    str(proof), "--", *command], check=True, capture_output=True, env=smoke_env)
+                self.launch.unlink()
+                run_id = f"equals-{label}"
+                args = self.start_args(smoke=proof, run_id=run_id)
+                result = self.cli(*args[:args.index("--") + 1], *command,
+                    extra_env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(self.base)})
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assert_payload_exit_zero(run_id)
+                self.assertEqual(self.launch.read_text(), command[1] if len(command) > 1 else "ran")
+
+    def test_explicit_smoke_removal_does_not_match_inheritance(self):
+        smoke_env = {**CLEAN_ENV, "PYTHONPATH": str(self.base / "overlay")}
+        for label, prefix in (("unset", ["/usr/bin/env", "-u", "PYTHONPATH"]),
+                              ("clear", ["/usr/bin/env", "-i"])):
+            with self.subTest(smoke=label):
+                proof = self.base / f"{label}-environment-smoke.json"
+                subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+                    str(self.repo / "config"), "--cwd", str(self.repo), "--output",
+                    str(proof), "--", *prefix, sys.executable, "-c", "pass"], check=True,
+                    capture_output=True, env=smoke_env)
+                result = self.cli(*self.start_args(smoke=proof, run_id=f"mismatch-{label}"),
+                                  extra_env={"PYTHONPATH": smoke_env["PYTHONPATH"]})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("smoke-execution-environment-mismatch", result.stderr)
+                self.assertFalse(self.launch.exists())
+
+    def test_explicit_unset_path_preserves_the_legacy_interpreter_identity(self):
+        shim_dir = self.base / "smoke-bin"
+        shim_dir.mkdir()
+        shim = shim_dir / "python3"
+        shim.write_text('#!/bin/sh\nexit 87\n')
+        shim.chmod(0o755)
+        shim_path = f"{shim_dir}:/usr/bin:/bin"
+        command = ["/usr/bin/env", "-u", "PATH", "python3", "-c",
+            "import os, sys; from pathlib import Path; "
+            "assert 'PATH' not in os.environ; Path(sys.argv[1]).write_text('ran')", str(self.launch)]
+        proof = self.base / "legacy-interpreter-smoke.json"
+        subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+            str(self.repo / "config"), "--cwd", str(self.repo), "--output",
+            str(proof), "--", *command], check=True, capture_output=True,
+            env={**CLEAN_ENV, "PATH": shim_path})
+        identity = json.loads(proof.read_text())["execution_environment"]
+        self.assertEqual(identity["interpreter"], str(shim))
+        self.assertEqual(identity["environment"]["PATH"], {"state": "unset"})
+        self.launch.unlink()
+        args = self.start_args(smoke=proof, run_id="legacy-interpreter")
+        result = self.cli(*args[:args.index("--") + 1], *command, extra_env={"PATH": shim_path})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_payload_exit_zero("legacy-interpreter")
+        self.assertEqual(self.launch.read_text(), "ran")
+
+    def test_inherited_absent_path_uses_smoke_lookup(self):
+        smoke_env = {key: value for key, value in CLEAN_ENV.items() if key != "PATH"}
+        fake_bin = self.base / "controller-bin"
+        fake_bin.mkdir()
+        shim = fake_bin / "python3"
+        shim.write_text('#!/bin/sh\nexit 87\n')
+        shim.chmod(0o755)
+        command = ["python3", "-c", "import os; assert 'PATH' not in os.environ"]
+        proof = self.base / "absent-path-smoke.json"
+        subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+            str(self.repo / "config"), "--cwd", str(self.repo), "--output",
+            str(proof), "--", *command], check=True, capture_output=True, env=smoke_env)
+        args = self.start_args(smoke=proof, run_id="absent-path")
+        result = self.cli(*args[:args.index("--") + 1], *command,
+                          extra_env={"PATH": f"{fake_bin}:/usr/bin:/bin"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_payload_exit_zero("absent-path")
 
     def test_cleanup_stops_only_its_exact_supervisor(self):
         watch = subprocess.Popen(
@@ -1822,7 +1911,11 @@ class TestRunner(unittest.TestCase):
         smoke_module = importlib.util.module_from_spec(smoke_spec)
         smoke_spec.loader.exec_module(smoke_module)
         base_path = "/usr/bin:/bin"
-        smoke_environment = {**CLEAN_ENV, "PATH": f"{self.base}/codex-arg0-smoke :{base_path}"}
+        smoke_bin = self.base / "codex-arg0-smoke "
+        smoke_bin.mkdir()
+        equals_executable = smoke_bin / "payload=python"
+        equals_executable.symlink_to(sys.executable)
+        smoke_environment = {**CLEAN_ENV, "PATH": f"{smoke_bin}:{base_path}"}
         smoke_environment.pop("PYTHONPATH", None)
         attestation_out = self.base / "queued-environment-smoke.json"
         with mock.patch.dict(os.environ, smoke_environment, clear=True):
@@ -1843,10 +1936,11 @@ class TestRunner(unittest.TestCase):
         controller_path = f"{self.base}/codex-arg0-controller:{base_path}"
         overlay = str(self.base / "controller-overlay")
 
-        for label, owner_path, launcher_path in (
-                ("controller-differs", smoke_environment["PATH"], controller_path),
-                ("owner-differs", base_path, controller_path),
-                ("sandbox-only-differs", smoke_environment["PATH"], smoke_environment["PATH"])):
+        for label, owner_path, launcher_path, executable in (
+                ("controller-differs", smoke_environment["PATH"], controller_path, sys.executable),
+                ("owner-differs", base_path, controller_path, str(equals_executable)),
+                ("sandbox-only-differs", smoke_environment["PATH"], smoke_environment["PATH"],
+                 equals_executable.name)):
             with self.subTest(launch=label):
                 case_directory = self.base / label
                 case_directory.mkdir()
@@ -1856,7 +1950,7 @@ class TestRunner(unittest.TestCase):
                 effect = self.base / f"{label}.payload"
                 outer_effect = self.base / f"{label}.wrapper"
                 log = self.base / f"{label}.log"
-                command = [sys.executable, "-c",
+                command = [executable, "-c",
                     "import os, sys; from pathlib import Path; "
                     "Path(sys.argv[1]).write_bytes(os.environb[b'PATH']); "
                     "assert b'PYTHONPATH' not in os.environb", str(effect)]

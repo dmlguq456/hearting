@@ -926,10 +926,10 @@ def start_verified(registry, args, route, route_file, placeholder, *,
         return True, placeholder
     with ledger.lock() if ledger else contextlib.nullcontext():
         command, cwd = placeholder["command"], placeholder.get("cwd")
-        recorded_environment = recorded_smoke_environment(launch_inputs)
+        attestation = read_smoke_attestation(launch_inputs)
         # The native sandbox can rewrite PATH after the controller's check.
         payload_environ, payload_prefix = RESOURCE_ENV.smoke_payload_environment(
-            command, recorded_environment, os.environ, pin_inherited=controller is not None)
+            command, attestation, os.environ, pin_inherited=controller is not None)
         launch_command = controller.command if controller else command
         if payload_prefix:
             if launch_command[-len(command):] != command:
@@ -942,7 +942,7 @@ def start_verified(registry, args, route, route_file, placeholder, *,
                 registry_path=registry, log_path=placeholder.get("log"), environ=payload_environ)
             if current_operation != operation:
                 raise ValueError("resource-operation-authorization-changed")
-        verify_smoke_execution_environment(recorded_environment, command, cwd,
+        verify_smoke_execution_environment(attestation, command, cwd,
                                            environ=payload_environ, operation=operation)
         if ledger and sup.resource_continuation_cancelled(route, ledger):
             raise ValueError("resource-parent-close-requested")
@@ -2281,7 +2281,7 @@ def verify_launch_input(command, **kwargs):
         print(result.stderr, file=sys.stderr, end="")
 
 
-def recorded_smoke_environment(launch_inputs):
+def read_smoke_attestation(launch_inputs):
     """Read the identity from the exact smoke bytes bound to this launch."""
     attestation_path = launch_inputs.get("smoke_attestation")
     if not attestation_path:
@@ -2296,17 +2296,17 @@ def recorded_smoke_environment(launch_inputs):
     recorded = data.get("execution_environment") if isinstance(data, dict) else None
     if not RESOURCE_ENV.valid_execution_identity(recorded):
         raise ValueError("smoke-execution-environment-unbound")
-    return recorded
+    return data
 
 
-def verify_smoke_execution_environment(recorded, command, cwd, *, environ, operation):
+def verify_smoke_execution_environment(attestation, command, cwd, *, environ, operation):
     """Bind smoke inputs to the environment the payload will actually receive."""
-    if recorded is None:
+    if attestation is None:
         return
     expected = ((operation or {}).get("payload") or {}).get("execution_environment")
     if expected is None:
         expected = RESOURCE_ENV.execution_identity(command, cwd, environ=environ)
-    if recorded != expected:
+    if attestation["execution_environment"] != expected:
         raise ValueError("smoke-execution-environment-mismatch")
 
 
@@ -2672,11 +2672,11 @@ def _main(argv=None, *, controller=None):
         if args.share:
             placeholder["share"] = True
         try:
-            recorded_environment = recorded_smoke_environment(launch_inputs or {})
+            attestation = read_smoke_attestation(launch_inputs or {})
+            payload_environ, payload_prefix = RESOURCE_ENV.smoke_payload_environment(
+                command, attestation, os.environ)
         except ValueError as error:
             fail(str(error))
-        payload_environ, payload_prefix = RESOURCE_ENV.smoke_payload_environment(
-            command, recorded_environment, os.environ)
         operation = None
         owner_wait = None
         if not resume and (node.get("continuation") or {}).get("kind") == "supervised":
@@ -2698,7 +2698,7 @@ def _main(argv=None, *, controller=None):
                 if operation is not None:
                     placeholder["resource_operation"] = operation
         try:
-            verify_smoke_execution_environment(recorded_environment, command, cwd,
+            verify_smoke_execution_environment(attestation, command, cwd,
                                                environ=payload_environ, operation=operation)
         except ValueError as error:
             fail(str(error))
