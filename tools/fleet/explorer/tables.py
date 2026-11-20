@@ -1296,7 +1296,8 @@ def _is_unit_route(route):
 
 def _kind_cell(route, bracket=True, tail=True):
     """``code(team·standard)``: the kind word (bold) and, in brackets, the route's FORM and its INTENSITY after a ``·``, always
-    both (``code(unit·quick)``, ``code(solo·quick)``, ``lab(team·strong)``); only the form where the record names no intensity.
+    both (``code(solo·quick)``, ``lab(team·strong)``); only the form where the record names no intensity, and a ``unit`` route's
+    bracket is its form alone (``code(unit)``, 11-20: see the last paragraph).
     11-19 (the person, in order: "code안에 어떤것인지 의미를 알려주는게 좋지 않아?", "code(unit) 이렇게 쓰는건 이상한가?", "근데
     강도랑은 좀 다르잖아. 어쨌든 전체 절차를 다 밟는 정식 라우트냐 아니면 한가지 일만 수행하는 건지", "unit, one-shot, staged을
     괄호로 넣어야하나 싶은데", "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아", "강도도 표기해 항상", "unit과 one-shot의
@@ -1306,15 +1307,20 @@ def _kind_cell(route, bracket=True, tail=True):
     color and weight follow the intensity (``kind_intensity_key``), a dim bracket where the route has no field hue. A route of another
     shape (a frame, an older record) keeps its intensity bracket alone; an older unit route that records no field keeps ``unit``
     with no bracket; a ``direct`` route has none. ``tail=False``: the form alone (the narrow form, the intensity goes first);
-    ``bracket=False``: the bare kind word."""
+    ``bracket=False``: the bare kind word.
+    11-20 (the person: "solo라도 strong은 가능하잖아. unit이어도 마찬가지고. 맞지?", the answer: a unit does one thing and has no
+    procedure, so its intensity means nothing and ``quick`` is always the same blank value, only the model depth varies; then "unit에는
+    강도를 표시안하는게 맞겠네"): a unit route's bracket holds its form alone, ``code(unit)``, whatever intensity the record keeps (the
+    record, the governor and the budget are untouched; only this text leaves it out). Its color is the one a form-only bracket already
+    has (the field's hue at the plain weight, dim where the field has no hue): the weight steps are an intensity's alone, so a unit
+    is neither dim (that would still read as ``quick``) nor bold, and no color of its own is added."""
     kind = str(route.get("capability") or "").strip()
     intensity = str(route.get("intensity") or "").strip()
     unit = _is_unit_route(route)
     if unit:
         recorded = str(route.get("field") or "").strip()
         kind = recorded if recorded in ROUTE_FIELDS else kind
-        if recorded not in ROUTE_FIELDS:
-            intensity = ""           # an older unit route (no field): its bare `unit`, no bracket
+        intensity = ""               # 11-20: a unit route shows no intensity (an older one, with no field, no bracket at all: its bare `unit`)
     if route.get("shape") == "direct" and intensity.casefold() in ("", "direct"):
         intensity = ""               # the `direct` zone's own name says it (11-17, route zones)
     if not kind:

@@ -491,13 +491,14 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
     detail = t("route.intensity.unspecified") if source == "shape-default" else ""
     if requested and requested != route["effective_intensity"]:
         detail += f", requested={requested}"
-    lines = [f"  intensity={route['effective_intensity']} (source={source}{detail})"]
+    unit_route = route.get("capability") == TOPO.UNIT_CAPABILITY   # one leg, no owner; its intensity is not a choice
+    # 11-20: a unit route's card does not tell an intensity (the record keeps `effective_intensity`; only this text leaves it out).
+    lines = [] if unit_route else [f"  intensity={route['effective_intensity']} (source={source}{detail})"]
     shape = (route.get("selection") or {}).get("shape") or shape_for_intensity(route["effective_intensity"])
     if shape == "framed":
         legs = len(RP.frame_legs(route))
         lines = ["  " + t("route.intensity.framed", requested=requested or "default", legs=legs,
                            bootstrap=route["effective_intensity"], source=source)]
-    unit_route = route.get("capability") == TOPO.UNIT_CAPABILITY   # one leg, no owner; its intensity is not a choice
     if source == "shape-default" and shape != "framed" and not unit_route:
         lines.append("  " + t("route.intensity.hint"))
     capability = basis.get("compose-capability", {})
@@ -601,9 +602,17 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
     graph = "→".join(ids) if ids else "-"
     t = UI_TEXT.translator()
     gates = ",".join(sorted({row["gate"] for row in route.get("human_gate_bindings") or []})) or t("route.none")
+    if route.get("capability") == TOPO.UNIT_CAPABILITY:
+        # 11-20: a unit route has no procedure to weigh, so its header names the unit and no shape or intensity
+        # (`[경로] unit · qa/code-review · route …`); the sealed record keeps both values.
+        unit = next((n["unit"] for n in route["nodes"] if n.get("unit")), "-")
+        header = t("route.card.header_unit", capability=route['capability'], unit=unit,
+                   route_id=route['route_id'], gates=gates)
+    else:
+        header = t("route.card.header", capability=route['capability'], shape=shape,
+                   intensity=route['effective_intensity'], graph=graph, route_id=route['route_id'], gates=gates)
     card = (
-        t("route.card.header", capability=route['capability'], shape=shape,
-          intensity=route['effective_intensity'], graph=graph, route_id=route['route_id'], gates=gates)
+        header
         + f"\n  cwd {route['cwd']} · slug {route.get('slug', '-')}\n"
         + _compose_field_line(route)
         + _compose_campaign_line(campaign_selection if campaign_selection is not None

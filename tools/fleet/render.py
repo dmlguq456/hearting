@@ -1115,9 +1115,11 @@ def _opts_segs(j, max_width=None):
     if stage_worker:
         knob_items = [t for t in (_short_level(getattr(j, "intensity", None)),) if t]
     else:
+        # 11-20: a unit route's leg shows no intensity (the registry row keeps it).
+        unit_leg = _strip_autopilot(getattr(j, "capability_owner", None) or "") == "unit"
         knob_items = [t for t in (
             _display_capability_mode(j),
-            _short_level(getattr(j, "intensity", None)),
+            None if unit_leg else _short_level(getattr(j, "intensity", None)),
         ) if t]
     # F-<next>: a compose-shaped owner route names its shape as a fourth behaviour knob
     # (mode·intensity·shape·role, plan §3 C-4.4) — owner rows only, and only when the
