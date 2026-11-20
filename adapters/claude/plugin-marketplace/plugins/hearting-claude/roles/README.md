@@ -26,6 +26,7 @@ agent surfaces.
 | `editorial` | `editorial/report` | `deep editor` | `stage` | `low` | `roles/units/editorial/report.md` |
 | `editorial` | `editorial/review` | `fast reviewer` | `review` | `low` | `roles/units/editorial/review.md` |
 | `editorial` | `editorial/translate` | `deep editor` | `stage` | `low` | `roles/units/editorial/translate.md` |
+| `general` | `general/explore` | `fast tool worker` | `support` | `low` | `roles/units/general/explore.md` |
 | `material` | `material/browser-fetch` | `fast tool worker` | `support` | `near-zero` | `roles/units/material/browser-fetch.md` |
 | `material` | `material/data-script` | `deep maker` | `stage` | `low` | `roles/units/material/data-script.md` |
 | `material` | `material/figure-gen` | `deep maker` | `stage` | `low` | `roles/units/material/figure-gen.md` |

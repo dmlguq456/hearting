@@ -449,6 +449,12 @@
       "worker_type": "stage",
       "floor": "low"
     },
+    "general/explore": {
+      "family": "general",
+      "role": "fast tool worker",
+      "worker_type": "support",
+      "floor": "low"
+    },
     "material/browser-fetch": {
       "family": "material",
       "role": "fast tool worker",
@@ -635,6 +641,10 @@
     },
     "editorial/translate": {
       "unit": "editorial/translate",
+      "status": "portable-persona"
+    },
+    "general/explore": {
+      "unit": "general/explore",
       "status": "portable-persona"
     },
     "material/browser-fetch": {
