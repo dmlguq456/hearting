@@ -270,7 +270,10 @@ def execution_identity(argv, cwd, *, environ=None, remote=None, legacy_lookup=Fa
     except (OSError, RuntimeError, ValueError, TypeError):
         return None
     effective, selected = _environment_values(descriptor, inherited, remote=False)
-    interpreter = _interpreter(payload, effective, legacy_lookup=legacy_lookup)
+    # Earlier releases only differed for commands that clear PATH themselves; an
+    # inherited absent PATH was looked up the same way then as now.
+    interpreter = _interpreter(
+        payload, effective, legacy_lookup=legacy_lookup and not _inherits(descriptor, "PATH"))
     if not interpreter:
         return None
     return {"schema_version": 1, "kind": "local", "cwd": resolved_cwd,

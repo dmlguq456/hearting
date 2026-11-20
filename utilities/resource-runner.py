@@ -717,15 +717,16 @@ def start_watch(route_file, jobs, cwd, runtime):
             os.close(ready_write)
 
 
-def resource_operation_unchanged(stored, *binding_args, **binding_kwargs):
-    """Whether the stored operation is this launch's, including one stored before
-    the interpreter lookup followed exec's search."""
-    kind = (((stored.get("payload") or {}).get("execution_environment")) or {}).get("kind")
-    for legacy_lookup in ((False, True) if kind == "local" else (False,)):
-        if resource_operation_binding(*binding_args, **binding_kwargs,
-                                      legacy_lookup=legacy_lookup) == stored:
-            return True
-    return False
+def resource_operation_for_launch(stored, *binding_args, **binding_kwargs):
+    """This launch's operation binding, keeping a stored one made before the
+    interpreter lookup followed exec's search: it is still this launch's."""
+    current = resource_operation_binding(*binding_args, **binding_kwargs)
+    kind = (((stored or {}).get("payload") or {}).get("execution_environment") or {}).get("kind")
+    if (stored is not None and current != stored and kind == "local"
+            and resource_operation_binding(*binding_args, **binding_kwargs,
+                                           legacy_lookup=True) == stored):
+        return stored
+    return current
 
 
 def start_verified(registry, args, route, route_file, placeholder, *,
@@ -948,10 +949,10 @@ def start_verified(registry, args, route, route_file, placeholder, *,
                 raise ValueError("resource-controller-command-mismatch")
             launch_command = [*launch_command[:-len(command)], *payload_prefix, *command]
         operation = placeholder.get("resource_operation")
-        if operation is not None and not resource_operation_unchanged(
+        if operation is not None and resource_operation_for_launch(
                 operation, route, route_file, args.node, args.run_id, command, cwd,
                 launch_inputs, owner_wait, registry_path=registry,
-                log_path=placeholder.get("log"), environ=payload_environ):
+                log_path=placeholder.get("log"), environ=payload_environ) != operation:
             raise ValueError("resource-operation-authorization-changed")
         verify_smoke_execution_environment(attestation, command, cwd,
                                            environ=payload_environ, operation=operation)
@@ -1086,10 +1087,11 @@ def start_verified(registry, args, route, route_file, placeholder, *,
         with ledger.lock():
             if sup.resource_continuation_cancelled(route, ledger):
                 raise ValueError("resource-parent-close-requested")
-            if row.get("resource_operation") is not None and not resource_operation_unchanged(
+            if row.get("resource_operation") is not None and resource_operation_for_launch(
                     row["resource_operation"], route, route_file, args.node, args.run_id,
                     row["command"], row["cwd"], row.get("launch_request") or {}, owner_wait,
-                    registry_path=registry, log_path=row.get("log"), environ=payload_environ):
+                    registry_path=registry, log_path=row.get("log"),
+                    environ=payload_environ) != row["resource_operation"]:
                 raise ValueError("resource-operation-authorization-changed")
             with controller.guard() if controller else contextlib.nullcontext():
                 publish_verified_run(registry, args.run_id, placeholder, row)
@@ -2704,7 +2706,8 @@ def _main(argv=None, *, controller=None):
                 if controller is not None and launch_inputs != controller.expected.get("launch_request"):
                     fail("resource-launch-request-changed")
                 try:
-                    operation = resource_operation_binding(
+                    operation = resource_operation_for_launch(
+                        controller.expected.get("resource_operation") if controller is not None else None,
                         route, route_file, args.node, args.run_id, command, cwd, launch_inputs,
                         owner_wait, registry_path=registry, log_path=log, environ=payload_environ)
                 except (OSError, ValueError, KeyError, TypeError):

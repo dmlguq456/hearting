@@ -1518,30 +1518,134 @@ class TestRunner(unittest.TestCase):
         self.assert_payload_exit_zero("legacy-lookup")
         self.assertEqual(self.launch.read_text(), "ran")
 
-    def test_stored_operation_made_with_the_launcher_path_lookup_still_matches(self):
-        recorded = []
-
+    def test_operation_for_launch_keeps_a_stored_one_made_with_the_launcher_path_lookup(self):
         def binding(*args, legacy_lookup=False, **kwargs):
-            recorded.append(legacy_lookup)
             return {"payload": {"execution_environment": {"kind": "local"}},
                     "lookup": "launcher" if legacy_lookup else "exec"}
 
-        with mock.patch.object(R, "resource_operation_binding", side_effect=binding):
-            for stored, lookups in (
-                    ({"payload": {"execution_environment": {"kind": "local"}}, "lookup": "exec"}, [False]),
-                    ({"payload": {"execution_environment": {"kind": "local"}}, "lookup": "launcher"},
-                     [False, True]),
-                    ({"payload": {"execution_environment": {"kind": "local"}}, "lookup": "other"},
-                     [False, True])):
-                recorded.clear()
-                expected = stored["lookup"] != "other"
-                self.assertEqual(R.resource_operation_unchanged(stored, "route"), expected)
-                self.assertEqual(recorded, lookups)
-            # A remote payload has no local lookup to reproduce.
-            recorded.clear()
-            self.assertFalse(R.resource_operation_unchanged(
-                {"payload": {"execution_environment": {"kind": "compute-hosts"}}}, "route"))
-            self.assertEqual(recorded, [False])
+        def stored(lookup, kind="local"):
+            return {"payload": {"execution_environment": {"kind": kind}}, "lookup": lookup}
+
+        with mock.patch.object(R, "resource_operation_binding", side_effect=binding) as bound:
+            for held, kept, lookups in (
+                    (None, "exec", [False]),
+                    (stored("exec"), "exec", [False]),
+                    (stored("launcher"), "launcher", [False, True]),
+                    (stored("other"), "exec", [False, True]),
+                    # A remote payload has no local lookup to reproduce.
+                    (stored("launcher", "compute-hosts"), "exec", [False])):
+                bound.reset_mock()
+                self.assertEqual(R.resource_operation_for_launch(held, "route")["lookup"], kept)
+                self.assertEqual([call.kwargs.get("legacy_lookup", False)
+                                  for call in bound.call_args_list], lookups)
+
+    def test_controller_keeps_a_queued_operation_made_with_the_launcher_path_lookup(self):
+        import artifact_producer
+        import dispatch_resource_wait
+        smoke_spec = importlib.util.spec_from_file_location("stored_operation_smoke", SMOKE)
+        smoke_module = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke_module)
+        command = [sys.executable, "-c", "import sys; from pathlib import Path; Path(sys.argv[1]).write_text('ran')",
+                   str(self.launch)]
+        proof = self.base / "stored-operation-smoke.json"
+        with mock.patch.dict(os.environ, CLEAN_ENV, clear=True):
+            attestation = smoke_module.payload([self.repo / "config"], command, self.repo)
+            identity = attestation["execution_environment"]
+        attestation.update(status="passed", exit_code=0)
+        attestation["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+            attestation, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        proof.write_text(json.dumps(attestation, sort_keys=True))
+        route = json.loads(self.route.read_text())
+        next(node for node in route["nodes"] if node["id"] == "full-run")["continuation"] = {
+            "kind": "supervised"}
+        self.route.write_text(json.dumps(route))
+        owner_wait = {"session_id": "same-native", "launch_scope": "codex-owner-controller"}
+
+        def operation(lookup):
+            return {"schema_version": 1, "operation_id": lookup,
+                    "payload": {"execution_environment": identity}}
+
+        def binding(*args, legacy_lookup=False, **kwargs):
+            return operation("launcher" if legacy_lookup else "exec")
+
+        watch = mock.Mock(pid=os.getpid(), **{"poll.return_value": None})
+        real_popen = subprocess.Popen
+        for stored, started in (("launcher", True), ("unrelated", False)):
+            with self.subTest(stored=stored):
+                directory = self.base / stored
+                directory.mkdir()
+                jobs = directory / "jobs.log"
+                jobs.write_text("")
+                registry = directory / "resource-runs.json"
+                argv = ["--registry", str(registry), "start", "--run-id", stored, "--cwd", str(self.repo),
+                        "--log", str(directory / "payload.log"), "--route", str(self.route),
+                        "--node", "full-run", "--jobs", str(jobs), "--parent-attempt-id", "att-parent",
+                        "--smoke-attestation", str(proof), "--", *command]
+                with mock.patch.object(dispatch_resource_wait, "start_binding", return_value=owner_wait), \
+                     mock.patch.object(artifact_producer, "prepare_route_artifact_env",
+                        return_value={"AGENT_ARTIFACT_OUTPUT_DIR": str(self.base)}), \
+                     mock.patch.object(R, "register_registry"), \
+                     mock.patch.object(R, "verify_launch_input"), \
+                     mock.patch.object(R.subprocess, "run"), \
+                     mock.patch.object(R, "resource_operation_binding", side_effect=binding), \
+                     mock.patch.object(R.gpu_leases, "resource_admission",
+                        return_value=(None, None, {"CUDA_VISIBLE_DEVICES": ""})), \
+                     mock.patch.object(R, "start_watch", return_value=(watch, R.proc_identity(os.getpid()))), \
+                     mock.patch.object(R.subprocess, "Popen", wraps=real_popen), \
+                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    with mock.patch.dict(os.environ, CLEAN_ENV, clear=True):
+                        R.main(argv)
+                    data = json.loads(registry.read_text())
+                    # The row was queued by a release that used the launcher-PATH lookup.
+                    data["runs"][stored]["resource_operation"] = operation(stored)
+                    registry.write_text(json.dumps(data))
+                    queued = json.loads(registry.read_text())["runs"][stored]
+                    controller = SimpleNamespace(
+                        expected=queued, identity={**R.proc_identity(os.getpid()),
+                        "pid_namespace": os.readlink("/proc/self/ns/pid")}, command=command,
+                        sandbox={"mode": "workspace-write", "enforcement": "os-sandbox"},
+                        guard=contextlib.nullcontext, registry=str(registry))
+                    with mock.patch.dict(os.environ, CLEAN_ENV, clear=True):
+                        if started:
+                            R.main(R.controller_argv(registry, queued), controller=controller)
+                        else:
+                            with self.assertRaises((SystemExit, ValueError)):
+                                R.main(R.controller_argv(registry, queued), controller=controller)
+                if started:
+                    payload, _ = controller.children
+                    self.addCleanup(payload.wait, timeout=5)
+                    self.assertEqual(payload.wait(timeout=5), 0)
+                    running = json.loads(registry.read_text())["runs"][stored]
+                    self.assertEqual(running["launch_state"], "started")
+                    self.assertEqual(running["resource_operation"], operation(stored))
+                    self.assertEqual(self.launch.read_text(), "ran")
+                else:
+                    self.assertEqual(json.loads(registry.read_text())["runs"][stored]["launch_state"], "queued")
+
+    def test_inherited_absent_path_does_not_accept_the_launcher_path_lookup(self):
+        smoke_env = {key: value for key, value in CLEAN_ENV.items() if key != "PATH"}
+        controller_bin = self.base / "controller-bin"
+        controller_bin.mkdir()
+        shim = controller_bin / "python3"
+        shim.write_text("#!/bin/sh\nexit 87\n")
+        shim.chmod(0o755)
+        command = ["python3", "-c", "import os; assert 'PATH' not in os.environ"]
+        proof = self.base / "absent-path-forged.json"
+        subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+            str(self.repo / "config"), "--cwd", str(self.repo), "--output",
+            str(proof), "--", *command], check=True, capture_output=True, env=smoke_env)
+        data = json.loads(proof.read_text())
+        # No release records a launcher shim for a command that inherits an absent PATH.
+        data["execution_environment"]["interpreter"] = str(shim)
+        data.pop("attestation_hash")
+        data["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+            data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        proof.write_text(json.dumps(data, sort_keys=True))
+        args = self.start_args(smoke=proof, run_id="absent-path-forged")
+        result = self.cli(*args[:args.index("--") + 1], *command,
+                          extra_env={"PATH": f"{controller_bin}:/usr/bin:/bin"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("smoke-execution-environment-mismatch", result.stderr)
 
     def test_equals_in_executable_resolved_on_the_default_path_keeps_its_bytes(self):
         import resource_execution_environment as environment
