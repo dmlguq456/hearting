@@ -1104,6 +1104,48 @@ class ObligationStoreTest(unittest.TestCase):
         self.assertEqual(self.store.list(states={"pending"}, kinds={"retire"}), [])
         self.assertEqual(self.store.list(states={"unknown"}, kinds={"retire"})[0]["state"], "unknown")
 
+    def test_has_active_answers_like_a_fast_active_list_without_copying(self):
+        self.assertFalse(self.store.has_active())
+        self.store.create("active-retire", "retire", {}, {"target": "pane"})
+        self.store.create("active-message", "message", {}, {})
+        for kinds in (None, {"retire"}, {"message", "run-notice"}, {"registered-batch"}):
+            self.assertEqual(
+                self.store.has_active(kinds=kinds),
+                bool(self.store.list(kinds=kinds, fast_active_only=True)), kinds)
+        self.assertFalse(self.store.has_active(kinds={"registered-batch", "run-notice"}))
+        self.store.begin_read_pass()
+        try:
+            self.store.list()  # the pass's snapshot; has_active never copies what it selects
+            with mock.patch.object(obligations.copy, "deepcopy",
+                                   side_effect=AssertionError("copied")):
+                self.assertTrue(self.store.has_active())
+                self.assertTrue(self.store.has_active(kinds={"retire"}))
+        finally:
+            self.store.end_read_pass()
+        self.store.update("active-retire", state="complete", result="normal-exit")
+        self.store.update("active-retire", observation={"terminal_followup": "complete"})
+        self.store.update("active-message", state="cancelled")
+        self.assertFalse(self.store.has_active())
+
+    def test_has_active_never_makes_a_fast_read_the_pass_snapshot(self):
+        # A fast-only read skips the active index's rebuild checks, so it must not
+        # stand in for the full recovery read a later list of the same pass takes.
+        self.store.create("active-retire", "retire", {}, {"target": "pane"})
+        with mock.patch.object(self.store, "_discover", wraps=self.store._discover) as discover:
+            self.assertTrue(self.store.has_active())  # outside a pass: active markers only
+            self.assertTrue(discover.call_args.kwargs["fast_active_only"])
+            self.store.begin_read_pass()
+            try:
+                self.assertTrue(self.store.has_active())
+                # Inside a pass the snapshot it leaves is the full read ...
+                self.assertFalse(discover.call_args.kwargs["fast_active_only"])
+                # ... which the pass's later list and checks share.
+                self.assertEqual(len(self.store.list()), 1)
+                self.assertTrue(self.store.has_active(kinds={"retire"}))
+            finally:
+                self.store.end_read_pass()
+        self.assertEqual(discover.call_count, 2)
+
     def test_skip_unchanged_preserves_default_revision_updates(self):
         duty = self.store.create("message-noop", "message", {}, {})
         observation = {"ref": "r" * 32, "reason": "target-identity-changed"}
