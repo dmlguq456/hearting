@@ -338,6 +338,88 @@ def _alloc_row(grid, x, y, right, label, name, options, current, folds, note="",
     return y + 1
 
 
+_FIELD_TABLE_FOLD = "fieldtable"       # the existing ("ui", key, value) choice holds it, like a chip
+
+
+def _table_date(view):
+    return str(view.get("checked_on") or "")[5:] or "·"
+
+
+def field_line_fragments(view, room=None, opened=False):
+    """The ``field:`` line as ``[[text, colour key], ...]``: each field whose applied row leans
+    (a row with all cells equal is off and left out) as ``field→harness·harness``, the toggle last.
+    With ``room`` (cells), trailing fields give way to ``…`` and the toggle stays."""
+    head = [[f"table {_table_date(view)} · ", "dim"]]
+    groups = []
+    for row in view.get("rows", ()):
+        if row.get("off") or not row.get("top"):
+            continue
+        group = [[str(row["field"]), "lvl_y" if row.get("overridden") else "soft"], ["→", "line"]]
+        for index, harness in enumerate(row["top"]):
+            group += ([["·", "dim"]] if index else []) + [[harness, "hb_" + harness]]
+        groups.append(group)
+    toggle = [["▾" if opened else "▸", "soft"]]
+    if not groups:
+        groups = [[["no field row leans", "dim"]]]
+    separator, ellipsis = [["  ", "dim"]], [["…", "dim"]]
+
+    def width(fragments):
+        return sum(cell_width(text) for text, _key in fragments)
+
+    def join(items, tail):
+        out = list(head)
+        for index, group in enumerate(items):
+            out += (separator if index else []) + group
+        return out + tail + separator + toggle
+
+    full = join(groups, [])
+    if room is None or width(full) <= room:
+        return full
+    for count in range(len(groups) - 1, 0, -1):
+        shortened = join(groups[:count], [["  ", "dim"], ["…", "dim"]])
+        if width(shortened) <= room:
+            return shortened
+    bare = join([], [["…", "dim"]])
+    return bare if width(bare) <= room else toggle
+
+
+def _draw_field_rows(grid, view, state, x, y, right):
+    """The ``field:`` line and, opened, the table of applied rows; returns the next row."""
+    opened = state.fold_map().get("ui:" + _FIELD_TABLE_FOLD) == "open"
+    grid.put(x + 3, y, "field:", "dim")
+    start = x + 20
+    cursor = start
+    fragments = field_line_fragments(view, max(1, right - start), opened)
+    for text, key in fragments:
+        glyph_x = cursor
+        cursor = grid.put(cursor, y, text, "branch_s" if text.isspace() else key, limit=right + 1)
+    grid.add_hit(y, glyph_x - 1, glyph_x + 2, ("ui", _FIELD_TABLE_FOLD, "closed" if opened else "open"))
+    y += 1
+    if not opened:
+        return y
+    columns = {"claude": start, "codex": start + 8, "opencode": start + 15}
+    grid.put(x + 3, y, "field", "dim", limit=right + 1)
+    for harness, column in columns.items():
+        grid.put(column, y, harness, "hb_" + harness, limit=right + 1)
+    y += 1
+    rows = view.get("rows", ())
+    for index, row in enumerate(rows):
+        off = bool(row.get("off"))
+        grid.put(x + 3, y, "  " + str(row["field"]), "lvl_y" if row.get("overridden") else "dim", limit=right + 1)
+        for harness, column in columns.items():
+            mine = harness in (row.get("overridden") or ())
+            key = "dim" if off else ("lvl_y" if mine else "soft")
+            grid.put(column, y, f"{float(row['cells'].get(harness, 1.0)):.2f}", key, limit=right + 1)
+        if index == len(rows) - 1:
+            note = f"table {_table_date(view)}" + (f" · basis: {view['basis']}" if view.get("basis") else "")
+            grid.put(start + 25, y, note, "dim", limit=right + 1)
+        y += 1
+    if view.get("differs"):
+        grid.put(start, y, "this install differs: " + str(view["differs"]), "dim", limit=right + 1)
+        y += 1
+    return y
+
+
 def _draw_allocation_editor(grid, allocation, state, x, y, right):
     """Every existing allocation key as choices, with what the chosen strategy ignores, a preview and Apply."""
     folds = state.fold_map()
@@ -359,6 +441,14 @@ def _draw_allocation_editor(grid, allocation, state, x, y, right):
         y = _alloc_row(grid, x, y, right, "share " + harness, "harness_weights." + harness,
                        _alloc_options("harness_weights", current), _num(current), folds,
                        "1.0 = full share; lower takes fewer new placements", inert.get("harness_weights", ""))
+    view = _dict(allocation.get("field_view"))
+    mine = [str(name) for name in allocation.get("field_overrides") or ()]
+    if view or mine:
+        text = ("your rows: " + ", ".join(mine) if mine
+                else f"registry table {_table_date(view)}") + " · read only, edit the file to change"
+        grid.put(x + 3, y, "field rows", "label", limit=right)
+        grid.put(x + 20, y, text, "dim", limit=right)
+        y += 1
     affinity = _dict(values.get("depth_affinity"))
     choices = tuple(allocation.get("harnesses") or ()) + ("none",)
     for role in ("worker", "owner"):
@@ -695,7 +785,11 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
     if isinstance(allocation.get("values"), Mapping):
         y = _draw_allocation_editor(grid, allocation, state, x, y, right)
         fields = [field for field in fields if field[0] not in _EDITED_FIELDS]
+    field_view = allocation.get("field_view")
     for label, fragments in fields:
+        if label == "field:" and isinstance(field_view, Mapping):
+            y = _draw_field_rows(grid, field_view, state, x, y, right)
+            continue
         grid.put(x + 3, y, label, "dim")
         cursor = x + 20
         for fragment, key in fragments:
