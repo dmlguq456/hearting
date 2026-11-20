@@ -374,7 +374,7 @@ def supervisor_resource_watch_for_run(supervisor, ledger, node, registry, run_id
 
 def resource_operation_binding(route, route_file, node, run_id, command, cwd,
                                launch_request_value, owner_wait, *, registry_path=None,
-                               log_path=None, environ=None):
+                               log_path=None, environ=None, legacy_lookup=False):
     """Bind an existing operation request to this exact supervised launch.
 
     The live sealed owner/controller selects an operation within the approved
@@ -486,7 +486,8 @@ def resource_operation_binding(route, route_file, node, run_id, command, cwd,
         if payload_environment is None:
             return None
     execution_environment = RESOURCE_ENV.execution_identity(
-        payload_argv, payload_cwd, environ=environ, remote=remote_environment)
+        payload_argv, payload_cwd, environ=environ, remote=remote_environment,
+        legacy_lookup=legacy_lookup)
     if not RESOURCE_ENV.valid_execution_identity(execution_environment):
         return None
 
@@ -716,6 +717,17 @@ def start_watch(route_file, jobs, cwd, runtime):
             os.close(ready_write)
 
 
+def resource_operation_unchanged(stored, *binding_args, **binding_kwargs):
+    """Whether the stored operation is this launch's, including one stored before
+    the interpreter lookup followed exec's search."""
+    kind = (((stored.get("payload") or {}).get("execution_environment")) or {}).get("kind")
+    for legacy_lookup in ((False, True) if kind == "local" else (False,)):
+        if resource_operation_binding(*binding_args, **binding_kwargs,
+                                      legacy_lookup=legacy_lookup) == stored:
+            return True
+    return False
+
+
 def start_verified(registry, args, route, route_file, placeholder, *,
                    controller=None, launch_inputs=None):
     """Own the existing watch before releasing an exact, once-only payload."""
@@ -936,12 +948,11 @@ def start_verified(registry, args, route, route_file, placeholder, *,
                 raise ValueError("resource-controller-command-mismatch")
             launch_command = [*launch_command[:-len(command)], *payload_prefix, *command]
         operation = placeholder.get("resource_operation")
-        if operation is not None:
-            current_operation = resource_operation_binding(
-                route, route_file, args.node, args.run_id, command, cwd, launch_inputs, owner_wait,
-                registry_path=registry, log_path=placeholder.get("log"), environ=payload_environ)
-            if current_operation != operation:
-                raise ValueError("resource-operation-authorization-changed")
+        if operation is not None and not resource_operation_unchanged(
+                operation, route, route_file, args.node, args.run_id, command, cwd,
+                launch_inputs, owner_wait, registry_path=registry,
+                log_path=placeholder.get("log"), environ=payload_environ):
+            raise ValueError("resource-operation-authorization-changed")
         verify_smoke_execution_environment(attestation, command, cwd,
                                            environ=payload_environ, operation=operation)
         if ledger and sup.resource_continuation_cancelled(route, ledger):
@@ -1075,13 +1086,11 @@ def start_verified(registry, args, route, route_file, placeholder, *,
         with ledger.lock():
             if sup.resource_continuation_cancelled(route, ledger):
                 raise ValueError("resource-parent-close-requested")
-            if row.get("resource_operation") is not None:
-                current_operation = resource_operation_binding(
-                    route, route_file, args.node, args.run_id, row["command"],
-                    row["cwd"], row.get("launch_request") or {}, owner_wait,
-                    registry_path=registry, log_path=row.get("log"), environ=payload_environ)
-                if current_operation != row["resource_operation"]:
-                    raise ValueError("resource-operation-authorization-changed")
+            if row.get("resource_operation") is not None and not resource_operation_unchanged(
+                    row["resource_operation"], route, route_file, args.node, args.run_id,
+                    row["command"], row["cwd"], row.get("launch_request") or {}, owner_wait,
+                    registry_path=registry, log_path=row.get("log"), environ=payload_environ):
+                raise ValueError("resource-operation-authorization-changed")
             with controller.guard() if controller else contextlib.nullcontext():
                 publish_verified_run(registry, args.run_id, placeholder, row)
                 os.write(release, b"start\n")
@@ -2303,11 +2312,16 @@ def verify_smoke_execution_environment(attestation, command, cwd, *, environ, op
     """Bind smoke inputs to the environment the payload will actually receive."""
     if attestation is None:
         return
+    recorded = attestation["execution_environment"]
     expected = ((operation or {}).get("payload") or {}).get("execution_environment")
-    if expected is None:
-        expected = RESOURCE_ENV.execution_identity(command, cwd, environ=environ)
-    if attestation["execution_environment"] != expected:
-        raise ValueError("smoke-execution-environment-mismatch")
+    if expected is not None and recorded == expected:
+        return
+    # A proof made before the exact lookup keeps matching its own lookup. A bound
+    # operation fixes the payload (and any remote), so only local ones re-derive.
+    if ((expected is None or expected.get("kind") == "local")
+            and RESOURCE_ENV.identity_matches(recorded, command, cwd, environ=environ)):
+        return
+    raise ValueError("smoke-execution-environment-mismatch")
 
 
 def settle_queued_validation_failure(controller, error):

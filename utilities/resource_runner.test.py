@@ -11,6 +11,7 @@ import json
 import os
 import select
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -1457,30 +1458,117 @@ class TestRunner(unittest.TestCase):
                 self.assertIn("smoke-execution-environment-mismatch", result.stderr)
                 self.assertFalse(self.launch.exists())
 
-    def test_explicit_unset_path_preserves_the_legacy_interpreter_identity(self):
+    def unset_path_command(self):
+        """`env -u PATH sh ...`, with a shim named `sh` that only a smoke session's PATH has."""
         shim_dir = self.base / "smoke-bin"
         shim_dir.mkdir()
-        shim = shim_dir / "python3"
-        shim.write_text('#!/bin/sh\nexit 87\n')
+        shim = shim_dir / "sh"
+        shim.write_text("#!/bin/sh\nexit 87\n")
         shim.chmod(0o755)
-        shim_path = f"{shim_dir}:/usr/bin:/bin"
-        command = ["/usr/bin/env", "-u", "PATH", "python3", "-c",
-            "import os, sys; from pathlib import Path; "
-            "assert 'PATH' not in os.environ; Path(sys.argv[1]).write_text('ran')", str(self.launch)]
-        proof = self.base / "legacy-interpreter-smoke.json"
+        # dash defines an unexported default PATH, so look at what it exports.
+        command = ["/usr/bin/env", "-u", "PATH", "sh", "-c",
+                   'if /usr/bin/env | /bin/grep -q "^PATH="; then exit 3; fi; printf ran > "$1"',
+                   "sh", str(self.launch)]
+        return shim, f"{shim_dir}:/usr/bin:/bin", command
+
+    def attest_command(self, command, path, name):
+        proof = self.base / name
         subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
             str(self.repo / "config"), "--cwd", str(self.repo), "--output",
             str(proof), "--", *command], check=True, capture_output=True,
-            env={**CLEAN_ENV, "PATH": shim_path})
-        identity = json.loads(proof.read_text())["execution_environment"]
-        self.assertEqual(identity["interpreter"], str(shim))
-        self.assertEqual(identity["environment"]["PATH"], {"state": "unset"})
+            env={**CLEAN_ENV, "PATH": path})
         self.launch.unlink()
-        args = self.start_args(smoke=proof, run_id="legacy-interpreter")
-        result = self.cli(*args[:args.index("--") + 1], *command, extra_env={"PATH": shim_path})
+        return proof
+
+    def test_explicit_unset_path_proof_ignores_the_smoke_session_path(self):
+        shim, smoke_path, command = self.unset_path_command()
+        proof = self.attest_command(command, smoke_path, "unset-path-smoke.json")
+        args = self.start_args(smoke=proof, run_id="unset-path")
+        result = self.cli(*args[:args.index("--") + 1], *command,
+                          extra_env={"PATH": "/usr/bin:/bin"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assert_payload_exit_zero("legacy-interpreter")
+        self.assert_payload_exit_zero("unset-path")
         self.assertEqual(self.launch.read_text(), "ran")
+        # With PATH unset, exec searches its default path, never the shim ahead of it.
+        identity = json.loads(proof.read_text())["execution_environment"]
+        self.assertEqual(identity["interpreter"],
+                         str(Path(shutil.which("sh", path=os.defpath)).resolve()))
+        self.assertNotEqual(identity["interpreter"], str(shim))
+
+    def test_proof_made_with_the_launcher_path_lookup_still_matches_that_lookup(self):
+        shim, smoke_path, command = self.unset_path_command()
+        proof = self.attest_command(command, smoke_path, "legacy-lookup-smoke.json")
+        # Earlier releases recorded the launcher PATH's `sh` for this command.
+        data = json.loads(proof.read_text())
+        data["execution_environment"]["interpreter"] = str(shim)
+        data.pop("attestation_hash")
+        data["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+            data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        proof.write_text(json.dumps(data, sort_keys=True))
+        args = self.start_args(smoke=proof, run_id="legacy-lookup")
+        prefix = args[:args.index("--") + 1]
+
+        result = self.cli(*prefix, *command, extra_env={"PATH": "/usr/bin:/bin"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("smoke-execution-environment-mismatch", result.stderr)
+        self.assertFalse(self.launch.exists())
+
+        result = self.cli(*prefix, *command, extra_env={"PATH": smoke_path})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_payload_exit_zero("legacy-lookup")
+        self.assertEqual(self.launch.read_text(), "ran")
+
+    def test_stored_operation_made_with_the_launcher_path_lookup_still_matches(self):
+        recorded = []
+
+        def binding(*args, legacy_lookup=False, **kwargs):
+            recorded.append(legacy_lookup)
+            return {"payload": {"execution_environment": {"kind": "local"}},
+                    "lookup": "launcher" if legacy_lookup else "exec"}
+
+        with mock.patch.object(R, "resource_operation_binding", side_effect=binding):
+            for stored, lookups in (
+                    ({"payload": {"execution_environment": {"kind": "local"}}, "lookup": "exec"}, [False]),
+                    ({"payload": {"execution_environment": {"kind": "local"}}, "lookup": "launcher"},
+                     [False, True]),
+                    ({"payload": {"execution_environment": {"kind": "local"}}, "lookup": "other"},
+                     [False, True])):
+                recorded.clear()
+                expected = stored["lookup"] != "other"
+                self.assertEqual(R.resource_operation_unchanged(stored, "route"), expected)
+                self.assertEqual(recorded, lookups)
+            # A remote payload has no local lookup to reproduce.
+            recorded.clear()
+            self.assertFalse(R.resource_operation_unchanged(
+                {"payload": {"execution_environment": {"kind": "compute-hosts"}}}, "route"))
+            self.assertEqual(recorded, [False])
+
+    def test_equals_in_executable_resolved_on_the_default_path_keeps_its_bytes(self):
+        import resource_execution_environment as environment
+        launch = {"PATH": "/bin:/usr/bin", "PYTHONPATH": str(self.base / "overlay")}
+        for name in ("payload=check", "payload=check\n"):
+            with self.subTest(executable=name):
+                found = self.base / "default-path" / name
+                found.parent.mkdir(exist_ok=True)
+                found.write_text(f"#!{sys.executable}\nimport os\n"
+                                 "assert 'PATH' not in os.environ and 'PYTHONPATH' not in os.environ\n"
+                                 "print('ran', end='')\n")
+                found.chmod(0o755)
+                # Only this name may exist, so a truncated lookup cannot find a sibling.
+                self.addCleanup(found.unlink, missing_ok=True)
+                with mock.patch.object(os, "defpath", str(found.parent)):
+                    command = [name]
+                    recorded = environment.execution_identity(command, self.base, environ={})
+                    self.assertEqual(recorded["interpreter"], str(found))
+                    effective, prefix = environment.smoke_payload_environment(
+                        command, {"execution_environment": recorded, "command": command},
+                        launch, pin_inherited=True)
+                    self.assertEqual(environment.execution_identity(
+                        command, self.base, environ=effective), recorded)
+                    result = subprocess.run([*prefix, *command], cwd=self.base, env=launch,
+                                            capture_output=True, text=True, timeout=5)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "ran", ""))
+                found.unlink()
 
     def test_inherited_absent_path_uses_smoke_lookup(self):
         smoke_env = {key: value for key, value in CLEAN_ENV.items() if key != "PATH"}

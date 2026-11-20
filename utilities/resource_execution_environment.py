@@ -147,12 +147,11 @@ def _environment_prefix(executable, unset, assigned, inherited):
     setup = [f"unset {name}" for name in unset]
     setup.extend(f'export {name}="$1"; shift' for name in assigned)
     if "PATH" not in inherited and "/" not in executable:
-        # Bash stops searching PATH after unset. Resolve using exec's default
-        # search path and keep the original executable name in argv[0].
-        setup.append(f'path=$(PATH={shlex.quote(os.defpath)} command -v -- "$1") || exit 127')
-        setup.append('exec -a "$1" -- "$path" "${@:2}"')
-    else:
-        setup.append('exec -- "$@"')
+        # An absent PATH means exec's default search path. Give bash that path
+        # as an unexported variable so exec searches it while the payload still
+        # sees no PATH, and the name's bytes never pass through a substitution.
+        setup.append(f"{'' if 'PATH' in unset else 'unset PATH; '}PATH={shlex.quote(os.defpath)}")
+    setup.append('exec -- "$@"')
     script = "; ".join(setup)
     return ["/bin/bash", "-p", "-c", script, "resource-payload", *assigned.values()]
 
@@ -204,7 +203,7 @@ def _environment_values(descriptor, inherited, *, remote):
     return effective, selected
 
 
-def _interpreter(command, environment, *, fallback_path=None):
+def _interpreter(command, environment, *, legacy_lookup=False):
     if not command:
         return None
     executable = command[0]
@@ -214,7 +213,10 @@ def _interpreter(command, environment, *, fallback_path=None):
             return str(path.expanduser().resolve(strict=True))
         except (OSError, RuntimeError, ValueError):
             return None
-    found = shutil.which(executable, path=environment.get("PATH", fallback_path))
+    # An absent PATH makes exec search its default path. Records made before
+    # this lookup was exact searched the launcher's PATH instead.
+    search = environment.get("PATH") if legacy_lookup else environment.get("PATH", os.defpath)
+    found = shutil.which(executable, path=search)
     if not found:
         return None
     try:
@@ -223,12 +225,13 @@ def _interpreter(command, environment, *, fallback_path=None):
         return None
 
 
-def execution_identity(argv, cwd, *, environ=None, remote=None):
+def execution_identity(argv, cwd, *, environ=None, remote=None, legacy_lookup=False):
     """Return normalized execution selectors, never the full ambient environment.
 
     A compute-hosts selector keeps remote host/environment identity separate
     from the local launcher interpreter. Unsupported shell/env syntax returns
-    None so callers refuse an unbound launch.
+    None so callers refuse an unbound launch. ``legacy_lookup`` is only for
+    reading records made before the interpreter lookup followed exec's search.
     """
     inherited = dict(os.environ if environ is None else environ)
     if remote is None:
@@ -267,14 +270,27 @@ def execution_identity(argv, cwd, *, environ=None, remote=None):
     except (OSError, RuntimeError, ValueError, TypeError):
         return None
     effective, selected = _environment_values(descriptor, inherited, remote=False)
-    # Preserve the old identity of commands that explicitly clear PATH. For
-    # inherited absence, lookup must also ignore a launcher PATH we will remove.
-    fallback_path = os.defpath if _inherits(descriptor, "PATH") else None
-    interpreter = _interpreter(payload, effective, fallback_path=fallback_path)
+    interpreter = _interpreter(payload, effective, legacy_lookup=legacy_lookup)
     if not interpreter:
         return None
     return {"schema_version": 1, "kind": "local", "cwd": resolved_cwd,
             "interpreter": interpreter, "environment": selected}
+
+
+def identity_matches(recorded, argv, cwd, *, environ=None, remote=None):
+    """Whether a recorded identity is this launch's, including older records.
+
+    New identities follow the search exec performs. A record made before that
+    keeps matching the launcher-PATH lookup it was made with.
+    """
+    if not valid_execution_identity(recorded):
+        return False
+    for legacy_lookup in ((False, True) if recorded["kind"] == "local" else (False,)):
+        current = execution_identity(argv, cwd, environ=environ, remote=remote,
+                                     legacy_lookup=legacy_lookup)
+        if valid_execution_identity(current) and current == recorded:
+            return True
+    return False
 
 
 def valid_execution_identity(value):
