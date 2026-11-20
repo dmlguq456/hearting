@@ -71,6 +71,31 @@ Shipping the importer rewrite this week.
 """
 
 
+CAMPAIGN_DOC = """<!-- hearting:campaign-document v1 -->
+# 하팅 4.0 공개 준비와 닫힌 캠페인 사이클 이동 결함 수정
+
+갱신 2026-11-19 18:16
+
+**한 줄**: 하팅 4.0 공개를 위해 화면·절차·검사를 고쳤다.
+
+## 결정 기다리는 것
+{decisions}
+
+## 하는 중
+- 옛 판으로 도는 창이 만드는 캐시 (현장 결함)
+- 질문판 답 결함 수정 · #1757 · 기록 2
+
+## 끝난 일
+- 11-19 화면 후속 묶음 · #1758 · 기록 1
+
+## 예정
+- Codex·OpenCode 위주로 동작 parity 검증 · 사용량 한도가 풀린 뒤
+- 등록부 보관 검토의 후속 · 열림
+"""
+DECISIONS_NONE = "지금 없음."
+DECISIONS_TWO = "- 질문판에 열린 질문 4개 (질문판 기준 18:16)\n- 두 번째 결정"
+
+
 def _touch(path, text="", mtime=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -145,6 +170,20 @@ class ArtifactRootTest(unittest.TestCase):
         self.assertEqual(project_status.artifact_root(child), os.path.realpath(parent / ".agent_reports"))
         (child / ".agent_reports").mkdir()
         self.assertEqual(project_status.artifact_root(child), os.path.realpath(child / ".agent_reports"))
+
+
+    def test_campaign_document_shape(self):
+        parsed = project_status.parse(CAMPAIGN_DOC.format(decisions=DECISIONS_NONE))
+        self.assertEqual(parsed["title"], "하팅 4.0 공개 준비와 닫힌 캠페인 사이클 이동 결함 수정")
+        self.assertEqual(parsed["line"], "하팅 4.0 공개를 위해 화면·절차·검사를 고쳤다.")
+        self.assertEqual(parsed["decisions"], [])                      # "지금 없음." is not a bullet
+        self.assertEqual(parsed["next"], ["Codex·OpenCode 위주로 동작 parity 검증 · 사용량 한도가 풀린 뒤",
+                                          "등록부 보관 검토의 후속 · 열림"])
+        two = project_status.parse(CAMPAIGN_DOC.format(decisions=DECISIONS_TWO))
+        self.assertEqual(len(two["decisions"]), 2)
+        self.assertTrue(project_status._UPDATED.match("갱신 2026-11-19 18:16"))
+        for title in ("결정 기다리는 것", "하는 중", "끝난 일", "예정"):   # none reads as a record of decisions made
+            self.assertFalse(any(word in title.casefold() for word in project_status._RECORD_WORDS), title)
 
 
 class FindTest(unittest.TestCase):
@@ -245,6 +284,31 @@ class FindTest(unittest.TestCase):
         record = project_status.newest(str(self.root), now=self.now)
         self.assertEqual(record["line"], "Updated in place")
         self.assertEqual(record["campaigns"][0]["campaign"], "stream")
+
+
+    def test_campaign_md_beats_older_names_and_a_long_folder_and_is_not_read_when_too_large(self):
+        campaign = self.root / "campaigns/2026-11-06_stream"
+        page = campaign / "campaign.md"
+        _touch(page, CAMPAIGN_DOC.format(decisions=DECISIONS_TWO), self.now - 5)
+        _touch(campaign / "현황.md", "# Hand written", self.now)
+        _touch(campaign / "status.md", "# Another hand written", self.now)
+        _touch(campaign / "2026-11-06_old" / "artifacts/STATUS.md", "# Cycle copy", self.now + 100)
+        for number in range(1005):
+            (campaign / ("x%04d.txt" % number)).write_text("")
+        self.assertEqual(project_status.find_documents(str(self.root), now=self.now), [str(page)])
+        record = project_status.newest(str(self.root), now=self.now)
+        self.assertEqual((record["name"], record["campaign"]), ("campaign.md", "stream"))
+        self.assertEqual(record["title"], "하팅 4.0 공개 준비와 닫힌 캠페인 사이클 이동 결함 수정")
+        self.assertEqual(len(record["decisions"]), 2)
+        self.assertEqual(record["next"][0], "Codex·OpenCode 위주로 동작 parity 검증 · 사용량 한도가 풀린 뒤")
+        project_status.clear_cache()
+        _touch(page, "# Large\n" + "x" * 70000, self.now)
+        self.assertEqual(project_status.find_documents(str(self.root), now=self.now), [])  # no older name stands in
+
+    def test_a_campaign_md_inside_a_cycle_folder_is_not_a_status_page(self):
+        campaign = self.root / "campaigns/2026-11-06_stream"
+        _touch(campaign / "2026-11-06_old" / "artifacts/campaign.md", "# Not a campaign page", self.now)
+        self.assertEqual(project_status.find_documents(str(self.root), now=self.now), [])
 
 
 class ProjectionTest(unittest.TestCase):

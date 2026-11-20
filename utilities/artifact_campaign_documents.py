@@ -15,6 +15,7 @@ import unicodedata
 from artifact_nofollow import open_relative, open_root
 
 STATUS_NAMES = ('현황.md', 'status.md')
+CAMPAIGN_DOCUMENT = 'campaign.md'
 READ_LIMIT = 65536
 LIST_LIMIT = 1000
 ROW_LIMIT = 300
@@ -104,8 +105,32 @@ def select_status(folder, *, canonical=True, candidates=None):
     return dict(result, status='known', path=paths[0])
 
 
+def campaign_page(folder):
+    """The campaign folder's own ``campaign.md``, opened by name; None when there is no such name.
+
+    The folder is not listed, so a long folder still shows it. A page that is a link, not a
+    regular file, over the read limit or unreadable is the campaign's page that cannot be taken:
+    it is ``unknown`` and no older name stands in for it. No ownership marker is required here.
+    """
+    path = Path(folder) / CAMPAIGN_DOCUMENT
+    try:
+        raw, _, coverage = read_document(Path(folder), CAMPAIGN_DOCUMENT)
+        if coverage == 'complete':
+            raw.decode('utf-8')
+    except FileNotFoundError:
+        return None
+    except (OSError, RuntimeError, ValueError, UnicodeError):
+        return {'status': 'unknown', 'path': None, 'candidates': [path]}
+    if coverage != 'complete':
+        return {'status': 'unknown', 'path': None, 'candidates': [path]}
+    return {'status': 'known', 'path': path, 'candidates': [path]}
+
+
 def campaign_status(campaign):
-    """One campaign's canonical selection, else its legacy cycle pages."""
+    """One campaign's ``campaign.md``, else its canonical selection, else its legacy cycle pages."""
+    page = campaign_page(campaign)
+    if page is not None:
+        return page
     primary = select_status(campaign)
     if primary['status'] != 'absent':
         return primary

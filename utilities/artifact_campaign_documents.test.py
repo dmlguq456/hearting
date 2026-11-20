@@ -16,11 +16,16 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import artifact_campaign_documents as documents
 import artifact_entrance as entrance
 import artifact_lifecycle as lifecycle
 import artifact_producer as producer
 import status_board
 
+CAMPAIGN_PAGE = (
+    '<!-- hearting:campaign-document v1 -->\n# Demo campaign\n\n갱신 2026-11-19 18:16\n\n'
+    '**한 줄**: Demo one line.\n\n## 결정 기다리는 것\n지금 없음.\n\n## 하는 중\n- a route\n\n'
+    '## 끝난 일\n- a done route · #1\n\n## 예정\n- a planned item\n')
 PAGE = '# Demo status\n\nUpdated 2026-11-01 09:00\n\n## Next\n- keep this decision\n'
 
 
@@ -57,6 +62,59 @@ class CampaignDocumentsTest(unittest.TestCase):
         self.assertIn('2026-11-07 22:00', canonical.read_text())
         self.assertIn('- keep this decision', canonical.read_text())
         self.assertEqual(old.read_text(), PAGE)
+
+    def test_campaign_md_is_opened_by_name_before_the_older_names(self):
+        page = self.campaign / 'campaign.md'; page.write_text(CAMPAIGN_PAGE)
+        (self.campaign / '현황.md').write_text(PAGE); (self.campaign / 'status.md').write_text('# Other\n')
+        self.legacy()
+        chosen = documents.campaign_status(self.campaign)
+        self.assertEqual((chosen['status'], chosen['path']), ('known', page))
+        self.assertEqual(documents.select_status(self.campaign)['status'], 'ambiguous')  # the old rule is unchanged
+        from tools.fleet.collectors import project_status
+        project_status.clear_cache(); self.addCleanup(project_status.clear_cache)
+        self.assertEqual(project_status.find_documents(str(self.root)), [str(page)])
+        record = project_status.newest(str(self.root))
+        self.assertEqual((record['title'], record['line']), ('Demo campaign', 'Demo one line.'))
+        self.assertEqual((record['decisions'], record['next']), ([], ['a planned item']))
+
+    def test_campaign_md_is_found_in_a_folder_longer_than_the_list_limit(self):
+        page = self.campaign / 'campaign.md'; page.write_text(CAMPAIGN_PAGE)
+        (self.campaign / '현황.md').write_text(PAGE)
+        for number in range(documents.LIST_LIMIT + 5):
+            (self.campaign / ('x%04d.txt' % number)).write_text('')
+        self.assertEqual(documents.campaign_status(self.campaign)['path'], page)
+        from tools.fleet.collectors import project_status
+        project_status.clear_cache(); self.addCleanup(project_status.clear_cache)
+        self.assertEqual(project_status.find_documents(str(self.root)), [str(page)])
+
+    def test_unusable_campaign_md_is_unknown_and_no_older_name_stands_in(self):
+        old = self.campaign / '현황.md'; old.write_text(PAGE)
+        self.legacy()
+        from tools.fleet.collectors import project_status
+        page = self.campaign / 'campaign.md'
+        outside = self.project / 'outside.md'; outside.write_text(CAMPAIGN_PAGE)
+        for make in (lambda: page.write_text('# Large\n' + 'x' * 70000), lambda: page.write_bytes(b'\xff\xfe'),
+                     lambda: page.symlink_to(outside), lambda: page.mkdir()):
+            with self.subTest(make=make):
+                project_status.clear_cache()
+                make()
+                chosen = documents.campaign_status(self.campaign)
+                self.assertEqual((chosen['status'], chosen['path']), ('unknown', None))
+                self.assertEqual(project_status.find_documents(str(self.root)), [])
+                if page.is_dir():
+                    page.rmdir()
+                else:
+                    page.unlink()
+        project_status.clear_cache()
+        self.assertEqual(documents.campaign_status(self.campaign)['path'], old)  # nothing left: the old path as before
+
+    def test_campaign_md_is_looked_for_only_in_the_campaign_folder(self):
+        old = self.legacy()
+        (old.parent / 'campaign.md').write_text(CAMPAIGN_PAGE)
+        self.assertEqual(documents.campaign_status(self.campaign)['path'], old)
+        from tools.fleet.collectors import project_status
+        project_status.clear_cache(); self.addCleanup(project_status.clear_cache)
+        self.assertEqual(project_status.find_documents(str(self.root)), [str(old)])
 
     def test_conflicting_campaign_pages_are_unknown_and_do_not_select_a_legacy_page(self):
         a = self.campaign / '현황.md'; b = self.campaign / 'STATUS.md'
