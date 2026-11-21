@@ -182,7 +182,7 @@ assert.equal(d.claudeStatusRows(namedBelow,'exact',record).size,0,'only the uppe
  let finish;
  const block=make({changed(){},answer:()=>new Promise(resolve=>finish=resolve),action(){}});
  const item={id:'q',revision:'one',answerable:true,questions:[{id:'q1',question:'Answer?',choices:[]}]};
- block.update([item]);block.enter();block.input(Buffer.from('tdraft'));
+ block.update([item]);block.enter();block.input(Buffer.from('draft'));
  assert.equal(block.waitingForReceipt,false);
  block.input(Buffer.from('\r'));assert.equal(block.waitingForReceipt,false,'in-flight API is not a receipt');
  finish({ok:true,state:'submitted'});await new Promise(resolve=>setImmediate(resolve));
@@ -190,7 +190,7 @@ assert.equal(d.claudeStatusRows(namedBelow,'exact',record).size,0,'only the uppe
  assert.equal(block.focused,false);assert.equal(block.waitingForReceipt,false);
  block.update([item,{...item,id:'new'}]);block.enter();
  assert.equal(block.waitingForReceipt,false,'another editable question');
- block.input(Buffer.from('tkept'));block.update([{...item,id:'new',revision:'two'}]);
+ block.input(Buffer.from('kept'));block.update([{...item,id:'new',revision:'two'}]);
  assert.equal(block.waitingForReceipt,false,'stale draft remains protected');
 })().catch(e=>{console.error(e);process.exitCode=1;});'''
         result = subprocess.run(['node', '-e', script, str(ROOT/'utilities/session-shell/block-input.cjs')], capture_output=True, text=True, timeout=5)

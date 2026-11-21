@@ -3470,6 +3470,11 @@ def _explorer_accept_question_result(update):
                                result, "Selected request is ready." if envelope["state"] == "open"
                                else "Request state: " + envelope["state"]))
     elif operation == "questions.draft":
+        from .explorer.state import _question_draft_for_backend
+        # The editor may have changed or submitted this draft while its save was running.
+        if overlay.get("pending") or (len(effect) > 2 and isinstance(overlay.get("draft"), Mapping)
+                and effect[2] != _question_draft_for_backend(overlay["draft"], overlay.get("detail"))):
+            return
         if envelope is not None and envelope.get("state") == "open":
             from .explorer.state import question_draft_from_backend, question_ui_detail
             draft = question_draft_from_backend(envelope, envelope.get("draft"))
@@ -6636,10 +6641,24 @@ def _explorer_question_editing():
                 and isinstance(overlay, Mapping) and overlay.get("editing"))
 
 
+def _explorer_question_writable():
+    from .explorer.state import QUESTION_OPEN_FOLD, question_items, question_free_text_supported
+    state = _EXPLORER_STATE
+    overlay = getattr(state, "question_overlay", None)
+    if (getattr(state, "view", None) != "QUESTIONS" or state.scope != "-"
+            or state.opened_for(QUESTION_OPEN_FOLD) == "-"
+            or not isinstance(overlay, Mapping) or overlay.get("state") != "open"):
+        return False
+    detail = overlay.get("detail")
+    specs = question_items(detail)
+    qid = overlay.get("editing_question_id") or (specs[0]["id"] if specs else "")
+    return bool(qid and question_free_text_supported(detail, qid))
+
+
 def _explorer_text_input():
     """Typed characters are text, not commands: a question is being edited or the MODELS list filtered."""
     from .explorer.state import models_finding
-    return _explorer_question_editing() or models_finding(_EXPLORER_STATE)
+    return _explorer_question_writable() or models_finding(_EXPLORER_STATE)
 
 
 def _explorer_unmoved_tree_release(bstate, state):
@@ -6707,7 +6726,8 @@ def _explorer_handle(ch, mouse_event=None, size=None, snapshot=None):
             _explorer_apply_effects(_effects, _EXPLORER_MODEL, snapshot=snapshot)
         return
     from .explorer.state import models_finding
-    editing = (state.view == "QUESTIONS" and _explorer_question_editing()) or models_finding(state)
+    editing = (state.view == "QUESTIONS" and _explorer_question_writable()
+               and (_explorer_question_editing() or ch not in range(49, 58))) or models_finding(state)
     if editing and isinstance(ch, int) and (32 <= ch < 127 or 128 <= ch < 256):
         key = _explorer_text_key(ch)
     else:
