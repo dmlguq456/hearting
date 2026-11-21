@@ -134,7 +134,7 @@ from artifact_producer_store import (  # noqa: F401
     _CLOSED_RECORD_STATES, _copy_tree_files, _cycle_rel, _digest, _disposition_value,
     _earlier_documents, _ensure_dir, _excluded_by_roots, _fallback_blocks, _folder_cycle_id,
     _fsync_dir, _HASH_CHUNK_BYTES, _HISTORICAL_OBSERVATIONS, _HISTORICAL_PROJECTIONS,
-    _is_payload_directory, _is_runtime_owned_top_level, _json_bytes, _KEY_RE, _LayoutScan,
+    _is_payload_directory, _is_runtime_owned_entry, _is_runtime_owned_top_level, _json_bytes, _KEY_RE, _LayoutScan,
     _legacy_content_names, _published_cycle_state, _QUIET_HISTORY, _read_json,
     _record_content_digest, _record_cycle_manifest_path, _reference_path, _rfc3339,
     _rfc3339_precise, _rfc3339_to_epoch, _SEALED_CYCLE_STATES, _stream_file_facts,
