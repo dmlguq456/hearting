@@ -826,7 +826,8 @@ class ViewTests(Home):
                 self.assertEqual(cells["tier/deep"]["next"]["branch"], "kept")
                 self.assertEqual(cells["tier/light"]["state"], "held")
                 self.assertEqual(cells["tier/light"]["held"], name("light-2"))
-                self.assertEqual(cells["tier/light"]["since"], {"date": "2026-11-02", "from": name("light-1"), "to": name("light-2")})
+                self.assertEqual(cells["tier/light"]["since"], {"date": "2026-11-02", "from": name("light-1"), "to": name("light-2"),
+                                                                "effort_was": None, "lines": []})
                 follow = cells["profile/deep"]
                 self.assertEqual((follow["state"], follow["why"], follow["model"], follow["effort"]),
                                  ("follow", "default", name("deep-1"), "high"))
@@ -859,6 +860,62 @@ class ViewTests(Home):
                 self.assertEqual(after["plan"], [])  # nothing is left to write
                 self.assertEqual(model_follow.state_counts(after), (3, 0, 0))
 
+    def view(self, adapter, rows):
+        catalog = SimpleNamespace(state="available", rows=tuple(rows), client_version=None)
+        (view,) = model_follow.fleet_view([adapter], source_root=self.src, today=TODAY,
+                                          read_catalog=lambda _h: catalog, probe=lambda _h: (None, None))
+        return {cell["target"]: cell for cell in view["cells"]}
+
+    def test_since_gives_the_effort_a_follow_lowered(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                self.table(adapter)
+                rows = self.newer(adapter, efforts=("medium", "high"))
+                self.apply(adapter, rows)
+                cells = self.view(adapter, rows)
+                self.assertEqual(cells["tier/deep"]["effort"], "high")
+                self.assertEqual(cells["tier/deep"]["since"]["effort_was"], "xhigh")
+                self.assertIsNone(cells["profile/deep"]["since"]["effort_was"])  # high stayed high
+                self.assertEqual(cells["tier/deep"]["since"]["from"], self.name(adapter)("deep-1"))
+
+    def test_since_gives_the_lines_the_follow_moved_as_the_table_records_them(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                path = self.table(adapter)
+                rows = self.newer(adapter)
+                self.apply(adapter, rows)
+                wanted = {"CFG_TIER_DEEP_FAILOVER_CASCADE", *(("CFG_V2_AUTO_FALLBACKS",) if adapter == "opencode" else ())}
+                cells = self.view(adapter, rows)
+                self.assertEqual(set(cells["tier/deep"]["since"]["lines"]), wanted)
+                self.assertEqual(cells["tier/light"]["since"], None)  # nothing newer: no follow, no lines
+                # a line whose record the person removed is theirs: it is not counted
+                text = "\n".join(l.split(" # auto-follow")[0] if l.startswith("CFG_TIER_DEEP_FAILOVER_CASCADE=") else l
+                                 for l in path.read_text().splitlines()) + "\n"
+                path.write_text(text)
+                self.assertNotIn("CFG_TIER_DEEP_FAILOVER_CASCADE", self.view(adapter, rows)["tier/deep"]["since"]["lines"])
+
+    def test_since_counts_the_main_session_only_name_a_follow_added(self):
+        for adapter in ("claude", "codex"):
+            with self.subTest(adapter=adapter):
+                self.table(adapter)
+                rows = [*self.newer(adapter), row("top-2", family="top", version=(2,))]
+                self.apply(adapter, rows)
+                self.assertIn("CFG_MAIN_SESSION_ONLY_MODELS", self.view(adapter, rows)["tier/top"]["since"]["lines"])
+
+    def test_a_cell_no_update_can_follow_is_told_from_an_ordinary_one(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                name = self.name(adapter)
+                path = self.table(adapter)
+                path.write_text(path.read_text().replace(f"CFG_TIER_MINI_MODEL={name('light-1')}", "CFG_TIER_MINI_MODEL=odd-alias"))
+                cells = self.view(adapter, self.newer(adapter))
+                self.assertEqual((cells["tier/mini"]["followable"], cells["tier/mini"]["reason"]),
+                                 (False, "not-in-list"))
+                self.assertEqual((cells["tier/light"]["followable"], cells["tier/light"]["next"]), (True, None))  # nothing newer
+                self.assertEqual((cells["tier/deep"]["followable"], cells["tier/deep"]["next"]["branch"]),
+                                 (True, "will-follow"))
+                self.assertIs(cells["tier/mini"]["state"] == "follow" and cells["tier/mini"]["next"] is None, True)
+
     def test_a_cell_waiting_to_go_back_is_in_the_plan_first(self):
         for adapter in HARNESSES:
             with self.subTest(adapter=adapter):
@@ -884,7 +941,8 @@ class ViewTests(Home):
                 deep = cells["tier/deep"]
                 self.assertEqual((deep["model"], deep["effort"], deep["state"], deep["why"], deep["held"], deep["next"]),
                                  (self.name(adapter)("deep-1"), "xhigh", "keep", "kept", None, None))
-                self.assertEqual(deep["since"], {"date": TODAY, "from": None, "to": None})
+                self.assertEqual(deep["since"], {"date": TODAY, "from": None, "to": None, "effort_was": None, "lines": []})
+                self.assertEqual((deep["followable"], deep["reason"]), (None, "no-catalog"))
                 self.assertEqual(cells["tier/light"]["state"], "follow")
 
     def test_a_held_cell_is_given_with_its_refusal_when_there_is_no_list(self):

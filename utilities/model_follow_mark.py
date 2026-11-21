@@ -165,11 +165,12 @@ def cell_state(model: str, record: Mapping | None) -> dict:
     `kept` (a person asked to keep it), `held`, `changed` (a person chose another model;
     the record is old and the next write to this line replaces it).
     """
-    out = {"state": "follow", "why": "default", "date": None, "from": None, "to": None, "skip": None}
+    out = {"state": "follow", "why": "default", "date": None, "from": None, "to": None, "skip": None,
+           "effort_was": None}
     if not record:
         return out
     kind = record["kind"]
-    out.update(date=record["date"], to=record.get("to"))
+    out.update(date=record["date"], to=record.get("to"), effort_was=record.get("effort_was"))
     out["from"] = record.get("from")
     if kind == "keep":
         return {**out, "state": "keep", "why": "kept"}

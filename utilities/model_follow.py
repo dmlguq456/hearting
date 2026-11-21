@@ -441,6 +441,29 @@ def _combine(entries: Iterable[Mapping]) -> tuple[dict, dict]:
     return changes, marks
 
 
+def _linked_lines(adapter: str, values: Mapping[str, str], marks: Mapping[str, Mapping],
+                  state: Mapping, cell: Mapping) -> list[str]:
+    """The keys of the companion lines a cell's follow moved: lines whose own record reads the
+    same follow (`A -> B`) and that still hold `B`. Read from the table alone; a cell that did not
+    follow has none."""
+    if state["why"] != "followed":
+        return []
+    keys = [CASCADE_KEY, *((OPENCODE_FALLBACK_KEY,) if adapter == "opencode" else ()),
+            *((model_config.MAIN_SESSION_ONLY_KEY,) if adapter in ("claude", "codex") else ())]
+    found = []
+    for key in keys:
+        record = marks.get(key)
+        if not record or record["kind"] != "follow" or key not in values:
+            continue
+        if (model_key(record["from"]) != model_key(state["from"])
+                or model_key(record["to"]) != model_key(state["to"])):
+            continue
+        names = [item.partition(":")[0] for item in values[key].split()]
+        if model_key(state["to"]) in {model_key(name) for name in names}:
+            found.append(key)
+    return found
+
+
 def follow_stage(adapter: str, values: Mapping[str, str], marks: Mapping[str, Mapping],
                  rows, observe: Callable, today: str, *, skip: Iterable[str] = ()) -> list[dict]:
     """One entry per cell: its state, the newer model its list gives, and what an update does.
@@ -461,7 +484,8 @@ def follow_stage(adapter: str, values: Mapping[str, str], marks: Mapping[str, Ma
                  "current": {"model": cell["model"], "effort": cell["effort"]}, "state": state,
                  "successor": None, "kind": "none", "reason": "no-catalog", "deprecated": False,
                  "companions": [], "command": None, "branch": "none", "action": None, "write": None,
-                 "skipping": sorted(refused), "skipped": None}
+                 "skipping": sorted(refused), "skipped": None,
+                 "linked": _linked_lines(adapter, values, marks, state, cell)}
         entries.append(entry)
         if rows is None:
             continue
@@ -828,6 +852,12 @@ def state_counts(result: Mapping) -> tuple[int, int, int]:
     return states.get("followed", 0), states.get("kept", 0), states.get("held", 0)
 
 
+# Why a cell is not one an update can follow, whatever the list shows next: a model the list does
+# not know (a Claude alias such as `opus` is one), a model with no family and version, or a
+# newer model whose companion lines cannot move with it.
+_NOT_FOLLOWABLE = frozenset({"not-in-list", "no-pattern", "lines-do-not-fit"})
+
+
 def fleet_view(harnesses: Iterable[str] = HARNESSES, **kwargs) -> list[dict]:
     """What a screen shows for each harness's table. Read-only: no model call, no list
     refresh, no write (a survey's own reads only).
@@ -838,7 +868,11 @@ def fleet_view(harnesses: Iterable[str] = HARNESSES, **kwargs) -> list[dict]:
     cells and their states are the table's own, so they are given without a list too (`next`
     is empty then, except for a cell waiting to go back).
     A cell is ``{"target", "model", "effort", "state": "follow"|"keep"|"held", "why",
-    "since": {"date", "from", "to"} | None, "held": the refused model (the one the cell holds
+    "since": {"date", "from", "to", "effort_was": the effort the follow lowered or None, "lines":
+    keys of the companion lines the follow moved, read from their own records} | None,
+    "followable": False for a cell no update can follow (`reason` is `not-in-list`, `no-pattern`
+    or `lines-do-not-fit`), None without a list, else True, "reason": the survey's reason for the
+    cell, "held": the refused model (the one the cell holds
     on, or the newest model its list gives that the record shows refused) | None,
     "next": {"model", "effort", "branch": "will-follow"|"proposal"|"kept"|"revert", "reason",
     "command"} | None, "lines": the companion lines that move with it}``. `plan` is what an
@@ -863,8 +897,12 @@ def fleet_view(harnesses: Iterable[str] = HARNESSES, **kwargs) -> list[dict]:
             shown.append({
                 "target": entry["target"], "model": entry["current"]["model"],
                 "effort": entry["current"]["effort"], "state": state["state"], "why": state["why"],
-                "since": ({"date": state["date"], "from": state["from"], "to": state["to"]}
+                "since": ({"date": state["date"], "from": state["from"], "to": state["to"],
+                           "effort_was": state["effort_was"], "lines": entry["linked"]}
                           if record and state["why"] in ("followed", "reverted", "held", "kept") else None),
+                "followable": (None if entry["reason"] == "no-catalog" else
+                               entry["reason"] not in _NOT_FOLLOWABLE),
+                "reason": entry["reason"],
                 "held": state["skip"] or entry.get("skipped"), "next": following,
                 "lines": [{"key": key, "from": line["from"], "to": line["to"]}
                           for key, line in final_lines([entry]).items()]})
