@@ -80,8 +80,9 @@ const out={};
  out.margins=frame(r).every(x=>x.margins.length===2&&x.margins.every(p=>p.background===F.popup&&p.text===' '));
  out.above_below=[r.rows[0],r.rows.at(-1)].every(row=>row.every(p=>p.background===undefined||p.background===null));
  key(b,'\x1b[B');out.moved=chosen(draw(b)).map(words);
- // Typing a text answer: the row being typed (`› …`) on the chosen ground, no choice.
- key(b,'t');key(b,'ab');out.typing=chosen(draw(b)).map(words);
+ // A free-text question keeps the selected choice and its typed answer on the chosen ground.
+ const writable=JSON.parse(JSON.stringify(items));writable[0].questions[0].free_text=true;
+ const writing=editor(writable);key(writing,'2ab');out.typing=chosen(draw(writing)).map(words);
  // The light face: the same cells on its own chosen ground, the popup on its own.
  const light=draw(editor(),{background:'light'});
  out.light=chosen(light,p=>p.background===L.chosen).map(words);
@@ -120,7 +121,7 @@ class ChosenGroundTest(unittest.TestCase):
         self.assertTrue(out["no_other_ground"], out)                          # two grounds inside, nothing reversed
         self.assertEqual(len(out["moved"]), 1, out["moved"])
         self.assertTrue(out["moved"][0].startswith("▸ 2  넓힌 옆 띠"), out["moved"])
-        self.assertEqual(out["typing"], ["› ab"])
+        self.assertEqual(out["typing"], out["moved"] + ["› ab"])
 
     def test_the_light_face_and_the_faces_without_hue(self):
         out = self.run_script()
