@@ -251,7 +251,11 @@ the set of open questions changes (never from a question's own hook path).
   and take the first bullet under the next heading (`## 나중에 할 것`, `## 다음`, `## Next`).
   A section that records decisions already made (`## 사용자 결정 기록`, `## Decision log`) is
   not counted. The file's modification time is when the status last changed. Fleet shows the
-  age in front of a document older than three days.
+  age in front of a document older than three days. The shell's status popup opens a generated
+  `campaign.md` on a list of its sections' own words (what waits for the person first, the
+  other headings folded, `full document ›` for the whole page) and any other page as it always
+  drew it (`core/references/session-shell.md`); a section it does not know is a folded line,
+  so a new heading never breaks it.
 
 ### Root `README.md` / `index.html` — the read entrance
 

@@ -112,6 +112,7 @@ shared-utility-deferred	review_watchdog.py
 shared-utility-deferred	session_resume.py
 shared-utility-deferred	session_route_resume.py
 shared-utility-deferred	session_shell.py
+shared-utility-deferred	status_popup_picture.py
 shared-utility-deferred	session_tidy_idle.py
 shared-utility-deferred	session_tidy_policy.py
 shared-utility-deferred	session_card_format.py
