@@ -1,0 +1,1 @@
+../../../../../tools/fleet/tests/models_follow_picture.py
