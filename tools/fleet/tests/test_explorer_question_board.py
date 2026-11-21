@@ -268,34 +268,141 @@ class DrawnAnswerRules(unittest.TestCase):
         rows = draw(vm, state, 100, 35).text_rows()
         marks = [n for n in (1, 2, 3) if any(f"▸ {n}  항목 {n}" in line for line in rows)]
         before = state
-        state, effects = reducer(state, {"type": "key", "key": "enter"})
+        state, effects = reducer(state, {"type": "key", "key": "enter",
+                                          "question_refs": [row["ref"] for row in vm.questions]})
         payload = next((effect[2]["answers"]["q"] for effect in effects if effect[0] == "questions.submit"), None)
         return marks, payload, state, before, rows
 
     def test_marks_match_submissions_for_all_harnesses(self):
-        cases = [([], [2], ["v2"]), (["text:가나"], [], ["가나"]),
+        cases = [([], [], None), (["2"], [2], ["v2"]), (["text:가나"], [], ["가나"]),
                  (["3", "text:가나"], [3], ["v3", "가나"]),
-                 (["down", "text:가나"], [3], ["v3", "가나"]),
+                 (["down"], [], None),
                  (["3", "3", "text:가나"], [], ["가나"]),
                  (["text:가나", "up", "1"], [1], ["v1", "가나"]),
                  (["click-write", "text:1가"], [], ["1가"]),
                  (["text:가", "backspace"], [], None),
                  (["3", "tab", "tab"], [3], ["v3"]),
                  (["2", "text:가나"], [2], ["v2", "가나"]),
-                 (["click-write"], [2], ["v2"]),
+                 (["click-write"], [], None),
                  (["click-3", "text:가나"], [3], ["v3", "가나"]),
-                 (["3", "down", "text:1가"], [3], ["v3", "1가"])]
+                 (["3", "click-write", "text:1가"], [3], ["v3", "1가"])]
         for harness in ("claude", "codex", "opencode"):
             for keys, mark, payload in cases:
                 with self.subTest(harness=harness, keys=keys):
                     actual, sent, state, before, rows = self.sequence(keys, harness=harness)
                     self.assertEqual((actual, sent), (mark, payload), "\n".join(rows))
-                    if payload is None:
-                        self.assertIn("empty answer", state.question_overlay["status"])
                     if payload and len(payload) == 2:
                         self.assertTrue(any("가" in line and "> " in line for line in rows))
                     print("FLEET_RULE=" + json.dumps({"harness": harness, "keys": keys, "mark": actual,
                                                       "sent": sent}, ensure_ascii=False), flush=True)
+
+    def test_folded_question_uses_list_keys_and_blocks_hidden_edits(self):
+        from tools.fleet import render
+        state, vm = self.setup_question()
+        ref = vm.questions[0]["ref"]
+
+        def key(state, name):
+            return reduce(state, {"type": "key", "key": name, "question_refs": [ref]})
+
+        for preceding in ((), ("2", "text:가")):
+            with self.subTest(preceding=preceding):
+                previous = state
+                for name in preceding:
+                    previous, _ = key(previous, name)
+                folded, _ = reduce(previous, {"type": "click", "action": ("question.open", ref["id"], ref)})
+                self.assertEqual(folded.opened_for("qopen:QUESTIONS"), "-")
+                self.assertFalse(folded.question_overlay["editing"])
+                self.assertFalse(any("항목" in row for row in _text(vm, folded)))
+                with patch.object(render, "_EXPLORER_STATE", folded):
+                    self.assertFalse(render._explorer_question_writable())
+                for name in ("x", "text:나", "3"):
+                    unchanged, effects = key(folded, name)
+                    self.assertEqual(effects, ())
+                    self.assertEqual(unchanged.question_overlay, folded.question_overlay)
+                opened, effects = key(folded, "enter")
+                self.assertEqual(opened.opened_for("qopen:QUESTIONS"), ref["id"])
+                self.assertEqual(effects, (("questions.read", ref),))
+                opened, effects = key(folded, "down")
+                self.assertEqual(effects, (("questions.read", ref),))
+                self.assertEqual(key(opened, "enter")[1], ())
+
+    def test_list_arrows_move_between_questions_without_picking_choices(self):
+        from dataclasses import replace
+        state, vm = self.setup_question()
+        first = vm.questions[0]["ref"]
+        second = {**first, "id": "S4:second", "session_id": "second", "request_id": "second"}
+        refs = [first, second]
+        state = replace(state, folds=(("qsel:QUESTIONS", second["id"]),),
+                        question_overlay=dict(state.question_overlay, ref=second))
+        detail = state.question_overlay["detail"]
+        for name, expected in zip(("up", "up", "up", "up", "down"),
+                                  (first, second, first, second, first)):
+            state, effects = reduce(state, {"type": "key", "key": name, "question_refs": refs})
+            self.assertEqual(effects, (("questions.read", expected),))
+            self.assertEqual(state.opened_for("qsel:QUESTIONS"), expected["id"])
+            self.assertFalse(state.question_overlay["editing"])
+            self.assertIsNone(state.question_overlay["draft"])
+            state = replace(state, question_overlay=dict(state.question_overlay, state="open", detail=detail))
+
+    def test_required_bundles_send_only_after_every_required_answer(self):
+        from dataclasses import replace
+        for harness, transport, ids in (
+            ("claude", "hearting-human-gate", ("_understanding", "q1", "q2", "q3", "q4")),
+            ("codex", "codex-managed-control", ("a", "b")),
+        ):
+            with self.subTest(transport=transport):
+                state, vm = self.setup_question(harness)
+                overlay = state.question_overlay
+                detail = overlay["detail"]
+                spec = detail["questions"][0]
+                detail = dict(detail, native_ref={"transport": transport},
+                              questions=[dict(spec, id=qid) for qid in ids])
+                state = replace(state, question_overlay=dict(overlay, detail=detail))
+                enter = {"type": "key", "key": "enter", "question_refs": [overlay["ref"]]}
+                self.assertFalse(any("▸ 2  항목" in row for row in draw(vm, state, 100, 24).text_rows()))
+                self.assertEqual(reduce(state, enter)[1], (("questions.read", overlay["ref"]),))
+                picked, _ = reduce(state, {"type": "key", "key": "2"})
+                cleared, _ = reduce(picked, {"type": "key", "key": "2"})
+                self.assertEqual(reduce(cleared, enter)[1], (("questions.read", overlay["ref"]),))
+                for index, qid in enumerate(ids):
+                    state, _ = reduce(state, {"type": "click", "action": ("question.choice", qid, "v2")})
+                    _, effects = reduce(state, enter)
+                    if index < len(ids) - 1:
+                        self.assertEqual(effects, ())
+                    else:
+                        self.assertEqual(effects[0][0], "questions.submit")
+                        self.assertEqual(effects[0][2], {"answers": {qid: ["v2"] for qid in ids}})
+
+    def test_text_equal_to_choice_is_unmarked_after_rereading_the_draft(self):
+        from dataclasses import replace
+        from tools.fleet.explorer.state import question_draft_from_backend
+        state, vm = self.setup_question()
+        state, effects = reduce(state, {"type": "key", "key": "text:v2"})
+        detail = state.question_overlay["detail"]
+        draft = question_draft_from_backend(detail, effects[0][2])
+        overlay = dict(state.question_overlay, draft=draft, choice_marks={}, editing=False)
+        state = replace(state, question_overlay=overlay)
+        rows = _text(vm, state)
+        self.assertTrue(any("> v2" in row for row in rows))
+        self.assertFalse(any("▸ 2  항목" in row for row in rows))
+        _, effects = reduce(state, {"type": "key", "key": "enter"})
+        self.assertEqual(effects[0][2], {"answers": {"q": ["v2"]}})
+
+    def test_answer_limit_is_localized_and_clears_on_the_next_key(self):
+        for lang, notice in (("en", "answer is full · 4,096 bytes"),
+                             ("ko", "답 입력 한도 · 4,096바이트")):
+            with self.subTest(language=lang), patch.dict(os.environ, FLEET_NOW_LANG=lang):
+                state, vm = self.setup_question(choices=[])
+                value = "가" * 1365 + "a"
+                state, effects = reduce(state, {"type": "key", "key": "text:" + value})
+                self.assertEqual(effects[0][0], "questions.draft")
+                self.assertFalse(any(notice in row for row in _text(vm, state)))
+                state, effects = reduce(state, {"type": "key", "key": "text:한"})
+                self.assertEqual(effects, ())
+                self.assertTrue(any(notice in row for row in _text(vm, state)))
+                self.assertEqual(state.question_overlay["draft"]["answers"]["q"], [value])
+                state, _ = reduce(state, {"type": "key", "key": "backspace"})
+                self.assertFalse(any(notice in row for row in _text(vm, state)))
 
     def test_local_mark_stays_authoritative_over_an_older_draft_receipt(self):
         from dataclasses import replace
@@ -314,7 +421,7 @@ class DrawnAnswerRules(unittest.TestCase):
         import subprocess
         import types
         root = Path(__file__).resolve().parents[3]
-        source = subprocess.check_output(["git", "show", "773a57382:tools/fleet/explorer/state.py"],
+        source = subprocess.check_output(["git", "show", "59839e05f:tools/fleet/explorer/state.py"],
                                          text=True, cwd=root, timeout=10)
         name = "tools.fleet.explorer._previous_question_state"
         previous = types.ModuleType(name)
@@ -322,9 +429,8 @@ class DrawnAnswerRules(unittest.TestCase):
         sys.modules[name] = previous
         self.addCleanup(sys.modules.pop, name, None)
         exec(compile(source, str(root / "tools/fleet/explorer/state.py"), "exec"), previous.__dict__)
-        for keys, expected in [([], ([2], ["v2"])),
-                               (["down", "text:가나"], ([3], ["v3", "가나"])),
-                               (["3", "3", "text:가나"], ([], ["가나"]))]:
+        previous.NavState = NavState
+        for keys, expected in [([], ([], None)), (["down"], ([], None)), (["click-write"], ([], None))]:
             with self.subTest(keys=keys):
                 current = self.sequence(keys)
                 old = self.sequence(keys, reducer=previous.reduce)
@@ -332,8 +438,8 @@ class DrawnAnswerRules(unittest.TestCase):
                 self.assertNotEqual(old[:2], expected)
 
     def test_fallback_no_choices_decision_and_choice_only(self):
-        self.assertEqual(self.sequence([], recommended=None)[:2], ([1], ["v1"]))
-        self.assertEqual(self.sequence(["down", "text:가"], recommended=2)[:2], ([], ["가"]))
+        self.assertEqual(self.sequence([], recommended=None)[:2], ([], None))
+        self.assertEqual(self.sequence(["text:가"], recommended=2)[:2], ([], ["가"]))
         self.assertEqual(self.sequence(["text:가나"], choices=[])[:2], ([], ["가나"]))
         state, vm = self.setup_question(is_other=False)
         rows = draw(vm, state, 100, 35).text_rows()
@@ -425,6 +531,17 @@ class MessageQuestions(unittest.TestCase):
                 self.assertEqual(len(records), 1)
                 self.assertNotIn("PRIVATE QUESTION", json.dumps(records))
         self.assertEqual(len(tidy_decisions.list_pending()), 3)
+
+    def test_a_late_save_receipt_cannot_restore_a_cleared_choice(self):
+        signal, _ = self.f.ask(choices=["original-value", "other"])
+        vm, row = self.board(signal)
+        state, _ = self.action(NavState(view="QUESTIONS"), ("question.select", row["id"], row["ref"]), vm)
+        state, effects = reduce(state, {"type": "key", "key": "1"})
+        state, _ = reduce(state, {"type": "key", "key": "1"})
+        state, _ = self.effect(state, effects[0], vm)
+        self.assertEqual(state.question_overlay["draft"]["answers"]["message-response"], [])
+        _, effects = reduce(state, {"type": "key", "key": "enter", "question_refs": [row["ref"]]})
+        self.assertEqual(effects, (("questions.read", row["ref"]),))
 
     def test_choice_and_typed_note_survive_the_board_and_courier(self):
         for harness in ("claude", "codex", "opencode"):

@@ -157,6 +157,98 @@ const cases={
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         print(result.stdout,flush=True)
 
+    def test_reading_while_writing_section_arrows_and_full_answers(self):
+        script = r"""
+const assert=require('node:assert/strict'),Module=require('node:module'),fs=require('node:fs');
+const dir=process.argv[1],filename=dir+'/block-input.cjs';
+const previous=new Module(filename);previous.filename=filename;previous.paths=module.paths;
+previous._compile(fs.readFileSync(0,'utf8'),filename);
+const current=require(filename);
+const body=Array.from({length:30},(_,i)=>[{text:'body line '+i}]);
+
+function setup(create,{choices=['one','two'],long=false,labels={}}={}){
+  const sections=[];
+  let answer;
+  const b=create({changed(){},action(){},section:delta=>sections.push(delta),
+    answer:async request=>(answer=request.answers.q,{state:'submitted'})});
+  const q={id:'q',question:'Synthetic',free_text:true,choices,...(long?{display:{body}}:{})};
+  b.update([{id:'synthetic',revision:'one',answerable:true,questions:[q]}],'',{labels});
+  b.enter();
+  return {b,sections,keys:keys=>b.input(Buffer.from(keys)),
+    rows:(budget=10)=>b.detail({columns:60,budget}).map(row=>row.map(part=>part.text).join('')),
+    get answer(){return answer;}};
+}
+
+const cases={
+  choiceless_scroll(create){
+    const x=setup(create,{choices:[],long:true});
+    assert.equal(x.rows()[1],'body line 0');
+    x.keys('\x1b[B'.repeat(3));
+    assert.equal(x.rows()[1],'body line 3');
+    assert(!x.b.typing);
+    x.keys('\x1b[A');
+    assert.equal(x.rows()[1],'body line 2');
+  },
+  scroll_while_typing(create){
+    const x=setup(create,{long:true});
+    x.keys('draft');
+    assert(x.rows().some(line=>line.includes('more · ↓ to read')));
+    x.keys('\x1bOB'.repeat(3));
+    assert.equal(x.rows()[1],'body line 3');
+    assert(x.b.typing);
+    x.keys('\x1b[A');
+    assert(!x.b.typing);
+    x.keys('\r');
+    assert.deepEqual(x.answer,['draft']);
+  },
+  section_arrows(create){
+    const x=setup(create);
+    x.keys('\x1b[D\x1bOC');
+    assert.deepEqual(x.sections,[-1,1]);
+    x.b.write();
+    x.keys('\x1b[D\x1b[C');
+    assert.deepEqual(x.sections,[-1,1]);
+    x.keys('draft\x1b[A\x1bOD\x1b[C');
+    assert.deepEqual(x.sections,[-1,1]);
+    x.keys('\r');
+    assert.deepEqual(x.answer,['draft']);
+  },
+  full_answer(create){
+    const x=setup(create);
+    x.keys('a'.repeat(4096));
+    assert(!x.rows().some(line=>line.includes('answer is full')));
+    x.keys('b');
+    assert(x.rows().includes('answer is full · 4,096 bytes'));
+    assert(x.rows(4).includes('answer is full · 4,096 bytes'));
+    x.keys('\x7f');
+    assert(!x.rows().some(line=>line.includes('answer is full')));
+    x.keys('x\r');
+    assert.deepEqual(x.answer,['a'.repeat(4095)+'x']);
+  },
+  full_paste(create){
+    const full='답 입력 한도 · 4,096바이트';
+    const x=setup(create,{labels:{full}});
+    x.keys('\x1b[200~'+'가'.repeat(2000)+'\x1b[201~');
+    assert(x.rows().includes(full));
+    x.keys('\x1b[B');
+    assert(!x.rows().includes(full));
+    x.keys('\r');
+    assert.deepEqual(x.answer,['가'.repeat(1365)]);
+  },
+};
+for(const [name,test] of Object.entries(cases)){
+  test(current);
+  assert.throws(()=>test(previous.exports),assert.AssertionError,name);
+  console.log(name+' current=PASS baseline=FAIL');
+}
+"""
+        baseline = subprocess.check_output(
+            ['git', 'show', '59839e05f:utilities/session-shell/block-input.cjs'], cwd=ROOT, text=True, timeout=10)
+        result = subprocess.run(['node', '-e', script, str(SHELL)], input=baseline,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        print(result.stdout, flush=True)
+
     def test_normal_exit_disables_remembered_cursor_keys_and_x10(self):
         script=r"""
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
@@ -403,6 +495,15 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                         def send(data,delay=.12):
                             if isinstance(data,str):data=data.encode()
                             tm('send-keys','-t','qi:0.0','-H',*[f'{v:02x}' for v in data]);time.sleep(delay)
+                        def click_answer_row():
+                            for y, line in enumerate(screen(), 1):
+                                match = re.search(r'│ (› ) *│', line)
+                                if match:
+                                    x = cells(line[:match.start(1)]) + 1
+                                    send(f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m')
+                                    return
+                            self.fail('missing empty answer row')
+
                         def position(name):
                             s=screen();actual=list(map(int,tm('display-message','-p','-t','qi:0.0','#{cursor_x},#{cursor_y}').strip().split(',')))
                             observations=[json.loads(line) for line in Path(cfg['frames']).read_text().splitlines()] if Path(cfg['frames']).exists() else []
@@ -451,7 +552,11 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                         send('\x1d');waitfor('시험 문구')
                         for index,kind in enumerate(['choice','text','secret','scroll']):
                             if index:send('\t')
-                            send('가\x7f' if kind=='choice' else '\x1b[B');position(kind+'-empty')
+                            if kind == 'choice':
+                                send('가\x7f')
+                            else:
+                                click_answer_row()
+                            position(kind+'-empty')
                             send('\r');position(kind+'-empty-enter')
                             tm('resize-window','-t','qi:0','-x','20','-y','8');time.sleep(.3);position(kind+'-small-empty')
                             tm('resize-window','-t','qi:0','-x',str(cols),'-y','30');time.sleep(.3)

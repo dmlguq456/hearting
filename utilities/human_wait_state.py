@@ -693,14 +693,29 @@ def _message_answer_error(text):
     return None
 
 
-def _message_body(portable):
+def _message_answer_values(portable):
     answers = portable.get("answers") if isinstance(portable, dict) else None
     values = answers.get("message-response") if isinstance(answers, dict) else None
     if not isinstance(values, list) or not 1 <= len(values) <= 2 or any(not isinstance(v, str) for v in values):
         return None
-    # A single answer keeps its existing payload. A choice plus a note retains
-    # both independent values in an unambiguous array in the private prompt.
-    return values[0] if len(values) == 1 else json.dumps(values, ensure_ascii=False)
+    return values
+
+
+def _message_body(portable, *, bound_bytes=None):
+    values = _message_answer_values(portable)
+    if values is None:
+        return None
+    if len(values) == 1:
+        value = values[0]
+        # Older claims may bind the unwrapped bytes. The caller still verifies their digest.
+        if not value.lstrip().startswith("[") or len(value.encode("utf-8")) == bound_bytes:
+            return value
+        try:
+            if not isinstance(json.loads(value), list):
+                return value
+        except (ValueError, RecursionError):
+            return value
+    return json.dumps(values, ensure_ascii=False)
 
 
 def message_binding_valid(binding):
@@ -730,7 +745,7 @@ def message_answer_body(binding, *, current=False):
         raise ValueError("message-answer-storage-invalid")
     entry = overlay.get(binding["body_id"]) or {}
     identity = entry.get("identity") or {}
-    text = _message_body(entry.get("response"))
+    text = _message_body(entry.get("response"), bound_bytes=binding["body_bytes"])
     if (entry.get("message_binding") != binding or entry.get("action_id") != binding["action_id"]
             or any(identity.get(key) != binding[key]
                    for key in ("harness", "session_id", "request_id", "question_id"))
@@ -823,7 +838,7 @@ def _settle_published_wait(wait_id):
         pass
 
 
-def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, verified=False):
+def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, verified=False, answer_values=()):
     """Source seat lock held; completion is independent of the transport claim."""
     if (not isinstance(text, str) or not text.strip() or signal.get("lifecycle") != "open"
             or sequence < signal["sequence"]
@@ -838,7 +853,9 @@ def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, v
     completion = {"actor": actor, "action_id": action_id, "at": time.time(),
                   "answer_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
     if not signal["detail"]["questions"][0].get("is_secret"):
-        completion["answer"] = text
+        completion["answer"] = answer_values[0] if answer_values else text
+        if len(answer_values) == 2:
+            completion["note"] = answer_values[1]
     signal.update(lifecycle="answered", completion=completion)
     _write_signal_source(signal)
     _settle_published_wait(signal["id"])
@@ -892,7 +909,8 @@ def complete_message_answer(receipt, recipient):
                 verified = True
             if verified:
                 _complete_message_locked(signal, text, "fleet", sequence=binding["sequence"],
-                                         action_id=binding["action_id"], verified=True)
+                                         action_id=binding["action_id"], verified=True,
+                                         answer_values=_message_answer_values(entry["response"]))
                 entry = _selected_entry(envelope) or entry
         won = bool(exact and (signal.get("completion") or {}).get("action_id") == binding["action_id"])
         status = "applied" if won else (
@@ -917,7 +935,8 @@ def _queue_message_decision(signal):
         question = signal["detail"]["questions"][0]
         saved = decisions.save_pending(decisions.make_payload(
             question["question"], [completion["answer"]], options=question["choices"],
-            cwd=signal.get("cwd"), origin={"kind": "message-question", "harness": signal["harness"],
+            note=completion.get("note", ""), cwd=signal.get("cwd"),
+            origin={"kind": "message-question", "harness": signal["harness"],
                                          "session_id": signal["session_id"], "request_id": signal["id"]}))
         if saved:
             import session_tidy as tidy

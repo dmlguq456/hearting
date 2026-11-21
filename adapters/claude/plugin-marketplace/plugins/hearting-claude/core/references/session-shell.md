@@ -828,10 +828,12 @@ printable input immediately, including `r/w/f/p/t`; numbers select until writing
 starts. The first accepted character clears a default mark, including after a
 click on the answer row or down past the last choice. An explicitly chosen mark
 stays while writing. Repeating its number before writing clears that choice.
-Down past the last choice enters the row without changing the mark's provenance;
-up returns to choices without discarding text. Enter sends exactly the marked
+Down past the last choice enters the row without changing the mark's provenance.
+While writing with choices, ↑ returns to them without discarding text and ↓ scrolls
+the body. With no choices, ↑↓ scroll the body. Enter sends exactly the marked
 original choice value and the separate typed text, `[original choice value, typed
 text]`, omitting whichever is absent; with neither, `empty answer` keeps it open.
+Input beyond 4,096 UTF-8 bytes shows a one-line notice until the next key.
 Tab and closing/reopening retain each question's mark, its default/explicit
 provenance, and its draft. Enter's existing next-field behavior stays.
 Its one localized guidance row reads
@@ -839,8 +841,12 @@ Its one localized guidance row reads
 and `Enter send · ↑ choices · Tab next · Esc/Ctrl+] back` while writing (without
 `↑ choices` when no choices exist). The existing key packing shortens narrow rows.
 Choice-only questions keep their selection behavior; their guidance omits the
-retired `t text` / `t 답 입력`. Fleet's separate editor follows the same default,
-explicit choice, first-character clearing, repeated-number and empty-answer rules.
+retired `t text` / `t 답 입력`. Fleet's question board shows recommendations as
+`(recommended)` and marks only choices picked by number or click. Repeating the
+number clears the choice. ↑↓ move among waits, with ↑ leaving the answer row first
+when editing. Enter on an unfolded question submits only chosen values and typed
+text, once all required fields are answered. Enter on a folded or untouched wait
+keeps its usual open or read behavior. Direct typing belongs to the unfolded row.
 A decision (approve/reject/defer) highlights nothing until ↑↓ or a number picks one, so
 Enter alone still sends nothing. With the popup closed, arrows and Enter stay
 the native's. Do not reserve a standalone
@@ -1103,9 +1109,13 @@ controls. Long drafts wrap with two-cell continuation indentation, keeping their
 and next input cell visible. The one localized key row describes choosing or writing.
 Tab retains each question's choices and draft. Transport-specific single-value forms
 must not offer mixed input that their recipient cannot retain.
+For a `Question answer (request=…):` message, read a two-item JSON array as choice
+and note, a one-item JSON array as one value, or the plain-text body as one value.
+The sender wraps a single value when its text itself parses as a JSON array.
 
-The question popup answers this session's own questions; another session's wait is answered in
-its own window or through Fleet (`f`), which also goes to that session, restarts or tidies it. While it
+The question popup answers this session's own questions. Answer another session's wait in
+its own window or in Fleet. In free-text questions, `f`, `r`, `p` and `w` enter text.
+←→ switch sections when the answer row is inactive and its draft is empty. While the popup
 stands every key and press is its own (none reaches the native, a native that
 reads the mouse included; whatever follows an Esc, in the same read or within its
 25 ms, other than `[` or `O` (an arrow or function key) is dropped, neither closing

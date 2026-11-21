@@ -618,6 +618,12 @@ class NativeResponseIntegrationTests(unittest.TestCase):
         from tools.fleet.explorer.view_model import persistable_view_model
         from tools.fleet.refresh import fleet_answer_wait_view
         backend, observation = self.backend_tests.state, self.backend_tests.observation
+        # This managed-gateway fixture has no live rollout processes. A host-wide
+        # /proc crawl can report an incomplete census for unrelated sessions.
+        rollout = mock.patch.object(observation, "_codex_rollout_waits",
+                                    return_value={"complete": True, "pending": {}})
+        rollout.start()
+        self.addCleanup(rollout.stop)
         fixture = self.fixture.gateway_fixture
         request_id = "approval-exact" if approval else 502
         turn_id, item_id = "turn-original", "item-original"

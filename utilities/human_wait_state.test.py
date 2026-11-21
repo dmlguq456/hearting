@@ -3588,6 +3588,66 @@ class MessageCompletionTests(unittest.TestCase):
             self.assertEqual(state._message_answer_error(state._message_body(response)), None)
         self.assertIsNone(state._message_answer_error("a" * 4096))
 
+    def test_array_shaped_single_answers_are_distinct_from_two_values_in_the_prompt(self):
+        import session_notice
+        pair = ["original-value", "A separate note"]
+        cases = [pair, [json.dumps(pair)], ["[1,2]"], ["[]"], ['["x"]'], ["[plain"]]
+        bodies = []
+        for index, values in enumerate(cases):
+            with self.subTest(values=values):
+                signal, envelope = self.f.ask("claude", f"array-shape-{index}", choices=[pair[0], "other"])
+                result = state.submit_selected_response(envelope, {"answers": {"message-response": values}},
+                                                       action_id="fixture-array")
+                self.assertEqual(result["state"], "submitted")
+                header, body = session_notice.consumer_text(self.f.record(signal)["receipt"]).split("\n", 1)
+                self.assertEqual(header, f"Question answer (request={signal['id']}):")
+                try:
+                    decoded = json.loads(body)
+                except ValueError:
+                    decoded = None
+                self.assertEqual(decoded if isinstance(decoded, list) else [body], values)
+                bodies.append(body)
+        self.assertNotEqual(bodies[0], bodies[1])
+
+    def test_a_preexisting_unwrapped_answer_keeps_its_bound_bytes(self):
+        import session_notice
+        value = '["a","b"]'
+        signal, envelope = self.f.ask()
+        # The receipt was bound before single array-shaped text began to be wrapped.
+        with mock.patch.object(state, "_message_body", return_value=value):
+            self.assertEqual(self.f.submit(envelope, value)["state"], "submitted")
+        receipt = self.f.record(signal)["receipt"]
+        self.assertEqual(session_notice.consumer_text(receipt).split("\n", 1)[1], value)
+        wire, _, recipient = self.f.prepare(signal)
+        self.f.peer.receive_peer_message(wire, recipient)
+        self.assertEqual(self.source(signal)["completion"]["answer"], value)
+
+    def test_choice_and_note_use_separate_decision_fields_and_secret_answers_are_omitted(self):
+        import tidy_decisions
+        choice, note = "original-value", "A separate note"
+        for secret in (False, True):
+            with self.subTest(secret=secret):
+                signal, envelope = self.f.ask("claude", f"split-memory-{secret}",
+                                              choices=[choice, "other"], secret=secret)
+                result = state.submit_selected_response(envelope, {"answers": {"message-response": [choice, note]}},
+                                                       action_id="fixture-note")
+                self.assertEqual(result["state"], "submitted")
+                wire, _, recipient = self.f.prepare(signal)
+                self.f.peer.receive_peer_message(wire, recipient)
+                self.assertEqual(self.source(signal)["lifecycle"], "answered")
+                state.flush_message_decisions()
+                decisions = tidy_decisions.list_pending()
+                self.assertEqual(len(decisions), 1)
+                entry = decisions[0][1]
+                self.assertEqual((entry["answers"], entry["note"]), ([choice], note))
+                body = tidy_decisions.decision_body(entry)
+                self.assertIn("고른 답: " + choice, body)
+                self.assertIn("사용자 메모: " + note, body)
+                if secret:
+                    completion = self.source(signal)["completion"]
+                    self.assertNotIn("answer", completion)
+                    self.assertNotIn("note", completion)
+
     def test_shared_project_questions_remain_open_for_each_exact_session(self):
         import session_tidy as tidy
         for harness in ("claude", "codex", "opencode"):

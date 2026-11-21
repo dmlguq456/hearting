@@ -1419,7 +1419,7 @@ function queueLayout(){
 const block=require('./block-input.cjs')({changed:queueDisplay,cellWidth,
   answer:async fields=>{const result=await source('answer',fields);queueProjection();return result;},
   action:key=>blockAction(key),
-  // ←→ in the question popup move to the next section's popup, as in every other popup.
+  // The question editor forwards section arrows when it has no active answer draft.
   section:delta=>setImmediate(()=>moveSection(delta))});
 let actionLines=[];
 function rebuildDisplay() {

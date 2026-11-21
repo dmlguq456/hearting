@@ -6,6 +6,7 @@ const {keyRows}=require('./panel-view.cjs');
 // was sent, whether or not its session has it yet (it used to go at that receipt, within seconds); it
 // leaves at the first update or paint past that, on the path it always left by (no timer of its own).
 const SENT_KEEP_MS=10*60*1000;
+const ANSWER_FULL=Symbol('answer full');
 module.exports=function({changed,answer,action,section,cellWidth}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false;
@@ -103,7 +104,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}
     changed();
   }
-  function leave(){focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
+  function leave(){clearFullNotice(current());focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
   const seatOf=row=>row?key(row.item)+'\0'+row.question.id:null;
   function move(delta){
     const count=flat().length;index=(index+delta+count+1)%(count+1);
@@ -170,7 +171,8 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
       const selected=picked.map(v=>{if(row.question.secret)return '•'.repeat([...String(v)].length);const n=choices(row).findIndex(c=>value(c)===v);return (n>=0?String(n+1)+' · ':'')+v;});
       tail.push(chosenRow([span('› '+selected.join(', '),'loc_repo')],active(row)));
     }
-    if(local.notice)tail.push([span(local.notice,stale?'lvl_r':'dim')]);
+    const notice=local.notice?[span(local.notice===ANSWER_FULL?text('full','answer is full · 4,096 bytes'):local.notice,stale?'lvl_r':'dim')]:null;
+    if(notice)tail.push(notice);
     if(focused){
       const ready=complete(row,formValues(row));
       const instruction=active(row)?(choosing(row)?text('choose','↑↓ choose · Enter send'):ready?text('send','Enter send'):text('text','type answer')):text(status,status);
@@ -183,7 +185,11 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     let footer=tail.slice(-tailLimit);
     const edit=tail.find(line=>line.some(part=>part.caret))||tail.findLast(line=>line.some(part=>part.answerRow));
     // At small heights notices and key hints yield before the live input cell.
-    if(edit&&!footer.includes(edit))footer=[edit,...(tailLimit>1?tail.slice(-(tailLimit-1)):[])];
+    if(edit&&!footer.includes(edit)){
+      const after=tailLimit>1?tail.slice(-(tailLimit-1)):[];
+      if(after.length===1&&local.notice===ANSWER_FULL)after[0]=notice;
+      footer=[edit,...after];
+    }
     const space=Math.max(0,limit-1-footer.length);
     if(edit&&!space)return [head,...footer].slice(0,limit);
     if(content.length>space&&gap.length>1){gap=gap.slice(1);content=lines();}
@@ -199,9 +205,13 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     // While ↑↓ choose, the body pages with PgUp/PgDn: the hint names the keys that read it.
     // A question with choices reads with PgUp/PgDn once focused (↑↓ choose): the hint names
     // those keys before focus too (11-14), as it does while choosing.
-    const reading=choosing(row)?text('more_choose','more · PgUp/PgDn to read'):!focused&&active(row)&&choices(row).length?text('more_page','more · focus and PgUp/PgDn to read'):text('more','more · focus and ↑↓ to read');
+    const readingDown=focused&&local.typing[id]&&choices(row).length>0;
+    const reading=choosing(row)?text('more_choose','more · PgUp/PgDn to read'):
+      readingDown?text('more_down','more · ↓ to read'):
+      !focused&&active(row)&&choices(row).length?text('more_page','more · focus and PgUp/PgDn to read'):
+      text('more','more · focus and ↑↓ to read');
     const more=[span(`+${Math.max(0,content.length-page)} · ${reading} ${scroll+1}/${content.length}`)];
-    if(space<=1)head=[...head,span(` +${content.length-page} ${choosing(row)?'PgUp/PgDn':'↑↓'}`)];
+    if(space<=1)head=[...head,span(` +${content.length-page} ${choosing(row)?'PgUp/PgDn':readingDown?'↓':'↑↓'}`)];
     return [head,...content.slice(scroll,scroll+page),...(space>1?[more]:[]),...footer].slice(0,limit);
   }
   // The option rows of one choice start with its number (`2 `); its wrapped rows
@@ -294,17 +304,21 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     else{local.answers[id]=[value(choice)];local.cursor[id]=at;}
     local.typing[id]=false;local.notice='';follow=true;
   }
+  function clearFullNotice(row){
+    if(row&&state(row.item).notice===ANSWER_FULL)state(row.item).notice='';
+  }
   // A cursor without an answer is the default, not a choice the person made.
   // Clear it on the first accepted character, including paste or a clicked row.
   function append(row,c){
     const local=state(row.item),id=row.question.id;
-    if(Buffer.byteLength((local.drafts[id]||'')+c)>4096)return;
+    if(Buffer.byteLength((local.drafts[id]||'')+c)>4096){local.notice=ANSWER_FULL;return;}
     if(!Number.isInteger(local.cursor[id])||local.cursor[id]<0){local.cursor[id]=-1;local.answers[id]=[];}
     local.typing[id]=true;local.drafts[id]=(local.drafts[id]||'')+c;
   }
   function character(c){
     const row=current(),local=row&&state(row.item),id=row?.question.id;
     if(pasting){if(row&&active(row)&&writable(row))append(row,c);return;}
+    clearFullNotice(row);
     if(c==='\x1d'||c==='\x1b'){leave();return;}
     if(c==='\t'){move(1);return;}
     if(c==='\r'||c==='\n'){
@@ -337,6 +351,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
         // An application-cursor terminal sends arrows as SS3 (`ESC O A`).
         if(escape==='\x1b'&&c!=='['&&!(c==='O'&&!pasting)){
           if(pasting){escape='';character('\x1b');character(c);continue;}
+          clearFullNotice(current());
           // Whatever follows an Esc in this read (or within the Esc window) other than `[` or `O` (an arrow or
           // function key) is a combination this editor has no meaning for: Alt+letter, Shift/Alt+Enter,
           // Esc then a control byte. It is dropped, never the native's (an Enter there would submit its
@@ -347,20 +362,22 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
           continue;
         }
         escape+=c;
-        if(escape==='\x1b[200~'){pasting=true;escape='';}
+        if(escape==='\x1b[200~'){if(!pasting)clearFullNotice(current());pasting=true;escape='';}
         else if(escape==='\x1b[201~'){pasting=false;escape='';}
         else if(escape.length>2&&byte>=0x40&&byte<=0x7e||escape.length===3&&escape[1]==='O'){
           if(!pasting){
             const up=escape==='\x1b[A'||escape==='\x1bOA',down=escape==='\x1b[B'||escape==='\x1bOB',row=current();
+            clearFullNotice(row);
             if(escape==='\x1b[Z')move(-1);
-            // ←→ move to the next section's popup (11-15), as in every popup.
-            else if((escape==='\x1b[C'||escape==='\x1b[D'||escape==='\x1bOC'||escape==='\x1bOD')&&section)section(escape.endsWith('C')?1:-1);
+            else if(escape==='\x1b[C'||escape==='\x1b[D'||escape==='\x1bOC'||escape==='\x1bOD'){
+              const local=row&&state(row.item),id=row?.question.id;
+              if(!local?.typing[id]&&!local?.drafts[id])section?.(escape.endsWith('C')?1:-1);
+            }
             else if(up&&row&&state(row.item).typing[row.question.id]&&choices(row).length){state(row.item).typing[row.question.id]=false;scroll=0;follow=true;}
             else if((up||down)&&choosing(row)){const local=state(row.item),id=row.question.id,n=choices(row).length,at=cursorOf(row);
               if(down&&at===n-1&&writable(row))local.typing[id]=true;
               else{local.cursor[id]=at<0?0:Math.max(0,Math.min(n-1,at+(up?-1:1)));local.answers[id]=[value(choices(row)[local.cursor[id]])];}
               scroll=0;follow=true;}
-            else if(down&&row&&active(row)&&writable(row)){state(row.item).typing[row.question.id]=true;}
             else if(up||escape==='\x1b[5~'){scroll-=escape.includes('5')?4:1;follow=false;}else if(down||escape==='\x1b[6~'){scroll+=escape.includes('6')?4:1;follow=false;}
           }
           escape='';

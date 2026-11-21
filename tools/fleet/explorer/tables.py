@@ -2284,7 +2284,6 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
                 line(wrapped)
     can_draft = question_draft_supported(envelope) and request_state == "open"
     can_answer = question_answer_supported(envelope)
-    draft = private.get("draft")
     answers = (_question_draft_response(private) or {}).get("answers", {})
     complete = True
     native_only = False
@@ -2310,8 +2309,7 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
             selection = question_mark(private, spec) if request_state == "open" else None
             chosen = selection[0] == number - 1 if selection is not None else value in values
             selectable = can_draft and question_choice_click_allowed(envelope, qid, value, values)
-            mark = (("▸" if chosen else " ") if selection is not None else
-                    ("●" if chosen else "○") if (selectable or chosen) else " ")
+            mark = ("▸" if selection is not None else "●") if chosen else "○" if selectable else " "
             cursor = grid.put(indent, y, mark, "hearting" if chosen else "dim", limit=right)
             # The number is the question's rose and bold, as `◑` and the popup's numbers are (11-17).
             cursor = grid.put(cursor + 1, y, f"{number}  ", "lvl_r", limit=right)
@@ -2383,6 +2381,8 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
         items[0] = ("sending…", "dim", None)
     if open_item:
         items.append(open_item)
+    if private.get("answer_full") and request_state == "open":
+        items.insert(0, (ui_text("fleet.session_block.full"), "dim", None))
     _question_actions(grid, indent, right, y, items)
     return y + 1
 

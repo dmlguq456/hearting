@@ -435,7 +435,8 @@ class NativeAnswerNormalizationTest(unittest.TestCase):
         import human_wait_state as waits
         interview = good_interview()
         rows = [{"id": FI.UNDERSTANDING_SLOT, "question": interview["understanding"], "choices": [{"value": "yes", "label": "yes"}]}]
-        answers = {FI.UNDERSTANDING_SLOT: ["yes"]}
+        long_note = "가" * (FI.MAX_CORRECTION_CHARS + 1)
+        answers = {FI.UNDERSTANDING_SLOT: ["yes", long_note]}
         for question in interview["questions"]:
             labels = [option["label"] for option in question["options"]]
             rows.append({"id": question["id"], "question": question["question"], "choices": [{"value": label, "label": label} for label in labels]})
@@ -446,6 +447,9 @@ class NativeAnswerNormalizationTest(unittest.TestCase):
         self.assertIsNone(waits._native_response_error(envelope, {"answers": answers}))
         result = waits._frame_interview_answers(detail, interview, answers)
         self.assertEqual(FI.validate_answers(interview, result), [])
+        mark = FI._truncated_mark()
+        self.assertTrue(result["understanding_confirmed"])
+        self.assertEqual(result["correction"], long_note[:FI.MAX_CORRECTION_CHARS - len(mark)] + mark)
         for question in interview["questions"]:
             self.assertEqual(result["answers"][question["id"]], {"choice": 0, "note": "A separate note"})
 

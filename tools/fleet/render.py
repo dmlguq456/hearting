@@ -3468,6 +3468,11 @@ def _explorer_accept_question_result(update):
                                result, "Selected request is ready." if envelope["state"] == "open"
                                else "Request state: " + envelope["state"]))
     elif operation == "questions.draft":
+        from .explorer.state import _question_draft_for_backend
+        # The editor may have changed or submitted this draft while its save was running.
+        if overlay.get("pending") or (len(effect) > 2 and isinstance(overlay.get("draft"), Mapping)
+                and effect[2] != _question_draft_for_backend(overlay["draft"], overlay.get("detail"))):
+            return
         if envelope is not None and envelope.get("state") == "open":
             from .explorer.state import question_draft_from_backend, question_ui_detail
             draft = question_draft_from_backend(envelope, envelope.get("draft"))
@@ -6635,10 +6640,12 @@ def _explorer_question_editing():
 
 
 def _explorer_question_writable():
-    from .explorer.state import question_items, question_free_text_supported
-    overlay = getattr(_EXPLORER_STATE, "question_overlay", None)
-    if (getattr(_EXPLORER_STATE, "view", None) != "QUESTIONS" or not isinstance(overlay, Mapping)
-            or overlay.get("state") != "open"):
+    from .explorer.state import QUESTION_OPEN_FOLD, question_items, question_free_text_supported
+    state = _EXPLORER_STATE
+    overlay = getattr(state, "question_overlay", None)
+    if (getattr(state, "view", None) != "QUESTIONS" or state.scope != "-"
+            or state.opened_for(QUESTION_OPEN_FOLD) == "-"
+            or not isinstance(overlay, Mapping) or overlay.get("state") != "open"):
         return False
     detail = overlay.get("detail")
     specs = question_items(detail)
