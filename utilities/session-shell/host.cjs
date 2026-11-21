@@ -838,8 +838,9 @@ function popupNow(){
   // (11-15: no control character reaches the terminal from a popup row: C0, DEL and C1 alike.)
   view.strings=view.rows.map(row=>'\x1b[0m'+row.map(part=>(part.margin?'\x1b[0m \x1b[D':'')+`\x1b[${cellAttr(part)}m${String(part.text).replace(/[\x00-\x1f\x7f-\x9f]/g,' ')}`).join('')+'\x1b[0m');
   if(table)return view;
-  // The caret stands after the answer being typed (its row starts `› `), as it did in the panel.
-  const edit=part=>String(part.text).startsWith('› ')&&String(part.text).length>2;
+  // The editor identifies the live draft, including its empty first cell.
+  // Question text and a picked answer can also start with `› `; neither is an editor.
+  const edit=block.typing?part=>part.caret===true:part=>String(part.text).startsWith('› ')&&String(part.text).length>2;
   const at=body.slice(0,view.body).findIndex(row=>Array.isArray(row)&&row.some(edit));
   if(at>=0){const parts=body[at],upto=parts.slice(0,parts.findIndex(edit)+1).map(part=>part.text).join('');
     view.cursor={row:view.frame.top+at+2,col:view.frame.left+3+Math.min(inner-1,cellWidth(upto))};}
@@ -1281,6 +1282,7 @@ function observeSelectedModel(lines){
     }
   }).finally(()=>{modelReading=false;});
 }
+let paintedCursor='',paintedModes=new Map();
 function render() {
   frameTimer=undefined;if(ended||!activated||relay||succeeding)return;
   try {
@@ -1312,7 +1314,7 @@ function render() {
     const tone=veilTone();
     if(tone!==veiledFrame){veiledFrame=tone;last=[];written=[];motionShown.clear();}
     popupBefore();const wrote=new Set();
-    let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
+    let text='';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
       // The rest of a Codex footer row whose ID cells are concealed keeps the
@@ -1360,13 +1362,22 @@ function render() {
     if(!fleetView)text+=popupOver(wrote);
     const b=view.buffer.active,m=view.modes;
     const owning=!!popupLayer&&!fleetView,cursor=owning?blockCursor:null;
-    text+=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)+(fleetView?0:geometry().nativeColumn)}H`;
-    text+=`\x1b[?2004${m.bracketedPasteMode?'h':'l'}\x1b[?1${m.applicationCursorKeysMode?'h':'l'}`;
-    text+='\x1b[?1000l\x1b[?1002l\x1b[?1003l';
-    if(!fleetView&&height()>0)text+='\x1b[?1002h\x1b[?1006h';
-    else if(m.mouseTrackingMode!=='none')text+=`\x1b[?${({x10:9,vt200:1000,drag:1002,any:1003})[m.mouseTrackingMode]}h\x1b[?1006h`;
-    text+=`\x1b[?1004${m.sendFocusMode?'h':'l'}\x1b[?7h${(owning?!!blockCursor:cursorVisible)?'\x1b[?25h':''}\x1b[?2026l`;
-    emit(text);armBeat();checkRelease();
+    const target=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)+(fleetView?0:geometry().nativeColumn)}H`;
+    // A paint moves the cursor temporarily; an unchanged frame need not move it at all.
+    if(text)text='\x1b[?7l'+text+target+'\x1b[?7h';
+    else if(target!==paintedCursor)text=target;
+    paintedCursor=target;
+    const mouse=!fleetView&&height()>0?1002:({x10:9,vt200:1000,drag:1002,any:1003})[m.mouseTrackingMode];
+    const modes=new Map([[2004,m.bracketedPasteMode],[1,m.applicationCursorKeysMode],
+      ...[9,1000,1002,1003].map(n=>[n,n===mouse]),[1006,!!mouse],
+      [1004,m.sendFocusMode],[25,owning?!!blockCursor:cursorVisible]]);
+    // Disable an old mouse mode before enabling its replacement. Reasserting focus/paste
+    // or toggling visibility on every native keystroke can disturb terminal IME composition.
+    for(const enabled of [false,true])for(const [mode,value] of modes){
+      if(!!value===enabled&&paintedModes.get(mode)!==enabled){text+=`\x1b[?${mode}${enabled?'h':'l'}`;paintedModes.set(mode,enabled);}
+    }
+    if(text)emit('\x1b[?2026h'+text+'\x1b[?2026l');
+    armBeat();checkRelease();
   } catch { rawRelay(); }
 }
 function lineLength(line){

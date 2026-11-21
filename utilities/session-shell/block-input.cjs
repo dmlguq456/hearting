@@ -158,7 +158,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
       const draft=local.drafts[id]||'',safe=row.question.secret?'•'.repeat([...draft].length):draft;
       const chars=[...safe];let shown='',width=0;
       for(let i=chars.length-1;i>=0;i--){const w=chars[i].charCodeAt(0)<128?1:2;if(width+w>Math.max(1,columns-9))break;shown=chars[i]+shown;width+=w;}
-      tail.push(chosenRow([span('› '+(shown!==safe?'…':'')+shown,'loc_repo')],active(row)));
+      tail.push(chosenRow([{...span('› '+(shown!==safe?'…':'')+shown,'loc_repo'),caret:true}],active(row)));
     }else if(picked&&!choosing(row)){
       const selected=picked.map(v=>{if(row.question.secret)return '•'.repeat([...String(v)].length);const n=choices(row).findIndex(c=>value(c)===v);return (n>=0?String(n+1)+' · ':'')+v;});
       tail.push(chosenRow([span('› '+selected.join(', '),'loc_repo')],active(row)));
@@ -171,7 +171,12 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
       tail.push(...keys([...(active(row)?[instruction]:[]),navigate],Math.max(1,Math.max(2,budget)-2)));
     }else if(status==='open')tail.push([span('Ctrl+] · '+text('open','answer needed'))]);
     const limit=Math.max(2,budget),tailLimit=Math.min(tail.length,Math.max(1,limit-2));
-    const footer=tail.slice(-tailLimit),space=Math.max(0,limit-1-footer.length);
+    let footer=tail.slice(-tailLimit);
+    const edit=tail.find(line=>line.some(part=>part.caret));
+    // At small heights notices and key hints yield before the live input cell.
+    if(edit&&!footer.includes(edit))footer=[edit,...(tailLimit>1?tail.slice(-(tailLimit-1)):[])];
+    const space=Math.max(0,limit-1-footer.length);
+    if(!space)return [head,...footer].slice(0,limit);
     if(content.length>space&&gap.length>1){gap=gap.slice(1);content=lines();}
     if(content.length<=space){scroll=0;return [head,...content,...footer].slice(0,limit);}
     const page=Math.max(1,space-1);
@@ -366,6 +371,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   }
   return {answeredEscape,escaped(){escapedAt=Date.now();},get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},
     get question(){return !!current();},
+    get typing(){const row=current();return focused&&!!row&&!!state(row.item).typing[row.question.id];},
     enter,leave,update,input,detail:preview,summary,sent:sentLines,references,
     // The wheel over the popup reads the question on, a row at a time, as ↑↓ and PgUp/PgDn do.
     wheel(delta){if(!focused||!current())return;scroll+=delta;follow=false;changed();}};
