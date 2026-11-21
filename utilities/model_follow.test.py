@@ -265,7 +265,7 @@ class SurveyTests(unittest.TestCase):
                     row(name("light-2"), family="light", version=(2,), cost=0.9)])
                 got = {e["target"]: (e["kind"], e["reason"]) for e in result["entries"]}
                 self.assertEqual(got["profile/deep"], ("proposal", "other family"))
-                self.assertEqual(got["tier/light"], ("proposal", "price x9.0"))
+                self.assertEqual(got["tier/light"], ("proposal", "price x9.00"))
                 self.assertEqual(model_follow.counts(result), (0, 5))
                 text = "\n".join(model_follow.lines([result]))
                 self.assertIn(f"model follow: proposal {adapter} profile/deep {name('deep-1')} -> "

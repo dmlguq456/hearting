@@ -121,6 +121,23 @@ class StateTests(unittest.TestCase):
         self.assertEqual((held["state"], held["why"], held["skip"]), ("held", "held", "gpt-6.2-sol"))
         self.assertEqual(self.state("gpt-9", HELD), ("follow", "changed"))
 
+    def test_a_line_that_carries_more_than_one_record_is_held_by_the_person(self):
+        two = K.render(KEEP) + " " + K.render(FOLLOW)
+        record = K.parse_record(two)
+        self.assertEqual(record["kind"], "keep")
+        self.assertEqual(record["date"], D)  # dated as the last one
+        for model in ("gpt-6.1-sol", "gpt-6.2-sol", "gpt-9"):
+            self.assertEqual(self.state(model, record), ("keep", "kept"))
+        text = f"CFG_TIER_DEEP_MODEL=gpt-6.1-sol {two}\n"
+        self.assertEqual(K.read_marks(text)["CFG_TIER_DEEP_MODEL"]["kind"], "keep")
+        # a bad second one is not a record, so the first stays the line's only record
+        self.assertEqual(K.parse_record(K.render(FOLLOW) + " # auto-follow 2026-13-40: a -> b"), FOLLOW)
+
+    def test_writing_a_record_on_such_a_line_leaves_one(self):
+        two = K.render(KEEP) + " " + K.render(FOLLOW)
+        self.assertEqual(K.with_record(two, KEEP), K.render(KEEP))
+        self.assertEqual(K.with_record(two, None), "")
+
 
 if __name__ == "__main__":
     unittest.main()

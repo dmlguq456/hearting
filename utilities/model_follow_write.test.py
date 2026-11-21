@@ -362,6 +362,67 @@ class HoldTests(Home):
                 self.apply(adapter, self.newer(adapter))
                 self.assertEqual(model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"], name("deep-2"))
 
+    def test_releasing_a_held_cell_does_not_follow_to_a_model_the_record_still_shows_refused(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                name = self.name(adapter)
+                refused = {name("deep-2").lower()}
+                held = K.render(K.held_record(TODAY, name("deep-2"), name("deep-1")))
+                path = self.table(adapter, suffix={"CFG_TIER_DEEP_MODEL": held})
+                model_settings.set_model(adapter, "tier/deep", "follow", runtime=path.parent.parent, source_root=self.src)
+                released, baks = path.read_bytes(), self.baks(adapter)
+                for _ in range(3):  # the person's `follow` removed the record; the refusal is still on record
+                    result = self.apply(adapter, self.newer(adapter), rejected=refused)
+                    self.assertEqual((result["written"], result["reverted"]), ([], []))
+                self.assertEqual((path.read_bytes(), self.baks(adapter)), (released, baks))
+                # once nothing refuses it any more the cell follows, as before
+                self.apply(adapter, self.newer(adapter), rejected=())
+                self.assertEqual(model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"], name("deep-2"))
+
+    def test_a_model_a_person_chose_that_the_record_shows_refused_is_not_followed_to_by_another_cell(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                name = self.name(adapter)
+                refused = {name("deep-2").lower()}
+                path = self.table(adapter)
+                name_deep = f"CFG_TIER_DEEP_MODEL={name('deep-1')}"
+                path.write_text(path.read_text().replace(name_deep, f"CFG_TIER_DEEP_MODEL={name('deep-2')}"))
+                before = path.read_bytes()  # one cell chosen by hand at the refused model, with no record
+                rows = self.newer(adapter)
+                plan = self.survey(adapter, rows, rejected=refused)["plan"]
+                result = self.apply(adapter, rows, rejected=refused)
+                self.assertEqual(([p["target"] for p in plan], result["written"], result["reverted"]), ([], [], []))
+                self.assertEqual((path.read_bytes(), self.baks(adapter)), (before, []))
+
+    def test_a_held_record_on_another_value_does_not_make_the_next_update_follow_to_the_refused_model(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                name = self.name(adapter)
+                refused = {name("deep-2").lower()}
+                held = K.render(K.held_record(TODAY, name("deep-2"), name("deep-1")))
+                path = self.table(adapter, deep="deep-0", suffix={"CFG_TIER_DEEP_MODEL": held})
+                rows = [row(name("deep-0"), version=(0, 5)), *self.newer(adapter)]
+                first = self.apply(adapter, rows, rejected=refused)
+                self.assertEqual(model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"], name("deep-1"))
+                self.assertTrue(first["written"])
+                after_first, baks = path.read_bytes(), self.baks(adapter)
+                for _ in range(2):  # no pass in this update goes on to deep-2 or back
+                    again = self.apply(adapter, rows, rejected=refused)
+                    self.assertEqual((again["written"], again["reverted"]), ([], []))
+                self.assertEqual((path.read_bytes(), self.baks(adapter)), (after_first, baks))
+
+    def test_the_view_says_which_refused_model_a_skipped_cell_would_have_followed_to(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                name = self.name(adapter)
+                self.table(adapter)
+                catalog = SimpleNamespace(state="available", rows=tuple(self.newer(adapter)), client_version=None)
+                (view,) = model_follow.fleet_view([adapter], source_root=self.src, today=TODAY,
+                                                  read_catalog=lambda _h: catalog, probe=lambda _h: (None, None),
+                                                  rejected={name("deep-2").lower()})
+                cell = {c["target"]: c for c in view["cells"]}["tier/deep"]
+                self.assertEqual((cell["held"], cell["next"], view["plan"]), (name("deep-2"), None, []))
+
     def test_a_model_chosen_on_a_kept_cell_stays_kept(self):
         for adapter in HARNESSES:
             with self.subTest(adapter=adapter):
@@ -694,17 +755,7 @@ class RejectionTests(Home):
         M.lift_unavailable("claude", "claude", "model-b", "acct")
         self.assertEqual(M.rejected_models("codex"), {"model-a"})
         self.assertEqual(M.rejected_models("claude"), frozenset())
-        rows = [{"provider": "opencode-go", "model": "m-1", "state": "unavailable"},
-                {"provider": "opencode-go", "model": "*", "state": "unavailable"},
-                {"provider": "opencode-go", "model": "m-2", "state": "usable"}]
-        tools = str(ROOT / "tools")
-        sys.path.insert(0, tools)
-        try:
-            from fleet.collectors import usage_cache
-            with mock.patch.object(usage_cache, "provider_records", return_value=rows):
-                self.assertEqual(M.rejected_models("opencode"), {"opencode-go/m-1"})
-        finally:
-            sys.path.remove(tools)
+        self.assertEqual(M.rejected_models("opencode"), frozenset())  # no usage cache at all
 
     def test_a_close_with_no_record_in_the_table_adds_no_table_work(self):
         # the table is read once (a small file); it is never locked, copied or imported into
@@ -827,6 +878,265 @@ class ViewTests(Home):
                     read_catalog=lambda _h: SimpleNamespace(state="unknown", rows=(), client_version=None))
                 self.assertEqual(view["reason"], "no-catalog")
                 self.assertEqual(view["states"]["kept"], 1)
+                cells = {cell["target"]: cell for cell in view["cells"]}
+                self.assertEqual(sorted(cells), sorted(c["target"] for c in model_follow.cells(
+                    adapter, model_config.parse_config(self.path(adapter)))))
+                deep = cells["tier/deep"]
+                self.assertEqual((deep["model"], deep["effort"], deep["state"], deep["why"], deep["held"], deep["next"]),
+                                 (self.name(adapter)("deep-1"), "xhigh", "keep", "kept", None, None))
+                self.assertEqual(deep["since"], {"date": TODAY, "from": None, "to": None})
+                self.assertEqual(cells["tier/light"]["state"], "follow")
+
+    def test_a_held_cell_is_given_with_its_refusal_when_there_is_no_list(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                name = self.name(adapter)
+                self.table(adapter, suffix={"CFG_TIER_DEEP_MODEL": K.render(K.held_record(TODAY, name("deep-2"), name("deep-1")))})
+                (view,) = model_follow.fleet_view(
+                    [adapter], source_root=self.src, today=TODAY,
+                    read_catalog=lambda _h: SimpleNamespace(state="unknown", rows=(), client_version=None))
+                cell = {c["target"]: c for c in view["cells"]}["tier/deep"]
+                self.assertEqual((cell["state"], cell["held"], cell["next"]), ("held", name("deep-2"), None))
+
+
+class WhoseTableTests(Home):
+    """A pinned config home belongs to one harness: a pass or a close for another harness
+    never writes it."""
+
+    def test_a_pass_and_a_close_for_another_harness_leave_a_pinned_foreign_table_alone(self):
+        claude, codex = self.table("claude"), self.table("codex")
+        before = (claude.read_bytes(), claude.stat().st_mtime_ns)
+        with mock.patch.dict(os.environ, {"HEARTING_MODEL_CONFIG_HOME": str(claude.parent.parent)}):
+            self.apply("codex", self.newer("codex"))
+            self.assertEqual(model_config.parse_config(codex)["CFG_TIER_DEEP_MODEL"], "deep-2")  # its own table
+            self.assertTrue(model_follow.revert_rejected("codex", "deep-2", source_root=self.src))  # codex's own
+            self.apply("codex", self.newer("codex"), rejected={"deep-2"})
+        self.assertEqual((claude.read_bytes(), claude.stat().st_mtime_ns), before)
+        self.assertEqual(self.baks("claude"), [])
+
+
+class ReadOnlyTableTests(Home):
+    """A table the person made read-only is theirs: nothing writes it on its own."""
+
+    def read_only(self, adapter, **kwargs):
+        path = self.table(adapter, **kwargs)
+        path.chmod(0o444)
+        self.addCleanup(path.chmod, 0o644)
+        return path
+
+    def test_a_read_only_table_with_something_to_follow_is_left_as_it_is_and_says_so_in_one_line(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                path = self.read_only(adapter)
+                before = (path.read_bytes(), path.stat().st_mode, path.stat().st_mtime_ns)
+                result = self.apply(adapter, self.newer(adapter))
+                self.assertEqual((result["written"], result["reverted"], result["read_only"]), ([], [], True))
+                self.assertEqual((path.read_bytes(), path.stat().st_mode, path.stat().st_mtime_ns), before)
+                self.assertEqual(self.baks(adapter), [])
+                self.assertEqual([t for t in model_follow.lines([result]) if "table" in t],
+                                 [f"model follow: {adapter} table is read-only · not updated"])
+                path.chmod(0o644)  # the person lets it be written: it follows at once
+                self.apply(adapter, self.newer(adapter))
+                self.assertEqual(model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"], self.name(adapter)("deep-2"))
+
+    def test_a_read_only_table_with_nothing_to_follow_says_nothing(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                self.read_only(adapter)
+                result = self.apply(adapter, [])
+                self.assertEqual((result["read_only"], model_follow.lines([result])), (False, []))
+
+    def test_the_plan_of_a_read_only_table_is_empty_so_plan_and_write_agree(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                self.read_only(adapter)
+                found = self.survey(adapter, self.newer(adapter))
+                self.assertEqual((found["plan"], found["read_only"]), ([], True))
+
+    def test_a_refusal_at_the_close_does_not_write_a_read_only_table(self):
+        for adapter in ("claude", "codex"):
+            with self.subTest(adapter=adapter):
+                path = self.table(adapter)
+                self.apply(adapter, self.newer(adapter))
+                path.chmod(0o444)
+                self.addCleanup(path.chmod, 0o644)
+                before = (path.read_bytes(), path.stat().st_mtime_ns)
+                self.assertFalse(model_follow.revert_rejected(adapter, "deep-2", source_root=self.src))
+                self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+                result = self.apply(adapter, self.newer(adapter), rejected={"deep-2"})  # the next update says so
+                self.assertEqual((result["read_only"], result["reverted"]), (True, []))
+
+    def test_the_person_setting_a_model_by_hand_still_writes_a_read_only_table(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                path = self.read_only(adapter)
+                done = model_settings.set_model(adapter, "tier/deep", self.name(adapter)("deep-3") + "@high",
+                                                runtime=path.parent.parent, source_root=self.src)
+                self.assertEqual(done["status"], "changed")
+                self.assertEqual(model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"], self.name(adapter)("deep-3"))
+
+
+class GoingBackTests(Home):
+    """A cell goes back with only the lines its follow moved."""
+
+    def test_a_line_the_person_set_by_hand_is_not_taken_back_with_the_cell(self):
+        for adapter in ("claude", "codex"):
+            with self.subTest(adapter=adapter):
+                path = self.table(adapter)
+                text = path.read_text()
+                # the person set tier/deep and its cascade to deep-2 by hand: no record on either line
+                text = text.replace("CFG_TIER_DEEP_MODEL=deep-1", "CFG_TIER_DEEP_MODEL=deep-2")
+                text = text.replace('CFG_TIER_DEEP_FAILOVER_CASCADE="deep-1:xhigh', 'CFG_TIER_DEEP_FAILOVER_CASCADE="deep-2:xhigh')
+                path.write_text(text)
+                rows = [row("deep-1"), row("deep-2", version=(2,)), row("light-1", family="light"), row("top-1", family="top")]
+                self.apply(adapter, rows)  # profile/deep follows deep-1 -> deep-2
+                self.assertEqual(model_config.parse_config(path)["CFG_MODEL_PROFILE_DEEP"], "model/deep-2:high")
+                self.assertTrue(M.note_row_closed(RejectionTests.refused(self, adapter, "deep-2")))
+                values = model_config.parse_config(path)
+                self.assertEqual(values["CFG_MODEL_PROFILE_DEEP"], "model/deep-1:high")
+                self.assertEqual(values["CFG_TIER_DEEP_MODEL"], "deep-2")
+                self.assertEqual(values["CFG_TIER_DEEP_FAILOVER_CASCADE"], "deep-2:xhigh light-1:medium")
+
+    def test_a_name_the_person_put_in_the_main_session_only_list_stays_when_the_cell_goes_back(self):
+        for adapter in ("claude", "codex"):
+            with self.subTest(adapter=adapter):
+                path = self.table(adapter)
+                path.write_text(path.read_text().replace('CFG_MAIN_SESSION_ONLY_MODELS="top-1"',
+                                                         'CFG_MAIN_SESSION_ONLY_MODELS="top-1 top-2"'))
+                rows = [row("top-1", family="top"), row("top-2", family="top", version=(2,)),
+                        row("deep-1"), row("light-1", family="light")]
+                self.apply(adapter, rows)
+                self.assertEqual(model_config.parse_config(path)["CFG_TIER_TOP_MODEL"], "top-2")
+                M.note_row_closed(RejectionTests.refused(self, adapter, "top-2"))
+                values = model_config.parse_config(path)
+                self.assertEqual((values["CFG_TIER_TOP_MODEL"], values["CFG_MAIN_SESSION_ONLY_MODELS"]),
+                                 ("top-1", "top-1 top-2"))
+
+    def test_a_going_back_says_which_items_of_a_shared_line_moved(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                path = self.table(adapter)
+                name = self.name(adapter)
+                self.apply(adapter, self.newer(adapter))
+                self.apply(adapter, self.newer(adapter), rejected={name("deep-2").lower()})
+                said = model_follow.lines([self.apply(adapter, self.newer(adapter), rejected={name("deep-2").lower()})])
+                self.assertEqual(said, [])  # the same line is not said again
+                if adapter == "opencode":
+                    return
+                path = self.table(adapter)
+                self.apply(adapter, self.newer(adapter))
+                result = self.apply(adapter, self.newer(adapter), rejected={name("deep-2").lower()})
+                self.assertIn(f"model follow: {adapter} cascade {name('deep-2')}:xhigh -> {name('deep-1')}:xhigh",
+                              model_follow.lines([result]))
+
+
+class MarkEdgeTests(Home):
+    def test_follow_on_a_line_with_no_record_writes_nothing(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                path = self.table(adapter, suffix={"CFG_TIER_DEEP_MODEL": "#   my  note   "})
+                before = path.read_bytes()
+                done = model_settings.set_model(adapter, "tier/deep", "follow", runtime=path.parent.parent,
+                                                source_root=self.src)
+                self.assertEqual((done["status"], done["backup"], done["changed_keys"]), ("unchanged", None, []))
+                self.assertEqual((path.read_bytes(), self.baks(adapter)), (before, []))
+
+    def test_a_line_with_more_than_one_record_is_held_by_the_person_until_they_follow(self):
+        for adapter in HARNESSES:
+            with self.subTest(adapter=adapter):
+                name = self.name(adapter)
+                two = K.render(K.keep_record("2026-11-20")) + " " + record(adapter, "deep-1", "deep-2")
+                path = self.table(adapter, suffix={"CFG_TIER_DEEP_MODEL": two})
+                self.assertEqual(K.cell_state(name("deep-1"), K.read_marks(path.read_text())["CFG_TIER_DEEP_MODEL"])["state"], "keep")
+                result = self.apply(adapter, self.newer(adapter))
+                self.assertEqual(model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"], name("deep-1"))
+                self.assertNotIn("tier/deep", [e["target"] for e in result["written"]])
+                model_settings.set_model(adapter, "tier/deep", "follow", runtime=path.parent.parent, source_root=self.src)
+                self.apply(adapter, self.newer(adapter))
+                self.assertEqual(model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"], name("deep-2"))
+
+    def test_a_proposal_gives_the_price_to_two_decimals(self):
+        found = model_follow.successor(
+            [row("a-1", cost=10.0), row("a-2", version=(2,), cost=4.5)], "a-1")
+        self.assertEqual((found["kind"], found["reason"]), ("proposal", "price x0.45"))
+
+
+class OpenCodeRejectionTests(Home):
+    """OpenCode's refusals are the model-level lines of its usage cache for the account in use."""
+    SCOPE, GENERATION = "acct-1", "gen-1"
+
+    def setUp(self):
+        super().setUp()
+        for key, value in (("OPENCODE_RUNTIME_VERSION", "1.19.0"),
+                           ("FLEET_USAGE_STATE_DIR", str(self.root / "usage"))):
+            patcher = mock.patch.dict(os.environ, {key: value})
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        tools = str(ROOT / "tools")
+        sys.path.insert(0, tools)
+        self.addCleanup(sys.path.remove, tools)
+        from fleet.collectors import usage_cache
+        import opencode_runtime
+        self.cache, self.runtime = usage_cache, opencode_runtime
+        account = opencode_runtime.AccountScopeObservation("available", self.SCOPE, None, self.GENERATION)
+        patcher = mock.patch.object(opencode_runtime, "provider_account_observation", return_value=account)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def put(self, provider, model, state, reason=None, *, scope=None, generation=None):
+        self.assertTrue(self.cache.record_provider(
+            "opencode", provider, model, scope or self.SCOPE, state, reason=reason, source="opencode-run",
+            credential_generation=generation or self.GENERATION))
+
+    def test_only_a_model_level_reason_counts_as_a_refusal(self):
+        for reason, counted in (("model-not-found", True), ("model-unavailable", True),
+                                ("credential-expired", False), ("authentication-rejected", False),
+                                ("subscription-missing", False), ("something-else", False), (None, False)):
+            with self.subTest(reason=reason):
+                self.put("opencode-go", "m-1", "unavailable", reason)
+                self.assertEqual(M.rejected_models("opencode"),
+                                 {"opencode-go/m-1"} if counted else frozenset())
+                self.put("opencode-go", "m-1", "usable")
+
+    def test_a_refusal_is_seen_however_many_other_lines_follow_it_by_name(self):
+        for index in range(40):
+            self.put("zz-provider", f"m-{index:02d}", "usable")
+        self.put("aa-provider", "refused-model", "unavailable", "model-not-found")
+        self.assertEqual(M.rejected_models("opencode"), {"aa-provider/refused-model"})
+
+    def test_a_line_of_another_account_or_another_credential_generation_is_not_known_to_refuse(self):
+        self.put("opencode-go", "m-1", "unavailable", "model-not-found", scope="acct-2")
+        self.put("opencode-go", "m-2", "unavailable", "model-not-found", generation="gen-old")
+        self.assertEqual(M.rejected_models("opencode"), frozenset())
+        self.put("opencode-go", "m-3", "unavailable", "model-not-found")
+        self.assertEqual(M.rejected_models("opencode"), {"opencode-go/m-3"})
+
+    def test_an_account_wide_line_is_not_a_model_refusal(self):
+        self.put("opencode-go", "*", "unavailable", "model-not-found")
+        self.assertEqual(M.rejected_models("opencode"), frozenset())
+
+    def test_no_cache_and_a_broken_cache_give_nothing(self):
+        self.assertEqual(M.rejected_models("opencode"), frozenset())
+        path = Path(self.cache._path("opencode"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for broken in ("{", "[]", '{"schema_version": 99}', '{"schema_version": 1, "harness": "opencode", "providers": []}'):
+            path.write_text(broken)
+            self.assertEqual(M.rejected_models("opencode"), frozenset())
+
+    def test_an_expired_key_does_not_send_a_followed_cell_back_and_a_refused_model_does(self):
+        provider = "prov"
+        name = lambda model: f"{provider}/{model}"  # noqa: E731
+        path = self.table("opencode", deep="deep-2", suffix={
+            "CFG_TIER_DEEP_MODEL": K.render(K.follow_record(TODAY, name("deep-1"), name("deep-2")))})
+        rows = [row(name("deep-1")), row(name("deep-2"), version=(2,))]
+        self.put(provider, "deep-2", "unavailable", "credential-expired")
+        before = path.read_bytes()
+        result = self.apply("opencode", rows, rejected=None)
+        self.assertEqual((result["reverted"], path.read_bytes()), ([], before))
+        self.put(provider, "deep-2", "unavailable", "model-not-found")
+        result = self.apply("opencode", rows, rejected=None)
+        self.assertTrue(result["reverted"])
+        self.assertEqual(K.read_marks(path.read_text())["CFG_TIER_DEEP_MODEL"]["kind"], "held")
 
 
 if __name__ == "__main__":

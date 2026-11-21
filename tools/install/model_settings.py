@@ -599,6 +599,8 @@ def _set_mark(adapter: str, target_name: str, action: str, *, runtime, environ, 
         value = values[key]
         model = value[len("model/"):].split(":")[0] if value.startswith("model/") else value
         state.update(target=target, key=key, model=model)
+        if action == "follow" and current is None:
+            return {"changed": {}, "marks": {}}  # no record to take off: the line stays as it is
         return {"changed": {}, "marks": {key: record}}
 
     edited = edit_file(adapter, build, runtime=runtime, environ=environ, source_root=source_root,
