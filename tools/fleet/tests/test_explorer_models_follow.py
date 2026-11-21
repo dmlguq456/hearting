@@ -815,8 +815,9 @@ class NoProcessInTheInput(unittest.TestCase):
     last background read's."""
 
     def setUp(self):
-        focus._CLI_SEEN.clear()
-        self.addCleanup(focus._CLI_SEEN.clear)
+        seen = getattr(focus, "_CLI_SEEN", {})                 # (what the last background read was told)
+        seen.clear()
+        self.addCleanup(seen.clear)
 
     def test_the_input_thread_asks_the_cli_nothing_and_the_note_stays(self):
         from tools.fleet.explorer.runtime import ExplorerRuntime
