@@ -979,6 +979,20 @@ class BootstrapTest(ProducerTestBase):
         names = sorted(p.name for p in self.root.iterdir() if p.name not in artifact_entrance.ENTRANCE_NAMES)
         self.assertEqual(names, [".runtime", "campaigns"])
 
+    def test_root_with_only_a_backlog_still_bootstraps_the_first_begin(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n갱신 2026-11-21 23:10\n\n## Unassigned\n- later\n", encoding="utf-8")
+        self.assertEqual(P.classify_root(self.root)["state"], "inactive-empty")
+        _, _, result = self.begin()
+        self.assertEqual((result["status"], result.get("layout")), ("begun", "cycle"))
+        self.assertEqual((P.read_cutover(self.root) or {}).get("state"), "active")
+        self.assertEqual((self.root / "backlog.md").read_text(encoding="utf-8").splitlines()[0], "# Backlog")
+
+    def test_root_with_only_a_backlog_bootstraps_when_a_cycle_is_required(self):
+        (self.root / "backlog.md").write_text("# Backlog\n", encoding="utf-8")
+        _, _, result = self.begin(require_cycle=True)
+        self.assertEqual(result["status"], "begun")
+
     def test_bootstrapped_root_denies_legacy_top_level_write(self):
         self.begin()
         verdict = P.check_write(self.root, self.root / "plans" / "x.md")
@@ -1051,6 +1065,24 @@ class ClassifyRootTest(ProducerTestBase):
         for name in P.ENTRANCE_NAMES:
             (self.root / name).write_text("x\n", encoding="utf-8")
         self.assertEqual(P.classify_root(self.root)["state"], "inactive-empty")
+
+    def test_root_document_only_root_is_inactive_empty(self):
+        for name in P.ROOT_DOCUMENT_NAMES:
+            (self.root / name).write_text("# Backlog\n", encoding="utf-8")
+        klass = P.classify_root(self.root, collect_legacy_top_level=True)
+        self.assertEqual(klass["state"], "inactive-empty")
+        self.assertEqual(klass["legacy_top_level"], [])
+
+    def test_a_root_document_is_not_an_entrance_file(self):
+        self.assertEqual(set(P.ROOT_DOCUMENT_NAMES) & set(P.ENTRANCE_NAMES), set())
+
+    def test_root_document_beside_real_legacy_content_does_not_hide_it(self):
+        (self.root / "backlog.md").write_text("# Backlog\n", encoding="utf-8")
+        (self.root / "plans").mkdir()
+        (self.root / "plans" / "a.md").write_text("x", encoding="utf-8")
+        klass = P.classify_root(self.root, collect_legacy_top_level=True)
+        self.assertEqual(klass["state"], "inactive-with-legacy")
+        self.assertEqual(klass["legacy_top_level"], ["plans"])
 
     def test_symlink_counts_as_content_and_is_not_followed(self):
         outside = Path(self._tmp.name) / "outside-target"
@@ -1285,6 +1317,16 @@ class CheckWriteTest(ProducerTestBase):
         self.assertEqual(P.check_write(self.root, self.root / "_scratch" / "x")["verdict"], "allow")
         outside = P.check_write(self.root, Path(self._tmp.name) / "elsewhere.md")
         self.assertEqual((outside["verdict"], outside["reason"]), ("allow", "outside-artifact-root"))
+
+    def test_a_root_document_write_is_allowed_in_both_states_and_only_at_the_root(self):
+        target = self.root / "backlog.md"
+        before = P.check_write(self.root, target)
+        self.assertEqual((before["verdict"], before["reason"]), ("allow", "root-document"))
+        self.activate()
+        after = P.check_write(self.root, target)
+        self.assertEqual((after["verdict"], after["reason"]), ("allow", "root-document"))
+        nested = P.check_write(self.root, self.root / "plans" / "backlog.md")
+        self.assertEqual((nested["verdict"], nested["reason"]), ("deny", "legacy-top-level-write-denied"))
 
     def test_shared_is_immutable_in_both_states(self):
         target = self.root / "shared" / "spec" / ("ref_" + "1" * 32) / "revisions" / ("rrev_" + "2" * 32) / "prd.md"
