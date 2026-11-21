@@ -174,9 +174,10 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     if(focused){
       const ready=complete(row,formValues(row));
       const instruction=active(row)?(choosing(row)?text('choose','↑↓ choose · Enter send · t text'):ready?text('send','Enter send'):text('text','type answer')):text(status,status);
-      const navigate=text(writable(row)?'navigate_write':'navigate','Tab next · Esc/Ctrl+] back');
+      const editing=active(row)&&writable(row);
+      const navigate=text(editing?'navigate_write':'navigate','Tab next · Esc/Ctrl+] back');
       const writeHint=local.typing[id]?(choices(row).length?text('writing_choices','Enter send · ↑ choices'):text('send','Enter send')):text('choose_write','↑↓ choose · type to write · Enter send');
-      tail.push(...keys([...(active(row)?[writable(row)?writeHint:instruction]:[]),navigate],writable(row)?1:Math.max(1,Math.max(2,budget)-2)));
+      tail.push(...keys([...(active(row)?[writable(row)?writeHint:instruction]:[]),navigate],editing?1:Math.max(1,Math.max(2,budget)-2)));
     }else if(status==='open')tail.push([span('Ctrl+] · '+text('open','answer needed'))]);
     const limit=Math.max(2,budget),tailLimit=Math.min(tail.length,Math.max(1,limit-2));
     let footer=tail.slice(-tailLimit);
