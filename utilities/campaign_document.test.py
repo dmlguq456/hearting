@@ -910,14 +910,17 @@ class RunningAttemptTest(Fixture):
         self.addCleanup(patch.stop)
         self.sleeper = None
 
-    def row(self, status, attempt, rid, *, alive, at=NOW - 7 * HOUR, log=None, extra=""):
-        """A registry row. `alive`: the attempt's process is this test's own; otherwise a pid no one has."""
+    def row(self, status, attempt, rid, *, alive, at=NOW - 7 * HOUR, log=None, extra="", lineage="",
+            worker_type="owner"):
+        """A registry row. `alive`: the attempt's process is this test's own; otherwise a pid no one has.
+        `lineage`: fields the real writer puts before the row's own `attempt_id` (`parent_attempt_id=…,`)."""
         if alive:
             start = Path(f"/proc/{os.getpid()}/stat").read_text().rsplit(")", 1)[1].split()[19]
             process = f"pid={os.getpid()},pid_start={start}"
         else:
             process = "pid=4000000,pid_start=1,pgid=4000000,pgid_host=4000000"
-        meta = f"attempt_id={attempt},worker_type=owner,dispatch_depth=1,route_id={rid},{process}{extra}"
+        meta = (f"{lineage}attempt_id={attempt},worker_type={worker_type},dispatch_depth=1,route_id={rid},"
+                f"{process}{extra}")
         if log is not None:
             meta += f",log_file={log}"
         with self.jobs.open("a") as handle:
@@ -968,6 +971,38 @@ class RunningAttemptTest(Fixture):
         bullets, _ = self.doing()
         self.assertEqual(bullets, ["- work-1725 · #1725 · 기록 2", "- other-1726 · #1726 · 기록 1"])   # newest movement first
         self.assertNotEqual(old, review)
+
+    def test_a_finished_stage_worker_written_after_its_owner_leaves_the_owner_doing(self):
+        busy, _ = self.route("owner-1730", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-owner", busy, alive=True)
+        self.row("done", "att-stage", busy, alive=False, at=NOW - 3 * HOUR, worker_type="worker",
+                 lineage="parent_attempt_id=att-owner,")
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- owner-1730 · #1730 · 기록 1"])
+
+    def test_a_finished_unit_call_written_after_a_running_worker_leaves_the_worker_doing(self):
+        busy, _ = self.route("worker-1731", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-worker", busy, alive=True, worker_type="worker")
+        self.row("done", "att-unit", busy, alive=False, at=NOW - 3 * HOUR, worker_type="worker",
+                 lineage="caller_attempt_id=att-worker,")
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- worker-1731 · #1731 · 기록 1"])
+
+    def test_a_live_child_with_a_finished_sibling_of_the_same_parent_is_doing(self):
+        busy, _ = self.route("child-1732", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-child", busy, alive=True, worker_type="worker", lineage="parent_attempt_id=att-p,")
+        self.row("done", "att-sibling", busy, alive=False, at=NOW - 3 * HOUR, worker_type="worker",
+                 lineage="parent_attempt_id=att-p,")
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- child-1732 · #1732 · 기록 1"])
+
+    def test_a_last_row_still_being_written_is_not_read(self):
+        busy, _ = self.route("tail-1733", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-tail", busy, alive=True)
+        with self.jobs.open("a") as handle:   # half of a later row for the same attempt, no newline yet
+            handle.write(f"{stamp(NOW - HOUR)}\tdone\t/w\t/w\tslug\tattempt_id=att-tail,worker_ty")
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- tail-1733 · #1733 · 기록 1"])
 
     def test_the_registry_is_read_once_per_pass_for_every_campaign_and_nothing_is_written_to_it(self):
         second_id = "camp_" + "2" * 32

@@ -255,6 +255,9 @@ def _attempts(registries: list[Path]) -> tuple[set[str], dict]:
     return held, owners
 
 
+_ATTEMPT_FIELD = re.compile(rb"(?:^|,)attempt_id=([^,]*)")
+
+
 def live_routes(registries: list[Path], route_ids) -> dict[str, float]:
     """route id -> when its newest live attempt last moved, for the given open routes only.
 
@@ -275,13 +278,17 @@ def live_routes(registries: list[Path], route_ids) -> dict[str, float]:
         except OSError:
             continue
         latest: dict[bytes, bytes] = {}
-        for ordinal, line in enumerate(data.split(b"\n")):
-            head = line.split(b"\t", 2)
-            if len(head) < 3:
+        lines = data.split(b"\n")
+        if not data.endswith(b"\n"):
+            lines = lines[:-1]   # a last row still being written is read on the next pass
+        for ordinal, line in enumerate(lines):
+            fields = line.split(b"\t", 5)
+            if len(fields) != 6:
                 continue
-            at = line.find(b"attempt_id=")
-            end = line.find(b",", at) if at >= 0 else -1
-            key = line[at + 11:end if end >= 0 else len(line)] if at >= 0 else b"#%d" % ordinal
+            # The row's own id is the `attempt_id` field of its metadata; lineage fields such as
+            # `parent_attempt_id=` and `caller_attempt_id=` come before it and are not the key.
+            match = _ATTEMPT_FIELD.search(fields[5])
+            key = match.group(1) if match else b"#%d" % ordinal
             latest[key] = line   # later rows replace earlier ones; a done row retires an open one
         for line in latest.values():
             parts = line.decode("utf-8", "replace").split("\t", 5)
