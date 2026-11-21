@@ -55,6 +55,19 @@ def _cell(item):
             "followable": followable if isinstance(followable, bool) else None}
 
 
+def _shown(cell):
+    """Whether the screen draws anything about this cell's following.
+
+    A cell followable is drawn; one that is not is not. A cell the answer does not know (no list to
+    tell: ``followable`` None, or no key) is drawn only when it has something to show: a record of
+    the follow, a next update, the user's Keep or a refused model. Else it looks as it did before."""
+    if cell["followable"] is True:
+        return True
+    if cell["followable"] is False:
+        return False
+    return bool(cell["since"] or cell["next"] or cell["state"] == "keep" or cell["held"])
+
+
 def _note(item):
     if not isinstance(item, Mapping) or item.get("harness") not in HARNESSES:
         return None
@@ -78,7 +91,8 @@ def normalize(answer):
     answer, or None.
 
     A cell the answer says no update can follow (``followable`` false: a Claude alias, a model its
-    list does not know) is left out: nothing about following is drawn for it. A key the answer
+    list does not know) is left out: nothing about following is drawn for it. So is a cell the
+    answer cannot tell (``followable`` null, no list) that has nothing to show (see ``_shown``). A key the answer
     lacks, or holds a value this does not know, leaves out only what it would have told."""
     if not _seq(answer):
         return None
@@ -89,7 +103,7 @@ def normalize(answer):
             return None
         harness = item["harness"]
         found = [cell for cell in map(_cell, item["cells"]) if cell is not None]
-        cells[harness] = [cell for cell in found if cell["followable"] is not False]
+        cells[harness] = [cell for cell in found if _shown(cell)]
         if item.get("read_only") is True:
             read_only.append(harness)
         note = _note(item.get("cli"))
@@ -280,15 +294,20 @@ class Follow:
             keys += [key for key in ((row["cell"]["since"] or {}).get("lines") or ()) if key not in keys]
         return keys
 
-    def table_note(self, rows):
+    def table_note(self, rows, short=False):
         """`` · table is read-only · not updated`` when a row's table is read-only, else ``""``.
 
-        The note names the harnesses when only some of the rows are on such a table."""
+        The note names the harnesses when only some of the rows are on such a table. ``short`` gives
+        the least that still says it: `` · read-only`` (`` · <harness> read-only``)."""
         held = [harness for harness in dict.fromkeys(row["harness"] for row in rows) if harness in self.read_only]
         if not held:
             return ""
-        everyone = len(held) == len({row["harness"] for row in rows})
-        return f" · {'' if everyone else ' '.join(held) + ' '}table is read-only · not updated"
+        names = "" if self.every_read_only(rows) else " ".join(held) + " "
+        return f" · {names}read-only" if short else f" · {names}table is read-only · not updated"
+
+    def every_read_only(self, rows):
+        """True when every row's harness has a read-only table."""
+        return all(row["harness"] in self.read_only for row in rows)
 
     def cli_lines(self):
         """The CLI-too-old notes: the version and what to do come first, the reason last (the part a

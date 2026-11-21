@@ -97,6 +97,7 @@ def _summary_plan(view, profiles, shown, values):
         for name, rows in view.groups(profiles):
             opened = values.get(_OPEN + name) == "open"
             one = rows[0] if len(rows) == 1 else None
+            fit = None
             if name == "followed":
                 date = max(row["cell"]["since"]["date"] for row in rows)[5:]
                 moved = len(view.moved_lines(rows))
@@ -108,7 +109,12 @@ def _summary_plan(view, profiles, shown, values):
                 text = "next " + (f"{one['harness']} {one['target']}" if one else
                                   _plural(len(rows), "cell") + (f" + {_plural(linked, 'linked line')}"
                                                                 if linked else ""))
-                text += " · on the next update or refresh" + view.table_note(rows)
+                note, short = view.table_note(rows), view.table_note(rows, short=True)
+                if not note:                       # no read-only table: the line promises the next update
+                    text += " · on the next update or refresh"
+                else:                              # the notice first: a narrow row cuts the promise, never the notice
+                    fit = (text + note, [(text, note, 12), (text, short, 12), short.removeprefix(" · ")])
+                    text += note if view.every_read_only(rows) else note + " · on the next update or refresh"
             elif name == "held":
                 text = "held " + (f"{one['harness']} {one['target']} · back on {name_of(one['cell']['model'])}"
                                   if one else _plural(len(rows), "cell"))
@@ -117,7 +123,7 @@ def _summary_plan(view, profiles, shown, values):
                 reason = f" ({following['reason']})" if one and following["reason"] else ""
                 text = "proposal " + (f"{one['harness']} {one['target']} · {name_of(following['model'])}{reason}"
                                       if one else _plural(len(rows), "cell"))
-            out.append({"kind": "group", "name": name, "text": text, "opened": opened})
+            out.append({"kind": "group", "name": name, "text": text, "opened": opened, "fit": fit})
             if opened:
                 out += [{"kind": "item", "text": row["text"], "profile": row["profile"],
                          "harness": row["harness"]} for row in rows]
@@ -142,7 +148,11 @@ def _draw_summary(grid, plan, legend, x, y, right):
         if kind == "group":
             glyph = follow_view.GLYPH[item["name"]]
             grid.put(x, y, glyph, _GROUP_KEY[item["name"]], limit=right + 1)
-            end = grid.put(x + 2, y, clip_cells(item["text"], room - 4), "soft", limit=right + 1)
+            text = item["text"]
+            if item["fit"] and cell_width(text) > room - 4:       # a read-only notice: cut the promise, then the head
+                must, fallback = item["fit"]
+                text = clip_cells(text, room - 4) if cell_width(must) <= room - 4 else _fit(fallback, room - 4)
+            end = grid.put(x + 2, y, clip_cells(text, room - 4), "soft", limit=right + 1)
             grid.put(end + 1, y, "▾" if item["opened"] else "▸", "soft", limit=right + 1)
             grid.add_hit(y, x, right + 1, ("ui", "fopen:" + item["name"], "closed" if item["opened"] else "open"))
         elif kind == "item":
@@ -164,11 +174,20 @@ def _draw_summary(grid, plan, legend, x, y, right):
 
 
 def _fit(candidates, room):
-    """The first candidate that fits in ``room`` cells, else the last one cut with an ellipsis."""
+    """The first candidate that fits in ``room`` cells, else the last one cut with an ellipsis.
+
+    A candidate may be ``(name, tail[, keep])``: when it does not fit whole, the ``name`` is cut and
+    the ``tail`` stays, as long as the name keeps ``keep`` (8) cells; else the next candidate is tried."""
     for text in candidates:
-        if cell_width(text) <= room:
+        if isinstance(text, tuple):
+            name, tail, keep = (*text, 8)[:3] if len(text) == 2 else text
+            left = room - cell_width(tail)
+            if left >= min(keep, cell_width(name)):
+                return clip_cells(name, left) + tail
+        elif cell_width(text) <= room:
             return text
-    return clip_cells(candidates[-1], max(1, room))
+    last = candidates[-1]
+    return clip_cells(last if isinstance(last, str) else "".join(last), max(1, room))
 
 
 def _box_plan(view, harness, profile, shown, values, table_effort=None):
@@ -200,17 +219,16 @@ def _box_plan(view, harness, profile, shown, values, table_effort=None):
                                    f"{date[5:]} · {refused} rejected · back on {name_of(cell['model'])}"], None))
         if following and cell["state"] != "keep":
             idle = view.table_note([{"harness": harness}])
+            ro = ((name_of(following["model"]), idle), (name_of(following["model"]), " · read-only"), "read-only")
             if following["branch"] == "will-follow":
-                lines.append(("next", [f"{name_of(following['model'])} · on the next update or refresh{idle}",
-                                       f"{name_of(following['model'])}{idle}"] if idle else
+                lines.append(("next", list(ro) if idle else
                                       [f"{name_of(following['model'])} · on the next update or refresh"], None))
             elif following["branch"] == "proposal":
                 reason = f" · {following['reason']}" if following["reason"] else ""
                 lines.append(("proposal", [f"{name_of(following['model'])}{reason} · choose it yourself",
                                            f"{name_of(following['model'])}{reason}"], None))
             elif following["branch"] == "revert":
-                lines.append(("next", [f"{name_of(following['model'])} · back on the next update or refresh{idle}",
-                                       f"{name_of(following['model'])}{idle}"] if idle else
+                lines.append(("next", list(ro) if idle else
                                       [f"{name_of(following['model'])} · back on the next update or refresh"], None))
         word = values.get("ui:fol")
         undo = follow_view.undo_request(cell)

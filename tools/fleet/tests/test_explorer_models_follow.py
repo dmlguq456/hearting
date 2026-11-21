@@ -952,10 +952,10 @@ class TheKeysTheCoreAdded(unittest.TestCase):
         self.assertEqual(models["follow"]["cells"]["claude"], [])
         self.assertEqual(picture.section_text(models, 140, "balanced/claude", TODAY)[9:],
                          picture.section_text(_models("followed"), 140, "balanced/claude", TODAY)[9:])
-        # a cell the answer cannot tell about (no list: null) is drawn like any other, with no next
+        # a cell the answer cannot tell about (no list: null) with nothing to show is not drawn either
         answer = [samples.item("codex", [dict(samples.cell("profile/deep", "gpt-6-astra", "high"), followable=None,
                                               reason="no-catalog")])]
-        self.assertTrue(any("follow   [ Follow ]" in row for row in _pic(answer=answer)))
+        self.assertEqual(_pic(answer=answer), _pic(answer=[samples.item("codex")]))
 
     def test_an_answer_without_the_new_keys_or_with_values_it_does_not_know_still_draws(self):
         answer = copy.deepcopy(ALL["followed"])
@@ -977,15 +977,97 @@ class TheKeysTheCoreAdded(unittest.TestCase):
         answer = copy.deepcopy(ALL["next"])
         answer[2]["read_only"] = True
         shown = _pic(answer=answer, targets=None)
-        self.assertIn("│ > next opencode tier/deep · on the next update or refresh · table is read-only · not updated ▸", shown)
+        self.assertIn("│ > next opencode tier/deep · table is read-only · not updated ▸", shown)
         box = _box(_pic(answer=answer, select="deep/opencode", targets={"opencode": {"deep": "tier/deep"}}))
         self.assertTrue(any("table is read-only · not updated" in row for row in box))
-        many = copy.deepcopy(ALL["mixed"])           # codex has next cells; one more on the opencode table, read-only
+        many = self._mixed()                          # codex has next cells; one more on the opencode table, read-only
+        text = "\n".join(_pic(answer=many, width=200))
+        self.assertIn("opencode table is read-only · not updated · on the next update or refresh", text)
+
+    @staticmethod
+    def _mixed():
+        many = copy.deepcopy(ALL["mixed"])
         many[2]["cells"].append(samples.cell("tier/light", "opencode-go/muse-spark", "max",
                                              following=samples.upcoming("opencode-go/muse-spark-2", "max")))
         many[2]["read_only"] = True
-        text = "\n".join(_pic(answer=many, width=200))
-        self.assertIn("on the next update or refresh · opencode table is read-only · not updated", text)
+        return many
+
+    def test_at_every_width_a_read_only_row_says_so_and_never_promises(self):
+        only = copy.deepcopy(ALL["next"])
+        only[2]["read_only"] = True
+        every = copy.deepcopy(ALL["next"])            # every table with a next cell is read-only
+        every[1]["cells"][0]["next"] = samples.upcoming("gpt-6.2-astra", "xhigh")
+        every[1]["read_only"] = every[2]["read_only"] = True
+        for width in (80, 100, 140, 200):
+            for name, answer in (("opencode only", only), ("both", every)):
+                with self.subTest(width=width, answer=name):
+                    summary = [row for row in _pic(answer=answer, width=width, select="", targets=None)
+                               if row.startswith("│ > next")]
+                    self.assertEqual(len(summary), 1)
+                    self.assertIn("read-only", summary[0])
+                    self.assertNotIn("on the next update", summary[0])
+            with self.subTest(width=width, box="next"):
+                box = _box(_pic(answer=only, width=width, select="deep/opencode",
+                                targets={"opencode": {"deep": "tier/deep"}}))
+                line = next(row for row in box if row.startswith("│  │  next"))
+                self.assertIn("read-only", line)
+                self.assertNotIn("on the next update", line)
+
+    def test_a_mixed_row_puts_the_notice_before_the_promise_at_every_width(self):
+        many = self._mixed()
+        for width in (80, 100, 140, 200):
+            with self.subTest(width=width):
+                summary = next(row for row in _pic(answer=many, width=width, select="", targets=None)
+                               if row.startswith("│ > next"))
+                self.assertIn("read-only", summary)
+                if "on the next update" in summary:
+                    self.assertLess(summary.index("read-only"), summary.index("on the next update"))
+        # a narrow row cuts the promise, then the head; the notice stays whole when it fits at all
+        row = next(row for row in _pic(answer=many, width=140, select="", targets=None) if row.startswith("│ > next"))
+        self.assertIn("opencode table is read-only · not updated · on the next update or re…", row)
+
+
+class ACellTheListCannotTell(unittest.TestCase):
+    """``followable`` null (no list to tell by): drawn only when there is something about following to show."""
+
+    @staticmethod
+    def _unknown(cells, harness="claude"):
+        return [samples.item(name, [dict(cell, followable=None, reason="no-catalog") for cell in cells]
+                             if name == harness else []) for name in ("claude", "codex", "opencode")]
+
+    def test_with_nothing_to_show_the_picture_is_the_one_from_before(self):
+        claude = [samples.cell(f"profile/{name}", model, effort)
+                  for name, (model, effort) in picture._CLAUDE.items()]
+        answer = self._unknown(claude)
+        checked = 0
+        for width in (80, 100, 140):
+            for select in ("", *(f"{name}/claude" for name in picture._CLAUDE)):
+                with self.subTest(width=width, select=select):
+                    before = picture.section_text(picture.base_models(), width, select, TODAY)
+                    self.assertEqual(_pic(answer=answer, width=width, select=select), before)
+                    checked += 1
+        self.assertEqual(checked, 21)
+
+    def test_a_cell_with_a_record_keeps_its_mark_and_its_undo(self):
+        answer = self._unknown([samples.followed("profile/deep", "gpt-6-astra", "gpt-6.2-astra", "high")], "codex")
+        shown = _pic(answer=answer)
+        self.assertIn("│ ^ followed 11-22 · codex profile/deep ▸", shown)
+        self.assertTrue(any("[ undo ]" in row for row in shown))
+
+    def test_a_cell_the_user_keeps_shows_the_follow_row_and_can_go_back_to_follow(self):
+        answer = self._unknown([samples.kept("profile/deep", "gpt-6-astra", "high")], "codex")
+        shown = _pic(answer=answer)
+        self.assertTrue(any("follow     Follow   [ Keep ]" in row for row in shown))
+        models = _models(answer=answer)
+        vm, state, frame = _frame(models, 140, "deep/codex", folds={"ui:fol": "follow"})
+        self.assertTrue(any(item.action[:3] == ("models.apply", "codex", "follow") for item in frame.hits))
+
+    def test_a_next_update_or_a_held_model_is_drawn(self):
+        nxt = self._unknown([samples.cell("profile/deep", "gpt-6-astra", "high",
+                                          following=samples.upcoming("gpt-6.2-astra", "high"))], "codex")
+        self.assertTrue(any("follow   [ Follow ]" in row for row in _pic(answer=nxt)))
+        held = self._unknown([samples.held("profile/deep", "gpt-6-astra", "high", "gpt-6.2-astra")], "codex")
+        self.assertTrue(any("rejected" in row for row in _pic(answer=held)))
 
 
 class ARefusedWriteKeepsTheFollowDraft(unittest.TestCase):
