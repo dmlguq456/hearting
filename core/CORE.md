@@ -98,8 +98,11 @@ check to accept a projection tree.
 Portable model profiles belong to core, while each adapter owns its shipped
 concrete model mapping. Installation seeds that mapping once as
 `<runtime-home>/agent-config/models.conf`. The seeded file is user-owned: it is
-never symlinked, refreshed, reapplied, or removed by a harness update or
-uninstall. Runtime consumers select a valid, complete user file as one unit and
+never symlinked, replaced as a whole, reapplied, or removed by a harness update or
+uninstall. An update (and a refresh) changes only the cells that are not held: each
+is moved, through the table's own edit path, to the newer same-family model the user's
+own harness model list shows, and every such edit leaves a `.bak` and an end-of-line
+record (`# auto-follow ...`) on that line. Every other line stays byte for byte. Runtime consumers select a valid, complete user file as one unit and
 otherwise fall back to the shipped adapter default as one unit; they never merge
 the two. INST-D-20 permits one narrow, memory-only normalization: when only
 the new balanced profile and its optional granularity are absent, retain the

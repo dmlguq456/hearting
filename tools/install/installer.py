@@ -215,7 +215,7 @@ def build_parser():
     p_model_set = model_sub.add_parser("set", help="Set a model target or the common context window")
     p_model_set.add_argument("harness", choices=RUNTIMES)
     p_model_set.add_argument("target", help="tier/profile/role name, or context-window")
-    p_model_set.add_argument("model", help="Model identifier with optional @effort/@variant, or token count for context-window")
+    p_model_set.add_argument("model", help="Model identifier with optional @effort/@variant, or token count for context-window; keep or follow holds or releases the cell's model (the value stays)")
     p_model_set.add_argument("--dry-run", action="store_true")
     p_model_set.add_argument("--json", action="store_true")
     p_model_get = model_sub.add_parser("get", help="Query a resolved common model setting")
@@ -1332,18 +1332,6 @@ def _runtime_emit_shape(command, reports, exit_code, lines):
     }
 
 
-def _model_follow_lines(harnesses):
-    """Read-only notes on newer models the user's table could follow (never raises)."""
-    try:
-        utilities = str(Path(__file__).resolve().parents[2] / "utilities")
-        if utilities not in sys.path:
-            sys.path.insert(0, utilities)
-        import model_follow
-        return model_follow.follow_lines(harnesses)
-    except Exception:
-        return []
-
-
 def cmd_runtime(args):
     first_install = args.runtime_command == "activate" and _new_global_install(args.scope)
     targets = _runtime_targets(args.runtime, args.runtime_command, args.scope)
@@ -1540,8 +1528,10 @@ def cmd_runtime(args):
             lines.append("compute-hosts-config: " + inventory["status"] + " " + inventory["path"])
             for report in reports:
                 report["compute_hosts_config"] = inventory
-            if args.runtime_command == "refresh":
-                lines.extend(_model_follow_lines(targets))
+            # What each activation did to the model table (it runs before the agent definitions
+            # are drawn); the same line from two runtimes is said once.
+            lines.extend(dict.fromkeys(
+                line for report in reports for line in report.get("model_follow_lines", [])))
     except Exception as exc:
         rollback_errors = []
         for snapshot in reversed(snapshots):

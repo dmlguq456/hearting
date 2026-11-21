@@ -5432,6 +5432,10 @@ def _install_or_update(
                 line = f"{row.get('runtime')}: {notice}"
                 if isinstance(notice, str) and line not in report_lines:
                     report_lines.append(line)
+        for row in activation_rows:
+            for line in row.get("model_follow_lines", []) if isinstance(row, dict) else []:
+                if isinstance(line, str) and line not in report_lines:
+                    report_lines.append(line)
         return {
             "status": "installed" if previous_state is None else "updated",
             "version": release["version"],
@@ -5489,16 +5493,42 @@ def bootstrap(
     return result
 
 
-def _model_follow_lines() -> list[str]:
-    """Read-only notes on newer models the user's table could follow (never raises)."""
+def _model_follow_pass() -> tuple[list[str], list[str]]:
+    """Let the user's model tables follow newer models: (result lines, harnesses written).
+
+    Runs at the end of every update, whichever way it went (a new release, an up-to-date one,
+    `--auto`, a pinned one): the model lists change without a Hearting release. Never raises.
+    """
     try:
         utilities = str(Path(__file__).resolve().parents[2] / "utilities")
         if utilities not in sys.path:
             sys.path.insert(0, utilities)
         import model_follow
-        return model_follow.follow_lines()
+        results = [model_follow.apply_harness(harness) for harness in model_follow.HARNESSES]
+        written = [row["harness"] for row in results if row.get("written") or row.get("reverted")]
+        return model_follow.lines(results), written
     except Exception:
-        return []
+        return [], []
+
+
+def _redraw_agent_definitions(root: Path, harnesses: Iterable[str]) -> list[str]:
+    """Refresh the harnesses whose table was just written, so their default agent definitions
+    are drawn from it in the same update. A refresh that cannot run is one line."""
+    notes = []
+    for harness in harnesses:
+        try:
+            done = subprocess.run(
+                ["sh", str(root / "tools/install/harness.sh"), "runtime", "refresh",
+                 "--runtime", harness, "--json"],
+                env={**os.environ, "AGENT_HOME": str(root)},
+                capture_output=True, text=True, timeout=300)
+            failed = done.returncode != 0
+        except (OSError, subprocess.SubprocessError):
+            failed = True
+        if failed:
+            notes.append(f"model follow: {harness} table updated; run `harness runtime refresh "
+                         f"--runtime {harness}` to redraw its agent definitions")
+    return notes
 
 
 def update(
@@ -5508,9 +5538,15 @@ def update(
     force_prune_unproven: bool = False,
 ) -> dict:
     result = _update_release(version, runtimes, automatic, force_prune_unproven)
-    lines = _model_follow_lines()
+    lines, written = _model_follow_pass()
+    if written and isinstance(result, dict):
+        try:
+            root = Path(result.get("release_root") or _load_state()["release_root"])
+            lines = [*lines, *_redraw_agent_definitions(root, written)]
+        except Exception:
+            pass
     if lines and isinstance(result, dict):
-        result["report_lines"] = [*result.get("report_lines", []), *lines]
+        result["report_lines"] = list(dict.fromkeys([*result.get("report_lines", []), *lines]))
     return result
 
 

@@ -99,8 +99,11 @@ Every adapter ships its release default at
 once to `<runtime-home>/agent-config/models.conf`. The runtime-home copy is a
 user-owned Hearting preference surface, not a managed projection:
 
-- an existing regular file is preserved byte-for-byte on install, refresh,
-  update, reapply, and uninstall;
+- an existing regular file is preserved byte-for-byte on install, reapply, and
+  uninstall; refresh and update change only the lines of cells that follow a newer
+  model of the user's own harness list (through the table's edit path, with a `.bak`
+  and a line-end record, see `core/MODEL_CONFIG.md`), before the agent definitions
+  are drawn from it, and leave every other line as it is;
 - the file is never a symlink and is not recorded as a managed copy-once file;
 - runtime model/profile consumers use the complete user file only when it is
   safe and contains every shipped key, otherwise they use the complete shipped

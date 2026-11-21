@@ -4361,6 +4361,9 @@ def activate(
         )
     except user_model_config.UserModelConfigError as exc:
         raise ActivationError(str(exc)) from exc
+    # The table is settled before the default agent definitions are drawn from it, so one
+    # refresh leaves the table and the definitions agreeing. Never fails the activation.
+    model_follow_lines = _follow_models(runtime, active_root, scope)
 
     desired = _desired_entries(runtime, mode, source_root, active_root, revision, scope)
     agent_report_lines = _native_agent_entries(
@@ -4540,7 +4543,21 @@ def activate(
     report["report_lines"] = (list(context_report_lines) + list(agent_report_lines) + notices
                               + list(report.get("report_lines", [])))
     report["notices"] = notices
+    report["model_follow_lines"] = model_follow_lines
     return report
+
+
+def _follow_models(runtime: str, active_root: Path, scope: str) -> List[str]:
+    """Let the cells of this runtime's models.conf follow the newer models its list shows.
+
+    Result lines for the person; any failure is one line and changes nothing here.
+    """
+    try:
+        import model_follow
+        return model_follow.apply_lines(
+            [runtime], source_root=active_root, runtime=paths.runtime_home(runtime, scope))
+    except Exception as exc:  # noqa: BLE001 - activation never fails on this
+        return [f"model follow: {runtime} table not updated ({type(exc).__name__})"]
 
 
 def _edited_render_lines(runtime: str, previous: Optional[dict], desired: List[dict]) -> List[str]:
