@@ -1,9 +1,10 @@
-"""`hearting update` and `harness config status` show what the model-follow survey found.
+"""`hearting update` and `harness config status` show what the model-follow pass did.
 
-The survey itself is `utilities/model_follow.py`; here only the surfaces are checked, with a
-stand-in survey: update carries its lines on every path (new release, up to date, pinned
-timer run), a survey that fails never fails the update, and the models.conf status reading
-gets "newer n · proposal n" only when a count is not zero.
+The pass itself is `utilities/model_follow.py`; here only the surfaces are checked, with a
+stand-in pass: update runs it on every path (new release, up to date, pinned timer run) and
+carries its lines, a pass that fails never fails the update, a table that was written is
+followed by a refresh of that harness (so its agent definitions are drawn from it in the same
+update), and the models.conf status reading gets the counts only when a count is not zero.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -32,13 +33,13 @@ import installer  # noqa: E402
 import model_follow  # noqa: E402
 import user_config  # noqa: E402
 
-LINE = "model follow: newer codex profile/deep model-1 -> model-2 (high) · hearting model set codex profile/deep model-2@high"
+LINE = "model follow: codex profile/deep model-1 -> model-2 (high) · backup models.conf.bak"
 
 
 class UpdateSurfaceTests(unittest.TestCase):
-    def update(self, release, lines=(LINE,), **kwargs):
+    def update(self, release, lines=(LINE,), written=(), **kwargs):
         with mock.patch.object(distribution, "_update_release", return_value=release), \
-                mock.patch.object(model_follow, "follow_lines", return_value=list(lines)):
+                mock.patch.object(distribution, "_model_follow_pass", return_value=(list(lines), list(written))):
             return distribution.update(**kwargs)
 
     def test_lines_follow_a_new_release_an_up_to_date_run_and_the_automatic_run(self):
@@ -54,18 +55,62 @@ class UpdateSurfaceTests(unittest.TestCase):
         quiet = self.update({"status": "up-to-date"}, lines=())
         self.assertNotIn("report_lines", quiet)
 
-    def test_a_failing_survey_never_fails_the_update(self):
+    def test_a_line_the_activation_already_said_is_not_said_twice(self):
+        result = self.update({"status": "updated", "report_lines": [LINE, "x"]})
+        self.assertEqual(result["report_lines"], [LINE, "x"])
+
+    def test_the_pass_runs_for_the_harnesses_the_update_handles_and_a_failing_one_never_fails_the_update(self):
+        seen = []
+
+        def apply(harness, **_kw):
+            seen.append(harness)
+            if harness == "codex":
+                raise RuntimeError("fixture")
+            return {"harness": harness, "written": [], "reverted": []}
         with mock.patch.object(distribution, "_update_release", return_value={"status": "up-to-date"}), \
-                mock.patch.object(model_follow, "follow_lines", side_effect=RuntimeError("fixture")):
-            self.assertEqual(distribution.update(), {"status": "up-to-date"})
+                mock.patch.object(model_follow, "apply_harness", side_effect=apply):
+            self.assertEqual(distribution.update(runtimes=["claude", "codex", "opencode"]),
+                             {"status": "up-to-date"})
+        self.assertEqual(seen[:1], ["claude"])  # the whole pass gives up quietly, update is untouched
 
     def test_the_pinned_automatic_run_is_covered_through_the_real_release_step(self):
         state = {"channel": "pinned", "version": "1.0.0", "release_root": "/r", "archive_sha256": "x"}
         with mock.patch.object(distribution, "_load_state", return_value=state), \
                 mock.patch.object(distribution, "_refresh_update_timer", side_effect=lambda result: result), \
-                mock.patch.object(model_follow, "follow_lines", return_value=[LINE]):
+                mock.patch.object(distribution, "_model_follow_pass", return_value=([LINE], [])):
             result = distribution.update(automatic=True)
         self.assertEqual((result["status"], result["report_lines"]), ("pinned", [LINE]))
+
+    def test_a_written_table_is_followed_by_a_refresh_of_that_harness_only(self):
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append((command, kwargs["env"]["AGENT_HOME"]))
+            return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+        with mock.patch.object(distribution.subprocess, "run", side_effect=run):
+            result = self.update({"status": "up-to-date", "release_root": "/release"}, written=["codex"])
+        self.assertEqual(result["report_lines"], [LINE])
+        self.assertEqual(len(calls), 1)
+        command, home = calls[0]
+        self.assertEqual((command[0], command[1].endswith("tools/install/harness.sh"), command[2:]),
+                         ("sh", True, ["runtime", "refresh", "--runtime", "codex", "--json"]))
+        self.assertEqual(home, "/release")
+        with mock.patch.object(distribution.subprocess, "run", side_effect=run):
+            self.update({"status": "up-to-date", "release_root": "/release"}, written=[])
+        self.assertEqual(len(calls), 1)
+
+    def test_a_refresh_that_cannot_run_is_one_line_and_never_fails_the_update(self):
+        for failure in (SimpleNamespace(returncode=3, stdout="", stderr="x"), OSError("no sh")):
+            with self.subTest(failure=failure):
+                def run(command, **kwargs):
+                    if isinstance(failure, Exception):
+                        raise failure
+                    return failure
+                with mock.patch.object(distribution.subprocess, "run", side_effect=run):
+                    result = self.update({"status": "up-to-date", "release_root": "/release"}, written=["claude"])
+                self.assertEqual(result["status"], "up-to-date")
+                self.assertEqual(result["report_lines"][0], LINE)
+                self.assertIn("run `harness runtime refresh --runtime claude`", result["report_lines"][1])
 
     def test_printed_update_output_shows_the_line(self):
         out = io.StringIO()
@@ -84,20 +129,30 @@ class ConfigStatusTests(unittest.TestCase):
                 {"id": "fleet", "status": "valid", "reading": "ok"}]
 
     def test_counts_are_appended_only_when_not_zero(self):
-        entries = {"codex": ["follow", "follow", "proposal", "none"], "claude": ["none"],
+        entries = {"codex": ["will-follow", "will-follow", "proposal", "none"], "claude": ["none"],
                    "opencode": ["proposal"]}
+        states = {"codex": {"followed": 3, "kept": 1, "held": 2}, "claude": {"followed": 0, "kept": 0, "held": 0},
+                  "opencode": {"followed": 0, "kept": 0, "held": 0}}
 
         def survey(runtime):
-            return {"entries": [{"kind": kind} for kind in entries[runtime]]}
+            return {"entries": [{"branch": branch} for branch in entries[runtime]], "states": states[runtime]}
 
         with mock.patch.object(model_follow, "survey_harness", side_effect=survey):
             rows = user_config.with_model_follow(self.rows())
         self.assertEqual([row["reading"] for row in rows],
-                         ["ok · newer 2 · proposal 1", "ok", "shipped default in use", "ok"])
+                         ["ok · newer 2 · proposal 1 · followed 3 · kept 1 · held 2", "ok", "shipped default in use", "ok"])
         with mock.patch.object(model_follow, "survey_harness",
-                               side_effect=lambda runtime: {"entries": [{"kind": "follow"}]}):
+                               side_effect=lambda runtime: {"entries": [{"branch": "will-follow"}],
+                                                            "states": {"followed": 0, "kept": 0, "held": 1}}):
             only_newer = user_config.with_model_follow(self.rows())
-        self.assertEqual(only_newer[0]["reading"], "ok · newer 1")
+        self.assertEqual(only_newer[0]["reading"], "ok · newer 1 · held 1")
+
+    def test_a_kept_cell_alone_is_counted_from_the_file_even_without_a_list(self):
+        survey = {"harness": "codex", "status": "skipped", "reason": "no-catalog", "entries": [],
+                  "states": {"followed": 0, "kept": 2, "held": 0}}
+        with mock.patch.object(model_follow, "survey_harness", return_value=survey):
+            rows = user_config.with_model_follow(self.rows())
+        self.assertEqual(rows[0]["reading"], "ok · kept 2")
 
     def test_a_failing_survey_leaves_the_reading_alone(self):
         with mock.patch.object(model_follow, "survey_harness", side_effect=RuntimeError("fixture")):
@@ -113,7 +168,7 @@ for path in sys.argv[1:4]:
     sys.path.insert(0, path)
 import distribution
 with mock.patch.object(distribution, "_update_release", return_value={"status": "up-to-date"}):
-    print(json.dumps(distribution.update().get("report_lines", [])))
+    print(json.dumps(distribution.update(runtimes=["claude", "codex", "opencode"]).get("report_lines", [])))
 """
 
 
@@ -249,7 +304,7 @@ class SlowServiceCallerTests(unittest.TestCase):
             return done["status"], done["exit"]
 
         def survey():
-            return model_follow.lines([model_follow.survey_harness("opencode")])
+            return model_follow.apply_lines(["opencode"])
 
         return {"launch": launch, "fleet": fleet, "install": install, "survey": survey}
 
@@ -271,7 +326,7 @@ class SlowServiceCallerTests(unittest.TestCase):
     def test_the_same_fixture_answering_promptly_gives_the_survey_its_line(self):
         self.PAUSE = 0.0
         lines = self.callers()["survey"]()
-        self.assertEqual(len(lines), 1, lines)
+        self.assertEqual(len(lines), 2, lines)  # the cell followed, and the field-weights note
         self.assertIn("p/elm-1 -> p/elm-2", lines[0])
 
 

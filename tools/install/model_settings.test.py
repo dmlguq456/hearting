@@ -642,6 +642,147 @@ class ModelSettingsCliTest(unittest.TestCase):
                                    environ=self.env, source_root=ROOT)
         self.assertEqual(path.read_bytes(), successor)
 
+    # -- `keep` and `follow`: the value stays, the cell's end-of-line record changes ---------------
+
+    TIER = {"claude": "deep", "codex": "deep", "opencode": "balanced-deep"}
+
+    def seeded(self, adapter, name="mark"):
+        home = self.root / name / adapter
+        path = self.user_path(adapter, home)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(model_config.shipped_path(adapter).read_bytes())
+        return home, path
+
+    def line(self, path, key):
+        return next(l for l in path.read_text().splitlines() if l.startswith(key + "="))
+
+    def test_keep_and_follow_mark_the_cell_and_leave_the_value_alone(self):
+        import model_follow_mark
+        for adapter in model_config.ADAPTERS:
+            with self.subTest(adapter=adapter):
+                home, path = self.seeded(adapter)
+                original = path.read_bytes()
+                tier = self.TIER[adapter]
+                key = f"CFG_TIER_{tier.upper().replace('-', '_')}_MODEL"
+                value = model_config.parse_config(path)[key]
+                kept = settings.set_model(adapter, f"tier/{tier}", "keep", runtime=home, environ=self.env, source_root=ROOT)
+                self.assertEqual((kept["status"], kept["changed_keys"], kept["mark"]), ("changed", [key], "keep"))
+                self.assertEqual(Path(kept["backup"]).read_bytes(), original)
+                self.assertEqual(model_config.parse_config(path), model_config.parse_config(Path(kept["backup"])))
+                self.assertEqual(model_follow_mark.read_marks(path.read_text())[key]["kind"], "keep")
+                self.assertEqual(model_config.parse_config(path)[key], value)
+                changed_lines = [(a, b) for a, b in zip(original.decode().splitlines(), path.read_text().splitlines()) if a != b]
+                self.assertEqual(len(changed_lines), 1)
+                again = settings.set_model(adapter, f"tier/{tier}", "keep", runtime=home, environ=self.env, source_root=ROOT)
+                self.assertEqual((again["status"], again["backup"]), ("unchanged", None))
+                freed = settings.set_model(adapter, f"tier/{tier}", "follow", runtime=home, environ=self.env, source_root=ROOT)
+                self.assertEqual(freed["status"], "changed")
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(settings.set_model(adapter, f"tier/{tier}", "follow", runtime=home, environ=self.env,
+                                                    source_root=ROOT)["status"], "unchanged")
+
+    def test_a_record_that_differs_is_a_change_even_when_the_value_is_the_same(self):
+        import model_follow_mark
+        home, path = self.seeded("codex")
+        value = model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"]
+        text = path.read_text().replace("CFG_TIER_DEEP_MODEL=" + value,
+                                        "CFG_TIER_DEEP_MODEL=" + value + " # auto-follow 2026-11-01: other-1 -> " + value)
+        path.write_text(text)  # a person went back to the earlier value: held by the record
+        result = settings.set_model("codex", "tier/deep", "keep", runtime=home, environ=self.env, source_root=ROOT)
+        self.assertEqual(result["status"], "changed")
+        self.assertEqual(model_follow_mark.read_marks(path.read_text())["CFG_TIER_DEEP_MODEL"]["kind"], "keep")
+
+    def test_the_users_own_comment_on_the_line_stays_through_keep_and_follow(self):
+        home, path = self.seeded("claude")
+        value = model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"]
+        path.write_text(path.read_text().replace("CFG_TIER_DEEP_MODEL=" + value,
+                                                 "CFG_TIER_DEEP_MODEL=" + value + "   # my deep model, do not touch"))
+        settings.set_model("claude", "tier/deep", "keep", runtime=home, environ=self.env, source_root=ROOT)
+        line = self.line(path, "CFG_TIER_DEEP_MODEL")
+        self.assertIn("# my deep model, do not touch", line)
+        self.assertEqual(line.count("auto-follow"), 1)
+        settings.set_model("claude", "tier/deep", "follow", runtime=home, environ=self.env, source_root=ROOT)
+        self.assertEqual(self.line(path, "CFG_TIER_DEEP_MODEL"), "CFG_TIER_DEEP_MODEL=" + value + " # my deep model, do not touch")
+
+    def test_keep_and_follow_have_a_dry_run_that_writes_nothing(self):
+        for adapter in model_config.ADAPTERS:
+            with self.subTest(adapter=adapter):
+                home, path = self.seeded(adapter, "dry-mark")
+                original = path.read_bytes()
+                tier = f"tier/{self.TIER[adapter]}"
+                for action in ("keep", "follow"):
+                    result = settings.set_model(adapter, tier, action, runtime=home, environ=self.env,
+                                                source_root=ROOT, dry_run=True)
+                    self.assertEqual(result["status"], "planned" if action == "keep" else "unchanged")
+                    self.assertEqual(path.read_bytes(), original)
+                    self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["models.conf"])
+                settings.set_model(adapter, tier, "keep", runtime=home, environ=self.env, source_root=ROOT)
+                held = path.read_bytes()
+                planned = settings.set_model(adapter, tier, "follow", runtime=home, environ=self.env,
+                                             source_root=ROOT, dry_run=True)
+                self.assertEqual((planned["status"], path.read_bytes()), ("planned", held))
+                self.assertIn("would follow", planned["lines"][0])
+
+    def test_keep_needs_a_line_that_names_a_model_and_takes_no_budget(self):
+        home, path = self.seeded("codex")
+        original = path.read_bytes()
+        with self.assertRaisesRegex(settings.ModelSettingsUsageError, "does not name a model"):
+            settings.set_model("codex", "profile/deep", "keep", runtime=home, environ=self.env, source_root=ROOT)
+        with self.assertRaisesRegex(settings.ModelSettingsUsageError, "takes no @budget"):
+            settings.set_model("codex", "tier/deep", "keep@high", runtime=home, environ=self.env, source_root=ROOT)
+        with self.assertRaises(settings.ModelSettingsUsageError):
+            settings.set_model("codex", "tier/nope", "keep", runtime=home, environ=self.env, source_root=ROOT)
+        self.assertEqual(path.read_bytes(), original)
+        settings.set_model("codex", "profile/deep", "some-model@high", runtime=home, environ=self.env, source_root=ROOT)
+        self.assertEqual(settings.set_model("codex", "profile/deep", "keep", runtime=home, environ=self.env,
+                                            source_root=ROOT)["status"], "changed")
+        missing = self.root / "none"
+        with self.assertRaises(settings.ModelSettingsError):
+            settings.set_model("codex", "tier/deep", "keep", runtime=missing, environ=self.env, source_root=ROOT)
+        self.assertFalse(missing.exists())
+
+    def test_the_command_line_takes_keep_and_follow_and_help_says_so(self):
+        import json
+        home = self.home / ".codex"
+        path = self.user_path("codex", home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(model_config.shipped_path("codex").read_bytes())
+        code, output = self.run_cli("codex", "tier/deep", "keep", "--dry-run", "--json")
+        self.assertEqual((code, json.loads(output)["status"]), (0, "planned"), output)
+        code, output = self.run_cli("codex", "tier/deep", "keep", "--json")
+        self.assertEqual((code, json.loads(output)["status"]), (0, "changed"), output)
+        code, output = self.run_cli("codex", "tier/deep", "follow", "--json")
+        self.assertEqual((code, json.loads(output)["status"]), (0, "changed"), output)
+        code, output = self.run_cli("codex", "tier/deep", "keep@high", "--json")
+        self.assertEqual((code, json.loads(output)["status"]), (64, "invalid-arguments"), output)
+        launcher = self.root / "bin" / "hearting"
+        helped = subprocess.run([str(launcher), "model", "set", "--help"], env=dict(os.environ), text=True,
+                                capture_output=True, timeout=10)
+        self.assertIn("keep or follow", " ".join(helped.stdout.split()))
+
+    def test_edit_file_rewrites_given_lines_through_the_same_steps_and_bounds_the_lock_wait(self):
+        import model_follow_mark
+        home, path = self.seeded("codex")
+        original = path.read_bytes()
+        key = "CFG_TIER_LIGHT_MODEL"
+        build = lambda text: {"changed": {key: "new-light"}, "marks": {key: model_follow_mark.keep_record("2026-11-21")}}  # noqa: E731
+        with safe_fs.TargetLock(path):
+            with self.assertRaises(safe_fs.SafetyError) as raised:
+                settings.edit_file("codex", build, runtime=home, environ=self.env, source_root=ROOT, lock_wait=0.1)
+        self.assertEqual(raised.exception.code, "lock-timeout")
+        self.assertEqual((path.read_bytes(), sorted(p.name for p in path.parent.iterdir() if "bak" in p.name)), (original, []))
+        planned = settings.edit_file("codex", build, runtime=home, environ=self.env, source_root=ROOT, dry_run=True)
+        self.assertEqual((planned["status"], path.read_bytes()), ("planned", original))
+        done = settings.edit_file("codex", build, runtime=home, environ=self.env, source_root=ROOT, lock_wait=2)
+        self.assertEqual(done["status"], "changed")
+        self.assertEqual(Path(done["backup"]).read_bytes(), original)
+        self.assertEqual(model_config.parse_config(path)[key], "new-light")
+        invalid = lambda text: {"changed": {"CFG_MODEL_PROFILE_LIGHT": "model/no-effort"}, "marks": {}}  # noqa: E731
+        before = path.read_bytes()
+        with self.assertRaises(Exception):
+            settings.edit_file("codex", invalid, runtime=home, environ=self.env, source_root=ROOT)
+        self.assertEqual(path.read_bytes(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

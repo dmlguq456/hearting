@@ -265,7 +265,7 @@ class SurveyTests(unittest.TestCase):
                     row(name("light-2"), family="light", version=(2,), cost=0.9)])
                 got = {e["target"]: (e["kind"], e["reason"]) for e in result["entries"]}
                 self.assertEqual(got["profile/deep"], ("proposal", "other family"))
-                self.assertEqual(got["tier/light"], ("proposal", "price x9.0"))
+                self.assertEqual(got["tier/light"], ("proposal", "price x9.00"))
                 self.assertEqual(model_follow.counts(result), (0, 5))
                 text = "\n".join(model_follow.lines([result]))
                 self.assertIn(f"model follow: proposal {adapter} profile/deep {name('deep-1')} -> "
@@ -273,21 +273,22 @@ class SurveyTests(unittest.TestCase):
                               f"profile/deep {name('zed-9')}@high", text)
                 self.assertNotIn("followed", text)
 
-    def test_result_lines_say_newer_and_never_followed(self):
+    def test_a_survey_only_reads_it_writes_nothing_and_says_nothing_about_a_followed_cell(self):
         for adapter in HARNESSES:
             with self.subTest(adapter=adapter):
-                self.user_file(adapter)
+                path = self.user_file(adapter)
+                before = path.read_bytes()
                 name = self.names(adapter)
                 result = self.run_survey(adapter, [
                     row(name("deep-1")), row(name("deep-2"), version=(2,), efforts=("high",))])
-                text = model_follow.lines([result])
-                self.assertIn(f"model follow: newer {adapter} profile/deep {name('deep-1')} -> "
-                              f"{name('deep-2')} (high) · hearting model set {adapter} "
-                              f"profile/deep {name('deep-2')}@high", text)
-                self.assertIn(f"model follow: newer {adapter} tier/deep {name('deep-1')} -> "
-                              f"{name('deep-2')} (high, was xhigh) · hearting model set {adapter} "
-                              f"tier/deep {name('deep-2')}@high", text)
-                self.assertFalse([t for t in text if "followed" in t])
+                # Following is `apply_harness`'s work: a survey only plans it.
+                self.assertEqual(model_follow.lines([result]), [])
+                self.assertEqual(path.read_bytes(), before)
+                plan = {item["target"]: item for item in result["plan"]}
+                self.assertEqual(plan["profile/deep"]["to"], name("deep-2"))
+                self.assertEqual(plan["profile/deep"]["effort"], "high")
+                self.assertEqual(plan["tier/deep"]["effort_was"], "xhigh")
+                self.assertEqual(model_follow.counts(result)[0], len(plan))
 
     def test_codex_cli_note_needs_a_matching_list_version_a_mark_and_no_successor(self):
         self.user_file("codex")
