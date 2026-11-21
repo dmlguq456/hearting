@@ -72,6 +72,12 @@ def _note(item):
     if not isinstance(item, Mapping) or item.get("harness") not in HARNESSES:
         return None
     kind, models = item.get("kind"), item.get("models")
+    if kind == "list-from-another-cli":  # the list was written by another CLI version: no models to name
+        version, listed = _text(item.get("version")), _text(item.get("list_version"))
+        if not version or not listed:
+            return None
+        return {"harness": item["harness"], "version": version, "models": [], "kind": kind,
+                "command": None, "list_version": listed}
     if kind not in ("previous-generation", "min-version") or not _seq(models):
         return None
     if kind == "previous-generation":
@@ -310,11 +316,16 @@ class Follow:
         return all(row["harness"] in self.read_only for row in rows)
 
     def cli_lines(self):
-        """The CLI-too-old notes: the version and what to do come first, the reason last (the part a
-        narrow row cuts), in the words ``hearting update`` prints without their head."""
+        """The CLI notes (too old, or a model list another CLI version wrote): the version and what to do
+        come first, the reason last (the part a narrow row cuts), in the words ``hearting update`` prints
+        without their head."""
         out = []
         for note in self.cli:
             how = note["command"] or "update it yourself"
+            if note["kind"] == "list-from-another-cli":
+                out.append(f"{note['harness']} CLI {note['version']} · start {note['harness']} once · "
+                           f"model list is from {note['list_version']}")
+                continue
             if note["kind"] == "previous-generation":
                 why = f"lists {', '.join(note['models'])} as previous generation with no successor"
             else:

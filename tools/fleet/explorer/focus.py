@@ -967,33 +967,62 @@ def follow_into(models, answer):
     return models
 
 
-_CLI_SEEN = {}                       # harness -> (version, path): what the last background read was told
+_CLI_SEEN = {}                       # harness -> (version, path): what the CLI was last asked and said
 _CLI_SEEN_LOCK = threading.Lock()
 
 
-def _cli_probe(refresh):
+def _cli_probe(refresh, asked):
     """The ``probe`` ``fleet_view`` asks the harness CLI's version through.
 
-    A background read (``refresh``) asks the CLI itself and remembers the answer; a read made inside
-    the input handling never starts a process: it is given what the last background read was told
-    (``(None, None)``, not known, for a harness that read never asked about)."""
-    def probe(harness):
-        if not refresh:
-            with _CLI_SEEN_LOCK:
-                return _CLI_SEEN.get(harness, (None, None))
+    A background read (``refresh``) asks the CLI itself for a harness it has no answer for (never asked,
+    CLI not found, or found but its version not read), once per harness per read (``asked`` holds the
+    harnesses this read has asked), and remembers the answer. Any other harness is given the remembered
+    answer, no process. A read made inside the input handling never starts a process: it is given the
+    remembered answer (``(None, None)``, not known, for a harness never asked about)."""
+    def ask(harness):
         found = utility("model_follow").installed_cli(harness)
         with _CLI_SEEN_LOCK:
             _CLI_SEEN[harness] = found
+        asked.add(harness)
         return found
+
+    def probe(harness):
+        with _CLI_SEEN_LOCK:
+            seen = _CLI_SEEN.get(harness)
+        if not refresh or harness in asked:
+            return seen if seen is not None else (None, None)
+        if seen is None or seen[0] is None:
+            return ask(harness)
+        return seen
+    probe.ask = ask
     return probe
 
 
 def _read_follow(catalogs, refresh=True):
     """What ``model_follow.fleet_view()`` says about the tables, reading the lists this read already
-    holds (no list is asked for again); None when it cannot say."""
+    holds (no list is asked for again); None when it cannot say.
+
+    A CLI note is never drawn from memory alone on a background read: the answer from the remembered
+    CLI versions is looked at, and each harness whose CLI has a note in it (of any kind) is asked again,
+    once; when the CLI says something else than was remembered, the answer is worked out once more from
+    it. A read inside the input handling uses the remembered answer until the next background read."""
     try:
-        return utility("model_follow").fleet_view(read_catalog=lambda harness: catalogs[harness],
-                                                  probe=_cli_probe(refresh))
+        follow = utility("model_follow")
+        view = lambda probe: follow.fleet_view(read_catalog=lambda harness: catalogs[harness], probe=probe)
+        asked = set()
+        probe = _cli_probe(refresh, asked)
+        answer = view(probe)
+        if refresh:
+            changed = False
+            for item in answer:
+                harness = item.get("harness")
+                if item.get("cli") and harness not in asked:
+                    with _CLI_SEEN_LOCK:
+                        before = _CLI_SEEN.get(harness)
+                    changed = probe.ask(harness) != before or changed
+            if changed:
+                answer = view(probe)
+        return answer
     except Exception:
         return None
 
@@ -1186,7 +1215,10 @@ def read_model_config(refresh=True):
     """MODELS view data from the harnesses' models.conf and the dispatch defaults (read once, cached).
 
     ``refresh=False`` is the read made inside the input handling after a write: it asks no harness
-    CLI anything (the CLI notes use what the last background read was told)."""
+    CLI anything and uses the remembered answers until the next background read. A background read asks
+    a harness's CLI the first time and while its version is not known, and asks again for each harness
+    that has a CLI line in the answer the remembered versions give (see ``_read_follow``); otherwise
+    it uses the remembered answer."""
     import importlib.util
     model_config = utility("model_config")
     profile_map, choices, main_only, context, profile_target = {}, {}, {}, {}, {}

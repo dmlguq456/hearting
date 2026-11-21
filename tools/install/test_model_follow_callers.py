@@ -368,5 +368,41 @@ class ReadOnlyTableThroughActivationTests(Fixture):
         self.assertEqual((table.read_bytes(), self.baks("codex")), (before, []))
 
 
+class AnotherListThroughCallersTests(Fixture):
+    """A list another CLI version wrote is not followed: every caller says so, once, and the table stays."""
+
+    LINE = ("model follow: codex: the model list was written by CLI 0.163.0, installed is 0.171.0 "
+            "· start codex once to refresh it · nothing followed")
+
+    def setUp(self):
+        super().setUp()
+        (self.homes["codex"] / "models_cache.json").write_text(json.dumps({"client_version": "0.163.0", "models": [
+            {"slug": slug(1), "visibility": "list"}, {"slug": slug(2), "visibility": "list"}]}))
+        bin_dir = self.root / "fakebin"
+        bin_dir.mkdir()
+        cli = bin_dir / "codex"   # `debug models` fails here: the list is not refreshed
+        cli.write_text(f'#!/bin/sh\n[ "$1" = debug ] && {{ echo x >> "{self.root / "refreshed"}"; exit 1; }}\n'
+                       'echo "codex-cli 0.171.0"\n')
+        cli.chmod(0o755)
+        patcher = mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:/usr/bin:/bin"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_update_pass_and_the_activation_say_it_and_leave_the_table(self):
+        table = self.table("codex")
+        before = (table.read_bytes(), table.stat().st_mtime_ns)
+        for name, call in {"update's end pass": lambda: distribution._model_follow_pass(["codex"])[0],
+                           "activation": lambda: runtime_activation._follow_models("codex", ROOT, "global")}.items():
+            with self.subTest(caller=name):
+                self.assertEqual(self.bounded(call), [self.LINE])
+                self.assertEqual((table.read_bytes(), table.stat().st_mtime_ns, self.baks("codex")), (*before, []))
+        self.assertEqual((self.root / "refreshed").read_text().split(), ["x", "x"])   # once per pass
+
+    def test_the_update_report_carries_the_line(self):
+        with mock.patch.object(distribution, "_update_release", return_value={"status": "up-to-date"}):
+            result = self.bounded(lambda: distribution.update(runtimes=["codex"]))
+        self.assertEqual([t for t in result["report_lines"] if "model follow:" in t], [self.LINE])
+
+
 if __name__ == "__main__":
     unittest.main()

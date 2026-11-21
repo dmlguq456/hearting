@@ -22,6 +22,14 @@ refused model go back to their earlier value and hold it.
 
 One survey reads one environment: the process environment, like every caller. The CLI
 version is asked once per survey, and a failure or a timeout counts as that one answer.
+
+A list that carries the version of the CLI that wrote it (`client_version`) is not the installed
+CLI's list when that version is not the installed one (a CLI left running from an older version
+rewrites the shared file). Such a list is never followed from: a write pass first has the
+installed CLI write it again, once, outside the table's lock (`_REFRESH`; no process of its group
+is left behind), and when that does not make the versions agree the harness's cells are left as they
+are and one line says so. Versions are compared with trailing zeros dropped (0.171 is 0.171.0). A
+survey (`fleet_view`) only reports it and never starts the refresh.
 """
 from __future__ import annotations
 
@@ -53,6 +61,11 @@ PRICE_LIMIT = 2.0
 _SETTABLE = frozenset({"low", "medium", "high", "xhigh", "max"})
 _SETTABLE_OPENCODE = _SETTABLE | {"runtime-default"}
 _CLI_TIMEOUT = 3
+# The one command per harness that makes its CLI write its model list again (output dropped; the
+# list file is read afterwards). A harness without an entry cannot be refreshed. Codex's
+# `debug models` prints the list as JSON and rewrites its cache.
+_REFRESH = {"codex": ("debug", "models")}
+REFRESH_WAIT = 10.0
 # How long a pass waits for the table's lock. A pass runs inside other work (an activation
 # holds locks of its own paths), so it never waits long: a table it cannot lock in this time is
 # not written and the next update or refresh tries again.
@@ -67,6 +80,16 @@ _VERSION = re.compile(r"\d+(?:\.\d+)+")
 def _numbers(text) -> tuple[int, ...] | None:
     match = _VERSION.search(text) if isinstance(text, str) else None
     return tuple(int(part) for part in match.group(0).split(".")) if match else None
+
+
+def _same_version(one: tuple, other: tuple) -> bool:
+    """Whether two version numbers are the same version: trailing zeros do not count (0.171 is 0.171.0)."""
+    def trimmed(numbers):
+        parts = list(numbers)
+        while len(parts) > 1 and parts[-1] == 0:
+            parts.pop()
+        return parts
+    return trimmed(one) == trimmed(other)
 
 
 # ---- the rule ----------------------------------------------------------------------
@@ -307,8 +330,79 @@ def upgrade_command(harness: str, path: str | None) -> str | None:
     return None
 
 
+def _other_cli(catalog, observe) -> tuple[str, str] | None:
+    """`(list version, installed version)` when the list says which CLI version wrote it and that is
+    not the installed one, else None (a list with no version, or a CLI whose version is unknown, has
+    no such case). Decided by the list, never by the harness's name."""
+    wanted = _numbers(getattr(catalog, "client_version", None))
+    if wanted is None:
+        return None
+    have, _path = observe()
+    if have is None or _same_version(have, wanted):
+        return None
+    return ".".join(map(str, wanted)), ".".join(map(str, have))
+
+
+def _ended(proc, wait) -> bool:
+    """Wait until `proc` has ended, within `wait` seconds, without reaping it, so that its pid (the
+    group id) stays ours while its group is ended. Returns whether the group may still be signalled:
+    False when the child was already reaped (or `waitid` is missing, so it is reaped here), as then
+    the pid may be another process's. Raises `subprocess.TimeoutExpired` on the deadline."""
+    waitid = getattr(os, "waitid", None)  # not in Python before 3.13 on macOS
+    if waitid is None:
+        proc.wait(timeout=wait)
+        return False
+    end = time.monotonic() + wait
+    try:
+        while waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+            if time.monotonic() >= end:
+                raise subprocess.TimeoutExpired(proc.args, wait)
+            time.sleep(0.02)
+    except ChildProcessError:  # reaped by someone else: nothing here is ours to signal
+        return False
+    return True
+
+
+def _refresh(harness, observe, wait) -> bool:
+    """Have the installed CLI write its list again, once, within `wait` seconds. True only when it
+    ended cleanly; a missing command, a failure and a timeout are False and never raise. The run
+    is its own process group and no process of that group is left behind, whether the CLI ended or
+    ran out of time (one that left its group with `setsid` is out of reach). The group is ended
+    before the CLI is reaped, while the pid is still ours."""
+    command = _REFRESH.get(harness)
+    path = observe()[1]
+    if not command or not path:
+        return False
+    proc = None
+    ours, clean = True, False  # `ours`: the group id is still this run's
+    try:
+        proc = subprocess.Popen([path, *command], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+        ours = _ended(proc, wait)
+        clean = True
+    except Exception:  # noqa: BLE001 - not refreshed is the answer, never an error
+        pass
+    finally:
+        if proc is not None and proc.returncode is None:
+            if ours:
+                try:
+                    os.killpg(proc.pid, 9)
+                except OSError:
+                    proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except Exception:  # noqa: BLE001
+                pass
+    return clean and proc.returncode == 0
+
+
 def _cli_note(harness, catalog, entries, observe) -> dict | None:
-    """The 'CLI is too old to list the next model' signal; needs only local facts."""
+    """The 'CLI is too old to list the next model' signal, or the 'list is from another CLI' one;
+    needs only local facts."""
+    other = _other_cli(catalog, observe)
+    if other:
+        return {"harness": harness, "version": other[1], "models": [],
+                "kind": "list-from-another-cli", "list_version": other[0], "command": None}
     if harness == "codex":
         names = list(dict.fromkeys(e["current"]["model"] for e in entries
                                    if e["kind"] == "none" and e["reason"] == "no-successor"
@@ -316,7 +410,7 @@ def _cli_note(harness, catalog, entries, observe) -> dict | None:
         if not names or not catalog.client_version:
             return None
         have, path = observe()
-        if have is None or have != _numbers(catalog.client_version):
+        if have is None or not _same_version(have, _numbers(catalog.client_version) or ()):
             return None
         return {"harness": harness, "version": ".".join(map(str, have)), "models": names,
                 "kind": "previous-generation", "command": upgrade_command(harness, path)}
@@ -663,8 +757,13 @@ def survey_harness(harness: str, *, source_root: str | Path | None = None,
         except Exception:  # a list that cannot be read: the table's own states are still shown
             catalog = None
         observe = _observer(harness, probe or installed_cli)
-        entries = follow_stage(harness, values, marks, catalog.rows if catalog else None,
-                               observe, today, skip=refused)
+        # A list another CLI version wrote is no list of the installed CLI: its cells are not known.
+        other = _other_cli(catalog, observe) if catalog else None
+        rows = catalog.rows if catalog and not other else None
+        entries = follow_stage(harness, values, marks, rows, observe, today, skip=refused)
+        if other:
+            for entry in entries:
+                entry["reason"] = "list-from-another-cli"
         for entry in reverts:
             match = next(e for e in entries if e["key"] == entry["key"])
             match.update(branch="revert", action="revert", write=entry["write"],
@@ -681,7 +780,7 @@ def survey_harness(harness: str, *, source_root: str | Path | None = None,
                                 {**marks, **{k: v for k, v in marks1.items() if v}})
         for key in [k for k, v in marks1.items() if not v]:
             marks_after.pop(key, None)
-        later = (follow_stage(harness, values1, marks_after, catalog.rows, observe, today, skip=refused)
+        later = (follow_stage(harness, values1, marks_after, rows, observe, today, skip=refused)
                  if reverts else entries)
         plan = _plan_writes(reverts, [e for e in later if e["action"] == "follow"])
         pending = read_only and bool(plan)
@@ -720,7 +819,8 @@ def _short(exc: Exception) -> str:
 def apply_harness(harness: str, *, source_root: str | Path | None = None,
                   read_catalog: Callable | None = None, probe: Callable | None = None,
                   runtime: str | Path | None = None, today: str | None = None,
-                  rejected: Iterable[str] | None = None, lock_wait: float = LOCK_WAIT) -> dict:
+                  rejected: Iterable[str] | None = None, lock_wait: float = LOCK_WAIT,
+                  refresh_wait: float = REFRESH_WAIT) -> dict:
     """Write what the survey plans, to this harness's table. Never raises.
 
     First the cells that followed a model the record shows refused go back (a refusal the
@@ -731,7 +831,10 @@ def apply_harness(harness: str, *, source_root: str | Path | None = None,
     written; a list that cannot be read still lets the first part run. The table's lock is
     waited for `lock_wait` seconds (a table that is locked longer is not written: the next
     update or refresh does it). A table the person made read-only is not written: the result
-    says `read_only` when it had something to write.
+    says `read_only` when it had something to write. A list another CLI version wrote is first
+    refreshed by the installed CLI (once, `refresh_wait` seconds, before the lock); when it is
+    still another version's, the cells are not followed and the result's `cli` says so (the going
+    back is the same).
     """
     result = {"harness": harness, "status": "skipped", "reason": "", "entries": [], "cli": None,
               "plan": [], "states": {"followed": 0, "kept": 0, "held": 0}, "written": [],
@@ -748,8 +851,19 @@ def apply_harness(harness: str, *, source_root: str | Path | None = None,
         except Exception:
             catalog = None
         observe = _observer(harness, probe or installed_cli)
-        if catalog is not None and any(row.get("min_cli") for row in catalog.rows):
+        if catalog is not None and (any(row.get("min_cli") for row in catalog.rows)
+                                    or getattr(catalog, "client_version", None)):
             observe()  # the CLI is asked before the table is locked, never under the lock
+        other = _other_cli(catalog, observe) if catalog is not None else None
+        if other:  # the installed CLI writes its list once more (outside the lock); else nothing follows
+            if _refresh(harness, observe, refresh_wait):
+                try:
+                    again = _read_catalog(harness, read_catalog)
+                except Exception:  # noqa: BLE001
+                    again = None
+                if again is not None:
+                    catalog = again
+                    other = _other_cli(catalog, observe)
         refused = frozenset(_rejected(harness) if rejected is None else rejected)
         settings = _model_settings()
         ok = _check(settings, harness, source_root)
@@ -764,8 +878,11 @@ def apply_harness(harness: str, *, source_root: str | Path | None = None,
             values1 = settings.parse_text(text1) if reverts else values
             marks1 = model_follow_mark.read_marks(text1) if reverts else marks
             entries = follow_stage(harness, values1, marks1,
-                                   catalog.rows if catalog is not None else None, observe, today,
-                                   skip=refused)
+                                   catalog.rows if catalog is not None and not other else None,
+                                   observe, today, skip=refused)
+            if other:
+                for entry in entries:
+                    entry["reason"] = "list-from-another-cli"
             follows, bad_follows = _accepted(
                 harness, text1, [e for e in entries if e["action"] == "follow"], ok)
             if _read_only(receipt.selected_path):  # the person's own: nothing is written
@@ -856,6 +973,8 @@ def state_counts(result: Mapping) -> tuple[int, int, int]:
 # not know (a Claude alias such as `opus` is one), a model with no family and version, or a
 # newer model whose companion lines cannot move with it.
 _NOT_FOLLOWABLE = frozenset({"not-in-list", "no-pattern", "lines-do-not-fit"})
+# Why a cell cannot be told at all: there is no list, or the list is another CLI version's.
+_NOT_KNOWN = frozenset({"no-catalog", "list-from-another-cli"})
 
 
 def fleet_view(harnesses: Iterable[str] = HARNESSES, **kwargs) -> list[dict]:
@@ -871,7 +990,9 @@ def fleet_view(harnesses: Iterable[str] = HARNESSES, **kwargs) -> list[dict]:
     "since": {"date", "from", "to", "effort_was": the effort the follow lowered or None, "lines":
     keys of the companion lines the follow moved, read from their own records} | None,
     "followable": False for a cell no update can follow (`reason` is `not-in-list`, `no-pattern`
-    or `lines-do-not-fit`), None without a list, else True, "reason": the survey's reason for the
+    or `lines-do-not-fit`), None without a list or with one the installed CLI did not write
+    (`reason` `no-catalog` or `list-from-another-cli`: `cli` then says so, and `next` is empty),
+    else True, "reason": the survey's reason for the
     cell, "held": the refused model (the one the cell holds
     on, or the newest model its list gives that the record shows refused) | None,
     "next": {"model", "effort", "branch": "will-follow"|"proposal"|"kept"|"revert", "reason",
@@ -900,7 +1021,7 @@ def fleet_view(harnesses: Iterable[str] = HARNESSES, **kwargs) -> list[dict]:
                 "since": ({"date": state["date"], "from": state["from"], "to": state["to"],
                            "effort_was": state["effort_was"], "lines": entry["linked"]}
                           if record and state["why"] in ("followed", "reverted", "held", "kept") else None),
-                "followable": (None if entry["reason"] == "no-catalog" else
+                "followable": (None if entry["reason"] in _NOT_KNOWN else
                                entry["reason"] not in _NOT_FOLLOWABLE),
                 "reason": entry["reason"],
                 "held": state["skip"] or entry.get("skipped"), "next": following,
@@ -966,9 +1087,13 @@ def lines(results: Iterable[Mapping]) -> list[str]:
                        + (f" · {entry['command']}" if entry["command"] else ""))
         note = result.get("cli")
         if note:
-            name = _CLI_NAME[note["harness"]]
+            name = _CLI_NAME.get(note["harness"], note["harness"])
             how = note["command"] or f"update the {name} CLI yourself"
-            if note["kind"] == "previous-generation":
+            if note["kind"] == "list-from-another-cli":
+                out.append(f"model follow: {note['harness']}: the model list was written by CLI "
+                           f"{note['list_version']}, installed is {note['version']} · start "
+                           f"{note['harness']} once to refresh it · nothing followed")
+            elif note["kind"] == "previous-generation":
                 out.append(f"model follow: {note['harness']} CLI {note['version']} lists "
                            f"{', '.join(note['models'])} as previous generation with no "
                            f"successor · {how}")
