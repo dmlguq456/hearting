@@ -5,7 +5,8 @@
 // row for a row that can be chosen), and may carry `key` (it can be chosen), `group` (the id of the heading its open state is kept by),
 // `when: 'open'` (shown only while that group is open), `alt` (the rows shown instead while it is open) and `text` (the whole
 // words of an item whose row was cut: set in place of that row, wrapped, while the person has the item open; an item whose
-// row was not cut has none, so there is nothing to open). Keys and ids are short names, never the words themselves. This file
+// row was not cut has none, so there is nothing to open) and `more` (rows that stand under the item's row while the person has it
+// open: the backlog's indented lines; an item that has them can be opened as one whose row was cut can). Keys and ids are short names, never the words themselves. This file
 // lays those out by the host's state and moves it. It reads
 // nothing, asks nothing and starts nothing: a state is `{sel, fold: Set of group ids, items: Set of item keys}`.
 //
@@ -21,9 +22,10 @@ function layout(entries, state, { width = 0, measure = defaultMeasure } = {}) {
   const rows = [], marks = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (entry.when === 'open' && !open(entry.group)) continue;
-    const opened = !!entry.key && !!entry.text && state.items.has(entry.key);
-    const own = opened && width > 0 ? unfold(entry, width, measure) : entry.alt && open(entry.group) ? entry.alt : entry.rows;
-    if (entry.key) marks.push({ key: entry.key, at: rows.length, rows: own.length, group: entry.group || '', text: !!entry.text, open: opened });
+    const opened = !!entry.key && (!!entry.text || !!entry.more) && state.items.has(entry.key);
+    const shown = opened && width > 0 && entry.text ? unfold(entry, width, measure) : entry.alt && open(entry.group) ? entry.alt : entry.rows;
+    const own = opened && entry.more ? [...shown, ...entry.more] : shown;
+    if (entry.key) marks.push({ key: entry.key, at: rows.length, rows: own.length, group: entry.group || '', text: !!entry.text || !!entry.more, open: opened });
     for (const row of own) rows.push(row);
   }
   const found = marks.find(m => m.key === state.sel), chosen = found || marks[0] || null;
@@ -112,7 +114,7 @@ function entriesOf(result) {
   return result.list.filter(e => e && typeof e === 'object').map(e => ({ rows: rowsIn(e.rows),
     ...(typeof e.key === 'string' && e.key ? { key: e.key } : {}), ...(typeof e.group === 'string' ? { group: e.group } : {}),
     ...(e.when === 'open' ? { when: 'open' } : {}), ...(Array.isArray(e.alt) ? { alt: rowsIn(e.alt) } : {}),
-    ...(typeof e.text === 'string' && e.text ? { text: e.text } : {}) }));
+    ...(typeof e.text === 'string' && e.text ? { text: e.text } : {}), ...(Array.isArray(e.more) && e.more.length ? { more: rowsIn(e.more) } : {}) }));
 }
 
 module.exports = { layout, neighbour, press, hits, runParts, rowsOf, entriesOf, wrap };

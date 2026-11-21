@@ -39,8 +39,8 @@ function screen(all, scroll, own, reveal, span = 1) {
   }
   clamp(); lay(); clamp();
   const body = [...all.slice(scroll, scroll + space), ...guide.map(text => [{ text, dim: true }])];
-  const title = [{ text: 'STATUS', dim: true }, { text: input.title_rest }];
-  const view = panelView.popup({ cols: input.cols, rows: input.rows, band: 0, kind: 'table', title, body, sections: names, current: 0,
+  const title = [{ text: input.word || 'STATUS', dim: true }, { text: input.title_rest }];
+  const view = panelView.popup({ cols: input.cols, rows: input.rows, band: 0, kind: 'table', title, body, sections: names, current: input.current || 0,
     model: { colors: 256, no_color: true }, cellWidth, background: '' });
   // The frame alone: the empty cells round it (one a side, one above and below where the window has them) are left out.
   const above = view.frame.top - view.top, left = view.frame.left - view.left, right = view.left + view.width - (view.frame.left + view.frame.width);

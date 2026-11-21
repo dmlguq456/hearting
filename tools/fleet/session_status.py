@@ -310,7 +310,8 @@ def read(cwd, routes=(), now=None):
         if path is None and folders:
             campaign = _campaign_name(folders[0])
             slot = os.path.relpath(os.path.join(folders[0], project_status.STATUS_NAMES[0]), root)
-        watch = ([path] if path else []) + [folder.rstrip(os.sep) + os.sep for folder in folders]
+        # (11-21: the backlog document is on the same watch, so the panel's BACKLOG part is read again when it changes)
+        watch = ([path] if path else []) + [folder.rstrip(os.sep) + os.sep for folder in folders] + [os.path.join(root, BACKLOG_NAME)]
         return {"word": word, "has_doc": path is not None, "campaign": campaign, "age": age,
                 "title": _title(word, campaign if path else "", age), "path": path or "",
                 "slot": slot, "watch": list(dict.fromkeys(watch))}
@@ -426,20 +427,22 @@ def popup_doc(view, width, now=None, want_list=False):
     ``rows`` is ``None`` when the document cannot be read (see ``popup_doc_rows``).  ``listing`` is ``None`` unless
     ``want_list`` and the document is the generated campaign page (marker on its first line) read whole; then it is
     ``[entry]`` (see ``listing_entries``).  Without ``want_list`` the rows are the ones the popup always drew and no list
-    is made at all: the document read whole (``full document ›``) asks this way."""
+    is made at all: the document read whole (``full document ›``) asks this way.  With a list, ``rows`` is a function that makes
+    them (the list screen needs none of them: the caller that has to drop the list calls it, nothing else pays for them)."""
     width = max(1, int(width))
-    if not view.get("has_doc"):
-        rows, lines, cut = _doc_rows_of(view, width, None, False), None, False
-    else:
-        lines, cut = read_text(view["path"])
-        if lines is None:
-            return None, None
+
+    def make(lines, cut):
         rows = _doc_rows_of(view, width, lines, cut)
-    rows = [[(transcript.clean(text), key) for text, key in row] for row in rows]
-    if not want_list or lines is None or cut or not is_generated(lines):
-        return rows, None
+        return [[(transcript.clean(text), key) for text, key in row] for row in rows]
+    if not view.get("has_doc"):
+        return make(None, False), None
+    lines, cut = read_text(view["path"])
+    if lines is None:
+        return None, None
+    if not want_list or cut or not is_generated(lines):
+        return make(lines, cut), None
     now = time.time() if now is None else now
-    return rows, listing_entries(parse_listing(lines), width, _doc_old(view, now), now)
+    return (lambda: make(lines, cut)), listing_entries(parse_listing(lines), width, _doc_old(view, now), now)
 
 
 def _clean_all(value):
@@ -559,13 +562,14 @@ def _cut_row(segments, width):
     return transcript._cut([(transcript.clean(text), key) for text, key in segments], width)
 
 
-def _entry(rows, key=None, group=None, when=None, alt=None, text=None):
+def _entry(rows, key=None, group=None, when=None, alt=None, text=None, more=None):
     """One part of the screen.  ``key`` makes it a row the person can choose; ``group`` the heading it belongs to
     (the id of the group the host's open state is kept by); ``when="open"`` shows it only while that group is open;
     ``alt`` the rows shown instead while the group is open; ``text`` (the whole words of an item whose row was cut)
-    is what the host sets in place of the cut row, wrapped, while the person has the item open."""
+    is what the host sets in place of the cut row, wrapped, while the person has the item open; ``more`` (the backlog's
+    indented lines under an item) is the rows that stand under the item's row while the person has it open."""
     entry = {"rows": rows}
-    for name, value in (("key", key), ("group", group), ("when", when), ("alt", alt), ("text", text)):
+    for name, value in (("key", key), ("group", group), ("when", when), ("alt", alt), ("text", text), ("more", more)):
         if value:
             entry[name] = value
     return entry
@@ -578,13 +582,19 @@ def _digest(*parts):
 
 
 def _group_ids(groups):
-    """One id per group, in order: the digest of its heading, and ``-N`` for the Nth group that says the same heading."""
+    """One id per group, in order: the digest of its heading, and ``-N`` for the Nth group that says the same heading (headings of
+    the same name are joined in order: the Nth of them is the one the choice and the opened state follow)."""
     seen, ids = {}, []
     for group in groups:
         base = _digest(group["name"])
         seen[base] = seen.get(base, 0) + 1
         ids.append(base if seen[base] == 1 else f"{base}-{seen[base]}")
     return ids
+
+
+def _item_key(gid, text, seen):
+    """The key of an item: its group's id, the words' own digest, and the order of the same words twice in a group."""
+    return f"i:{gid}:{_digest(text)}" + (f":{seen}" if seen > 1 else "")
 
 
 def listing_entries(parsed, width, old=False, now=None):
@@ -630,7 +640,7 @@ def listing_entries(parsed, width, old=False, now=None):
             seen = taken[text] = taken.get(text, 0) + 1
             # (the words' own digest in the key: the choice follows the same words when the page is read again; the same words
             # twice in a group are told by their order)
-            key = f"i:{gid}:{_digest(text)}" + (f":{seen}" if seen > 1 else "")
+            key = _item_key(gid, text, seen)
             lead = [_SLOT] + ([("  ", None)] if folded else []) + ([("! ", "lvl_y")] if kind == "waiting" else [])
             whole = lead + [(transcript.clean(text), "soft")]
             row = _cut_row(whole, width)
@@ -652,3 +662,268 @@ def listing_entries(parsed, width, old=False, now=None):
         out.append(_entry([[]]))
     out.append(_entry([_cut_row([_SLOT, (ui("fleet.status.popup.full") + " ›", "soft")], width)], key="full"))
     return out
+
+
+# -- the panel's two short lists, and the backlog (11-21) ---------------------------------------------------------------
+#
+# Under the REPO group the panel has a STATUS part and a BACKLOG part: each a head row and the first three items, the rest as
+# ``+N`` on the head.  Both are read when the panel reads its status button (one read, in the same worker), and only when the
+# document changed (``sign``: its path, modification time and size, which the host sends back with its next ask).
+#
+# STATUS items are the list screen's own reading: ``parse_listing``'s ``waiting`` group, then its ``running`` group
+# (``listing_entries`` draws the same groups in the same order); there is no second reading of the page.  BACKLOG is
+# ``<artifact root>/backlog.md`` (written by another task; only read here): ``##`` headings are the groups (campaign folder names
+# or ``Unassigned``, as written), a top-level bullet is an item, and the indented lines under it are its detail.
+
+BACKLOG_NAME = "backlog.md"
+BACKLOG_WORD = "BACKLOG"
+PANEL_ITEMS = 3        # items each short list shows (the panel gives them up in its own order)
+PANEL_TEXT = 200       # characters of an item's title the panel keeps
+DETAIL_LINES = 12      # indented lines kept under one backlog item
+DETAIL_ROWS = 3        # rows one of them takes in the popup
+BACKLOG_WORDS = {"updated": "updated", "old": "old document", "full": "full document", "none": "No backlog document yet.",
+                 "cut": "… 64 KiB"}      # (the words Hearting puts there are English, as the panel's section names are)
+
+
+def parse_backlog(lines):
+    """``{title, updated, groups}`` of a backlog document's lines; ``groups`` is ``[{name, items: [{text, detail}]}]``.
+
+    A ``##`` heading is a group (its words as written, the markdown taken off).  A top-level bullet under one is an item
+    and the indented lines after it (a sub-bullet too) are its ``detail``; a code fence is not read.  A line that is none
+    of these is left to the full document, and a bullet before any ``##`` belongs to no group (nothing is made up for it)."""
+    title, updated, groups = "", None, []
+    current, item, fence = None, None, False
+    for raw in lines:
+        raw = str(raw)
+        stripped = raw.strip()
+        if stripped.startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence or not stripped:
+            continue
+        indented = raw[:1] in (" ", "\t")
+        heading = None if indented else _HEADING.match(stripped)
+        if heading:
+            depth, words = len(heading.group(1)), project_status._plain(heading.group(2))
+            item = None
+            if depth == 1:
+                title = title or words
+                current = None
+            elif depth == 2:
+                current = {"name": words, "items": []}
+                groups.append(current)
+            continue
+        if current is None:
+            found = _UPDATED.match(stripped)
+            if found and updated is None:
+                updated = tuple(int(part) for part in found.groups())
+            continue
+        if indented:
+            if item is not None and len(item["detail"]) < DETAIL_LINES:
+                item["detail"].append(transcript.clean(project_status._plain(stripped)))
+            continue
+        bullet = _BULLET.match(raw)
+        item = None
+        if bullet:
+            text = project_status._plain(bullet.group(1))
+            if text:
+                item = {"text": text, "detail": []}
+                current["items"].append(item)
+    return {"title": title, "updated": updated, "groups": groups}
+
+
+def _own_first(groups, own):
+    """``[(group, id, is_own)]``: the groups headed by ``own`` (this window's campaign folder name) first, then the rest in order."""
+    ids = _group_ids(groups)
+    rows = [(group, gid, bool(own) and group["name"] == own) for group, gid in zip(groups, ids)]
+    return [row for row in rows if row[2]] + [row for row in rows if not row[2]]
+
+
+def backlog_entries(parsed, own, width, old=False, now=None, cut=False):
+    """The backlog's list screen at ``width`` cells as entries (see ``_entry``): the status screen's own parts, drawn by the same code.
+
+    Its head is the title and ``updated …``; the group of this window's campaign (``own``) stands open on top, every other group is
+    a folded line with its count (``› <heading> N``) in the document's order; an item opens to the indented lines under it;
+    ``full document ›`` ends it.  Keys are the status screen's (``g:``, ``i:``, ``full``)."""
+    width = max(8, int(width))
+    out = []
+    if parsed["title"]:
+        out.append(_entry(_wrapped(parsed["title"], width, 2, "sect")))
+    stamp = parsed["updated"]
+    if stamp:
+        year, month, day, hour, minute = stamp
+        when = f"{month:02d}-{day:02d} {hour:02d}:{minute:02d}"
+        if year != time.localtime(time.time() if now is None else now).tm_year:
+            when = f"{year}-{when}"
+        said = f"{BACKLOG_WORDS['updated']} {when}"
+    else:
+        said = BACKLOG_WORDS["updated"] + ": could not read the time"
+    said = " · ".join(part for part in (said, BACKLOG_WORDS["old"] if old else "") if part)
+    out.append(_entry([_cut_row(([("! ", "lvl_y")] if old else []) + [(said, "dim")], width)]))
+    out.append(_entry([[]]))
+    for group, gid, mine in _own_first(parsed["groups"], own):
+        items = group["items"]
+        head = [(group["name"], "sect"), (f" {len(items)}", "dim")]
+        folded = not mine
+        out.append(_entry([_cut_row(([_SLOT, ("› ", "soft")] if folded else []) + head, width)], key=("g:" + gid) if folded else None,
+                          group=gid if folded else None, alt=[_cut_row([_SLOT, ("▾ ", "soft")] + head, width)] if folded else None))
+        taken = {}
+        for item in items:
+            text = item["text"]
+            seen = taken[text] = taken.get(text, 0) + 1
+            lead = [_SLOT] + ([("  ", None)] if folded else [])
+            whole = lead + [(transcript.clean(text), "soft")]
+            row = _cut_row(whole, width)
+            cutoff = "".join(part for part, _ in row) != "".join(part for part, _ in whole)
+            indent = sum(len(part) for part, _ in lead) + 2
+            more = [[(" " * indent, None)] + line for detail in item["detail"] for line in
+                    _wrapped_rows(detail, max(8, width - indent), DETAIL_ROWS)]
+            out.append(_entry([row], key=_item_key(gid, text, seen), group=gid if folded else None, when="open" if folded else None,
+                              text=transcript.clean(text) if cutoff else None, more=more or None))
+        if not folded:
+            out.append(_entry([[]]))
+    if not (out and out[-1]["rows"] == [[]]):
+        out.append(_entry([[]]))
+    if cut:
+        out.append(_entry([[(BACKLOG_WORDS["cut"], "dim")]]))
+    out.append(_entry([_cut_row([_SLOT, (BACKLOG_WORDS["full"] + " ›", "soft")], width)], key="full"))
+    return out
+
+
+def _wrapped_rows(text, width, rows):
+    return _wrapped(text, width, rows, "dim")
+
+
+def backlog_path(root):
+    return os.path.join(root, BACKLOG_NAME)
+
+
+def read_backlog(root):
+    """``(lines, cut)`` of ``<root>/backlog.md`` (the first 64 KiB, as ``read_text``), or ``(None, False)`` when there is none or
+    it cannot be read (a link, a folder, no permission): the same as no document."""
+    import artifact_campaign_documents as documents
+    try:
+        raw, _info, coverage = documents.read_document(Path(root), BACKLOG_NAME)
+    except Exception:  # noqa: BLE001 -- an unreadable backlog is no backlog
+        return None, False
+    text = raw.decode("utf-8", "replace")
+    cut = coverage != "complete"
+    if cut:
+        text = text[:text.rfind("\n") + 1] if "\n" in text else ""
+    return text.splitlines(), cut
+
+
+def own_folder(view):
+    """The name of the folder this window's status document is in (a backlog group of that name is this window's campaign)."""
+    path = view.get("path") if isinstance(view, Mapping) else ""
+    return os.path.basename(os.path.dirname(str(path))) if path else ""
+
+
+def backlog_view(root, own, width, now=None, want_list=False):
+    """``(rows, listing, view)`` of the backlog popup at ``width`` cells: ``rows`` is a function when ``listing`` is made (as
+    ``popup_doc``'s), ``view`` is ``{has_doc, title, age}``.  No document (or one that cannot be read): one dim row, no list."""
+    now = time.time() if now is None else now
+    lines, cut = read_backlog(root) if root else (None, False)
+    if lines is None:
+        row = [[(BACKLOG_WORDS["none"], "dim")]]
+        return row, None, {"has_doc": False, "title": BACKLOG_WORD, "age": ""}
+    stamp = _mtime(backlog_path(root))
+    age = _age(stamp, now)
+    view = {"has_doc": True, "title": BACKLOG_WORD + (" · " + age if age else ""), "age": age}
+
+    def make():
+        rows = transcript.doc_rows(lines, max(1, int(width)))
+        if cut:
+            rows.append([("… 64 KiB", "dim")])
+        return [[(transcript.clean(text), key) for text, key in row] for row in rows]
+    if not want_list:
+        return make(), None, view
+    old = stamp is not None and now - stamp >= 3 * 86400
+    try:
+        from .explorer.live import STATUS_STALE_DAYS
+        old = stamp is not None and now - stamp >= STATUS_STALE_DAYS * 86400
+    except Exception:  # noqa: BLE001 -- three days wherever Fleet's own cannot be read
+        pass
+    return make, backlog_entries(parse_backlog(lines), own, width, old, now, cut), view
+
+
+def panel_items(parsed, first=PANEL_ITEMS):
+    """``(items, total)`` of the status list: what waits for the person, then what is in progress, the list screen's own order.
+
+    ``parsed`` is ``parse_listing``'s answer.  Each item is ``{mark, text, key}``: ``mark`` is ``!`` for what waits (the screen's
+    own mark) and '' for the rest; ``key`` is the line's key on the list screen (a press on the item stands on it there).
+    ``total`` counts every item of the two groups; the recent and folded groups are not counted."""
+    ids = _group_ids(parsed["groups"])
+    pairs = [(group, gid) for group, gid in zip(parsed["groups"], ids) if group["kind"] in ("waiting", "running")]
+    pairs.sort(key=lambda pair: 0 if pair[0]["kind"] == "waiting" else 1)
+    items, total = [], 0
+    for group, gid in pairs:
+        taken = {}
+        for text in group["items"]:
+            seen = taken[text] = taken.get(text, 0) + 1
+            total += 1
+            if len(items) < first:
+                items.append({"mark": "!" if group["kind"] == "waiting" else "", "text": transcript.clean(text)[:PANEL_TEXT],
+                              "key": _item_key(gid, text, seen)})
+    return items, total
+
+
+def panel_backlog_items(parsed, own, first=PANEL_ITEMS):
+    """``(items, total)`` of the backlog: this window's campaign group first, then the others in the document's order."""
+    items, total = [], 0
+    for group, gid, _mine in _own_first(parsed["groups"], own):
+        taken = {}
+        for item in group["items"]:
+            text = item["text"]
+            seen = taken[text] = taken.get(text, 0) + 1
+            total += 1
+            if len(items) < first:
+                items.append({"mark": "", "text": transcript.clean(text)[:PANEL_TEXT], "key": _item_key(gid, text, seen)})
+    return items, total
+
+
+def _sign(path):
+    """A document's identity for the read-again test: its path, modification time (ns, as text) and size; None where there is none."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return f"{path}|{info.st_mtime_ns}|{info.st_size}"
+
+
+def panel_lists(cwd, view, have=None, now=None):
+    """The panel's two short lists, ``{"status": …, "backlog": …}`` (``None`` where the folder has no artifact root).
+
+    Each is ``{"same": True}`` where the document is the one ``have`` (the signs the host holds, ``{"status": s, "backlog": s}``)
+    names, else ``{"sign", "items", "total"}`` read from it (``has_doc`` for the backlog: it is read and readable).  A
+    document that did not change is not read or parsed again.  Never raises: a list that cannot be read has no items."""
+    try:
+        now = time.time() if now is None else now
+        root = _root(cwd, now)
+        if not root:
+            return None
+        have = have if isinstance(have, Mapping) else {}
+        out = {}
+        path = view.get("path") if isinstance(view, Mapping) else ""
+        sign = _sign(path) if path else None
+        if sign is not None and have.get("status") == sign:
+            out["status"] = {"same": True}
+        else:
+            items, total = [], 0
+            lines, cut = read_text(path) if sign is not None else (None, False)
+            if lines is not None and not cut and is_generated(lines):
+                items, total = panel_items(parse_listing(lines))
+            out["status"] = {"sign": sign, "items": items, "total": total}
+        sign = _sign(backlog_path(root))
+        if sign is not None and have.get("backlog") == sign:
+            out["backlog"] = {"same": True}
+        else:
+            items, total, has = [], 0, False
+            lines, cut = read_backlog(root) if sign is not None else (None, False)
+            if lines is not None:
+                has = True
+                items, total = panel_backlog_items(parse_backlog(lines), own_folder(view))
+            out["backlog"] = {"sign": sign, "has_doc": has, "items": items, "total": total}
+        return out
+    except Exception:  # noqa: BLE001 -- the panel draws on without its lists
+        return None

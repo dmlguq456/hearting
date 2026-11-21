@@ -2,7 +2,7 @@
 """The status popup's screens as text, from one document and a size (11-21, design C).
 
     python3 -I -B utilities/status_popup_picture.py <campaign.md | -> [--width 100] [--height 26] [--steps first,group,item,short,full]
-                                                    [--fleet-line TEXT] [--now EPOCH] [--out FILE]
+                                                    [--fleet-line TEXT] [--now EPOCH] [--out FILE] [--kind status|backlog] [--own FOLDER]
 
 ``<document>`` is a ``campaign.md`` (the generated page) or any other status page; ``-`` is no document. ``--width`` and
 ``--height`` are the popup frame's size in cells (100 x 26 by default). The steps draw, in order: ``first`` the screen the
@@ -10,6 +10,10 @@ popup opens on, ``group`` the same with the first folded group opened, ``item`` 
 ``short`` with the first item that is not cut pressed (it has nothing to open: the screen stays), ``all`` with
 ``all N ›`` opened, ``full`` the document read whole (``full document ›``). A page that is not the generated one has no list
 screen: ``first`` and ``full`` draw the one screen it always had.
+
+``--kind backlog`` draws the BACKLOG popup the same way: ``<document>`` is a ``backlog.md`` (or ``-`` for none), ``--own`` the name of the
+campaign folder this window's status document is in (its group stands open on top), and the steps are the same (``first``, ``group`` the
+first folded group opened, ``item`` the first item that has something to open, opened, ``short``, ``full``); it has no Fleet lines.
 
 What it runs is the product's: the backend's own answer (``session_shell._status_popup``, which reads the document the way the
 popup does) laid out by the host's own list code (``utilities/session-shell/status-list.cjs``) and drawn in the popup's own frame
@@ -35,7 +39,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SECTIONS = ["STATUS", "NOW", "QUESTIONS", "ROUTE", "MESSAGES", "MEM"]
+SECTIONS = ["STATUS", "BACKLOG", "NOW", "QUESTIONS", "ROUTE", "MESSAGES", "MEM"]
 
 
 def main(argv=None):
@@ -47,6 +51,8 @@ def main(argv=None):
     parser.add_argument("--fleet-line", default="fixture: Fleet's status line stands here")
     parser.add_argument("--now", type=float, default=None, help="the time the age is told against (default: now)")
     parser.add_argument("--out", default="")
+    parser.add_argument("--kind", choices=("status", "backlog"), default="status")
+    parser.add_argument("--own", default="")
     args = parser.parse_args(argv)
     if args.width < 20 or args.height < 6:
         parser.error("the popup frame is at least 20 x 6 cells")
@@ -84,6 +90,8 @@ def picture(args, scratch):
     columns = max(20, min(200, size["width"] - 4))
     now = time.time() if args.now is None else args.now
 
+    if args.kind == "backlog":
+        return backlog_picture(args, scratch, node, helper, columns, cols, rows, now, session_shell, session_status, mock)
     campaign = "campaign"
     if args.document == "-":
         view = {"word": "STATUS", "has_doc": False, "campaign": "", "age": "", "title": "STATUS", "path": "",
@@ -124,6 +132,29 @@ def picture(args, scratch):
     steps = [step for step in args.steps.split(",") if step]
     drawn = run_node(node, helper, scratch, {"mode": "draw", "cols": cols, "rows": rows, "answer": first, "document": doc, "fleet": fleet if fleet.get("ok") else None,
                                        "sections": SECTIONS, "keys": keys, "title_rest": rest, "steps": steps})
+    return "{} x {} popup frame\n\n{}\n".format(args.width, args.height, drawn.rstrip("\n"))
+
+
+def backlog_picture(args, scratch, node, helper, columns, cols, rows, now, session_shell, session_status, mock):
+    """The BACKLOG popup's screens: ``<scratch>/root/backlog.md`` is the copy of the document (its modification time kept), read the way the popup reads it."""
+    root = scratch / "root"
+    root.mkdir(exist_ok=True)
+    if args.document != "-":
+        shutil.copy2(Path(args.document), root / "backlog.md")
+    binding = {"harness": "claude", "sid": "00000000-0000-4000-8000-000000000001"}
+    request = {"cwd": str(scratch), "routes": [], "status": {}, "own": args.own}
+    with mock.patch.object(session_status, "_root", lambda cwd, at: str(root)), mock.patch("time.time", lambda: now):
+        first = session_shell._status_popup(binding, dict(request, part="list"), columns, 256, True, "backlog")
+        doc = session_shell._status_popup(binding, dict(request, part="doc"), columns, 256, True, "backlog")
+    if not first.get("ok") or not doc.get("ok"):
+        raise SystemExit("the document could not be read: " + json.dumps(doc))
+    from fleet.config import ui_text
+    keys = {"list": ui_text("fleet.session_panel.popup_status"),
+            "popup_keys": ui_text("fleet.session_panel.popup_keys"), "fold": ui_text("fleet.session_panel.popup_unfold")}
+    title = str(first.get("title") or "BACKLOG")
+    steps = [step for step in args.steps.split(",") if step]
+    drawn = run_node(node, helper, scratch, {"mode": "draw", "cols": cols, "rows": rows, "answer": first, "document": doc, "fleet": None, "sections": SECTIONS,
+                                       "keys": keys, "title_rest": title[len("BACKLOG"):], "word": "BACKLOG", "current": 1, "steps": steps})
     return "{} x {} popup frame\n\n{}\n".format(args.width, args.height, drawn.rstrip("\n"))
 
 
