@@ -1129,6 +1129,9 @@ function openPopup(name,open='',page=false){
     // 11-21: the status popup's list screen state: the line chosen, the groups and items opened (by their own words).
     // (a press on one of the panel's items opens it standing on that item: `open` is the item's key, taken if the list has it)
     ...(listed(name)?{listing:null,screen:'',sel:open,fold:new Set(),items:new Set(),more:{},moreAsking:new Set(),reveal:true,listScroll:0}:{})};
+  // An item of another campaign's group (`i:<group id>:…`) pressed on the backlog panel stands in a folded group of the popup: that group opens with it,
+  // else its line is not on the screen and the popup would fall back to the first line.
+  if(name==='BACKLOG'&&table.fold&&/^i:[^:]+:/.test(open))table.fold.add(open.split(':')[1]);
   // The status popup's rows as read last, while no watch event came and the width is the same.
   const kept=name==='STATUS'&&statusPopup&&statusPopup.width===table.width&&statusPopup.generation===statusGeneration;
   if(kept)Object.assign(table,{rows:statusPopup.rows,head:statusPopup.head,doc:statusPopup.doc,title:statusPopup.title,loaded:true,

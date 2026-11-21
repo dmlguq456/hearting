@@ -189,7 +189,7 @@ const mmRows=(p,name)=>{let on=false,n=0;for(const r of p.rows){if(r.k==='mm-hea
         # MEM's heads, is the panel without them; where the heads are not up the whole panel but its REPO row is, byte for byte, and the REPO row ends in the two buttons.
         self.node(self.SORT + r"""
 const lists=[[status(3,5),backlog(3,14)],[status(1,1),backlog(1,1)],[status(0,0),backlog(0,0)],[status(0,0,false),backlog(0,0,false)],[status(3,5),undefined]];   // the last: no BACKLOG value at all (the older host)
-let cases=0,up=0,off=0;
+let cases=0,up=0,off=0,short=0;
 for(const width of [59,44,40,30])for(let height=6;height<=60;height++)for(const question of [false,true])for(const routes of [0,3])for(const messages of [0,7])for(const mem of [0,5]){
   const peers=height%2===0,o={width,height,question,routes,messages,mem,peers},base=sort(drawN({...o,status:undefined,backlog:undefined}));
   lists.forEach(([s,b],n)=>{
@@ -200,6 +200,11 @@ for(const width of [59,44,40,30])for(let height=6;height<=60;height++)for(const 
     if(heads){
       up++;assert.equal(heads,n===4?1:2,where);
       assert.deepEqual(rest(p),rest(base),where);
+      // The BACKLOG items are never short while an empty row is left (a fold that frees several rows at once leaves some: the items stand on them again), and the STATUS items come first.
+      const have=[3,1,0,0,0][n],bItems=items(p,'BACKLOG'),sItems=items(p,'STATUS'),blank=p.rows.filter(r=>r.k==='blank').length;
+      if(bItems<have)short++;
+      assert(!(bItems<have&&blank>0),'a BACKLOG item short with an empty row\n'+where);
+      assert(!(bItems>0&&sItems<[3,1,0,0,3][n]),'a BACKLOG item standing with a STATUS item short\n'+where);
       assert(!v.hits.some(h=>h.row===1&&/^popup:(STATUS|BACKLOG)/.test(h.action)),'no buttons beside the heads\n'+where);
     }else{
       off++;
@@ -210,11 +215,11 @@ for(const width of [59,44,40,30])for(let height=6;height<=60;height++)for(const 
     }
   });
 }
-assert(up>1000&&off>1000,[cases,up,off].join(' '));
+assert(up>1000&&off>1000&&short>100,[cases,up,off,short].join(' '));
 """)
 
     def test_the_lists_give_way_first_and_in_their_order_as_the_height_falls(self):
-        # Height by height: the BACKLOG items, then MESSAGES and MEM fold (each keeps its head and one row), then the STATUS items, then the two heads (the REPO row takes the buttons).
+        # Height by height: the BACKLOG items, then MESSAGES and MEM fold (each keeps its head and one row; the rows a fold leaves empty are the BACKLOG items' again), then the STATUS items, then the two heads (the REPO row takes the buttons).
         self.node(self.SORT + r"""
 const o={width:44,question:true,routes:3,messages:7,mem:5,peers:true};
 const seen=[];
@@ -225,22 +230,21 @@ for(let h=70;h>=14;h--){
   seen.push(r);const w=JSON.stringify(r)+'\n'+p.lines.join('\n');
   assert.deepEqual(rest(p),rest(base),w);
   if(r.heads){
-    // BACKLOG items stand only on empty rows: where they stand nothing is folded.
-    if(r.b>0)assert.deepEqual([r.msg,r.mem],[r.msg0,r.mem0],w);
     // STATUS items give way only once MESSAGES and MEM are down to one row each, and then BACKLOG has none.
     if(r.s<3)assert(r.b===0&&r.msg<=1&&r.mem<=1,w);
-    // A BACKLOG item missing while nothing is folded and a row is empty: never.
-    if(r.b<3&&r.msg===r.msg0&&r.mem===r.mem0)assert.equal(r.gap,0,w);
+    // A BACKLOG item missing while a row is empty: never (a fold that frees several rows at once leaves some, and the BACKLOG items stand on them again).
+    if(r.b<3)assert.equal(r.gap,0,w);
   }else{
     // The heads gone: MESSAGES and MEM are what they are without the lists.
     assert.deepEqual([r.b,r.s,r.msg,r.mem],[0,0,r.msg0,r.mem0],w);
   }
 }
-// Falling, each part only goes (BACKLOG items, STATUS items, the heads never come back as the height falls).
-for(let i=1;i<seen.length;i++){const a=seen[i-1],b=seen[i];assert(b.b<=a.b&&b.s<=a.s&&b.heads<=a.heads,JSON.stringify([a,b]));}
+// Falling, the STATUS items and the heads only go. (The BACKLOG items may stand again where a fold leaves empty rows: the layout without the lists is not monotonic in the height either.)
+for(let i=1;i<seen.length;i++){const a=seen[i-1],b=seen[i];assert(b.s<=a.s&&b.heads<=a.heads,JSON.stringify([a,b]));}
+assert(seen.some(r=>r.heads&&r.b>0&&(r.msg<r.msg0||r.mem<r.mem0)),'the BACKLOG items stand on the rows a fold left');
 // And the four steps all stand in this run, in this order.
 const first=f=>seen.findIndex(f);
-const at=[first(r=>r.heads&&r.b<3),first(r=>r.heads&&r.b===0&&(r.msg<r.msg0||r.mem<r.mem0)),first(r=>r.heads&&r.s<3),first(r=>!r.heads)];
+const at=[first(r=>r.heads&&r.b<3),first(r=>r.heads&&(r.msg<r.msg0||r.mem<r.mem0)),first(r=>r.heads&&r.s<3),first(r=>!r.heads)];
 assert(at.every(x=>x>0)&&at[0]<at[1]&&at[1]<at[2]&&at[2]<at[3],JSON.stringify({at,seen:seen.slice(0,3)}));
 // The full panel stands whole and the same at a height with room to spare.
 assert.deepEqual([seen[0].b,seen[0].s,seen[0].heads],[3,3,2]);
@@ -477,6 +481,82 @@ class BackendTest(unittest.TestCase):
         # A status page that is not the generated one has no items (the popup has no list screen for it either).
         hand = self.page("2026-11-03_hand", "# 손으로 쓴 글\n\n## 하는 중\n- 하나\n")
         self.assertEqual(self.status.panel_lists(self.cwd, hand, {})["status"]["items"], [])
+
+    def test_a_change_of_the_windows_campaign_folder_reads_the_backlog_again_because_its_order_is_made_for_that_folder(self):
+        self.backlog()
+        mine, other = self.page("2026-11-02_some-campaign"), self.page("2026-10-01_other-campaign")
+        first = self.status.panel_lists(self.cwd, mine, {}, now=time.time())
+        have = {"status": first["status"]["sign"], "backlog": first["backlog"]["sign"]}
+        self.assertEqual([i["text"] for i in first["backlog"]["items"]], ["일 하나", "일 둘", "다른 일"])
+        # The same backlog.md, the window in another campaign's folder: not "same", and that folder's group stands first.
+        second = self.status.panel_lists(self.cwd, other, have, now=time.time())
+        self.assertNotEqual(second["backlog"], {"same": True})
+        self.assertEqual([i["text"] for i in second["backlog"]["items"]], ["다른 일", "일 하나", "일 둘"])
+        self.assertNotEqual(second["backlog"]["sign"], first["backlog"]["sign"])
+        # (the sign is still one opaque text; the same folder again is "same")
+        self.assertIsInstance(second["backlog"]["sign"], str)
+        again = {"status": second["status"]["sign"], "backlog": second["backlog"]["sign"]}
+        self.assertEqual(self.status.panel_lists(self.cwd, other, again, now=time.time())["backlog"], {"same": True})
+        # The host holds what the backend answered: asked with the old signs after the window moved, it holds the new order.
+        answers = [{"ok": True, "status": {"word": "STATUS", "has_doc": True, "path": v["path"], "title": "STATUS", "watch": []},
+                    "lists": lists} for v, lists in ((mine, first), (other, second))]
+        with tempfile.TemporaryDirectory(prefix="rlj") as folder:
+            path = Path(folder) / "answers.json"
+            path.write_text(json.dumps(answers, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run([NODE, "-e", HOST + r"""
+const answers=JSON.parse(fs.readFileSync(process.argv[2],'utf8')),asked=[];
+const ctx={process,path,JSON,Set,Array,Number,String,Math,Promise,panelModel:{},table:null,selection:1,lastWatch:[],listed:k=>k==='STATUS'||k==='BACKLOG',
+  readAction:(extra)=>{asked.push(JSON.parse(JSON.stringify(extra)));return Promise.resolve(answers.shift());},observeFiles:()=>false,queueProjection:()=>{},queueDisplay:()=>{},askTable:()=>{}};
+vm.createContext(ctx);
+vm.runInContext(cut('let statusValue=null,','// At a projection:')+'\nthis.api={askStatus,backlogDoc,ownFolder};',ctx);
+const settle=()=>new Promise(r=>setTimeout(r,10)),texts=()=>ctx.api.backlogDoc().items.map(i=>i.text);
+(async()=>{
+  ctx.askStatus();await settle();
+  same([ctx.api.ownFolder(),texts()],['2026-11-02_some-campaign',['일 하나','일 둘','다른 일']]);
+  ctx.askStatus();await settle();
+  assert(asked[1].have.backlog);
+  same([ctx.api.ownFolder(),texts()],['2026-10-01_other-campaign',['다른 일','일 하나','일 둘']]);
+})().catch(e=>{console.error(e);process.exit(1);});
+""", str(SHELL), str(path)], capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_signed_document_is_read_again_where_it_was_made_again_in_a_tick_the_clock_cannot_tell_apart(self):
+        path = self.backlog("## a\n- x\n")
+        stat = os.stat(path)
+        first = self.status._sign(str(path))
+        # Same size, the same modification time put back: the inode (a rename over the file) and the change time still tell.
+        other = Path(str(path) + ".new")
+        other.write_text("## a\n- y\n", encoding="utf-8")
+        os.utime(other, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        os.replace(other, path)
+        self.assertEqual(os.stat(path).st_size, stat.st_size)
+        self.assertEqual(os.stat(path).st_mtime_ns, stat.st_mtime_ns)
+        self.assertNotEqual(self.status._sign(str(path)), first)
+        # In place, size and modification time put back: the change time moves.
+        signed = self.status._sign(str(path))
+        path.write_text("## a\n- z\n", encoding="utf-8")
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertNotEqual(self.status._sign(str(path)), signed)
+        self.assertIsNone(self.status._sign(str(self.root / "none.md")))
+
+    def test_a_panel_item_of_a_folded_group_is_a_line_of_the_popup_once_its_group_is_open(self):
+        self.backlog()
+        own = "2026-10-01_other-campaign"           # one item of its own: the panel fills up with the other group's
+        items, _total = self.status.panel_backlog_items(self.status.parse_backlog(BACKLOG.splitlines()), own, first=2)
+        pressed = items[1]["key"]                    # the first of the group that is a folded line in the popup
+        with tempfile.TemporaryDirectory(prefix="rlj") as folder:
+            path = Path(folder) / "answer.json"
+            path.write_text(json.dumps(self.popup("list", own=own), ensure_ascii=False), encoding="utf-8")
+            out = subprocess.run([NODE, "-e", r"""
+const fs=require('node:fs'),path=require('node:path');
+const list=require(path.join(process.argv[1],'status-list.cjs'));
+const entries=list.entriesOf(JSON.parse(fs.readFileSync(process.argv[2],'utf8'))),key=process.argv[3];
+const closed={sel:key,fold:new Set(),items:new Set()},gid=key.split(':')[1];
+const open={sel:key,fold:new Set([gid]),items:new Set()};
+console.log(JSON.stringify({closed:list.layout(entries,closed).fellBack,open:list.layout(entries,open).fellBack,stands:list.layout(entries,open).sel===key}));
+""", str(SHELL), str(path), pressed], capture_output=True, text=True, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), {"closed": True, "open": False, "stands": True})
 
     def test_the_status_read_carries_the_lists_and_asks_the_signs_back(self):
         value = {"word": "STATUS", "has_doc": True, "path": self.page()["path"], "title": "STATUS x", "slot": "", "watch": []}
@@ -914,6 +994,11 @@ assert.equal(ctx.table.kind,'STATUS');assert.equal(ctx.table.sel,'i:abc:def');as
 ctx.openPopup('STATUS','');assert.equal(ctx.table.sel,'');
 calls.length=0;ctx.openPopup('BACKLOG','i:1:2');
 assert.equal(ctx.table.kind,'BACKLOG');assert.equal(ctx.table.sel,'i:1:2');assert(ctx.table.fold instanceof Set&&ctx.table.items instanceof Set);assert(calls.includes('askTable'));
+// A press on an item of a folded group (another campaign's, when this window's has fewer than three) opens that group with it.
+calls.length=0;ctx.openPopup('BACKLOG','i:g1:abc');assert(ctx.table.fold.has('g1'));assert.equal(ctx.table.sel,'i:g1:abc');
+ctx.openPopup('BACKLOG','i:g2:abc:2');same([...ctx.table.fold],['g2']);                      // (the group id is the key's second part; a repeat's number is the third)
+ctx.openPopup('BACKLOG','');same([...ctx.table.fold],[]);ctx.openPopup('BACKLOG','g:g3');same([...ctx.table.fold],[]);   // no item: nothing opened
+ctx.openPopup('STATUS','i:g1:abc');same([...ctx.table.fold],[]);                              // (the status list has no folded group of items to open)
 // What a panel press names parses to that: `popup:STATUS:i:a:b` is the section STATUS and the key `i:a:b`.
 const [,name,...rest]='popup:BACKLOG:i:a:b'.split(':');same([name,rest.join(':')],['BACKLOG','i:a:b']);
 // The sections the host walks, and the popup kind the backend is asked for.

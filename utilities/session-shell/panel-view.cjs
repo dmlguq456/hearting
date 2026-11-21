@@ -2124,7 +2124,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-22 (the person's STATUS and BACKLOG lists under REPO; one rule): the lists are the first to give way and nothing else gives way for them. The rest stands as it stands
     // in a window without them (the layout above); the lists take the empty rows and, short of those, rows MESSAGES and MEM fold (both keep their head and one row), in this order:
     // the empty rows, the BACKLOG items (3, 2, 1, none: only the empty rows are theirs), MESSAGES and MEM folding, the STATUS items (they may stand on what was folded), then the two heads
-    // together, where the REPO row ends in the two buttons and everything else is the window's own (what was folded unfolds).
+    // together (a fold that frees several rows at once and leaves empty ones is no reason to leave the BACKLOG items short: they stand on those again), where the REPO row ends in the two buttons and everything else is the window's own (what was folded unfolds).
     if(lists.length>0){
       listsOn=true;
       const own=[keepSpacers,messageOne,take.MEM,take.MESSAGES];
@@ -2136,8 +2136,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         [()=>kept.MEM&&take.MEM>1,()=>{take.MEM--;}],
         [()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;}],
         [()=>take.STATUS_ITEMS>0,()=>{take.STATUS_ITEMS--;}]];
+      const backlogFull=take.BACKLOG_ITEMS;
       for(const [can,apply] of steps)while(need()>budget&&can())apply();
       if(need()>budget){keepLists=false;[keepSpacers,messageOne,take.MEM,take.MESSAGES]=own;}
+      // A fold can free several rows at once and leave empty ones: the BACKLOG items stand on them again (up to what they were, and the STATUS items stand already).
+      else while(need()<budget&&take.BACKLOG_ITEMS<backlogFull)take.BACKLOG_ITEMS++;
     }
     const order=[];
     top.forEach((row,i)=>{

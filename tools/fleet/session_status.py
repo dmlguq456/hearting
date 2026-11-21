@@ -989,12 +989,14 @@ def panel_backlog_items(parsed, own, first=PANEL_ITEMS):
 
 
 def _sign(path):
-    """A document's identity for the read-again test: its path, modification time (ns, as text) and size; None where there is none."""
+    """A document's identity for the read-again test: its path, modification time (ns), size, inode and change time (ns), as text; None
+    where there is none.  (The inode and the change time catch a same-size rewrite within one tick of a coarse clock, on a network
+    file system, and a rename over the file.)"""
     try:
         info = os.stat(path)
     except OSError:
         return None
-    return f"{path}|{info.st_mtime_ns}|{info.st_size}"
+    return f"{path}|{info.st_mtime_ns}|{info.st_size}|{info.st_ino}|{info.st_ctime_ns}"
 
 
 def panel_lists(cwd, view, have=None, now=None):
@@ -1020,7 +1022,10 @@ def panel_lists(cwd, view, have=None, now=None):
             if lines is not None and not cut and is_generated(lines):
                 items, total = panel_items(parse_listing(lines))
             out["status"] = {"sign": sign, "items": items, "total": total}
+        own = own_folder(view)
         sign = _sign(backlog_path(root))
+        # the order of the items depends on this window's folder too: a sign that did not name it would keep an old order
+        sign = sign and f"{sign}|{own}"
         if sign is not None and have.get("backlog") == sign:
             out["backlog"] = {"same": True}
         else:
@@ -1028,7 +1033,7 @@ def panel_lists(cwd, view, have=None, now=None):
             lines, more = read_backlog(root) if sign is not None else (None, False)
             if lines is not None:
                 has = True
-                items, total = panel_backlog_items(parse_backlog(lines, detail=False), own_folder(view))
+                items, total = panel_backlog_items(parse_backlog(lines, detail=False), own)
             out["backlog"] = {"sign": sign, "has_doc": has, "items": items, "total": total, "more": more is True}
         return out
     except Exception:  # noqa: BLE001 -- the panel draws on without its lists
