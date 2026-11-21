@@ -821,11 +821,17 @@ every row of it (each row of a wrapped one) has its words bold in the bright
 body color, while every
 other choice keeps the mark's column blank and reads dim grey (without color
 the mark and the weight alone tell them apart). Enter
-sends it, as Claude's own question does; it starts on the recommended choice,
-else the first. Number keys pick a choice and `t` types an answer as before;
-the guidance reads `↑↓ choose · Enter send · t text` (on a Korean screen
-`↑↓ · Enter 보내기 · t 답 입력`, then `Tab 다음 · Esc/Ctrl+] 돌아가기`). A decision
-(approve/reject/defer) highlights nothing until ↑↓ or a number picks one, so
+sends it. A choice-only question starts on its recommended choice, else the first,
+and keeps its existing guidance and number keys. A free-text question starts with
+no selection: its always-visible `› ` row takes printable input immediately,
+including `r/w/f/p/t`; numbers select until writing starts. Down past the last
+choice or a click enters the row; up returns to choices without discarding text.
+Enter sends `[original choice value, typed text]`, omitting whichever is absent;
+with neither, `empty answer` keeps it open. Its one localized guidance row reads
+`↑↓ choose · type to write · Enter send · Tab next · Esc/Ctrl+] back` before writing,
+and `Enter send · ↑ choices · Tab next · Esc/Ctrl+] back` while writing (without
+`↑ choices` when no choices exist). The existing key packing shortens narrow rows.
+A decision (approve/reject/defer) highlights nothing until ↑↓ or a number picks one, so
 Enter alone still sends nothing. With the popup closed, arrows and Enter stay
 the native's. Do not reserve a standalone
 session/age row. Hide an empty result section. Use the
@@ -1078,13 +1084,23 @@ back on that row (keys `Enter 목록으로 돌아가기`); on a route row Enter 
 question or message row that section's popup. No key or press goes to the native window and the window never
 moves. Keys row: `↑↓ · Enter 그 대목 읽기 · ←→ 구획 · …`. The folded strip and a window too small for the panel's NOW row
 reach it as every popup is reached: `Ctrl+]`, then ←→.
+Free-text questions always show an answer row (`› `). Printable input starts writing;
+before writing, digits select a choice. Down after the last choice or a press on the
+answer row enters it; up returns to choices and retains the draft. Enter sends the
+original selected value and the separate text together, or whichever is present;
+an empty answer stays open. Choice-only questions and decisions keep their existing
+controls. Long drafts wrap with two-cell continuation indentation, keeping their tail
+and next input cell visible. The one localized key row describes choosing or writing.
+Tab retains each question's choices and draft. Transport-specific single-value forms
+must not offer mixed input that their recipient cannot retain.
+
 The question popup answers this session's own questions; another session's wait is answered in
 its own window or through Fleet (`f`), which also goes to that session, restarts or tidies it. While it
 stands every key and press is its own (none reaches the native, a native that
 reads the mouse included; whatever follows an Esc, in the same read or within its
 25 ms, other than `[` or `O` (an arrow or function key) is dropped, neither closing
 it nor reaching the native: Alt+letter, Shift/Alt+Enter, Esc then a control byte, and a
-second Esc closes it and is dropped; a paste is the popup's and does nothing, its end mark `ESC[201~` read whole wherever it is split, and a paste that never ends is left by Esc, `Ctrl+]` or a press outside; the popup's input state, a paste under way, a key's front and the Esc waited on, ends with the popup, closed or opened again); a lone Escape,
+second Esc closes it and is dropped; a paste enters a free-text answer row, its end mark `ESC[201~` read whole wherever it is split, and a paste that never ends is left by Esc, `Ctrl+]` or a press outside; the popup's input state, a paste under way, a key's front and the Esc waited on, ends with the popup, closed or opened again); a lone Escape,
 `Ctrl+]`, its `✕` or a press outside it closes it
 and returns to the native input and cursor (the drag and release that follow that
 press are the popup's too; one lone Esc within a second of the Esc that closed it is

@@ -688,7 +688,7 @@ def _message_incarnation_current(signal):
 def _message_answer_error(text):
     if not isinstance(text, str) or not text.strip():
         return "message-answer-empty"
-    if len(text) > 600 or len(text.encode("utf-8")) > _SELECTED_DRAFT_MAX:
+    if len(text.encode("utf-8")) > 16_384:
         return "message-answer-too-large-use-original-session"
     return None
 
@@ -696,7 +696,11 @@ def _message_answer_error(text):
 def _message_body(portable):
     answers = portable.get("answers") if isinstance(portable, dict) else None
     values = answers.get("message-response") if isinstance(answers, dict) else None
-    return values[0] if isinstance(values, list) and len(values) == 1 else None
+    if not isinstance(values, list) or not 1 <= len(values) <= 2 or any(not isinstance(v, str) for v in values):
+        return None
+    # A single answer keeps its existing payload. A choice plus a note retains
+    # both independent values in an unambiguous array in the private prompt.
+    return values[0] if len(values) == 1 else json.dumps(values, ensure_ascii=False)
 
 
 def message_binding_valid(binding):
@@ -710,7 +714,7 @@ def message_binding_valid(binding):
             and binding["question_id"] == "message-response"
             and isinstance(binding["seat_key"], str) and bool(binding["seat_key"])
             and type(binding["sequence"]) is int and binding["sequence"] >= 0
-            and type(binding["body_bytes"]) is int and 0 < binding["body_bytes"] <= 4096
+            and type(binding["body_bytes"]) is int and 0 < binding["body_bytes"] <= 16_384
             and isinstance(binding["action_id"], str) and bool(_SAFE.fullmatch(binding["action_id"]))
             and all(isinstance(binding[key], str) and re.fullmatch(r"[0-9a-f]{64}", binding[key])
                     for key in ("body_id", "body_sha256")))
@@ -4230,11 +4234,14 @@ def _native_response_error(envelope, portable):
             if not isinstance(question, dict):
                 return "workflow-gate-question-invalid"
             values = answers.get(question.get("id"))
-            if not isinstance(values, list) or len(values) != 1:
+            mixed = detail.get("response_mode") == "frame-interview" and question.get("is_other") is True
+            if not isinstance(values, list) or len(values) not in ({1, 2} if mixed else {1}):
                 return "workflow-gate-answer-count-invalid"
             choices = question.get("choices")
             allowed = {choice.get("value", choice.get("label")) for choice in choices
                        if isinstance(choice, dict)} if isinstance(choices, list) else set()
+            if len(values) == 2 and values[0] not in allowed:
+                return "workflow-gate-answer-not-current-option"
             if values[0] not in allowed and question.get("is_other") is not True:
                 return "workflow-gate-answer-not-current-option"
         return None
@@ -4280,6 +4287,21 @@ def _native_response_error(envelope, portable):
     return None
 
 
+def _frame_interview_answers(detail, interview, answers):
+    """Keep the selected value and its note in the frame's existing answer fields."""
+    import frame_interview as FI
+    asked = []
+    for question in detail.get("questions", ()):
+        values = answers.get(question.get("id"))
+        if not isinstance(values, list) or len(values) not in {1, 2}:
+            return None
+        options = [choice.get("label", choice.get("value"))
+                   for choice in question.get("choices", ()) if isinstance(choice, dict)]
+        asked.append({"question": question.get("question"), "options": options,
+                      "answer": values[0], **({"note": values[1]} if len(values) == 2 else {})})
+    return FI.answers_from_native(interview, asked)
+
+
 def _workflow_gate_submit(envelope, portable, action_id):
     """Submit a current person's explicit S2 decision through the normal release CLI."""
     base, error = _selected_base(envelope)
@@ -4318,16 +4340,7 @@ def _workflow_gate_submit(envelope, portable, action_id):
     elif mode == "frame-interview":
         import frame_interview as FI
 
-        asked = []
-        for question in current["detail"].get("questions", ()):
-            values = answers.get(question.get("id"))
-            if not isinstance(values, list) or len(values) != 1:
-                return "unknown", {"reason": "workflow-interview-answer-incomplete"}
-            options = [choice.get("label", choice.get("value"))
-                       for choice in question.get("choices", ()) if isinstance(choice, dict)]
-            asked.append({"question": question.get("question"), "options": options,
-                          "answer": values[0]})
-        answers_file_value = FI.answers_from_native(current["interview"], asked)
+        answers_file_value = _frame_interview_answers(current["detail"], current["interview"], answers)
         if (not isinstance(answers_file_value, dict)
                 or FI.validate_answers(current["interview"], answers_file_value)):
             return "unknown", {"reason": "workflow-interview-answer-invalid"}

@@ -1903,6 +1903,7 @@ function popupMouse(code,x,y,release){
   const hit=inside&&l.hits.find(h=>h.row===row&&col>=h.left&&col<=h.right);
   if(!inside||hit&&hit.action==='popup-close'){epoch++;closePopup();return true;}
   // A section's name on the bottom line opens its popup.
+  if(hit&&hit.action==='answer-write'){block.write();return true;}
   if(hit&&hit.action.startsWith('popup:')){openPopup(hit.action.slice(6));return true;}
   // A table's row: a route unfolds (pressed again, its page).
   const target=table&&(l.tableHits||[]).find(h=>h.row===row&&col>=h.left&&col<=h.right);

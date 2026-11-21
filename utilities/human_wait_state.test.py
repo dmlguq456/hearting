@@ -3576,6 +3576,18 @@ class MessageCompletionTests(unittest.TestCase):
         self.f = self.fixture.__enter__()
         self.addCleanup(self.fixture.__exit__, None, None, None)
 
+    def test_choice_and_note_use_the_private_answer_delivery(self):
+        for harness in ("claude", "codex", "opencode"):
+            signal, envelope = self.f.ask(harness, "mixed-"+harness, "Synthetic choice?", choices=["original-value", "other"])
+            values = ["original-value", "A separate note"]
+            response = {"answers": {"message-response": values}}
+            result = state.submit_selected_response(envelope, response, action_id="mixed-"+harness)
+            self.assertEqual(result["state"], "submitted", result)
+            wire, _, _ = self.f.prepare(signal)
+            self.assertIn(json.dumps(values), wire)
+            self.assertEqual(state._message_answer_error(state._message_body(response)), None)
+        self.assertIsNone(state._message_answer_error("a" * 4096))
+
     def test_shared_project_questions_remain_open_for_each_exact_session(self):
         import session_tidy as tidy
         for harness in ("claude", "codex", "opencode"):

@@ -740,8 +740,11 @@ def _question_text_draft(overlay, question_id=None):
     values = answers.get(question_id, ()) if question_id else ()
     if values and question_free_text_supported(overlay.get("detail"), question_id):
         question = next((item for item in questions if item["id"] == question_id), None)
-        if question and question_multiple_select(overlay.get("detail"), question_id):
-            allowed = set(question.get("option_values", ()))
+        if question and (question_multiple_select(overlay.get("detail"), question_id)
+                         or _question_uses_workflow_transport(overlay.get("detail"))):
+            allowed = {_question_choice_value(c) for c in question.get("choices", ())} | set(question.get("option_values", ()))
+            if _question_uses_workflow_transport(overlay.get("detail")) and len(values) > 1:
+                return str(values[-1])
             return str(next((value for value in values if value not in allowed), ""))
     return str(values[0]) if values else ""
 
@@ -781,10 +784,12 @@ def _question_set_answer(state, question_id, answer):
                                                     "answers", {}).get(question_id, ()))):
         return state, ()
     existing = ((_question_draft_response(overlay) or {}).get("answers", {}).get(question_id, ()))
-    if question_multiple_select(detail, question_id):
+    if question_multiple_select(detail, question_id) or _question_uses_workflow_transport(detail):
         question = next(item for item in question_items(detail) if item["id"] == question_id)
-        allowed = set(question.get("option_values", ()))
+        allowed = {_question_choice_value(c) for c in question.get("choices", ())} | set(question.get("option_values", ()))
         values = [value for value in existing if value in allowed]
+        if _question_uses_workflow_transport(detail):
+            values = values[:1]
         maximum = question.get("max_items")
         if answer and type(maximum) is int and len(values) >= maximum:
             return state, ()
@@ -943,7 +948,8 @@ def _reduce(state, event, frame=None):
                 return state, ()
             if question_multiple_select(detail, question_id):
                 return _question_toggle_choice(state, question_id, answer)
-            return _question_store_answers(state, question_id, [answer])
+            note = _question_text_draft(_question_overlay(state), question_id) if _question_uses_workflow_transport(detail) else ""
+            return _question_store_answers(state, question_id, [answer] + ([note] if note else []))
         if action[0] == "question.edit":
             overlay = dict(_question_overlay(state))
             detail = overlay.get("detail")
@@ -1169,11 +1175,28 @@ def _reduce(state, event, frame=None):
         overlay = _question_overlay(state)
         refs = _question_refs(event)
         selected = state.opened_for("qsel:QUESTIONS", "")
+        if key == "up" and overlay.get("editing"):
+            overlay = dict(overlay)
+            overlay.update(editing=False)
+            return replace(state, question_overlay=overlay), ()
         if key in ("up", "down") and refs:
             ids = [ref.get("id", "") for ref in refs]
             index = ids.index(selected) if selected in ids else (-1 if key == "down" else 0)
             step = -1 if key == "up" else 1
             return _question_selection(state, refs[(index + step) % len(refs)])
+        if isinstance(key, str) and (key.startswith("text:") or len(key) == 1 and key.isprintable()):
+            detail = overlay.get("detail")
+            specs = question_items(detail)
+            qid = overlay.get("editing_question_id") or (specs[0]["id"] if specs else "")
+            if qid and question_free_text_supported(detail, qid):
+                addition = key[5:] if key.startswith("text:") else key
+                question = next(item for item in specs if item["id"] == qid)
+                choices = question.get("choices", question.get("options"))
+                if overlay.get("editing") or not choices or not (len(addition) == 1 and addition in "123456789"):
+                    text = _question_text_draft(overlay, qid)
+                    if len((text + addition).encode("utf-8")) <= 4096:
+                        return _question_set_answer(state, qid, text + addition)
+                    return state, ()
         if key in ("e", "E"):
             return _reduce(state, {"type": "click", "action": ("question.edit",)}, frame)
         if (isinstance(key, str) and len(key) == 1 and key in "123456789"

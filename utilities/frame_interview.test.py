@@ -431,6 +431,33 @@ class NativeAnswerNormalizationTest(unittest.TestCase):
         answers = FI.answers_from_native(interview, asked)
         self.assertEqual(answers["answers"][question["id"]]["choice"], 0)
 
+    def test_board_mixed_values_reach_the_frame_answer_file(self):
+        import human_wait_state as waits
+        interview = good_interview()
+        rows = [{"id": FI.UNDERSTANDING_SLOT, "question": interview["understanding"], "choices": [{"value": "yes", "label": "yes"}]}]
+        answers = {FI.UNDERSTANDING_SLOT: ["yes"]}
+        for question in interview["questions"]:
+            labels = [option["label"] for option in question["options"]]
+            rows.append({"id": question["id"], "question": question["question"], "choices": [{"value": label, "label": label} for label in labels]})
+            answers[question["id"]] = [labels[0], "A separate note"]
+        detail = {"questions": [{**row, "is_other": True} for row in rows], "response_mode": "frame-interview"}
+        envelope = {"source": "S2", "kind": "question", "gate_epoch": 1, "detail": detail,
+                    "native_ref": {"transport": "hearting-human-gate", "gate_epoch": 1}}
+        self.assertIsNone(waits._native_response_error(envelope, {"answers": answers}))
+        result = waits._frame_interview_answers(detail, interview, answers)
+        self.assertEqual(FI.validate_answers(interview, result), [])
+        for question in interview["questions"]:
+            self.assertEqual(result["answers"][question["id"]], {"choice": 0, "note": "A separate note"})
+
+    def test_restatement_choice_keeps_the_added_correction(self):
+        row = {"options": ["yes", "no"], "answer": "yes", "note": "Correct the target"}
+        self.assertEqual(FI._restatement_outcome(row), (True, "Correct the target"))
+        interview = good_interview()
+        answers = {"schema": FI.ANSWERS_SCHEMA, "route_id": interview["route_id"], "round": 1,
+                   "actor_kind": "user", "understanding_confirmed": True, "correction": row["note"],
+                   "answers": {q["id"]: {"choice": 0, "note": ""} for q in interview["questions"]}}
+        self.assertIn("Correct the target", FI.render_intent(interview, answers))
+
     def test_a_note_beside_a_picked_option_is_kept_with_the_choice(self):
         # GA-A5-007: the words added beside a picked option are the person's, kept as the note.
         interview = good_interview()

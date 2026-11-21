@@ -6634,10 +6634,22 @@ def _explorer_question_editing():
                 and isinstance(overlay, Mapping) and overlay.get("editing"))
 
 
+def _explorer_question_writable():
+    from .explorer.state import question_items, question_free_text_supported
+    overlay = getattr(_EXPLORER_STATE, "question_overlay", None)
+    if (getattr(_EXPLORER_STATE, "view", None) != "QUESTIONS" or not isinstance(overlay, Mapping)
+            or overlay.get("state") != "open"):
+        return False
+    detail = overlay.get("detail")
+    specs = question_items(detail)
+    qid = overlay.get("editing_question_id") or (specs[0]["id"] if specs else "")
+    return bool(qid and question_free_text_supported(detail, qid))
+
+
 def _explorer_text_input():
     """Typed characters are text, not commands: a question is being edited or the MODELS list filtered."""
     from .explorer.state import models_finding
-    return _explorer_question_editing() or models_finding(_EXPLORER_STATE)
+    return _explorer_question_writable() or models_finding(_EXPLORER_STATE)
 
 
 def _explorer_unmoved_tree_release(bstate, state):
@@ -6705,7 +6717,8 @@ def _explorer_handle(ch, mouse_event=None, size=None, snapshot=None):
             _explorer_apply_effects(_effects, _EXPLORER_MODEL, snapshot=snapshot)
         return
     from .explorer.state import models_finding
-    editing = (state.view == "QUESTIONS" and _explorer_question_editing()) or models_finding(state)
+    editing = (state.view == "QUESTIONS" and _explorer_question_writable()
+               and (_explorer_question_editing() or ch not in range(49, 58))) or models_finding(state)
     if editing and isinstance(ch, int) and (32 <= ch < 127 or 128 <= ch < 256):
         key = _explorer_text_key(ch)
     else:

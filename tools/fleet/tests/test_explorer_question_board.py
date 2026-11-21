@@ -316,6 +316,23 @@ class MessageQuestions(unittest.TestCase):
                 self.assertNotIn("PRIVATE QUESTION", json.dumps(records))
         self.assertEqual(len(tidy_decisions.list_pending()), 3)
 
+    def test_choice_and_typed_note_survive_the_board_and_courier(self):
+        for harness in ("claude", "codex", "opencode"):
+            signal, _ = self.f.ask(harness, "combined-"+harness, choices=["original-value", "other"])
+            vm, row = self.board(signal)
+            state, _ = self.action(NavState(view="QUESTIONS"), ("question.select", row["id"], row["ref"]), vm)
+            state, _ = self.action(state, ("question.choice", "message-response", "original-value"), vm)
+            state, effects = reduce(state, {"type": "key", "key": "text:A separate note"})
+            for effect in effects:
+                state, _ = self.effect(state, effect, vm)
+            self.assertEqual(state.question_overlay["draft"]["answers"]["message-response"], ["original-value", "A separate note"])
+            state, _ = self.action(state, ("question.submit",), vm)
+            self.assertEqual(state.question_overlay["state"], "submitted")
+            calls, _, pending = self.f.courier(signal)
+            self.assertEqual(len(calls), 1)
+            self.assertIn('["original-value", "A separate note"]', pending["text"])
+            self.f.consume(signal, pending["text"])
+
     def test_editor_preserves_raw_free_text_secret_and_changed_request_draft(self):
         import human_wait_state as waits
         import tidy_decisions

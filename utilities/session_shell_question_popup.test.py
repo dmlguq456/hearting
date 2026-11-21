@@ -48,6 +48,20 @@ class QuestionPopupTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
+    def test_free_text_guidance_uses_one_localized_row(self):
+        from fleet.config import ui_text
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "en"}):
+            labels = {name: ui_text("fleet.session_block." + name) for name in
+                      ("choose_write", "writing_choices", "navigate_write", "send")}
+        self.node(r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]+'/block-input.cjs');
+const b=create({changed(){},answer(){},action(){}}),labels=JSON.parse(process.argv[2]);
+b.update([{id:'fixture',revision:'one',answerable:true,questions:[{id:'q',question:'Question',free_text:true,choices:['one','two']}]}],'',{labels});b.enter();
+const last=()=>b.detail({budget:20,columns:92}).at(-1).map(p=>p.text).join('');
+assert.equal(last(),'↑↓ choose · type to write · Enter send · Tab next · Esc/Ctrl+] back');
+b.input(Buffer.from('hello'));assert.equal(last(),'Enter send · ↑ choices · Tab next · Esc/Ctrl+] back');
+""", json.dumps(labels))
+
     def test_the_backend_sends_the_summary_and_the_count_leads_its_name(self):
         items = presented(76, 52)
         display = items[0]["questions"][0]["display"]

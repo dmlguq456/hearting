@@ -67,14 +67,20 @@ PRELOAD = r'''
 const fs=require('node:fs'),cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG));
 if(process.argv.some(a=>a.endsWith('/session-shell/host.cjs'))){
  process.env.HEARTING_SHELL_PYTHON=cfg.backend;
- const cp=require('node:child_process');
+ const cp=require('node:child_process'),path=require('node:path');
+ let caretText=null;
+ const blockPath=path.join(path.dirname(process.argv.find(a=>a.endsWith('/session-shell/host.cjs'))),'block-input.cjs');
+ const create=require(blockPath);
+ require.cache[blockPath].exports=(...args)=>{const b=create(...args),detail=b.detail;
+  b.detail=options=>{const rows=detail(options);caretText=null;if(b.typing)for(const row of rows){const at=row.findIndex(p=>p.caret);if(at>=0)caretText=row.slice(0,at+1).map(p=>p.text).join('');}return rows;};return b;};
  const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
  let observations=0;
  function observe(){
   try{
    const snap=cp.execFileSync('tmux',['-S',cfg.socket,'capture-pane','-p','-t','qi:0.0',';','display-message','-p','-t','qi:0.0','CURSOR=#{cursor_x},#{cursor_y}'],{encoding:'utf8',stdio:['ignore','pipe','ignore'],timeout:2000}).trimEnd().split('\n');
    const actual=snap.pop().slice(7).split(',').map(Number),candidates=[];
-   snap.forEach((line,y)=>{const at=line.indexOf('│ › ');if(at<0)return;const start=at+2,end=line.indexOf('│',start);let answer=line.slice(start,end).trimEnd();if(answer==='› 설명을 적으세요.')return;if(answer==='›')answer='› ';candidates.push({actual,expected:[cells(line.slice(0,start)+answer),y]});});
+   if(caretText===null)return;
+   snap.forEach((line,y)=>{const at=line.indexOf('│ '+caretText);if(at>=0)candidates.push({actual,expected:[cells(line.slice(0,at+2)+caretText),y]});});
    if(candidates.length&&observations++<2000)fs.appendFileSync(cfg.frames,JSON.stringify(candidates.at(-1))+'\n');
   }catch{}
  }
@@ -84,13 +90,54 @@ if(process.argv.some(a=>a.endsWith('/session-shell/host.cjs'))){
 '''
 
 class QuestionInputTest(unittest.TestCase):
-    def test_small_nonediting_preview_keeps_its_existing_choice(self):
+    def test_always_visible_answer_baseline_negative(self):
+        script=r"""
+const assert=require('node:assert/strict'),Module=require('node:module'),fs=require('node:fs');
+const dir=process.argv[1],old=fs.readFileSync(0,'utf8');
+const previous=new Module(dir+'/block-input.cjs');previous.filename=dir+'/block-input.cjs';previous.paths=module.paths;previous._compile(old,previous.filename);
+const current=require(dir+'/block-input.cjs');
+const measure=s=>[...s].reduce((n,c)=>n+(/\p{Mark}/u.test(c)?0:c.codePointAt(0)>=0x2e80?2:1),0);
+function setup(create,extra={}){let sent,actions=[];const b=create({cellWidth:measure,changed(){},action:c=>actions.push(c),answer:async x=>(sent=x,{state:'submitted'})});
+ b.update([{id:'synthetic',revision:'one',answerable:true,questions:[{id:'q',question:'Synthetic question',free_text:true,choices:[{value:'v1',label:'First'},{value:'v2',label:'Second'}],...extra}]}],'',{});b.enter();
+ return {b,actions,send:async keys=>{b.input(Buffer.from(keys));await new Promise(r=>setImmediate(r));return sent},rows:(columns=96,budget=24)=>b.detail({columns,budget}),get sent(){return sent}};}
+const words=rows=>rows.map(r=>r.map(p=>p.text).join('')).join('\n');
+const cases={
+ visible:async create=>{const x=setup(create);assert(x.rows().some(r=>r.map(p=>p.text).join('')==='› '));},
+ letters:async create=>{for(const first of ['r','w','f','p','t','한','!']){const x=setup(create);assert.deepEqual((await x.send(first+'note\r'))?.answers.q,[first+'note']);assert.deepEqual(x.actions,[]);}},
+ mixed:async create=>{const x=setup(create);assert.deepEqual((await x.send('2hello\r'))?.answers.q,['v2','hello']);assert(words(x.b.sent()).includes('Second, hello'));},
+ down_digits:async create=>{const x=setup(create);assert.deepEqual((await x.send('2\x1b[B123\r'))?.answers.q,['v2','123']);},
+ up_retains:async create=>{const x=setup(create);assert.deepEqual((await x.send('note\x1b[A2\r'))?.answers.q,['v2','note']);},
+ click:async create=>{const x=setup(create);x.b.write();assert.deepEqual((await x.send('12\r'))?.answers.q,['12']);},
+ empty:async create=>{const x=setup(create);assert.equal(await x.send('\r'),undefined);assert(words(x.rows()).includes('empty answer'));},
+ wrap:async create=>{for(const columns of [96,56,17])for(const budget of [30,6,2]){const x=setup(create);x.b.input(Buffer.from('한글 답변 '.repeat(30)+'끝'));const rows=x.rows(columns,budget),edit=rows.find(r=>r.some(p=>p.caret));assert(edit);const text=edit.map(p=>p.text).join('');assert(text.endsWith('끝'));assert(text.startsWith('  '));assert(measure(text)<columns);assert(!text.includes('…'));if(budget===30)assert(rows.filter(r=>r.some(p=>p.answerRow)).length>1);}},
+ secret:async create=>{const x=setup(create,{secret:true});x.b.input(Buffer.from('private'));assert(!words(x.rows()).includes('private'));assert(words(x.rows()).includes('•••••••'));},
+ split_utf8:async create=>{for(let at=1;at<Buffer.byteLength('한글');at++){const x=setup(create),s=Buffer.from('한글');x.b.input(s.subarray(0,at));x.b.input(s.subarray(at));assert.deepEqual((await x.send('\r'))?.answers.q,['한글']);}},
+ paste_mixed:async create=>{const x=setup(create);assert.deepEqual((await x.send('2\x1b[200~hello\x1b[201~\r'))?.answers.q,['v2','hello']);},
+ tab:async create=>{const x=setup(create);x.b.update([{id:'synthetic',revision:'one',answerable:true,questions:['q','q2'].map(id=>({id,question:id,free_text:true,choices:['one','two']}))}],'',{});assert.deepEqual((await x.send('2note\t1other\r'))?.answers,{q:['two','note'],q2:['one','other']});},
+};
+(async()=>{for(const [name,test] of Object.entries(cases)){await test(current);let failed=false;try{await test(previous.exports);}catch{failed=true;}assert(failed,'baseline must fail '+name);console.log('NEW_CASE '+name+' current=PASS baseline=FAIL');}
+ for(const columns of [96,56,17])for(const budget of [24,6,2]){const draw=create=>JSON.stringify(setup(create,{free_text:false}).rows(columns,budget));assert.equal(draw(current),draw(previous.exports));}
+ for(const columns of [96,56,17])for(const budget of [24,6,2]){
+  const draw=create=>{const x=setup(create);x.b.update([{id:'decision',revision:'one',answerable:true,answer_kind:'decision',questions:[{id:'q',question:'Decision'}]}],'',{});return JSON.stringify(x.rows(columns,budget));};assert.equal(draw(current),draw(previous.exports));
+ }
+ const x=setup(current);assert.deepEqual((await x.send('2\r')).answers.q,['v2']);
+ const y=setup(current);y.b.input(Buffer.from('a'.repeat(4096)+'한\x7fZ'));assert.equal((await y.send('\r')).answers.q[0],'a'.repeat(4095)+'Z');
+ for(const close of ['\x1d','\x1b']){const z=setup(current);z.b.input(Buffer.from('note'+close));await new Promise(r=>setTimeout(r,35));assert(!z.sent);assert(!z.b.focused);}
+ console.log('COMPAT choice-only bytes, choice, limit, backspace, dismissal PASS');
+})().catch(e=>{console.error(e);process.exit(1)});
+"""
+        baseline=subprocess.check_output(['git','show','15784ff83:utilities/session-shell/block-input.cjs'],text=True,timeout=10,cwd=ROOT)
+        result=subprocess.run(['node','-e',script,str(SHELL)],input=baseline,capture_output=True,text=True,timeout=30)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        print(result.stdout,flush=True)
+
+    def test_small_free_text_preview_keeps_the_answer_row(self):
         script=r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]+'/block-input.cjs');
 const b=create({changed(){},action(){},answer(){}});
-b.update([{id:'fixture',revision:'one',answerable:true,questions:[{id:'q',question:'Keep this body',choices:['one','two']}]}],'',{});
+b.update([{id:'fixture',revision:'one',answerable:true,questions:[{id:'q',question:'Keep this body',choices:['one','two'],free_text:true}]}],'',{});
 b.enter();const rows=b.detail({budget:2,columns:20});
-assert.equal(rows[1].map(p=>p.text).join(''),'▸ 1  one');
+assert.equal(rows[1].map(p=>p.text).join(''),'› ');
 assert.equal(b.typing,false);
 b.input(Buffer.from('t'));const edit=b.detail({budget:2,columns:20});
 assert(edit[1].some(p=>p.caret),'the same small budget keeps the live draft while editing');
@@ -150,7 +197,7 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                 for layout,cols in [('side',160),('bottom',100)]:
                     case=root/layout;case.mkdir();(case/'project').mkdir()
                     policy.write_text(json.dumps(dict(enabled=True,layout=layout,side_width=40,side_min_columns=132,shade='none',theme='dark',rule_motion='rule')));policy.chmod(0o600)
-                    questions=[dict(id='choice',question='시험 문구를 고르세요.',choices=['진행','보류','수정 — 고칠 것을 적는다']),dict(id='text',question='› 설명을 적으세요.'),dict(id='secret',question='시험 암호를 적으세요.',secret=True),dict(id='scroll',question='긴 질문',display={'body':[[{'text':f'설명 {i}'}] for i in range(45)]})]
+                    questions=[dict(id='choice',question='시험 문구를 고르세요.',choices=['진행','보류','수정 — 고칠 것을 적는다'],free_text=True),dict(id='text',question='› 설명을 적으세요.'),dict(id='secret',question='시험 암호를 적으세요.',secret=True),dict(id='scroll',question='긴 질문',display={'body':[[{'text':f'설명 {i}'}] for i in range(45)]})]
                     qp=case/'questions.json';qp.write_text(json.dumps({SID:[dict(id='fixture',revision='a'*64,answerable=True,questions=questions)]}))
                     backend=case/'backend';backend.write_text(fixture.BACKEND.format(python=sys.executable,utilities=str(ROOT/'utilities'),tools=str(ROOT/'tools'),sid=SID,questions=str(qp)));backend.chmod(0o700)
                     cfg=dict(sid=SID,backend=str(backend),socket=str(case/'tmux.sock'),frames=str(case/'frames'),output=str(case/'output'),received=str(case/'received'),native_output=str(case/'native-output'),state=str(case/'state'))
@@ -182,11 +229,8 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                             tm('send-keys','-t','qi:0.0','-H',*[f'{v:02x}' for v in data]);time.sleep(delay)
                         def position(name):
                             s=screen();actual=list(map(int,tm('display-message','-p','-t','qi:0.0','#{cursor_x},#{cursor_y}').strip().split(',')))
-                            candidates=[(y,line) for y,line in enumerate(s) if '│ › ' in line]
-                            expected=None
-                            if candidates:
-                                y,line=candidates[-1];begin=line.index('│ › ')+2;answer=line[begin:line.index('│',begin)].rstrip();answer=answer if answer!='›' else '› '
-                                expected=[cells(line[:begin]+answer),y]
+                            observations=[json.loads(line) for line in Path(cfg['frames']).read_text().splitlines()] if Path(cfg['frames']).exists() else []
+                            expected=observations[-1]['expected'] if observations else None
                             measured.append(dict(layout=layout,case=name,actual=actual,expected=expected,ok=actual==expected))
                         waitfor('READY');waitfor('QUESTIONS');time.sleep(.5)
                         for state in ('idle','working'):
@@ -209,7 +253,7 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                         send('\x1d');waitfor('시험 문구')
                         for index,kind in enumerate(['choice','text','secret','scroll']):
                             if index:send('\t')
-                            send('t');position(kind+'-empty')
+                            send('\x1b[B'*4 if kind=='choice' else '\x1b[B');position(kind+'-empty')
                             send('\r');position(kind+'-empty-enter')
                             tm('resize-window','-t','qi:0','-x','20','-y','8');time.sleep(.3);position(kind+'-small-empty')
                             tm('resize-window','-t','qi:0','-x',str(cols),'-y','30');time.sleep(.3)
