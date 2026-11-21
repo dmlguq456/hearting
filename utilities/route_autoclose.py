@@ -182,19 +182,23 @@ def _current_identity():
 
 
 def registries_at(home) -> list[Path]:
+    """The global registry of ``home`` (none when ``home`` is None) and the explicit one, if set."""
     import dispatch_contract as dispatch
     paths = []
-    try:
-        paths.append(Path(dispatch.resolve_global_registry(home, None, 0, "read").path))
-    except Exception:
-        pass
+    if home is not None:
+        try:
+            paths.append(Path(dispatch.resolve_global_registry(home, None, 0, "read").path))
+        except Exception:
+            pass
     if os.environ.get("AGENT_DISPATCH_JOBS"):
         paths.append(Path(os.environ["AGENT_DISPATCH_JOBS"]))
     return list(dict.fromkeys(paths))
 
 
 def _registries(api) -> list[Path]:
-    return registries_at(api.ROOT)
+    # An `api` without `ROOT` (a caller passing another module) reads only the explicit
+    # registry, as the guarded read always did; it never raises out of the sweep.
+    return registries_at(getattr(api, "ROOT", None))
 
 
 def _row_liveness(row) -> tuple[str, bool]:
