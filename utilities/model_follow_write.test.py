@@ -1250,8 +1250,10 @@ class StaleListTests(Home):
 
     def forget_kids(self):
         for pid in self.kids():  # a `sleep` the test started is ended by its pid, pass or fail
-            try:
-                os.kill(pid, 9)
+            try:  # only while that pid is still such a `sleep` (a pid that was reused is not ours)
+                cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+                if cmdline[0].rsplit(b"/", 1)[-1] == b"sleep" and cmdline[1:2] == [b"300"]:
+                    os.kill(pid, 9)
             except OSError:
                 pass
         (self.fake / "kids").unlink(missing_ok=True)

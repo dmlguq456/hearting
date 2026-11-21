@@ -985,6 +985,73 @@ class NoProcessInTheInput(unittest.TestCase):
                 focus.read_model_config()
                 self.assertEqual(_calls(root).count("codex"), 4)
 
+    def _fail_the_first_version(self, root):
+        script = root / "bin" / "codex"
+        script.write_text(script.read_text().replace(
+            "echo codex >>", f'[ -f "{root}/failed_once" ] || {{ touch "{root}/failed_once"; echo codex >> "{root / "calls"}"; exit 1; }}\necho codex >>', 1))
+
+    def test_a_first_version_that_fails_is_asked_again_by_the_next_background_read(self):
+        for list_version, line in (("0.170.0", []), ("0.163.0", [("0.170.0", "0.163.0")])):
+            with self.subTest(list_version=list_version), TemporaryDirectory() as temp:
+                root = Path(temp)
+                focus._CLI_SEEN.clear()
+                with _env(root, list_version=list_version):
+                    self._fail_the_first_version(root)
+                    models = focus.read_model_config()                  # --version fails: the version is not known
+                    self.assertEqual(_calls(root).count("codex"), 1)
+                    self.assertEqual(self._another_line(models), [])
+                    focus.read_model_config(refresh=False)               # the input read starts nothing
+                    self.assertEqual(_calls(root).count("codex"), 1)
+                    models = focus.read_model_config()                  # the next background read asks again
+                    self.assertEqual(_calls(root).count("codex"), 2)
+                    self.assertEqual([(n["version"], n["list_version"]) for n in self._another_line(models)], line)
+                    self.assertEqual(focus._CLI_SEEN["codex"][0], (0, 170, 0))
+                    focus.read_model_config(refresh=False)
+                    self.assertEqual(_calls(root).count("codex"), 2)
+                    focus.read_model_config()
+                    self.assertEqual(_calls(root).count("codex"), 2 if not line else 3)   # a line that stands asks once per read
+
+    def test_a_min_version_line_goes_when_the_claude_cli_is_raised_and_the_next_read_after_asks_nothing(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            focus._CLI_SEEN.clear()
+            with _env(root, slow_claude=True):
+                models = focus.read_model_config()
+                self.assertEqual([(n["harness"], n["kind"], n["version"]) for n in models["follow"]["cli"]],
+                                 [("claude", "min-version", "2.1.0")])
+                self.assertEqual(_calls(root).count("claude"), 1)
+                script = root / "bin" / "claude"
+                script.write_text(script.read_text().replace("2.1.0 (fake", "9.9.1 (fake"))
+                before = len(_calls(root))
+                self.assertEqual(focus.read_model_config(refresh=False)["follow"]["cli"][0]["version"], "2.1.0")
+                self.assertEqual(len(_calls(root)), before)               # the input read: the remembered answer
+                models = focus.read_model_config()                      # the next background read asks again
+                self.assertEqual(_calls(root).count("claude"), 2)
+                self.assertEqual(models["follow"]["cli"], [])
+                for _again in range(3):
+                    models = focus.read_model_config()
+                focus.read_model_config(refresh=False)
+                self.assertEqual(_calls(root).count("claude"), 2)
+                self.assertEqual(models["follow"]["cli"], [])
+
+    def test_a_cli_line_of_any_kind_makes_the_harness_be_asked_once_per_read_and_a_second_view_only_when_it_changed(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            focus._CLI_SEEN.clear()
+            with _env(root, slow_claude=True):
+                follow, views = focus.utility("model_follow"), []
+                real = follow.fleet_view
+                with mock.patch.object(follow, "fleet_view", side_effect=lambda *a, **k: views.append(1) or real(*a, **k)):
+                    focus.read_model_config()
+                    self.assertEqual(len(views), 1)                     # the asking read: no second view, the line was asked this read
+                    focus.read_model_config()
+                    self.assertEqual(len(views), 2)                     # the line stands and the answer is the same: one view
+                    self.assertEqual(_calls(root).count("claude"), 2)
+                    script = root / "bin" / "claude"
+                    script.write_text(script.read_text().replace("2.1.0 (fake", "9.9.1 (fake"))
+                    focus.read_model_config()
+                    self.assertEqual(len(views), 4)                     # the answer changed: the view is worked out once more
+
     def test_the_input_read_starts_no_process_with_the_list_the_same_or_another(self):
         for list_version in ("0.170.0", "0.163.0"):
             with self.subTest(list_version=list_version), TemporaryDirectory() as temp:
