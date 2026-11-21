@@ -688,23 +688,30 @@ BACKLOG_WORDS = {"updated": "updated", "old": "old document", "full": "full docu
                  "cut": "… 64 KiB", "more": "… {n} more in backlog.md", "unread": "… the file is longer than is read here: more items follow"}
 # (the words Hearting puts there are English, as the panel's section names are)
 
-# The backlog is counted by the rule the artifact entrance counts it by (core/ARTIFACT_META.md, `backlog.md`), not by the status page's reading:
-#  - a task is a top-level `- ` bullet under a `##` heading; a `- ` before the first `##` is none, `*` `+` and numbered lists are none,
-#    an indented line and a sub-bullet are none; a code fence is not read (it closes on the same character and the same or a longer length
-#    only; one never closed runs to the end);
-#  - the `갱신 YYYY-MM-DD HH:MM` line is read before the first `##` only, and only where the date and the time are real.
-_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-_BACKLOG_UPDATED = re.compile(r"^갱신[ \t]+(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?!\d)")
+# The backlog is counted by the rule the artifact entrance counts it by (core/ARTIFACT_META.md, `backlog.md`; `utilities/artifact_entrance.py`
+# `_backlog`), not by the status page's reading:
+#  - a task is a top-level `- ` bullet under a `##` heading; a heading is `##` at the very start of the line followed by a blank or the end of it
+#    (an indented `##` and `###` are none); a `- ` before the first `##` is none, `*` `+` `-<tab>` and numbered lists are none, an indented line and a
+#    sub-bullet are none; a line that only looks like a rule (`- - -`) and a `- ` inside an HTML comment are counted, nothing filters them;
+#  - a code fence (up to three spaces in, three or more of ``` or ~~~, whatever follows) is not read; it closes on the same character and the same or
+#    a longer length only, on a line with nothing else; one never closed runs to the end;
+#  - the `갱신 YYYY-MM-DD HH:MM` line (ASCII digits, one blank, the line's own surrounding blanks cut) is read before the first `##` only, and only
+#    where the date and the time are real; the first real one is the one.
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_BACKLOG_UPDATED = re.compile(r"^갱신 ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2})$")
+_BACKLOG_HEADING = re.compile(r"^##(?:[ \t]|$)")
 
 
-def _real_stamp(found):
+def _real_stamp(line):
     import datetime
+    found = _BACKLOG_UPDATED.match(line.strip())
+    if not found:
+        return None
     try:
-        year, month, day, hour, minute = (int(part) for part in found.groups())
-        datetime.datetime(year, month, day, hour, minute)
+        when = datetime.datetime.strptime(found.group(1), "%Y-%m-%d %H:%M")
     except ValueError:
         return None
-    return (year, month, day, hour, minute)
+    return (when.year, when.month, when.day, when.hour, when.minute)
 
 
 def parse_backlog(lines, detail=True):
@@ -719,13 +726,21 @@ def parse_backlog(lines, detail=True):
         raw = str(raw)
         found = _FENCE.match(raw)
         if fence:
-            if found and found.group(1)[0] == fence[0] and len(found.group(1)) >= fence[1] and not found.group(2).strip():
+            if found and found.group(1)[0] == fence[0] and len(found.group(1)) >= fence[1] and not raw.strip().strip(fence[0]):
                 fence = None
             continue
-        if found and not (found.group(1)[0] == "`" and "`" in found.group(2)):
+        if found:
             fence = (found.group(1)[0], len(found.group(1)))
             item = None
             continue
+        if _BACKLOG_HEADING.match(raw):
+            item = None
+            heading = _HEADING.match(raw.strip())
+            current = {"name": project_status._plain(heading.group(2)) if heading else "", "items": []}
+            groups.append(current)
+            continue
+        if current is None and updated is None:
+            updated = _real_stamp(raw)
         stripped = raw.strip()
         if not stripped:
             continue
@@ -736,19 +751,10 @@ def parse_backlog(lines, detail=True):
                     item["detail"].append(transcript.clean(project_status._plain(stripped)))
             continue
         item = None
-        heading = _HEADING.match(stripped)
-        if heading:
-            depth, words = len(heading.group(1)), project_status._plain(heading.group(2))
-            if depth == 2:
-                current = {"name": words, "items": []}
-                groups.append(current)
-            elif depth == 1 and not groups:
-                title = title or words
-            continue
         if current is None:
-            stamp = _BACKLOG_UPDATED.match(stripped)
-            if stamp and updated is None:
-                updated = _real_stamp(stamp)
+            heading = _HEADING.match(stripped)
+            if heading and len(heading.group(1)) == 1:
+                title = title or project_status._plain(heading.group(2))
             continue
         if raw.startswith("- "):
             item = {"text": project_status._plain(raw[2:]) or "(empty)", "detail": [], "has_detail": False}

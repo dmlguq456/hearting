@@ -529,6 +529,83 @@ console.log(JSON.stringify(out));
         heads = [e for e in self.popup("list", own="A")["list"] if e.get("rows") and "".join(r[0] for r in e["rows"][0]).startswith("A ")]
         self.assertEqual("".join(r[0] for r in heads[0]["rows"][0]), "A 2")
 
+    # What the artifact entrance (`utilities/artifact_entrance.py` `_backlog`, the PR that reads `core/ARTIFACT_META.md`'s rule) counts and reads for the same
+    # texts: (name, text, its count, its `갱신` as `YYYY-MM-DD HH:MM` or ''). The expectations are written out (the entrance is not in this tree yet) from running its
+    # function on these texts; the panel's reading (`parse_backlog`) and the popup's list must give the same count and the same date.
+    ENTRANCE = [
+        ('before_first_heading', '- 앞\n## A\n- 하나\n', 1, ''),
+        ('no_heading_at_all', '# T\n- a\n- b\n', 0, ''),
+        ('indented_heading', '# T\n - x\n  ## A\n- 앞이라 세지 않는다\n## B\n- 하나\n', 1, ''),
+        ('only_indented_heading', '  ## A\n- 앞\n', 0, ''),
+        ('heading_without_space', '##A\n- 하나\n## B\n- 둘\n', 1, ''),
+        ('heading_alone', '##\n- 하나\n', 1, ''),
+        ('heading_tab', '##\tA\n- 하나\n', 1, ''),
+        ('deeper_headings_are_none', '### A\n- 앞\n## B\n- 하나\n### C\n- 둘\n#### D\n- 셋\n', 3, ''),
+        ('star_plus_number_tab', '## A\n* 별\n+ 더하기\n1. 번호\n2) 번호\n-\t탭\n- 하나\n-하나\n', 1, ''),
+        ('indented_and_sub_bullets', '## A\n- 하나\n  - 하위\n    - 더 하위\n  note: x\n\t- 탭 하위\n- 둘\n', 2, ''),
+        ('short_fence_in_longer', '## A\n````\n```\n- 안\n```\n- 아직 안\n````\n- 밖\n', 1, ''),
+        ('other_char_fence_in_fence', '## A\n~~~\n```\n- 안\n~~~~\n- 밖\n', 1, ''),
+        ('unclosed_fence', '## A\n- 앞\n```\n- 안\n## B\n- 끝까지\n', 1, ''),
+        ('fence_with_info', '## A\n```python\n- 안\n```\n- 밖\n', 1, ''),
+        ('fence_with_backtick_in_info', '## A\n``` a`b\n- 안\n```\n- 밖\n', 1, ''),
+        ('fence_closer_with_text', '## A\n```\n- 안\n``` text\n- 아직 안\n```\n- 밖\n', 1, ''),
+        ('fence_closer_with_blanks', '## A\n```\n- 안\n```   \n- 밖\n', 1, ''),
+        ('fence_indented_three_four', '## A\n   ```\n- 안\n   ```\n    ```\n- 밖\n', 1, ''),
+        ('heading_in_fence', '```\n## 안\n```\n- 앞\n## A\n- 하나\n', 1, ''),
+        ('rule_looking_line', '## A\n- - -\n- 하나\n', 2, ''),
+        ('html_comment', '## A\n<!--\n- 주석 안\n- 또\n-->\n- 밖\n', 3, ''),
+        ('empty_bullet', '## A\n- \n- 하나\n-\n', 2, ''),
+        ('two_groups_same_heading', '## A\n- 1\n## A\n- 2\n- 3\n', 3, ''),
+        ('updated_ok', '# T\n갱신 2026-11-21 11:02\n## A\n- 일\n', 1, '2026-11-21 11:02'),
+        ('updated_wrong_date', '갱신 2026-13-45 99:99\n## A\n- 일\n', 1, ''),
+        ('updated_feb30', '갱신 2026-02-30 10:00\n## A\n', 0, ''),
+        ('updated_no_time', '갱신 2026-11-21\n## A\n- 일\n', 1, ''),
+        ('updated_colon', '갱신: 2026-11-21 11:02\n## A\n', 0, ''),
+        ('updated_fullwidth', '갱신 ２０２６-１１-２１ １１:０２\n## A\n', 0, ''),
+        ('updated_surrounded', '   갱신 2026-11-21 23:10   \n## A\n- 일\n', 1, '2026-11-21 23:10'),
+        ('updated_tab_inside', '갱신\t2026-11-21 11:02\n## A\n', 0, ''),
+        ('updated_two_blanks', '갱신  2026-11-21 11:02\n## A\n', 0, ''),
+        ('updated_with_T', '갱신 2026-11-21T11:02\n## A\n', 0, ''),
+        ('updated_seconds', '갱신 2026-11-21 11:02:30\n## A\n', 0, ''),
+        ('updated_after_heading', '## A\n갱신 2026-11-21 11:02\n- 일\n', 1, ''),
+        ('updated_in_fence', '```\n갱신 2026-11-21 11:02\n```\n## A\n', 0, ''),
+        ('updated_first_bad_second_good', '갱신 2026-13-45 99:99\n갱신 2026-11-22 12:00\n## A\n', 0, '2026-11-22 12:00'),
+        ('updated_first_good_second_good', '갱신 2026-11-21 11:02\n갱신 2026-11-22 12:00\n## A\n', 0, '2026-11-21 11:02'),
+        ('updated_in_title_block', '# 제목\n\n갱신 2026-11-21 11:02\n\n## A\n- 일\n', 1, '2026-11-21 11:02'),
+        ('updated_english_word', 'updated 2026-11-21 11:02\n## A\n', 0, ''),
+        ('updated_after_bad_prose', '설명 글\n갱신 2026-11-21 11:02\n## A\n', 0, '2026-11-21 11:02'),
+        ('empty', '', 0, ''),
+        ('crlf', '## A\r\n- 하나\r\n- 둘\r\n', 2, ''),
+        ('no_final_newline', '## A\n- 하나', 1, ''),
+        ('other_line_breaks', '## A\n- 하나\u2028- 둘\x0c- 셋\n', 3, ''),
+    ]
+
+    def test_the_count_and_the_date_are_the_entrances_on_the_same_texts(self):
+        for name, text, count, updated in self.ENTRANCE:
+            parsed = self.status.parse_backlog(text.splitlines())
+            when = "%04d-%02d-%02d %02d:%02d" % parsed["updated"] if parsed["updated"] else ""
+            self.assertEqual((self.status.backlog_total(parsed), when), (count, updated), name)
+            self.backlog(text)                                                       # the file read the way the panel reads it, and the list the popup draws
+            got = self.status.panel_lists(self.cwd, self.page(), {})["backlog"]
+            self.assertEqual(got["total"], count, name)
+            if parsed["groups"]:
+                self.assertEqual(sum(int(e["rows"][0][-1][0].rsplit(" ", 1)[-1]) for e in self.popup("list", own="")["list"] if e.get("key", "").startswith("g:")),
+                                 count, name)
+        # 64 KiB: exactly it the entrance counts (8191 here), one byte over it has no count at all (`count` None: the line only). The panel is not so bounded
+        # (it reads to 1 MiB and says `+` past that: an addition of the real backlog's size) and counts the same 8191.
+        def sized(n):
+            body, k = "## A\n", 0
+            while len((body + "- %05d\n" % (k + 1)).encode()) <= n:
+                k += 1
+                body += "- %05d\n" % k
+            return body + "x" * (n - len(body.encode()))
+        for size, entrance in ((65536, 8191), (65537, None)):
+            text = sized(size)
+            self.assertEqual(len(text.encode()), size)
+            self.backlog(text)
+            got = self.status.panel_lists(self.cwd, self.page(), {})["backlog"]
+            self.assertEqual((got["total"], got["more"]), (8191, False), size)
+
     def long_backlog(self, items, note=300, groups=1, title="시험용 나중 일"):
         out, per = ["# 시험용 백로그", "갱신 2026-11-21 11:02", ""], max(1, items // groups)
         n = 0
