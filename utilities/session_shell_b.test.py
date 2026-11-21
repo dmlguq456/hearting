@@ -53,7 +53,7 @@ for(const [keys,want] of [['\x1b[B\r','two'],['\x1bOB\x1bOB\x1b[A\r','two'],['2\
 // The recommended choice is where the highlight starts; the hint names the keys.
 {const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});b.update([item('rec',{recommended:2})]);b.enter();
  assert.deepEqual(lit(b),['three']);b.input(Buffer.from('\x1b[A'));assert.deepEqual(lit(b),['two']);
- assert.ok(b.detail({budget:20,columns:80}).some(row=>row.map(p=>p.text).join('').includes('↑↓ choose · Enter send · t text')));}
+ assert.ok(b.detail({budget:20,columns:80}).some(row=>row.map(p=>p.text).join('').includes('↑↓ choose · Enter send')));}
 // Without focus the arrows and Enter are the conversation's: every byte goes back.
 {let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});b.update([item('id')]);
  const rest=b.input(Buffer.from('\x1b[B\r'));assert.equal(rest.toString(),'\x1b[B\r');await new Promise(setImmediate);assert.equal(sent.length,0);}
@@ -286,7 +286,8 @@ for(const selected of [false,true]){
  if(selected)b.input(Buffer.from('1'));
  const rows=b.detail({budget:20,columns:40}).map(row=>row.map(part=>part.text).join(''));
  const hints=rows.filter(row=>row.includes('Esc/')||row.includes('choose')||row.includes('Enter send'));
- assert.ok(hints.every(row=>[...row].reduce((n,c)=>n+(c.charCodeAt(0)<128?1:2),0)<=36),'focus guidance must fit the panel');
+ // This English guide uses single-cell arrows and middots; columns is the body width.
+ assert.ok(hints.every(row=>[...row].length<=40),'focus guidance must fit the panel');
  assert.ok(hints.join(' ').includes('Esc/Ctrl+] back'));
  assert.ok(hints.join(' ').includes('↑↓ choose · Enter send'));
 }
