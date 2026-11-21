@@ -74,6 +74,27 @@ class Base(unittest.TestCase):
 
 
 class RedirectTest(Base):
+    def test_redirected_choice_and_note_reach_each_original_session(self):
+        for harness, payload in (("claude", claude_payload()), ("codex", codex_payload()),
+                                 ("opencode", opencode_payload())):
+            with self.subTest(harness=harness):
+                reason = redirect.redirect(harness, payload)
+                self.registered(harness, reason)
+                signal = next(x for x in state.read_signals() if x["harness"] == harness)
+                envelope = state.read_selected_request({"id": signal["id"], "harness": harness, "session_id": SID})
+                question = questions.questions_of(envelope)[0]
+                choice = questions._choice_value(question["choices"][0])
+                values = [choice, "간격을 넓혀 주세요."]
+                result = state.submit_selected_response(envelope, {"answers": {"message-response": values}}, action_id="combined-"+harness)
+                self.assertEqual(result["state"], "submitted", result)
+                calls, _, pending = self.f.courier(signal)
+                self.assertEqual(len(calls), 1)
+                wire = pending["text"]
+                self.assertIn(json.dumps(values, ensure_ascii=False), wire)
+                self.assertEqual(pending["to"]["session_id"], SID)
+                self.f.consume(signal, wire)
+                self.assertEqual(state._read(state._signal_path(signal))["lifecycle"], "answered")
+
     def test_one_question_keeps_text_choices_and_the_recommended_choice(self):
         reason = redirect.redirect("claude", claude_payload())
         (question,) = self.registered("claude", reason)

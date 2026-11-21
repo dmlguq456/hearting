@@ -255,7 +255,23 @@ def _attempts(registries: list[Path]) -> tuple[set[str], dict]:
     return held, owners
 
 
-_ATTEMPT_FIELD = re.compile(rb"(?:^|,)attempt_id=([^,]*)")
+_ATTEMPT_KEY = b"attempt_id="
+
+
+def _attempt_key(metadata: bytes, ordinal: int) -> bytes:
+    """The row's own id: the `attempt_id=` field of its metadata, else its line number.
+
+    Lineage fields such as `parent_attempt_id=` and `caller_attempt_id=` end in the same text and
+    come first, so a hit counts only at the start of the column or right after a `,`.  A plain
+    byte search, not a scan of every byte before the field (the registry is tens of megabytes)."""
+    at = metadata.find(_ATTEMPT_KEY)
+    while at >= 0:
+        if at == 0 or metadata[at - 1] == 0x2C:   # ","
+            start = at + len(_ATTEMPT_KEY)
+            end = metadata.find(b",", start)
+            return metadata[start:] if end < 0 else metadata[start:end]
+        at = metadata.find(_ATTEMPT_KEY, at + 1)
+    return b"#%d" % ordinal
 
 
 def live_routes(registries: list[Path], route_ids) -> dict[str, float]:
@@ -287,9 +303,7 @@ def live_routes(registries: list[Path], route_ids) -> dict[str, float]:
                 continue
             # The row's own id is the `attempt_id` field of its metadata; lineage fields such as
             # `parent_attempt_id=` and `caller_attempt_id=` come before it and are not the key.
-            match = _ATTEMPT_FIELD.search(fields[5])
-            key = match.group(1) if match else b"#%d" % ordinal
-            latest[key] = line   # later rows replace earlier ones; a done row retires an open one
+            latest[_attempt_key(fields[5], ordinal)] = line   # later rows replace earlier ones; a done row retires an open one
         for line in latest.values():
             parts = line.decode("utf-8", "replace").split("\t", 5)
             if len(parts) != 6 or parts[1] not in {"open", "running"}:

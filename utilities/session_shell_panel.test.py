@@ -2975,15 +2975,15 @@ for(const harness of ['claude','codex','opencode']){
         script = r'''
 const assert=require('node:assert/strict'),path=require('node:path'),v=require(process.argv[1]);
 const c=require(path.join(path.dirname(process.argv[1]),'block-input.cjs'))({changed(){},answer(){throw Error('no submit');},action(){}});
-c.update([{id:'exact',revision:'one',answerable:true,questions:[{id:'q',question:'Where should this result go?',choices:['Here','Another folder'],display:{head:[{text:'Question · answer needed'}],body:[[{text:'Where should this result go?'}]],options:[[{text:'1 Here · 2 Another folder'}]],source:[[{text:'this session'}]]}}]}]);
-c.enter();c.input(Buffer.from('tDraft answer'));
+c.update([{id:'exact',revision:'one',answerable:true,questions:[{id:'q',question:'Where should this result go?',free_text:true,choices:['Here','Another folder'],display:{head:[{text:'Question · answer needed'}],body:[[{text:'Where should this result go?'}]],options:[[{text:'1 Here · 2 Another folder'}]],source:[[{text:'this session'}]]}}]}]);
+c.enter();c.input(Buffer.from('Draft answer'));
 // 11-15: the editor reads in the popup over the window, at its width: a narrow window and 80 columns
 // keep the draft and the keys in sight.
 for(const [cols,rows] of [[40,16],[80,12],[60,10]]){
  const all=c.detail({budget:v.popupRoom(rows)+1,columns:v.popupWidth(cols)-4});
  const r=v.popup({cols,rows,title:all[0],body:all.slice(1),sections:['QUESTIONS']});
  const text=r.rows.map(row=>row.map(p=>p.text).join('')).join('\n');
- assert(text.includes('Draft answer'),text);assert(text.includes('Tab next'),text);
+ assert(text.includes('Draft answer'),text);assert(text.includes('Esc/Ctrl+] back'),text);
  assert(r.rows.every(row=>row.reduce((n,p)=>n+[...p.text].length,0)<=cols),text);
 }
 '''

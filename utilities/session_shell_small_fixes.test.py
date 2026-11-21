@@ -76,7 +76,11 @@ for(const lang of ['en','ko'])for(const [kind,item] of Object.entries(kinds)){
   assert(foot.length>=1,'a key line stands\n'+tag);
   assert(foot.every(r=>cells(r)<=inner),'within the popup\n'+tag);
   assert(foot.at(-1).split(' ').at(-1)===close,'the closing key stays last\n'+tag);
-  if(rows===40){ // room for every piece: all words, in order, none cut
+  if(kind==='text'){
+   assert.equal(foot.length,1,'free-text guidance is one row\n'+tag);
+   const full=labels.choose_write+' · '+labels.navigate_write;
+   if(cells(full)<=inner)assert.equal(foot[0],full,tag);
+  }else if(rows===40){ // other questions keep every existing navigation piece
    const all=foot.join(' ').replace(/ · /g,' ').split(' '),want=labels.navigate.replace(/ · /g,' ').split(' ');
    assert.deepEqual(all.slice(-want.length),want,tag);
   }

@@ -53,13 +53,13 @@ for(const [keys,want] of [['\x1b[B\r','two'],['\x1bOB\x1bOB\x1b[A\r','two'],['2\
 // The recommended choice is where the highlight starts; the hint names the keys.
 {const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});b.update([item('rec',{recommended:2})]);b.enter();
  assert.deepEqual(lit(b),['three']);b.input(Buffer.from('\x1b[A'));assert.deepEqual(lit(b),['two']);
- assert.ok(b.detail({budget:20,columns:80}).some(row=>row.map(p=>p.text).join('').includes('↑↓ choose · Enter send · t text')));}
+ assert.ok(b.detail({budget:20,columns:80}).some(row=>row.map(p=>p.text).join('').includes('↑↓ choose · Enter send')));}
 // Without focus the arrows and Enter are the conversation's: every byte goes back.
 {let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});b.update([item('id')]);
  const rest=b.input(Buffer.from('\x1b[B\r'));assert.equal(rest.toString(),'\x1b[B\r');await new Promise(setImmediate);assert.equal(sent.length,0);}
-// `t` still types an answer, and arrows do not move a choice while typing.
-{let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});b.update([item('id')]);b.enter();
- b.input(Buffer.from('tmine\x1b[B\r'));await new Promise(setImmediate);assert.deepEqual(sent,[{question_id:'id',revision:'r',answers:{q:['mine']}}]);}
+// Free-text questions accept letters directly; down does not replace the draft.
+{let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});const q=item('id');q.questions[0].free_text=true;b.update([q]);b.enter();
+ b.input(Buffer.from('mine\x1b[B\r'));await new Promise(setImmediate);assert.deepEqual(sent,[{question_id:'id',revision:'r',answers:{q:['mine']}}]);}
 // A decision highlights nothing until ↑↓ or a number picks one; then Enter sends it.
 {let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});
  b.update([{id:'d',revision:'r',answerable:true,answer_kind:'decision',questions:[{id:'q',question:'Approve?'}]}]);b.enter();
@@ -217,7 +217,7 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]);
 for(const edited of [false,true]){
  const sent=[],b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});
  b.update([{id:'exact',revision:'r',answerable:true,questions:[{id:'first',question:'First?'},{id:'second',question:'Second?'}]}]);b.enter();
- if(edited){b.input(Buffer.from('first\r'));await new Promise(setImmediate);b.input(Buffer.from('t-EDIT'));}
+ if(edited){b.input(Buffer.from('first\r'));await new Promise(setImmediate);b.input(Buffer.from('-EDIT'));}
  else b.input(Buffer.from('first'));
  b.input(Buffer.from('\tsecond\r'));await new Promise(setImmediate);
  assert.deepEqual(sent,[{question_id:'exact',revision:'r',answers:{first:[edited?'first-EDIT':'first'],second:['second']}}]);
@@ -226,7 +226,7 @@ for(const edited of [false,true]){
 }
 const sent=[],b=create({changed(){},answer:async x=>{sent.push(x);return {state:'received'};},action(){}});
 b.update([{id:'cleared',revision:'r',answerable:true,questions:[{id:'first',question:'First?'},{id:'second',question:'Second?'}]}]);b.enter();
-b.input(Buffer.from('first\r'));await new Promise(setImmediate);b.input(Buffer.from('t\x7f\x7f\x7f\x7f\x7f\tsecond\r'));await new Promise(setImmediate);
+b.input(Buffer.from('first\r'));await new Promise(setImmediate);b.input(Buffer.from('\x7f\x7f\x7f\x7f\x7f\tsecond\r'));await new Promise(setImmediate);
 assert.equal(sent.length,0,'cleared latest text must not fall back to an older saved answer');
 })();""")
 
@@ -270,9 +270,9 @@ assert.ok(!JSON.stringify(b.detail()).includes('consumed'));
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
 const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
 const a={id:'a',revision:'r',answerable:true,questions:[{id:'q',question:'First?',display:{head:[{text:'Head'}],body:Array.from({length:12},(_,i)=>[{text:'row-'+i}]),options:[[{text:'choice'}]]}}]};
-b.update([a]);b.enter();b.input(Buffer.from('tdraft'));
+b.update([a]);b.enter();b.input(Buffer.from('draft'));
 let first=JSON.stringify(b.detail({budget:5,columns:80}));assert.ok(first.includes('row-0')&&first.includes('draft'));
-b.input(Buffer.from('\x1b[B\x1b[B'));assert.ok(!JSON.stringify(b.detail({budget:5})).includes('row-0'));
+b.input(Buffer.from('\x1b[6~'));assert.ok(!JSON.stringify(b.detail({budget:5})).includes('row-0'));
 b.update([a,{id:'late',revision:'r',answerable:true,questions:[{id:'q',question:'Late?'}]}]);assert.ok(JSON.stringify(b.detail({budget:5})).includes('draft'));
 b.update([{...a,revision:'changed'}]);assert.ok(JSON.stringify(b.detail({budget:5})).includes('changed'));
 ''')
@@ -286,7 +286,8 @@ for(const selected of [false,true]){
  if(selected)b.input(Buffer.from('1'));
  const rows=b.detail({budget:20,columns:40}).map(row=>row.map(part=>part.text).join(''));
  const hints=rows.filter(row=>row.includes('Esc/')||row.includes('choose')||row.includes('Enter send'));
- assert.ok(hints.every(row=>[...row].reduce((n,c)=>n+(c.charCodeAt(0)<128?1:2),0)<=36),'focus guidance must fit the panel');
+ // This English guide uses single-cell arrows and middots; columns is the body width.
+ assert.ok(hints.every(row=>[...row].length<=40),'focus guidance must fit the panel');
  assert.ok(hints.join(' ').includes('Esc/Ctrl+] back'));
  assert.ok(hints.join(' ').includes('↑↓ choose · Enter send'));
 }

@@ -279,13 +279,18 @@ def _native_option_index(value, labels):
 
 def _restatement_outcome(row):
     """`(confirmed, correction)` of the restatement's reply, or None when it is not an answer."""
+    note = _text(row.get("note")).strip()
     options = list(row.get("options") or [])
     reply = _text(row.get("answer")).strip()
     if not _plain(reply):
         return None
     index = _native_option_index(reply, options)
+    if index is not None:
+        note = _truncate_note(note, MAX_CORRECTION_CHARS)
     if options and index == 0:
-        return True, ""
+        return True, note
+    if note:
+        return False, note
     if index is not None:
         return None                                   # "no" without saying what is wrong: ask for it
     return False, reply
@@ -304,11 +309,15 @@ def _question_outcome(question: dict, row):
         return {"choice": NONE_SENTINEL, "note": picked}
     # The words the person added beside the option they picked; a reply is never asked again
     # for its length, so an over-long note keeps its head and says it was cut.
-    note = _text(row.get("note")).strip()
-    if len(note) > MAX_NOTE_CHARS:
-        mark = _truncated_mark()
-        note = note[:MAX_NOTE_CHARS - len(mark)] + mark
+    note = _truncate_note(_text(row.get("note")).strip(), MAX_NOTE_CHARS)
     return {"choice": option_index, "note": note}
+
+
+def _truncate_note(note: str, limit: int) -> str:
+    if len(note) <= limit:
+        return note
+    mark = _truncated_mark()
+    return note[:limit - len(mark)] + mark
 
 
 def _truncated_mark() -> str:
@@ -327,7 +336,7 @@ def native_slots(interview: dict, asked) -> dict | None:
     The restatement is asked as its own question (the understanding sentence, verbatim);
     every registered question is matched by its own text. A call may carry only some of
     them. None when a shown registered row is not an answer (empty, "no" without a
-    correction, an ambiguous label, a note over its cap): that call is asked again whole."""
+    correction, an ambiguous label, an off-menu answer over its cap): that call is asked again whole."""
     shown = [row for row in asked or [] if isinstance(row, dict) and _plain(row.get("question"))]
     find = lambda text: next((row for row in shown if _plain(text) and _plain(text) in _plain(row["question"])), None)
     keep = lambda row: {"question": _text(row.get("question")), "options": list(row.get("options") or []),
@@ -1019,7 +1028,7 @@ def render_intent(interview: dict, answers: dict, *, now: str | None = None, app
         "",
         _inline(interview.get("understanding")) or "-",
     ]
-    if not confirmed:
+    if not confirmed or _text(answers.get("correction")).strip():
         lines += ["", f"**{speaker}'s correction:** " + (_inline(answers.get("correction")) or "-")]
     section = {
         "problem": "Problem", "outcome": "Proposed Outcome",

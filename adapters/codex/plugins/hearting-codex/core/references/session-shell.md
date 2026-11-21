@@ -839,11 +839,35 @@ every row of it (each row of a wrapped one) has its words bold in the bright
 body color, while every
 other choice keeps the mark's column blank and reads dim grey (without color
 the mark and the weight alone tell them apart). Enter
-sends it, as Claude's own question does; it starts on the recommended choice,
-else the first. Number keys pick a choice and `t` types an answer as before;
-the guidance reads `↑↓ choose · Enter send · t text` (on a Korean screen
-`↑↓ · Enter 보내기 · t 답 입력`, then `Tab 다음 · Esc/Ctrl+] 돌아가기`). A decision
-(approve/reject/defer) highlights nothing until ↑↓ or a number picks one, so
+sends it. A question with choices starts on its recommended choice, else the first.
+That mark is a default until a number, an arrow choosing an option, or a click
+explicitly picks a choice. A free-text question's always-visible `› ` row takes
+printable input immediately, including `r/w/f/p/t`; numbers select until writing
+starts. The first accepted character clears a default mark, including after a
+click on the answer row or down past the last choice. An explicitly chosen mark
+stays while writing. Repeating its number before writing clears that choice.
+Down past the last choice enters the row without changing the mark's provenance.
+While writing with choices, ↑ returns to them without discarding text and ↓ scrolls
+the body. With no choices, ↑↓ scroll the body. Enter sends exactly the marked
+original choice value and the separate typed text, `[original choice value, typed
+text]`, omitting whichever is absent; with neither, `empty answer` keeps it open.
+Input beyond 4,096 UTF-8 bytes shows a one-line notice until the next key.
+Tab and closing/reopening retain each question's mark, its default/explicit
+provenance, and its draft. Enter's existing next-field behavior stays.
+Its one localized guidance row reads
+`↑↓ choose · type to write · Enter send · Tab next · Esc/Ctrl+] back` before writing,
+and `Enter send · ↑ choices · Tab next · Esc/Ctrl+] back` while writing (without
+`↑ choices` when no choices exist). The existing key packing shortens narrow rows.
+Choice-only questions keep their selection behavior; their guidance omits the
+retired `t text` / `t 답 입력`. Fleet's question board shows recommendations as
+`(recommended)` and marks only choices picked by number or click. Repeating the
+number clears the choice, but only in the question that number would pick for
+(the first unanswered one, else the first); the same number on the next question
+answers it. ↑↓ move among waits, with ↑ leaving the answer row first
+when editing. Enter on an unfolded question submits only chosen values and typed
+text, once all required fields are answered. Enter on a folded or untouched wait
+keeps its usual open or read behavior. Direct typing belongs to the unfolded row.
+A decision (approve/reject/defer) highlights nothing until ↑↓ or a number picks one, so
 Enter alone still sends nothing. With the popup closed, arrows and Enter stay
 the native's. Do not reserve a standalone
 session/age row. Hide an empty result section. Use the
@@ -1111,13 +1135,27 @@ back on that row (keys `Enter 목록으로 돌아가기`); on a route row Enter 
 question or message row that section's popup. No key or press goes to the native window and the window never
 moves. Keys row: `↑↓ · Enter 그 대목 읽기 · ←→ 구획 · …`. The folded strip and a window too small for the panel's NOW row
 reach it as every popup is reached: `Ctrl+]`, then ←→.
-The question popup answers this session's own questions; another session's wait is answered in
-its own window or through Fleet (`f`), which also goes to that session, restarts or tidies it. While it
+Free-text questions always show an answer row (`› `). Printable input starts writing;
+before writing, digits select a choice. Down after the last choice or a press on the
+answer row enters it; up returns to choices and retains the draft. Enter sends the
+original selected value and the separate text together, or whichever is present;
+an empty answer stays open. Choice-only questions and decisions keep their existing
+controls. Long drafts wrap with two-cell continuation indentation, keeping their tail
+and next input cell visible. The one localized key row describes choosing or writing.
+Tab retains each question's choices and draft. Transport-specific single-value forms
+must not offer mixed input that their recipient cannot retain.
+For a `Question answer (request=…):` message, read a two-item JSON array as choice
+and note, a one-item JSON array as one value, or the plain-text body as one value.
+The sender wraps a single value when its text itself parses as a JSON array.
+
+The question popup answers this session's own questions. Answer another session's wait in
+its own window or in Fleet. In free-text questions, `f`, `r`, `p` and `w` enter text.
+←→ switch sections when the answer row is inactive and its draft is empty. While the popup
 stands every key and press is its own (none reaches the native, a native that
 reads the mouse included; whatever follows an Esc, in the same read or within its
 25 ms, other than `[` or `O` (an arrow or function key) is dropped, neither closing
 it nor reaching the native: Alt+letter, Shift/Alt+Enter, Esc then a control byte, and a
-second Esc closes it and is dropped; a paste is the popup's and does nothing, its end mark `ESC[201~` read whole wherever it is split, and a paste that never ends is left by Esc, `Ctrl+]` or a press outside; the popup's input state, a paste under way, a key's front and the Esc waited on, ends with the popup, closed or opened again); a lone Escape,
+second Esc closes it and is dropped; a paste enters a free-text answer row, its end mark `ESC[201~` read whole wherever it is split, and a paste that never ends is left by Esc, `Ctrl+]` or a press outside; the popup's input state, a paste under way, a key's front and the Esc waited on, ends with the popup, closed or opened again); a lone Escape,
 `Ctrl+]`, its `✕` or a press outside it closes it
 and returns to the native input and cursor (the drag and release that follow that
 press are the popup's too; one lone Esc within a second of the Esc that closed it is
