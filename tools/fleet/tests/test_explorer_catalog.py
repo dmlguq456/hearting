@@ -730,12 +730,14 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(lines, [
             "model follow: proposal codex tier/top gpt-6-astra -> gpt-6.2-sol (other family)"
             " · hearting model set codex tier/top gpt-6.2-sol@high",
-            "model follow: newer codex tier/deep gpt-6.1-sol -> gpt-6.2-sol (high, was xhigh)"
-            " · hearting model set codex tier/deep gpt-6.2-sol@high",
             "model follow: proposal codex profile/deep gpt-6-astra -> gpt-6.2-sol (other family)"
             " · hearting model set codex profile/deep gpt-6.2-sol@high",
             "model follow: codex CLI 0.163.0 lists gpt-6-luna as previous generation with no"
             " successor · update the Codex CLI yourself"])
+        # what an update would write is the plan; the survey itself says nothing about it
+        plan = {item["target"]: item for item in result["plan"]}
+        self.assertEqual((plan["tier/deep"]["to"], plan["tier/deep"]["effort"], plan["tier/deep"]["effort_was"]),
+                         ("gpt-6.2-sol", "high", "xhigh"))
         cascade = {e["target"]: e["companions"] for e in result["entries"]}["tier/deep"]
         self.assertEqual([c["key"] for c in cascade], ["CFG_TIER_DEEP_FAILOVER_CASCADE"])
         import model_follow
@@ -758,11 +760,10 @@ class ModelCatalogTests(unittest.TestCase):
         self._claude_cache("one.json", document)
         result, lines = self._follow("claude", installed=((2, 1, 5), "/h/.local/share/claude/versions/2.1.5"))
         self.assertEqual(lines, [
-            "model follow: newer claude tier/light claude-sonnet-4-5 -> claude-sonnet-5-5 (medium)"
-            " · hearting model set claude tier/light claude-sonnet-5-5@medium",
-            "model follow: newer claude profile/deep claude-opus-4-6 -> claude-opus-5-5 (high, was xhigh)"
-            " · hearting model set claude profile/deep claude-opus-5-5@high",
             "model follow: claude CLI 2.1.5 is older than claude-fable-9-0 (needs 9.0.0) · claude update"])
+        plan = {item["target"]: (item["to"], item["effort"], item["effort_was"]) for item in result["plan"]}
+        self.assertEqual(plan, {"tier/light": ("claude-sonnet-5-5", "medium", None),
+                                "profile/deep": ("claude-opus-5-5", "high", "xhigh")})
         # the alias cells name no listed id: nothing to do for them
         aliases = [e for e in result["entries"] if e["current"]["model"] in ("opus", "sonnet", "fable")]
         self.assertTrue(aliases and {e["kind"] for e in aliases} == {"none"})
@@ -786,11 +787,9 @@ class ModelCatalogTests(unittest.TestCase):
             "model follow: proposal opencode tier/light opencode-go/deepseek-v4.1-flash -> "
             "opencode-go/deepseek-v4.2-flash (price x5.0)",
             "model follow: proposal opencode tier/mini opencode-go/deepseek-v4.1-flash -> "
-            "opencode-go/deepseek-v4.2-flash (price x5.0)",
-            "model follow: newer opencode profile/deep opencode-go/muse-spark-1.2-contributor -> "
-            "opencode-go/muse-spark-1.3-contributor (high)"])
-        self.assertTrue(lines[2].endswith(" · hearting model set opencode profile/deep "
-                                          "opencode-go/muse-spark-1.3-contributor@high"))
+            "opencode-go/deepseek-v4.2-flash (price x5.0)"])
+        plan = {item["target"]: (item["to"], item["effort"]) for item in result["plan"]}
+        self.assertEqual(plan, {"profile/deep": ("opencode-go/muse-spark-1.3-contributor", "high")})
         self.assertIsNone(result["cli"])  # OpenCode never gets the CLI note
 
 
