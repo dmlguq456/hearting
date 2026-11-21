@@ -928,6 +928,18 @@ class CloseoutTest(unittest.TestCase):
         self.assertIn("plan.md", selected)  # a loose root file is still residue
         self.assertNotIn("backlog.md", selected)
 
+    def test_a_link_named_as_a_root_document_is_not_skipped_by_the_closeout_plan(self):
+        for target in ("plan.md", "no-such-file.md"):  # a link to a file, then a broken link
+            with self.subTest(target=target):
+                link = self.root / "backlog.md"
+                link.symlink_to(self.root / target)
+                try:
+                    _route_package, closeout_package = self.packages()
+                finally:
+                    link.unlink()
+                blockers = closeout_package["plan"]["target_blockers"]
+                self.assertIn({"path": "backlog.md", "reason": "top-level-symlink"}, blockers)
+
     def test_false_approval_refuses_both_apply_surfaces(self):
         route_package, closeout_package = self.packages()
         approval = self.approval(route_package, closeout_package, False)

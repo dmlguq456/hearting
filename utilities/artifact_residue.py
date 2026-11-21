@@ -204,6 +204,10 @@ def _is_runtime_owned(name: str) -> bool:
     return P._is_runtime_owned_top_level(name) or name in {"campaigns", "shared"}
 
 
+def _is_runtime_owned_entry(entry: Path) -> bool:
+    return P._is_runtime_owned_entry(entry) or entry.name in {"campaigns", "shared"}
+
+
 def _date_from_prefix(name: str) -> Optional[str]:
     match = _DATE_PREFIX.match(name)
     if not match:
@@ -246,7 +250,7 @@ def iter_residue_files(root: Path) -> Iterator[str]:
     """Every regular file at the legacy top level, root-relative, sorted."""
     root = Path(root).resolve()
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
-        if _is_runtime_owned(entry.name):
+        if _is_runtime_owned_entry(entry):
             continue
         if entry.is_symlink() or entry.is_file():
             yield entry.name
@@ -726,7 +730,7 @@ def build_plan(root: Path, *, include_spec_top: bool = False) -> Dict[str, Any]:
                                        "group": cycle["cycle_key"], "target": f["target"]})
     empty_dirs = []
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
-        if _is_runtime_owned(entry.name) or entry.is_symlink() or not entry.is_dir():
+        if _is_runtime_owned_entry(entry) or entry.is_symlink() or not entry.is_dir():
             continue
         if not any(p.is_file() or p.is_symlink() for p in P._walk_files(entry)):
             empty_dirs.append(entry.name)
@@ -1124,7 +1128,7 @@ def _phase_compat(root: Path, run_dir: Path, journal: Dict[str, Any], plan: Dict
 def _prune_empty(root: Path) -> List[str]:
     pruned = []
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
-        if _is_runtime_owned(entry.name) or entry.is_symlink() or not entry.is_dir():
+        if _is_runtime_owned_entry(entry) or entry.is_symlink() or not entry.is_dir():
             continue
         if any(p.is_file() or p.is_symlink() for p in P._walk_files(entry)):
             continue

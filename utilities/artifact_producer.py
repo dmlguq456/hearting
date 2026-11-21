@@ -147,7 +147,7 @@ from artifact_producer_store import (  # noqa: F401
     classify_root, CLOSED_BINDABLE_STATES, COMPAT_OVERRIDE_FIELDS, COMPAT_OVERRIDE_NAME,
     compat_override_path, CONTRACT, cutover_path, cycle_dir, cycle_disposition,
     cycle_record_closed, cycle_record_path, default_bucket, ENTRANCE_NAMES, ENTRY_CAPABILITIES,
-    find_campaign_by_key, INACTIVE_FALLBACK_ENV, inactive_fallback_level, INTENSITIES,    INTERNAL_CAPABILITIES, is_active, journal_path, legacy_fallback_state, LEGACY_TOP_LEVEL,
+    find_campaign_by_key, INACTIVE_FALLBACK_ENV, inactive_fallback_level, INTENSITIES,    INTERNAL_CAPABILITIES, is_active, is_root_document, journal_path, legacy_fallback_state, LEGACY_TOP_LEVEL,
     LEGACY_WRITE_HINT, list_cycle_records, MEDIA_TYPES, OK, PRIMARY_CANDIDATES, producer_dir,
     PRODUCER_REL, ProducerError, PROVISIONAL_SEAL_WARNING, read_campaign,
     read_campaign_tombstone, read_compat_override, read_cutover, read_cycle_record,
@@ -1965,7 +1965,9 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
     top = parts[0]
     if top.startswith(".") or top == "_scratch":
         return {**base, "verdict": "allow", "reason": "runtime-owned", "layout": "runtime"}
-    if len(parts) == 1 and top in ROOT_DOCUMENT_NAMES:  # a person's or a session's root document, not a record
+    if len(parts) == 1 and top in ROOT_DOCUMENT_NAMES and (
+            not os.path.lexists(str(root / top)) or is_root_document(root / top)):
+        # a person's or a session's root document, not a record; a link or a folder of that name is not one
         return {**base, "verdict": "allow", "reason": "root-document", "layout": "runtime"}
     if top == "shared":
         return {**base, "verdict": "deny", "reason": "shared-revision-immutable", "layout": "shared"}
