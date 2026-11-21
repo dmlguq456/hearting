@@ -117,8 +117,8 @@ const cases={
 };
 (async()=>{for(const [name,test] of Object.entries(cases)){await test(current);let failed=false;try{await test(previous.exports);}catch{failed=true;}assert(failed,'baseline must fail '+name);console.log('NEW_CASE '+name+' current=PASS baseline=FAIL');}
  for(const columns of [96,56,17])for(const budget of [24,6,2]){const draw=create=>JSON.stringify(setup(create,{free_text:false}).rows(columns,budget));assert.equal(draw(current),draw(previous.exports));}
- for(const columns of [96,56,17])for(const budget of [24,6,2]){
-  const draw=create=>{const x=setup(create);x.b.update([{id:'decision',revision:'one',answerable:true,answer_kind:'decision',questions:[{id:'q',question:'Decision'}]}],'',{});return JSON.stringify(x.rows(columns,budget));};assert.equal(draw(current),draw(previous.exports));
+ for(const columns of [96,56,17])for(const budget of [24,6,2])for(const keys of ['', '\r']){
+  const draw=create=>{const x=setup(create);x.b.leave();x.b.update([{id:'decision',revision:'one',answerable:true,answer_kind:'decision',questions:[{id:'q',question:'Decision'}]}],'',{});x.b.enter();x.b.input(Buffer.from(keys));return JSON.stringify(x.rows(columns,budget));};assert.equal(draw(current),draw(previous.exports));
  }
  const x=setup(current);assert.deepEqual((await x.send('2\r')).answers.q,['v2']);
  const y=setup(current);y.b.input(Buffer.from('a'.repeat(4096)+'한\x7fZ'));assert.equal((await y.send('\r')).answers.q[0],'a'.repeat(4095)+'Z');

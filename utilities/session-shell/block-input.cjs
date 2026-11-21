@@ -265,7 +265,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     if(!active(row)){const word=terminalState(row)==='open'?unanswerable(row):terminalState(row);
       local.notice=stale?text('changed','question changed · Tab next'):text(word,word);changed();return;}
     const values=formValues(row);
-    if(!values[id]){local.notice=text('empty','empty answer');changed();return;}
+    if(writable(row)&&!values[id]){local.notice=text('empty','empty answer');changed();return;}
     if(!complete(row,values)){local.notice=text('complete','answer every field · Tab next');changed();return;}
     busy=true;local.sending=true;local.notice='';changed();
     let sent=false;const started=moves;
