@@ -99,14 +99,16 @@ def _summary_plan(view, profiles, shown, values):
             one = rows[0] if len(rows) == 1 else None
             if name == "followed":
                 date = max(row["cell"]["since"]["date"] for row in rows)[5:]
+                moved = len(view.moved_lines(rows))
                 text = f"followed {date} · " + (f"{one['harness']} {one['target']}" if one
-                                                else _plural(len(rows), "cell"))
+                                                else _plural(len(rows), "cell") + (
+                                                    f" + {_plural(moved, 'linked line')}" if moved else ""))
             elif name == "next":
                 linked = len(view.linked(rows))
                 text = "next " + (f"{one['harness']} {one['target']}" if one else
                                   _plural(len(rows), "cell") + (f" + {_plural(linked, 'linked line')}"
                                                                 if linked else ""))
-                text += " · on the next update or refresh"
+                text += " · on the next update or refresh" + view.table_note(rows)
             elif name == "held":
                 text = "held " + (f"{one['harness']} {one['target']} · back on {name_of(one['cell']['model'])}"
                                   if one else _plural(len(rows), "cell"))
@@ -122,6 +124,9 @@ def _summary_plan(view, profiles, shown, values):
                 if name == "next":
                     out += [{"kind": "item", "text": line, "profile": None, "harness": None}
                             for line in view.linked(rows)]
+                elif name == "followed":
+                    out += [{"kind": "item", "text": "linked " + follow_view.line_label(key), "profile": None,
+                             "harness": None} for key in view.moved_lines(rows)]
         out += [{"kind": "note", "text": line} for line in view.cli_lines()]
         return out
     except Exception:
@@ -166,7 +171,7 @@ def _fit(candidates, room):
     return clip_cells(candidates[-1], max(1, room))
 
 
-def _box_plan(view, harness, profile, shown, values):
+def _box_plan(view, harness, profile, shown, values, table_effort=None):
     """What the chosen cell's box adds: status lines, the ``follow`` row and the draft, or None."""
     try:
         cell = view.cell(harness, profile)
@@ -177,7 +182,8 @@ def _box_plan(view, harness, profile, shown, values):
         lines = []
         if cell["state"] == "follow" and cell["why"] == "followed" and since:
             date, before = since["date"], name_of(since["from"] or "?")
-            effort = f" · {cell['effort']}" if cell["effort"] else ""
+            back = follow_view.effort_after_undo(cell, table_effort)       # what the cell shows once put back
+            effort = f" · {back}" if back else ""
             lines.append(("followed", [f"{date} · from {before}{effort}", f"{date} · from {before}",
                                        f"{date[5:]} · from {before}"], _UNDO))
         elif cell["state"] == "keep" and since:
@@ -193,14 +199,19 @@ def _box_plan(view, harness, profile, shown, values):
             lines.append(("held", [f"{date} · {refused} rejected · back on {name_of(cell['model'])}",
                                    f"{date[5:]} · {refused} rejected · back on {name_of(cell['model'])}"], None))
         if following and cell["state"] != "keep":
+            idle = view.table_note([{"harness": harness}])
             if following["branch"] == "will-follow":
-                lines.append(("next", [f"{name_of(following['model'])} · on the next update or refresh"], None))
+                lines.append(("next", [f"{name_of(following['model'])} · on the next update or refresh{idle}",
+                                       f"{name_of(following['model'])}{idle}"] if idle else
+                                      [f"{name_of(following['model'])} · on the next update or refresh"], None))
             elif following["branch"] == "proposal":
                 reason = f" · {following['reason']}" if following["reason"] else ""
                 lines.append(("proposal", [f"{name_of(following['model'])}{reason} · choose it yourself",
                                            f"{name_of(following['model'])}{reason}"], None))
             elif following["branch"] == "revert":
-                lines.append(("next", [f"{name_of(following['model'])} · back on the next update or refresh"], None))
+                lines.append(("next", [f"{name_of(following['model'])} · back on the next update or refresh{idle}",
+                                       f"{name_of(following['model'])}{idle}"] if idle else
+                                      [f"{name_of(following['model'])} · back on the next update or refresh"], None))
         word = values.get("ui:fol")
         undo = follow_view.undo_request(cell)
         requested = None
@@ -210,8 +221,12 @@ def _box_plan(view, harness, profile, shown, values):
             requested = "follow"
         elif word == "undo" and undo:
             requested = undo
+        moved = len((since or {}).get("lines") or ())
+        then = ["then Keep" + (f" · linked line{'s' if moved > 1 else ''} stay{'' if moved > 1 else 's'}"
+                               if moved else ""), "then Keep"]
         return {"cell": cell, "lines": lines, "rows": len(lines) + 1, "word": word, "requested": requested,
-                "undo": undo, "kept": cell["state"] == "keep",
+                "undo": undo, "kept": cell["state"] == "keep", "then": then,
+                "back_effort": follow_view.effort_after_undo(cell, table_effort),
                 "skips": name_of(cell["held"]) if cell["state"] == "held" and cell["held"] else None}
     except Exception:
         return None
@@ -236,6 +251,11 @@ def _draw_box_follow(grid, box, harness, bx, y, right):
                  right - 2, {"follow": "Follow", "keep": "Keep"})
     if box["skips"]:
         grid.put(end + 1, y, "skips " + box["skips"], "dim", limit=right - 1)
+    elif box["requested"] and box["word"] == "undo":      # the end of this row: the list below keeps its own note row
+        room = right - 1 - (end + 2)
+        text = next((item for item in box["then"] if cell_width(item) <= room), None)
+        if text:
+            grid.put(end + 2, y, text, "dim", limit=right - 1)
 
 
 PICK_ROWS = 8          # visible rows of the model list; the box grows by this many rows, the list scrolls
@@ -879,7 +899,7 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
     harness_choices = tuple(choices.get(harness, ()))
     picking = not _chips_fit(harness_choices, shown, right - 2 - (x + 13))
     extra = PICK_ROWS if picking else 0
-    box = _box_plan(view, harness, profile, shown, values) if view is not None else None
+    box = (_box_plan(view, harness, profile, shown, values, current_effort) if view is not None else None)
     extra_rows = box["rows"] if box else 0           # the status lines and the follow row
     box_top, box_bottom = y, y + 8 + extra + extra_rows
     box_left = x + 1
@@ -910,7 +930,7 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
     if draft and box["word"] == "undo":
         grid.put(now_end + 2, y + 1, "→", "line", limit=right)
         _model_cell(grid, now_end + 5, y + 1, harness,
-                    (box["cell"]["since"]["from"], box["cell"]["effort"]), shown, effort_keys, 40, limit=right)
+                    (box["cell"]["since"]["from"], box["back_effort"]), shown, effort_keys, 40, limit=right)
     if changed:
         grid.put(box_left + 56, y + 1, "→", "line", limit=right)
         _model_cell(grid, box_left + 59, y + 1, harness, (model_choice, effort_choice), shown, effort_keys, 40,
@@ -928,8 +948,6 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
                right - 2, shown)
     if missing_current:
         grid.put(box_left + 12, y + 2, "not in catalog · choose from the current list", "dim", limit=right)
-    elif draft and box["word"] == "undo":
-        grid.put(box_left + 12, y + 2, "then Keep", "dim", limit=right)
     grid.put(box_left + 3, y + 4 + extra, "effort", "label")
     effort_options = tuple(data.get("efforts", ()))
     observed = catalog.get("variants")

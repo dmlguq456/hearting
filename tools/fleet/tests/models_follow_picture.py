@@ -100,8 +100,6 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--answer", help="JSON file: the answer of model_follow.fleet_view()")
     parser.add_argument("--sample", help="a made-up answer of tools/fleet/tests/models_follow_samples.py instead")
-    parser.add_argument("--unlisted", action="append", default=[],
-                        help="HARNESS:MODEL the harness's list does not hold (a cell with nothing to follow)")
     parser.add_argument("--width", type=int, action="append", help="screen width(s); default 140")
     parser.add_argument("--select", default="deep/codex", help="the chosen cell, <profile>/<harness>; '' for none")
     parser.add_argument("--today", help="the day the screen counts three days from, YYYY-MM-DD")
@@ -118,7 +116,7 @@ def main(argv=None):
         args.today = args.today or models_follow_samples.TODAY
     if answer is not None:
         from tools.fleet.explorer import focus
-        focus.follow_into(fit_table(models, answer), answer, [tuple(item.split(":", 1)) for item in args.unlisted])
+        focus.follow_into(fit_table(models, answer), answer)
     folds = dict(item.partition("=")[::2] for item in args.fold)
     for name in filter(None, args.open.split(",")):
         folds["ui:fopen:" + name] = "open"

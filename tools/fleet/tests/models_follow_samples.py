@@ -8,28 +8,38 @@ TODAY = "2026-11-22"
 
 
 def cell(target, model, effort, *, state="follow", why="default", since=None, held=None, following=None,
-         lines=()):
+         lines=(), followable=True, reason=None):
     return {"target": target, "model": model, "effort": effort, "state": state, "why": why,
-            "since": since, "held": held, "next": following, "lines": list(lines)}
+            "since": since, "held": held, "next": following, "lines": list(lines),
+            "followable": followable, "reason": reason}
 
 
-def followed(target, before, model, effort, date=TODAY):
-    return cell(target, model, effort, why="followed", since={"date": date, "from": before, "to": model})
+def followed(target, before, model, effort, date=TODAY, effort_was=None, moved=()):
+    """A cell that followed: ``effort_was`` is the effort the follow lowered, ``moved`` the keys of the
+    companion lines it moved (both in the answer's own words)."""
+    return cell(target, model, effort, why="followed",
+                since={"date": date, "from": before, "to": model, "effort_was": effort_was, "lines": list(moved)})
+
+
+def unfollowable(target, model, effort, reason="not-in-list"):
+    """A cell no update can follow (a Claude alias, a model its list does not know)."""
+    return cell(target, model, effort, followable=False, reason=reason)
 
 
 def kept(target, model, effort, date="2026-11-20"):
-    return cell(target, model, effort, state="keep", why="kept", since={"date": date, "from": None, "to": None})
+    return cell(target, model, effort, state="keep", why="kept",
+                since={"date": date, "from": None, "to": None, "effort_was": None, "lines": []})
 
 
 def undone(target, model, effort, later, date="2026-11-22"):
     """A cell the user put back to the value before its follow (a keep)."""
     return cell(target, model, effort, state="keep", why="reverted",
-                since={"date": date, "from": model, "to": later})
+                since={"date": date, "from": model, "to": later, "effort_was": None, "lines": []})
 
 
 def held(target, model, effort, refused, date="2026-11-22"):
     return cell(target, model, effort, state="held", why="held", held=refused,
-                since={"date": date, "from": model, "to": refused})
+                since={"date": date, "from": model, "to": refused, "effort_was": None, "lines": []})
 
 
 def upcoming(model, effort, branch="will-follow", reason="newer"):
@@ -37,9 +47,9 @@ def upcoming(model, effort, branch="will-follow", reason="newer"):
             "command": None, "fit_from": None}
 
 
-def item(harness, cells=(), cli=None, status="ok"):
+def item(harness, cells=(), cli=None, status="ok", read_only=False):
     return {"harness": harness, "status": status, "reason": "", "cells": list(cells), "plan": [],
-            "cli": cli, "states": {"followed": 0, "kept": 0, "held": 0}}
+            "cli": cli, "states": {"followed": 0, "kept": 0, "held": 0}, "read_only": read_only}
 
 
 def plain_codex():

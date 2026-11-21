@@ -18,7 +18,7 @@ from unittest import mock
 from tools.fleet.explorer import focus, follow
 from tools.fleet.explorer.frame import draw
 from tools.fleet.explorer.grid import cell_width
-from tools.fleet.explorer.state import NavState, reduce
+from tools.fleet.explorer.state import NavState, finish_follow_draft, reduce
 from tools.fleet.explorer.style import normalize_style
 from tools.fleet.explorer.view_model import ExplorerViewModel
 from tools.fleet.tests import models_follow_picture as picture
@@ -29,13 +29,13 @@ TODAY = samples.TODAY
 ALL = samples.samples()
 
 
-def _models(name=None, answer=None, unlisted=(), targets=None):
+def _models(name=None, answer=None, targets=None):
     answer = ALL[name] if answer is None and name else answer
     models = picture.base_models()
     if targets:
         models["profile_target"] = targets
     if answer is not None:
-        focus.follow_into(picture.fit_table(models, answer), answer, unlisted)
+        focus.follow_into(picture.fit_table(models, answer), answer)
     return models
 
 
@@ -89,10 +89,10 @@ class QuietDay(unittest.TestCase):
                     self.assertEqual(shown, _golden(width, select))
 
     def test_a_cell_with_nothing_to_follow_has_the_box_it_had(self):
-        # a Claude alias the model list does not hold: the answer's cell is left out
+        # a Claude alias the model list does not hold: the answer says no update can follow it
         answer = copy.deepcopy(ALL["quiet"])
-        answer[0]["cells"] = [samples.cell("tier/balanced", "sonnet", "high")]
-        models = _models(answer=answer, unlisted={("claude", "sonnet")})
+        answer[0]["cells"] = [samples.unfollowable("tier/balanced", "sonnet", "high")]
+        models = _models(answer=answer)
         self.assertEqual(models["follow"]["cells"]["claude"], [])
         self.assertEqual(picture.section_text(models, 140, "balanced/claude", TODAY), _golden(140, "balanced/claude"))
 
@@ -115,7 +115,7 @@ class QuietDay(unittest.TestCase):
                 raise RuntimeError("no table")
 
         with mock.patch.object(focus, "utility", return_value=Utility):
-            self.assertEqual(focus._read_follow({}), (None, ()))
+            self.assertIsNone(focus._read_follow({}))
         models = picture.base_models()
         focus.follow_into(models, None)
         self.assertNotIn("follow", models)
@@ -242,7 +242,7 @@ class Summary(unittest.TestCase):
         self.assertTrue(rows[1].startswith("│ > next 2 cells + 1 linked line · on the next update or refresh"))
         self.assertTrue(rows[2].startswith("│ ! held codex profile/deep · back on gpt-6-astra"))
         self.assertTrue(rows[3].startswith("│ ? proposal codex profile/balanced · gpt-7-terra (other family)"))
-        self.assertTrue(rows[4].startswith("│ codex CLI 0.163.0 lists gpt-6.1-sol, gpt-6-astra as previous generation"))
+        self.assertTrue(rows[4].startswith("│ codex CLI 0.163.0 · update it yourself · lists gpt-6.1-sol, gpt-6-astra as previous"))
         self.assertEqual(rows[5], "│ ^ Followed   = Keep   ! Held")
 
     def test_one_target_is_named_and_several_are_counted(self):
@@ -286,11 +286,13 @@ class Summary(unittest.TestCase):
             self.assertEqual(shown[11], "│")                                      # the blank row before the box
         self.assertTrue(next(row for row in narrow if "CLI" in row).endswith("…"))
         self.assertTrue(next(row for row in wide if "CLI" in row).endswith("…"))   # 105 cells are not enough
+        for shown in (wide, narrow):          # what to do comes before why: the cut takes only the reason
+            self.assertIn("codex CLI 0.163.0 · update it yourself · lists gpt-6.1-sol", next(row for row in shown if "CLI" in row))
 
     def test_todays_machine_two_lines_no_mark_no_legend(self):
         shown = _pic("today", 140, "balanced/claude")
         self.assertEqual(shown[9], "│ > next opencode tier/deep · on the next update or refresh ▸")
-        self.assertTrue(shown[10].startswith("│ codex CLI 0.163.0 lists gpt-6.1-sol, gpt-6-astra as previous generation"))
+        self.assertTrue(shown[10].startswith("│ codex CLI 0.163.0 · update it yourself · lists gpt-6.1-sol, gpt-6-astra as previous"))
         self.assertFalse(any(glyph in "".join(shown[1:8]) for glyph in "^=!"))
         self.assertNotIn("Followed", "\n".join(shown))
 
@@ -298,8 +300,8 @@ class Summary(unittest.TestCase):
         view = follow.Follow({"cells": {}, "cli": [{"harness": "claude", "version": "2.1.0", "kind": "min-version",
                                                      "models": [["a", "2.2"], ["b", "2.3"], ["c", "2.4"], ["d", "2.5"]],
                                                      "command": "claude update"}]}, {}, None)
-        self.assertEqual(view.cli_lines(), ["claude CLI 2.1.0 is older than a (needs 2.2), b (needs 2.3), "
-                                            "c (needs 2.4) and 1 more · claude update"])
+        self.assertEqual(view.cli_lines(), ["claude CLI 2.1.0 · claude update · older than a (needs 2.2), "
+                                            "b (needs 2.3), c (needs 2.4) and 1 more"])
 
     def test_every_row_stays_inside_the_pane(self):
         opened = {f"ui:fopen:{g}": "open" for g in follow.GROUPS}
@@ -430,7 +432,7 @@ class Drafts(unittest.TestCase):
         self.assertEqual(state.fold_map()["ui:fol"], "undo")
         undo_rows = [row for row in frame.text_rows() if "then Keep" in row]
         follow_row = next(i for i, row in enumerate(frame.text_rows()) if "follow   [ Follow ]" in row)
-        self.assertEqual(frame.text_rows()[follow_row + 1].strip(" │"), "then Keep")
+        self.assertIn("then Keep", frame.text_rows()[follow_row])       # at the end of the follow row
         self.assertEqual(len(undo_rows), 1)
 
     def test_the_draft_keeps_its_command_whole_and_its_buttons_at_width_100(self):
@@ -446,7 +448,7 @@ class Drafts(unittest.TestCase):
         models = _models(answer=answer, targets=targets)
         vm, state, frame = _frame(models, 140, "deep/codex")
         state, _e, frame = _click(vm, state, frame, 140, lambda a: a == ("ui", "fol", "undo"))
-        self.assertIn("$ hearting model set codex tier/deep gpt-6.1-sol@xhigh",
+        self.assertIn("$ hearting model set codex tier/deep gpt-6.1-sol ",         # the tier line keeps its effort
                       next(r for r in frame.text_rows() if "$ hearting" in r))
 
     def test_a_model_draft_and_a_keep_draft_do_not_stand_together(self):
@@ -467,7 +469,12 @@ class Drafts(unittest.TestCase):
         after, effects = reduce(state, {"type": "click", "action": dry}, frame)
         self.assertEqual((effects, after.fold_map().get("ui:fol")), ((dry,), "keep"))
         after, effects = reduce(state, {"type": "click", "action": app}, frame)
-        self.assertEqual((effects, "ui:fol" in after.fold_map()), ((app,), False))
+        self.assertEqual((effects, after.fold_map().get("ui:fol")), ((app,), "keep"))   # not cleared before it is written
+        for status, kept in (("changed", False), ("unchanged", False), ("failed", True), ("invalid-arguments", True),
+                             ("read-only", True)):
+            done = finish_follow_draft(after, effects, {"model_action": True, "status": status})
+            self.assertEqual("ui:fol" in done.fold_map(), kept, status)
+        self.assertIn("ui:fol", finish_follow_draft(state, (dry,), {"status": "planned"}).fold_map())
 
 
 class Apply(unittest.TestCase):
@@ -488,7 +495,7 @@ class Apply(unittest.TestCase):
         reads = []
         runtime = self._runtime()
         with mock.patch.object(runtime, "_model_settings_module", return_value=settings), \
-                mock.patch.object(focus, "read_model_config", side_effect=lambda: reads.append(1) or fresh), \
+                mock.patch.object(focus, "read_model_config", side_effect=lambda **kw: reads.append(kw) or fresh), \
                 mock.patch.object(focus, "utility", return_value=SimpleNamespace(runtime_home=lambda h: "/nowhere")):
             for requested in ("keep", "follow", "gpt-6-astra@high"):
                 result = runtime.apply_effects([("models.apply", "codex", "follow", "profile/deep", requested, False)], vm)
@@ -502,7 +509,7 @@ class Apply(unittest.TestCase):
                 self.assertEqual(result["status"], "failed", bad)
         self.assertEqual(calls, [("codex", "profile/deep", "keep", False), ("codex", "profile/deep", "follow", False),
                                  ("codex", "profile/deep", "gpt-6-astra@high", False)])
-        self.assertEqual(len(reads), 3)                      # one read after each apply; a refused effect reads nothing
+        self.assertEqual(reads, [{"refresh": False}] * 3)     # one read after each apply; a refused effect reads nothing
 
     def test_keep_then_follow_on_a_copy_of_a_table_in_a_temporary_home(self):
         answer = [samples.item("opencode", [samples.cell("tier/light", "opencode-go/deepseek-v4.1-flash", "max")])]
@@ -549,14 +556,13 @@ class ReadOnce(unittest.TestCase):
                 asked.append(kw)
                 assert kw["read_catalog"]("codex") is catalogs["codex"]
                 return [samples.item("codex", [samples.cell("tier/deep", "gpt-6-astra", "high"),
-                                               samples.cell("tier/light", "gpt-5", "high")]),
-                        samples.item("claude", [samples.cell("tier/deep", "opus", "xhigh")])]
+                                               samples.unfollowable("tier/light", "gpt-5", "high")]),
+                        samples.item("claude", [samples.unfollowable("tier/deep", "opus", "xhigh")])]
 
         with mock.patch.object(focus, "utility", return_value=Utility):
-            answer, unlisted = focus._read_follow(catalogs)
+            answer = focus._read_follow(catalogs)
         self.assertEqual(len(asked), 1)
-        self.assertEqual(set(asked[0]), {"read_catalog"})
-        self.assertEqual(set(unlisted), {("codex", "gpt-5"), ("claude", "opus")})
+        self.assertEqual(set(asked[0]), {"read_catalog", "probe"})
         self.assertEqual(len(answer), 2)
 
     def test_drawing_never_asks_for_anything(self):
@@ -586,6 +592,416 @@ class ReadOnce(unittest.TestCase):
                          "tier/balanced-deep")
         self.assertIsNone(focus._profile_target({"CFG_MODEL_PROFILE_DEEP": "deep:x",
                                                  "CFG_MODEL_PROFILE_GRANULARITY_DEEP": "collapsed"}, "deep"))
+
+
+
+# ---- the review of the screen: one box says one thing, the keyboard and the mouse agree, the input
+# ---- thread starts no process, an odd answer costs only following, the lines do not run into each other
+
+AGENT_HOME = Path(__file__).resolve().parents[3]
+ODD_ANSWERS = ([{"harness": "codex", "cells": 5}],
+               [{"harness": "codex", "cells": [{"target": "profile/deep", "model": ["x"], "state": "follow"}]}],
+               [{"harness": "codex", "cells": [{"target": "profile/deep", "model": {"a": 1}, "state": "follow"}]}],
+               [{"cells": [{"model": "x"}]}])
+
+
+def _through_a_tier(*, table_effort="medium", tier_effort="xhigh", effort_was=None, moved=()):
+    """A codex ``deep`` profile that is ``deep:<table_effort>`` through a tier whose own effort is ``tier_effort``,
+    followed the day before: the table and the answer, as the product reads them."""
+    answer = [samples.item("codex", [samples.followed("tier/deep", "gpt-6.1-sol", "gpt-6.2-sol", tier_effort,
+                                                       effort_was=effort_was, moved=moved)])]
+    models = picture.base_models()
+    models["profile_map"]["codex"]["deep"] = ["gpt-6.2-sol", table_effort]
+    models["profile_target"] = {"codex": {"deep": "tier/deep"}}
+    focus.follow_into(picture.fit_table(models, answer), answer)
+    return models
+
+
+def _box_rows(models, width=140, folds=None, select="deep/codex"):
+    return _box(picture.section_text(models, width, select, TODAY, folds))
+
+
+class OneBoxOneThing(unittest.TestCase):
+    """The state line and the preview say what the cell shows after the write: its own effort."""
+
+    def test_a_cell_through_a_tier_shows_its_own_effort_in_the_box_and_asks_for_no_effort(self):
+        models = _through_a_tier()
+        for width in (100, 140):
+            box = "\n".join(_box_rows(models, width, {"ui:fol": "undo"}))
+            with self.subTest(width=width):
+                self.assertIn("now      gpt-6.2-sol · medium  →  gpt-6.1-sol · medium", box)
+                self.assertNotIn("xhigh", box.split("effort")[0])
+                self.assertIn("$ hearting model set codex tier/deep gpt-6.1-sol ", box)
+                self.assertNotIn("gpt-6.1-sol@", box)
+        plain = "\n".join(_box_rows(models, 140))
+        self.assertIn("followed 2026-11-22 · from gpt-6.1-sol · medium", plain)
+
+    def test_the_request_of_a_follow_that_lowered_the_effort_puts_it_back(self):
+        # the cell goes through a tier: the tier line is put back at the effort the follow lowered it from
+        models = _through_a_tier(tier_effort="high", effort_was="xhigh")
+        box = "\n".join(_box_rows(models, 140, {"ui:fol": "undo"}))
+        self.assertIn("$ hearting model set codex tier/deep gpt-6.1-sol@xhigh", box)
+        self.assertIn("now      gpt-6.2-sol · medium  →  gpt-6.1-sol · medium", box)     # the profile line's own effort
+        # a cell that names its model goes back to the effort it had before, in the box and in the request
+        answer = [samples.item("codex", [samples.followed("profile/deep", "gpt-6-astra", "gpt-6.2-astra", "high",
+                                                           effort_was="xhigh")])]
+        direct = _models(answer=answer)
+        box = "\n".join(_box_rows(direct, 140, {"ui:fol": "undo"}))
+        self.assertIn("now      gpt-6.2-astra · high  →  gpt-6-astra · xhigh", box)
+        self.assertIn("followed 2026-11-22 · from gpt-6-astra · xhigh", box)
+        self.assertIn("$ hearting model set codex profile/deep gpt-6-astra@xhigh", box)
+        cell = direct["follow"]["cells"]["codex"][0]
+        self.assertEqual(follow.undo_request(cell), "gpt-6-astra@xhigh")
+        self.assertEqual(follow.undo_request(_through_a_tier()["follow"]["cells"]["codex"][0]), "gpt-6.1-sol")
+
+    def test_the_runtime_takes_the_same_request_the_box_drafts(self):
+        from tools.fleet.explorer.runtime import ExplorerRuntime
+        for models, asked in ((_through_a_tier(), "gpt-6.1-sol"),
+                              (_through_a_tier(tier_effort="high", effort_was="xhigh"), "gpt-6.1-sol@xhigh")):
+            seen = []
+            settings = SimpleNamespace(set_model=lambda *a, **kw: seen.append(a) or {"status": "changed", "lines": []},
+                                       ModelSettingsUsageError=ValueError)
+            runtime = ExplorerRuntime()
+            vm = SimpleNamespace(models=models, ordering={})
+            with mock.patch.object(runtime, "_model_settings_module", return_value=settings), \
+                    mock.patch.object(focus, "read_model_config", return_value=None), \
+                    mock.patch.object(focus, "utility", return_value=SimpleNamespace(runtime_home=lambda h: "/nowhere")):
+                result = runtime.apply_effects([("models.apply", "codex", "follow", "tier/deep", asked, False)], vm)
+                self.assertEqual(result["status"], "changed", asked)
+                bad = runtime.apply_effects([("models.apply", "codex", "follow", "tier/deep", "gpt-6.1-sol@low", False)], vm)
+                self.assertEqual(bad["status"], "failed")
+            self.assertEqual([call[2] for call in seen], [asked])
+
+
+def _isolated(root, *, followed=True, slow_claude=False):
+    """An isolated HOME: the shipped codex table (``deep:medium`` through a tier whose effort is xhigh), a made-up
+    list, and fake CLIs that only count their calls (the real ones are never on the PATH)."""
+    import datetime
+    home, calls = root / "codex", root / "calls"
+    for folder in ("codex/agent-config", "claude/agent-config", "config", "state", "data", "cache", "bin"):
+        (root / folder).mkdir(parents=True)
+    text = (AGENT_HOME / "adapters/codex/config/models.conf").read_text()
+    if followed:
+        day = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        text = text.replace("CFG_TIER_DEEP_MODEL=gpt-6.1-sol",
+                            f"CFG_TIER_DEEP_MODEL=gpt-6.2-sol # auto-follow {day}: gpt-6.1-sol -> gpt-6.2-sol")
+    (home / "agent-config" / "models.conf").write_text(text)
+    levels = '"supported_reasoning_levels":["low","medium","high","xhigh"]'
+    rows = ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"] + (["gpt-6.2-sol"] if followed else [])
+    (home / "models_cache.json").write_text('{"client_version":"0.170.0","models":[' + ",".join(
+        '{"slug":"%s","visibility":"list",%s}' % (slug, levels) for slug in rows) + ']}')
+    if slow_claude:
+        shutil.copyfile(AGENT_HOME / "adapters/claude/config/models.conf", root / "claude/agent-config/models.conf")
+        (root / "claude/cache/model-catalog").mkdir(parents=True)
+        (root / "claude/cache/model-catalog/a.json").write_text(
+            '{"catalog":{"config":{"models":[{"id":"claude-opus-5-5","section":"main","min_claude_code_version":"9.9.0"},'
+            '{"id":"claude-sonnet-5-5","section":"main"},{"id":"claude-haiku-5-5","section":"main"}]}}}')
+    for name in ("claude", "codex", "opencode"):
+        script = root / "bin" / name
+        script.write_text(f'#!/bin/sh\necho {name} >> "{calls}"\n[ {name} = opencode ] && exit 1\n'
+                          f'echo "2.1.0 (fake {name})"\n')
+        script.chmod(0o755)
+    kept = {key: os.environ[key] for key in ("PYTHONPYCACHEPREFIX", "PYTHONDONTWRITEBYTECODE", "LANG", "LC_ALL")
+            if key in os.environ}
+    return {**kept, "AGENT_HOME": str(AGENT_HOME), "HOME": str(root), "CLAUDE_CONFIG_DIR": str(root / "claude"),
+            "CODEX_HOME": str(home), "XDG_CONFIG_HOME": str(root / "config"), "XDG_DATA_HOME": str(root / "data"),
+            "XDG_STATE_HOME": str(root / "state"), "XDG_CACHE_HOME": str(root / "cache"), "TMPDIR": str(root),
+            "PATH": f"{root / 'bin'}:/usr/bin:/bin"}
+
+
+def _env(root, **kw):
+    """The environment of an isolated HOME and nothing else (a pinned config home of the caller is not kept)."""
+    return mock.patch.dict(os.environ, _isolated(root, **kw), clear=True)
+
+
+def _calls(root):
+    path = root / "calls"                 # (the catalog reader asks `opencode --version` itself: not what is counted here)
+    return [name for name in path.read_text().split() if name != "opencode"] if path.exists() else []
+
+
+class TheTableReadAgain(unittest.TestCase):
+    """Written to a real table in an isolated HOME and read again: the box said what the table shows."""
+
+    def test_the_box_and_the_table_read_after_the_write_agree(self):
+        from tools.fleet.explorer.runtime import ExplorerRuntime
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with _env(root):
+                models = focus.read_model_config()
+                self.assertEqual(models["profile_target"]["codex"]["balanced-deep"], "tier/deep")
+                vm, state, frame = _frame(models, 140, "balanced-deep/codex")
+                state, _e, frame = _click(vm, state, frame, 140, lambda a: a == ("ui", "fol", "undo"))
+                rows = frame.text_rows()
+                preview = next(row for row in rows if "now      gpt-6.2-sol" in row and "→" in row)
+                said = preview.split("→")[1].replace("│", "").strip()
+                stated = next(row for row in rows if "from gpt-6.1-sol" in row)
+                self.assertIn(f"from gpt-6.1-sol · {said.split(' · ')[1]}", stated)
+                apply = next(h for h in frame.hits if h.action[:3] == ("models.apply", "codex", "follow")
+                             and h.action[-1] is False)
+                result = ExplorerRuntime().apply_effects((apply.action,), vm)
+                self.assertEqual(result["status"], "changed")
+                again = result["models"]["profile_map"]["codex"]["balanced-deep"]
+                self.assertEqual(f"{again[0]} · {again[1]}", said)
+
+
+class TheKeyboardAndTheMouse(unittest.TestCase):
+    def _kept_then_list(self, models):
+        vm, state, frame = _frame(models, 100, "deep/codex")
+        state, _e, frame = _click(vm, state, frame, 100, lambda a: a == ("ui", "fol", "keep"))
+        state, _e, frame = _click(vm, state, frame, 100, lambda a: a[:1] == ("models.find",))
+        for key in ("down", "down", "enter"):
+            state, _effects = reduce(state, {"type": "key", "key": key}, frame)
+            frame = draw(vm, state, 100, 70, beat=1)
+        return state, frame
+
+    def test_choosing_a_model_with_the_keys_drops_the_follow_draft(self):
+        state, frame = self._kept_then_list(_models("followed"))
+        folds = state.fold_map()
+        self.assertNotIn("ui:fol", folds)
+        chosen = folds["ui:model"]
+        self.assertNotEqual(chosen, "gpt-6.2-astra")                     # a model the list gave, not the cell's own
+        command = next(row for row in frame.text_rows() if "$ hearting" in row)
+        self.assertIn("$ hearting model set codex profil", command)       # a model draft's command (cut at 100), not keep
+        self.assertNotIn(" keep", command)
+        written = [hit.action for hit in frame.hits if hit.action[:1] == ("models.apply",)]
+        self.assertEqual(written, [("models.apply", "codex", "profile", "deep", chosen, "high", True),
+                                   ("models.apply", "codex", "profile", "deep", chosen, "high", False)])
+
+    def test_every_way_to_start_one_draft_drops_the_other(self):
+        from tools.fleet.explorer.state import _draft
+        for key, gone in (("ui:model", ["ui:fol"]), ("ui:effort", ["ui:fol"]),
+                          ("ui:fol", ["ui:model", "ui:effort", "ui:mfocus"]),
+                          ("ui:sel", ["ui:model", "ui:effort", "ui:fol", "ui:mfocus"])):
+            folds = {"ui:fol": "keep", "ui:model": "m", "ui:effort": "high", "ui:mfocus": "1"}
+            _draft(folds, {"mpick": 3}, key)
+            self.assertEqual([name for name in folds if name in gone], [], key)
+
+    def test_a_refused_write_keeps_the_draft_and_a_written_one_drops_it(self):
+        from tools.fleet.explorer.runtime import ExplorerRuntime
+        from tools.fleet.explorer import runtime as runtime_module
+        models = _models("followed")
+        vm, state, frame = _frame(models, 140, "balanced/codex", folds={"ui:fol": "keep"})
+        apply = next(h.action for h in frame.hits if h.action[:1] == ("models.apply",) and h.action[-1] is False)
+        state, effects = reduce(state, {"type": "click", "action": apply}, frame)
+        runtime = ExplorerRuntime()
+        for status, left in (("failed", True), ("changed", False)):
+            settings = SimpleNamespace(set_model=lambda *a, **kw: {"status": status, "lines": [f"model set: {status}"]},
+                                       ModelSettingsUsageError=ValueError)
+            with mock.patch.object(runtime, "_model_settings_module", return_value=settings), \
+                    mock.patch.object(focus, "read_model_config", return_value=None), \
+                    mock.patch.object(focus, "utility", return_value=SimpleNamespace(runtime_home=lambda h: "/nowhere")):
+                result = runtime.apply_effects(effects, vm)
+            after = finish_follow_draft(state, effects, result)
+            self.assertEqual("ui:fol" in after.fold_map(), left, status)
+
+
+    def test_the_screen_drops_the_draft_only_when_the_result_says_it_was_written(self):
+        from tools.fleet import render
+        effect = ("models.apply", "codex", "follow", "tier/deep", "keep", False)
+        for status, left in (("changed", False), ("failed", True), ("invalid-arguments", True)):
+            state = NavState(view="MODELS", title="MODELS", folds=(("ui:fol", "keep"), ("ui:sel", "deep/codex")))
+            runtime = SimpleNamespace(apply_effects=lambda effects, vm, status=status: {
+                "model_action": True, "status": status, "message": f"model set: {status}", "models": None})
+            with mock.patch.object(render, "_explorer_runtime", return_value=runtime), \
+                    mock.patch.object(render, "_EXPLORER_STATE", state), \
+                    mock.patch.object(render, "_EXPLORER_REPLAY_ACTIVE", False):
+                render._explorer_apply_effects((effect,), SimpleNamespace(models={}))
+                self.assertEqual("ui:fol" in render._EXPLORER_STATE.fold_map(), left, status)
+                self.assertEqual(render._EXPLORER_STATE.status, f"model set: {status}")
+
+
+class NoProcessInTheInput(unittest.TestCase):
+    """The read made inside the key and mouse handling starts no process: the CLI's answer is the
+    last background read's."""
+
+    def setUp(self):
+        focus._CLI_SEEN.clear()
+        self.addCleanup(focus._CLI_SEEN.clear)
+
+    def test_the_input_thread_asks_the_cli_nothing_and_the_note_stays(self):
+        from tools.fleet.explorer.runtime import ExplorerRuntime
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with _env(root, slow_claude=True):
+                models = focus.read_model_config()                       # the background read
+                asked = _calls(root)
+                self.assertLessEqual(asked.count("claude"), 1)
+                self.assertLessEqual(asked.count("codex"), 1)
+                self.assertEqual([note["harness"] for note in models["follow"]["cli"]], ["claude"])
+                runtime, vm = ExplorerRuntime(), SimpleNamespace(models=models, ordering={})
+                claude = models["profile_map"]["claude"]["balanced"]
+                before = len(_calls(root))
+                results = [
+                    runtime.apply_effects([("models.apply", "claude", "profile", "balanced", claude[0], claude[1], True)], vm),
+                    runtime.apply_effects([("models.apply", "codex", "follow", "tier/deep", "keep", True)], vm),
+                    runtime.apply_effects([("models.apply", "claude", "profile", "balanced", claude[0], claude[1], False)], vm),
+                    runtime.apply_effects([("alloc.apply", (("window", "5"),), True)], vm)]
+                self.assertEqual([r["status"] for r in results[:3]], ["unchanged", "planned", "unchanged"])
+                self.assertEqual(len(_calls(root)), before, "the input thread started a process")
+                for result in results:
+                    if result["models"]:
+                        self.assertEqual(result["models"]["follow"]["cli"], models["follow"]["cli"])
+                self.assertTrue(any(r["models"] for r in results))
+
+    def test_a_harness_the_background_read_never_asked_about_is_not_known_to_the_input_read(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with _env(root, slow_claude=True):
+                models = focus.read_model_config(refresh=False)
+                self.assertEqual(_calls(root), [])
+                self.assertEqual(models["follow"]["cli"], [])
+
+
+class AnOddAnswerCostsOnlyFollowing(unittest.TestCase):
+    def _models_value(self, utility_for_follow):
+        from tools.fleet.explorer.types import FocusKey, FocusRequest
+        cat = SimpleNamespace(state="available", rows=({"id": "gpt-6-astra"}, {"id": "gpt-6.1-sol"}),
+                              models=("gpt-6-astra", "gpt-6.1-sol"), source="/cache/models.json", observed_at=1,
+                              variants={})
+        real = focus.utility
+        with mock.patch.object(focus, "utility", side_effect=lambda name: utility_for_follow if name == "model_follow"
+                               else real(name)), \
+                mock.patch("tools.fleet.explorer.model_catalog.read_catalogs",
+                           return_value={"claude": cat, "codex": cat, "opencode": cat}):
+            return focus.collect_aux(FocusRequest(FocusKey("*", "models"), 1, 0)).source_records["models"]
+
+    def test_the_models_value_comes_whole_and_draws_as_it_did_before_following(self):
+        class Broken:
+            @staticmethod
+            def fleet_view(**_kw):
+                raise RuntimeError("no")
+        with TemporaryDirectory() as temp:
+            with _env(Path(temp)):
+                reference = self._models_value(Broken)
+                self.assertNotIn("follow", reference)
+                self.assertTrue(reference["profile_map"])
+                for odd in ODD_ANSWERS:
+                    class Odd:
+                        @staticmethod
+                        def fleet_view(**_kw):
+                            return copy.deepcopy(odd)
+                    with self.subTest(odd=odd):
+                        got = self._models_value(Odd)
+                        self.assertFalse([cells for cells in (got.get("follow") or {}).get("cells", {}).values() if cells])
+                        self.assertEqual({k: v for k, v in got.items() if k != "follow"}, reference)
+                        for width in (100, 140):
+                            self.assertEqual(picture.section_text(got, width, "deep/codex", TODAY),
+                                             picture.section_text(reference, width, "deep/codex", TODAY))
+
+
+class TheLinesDoNotRunIntoEachOther(unittest.TestCase):
+    def _picker(self, harness, answer, source):
+        models = picture.base_models()
+        models["catalog_sources"] = {harness: {"state": "available", "source": source, "observed_at": 1}}
+        focus.follow_into(picture.fit_table(models, answer), answer)
+        return models
+
+    def test_then_keep_is_at_the_end_of_the_follow_row_beside_a_list_with_its_notes(self):
+        codex = [samples.item("codex", [samples.followed("profile/deep", "gpt-6-astra", "gpt-6.2-astra", "high")])]
+        opencode = [samples.item("opencode", [samples.followed("profile/deep", "opencode-go/glm-5.2-flash",
+                                                               "opencode-go/glm-5.3-flash", "max")])]
+        for harness, answer in (("codex", codex), ("opencode", opencode)):
+            models = self._picker(harness, answer, "/cache/models.json")
+            if harness == "opencode":
+                models["model_choices"]["opencode"] = [f"opencode-go/m{index}" for index in range(5)] \
+                    + ["openai/a", "openai/b", "opencode-go/glm-5.3-flash"]
+            box = _box_rows(models, 100, {"ui:fol": "undo"}, select=f"deep/{harness}")
+            with self.subTest(harness=harness):
+                rows = [row.strip("│ ").rstrip(" │┐┘") for row in box]
+                self.assertEqual(len([row for row in rows if "then Keep" in row]), 1)
+                self.assertTrue(next(row for row in rows if "then Keep" in row).startswith("follow   [ Follow ]   Keep"))
+                note = next(row for row in rows if row.startswith(("from cache", "opencode-go 6")))
+                self.assertNotIn("Keep", note)
+                self.assertTrue(note.startswith("from cache, callabil") or note.startswith("opencode-go 6 · openai 2  · from cache"),
+                                note)
+                for row in rows:
+                    for broken in ("Keepe", "Keepgo", "Keep,", "Keepfrom"):
+                        self.assertNotIn(broken, row)
+                self.assertEqual(len(box), len(_box_rows(models, 100, {}, select=f"deep/{harness}")) + 0)
+
+    def test_the_words_about_lines_that_moved_with_the_follow(self):
+        for moved, said in (((), "then Keep"), (("CFG_TIER_DEEP_FAILOVER_CASCADE",), "then Keep · linked line stays"),
+                            (("CFG_TIER_DEEP_FAILOVER_CASCADE", "CFG_MAIN_SESSION_ONLY_MODELS"),
+                             "then Keep · linked lines stay")):
+            models = _through_a_tier(moved=moved)
+            rows = [row.strip("│ ").rstrip(" │┐┘") for row in _box_rows(models, 140, {"ui:fol": "undo"})]
+            follow_row = next(row for row in rows if row.startswith("follow "))
+            self.assertTrue(follow_row.endswith(said), (follow_row, said))
+        narrow = [row.strip("│ ").rstrip(" │┐┘") for row in _box_rows(
+            _through_a_tier(moved=("CFG_TIER_DEEP_FAILOVER_CASCADE",)), 100, {"ui:fol": "undo"})]
+        row = next(row for row in narrow if row.startswith("follow "))
+        self.assertIn("then Keep", row)
+        self.assertLessEqual(cell_width(row), 63)
+
+    def test_lines_the_follow_moved_are_counted_from_the_answer(self):
+        answer = [samples.item("codex", [
+            samples.followed("tier/deep", "gpt-6.1-sol", "gpt-6.2-sol", "xhigh", moved=("CFG_TIER_DEEP_FAILOVER_CASCADE",)),
+            samples.followed("tier/light", "gpt-6-luna", "gpt-6.1-luna", "medium", moved=("CFG_TIER_DEEP_FAILOVER_CASCADE",)),
+            samples.followed("tier/top", "gpt-6-astra", "gpt-6.2-astra", "xhigh")])]
+        shown = _pic(answer=answer, targets={"codex": {"deep": "tier/deep", "light": "tier/light", "top": "tier/top"}})
+        self.assertEqual(shown[9], "│ ^ followed 11-22 · 3 cells + 1 linked line ▸")
+
+
+class TheKeysTheCoreAdded(unittest.TestCase):
+    def test_a_cell_no_update_can_follow_gets_nothing_about_following(self):
+        answer = copy.deepcopy(ALL["followed"])
+        answer[0]["cells"] = [samples.unfollowable("tier/balanced", "sonnet", "high", "not-in-list"),
+                              samples.unfollowable("tier/light", "odd", "high", "no-pattern")]
+        models = _models(answer=answer)
+        self.assertEqual(models["follow"]["cells"]["claude"], [])
+        self.assertEqual(picture.section_text(models, 140, "balanced/claude", TODAY)[9:],
+                         picture.section_text(_models("followed"), 140, "balanced/claude", TODAY)[9:])
+        # a cell the answer cannot tell about (no list: null) is drawn like any other, with no next
+        answer = [samples.item("codex", [dict(samples.cell("profile/deep", "gpt-6-astra", "high"), followable=None,
+                                              reason="no-catalog")])]
+        self.assertTrue(any("follow   [ Follow ]" in row for row in _pic(answer=answer)))
+
+    def test_an_answer_without_the_new_keys_or_with_values_it_does_not_know_still_draws(self):
+        answer = copy.deepcopy(ALL["followed"])
+        for entry in answer:
+            entry.pop("read_only", None)
+            for found in entry["cells"]:
+                for key in ("followable", "reason"):
+                    found.pop(key, None)
+                if found["since"]:
+                    found["since"] = {k: v for k, v in found["since"].items() if k not in ("effort_was", "lines")}
+        self.assertEqual(_pic(answer=answer), _pic("followed"))
+        odd = copy.deepcopy(ALL["followed"])
+        odd[1]["read_only"] = "sure"
+        odd[1]["cells"][0]["followable"] = "maybe"
+        odd[1]["cells"][1]["since"].update(effort_was=3, lines="x")
+        self.assertEqual(_pic(answer=odd), _pic("followed"))
+
+    def test_a_table_that_is_read_only_does_not_promise_the_next_update(self):
+        answer = copy.deepcopy(ALL["next"])
+        answer[2]["read_only"] = True
+        shown = _pic(answer=answer, targets=None)
+        self.assertIn("│ > next opencode tier/deep · on the next update or refresh · table is read-only · not updated ▸", shown)
+        box = _box(_pic(answer=answer, select="deep/opencode", targets={"opencode": {"deep": "tier/deep"}}))
+        self.assertTrue(any("table is read-only · not updated" in row for row in box))
+        many = copy.deepcopy(ALL["mixed"])           # codex has next cells; one more on the opencode table, read-only
+        many[2]["cells"].append(samples.cell("tier/light", "opencode-go/muse-spark", "max",
+                                             following=samples.upcoming("opencode-go/muse-spark-2", "max")))
+        many[2]["read_only"] = True
+        text = "\n".join(_pic(answer=many, width=200))
+        self.assertIn("on the next update or refresh · opencode table is read-only · not updated", text)
+
+
+class ARefusedWriteKeepsTheFollowDraft(unittest.TestCase):
+    def test_a_table_with_a_hardlink_alias_refuses_and_the_draft_stays(self):
+        from tools.fleet.explorer.runtime import ExplorerRuntime
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with _env(root):
+                models = focus.read_model_config()
+                vm, state, frame = _frame(models, 140, "deep/codex", folds={"ui:fol": "keep"})
+                apply = next(h for h in frame.hits if h.action[:3] == ("models.apply", "codex", "follow")
+                             and h.action[-1] is False)
+                os.link(root / "codex/agent-config/models.conf", root / "alias.conf")
+                state, effects = reduce(state, {"type": "click", "action": apply.action}, frame)
+                result = ExplorerRuntime().apply_effects(effects, vm)
+                self.assertNotIn(result["status"], ("changed", "unchanged"))
+                self.assertEqual(finish_follow_draft(state, effects, result).fold_map().get("ui:fol"), "keep")
 
 
 if __name__ == "__main__":

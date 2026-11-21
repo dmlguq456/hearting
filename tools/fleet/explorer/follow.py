@@ -16,7 +16,6 @@ GROUPS = ("followed", "next", "held", "proposal")
 GLYPH = {"followed": "^", "next": ">", "held": "!", "proposal": "?"}
 MARK = {"followed": "^", "keep": "=", "held": "!"}
 LEGEND = (("^", "Followed"), ("=", "Keep"), ("!", "Held"))
-_CLI_NAME = {"claude": "Claude Code", "codex": "Codex"}
 
 
 def _text(value):
@@ -35,7 +34,10 @@ def _cell(item):
         return None
     since = item.get("since")
     if isinstance(since, Mapping) and _text(since.get("date")):
-        since = {"date": since["date"], "from": _text(since.get("from")), "to": _text(since.get("to"))}
+        moved = since.get("lines")
+        since = {"date": since["date"], "from": _text(since.get("from")), "to": _text(since.get("to")),
+                 "effort_was": _text(since.get("effort_was")),
+                 "lines": [key for key in moved if _text(key)] if _seq(moved) else []}
     else:
         since = None
     following = item.get("next")
@@ -46,9 +48,11 @@ def _cell(item):
         following = None
     lines = [{"key": line["key"], "from": str(line.get("from") or ""), "to": str(line.get("to") or "")}
              for line in (item.get("lines") or ()) if isinstance(line, Mapping) and _text(line.get("key"))]
+    followable = item.get("followable")
     return {"target": target, "model": model, "effort": _text(item.get("effort")), "state": state,
             "why": _text(item.get("why")) or "", "since": since, "held": _text(item.get("held")),
-            "next": following, "lines": lines}
+            "next": following, "lines": lines, "reason": _text(item.get("reason")),
+            "followable": followable if isinstance(followable, bool) else None}
 
 
 def _note(item):
@@ -69,28 +73,29 @@ def _note(item):
             "command": _text(item.get("command"))}
 
 
-def normalize(answer, unlisted=()):
-    """``{"cells": {harness: [cell]}, "cli": [note]}`` from ``fleet_view()``'s answer, or None.
+def normalize(answer):
+    """``{"cells": {harness: [cell]}, "cli": [note], "read_only": [harness]}`` from ``fleet_view()``'s
+    answer, or None.
 
-    ``unlisted`` holds ``(harness, model)`` pairs the harness's model list does not hold: such a cell
-    (a Claude alias, a model the list does not know) has nothing to follow, so one with no record and
-    no newer model is left out.
-    """
+    A cell the answer says no update can follow (``followable`` false: a Claude alias, a model its
+    list does not know) is left out: nothing about following is drawn for it. A key the answer
+    lacks, or holds a value this does not know, leaves out only what it would have told."""
     if not _seq(answer):
         return None
-    cells, notes = {}, []
+    cells, notes, read_only = {}, [], []
     for item in answer:
         if (not isinstance(item, Mapping) or item.get("harness") not in HARNESSES
                 or not _seq(item.get("cells"))):
             return None
         harness = item["harness"]
         found = [cell for cell in map(_cell, item["cells"]) if cell is not None]
-        cells[harness] = [cell for cell in found
-                          if cell["since"] or cell["next"] or (harness, cell["model"]) not in unlisted]
+        cells[harness] = [cell for cell in found if cell["followable"] is not False]
+        if item.get("read_only") is True:
+            read_only.append(harness)
         note = _note(item.get("cli"))
         if note:
             notes.append(note)
-    return {"cells": cells, "cli": notes}
+    return {"cells": cells, "cli": notes, "read_only": read_only}
 
 
 def model_names(follow):
@@ -119,14 +124,27 @@ def today_of(clock):
 
 
 def undo_request(cell):
-    """``<model before>@<effort>`` that puts a followed cell back, or None when it is not one.
+    """``<model before>[@<effort>]`` that puts a followed cell back, or None when it is not one.
 
-    The answer carries the model before and the cell's effort now; an effort the follow had to
-    lower is not in it, so the cell goes back at the effort it has now."""
+    A cell the profile line names a model for goes back at the effort it had before the follow
+    (the answer's ``effort_was`` when the follow lowered it, else the effort it has now). A cell
+    that goes through a tier is put back on the tier line alone: the setter leaves that line's
+    effort as it is, unless the follow lowered it, and then it is put back too."""
     record = cell.get("since") if cell["state"] == "follow" and cell["why"] == "followed" else None
     if not record or not record["from"]:
         return None
-    return record["from"] + (f"@{cell['effort']}" if cell["effort"] else "")
+    was = record.get("effort_was")
+    effort = was if cell["target"].startswith("tier/") else (was or cell["effort"])
+    return record["from"] + (f"@{effort}" if effort else "")
+
+
+def effort_after_undo(cell, table_effort):
+    """The effort the cell shows in the table once ``undo_request`` is written: the profile line's
+    own for a cell that goes through a tier, else the one the request carries."""
+    if cell["target"].startswith("tier/"):
+        return table_effort
+    record = cell.get("since") or {}
+    return record.get("effort_was") or cell["effort"]
 
 
 def _day(text):
@@ -161,6 +179,7 @@ class Follow:
                        for harness, cells in (follow or {}).get("cells", {}).items()}
         self._targets = targets if isinstance(targets, Mapping) else {}
         self.cli = tuple((follow or {}).get("cli", ()))
+        self.read_only = frozenset((follow or {}).get("read_only") or ())
 
     @classmethod
     def read(cls, models, clock):
@@ -254,17 +273,34 @@ class Follow:
                         pieces.append(piece)
         return [f"linked {label}: {', '.join(pieces)}" for label, pieces in merged.items() if pieces]
 
+    def moved_lines(self, rows):
+        """The companion lines the given followed rows moved with them, by the answer's own keys, once each."""
+        keys = []
+        for row in rows:
+            keys += [key for key in ((row["cell"]["since"] or {}).get("lines") or ()) if key not in keys]
+        return keys
+
+    def table_note(self, rows):
+        """`` · table is read-only · not updated`` when a row's table is read-only, else ``""``.
+
+        The note names the harnesses when only some of the rows are on such a table."""
+        held = [harness for harness in dict.fromkeys(row["harness"] for row in rows) if harness in self.read_only]
+        if not held:
+            return ""
+        everyone = len(held) == len({row["harness"] for row in rows})
+        return f" · {'' if everyone else ' '.join(held) + ' '}table is read-only · not updated"
+
     def cli_lines(self):
-        """The CLI-too-old notes in the words ``hearting update`` prints, without their head."""
+        """The CLI-too-old notes: the version and what to do come first, the reason last (the part a
+        narrow row cuts), in the words ``hearting update`` prints without their head."""
         out = []
         for note in self.cli:
-            how = note["command"] or f"update the {_CLI_NAME.get(note['harness'], note['harness'])} CLI yourself"
+            how = note["command"] or "update it yourself"
             if note["kind"] == "previous-generation":
-                out.append(f"{note['harness']} CLI {note['version']} lists {', '.join(note['models'])} "
-                           f"as previous generation with no successor · {how}")
+                why = f"lists {', '.join(note['models'])} as previous generation with no successor"
             else:
                 needs = ", ".join(f"{model} (needs {version})" for model, version in note["models"][:3])
                 more = len(note["models"]) - 3
-                out.append(f"{note['harness']} CLI {note['version']} is older than {needs}"
-                           f"{f' and {more} more' if more > 0 else ''} · {how}")
+                why = f"older than {needs}{f' and {more} more' if more > 0 else ''}"
+            out.append(f"{note['harness']} CLI {note['version']} · {how} · {why}")
         return out

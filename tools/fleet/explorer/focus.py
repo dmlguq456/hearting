@@ -941,7 +941,7 @@ def _profile_target(values, profile):
     return f"profile/{profile}" if target.startswith("model/") else "tier/" + target.lower().replace("_", "-")
 
 
-def follow_into(models, answer, unlisted=()):
+def follow_into(models, answer):
     """Put the follow facts of ``model_follow.fleet_view()``'s ``answer`` into the MODELS view ``models``.
 
     ``models["follow"]`` is the normalized answer, and each model it names gets a shown name; an
@@ -950,7 +950,7 @@ def follow_into(models, answer, unlisted=()):
     from . import follow
     models.pop("follow", None)
     try:
-        found = follow.normalize(answer, unlisted)
+        found = follow.normalize(answer)
         if found is None:
             return models
         shown = dict(models.get("shown") or {})
@@ -967,23 +967,35 @@ def follow_into(models, answer, unlisted=()):
     return models
 
 
-def _read_follow(catalogs):
-    """``(answer, unlisted)``: what ``model_follow.fleet_view()`` says about the tables, reading the lists
-    this read already holds (no list is asked for again), and the ``(harness, model)`` pairs a list lacks."""
+_CLI_SEEN = {}                       # harness -> (version, path): what the last background read was told
+_CLI_SEEN_LOCK = threading.Lock()
+
+
+def _cli_probe(refresh):
+    """The ``probe`` ``fleet_view`` asks the harness CLI's version through.
+
+    A background read (``refresh``) asks the CLI itself and remembers the answer; a read made inside
+    the input handling never starts a process: it is given what the last background read was told
+    (``(None, None)``, not known, for a harness that read never asked about)."""
+    def probe(harness):
+        if not refresh:
+            with _CLI_SEEN_LOCK:
+                return _CLI_SEEN.get(harness, (None, None))
+        found = utility("model_follow").installed_cli(harness)
+        with _CLI_SEEN_LOCK:
+            _CLI_SEEN[harness] = found
+        return found
+    return probe
+
+
+def _read_follow(catalogs, refresh=True):
+    """What ``model_follow.fleet_view()`` says about the tables, reading the lists this read already
+    holds (no list is asked for again); None when it cannot say."""
     try:
-        answer = utility("model_follow").fleet_view(read_catalog=lambda harness: catalogs[harness])
+        return utility("model_follow").fleet_view(read_catalog=lambda harness: catalogs[harness],
+                                                  probe=_cli_probe(refresh))
     except Exception:
-        return None, ()
-    unlisted = set()
-    for item in answer if isinstance(answer, (list, tuple)) else ():
-        catalog = catalogs.get(item.get("harness")) if isinstance(item, dict) else None
-        rows = getattr(catalog, "rows", None) or ()
-        if getattr(catalog, "state", None) != "available" or not rows:
-            continue
-        known = {row["id"] for row in rows}
-        unlisted.update((item["harness"], cell["model"]) for cell in item.get("cells") or ()
-                        if isinstance(cell, dict) and cell.get("model") not in known)
-    return answer, unlisted
+        return None
 
 
 def _allocation_fields(policy, field_view=None):
@@ -1170,8 +1182,11 @@ def _read_tidy_points():
     return tuple(points)
 
 
-def read_model_config():
-    """MODELS view data from the harnesses' models.conf and the dispatch defaults (read once, cached)."""
+def read_model_config(refresh=True):
+    """MODELS view data from the harnesses' models.conf and the dispatch defaults (read once, cached).
+
+    ``refresh=False`` is the read made inside the input handling after a write: it asks no harness
+    CLI anything (the CLI notes use what the last background read was told)."""
     import importlib.util
     model_config = utility("model_config")
     profile_map, choices, main_only, context, profile_target = {}, {}, {}, {}, {}
@@ -1262,8 +1277,7 @@ def read_model_config():
               "tidy": _read_tidy_points(),
               "token_units": dict(_TOKEN_UNITS), "allocation": allocation, "steward": steward,
               "profile_target": profile_target}
-    answer, unlisted = _read_follow(catalogs)
-    return follow_into(config, answer, unlisted)
+    return follow_into(config, _read_follow(catalogs, refresh))
 
 
 def collect_aux(request, *, snapshot=None, now=None, aux_reader=None):

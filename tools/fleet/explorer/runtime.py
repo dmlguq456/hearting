@@ -965,7 +965,7 @@ class ExplorerRuntime:
             result = {"status": status, "error": str(exc),
                       "lines": [f"model set: {exc}"]}
         try:
-            refreshed = focus.read_model_config()
+            refreshed = focus.read_model_config(refresh=False)
         except Exception as exc:
             refreshed = None
             refresh_error = str(exc)
@@ -1039,7 +1039,7 @@ class ExplorerRuntime:
         finally:
             sys.path[:] = original_path
         try:
-            refreshed = focus.read_model_config()
+            refreshed = focus.read_model_config(refresh=False)
         except Exception as exc:
             refreshed, note = None, " · refresh failed: " + str(exc)
         else:
