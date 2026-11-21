@@ -5087,7 +5087,6 @@ def _cleanup_orphan_source_pycache(*, now: float | None = None) -> list[Path]:
     return removed
 
 
-# destructive-ok: reason=rollback or discard one managed release staging transaction; boundary=version target staging root and state leaf selected by this invocation
 def _activation_report_lines(activation_report) -> tuple[list[dict], list[str]]:
     """`(preserved, report_lines)` an update says from its activation's JSON report."""
     activation_rows = (
@@ -5131,6 +5130,7 @@ def _activation_report_lines(activation_report) -> tuple[list[dict], list[str]]:
     return preserved, report_lines
 
 
+# destructive-ok: reason=rollback or discard one managed release staging transaction; boundary=version target staging root and state leaf selected by this invocation
 def _install_or_update(
     *,
     repository: str,
