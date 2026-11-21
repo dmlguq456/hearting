@@ -84,6 +84,20 @@ if(process.argv.some(a=>a.endsWith('/session-shell/host.cjs'))){
 '''
 
 class QuestionInputTest(unittest.TestCase):
+    def test_small_nonediting_preview_keeps_its_existing_choice(self):
+        script=r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]+'/block-input.cjs');
+const b=create({changed(){},action(){},answer(){}});
+b.update([{id:'fixture',revision:'one',answerable:true,questions:[{id:'q',question:'Keep this body',choices:['one','two']}]}],'',{});
+b.enter();const rows=b.detail({budget:2,columns:20});
+assert.equal(rows[1].map(p=>p.text).join(''),'▸ 1  one');
+assert.equal(b.typing,false);
+b.input(Buffer.from('t'));const edit=b.detail({budget:2,columns:20});
+assert(edit[1].some(p=>p.caret),'the same small budget keeps the live draft while editing');
+"""
+        result=subprocess.run(['node','-e',script,str(SHELL)],capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+
     def test_fragmented_utf8_drafts_and_alt_tail(self):
         script=r'''
 const assert=require('node:assert/strict'),create=require(process.argv[1]+'/block-input.cjs');

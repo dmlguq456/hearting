@@ -176,7 +176,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     // At small heights notices and key hints yield before the live input cell.
     if(edit&&!footer.includes(edit))footer=[edit,...(tailLimit>1?tail.slice(-(tailLimit-1)):[])];
     const space=Math.max(0,limit-1-footer.length);
-    if(!space)return [head,...footer].slice(0,limit);
+    if(edit&&!space)return [head,...footer].slice(0,limit);
     if(content.length>space&&gap.length>1){gap=gap.slice(1);content=lines();}
     if(content.length<=space){scroll=0;return [head,...content,...footer].slice(0,limit);}
     const page=Math.max(1,space-1);
