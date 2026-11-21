@@ -97,6 +97,13 @@ class PureTest(unittest.TestCase):
         self.assertEqual([u["key"] for u in units["active"]], ["rt:a"])
         self.assertEqual(units["active_folded"], 2)
 
+    def test_a_piece_with_a_running_attempt_on_any_open_route_is_doing_whatever_its_age(self):
+        old = NOW - 20 * HOUR
+        units = cd.link_units([], [self.open_route("a", old, pr=9), dict(self.open_route("b", old, pr=9, kind="review"), alive=True),
+                                   self.open_route("c", old), dict(self.open_route("d", old), alive=False)], {}, now=NOW)
+        self.assertEqual([u["key"] for u in units["active"]], ["pr:9"])
+        self.assertEqual(units["active_folded"], 2)
+
     def test_a_piece_of_work_with_an_open_route_is_doing_even_with_closed_members(self):
         units = cd.link_units([self.fact("a", pr=7)], [self.open_route("b", NOW - HOUR, pr=7)], {}, now=NOW)
         self.assertEqual([(u["key"], u["count"]) for u in units["active"]], [("pr:7", 2)])
@@ -888,6 +895,137 @@ class RoundThreeFixesTest(Fixture):
         text = self.document()
         self.assertEqual(self.bullets(text, "하는 중"), [])
         self.assertEqual(self.bullets(text, "최근에 끝난 것"), ["- 11-20 work-1785 · #1785 · v4.66.2 · 기록 3"])
+
+
+class RunningAttemptTest(Fixture):
+    """An open route with a running attempt is doing at any age; the runtime's own liveness says what is running."""
+
+    def setUp(self):
+        super().setUp()
+        self.jobs = self.root.parent / "state" / "dispatch" / "jobs.log"
+        self.jobs.parent.mkdir(parents=True)
+        self.jobs.write_text("")
+        patch = mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(self.jobs)})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.sleeper = None
+
+    def row(self, status, attempt, rid, *, alive, at=NOW - 7 * HOUR, log=None, extra="", lineage="",
+            worker_type="owner"):
+        """A registry row. `alive`: the attempt's process is this test's own; otherwise a pid no one has.
+        `lineage`: fields the real writer puts before the row's own `attempt_id` (`parent_attempt_id=…,`)."""
+        if alive:
+            start = Path(f"/proc/{os.getpid()}/stat").read_text().rsplit(")", 1)[1].split()[19]
+            process = f"pid={os.getpid()},pid_start={start}"
+        else:
+            process = "pid=4000000,pid_start=1,pgid=4000000,pgid_host=4000000"
+        meta = (f"{lineage}attempt_id={attempt},worker_type={worker_type},dispatch_depth=1,route_id={rid},"
+                f"{process}{extra}")
+        if log is not None:
+            meta += f",log_file={log}"
+        with self.jobs.open("a") as handle:
+            handle.write(f"{stamp(at)}\t{status}\t/w\t/w\tslug\t{meta}\n")
+
+    def log(self, moved):
+        path = self.root.parent / f"attempt-{self.serial}.log"
+        path.write_text("x")
+        os.utime(path, (moved, moved))
+        return path
+
+    def doing(self):
+        self.catch_up()
+        text = self.document()
+        return self.bullets(text, "하는 중"), text
+
+    def test_a_route_older_than_six_hours_with_a_running_attempt_stays_doing_and_an_idle_one_folds(self):
+        busy, _ = self.route("busy-1720", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.route("idle-1721", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-busy", busy, alive=True)
+        bullets, text = self.doing()
+        self.assertEqual(bullets, ["- busy-1720 · #1720 · 기록 1"])
+        self.assertIn("6시간 넘게 움직임 없는 열린 일 1개는 접어 둠.", text)
+
+    def test_a_replacement_attempt_counts_when_the_first_one_ended(self):
+        busy, _ = self.route("handoff-1722", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-first", busy, alive=False, at=NOW - 9 * HOUR)
+        self.row("done", "att-first", busy, alive=False, at=NOW - 8 * HOUR, extra=",failure_class=capacity,note=dead-capacity")
+        self.row("open", "att-second", busy, alive=True, at=NOW - 2 * HOUR)
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- handoff-1722 · #1722 · 기록 1"])
+
+    def test_only_ended_or_gone_attempts_leave_an_old_open_route_folded(self):
+        gone, _ = self.route("gone-1723", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        done, _ = self.route("done-1724", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-gone", gone, alive=False)                 # open row, its process is gone
+        self.row("open", "att-done", done, alive=True)                   # later closed: the row says it ended
+        self.row("done", "att-done", done, alive=False, at=NOW - 6 * HOUR)
+        bullets, text = self.doing()
+        self.assertEqual(bullets, [])
+        self.assertIn("6시간 넘게 움직임 없는 열린 일 2개는 접어 둠.", text)
+
+    def test_one_running_route_of_a_pr_keeps_the_whole_piece_doing_and_its_log_is_its_movement(self):
+        old = self.route("work-1725", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)[0]
+        review, _ = self.route("rv-1725-unit", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        other, _ = self.route("other-1726", started=NOW - HOUR, touched=NOW - 2 * HOUR)
+        self.row("open", "att-review", review, alive=True, log=self.log(NOW - HOUR))
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- work-1725 · #1725 · 기록 2", "- other-1726 · #1726 · 기록 1"])   # newest movement first
+        self.assertNotEqual(old, review)
+
+    def test_a_finished_stage_worker_written_after_its_owner_leaves_the_owner_doing(self):
+        busy, _ = self.route("owner-1730", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-owner", busy, alive=True)
+        self.row("done", "att-stage", busy, alive=False, at=NOW - 3 * HOUR, worker_type="worker",
+                 lineage="parent_attempt_id=att-owner,")
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- owner-1730 · #1730 · 기록 1"])
+
+    def test_a_finished_unit_call_written_after_a_running_worker_leaves_the_worker_doing(self):
+        busy, _ = self.route("worker-1731", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-worker", busy, alive=True, worker_type="worker")
+        self.row("done", "att-unit", busy, alive=False, at=NOW - 3 * HOUR, worker_type="worker",
+                 lineage="caller_attempt_id=att-worker,")
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- worker-1731 · #1731 · 기록 1"])
+
+    def test_a_live_child_with_a_finished_sibling_of_the_same_parent_is_doing(self):
+        busy, _ = self.route("child-1732", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-child", busy, alive=True, worker_type="worker", lineage="parent_attempt_id=att-p,")
+        self.row("done", "att-sibling", busy, alive=False, at=NOW - 3 * HOUR, worker_type="worker",
+                 lineage="parent_attempt_id=att-p,")
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- child-1732 · #1732 · 기록 1"])
+
+    def test_a_last_row_still_being_written_is_not_read(self):
+        busy, _ = self.route("tail-1733", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-tail", busy, alive=True)
+        with self.jobs.open("a") as handle:   # half of a later row for the same attempt, no newline yet
+            handle.write(f"{stamp(NOW - HOUR)}\tdone\t/w\t/w\tslug\tattempt_id=att-tail,worker_ty")
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- tail-1733 · #1733 · 기록 1"])
+
+    def test_the_registry_is_read_once_per_pass_for_every_campaign_and_nothing_is_written_to_it(self):
+        second_id = "camp_" + "2" * 32
+        second = self.campaign("2026-11-02_second", second_id, "Second")
+        a, _ = self.route("a-1727", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        b, _ = self.route("b-1728", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR, campaign_id=second_id)
+        self.row("open", "att-a", a, alive=True)
+        self.row("open", "att-b", b, alive=True)
+        before = self.jobs.read_bytes()
+        import route_autoclose
+        with mock.patch.object(route_autoclose, "live_routes", wraps=route_autoclose.live_routes) as spy:
+            self.catch_up()
+        self.assertEqual(spy.call_count, 1)
+        self.assertEqual(self.bullets(self.document(), "하는 중"), ["- a-1727 · #1727 · 기록 1"])
+        self.assertEqual(self.bullets(self.document(second), "하는 중"), ["- b-1728 · #1728 · 기록 1"])
+        self.assertEqual(self.jobs.read_bytes(), before)
+
+    def test_an_unreadable_registry_leaves_the_six_hour_rule_alone(self):
+        busy, _ = self.route("busy-1729", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.jobs.write_bytes(b"\xff\xfe not a row\n\t\t\n")
+        self.assertEqual(self.doing()[0], [])
+        os.environ["AGENT_DISPATCH_JOBS"] = str(self.jobs.parent / "missing.log")
+        self.assertEqual(self.doing()[0], [])
 
 
 class WaitsTest(Fixture):
