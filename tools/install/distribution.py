@@ -1245,8 +1245,11 @@ def _activate_release(root: Path, runtimes: Iterable[str]) -> dict:
         report = None
     if result.returncode != 0 or not isinstance(report, dict):
         detail = _activation_failure_detail(result.stdout, result.stderr)
+        # A table the activation edited before it failed stays edited: say what was done.
+        done = _model_follow_lines_of(report)
         raise DistributionError(
             f"runtime activation failed ({result.returncode}): {detail}"
+            + (" · " + " · ".join(done) if done else "")
         )
     rows = report.get("runtimes")
     if not isinstance(rows, list):
@@ -1260,6 +1263,20 @@ def _activate_release(root: Path, runtimes: Iterable[str]) -> dict:
         },
         "report": report,
     }
+
+
+def _model_follow_lines_of(report) -> list[str]:
+    """The `model follow:` lines of a `runtime activate|refresh --json` report (a failed one
+    keeps them in its `lines`), without a duplicate."""
+    found: list[str] = []
+    if isinstance(report, dict):
+        rows = [report, *(row for row in report.get("runtimes", ()) if isinstance(row, dict))]
+        for row in rows:
+            for key in ("model_follow_lines", "lines"):
+                for line in row.get(key, ()) if isinstance(row.get(key), list) else ():
+                    if isinstance(line, str) and line.startswith("model follow:") and line not in found:
+                        found.append(line)
+    return found
 
 
 def _activation_failure_detail(stdout: str, stderr: str) -> str:
@@ -5070,6 +5087,49 @@ def _cleanup_orphan_source_pycache(*, now: float | None = None) -> list[Path]:
     return removed
 
 
+def _activation_report_lines(activation_report) -> tuple[list[dict], list[str]]:
+    """`(preserved, report_lines)` an update says from its activation's JSON report."""
+    activation_rows = (
+        activation_report.get("runtimes", [])
+        if isinstance(activation_report, dict)
+        else []
+    )
+    if isinstance(activation_report, dict) and not isinstance(activation_rows, list):
+        activation_rows = []
+    if isinstance(activation_report, dict) and not activation_rows and activation_report.get("runtime"):
+        activation_rows = [activation_report]
+    preserved = []
+    for row in activation_rows:
+        if not isinstance(row, dict):
+            continue
+        values = row.get("preserved", [])
+        if isinstance(values, list):
+            for value in values:
+                path = value.get("path") if isinstance(value, dict) else value
+                item = {"runtime": row.get("runtime"), "path": str(path)}
+                if path and item not in preserved:
+                    preserved.append(item)
+    report_lines = [
+        f"preserved user-changed: {item['path']}"
+        for item in preserved
+    ]
+    # Activation notices (a skipped rule file, an edit kept aside) must
+    # reach the person here too, not only through `harness runtime activate`.
+    for row in activation_rows:
+        notices = row.get("notices") if isinstance(row, dict) else None
+        for notice in notices if isinstance(notices, list) else []:
+            line = f"{row.get('runtime')}: {notice}"
+            if isinstance(notice, str) and notice.startswith("model follow:"):
+                continue  # the same line, said once below (an older release reads it here)
+            if isinstance(notice, str) and line not in report_lines:
+                report_lines.append(line)
+    for row in activation_rows:
+        for line in row.get("model_follow_lines", []) if isinstance(row, dict) else []:
+            if isinstance(line, str) and line not in report_lines:
+                report_lines.append(line)
+    return preserved, report_lines
+
+
 # destructive-ok: reason=rollback or discard one managed release staging transaction; boundary=version target staging root and state leaf selected by this invocation
 def _install_or_update(
     *,
@@ -5399,39 +5459,7 @@ def _install_or_update(
                 f"harness release: dispatch state migration deferred: {exc}",
                 file=sys.stderr,
             )
-        activation_report = activation.get("report")
-        activation_rows = (
-            activation_report.get("runtimes", [])
-            if isinstance(activation_report, dict)
-            else []
-        )
-        if isinstance(activation_report, dict) and not isinstance(activation_rows, list):
-            activation_rows = []
-        if isinstance(activation_report, dict) and not activation_rows and activation_report.get("runtime"):
-            activation_rows = [activation_report]
-        preserved = []
-        for row in activation_rows:
-            if not isinstance(row, dict):
-                continue
-            values = row.get("preserved", [])
-            if isinstance(values, list):
-                for value in values:
-                    path = value.get("path") if isinstance(value, dict) else value
-                    item = {"runtime": row.get("runtime"), "path": str(path)}
-                    if path and item not in preserved:
-                        preserved.append(item)
-        report_lines = [
-            f"preserved user-changed: {item['path']}"
-            for item in preserved
-        ]
-        # Activation notices (a skipped rule file, an edit kept aside) must
-        # reach the person here too, not only through `harness runtime activate`.
-        for row in activation_rows:
-            notices = row.get("notices") if isinstance(row, dict) else None
-            for notice in notices if isinstance(notices, list) else []:
-                line = f"{row.get('runtime')}: {notice}"
-                if isinstance(notice, str) and line not in report_lines:
-                    report_lines.append(line)
+        preserved, report_lines = _activation_report_lines(activation.get("report"))
         return {
             "status": "installed" if previous_state is None else "updated",
             "version": release["version"],
@@ -5489,14 +5517,59 @@ def bootstrap(
     return result
 
 
-def _model_follow_lines() -> list[str]:
-    """Read-only notes on newer models the user's table could follow (never raises)."""
+def _model_follow_pass(harnesses: Optional[Iterable[str]] = None) -> tuple[list[str], list[str]]:
+    """Let the user's model tables follow newer models: (result lines, harnesses written).
+
+    Runs at the end of every update, whichever way it went (a new release, an up-to-date one,
+    `--auto`, a pinned one): the model lists change without a Hearting release. Only the
+    harnesses this update handles (`harnesses`; none given means all) are read or written, and
+    the table's lock is waited for a short time only. Never raises.
+    """
     try:
         utilities = str(Path(__file__).resolve().parents[2] / "utilities")
         if utilities not in sys.path:
             sys.path.insert(0, utilities)
         import model_follow
-        return model_follow.follow_lines()
+        chosen = None if harnesses is None else set(harnesses)
+        results = [model_follow.apply_harness(harness) for harness in model_follow.HARNESSES
+                   if chosen is None or harness in chosen]
+        written = [row["harness"] for row in results if row.get("written") or row.get("reverted")]
+        return model_follow.lines(results), written
+    except Exception:
+        return [], []
+
+
+def _redraw_agent_definitions(root: Path, harnesses: Iterable[str]) -> list[str]:
+    """Refresh the harnesses whose table was just written, so their default agent definitions
+    are drawn from it in the same update. A refresh that cannot run is one line."""
+    notes = []
+    for harness in harnesses:
+        try:
+            done = subprocess.run(
+                ["sh", str(root / "tools/install/harness.sh"), "runtime", "refresh",
+                 "--runtime", harness, "--json"],
+                env={**os.environ, "AGENT_HOME": str(root)},
+                capture_output=True, text=True, timeout=300)
+            failed = done.returncode != 0
+            try:  # what that refresh did to the table is said too, never dropped
+                notes.extend(_model_follow_lines_of(json.loads(done.stdout)))
+            except ValueError:
+                pass
+        except (OSError, subprocess.SubprocessError):
+            failed = True
+        if failed:
+            notes.append(f"model follow: {harness} table updated; run `harness runtime refresh "
+                         f"--runtime {harness}` to redraw its agent definitions")
+    return notes
+
+
+def _handled_runtimes(runtimes: Optional[Iterable[str]]) -> list[str]:
+    """The harnesses an update handles: the chosen `--runtime`, else the activated ones. A
+    harness that is uninstalled, or not chosen, is not this update's to touch."""
+    try:
+        if runtimes:
+            return [runtime for runtime in runtimes]
+        return [runtime for runtime in RUNTIMES if _activation_state(runtime)]
     except Exception:
         return []
 
@@ -5508,9 +5581,15 @@ def update(
     force_prune_unproven: bool = False,
 ) -> dict:
     result = _update_release(version, runtimes, automatic, force_prune_unproven)
-    lines = _model_follow_lines()
+    lines, written = _model_follow_pass(_handled_runtimes(runtimes))
+    if written and isinstance(result, dict):
+        try:
+            root = Path(result.get("release_root") or _load_state()["release_root"])
+            lines = [*lines, *_redraw_agent_definitions(root, written)]
+        except Exception:
+            pass
     if lines and isinstance(result, dict):
-        result["report_lines"] = [*result.get("report_lines", []), *lines]
+        result["report_lines"] = list(dict.fromkeys([*result.get("report_lines", []), *lines]))
     return result
 
 

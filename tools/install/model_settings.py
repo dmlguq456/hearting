@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utilities"))
 import model_config
+import model_follow_mark
 import model_profile
 import opencode_runtime
 import safe_fs
@@ -22,6 +23,11 @@ class ModelSettingsError(ValueError):
 
 class ModelSettingsUsageError(ModelSettingsError):
     """A user supplied an unknown or malformed command argument."""
+
+
+# `keep` and `follow` stand where a model goes: they mark the cell (a line-end record)
+# and leave its value alone. Bare words only; a model of that name cannot be set.
+MARKS = ("keep", "follow")
 
 
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
@@ -138,7 +144,15 @@ def _profile_budget(adapter: str, budget: str) -> str:
     return budget
 
 
-def _edit_bytes(raw: bytes, changed: dict[str, str]) -> bytes:
+def _edit_bytes(raw: bytes, changed: dict[str, str],
+                marks: dict[str, dict | None] | None = None) -> bytes:
+    """Replace the values in `changed` and the end-of-line record of the keys in `marks`.
+
+    A line in neither is left byte for byte. A changed value is re-quoted; a line whose
+    record alone changes keeps its value text exactly. The user's own comment stays; the
+    line keeps at most one record (None removes it).
+    """
+    marks = marks or {}
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -148,18 +162,18 @@ def _edit_bytes(raw: bytes, changed: dict[str, str]) -> bytes:
     found: set[str] = set()
     for i, line in enumerate(lines):
         match = model_config.ASSIGNMENT.fullmatch(line.rstrip("\r\n").strip())
-        if match and match.group(1) in changed:
+        if match and (match.group(1) in changed or match.group(1) in marks):
             key = match.group(1)
             # Replace only the assignment value; retain indentation, comment, and newline.
             newline = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
             body = line[:-len(newline)] if newline else line
-            comment = ""
-            value = match.group(2)
-            comment_pos = value.find("#")
-            if comment_pos >= 0:
-                comment = " " + value[comment_pos:].lstrip()
+            value, comment = model_follow_mark.split_comment(match.group(2))
+            if key in marks:
+                comment = model_follow_mark.with_record(comment, marks[key])
+            if key in changed:
+                value = model_config._shell_quote(changed[key])
             prefix = body[:body.find(key) + len(key)]
-            lines[i] = f"{prefix}={model_config._shell_quote(changed[key])}{comment}{newline}"
+            lines[i] = f"{prefix}={value}{' ' + comment.lstrip() if comment else ''}{newline}"
             found.add(key)
     missing = [key for key in changed if key not in found]
     if missing:
@@ -245,6 +259,47 @@ def _backup(path: Path, payload: bytes, mode: int) -> Path:
     raise ModelSettingsError(f"could not allocate an exclusive backup beside {path}")
 
 
+def _check_candidate(adapter: str, candidate: bytes, source_root) -> dict[str, str]:
+    """Re-validate the whole candidate file the way a launch would read it; its values."""
+    parsed = _parse_bytes(candidate)
+    with tempfile.TemporaryDirectory(prefix="hearting-model-selected-") as isolated:
+        isolated_path = Path(isolated) / "agent-config" / "models.conf"
+        isolated_path.parent.mkdir()
+        isolated_path.write_bytes(candidate)
+        _resolved, receipt = model_config.resolve_config(
+            adapter, runtime=Path(isolated), source_root=source_root)
+        if receipt.source != "user" or Path(receipt.selected_path) != isolated_path:
+            raise ModelSettingsError(
+                f"candidate was not selected as the complete user file: {receipt.reason}")
+    declared_profiles = [key[len("CFG_MODEL_PROFILE_"):].lower().replace("_", "-")
+                         for key in parsed if key.startswith("CFG_MODEL_PROFILE_")
+                         and key != "CFG_MODEL_PROFILE_GRANULARITY"
+                         and not key.startswith("CFG_MODEL_PROFILE_GRANULARITY_")]
+    for declared_profile in declared_profiles:
+        try:
+            model_profile.resolve_profile_values(adapter, parsed, declared_profile)
+        except ValueError as exc:
+            raise ModelSettingsError(
+                f"candidate profile {declared_profile} is invalid: {exc}") from exc
+    return parsed
+
+
+def _commit(path: Path, raw: bytes, mode: int, missing: bool, candidate: bytes):
+    """Keep the pre-edit bytes as `.bak`, then replace the file if it is still what was read."""
+    backup = None
+    current = safe_fs.capture_state(path, include_payload=True)
+    if missing and current.kind != "missing":
+        raise ModelSettingsError(f"user config changed during update; preserving successor: {path}")
+    if not missing and (current.kind != "file" or current.payload != raw or current.mode != mode):
+        raise ModelSettingsError(f"user config changed during update; preserving successor: {path}")
+    if not missing:
+        backup = _backup(path, raw, mode)
+    auth = safe_fs.authority(path, owner="model-settings:set", allowed_paths=(path,),
+                             allow_leaf_symlink=False, expected=current)
+    safe_fs.atomic_write_bytes(auth, candidate, mode, expected=current, create_parents=True)
+    return backup
+
+
 def set_model(adapter: str, target_name: str, requested: str, *, runtime: str | Path | None = None,
               environ: dict[str, str] | None = None, source_root: str | Path | None = None,
               dry_run: bool = False, variant_observation=None,
@@ -259,6 +314,11 @@ def set_model(adapter: str, target_name: str, requested: str, *, runtime: str | 
             raise ModelSettingsUsageError(str(exc)) from exc
         explicit_budget = None
     else:
+        if requested.partition("@")[0] in MARKS:
+            if requested not in MARKS:
+                raise ModelSettingsUsageError(f"{requested.partition('@')[0]} takes no @budget")
+            return _set_mark(adapter, target_name, requested, runtime=runtime, environ=environ,
+                             source_root=source_root, dry_run=dry_run)
         model, explicit_budget = _parse_model(adapter, requested)
     runtime_path = model_config.runtime_home(adapter, runtime, environ)
     path = model_config.user_path(adapter, runtime=runtime_path)
@@ -296,26 +356,7 @@ def set_model(adapter: str, target_name: str, requested: str, *, runtime: str | 
               _resolve_target(adapter, target_name, values, source_root=source_root))
     updated, changed = _candidate(adapter, values, target, model, explicit_budget)
     candidate = _edit_bytes(raw, changed)
-    parsed = _parse_bytes(candidate)
-    with tempfile.TemporaryDirectory(prefix="hearting-model-selected-") as isolated:
-        isolated_path = Path(isolated) / "agent-config" / "models.conf"
-        isolated_path.parent.mkdir()
-        isolated_path.write_bytes(candidate)
-        _resolved, receipt = model_config.resolve_config(
-            adapter, runtime=Path(isolated), source_root=source_root)
-        if receipt.source != "user" or Path(receipt.selected_path) != isolated_path:
-            raise ModelSettingsError(
-                f"candidate was not selected as the complete user file: {receipt.reason}")
-    declared_profiles = [key[len("CFG_MODEL_PROFILE_"):].lower().replace("_", "-")
-                         for key in parsed if key.startswith("CFG_MODEL_PROFILE_")
-                         and key != "CFG_MODEL_PROFILE_GRANULARITY"
-                         and not key.startswith("CFG_MODEL_PROFILE_GRANULARITY_")]
-    for declared_profile in declared_profiles:
-        try:
-            model_profile.resolve_profile_values(adapter, parsed, declared_profile)
-        except ValueError as exc:
-            raise ModelSettingsError(
-                f"candidate profile {declared_profile} is invalid: {exc}") from exc
+    parsed = _check_candidate(adapter, candidate, source_root)
     if target["kind"] == "scalar":
         try:
             model_config.resolve_context_window(parsed)
@@ -407,17 +448,7 @@ def set_model(adapter: str, target_name: str, requested: str, *, runtime: str | 
             return set_model(adapter, target_name, requested, runtime=runtime_path,
                              source_root=source_root, dry_run=False,
                              variant_observation=variant_observation, _locked=True)
-    backup = None
-    current = safe_fs.capture_state(path, include_payload=True)
-    if missing and current.kind != "missing":
-        raise ModelSettingsError(f"user config changed during update; preserving successor: {path}")
-    if not missing and (current.kind != "file" or current.payload != raw or current.mode != mode):
-        raise ModelSettingsError(f"user config changed during update; preserving successor: {path}")
-    if not missing:
-        backup = _backup(path, raw, mode)
-    auth = safe_fs.authority(path, owner="model-settings:set", allowed_paths=(path,),
-                             allow_leaf_symlink=False, expected=current)
-    safe_fs.atomic_write_bytes(auth, candidate, mode, expected=current, create_parents=True)
+    backup = _commit(path, raw, mode, missing, candidate)
     projection_lines = []
     if target["kind"] == "scalar" and adapter in {"claude", "codex"}:
         try:
@@ -456,6 +487,137 @@ def set_model(adapter: str, target_name: str, requested: str, *, runtime: str | 
             "old_budget": old_budget, "new_budget": new_budget, "changed_keys": sorted(changed),
             "backup": str(backup) if backup else None, "source_reason": reason,
             "lines": lines, **context_fields}
+
+
+def parse_text(text: str) -> dict[str, str]:
+    """The values of a models.conf text, read the way the table is read."""
+    return _parse_bytes(text.encode("utf-8"))
+
+
+def edit_text(text: str, changed: dict[str, str], marks: dict[str, dict | None] | None = None) -> str:
+    """`text` with the given values and end-of-line records edited; nothing else moves."""
+    return _edit_bytes(text.encode("utf-8"), changed, marks).decode("utf-8")
+
+
+def candidate_ok(adapter: str, text: str, source_root=None) -> bool:
+    """Whether the whole file `text` would pass the same re-validation a write goes through."""
+    try:
+        _check_candidate(adapter, text.encode("utf-8"), source_root)
+    except (ModelSettingsError, model_config.ModelConfigError, ValueError, OSError):
+        return False
+    return True
+
+
+def edit_file(adapter: str, build, *, runtime: str | Path | None = None,
+              environ: dict[str, str] | None = None, source_root: str | Path | None = None,
+              dry_run: bool = False, lock_wait: float | None = None) -> dict[str, object]:
+    """Rewrite some lines of the user's models.conf through the steps `set_model` takes.
+
+    The file must already be there and be the complete selected user file. Under the
+    file's lock it is read again and `build(text)` says what to change:
+    ``{"changed": {key: value}, "marks": {key: record or None}, ...}`` (extra keys ride
+    along in the result as `plan`). The result is edited line by line, re-validated as a
+    whole, kept as `.bak`, and replaced only if the file is still the bytes that were read.
+    Any failure leaves the file as it was. `lock_wait` seconds bound the wait for the lock
+    (None waits); a lock not taken raises `SafetyError("lock-timeout")` and writes nothing.
+    """
+    if adapter not in model_config.ADAPTERS:
+        raise ModelSettingsError(f"unknown harness: {adapter!r}")
+    runtime_path = model_config.runtime_home(adapter, runtime, environ)
+    path = model_config.user_path(adapter, runtime=runtime_path)
+
+    def attempt(commit: bool) -> dict[str, object]:
+        if path.is_symlink() or not path.is_file():
+            raise ModelSettingsError(f"user config must be a regular non-symlink file: {path}")
+        info = os.lstat(path)
+        if info.st_nlink != 1:
+            raise ModelSettingsError(f"user config has a hardlink alias: {path}")
+        raw = path.read_bytes()
+        mode = stat.S_IMODE(info.st_mode)
+        try:
+            _values, receipt = model_config.resolve_config(adapter, runtime=runtime_path,
+                                                           source_root=source_root)
+        except model_config.ModelConfigError as exc:
+            raise ModelSettingsError(f"cannot select user configuration: {exc}") from exc
+        if receipt.source != "user":
+            raise ModelSettingsError(f"existing user config preserved: {receipt.reason} ({path})")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ModelSettingsError("configuration is not valid UTF-8") from exc
+        plan = build(text)
+        candidate = _edit_bytes(raw, plan.get("changed", {}), plan.get("marks", {}))
+        out = {"operation": "model-edit", "exit": 0, "runtime": adapter, "config_path": str(path),
+               "source_reason": receipt.reason, "plan": plan, "backup": None,
+               "changed_keys": sorted({*plan.get("changed", {}), *plan.get("marks", {})})}
+        if candidate == raw:
+            return {**out, "status": "unchanged", "changed_keys": []}
+        _check_candidate(adapter, candidate, source_root)
+        if not commit:
+            return {**out, "status": "planned"}
+        backup = _commit(path, raw, mode, False, candidate)
+        return {**out, "status": "changed", "backup": str(backup) if backup else None}
+
+    if dry_run:
+        return attempt(False)
+    with safe_fs.TargetLock(path, wait=lock_wait):
+        return attempt(True)
+
+
+def _mark_key(adapter: str, target: dict[str, str], values: dict[str, str]) -> str:
+    """The line of a target that carries its record: the line that names a concrete model."""
+    if target["kind"] == "profile":
+        key = f"CFG_MODEL_PROFILE_{_key_name(target['profile'])}"
+        value = values.get(key, "")
+        if not (value.startswith("model/") and value.count(":") == 1):
+            raise ModelSettingsUsageError(
+                f"{target['name']} does not name a model of its own ({key} is not model/<id>:<effort>); "
+                "keep and follow apply to a line that does")
+        return key
+    key = f"CFG_TIER_{target['tier']}_MODEL"
+    if key not in values:
+        raise ModelSettingsUsageError(f"{target['name']} has no model line to mark")
+    return key
+
+
+def _set_mark(adapter: str, target_name: str, action: str, *, runtime, environ, source_root,
+              dry_run: bool) -> dict[str, object]:
+    """`model set <harness> <target> keep|follow`: only the line-end record changes."""
+    state = {}
+
+    def build(text: str) -> dict:
+        values = parse_text(text)
+        target = _resolve_target(adapter, target_name, values, source_root=source_root)
+        key = _mark_key(adapter, target, values)
+        current = model_follow_mark.read_marks(text).get(key)
+        if action == "follow":
+            record = None
+        elif current and current["kind"] == "keep":
+            record = current
+        else:
+            record = model_follow_mark.keep_record(model_follow_mark.today())
+        value = values[key]
+        model = value[len("model/"):].split(":")[0] if value.startswith("model/") else value
+        state.update(target=target, key=key, model=model)
+        if action == "follow" and current is None:
+            return {"changed": {}, "marks": {}}  # no record to take off: the line stays as it is
+        return {"changed": {}, "marks": {key: record}}
+
+    edited = edit_file(adapter, build, runtime=runtime, environ=environ, source_root=source_root,
+                       dry_run=dry_run)
+    target, model, name = state["target"], state["model"], state["target"]["name"]
+    if edited["status"] == "unchanged":
+        lines = [f"model set: unchanged {adapter} {name} -> {action} ({model})"]
+    elif edited["status"] == "planned":
+        lines = [f"model set: would {action} {adapter} {name} ({model})"]
+    else:
+        lines = [f"model set: {adapter} {name} {action} ({model})",
+                 f"config: {edited['config_path']}", f"backup: {edited['backup'] or 'none'}"]
+    return {"operation": "model-set", "status": edited["status"], "exit": 0, "runtime": adapter,
+            "config_path": edited["config_path"], "target": target, "requested_model": action,
+            "old_model": model, "new_model": model, "old_budget": None, "new_budget": None,
+            "changed_keys": edited["changed_keys"], "backup": edited["backup"],
+            "source_reason": edited["source_reason"], "mark": action, "lines": lines}
 
 
 def get_context_window(adapter: str, *, runtime: str | Path | None = None,
