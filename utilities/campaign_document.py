@@ -23,6 +23,12 @@ and the small close results are read, and no index is rebuilt (only a close that
 is looked up by route id). What was read is kept in
 `<root>/.runtime/campaign-document/<campaign_id>.json`; deleting it only starts the campaign
 again from its newest 20 pieces of work (nothing is backfilled).
+
+A piece of work with a running registered attempt on any of its open routes stays under `## 하는 중`
+whatever its age: "running" is the runtime's own liveness of an attempt row (`route_autoclose.live_routes`,
+the verdict the route sweep uses), read once per pass and only for the open routes, and the attempt's
+last write to its log is that work's movement too. An attempt that ended, or whose process is gone,
+counts for nothing, and a replacement attempt of the same route counts as the route's own.
 """
 from __future__ import annotations
 
@@ -139,8 +145,9 @@ def link_units(facts, open_routes, titles, *, now, closed_total=None):
 
     `facts`: closed routes (`rid`, `kind`, `slug`, `cy`, `st`, `c`, `ok`, `pr`, `prs`, `v`, `t`).
     `open_routes`: routes with no close result (`rid`, `kind`, `slug`, `cy`, `st`, `pr`,
-    `activity`). `titles`: cycle id -> title from the campaign's meta. A route's PR number joins
-    it to the other routes of that number; without one it stands alone. Frames do no work and a
+    `activity`, `alive`: a registered attempt of it is running). `titles`: cycle id -> title from the campaign's meta. A route's PR number joins
+    it to the other routes of that number; without one it stands alone. A piece with a running
+    attempt on any of its open routes is doing whatever its age. Frames do no work and a
     close that is not proven is not finished work: neither is a line or a count. Publish routes
     have no line of their own; they add their version and a record to the PRs they name.
 
@@ -200,7 +207,7 @@ def link_units(facts, open_routes, titles, *, now, closed_total=None):
             done.append(finish(item))
         elif item["open"]:
             line = finish(item)
-            if now - line["activity"] < ACTIVE_SECONDS:
+            if now - line["activity"] < ACTIVE_SECONDS or any(m.get("alive") for m in item["open"]):
                 active.append(line)
             else:
                 active_folded += 1
@@ -510,6 +517,29 @@ def _activity(root, rid, member):
     return newest
 
 
+def _live_moves(root, listing):
+    """A reader of the route ids that hold a running attempt, with when each last moved: the runtime's
+    own liveness (`route_autoclose.live_routes`) over the registry, read once however many campaigns
+    ask in one pass and only for routes that have no close result. Unreadable means none are known."""
+    memo = []
+
+    def read():
+        if not memo:
+            try:
+                import route_autoclose
+                memo.append(route_autoclose.live_routes(
+                    route_autoclose.registries_at(_agent_home()), [rid for rid, (_, closed) in listing.items() if closed is None]))
+            except Exception:  # noqa: BLE001 -- the six-hour rule alone then decides, as before
+                memo.append({})
+        return memo[0]
+    return read
+
+
+def _agent_home():
+    import dispatch_contract
+    return dispatch_contract.resolve_agent_home()
+
+
 def _intent_title(root, rid):
     try:
         import work_intent
@@ -540,7 +570,8 @@ def _cache_member(entry):
     return isinstance(entry, dict) and isinstance(entry.get("slug"), str)
 
 
-def collect(root, campaign_dir, *, now, waits, cache=None, persist=False, listing=None, new_records=None, tz=None):
+def collect(root, campaign_dir, *, now, waits, cache=None, persist=False, listing=None, new_records=None, tz=None,
+            live=None):
     """`(document text, cache)` for one campaign, from its records. Writes nothing itself;
     `persist=False` is a faithful drawing from real records, `catch_up` persists."""
     root, campaign_dir = Path(root), Path(campaign_dir)
@@ -578,13 +609,15 @@ def collect(root, campaign_dir, *, now, waits, cache=None, persist=False, listin
                   if rid not in facts and (horizon is None or closed[rid] > horizon)),
                  key=lambda rid: (-closed[rid], rid))
 
-    activity = {rid: _activity(root, rid, members[rid]) for rid in opened if kinds[rid] not in ("frame", "publish")}
+    moves = (live or _live_moves(root, listing))()   # route id -> last move of its running attempt
+    activity = {rid: max(_activity(root, rid, members[rid]), moves.get(rid, 0.0))
+                for rid in opened if kinds[rid] not in ("frame", "publish")}
 
     def open_pr(rid):
         """The PR of an open route: its slug's, else the one its intent's first sentence names. Only a
         route still moving reads its intent, once; a long-idle one is folded and keeps its own line."""
         found = pr_from_slug(members[rid]["slug"])
-        if found is not None or now - activity[rid] >= ACTIVE_SECONDS:
+        if found is not None or (rid not in moves and now - activity[rid] >= ACTIVE_SECONDS):
             return found
         if rid not in cached_prs:
             title = cached_titles.get(rid) or _intent_title(root, rid)
@@ -635,7 +668,7 @@ def collect(root, campaign_dir, *, now, waits, cache=None, persist=False, listin
         member = members[rid]
         open_rows.append({"rid": rid, "kind": kinds[rid], "slug": member["slug"], "cy": member["cy"],
                           "st": member["st"], "pr": open_pr(rid), "t": cached_titles.get(rid),
-                          "activity": activity[rid]})
+                          "activity": activity[rid], "alive": rid in moves})
     for rid in [rid for rid in cached_prs if rid not in members]:
         del cached_prs[rid]
     for row in fact_rows:
@@ -850,6 +883,7 @@ def catch_up(root, cycle_id=None, *, now=None, waits=None):
     started = time.time_ns() if now is None else int(now * 10 ** 9)  # `now` is the pass's clock
     now = time.time() if now is None else now
     listing = _list_routes(root)
+    live = _live_moves(root, listing)
     saved = store._read_json(root / CACHE_REL / "watermark.json") or {}
     mark = saved.get("ns")
     mark = mark if isinstance(mark, int) and not isinstance(mark, bool) else started - FIRST_WINDOW_NS
@@ -882,7 +916,7 @@ def catch_up(root, cycle_id=None, *, now=None, waits=None):
                 if not record or record.get("campaign_id") != campaign_id or record.get("state") != "active":
                     continue
                 text, cache = collect(root, folder, now=now, waits=board, cache=_load_cache(root, campaign_id),
-                                      persist=True, listing=listing, new_records=records)
+                                      persist=True, listing=listing, new_records=records, live=live)
                 if _write_document(folder, text):
                     written.append(folder.name)
                 else:
