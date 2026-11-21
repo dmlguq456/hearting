@@ -832,7 +832,9 @@ def fleet_view(harnesses: Iterable[str] = HARNESSES, **kwargs) -> list[dict]:
     """What a screen shows for each harness's table. Read-only: no model call, no list
     refresh, no write (a survey's own reads only).
 
-    One item per harness: ``{"harness", "status", "reason", "cells", "plan", "cli"}``. The
+    One item per harness: ``{"harness", "status", "reason", "cells", "plan", "cli", "states",
+    "read_only"}`` (`read_only`: the table is read-only and has something to write, so `plan` is
+    empty: nothing writes it on its own). The
     cells and their states are the table's own, so they are given without a list too (`next`
     is empty then, except for a cell waiting to go back).
     A cell is ``{"target", "model", "effort", "state": "follow"|"keep"|"held", "why",
@@ -870,7 +872,8 @@ def fleet_view(harnesses: Iterable[str] = HARNESSES, **kwargs) -> list[dict]:
                     "reason": result["reason"], "cells": shown,
                     "plan": [{k: v for k, v in item.items() if k not in ("write", "companions", "order")}
                              for item in result["plan"]],
-                    "cli": result["cli"], "states": result["states"]})
+                    "cli": result["cli"], "states": result["states"],
+                    "read_only": result.get("read_only", False)})
     return out
 
 

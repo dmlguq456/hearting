@@ -952,6 +952,10 @@ class ReadOnlyTableTests(Home):
                 self.read_only(adapter)
                 found = self.survey(adapter, self.newer(adapter))
                 self.assertEqual((found["plan"], found["read_only"]), ([], True))
+                catalog = SimpleNamespace(state="available", rows=tuple(self.newer(adapter)), client_version=None)
+                (view,) = model_follow.fleet_view([adapter], source_root=self.src, today=TODAY,
+                                                  read_catalog=lambda _h: catalog, probe=lambda _h: (None, None))
+                self.assertEqual((view["plan"], view["read_only"]), ([], True))
 
     def test_a_refusal_at_the_close_does_not_write_a_read_only_table(self):
         for adapter in ("claude", "codex"):
