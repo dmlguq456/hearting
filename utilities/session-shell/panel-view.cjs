@@ -779,10 +779,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const ruleRun=n=>({...text('─'.repeat(Math.max(1,n)),'dim'),role:'messages'});
     const fillEnd=n=>n>=3?[text(' '),ruleRun(n-1)]:[pad(n)];
     // One bottom-layout button of a document at a stage (0: word, count and `›`; 1: word and `›`; 2: `›`), its pieces.
+    // `+N` and, where the document has more than was read (a very long backlog), a `+` after it: `+2997+` (`+` alone where nothing is hidden by the rows).
+    const countWords=(n,more)=>n>0?'+'+n+(more?'+':''):'+';
     const listTotalOf=doc=>Math.max(0,Math.min(Number.isInteger(doc.total)?doc.total:0,99999));
     const listButton=(doc,stage)=>{const arrow=text('›','dim');if(stage>=2)return [arrow];
       const n=listTotalOf(doc);
-      return [text(clean(doc.word).trim(),doc.has_doc===true?'loc_repo':'dim'),...(stage===0&&n>0?[text(' '),text('+'+n,'loc_repo')]:[]),text(' '),arrow];};
+      return [text(clean(doc.word).trim(),doc.has_doc===true?'loc_repo':'dim'),...(stage===0&&(n>0||doc.more===true)?[text(' '),text(countWords(n,doc.more===true),'loc_repo')]:[]),text(' '),arrow];};
     // A group's head row: its name (the title role, as a section's), a thin rule to the row's end.
     const groupHead=name=>{const lead=[{...text(name,'dim'),role:'title'}],rest=inner-size(lead);
       return rest>=3?[...lead,text(' '),{...text('─'.repeat(rest-1),'dim'),role:'messages'}]:cut(lead,inner);};
@@ -2111,7 +2113,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const head=listHeads.get(i);
         // A list part's head: `STATUS +2 ──── ›` (the count of the items not shown, as MESSAGES' head; the word dim, not titled, where its document is not there).
         const hidden=head?head.total-Math.min(take[head.name+'_ITEMS'],head.items.length):0;
-        order.push({parts:head?sectionHead([],head.name,hidden>0?[text('+'+hidden,'loc_repo')]:[],[[]],true,head.doc.has_doc!==true):!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});}});
+        order.push({parts:head?sectionHead([],head.name,hidden>0||head.doc.more===true?[text(countWords(hidden,head.doc.more===true),'loc_repo')]:[],[[]],true,head.doc.has_doc!==true):!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});}});
     for(const item of order)add(item.parts,item.action,item.groups);
     const headRows=content.length;
     // Each section stands whole (its head and the rows it kept), one after another from the top; the

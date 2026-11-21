@@ -432,6 +432,9 @@ const checks={};
     await key('\r',300);r=await screen();checks.detail_closed=!popupHas('BL_DETAIL_NOTE')(r);
     for(let i=0;i<4;i++)await key('\x1b[B',200);await key('\r',400);r=await screen();
     checks.group_opened=popupHas('BL_OTHER_ITEM')(r);
+    // PgDn/PgUp move the chosen line (the window follows): to the end of what there is, and back to the first line.
+    await key('\x1b[6~',300);r=await screen();checks.pgdn_end=body(r).some(l=>l.startsWith('> ')&&l.includes('full document'));
+    await key('\x1b[5~',300);r=await screen();checks.pgup_top=body(r).some(l=>l.startsWith('> ')&&l.includes('BL_ITEM_ONE'));
     await key('\x1b[C',400);r=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('ROUTE');},'the next section after BACKLOG');checks.next_section=true;
     await key('\x1b[D',400);r=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('BACKLOG');},'BACKLOG again by ←');checks.back=true;
     await close();
@@ -615,6 +618,7 @@ class PtyTest(unittest.TestCase):
         self.assertTrue(checks['other_folded'] and checks['other_hidden'], checks)        # this window's group is open, the other one folded
         self.assertTrue(checks['detail'] and checks['detail_closed'], checks)             # the indented lines under an item
         self.assertTrue(checks['group_opened'], checks)
+        self.assertTrue(checks['pgdn_end'] and checks['pgup_top'], checks)                # PgDn/PgUp move the chosen line, not only the window
         self.assertTrue(checks['next_section'] and checks['back'], checks)
 
     def test_a_late_fleet_part_of_another_width_is_not_kept(self):

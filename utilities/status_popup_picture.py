@@ -13,7 +13,8 @@ screen: ``first`` and ``full`` draw the one screen it always had.
 
 ``--kind backlog`` draws the BACKLOG popup the same way: ``<document>`` is a ``backlog.md`` (or ``-`` for none), ``--own`` the name of the
 campaign folder this window's status document is in (its group stands open on top), and the steps are the same (``first``, ``group`` the
-first folded group opened, ``item`` the first item that has something to open, opened, ``short``, ``full``); it has no Fleet lines.
+first folded group opened, ``item`` the first item that has something to open, opened, ``short``, ``pgdn``/``pgup``/``end`` the chosen line a screen on
+or as far as it goes, ``full``); it has no Fleet lines.
 
 What it runs is the product's: the backend's own answer (``session_shell._status_popup``, which reads the document the way the
 popup does) laid out by the host's own list code (``utilities/session-shell/status-list.cjs``) and drawn in the popup's own frame
@@ -153,8 +154,17 @@ def backlog_picture(args, scratch, node, helper, columns, cols, rows, now, sessi
             "popup_keys": ui_text("fleet.session_panel.popup_keys"), "fold": ui_text("fleet.session_panel.popup_unfold")}
     title = str(first.get("title") or "BACKLOG")
     steps = [step for step in args.steps.split(",") if step]
+    details = {}                         # the lines under the items the steps open (the popup asks for them when an item is opened)
+    with mock.patch.object(session_status, "_root", lambda cwd, at: str(root)):
+        for entry in first.get("list") or []:
+            if entry.get("lazy") and entry.get("key"):
+                got = session_shell._status_popup(binding, dict(request, part="detail", open=entry["key"]), columns, 256, True, "backlog")
+                if got.get("ok"):
+                    details[entry["key"]] = got
+                if len(details) >= 40:
+                    break
     drawn = run_node(node, helper, scratch, {"mode": "draw", "cols": cols, "rows": rows, "answer": first, "document": doc, "fleet": None, "sections": SECTIONS,
-                                       "keys": keys, "title_rest": title[len("BACKLOG"):], "word": "BACKLOG", "current": 1, "steps": steps})
+                                       "keys": keys, "title_rest": title[len("BACKLOG"):], "word": "BACKLOG", "current": 1, "steps": steps, "details": details})
     return "{} x {} popup frame\n\n{}\n".format(args.width, args.height, drawn.rstrip("\n"))
 
 

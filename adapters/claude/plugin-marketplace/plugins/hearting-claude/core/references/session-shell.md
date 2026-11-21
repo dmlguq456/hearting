@@ -430,7 +430,7 @@ color and place, `›` last; a press opens that popup) and its first three items
 `· ` dim before the rest; a press on an item opens the popup standing on that item). The STATUS items are the status list screen's own order, what waits for the person and
 then what is in progress (`session_status.panel_items`, from `parse_listing`, the one reading the list screen uses; the recent and the folded count nothing); the BACKLOG items
 are `<artifact root>/backlog.md`'s, this window's campaign group (the `##` heading that is, letter for letter, the name of the folder this window's status document is in) first,
-then the other groups in the document's order. `+N` is the count of the items of the whole document not shown (nothing for zero); no item: the head alone; no document, or one that
+then the other groups in the document's order. `+N` is the count of the items of the whole document not shown (nothing for zero; a `+` after it, `+2997+`, where the file is longer than is read: the first 1 MiB is read and what was read is counted; `+` alone where nothing is hidden by the rows and there is more); no item: the head alone; no document, or one that
 cannot be read: the word plain dim, no item, a press still opens the popup; no artifact root: neither part. Short of rows (the same `give` order as the other sections, no
 budget of its own): the BACKLOG items go first (3, 2, 1, none: `+N` grows by as many), then the order MESSAGES and MEM already had down to one row each, then the STATUS items;
 where the three it must not touch would still give a row, the SESSION head and the rule above the title go, then MESSAGES and MEM (rows, then heads), then Git, PEERS and the
@@ -1039,14 +1039,18 @@ they arrive (for a page with a list screen, after the document read whole is ask
 cannot read is that same failure, not a `?`), and the Fleet part holds no place of the document's: a popup opened again while it is out
 stands at once, and its lines are kept only for the width and value they were asked at), BACKLOG (11-21: the status popup's list screen over
 `<artifact root>/backlog.md`, drawn by the same `status-list.cjs` with the same keys and the same frame; its answer is the status popup's own (`part: list` / `doc`, no Fleet part;
-`session_status.backlog_view`, `session_shell._status_popup(kind="backlog")`). The document's form (written by another task, only read here): a title, `갱신 YYYY-MM-DD HH:MM`
-(read as the status document's is, shown as `updated MM-DD HH:MM`, with `! … old document` after three days), then `##` headings, each a campaign folder name or `Unassigned`, and under
-each the top-level bullets, one item each; the indented lines under an item (`date:`, `source:`, `note:`, a sub-bullet) are its detail, a code fence is not read, no tag or
-state is. The list screen is the title, `updated …`, this window's campaign group open on top (its heading and its items), every other group one folded line `› <heading> <count>`
-in the document's order, then `full document ›` (the document read whole, its first 64 KiB, a cut one with `… 64 KiB`); an item with detail opens under its row to show it (Enter or a press; again
-closes), and the headings are the document's words as written, never invented. The words Hearting puts there (`BACKLOG`, `updated`, `old document`, `full document`,
+`session_status.backlog_view`, `session_shell._status_popup(kind="backlog")`). The document's form (written by another task, only read here): a title, `갱신 YYYY-MM-DD HH:MM`, then `##` headings, each a campaign folder name or `Unassigned`, and under
+each the top-level `- ` bullets, one item each (the artifact entrance's own counting rule, `parse_backlog`, not the status page's looser reading: a `- ` before the first `##` is none; `*`, `+`
+and numbered lists are none; an indented line and a sub-bullet are none; a code fence is not read, closes on the same character and the same or a longer length only, and one never closed runs to
+the end; `갱신` is read before the first `##` only, and only where the date and the time are real, shown as `updated MM-DD HH:MM`, with `! … old document` after three days). The indented lines under an item
+(`date:`, `source:`, `note:`) are its detail. The list screen is the title, `updated …`, this window's campaign group open on top (its heading and its items), every other group one folded line
+`› <heading> N` in the document's order, then `full document ›` (the document read whole, its first 64 KiB, `… 64 KiB` after a longer one). **The list answer carries titles only** (and the groups and
+counts): an item with indented lines under it is `lazy`, and opening it (Enter or a press; again closes) asks for its lines (`part: detail`, `open` the item's key; one `⠏` stands under it until they come), so a
+backlog of 256 KiB and 500 items stands as a list. The list's answer may weigh 200 KiB (`BACKLOG_ANSWER_BYTES`; the host reads 256 KiB of an answer); a document whose titles alone pass it draws
+the most that fit, then one line `… N more in backlog.md`; a file longer than the 1 MiB read limit adds `… the file is longer than is read here: more items follow`. PgUp/PgDn on a list screen (the status
+popup's too) move the chosen line a screen on, the window following it. The headings are the document's words as written, never invented. The words Hearting puts there (`BACKLOG`, `updated`, `old document`, `full document`,
 `No backlog document yet.`) are English whatever the language. No document, a folder or link of that name, one that cannot be read: the popup's one dim line, no list.
-A document of another form (no headings, no bullets) shows as much as is read and no item is none. The title is `BACKLOG · <age>`.),
+A document of another form (no headings, no `- ` bullets) shows as much as is read and no item is none. The title is `BACKLOG · <age>`.),
 QUESTIONS (the question editor),
 ROUTE (Fleet's own table: the backend's `popup` reading draws
 Fleet's `draw_routes` with one route unfolded and Fleet's route page into a grid of

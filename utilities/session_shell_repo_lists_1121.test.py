@@ -206,6 +206,25 @@ assert.match(lines(two(52,8,5,14))[1],/ctx 41% +›  › │$/);
 assert.match(lines(two(120,8,0,0))[1],/ctx 41% +STATUS ›  BACKLOG › │$/);
 """)
 
+    def test_a_backlog_longer_than_is_read_says_so_with_a_plus_after_its_count(self):
+        self.node(r"""
+const more=(n,total,has=true)=>({...backlog(n,total,has),more:true});
+const heads=(b,o={})=>inside(draw({status:status(),backlog:b,height:40,...o})).filter(l=>/^BACKLOG/.test(l));
+// `+N` is what the rows do not show, and the `+` after it that the file has more than was read.
+assert(/^BACKLOG \+2997\+ ─+ ›$/.test(heads(more(3,3000))[0]),heads(more(3,3000))[0]);
+assert(/^BACKLOG \+2997 ─+ ›$/.test(heads(backlog(3,3000))[0]));
+// Nothing hidden by the rows and still more in the file: `+` alone.
+assert(/^BACKLOG \+ ─+ ›$/.test(heads(more(3,3))[0]),heads(more(3,3))[0]);
+// The items go first and the count grows with them, the `+` stays.
+{const ls=inside(draw({status:status(),backlog:more(3,3000),routes:1,messages:3,mem:2,height:34}));
+ assert(ls.some(l=>/^BACKLOG \+\d+\+ ─+ ›$/.test(l)),ls.join('\n'));}
+// The bottom layout's button.
+const two=(w,s,b)=>draw({side:false,width:w,height:8,status:{word:'STATUS',has_doc:true,items:SI,total:s},backlog:{...b,word:'BACKLOG',has_doc:true,items:[]}});
+assert.match(lines(two(120,5,{total:2997,more:true}))[1],/STATUS \+5 ›  BACKLOG \+2997\+ › │$/);
+assert.match(lines(two(120,5,{total:0,more:true}))[1],/STATUS \+5 ›  BACKLOG \+ › │$/);
+assert.match(lines(two(120,5,{total:2997,more:false}))[1],/BACKLOG \+2997 › │$/);
+""")
+
     def test_the_drawing_reads_no_file_and_asks_nothing(self):
         out = self.node(r"""
 const calls=[];
@@ -388,9 +407,9 @@ class BackendTest(unittest.TestCase):
         with mock.patch.object(self.status, "read", lambda cwd, routes=(), now=None: None):
             self.assertEqual(self.shell._panel_status({}, {"cwd": self.cwd, "routes": []}), {"ok": True, "status": None, "lists": None})
 
-    def popup(self, part, own="2026-11-02_some-campaign", width=80, kind="backlog"):
+    def popup(self, part, own="2026-11-02_some-campaign", width=80, kind="backlog", open=""):
         binding = {"harness": "claude", "sid": "00000000-0000-4000-8000-000000000001"}
-        return self.shell._status_popup(binding, {"cwd": self.cwd, "routes": [], "status": {}, "part": part, "own": own}, width, 256, False, kind)
+        return self.shell._status_popup(binding, {"cwd": self.cwd, "routes": [], "status": {}, "part": part, "own": own, "open": open}, width, 256, False, kind)
 
     def test_the_backlog_popup_is_the_status_screens_own_parts_over_the_document(self):
         self.backlog()
@@ -402,9 +421,20 @@ class BackendTest(unittest.TestCase):
         self.assertEqual([t for t, _ in shown], ["시험용 백로그", "updated 11-21 11:02", "", "2026-11-02_some-campaign 2", "  일 하나", "  일 둘", "",
                                                   "  › 2026-10-01_other-campaign 1", "    다른 일", "  › Unassigned 1", "    정해지지 않은 일", "", "  full document ›"])
         self.assertEqual([k for _, k in shown], ["", "", "", "", "i:", "i:", "", "g:", "i:", "g:", "i:", "", "fu"])
-        # The item with indented lines carries them (they stand under it while it is open); the one without carries none.
-        self.assertEqual(["".join(run[0] for run in row) for row in entries[4]["more"]], ["    date: 2026-11-20", "    source: 어딘가", "    note: 맥락 하나"])
-        self.assertNotIn("more", entries[5] if not entries[5].get("more") else {})
+        # The answer carries titles only: an item with indented lines under it is `lazy` (they are asked for when it is opened), and no entry holds them.
+        self.assertTrue(all("more" not in e for e in entries))
+        self.assertEqual([bool(e.get("lazy")) for e in entries if e.get("key", "").startswith("i:")], [True, True, False, False])
+        self.assertNotIn("date: 2026-11-20", json.dumps(answer, ensure_ascii=False))
+        # The lines come with the item's own ask.
+        key = entries[4]["key"]
+        got = self.popup("detail", open=key)
+        self.assertEqual((got["ok"], got["part"], got["open"]), (True, "detail", key))
+        self.assertEqual(["".join(run[0] for run in row) for row in got["rows"]], ["    date: 2026-11-20", "    source: 어딘가", "    note: 맥락 하나"])
+        folded = [e for e in entries if e.get("key", "").startswith("i:") and e.get("when") == "open"][0]
+        self.assertEqual(self.popup("detail", open=folded["key"])["rows"], [])                     # an item with no lines under it: none
+        for bad in ("", "g:abc", "i:nothere", "x" * 80):
+            self.assertFalse(self.popup("detail", open=bad)["ok"], bad)
+        self.assertEqual(self.popup("detail", open=key, kind="status", own=""), {"ok": False, "reason": "invalid-status"})
         # Not the campaign of this window: every group is a folded line, in the document's order.
         other = [("".join(run[0] for run in e["rows"][0])) for e in self.popup("list", own="")["list"] if e.get("key", "").startswith("g:")]
         self.assertEqual(other, ["  › 2026-11-02_some-campaign 2", "  › 2026-10-01_other-campaign 1", "  › Unassigned 1"])
@@ -429,20 +459,26 @@ class BackendTest(unittest.TestCase):
     def test_an_item_opens_to_its_indented_lines_in_the_status_lists_own_code_and_a_press_stands_on_it(self):
         self.backlog()
         answer = self.popup("list")
+        detail = self.popup("detail", open=answer["list"][4]["key"])
         with tempfile.TemporaryDirectory(prefix="rlj") as folder:
-            path = Path(folder) / "answer.json"
+            path, more = Path(folder) / "answer.json", Path(folder) / "detail.json"
             path.write_text(json.dumps(answer, ensure_ascii=False), encoding="utf-8")
+            more.write_text(json.dumps(detail, ensure_ascii=False), encoding="utf-8")
             out = subprocess.run([NODE, "-e", r"""
 const fs=require('node:fs'),path=require('node:path');
 const list=require(path.join(process.argv[1],'status-list.cjs'));
 const entries=list.entriesOf(JSON.parse(fs.readFileSync(process.argv[2],'utf8'))),text=r=>r.map(p=>p.text).join('');
-const st={sel:'',fold:new Set(),items:new Set()};
+const detail=list.rowsOf(JSON.parse(fs.readFileSync(process.argv[3],'utf8')));
+const st={sel:'',fold:new Set(),items:new Set(),more:{}};
 const lines=()=>list.layout(entries,st,{width:60}).rows.map(text);
 const first=lines(),item=list.layout(entries,st).marks.find(m=>m.key.startsWith('i:')&&m.text);
-// (the first item has indented lines: it can be opened; the second has none)
-const second=list.layout(entries,st).marks.filter(m=>m.key.startsWith('i:'))[1];
-const out={item_can_open:!!item,second_can_open:!!second.text};
+// (the first item has lines under it: it can be opened; an item with none is not lazy and has nothing to open)
+const plain=entries.find(e=>e.key&&e.key.startsWith('i:')&&!e.lazy);
+const out={item_can_open:!!item,item_lazy:item.lazy,plain_can_open:!!(plain.text||plain.more||plain.lazy)};
 out.pressed=list.press(st,list.layout(entries,st),item.key);
+// until the lines come one dim `⠏` stands under the row; then they do
+out.waiting=lines().slice(lines().findIndex(l=>l.startsWith('> '))+1)[0];
+st.more[item.key]=detail;
 const opened=lines();out.more=opened.length-first.length;out.shown=opened.filter(l=>/date:|source:|note:/.test(l));
 const v=list.layout(entries,st,{width:60});out.tinted=v.rows.slice(v.at,v.at+v.span).every(r=>r.some(p=>p.tint));out.span=v.span;
 out.hits=list.hits(v).filter(h=>h.action[1]===item.key).length;
@@ -454,12 +490,109 @@ const gone={sel:'i:nothere',fold:new Set(),items:new Set()};out.fell=list.layout
 const g=list.layout(entries,st).marks.find(m=>m.key.startsWith('g:'));out.group=list.press(st,list.layout(entries,st),g.key);
 out.group_items=lines().filter(l=>/다른 일/.test(l)).length;
 console.log(JSON.stringify(out));
-""", str(SHELL), str(path)], capture_output=True, text=True, timeout=120)
+""", str(SHELL), str(path), str(more)], capture_output=True, text=True, timeout=120)
         self.assertEqual(out.returncode, 0, out.stderr)
         got = json.loads(out.stdout)
-        self.assertEqual(got, {"item_can_open": True, "second_can_open": True, "pressed": "item", "more": 3,
+        self.assertEqual(got, {"item_can_open": True, "item_lazy": True, "plain_can_open": False, "pressed": "item", "waiting": "    ⠏", "more": 3,
                                "shown": ["    date: 2026-11-20", "    source: 어딘가", "    note: 맥락 하나"], "tinted": True, "span": 4, "hits": 4,
                                "press_again": "item", "closed": True, "stands": True, "fell": True, "group": "fold", "group_items": 1})
+
+    # -- the entrance's counting rule, and a backlog far longer than the first one -------------------------------------------
+
+    def test_a_task_is_counted_by_the_entrances_rule_and_the_updated_line_by_its_own(self):
+        def items(body):
+            return [(g["name"], [i["text"] for i in g["items"]]) for g in self.status.parse_backlog(body.splitlines())["groups"]]
+        self.assertEqual(items("- 머리말 앞\n## A\n- 하나\n"), [("A", ["하나"])])                                     # a `- ` before the first `##` is none
+        self.assertEqual(items("## A\n* 별\n+ 더하기\n1. 번호\n2) 번호\n- 하나\n  - 하위\n    - 더 하위\n"), [("A", ["하나"])])    # only `- `; no sub-bullet
+        # A fence closes on the same character and the same or a longer length: a short one inside a longer one, and a wrong character, close nothing.
+        self.assertEqual(items("## A\n````\n```\n- 안\n```\n- 아직 안\n````\n- 밖\n"), [("A", ["밖"])])
+        self.assertEqual(items("## A\n~~~\n```\n- 안\n~~~~\n- 밖\n"), [("A", ["밖"])])
+        self.assertEqual(items("## A\n- 앞\n```\n- 닫히지 않음\n## B\n- 끝까지\n"), [("A", ["앞"])])                 # never closed: to the end
+        self.assertEqual(items("## A\n```python\n- 안\n```\n- 밖\n"), [("A", ["밖"])])
+        self.assertEqual(items("```\n## 울타리 안 머리말\n```\n## A\n- 하나\n"), [("A", ["하나"])])
+        self.assertEqual(items("## A\n- 하나\n# 다른 제목\n- 둘\n### 더 깊은\n- 셋\n"), [("A", ["하나", "둘", "셋"])])        # only `##` heads a group
+        # The `갱신` line: before the first `##` only, and a real date and time only.
+        def stamp(body):
+            return self.status.parse_backlog(body.splitlines())["updated"]
+        self.assertEqual(stamp("# T\n갱신 2026-11-21 11:02\n## A\n- 일\n"), (2026, 11, 21, 11, 2))
+        self.assertIsNone(stamp("# T\n## A\n갱신 2026-11-21 11:02\n- 일\n"))                                            # after the first `##`
+        self.assertIsNone(stamp("갱신 2026-13-45 99:99\n## A\n"))
+        self.assertIsNone(stamp("갱신 2026-02-30 10:00\n## A\n"))
+        self.assertIsNone(stamp("updated 2026-11-21 11:02\n## A\n"))                                                   # the status page's looser word is not this document's
+        self.assertIsNone(stamp("```\n갱신 2026-11-21 11:02\n```\n## A\n"))
+        self.assertEqual(stamp("갱신 2026-11-21 11:02\n갱신 2026-11-22 12:00\n## A\n"), (2026, 11, 21, 11, 2))          # the first one
+        # The panel and the popup count the same.
+        body = "# T\n- 앞\n## A\n- 하나\n* 둘\n```\n- 셋\n```\n- 넷\n"
+        self.backlog(body)
+        got = self.status.panel_lists(self.cwd, self.page(), {})["backlog"]
+        self.assertEqual((got["total"], [i["text"] for i in got["items"]]), (2, ["하나", "넷"]))
+        heads = [e for e in self.popup("list", own="A")["list"] if e.get("rows") and "".join(r[0] for r in e["rows"][0]).startswith("A ")]
+        self.assertEqual("".join(r[0] for r in heads[0]["rows"][0]), "A 2")
+
+    def long_backlog(self, items, note=300, groups=1, title="시험용 나중 일"):
+        out, per = ["# 시험용 백로그", "갱신 2026-11-21 11:02", ""], max(1, items // groups)
+        n = 0
+        for g in range(groups):
+            out.append("## 2026-11-02_some-campaign" if g == 0 else "## 2026-10-%02d_other-%d" % (g % 28 + 1, g))
+            for _ in range(per if g < groups - 1 else items - n):
+                n += 1
+                out += ["- %s %d — 제목이 한 줄로 이어지는 시험용 글입니다" % (title, n), "  date: 2026-11-%02d" % (n % 28 + 1), "  source: 시험용 출처 %d" % n,
+                        "  note: " + ("시험용 맥락이 길게 이어집니다 " * 40)[:note]]
+            out.append("")
+        return "\n".join(out) + "\n"
+
+    def test_a_long_backlog_stands_as_a_list_of_titles_with_its_whole_count(self):
+        for count, size_at_least in ((110, 40_000), (500, 200_000)):
+            body = self.long_backlog(count)
+            self.assertGreater(len(body.encode()), size_at_least)
+            self.backlog(body)
+            got = self.status.panel_lists(self.cwd, self.page(), {})["backlog"]
+            self.assertEqual((got["total"], len(got["items"]), got["more"]), (count, 3, False))
+            answer = self.popup("list")
+            self.assertIn("list", answer, count)                                          # the list stands: not the document read whole
+            self.assertLessEqual(len(json.dumps({"id": 0, **answer}, ensure_ascii=False).encode()), self.shell.BACKLOG_ANSWER_BYTES)
+            titles = [e for e in answer["list"] if e.get("key", "").startswith("i:")]
+            self.assertEqual(len(titles), count)                                          # every title; no note in the answer
+            self.assertNotIn("시험용 맥락이 길게", json.dumps(answer, ensure_ascii=False))
+            self.assertEqual(sum(1 for e in titles if e.get("lazy")), count)
+            self.assertNotIn("more in backlog.md", json.dumps(answer, ensure_ascii=False))
+
+    def test_a_backlog_of_thousands_is_read_as_far_as_it_goes_and_says_there_is_more(self):
+        # Titles alone pass the answer's size: the most that fit stand, then one line says how many more, and `full document ›` is there.
+        self.backlog(self.long_backlog(4000, note=20))
+        got = self.status.panel_lists(self.cwd, self.page(), {})["backlog"]
+        self.assertEqual((got["total"], got["more"]), (4000, False))
+        answer = self.popup("list")
+        self.assertIn("list", answer)
+        shown = ["".join(r[0] for r in e["rows"][0]) for e in answer["list"] if e.get("rows") and e["rows"][0]]
+        self.assertEqual(shown[-1], "  full document ›")
+        more = [t for t in shown if "more in backlog.md" in t]
+        self.assertEqual(len(more), 1)
+        drawn = sum(1 for e in answer["list"] if e.get("key", "").startswith("i:"))
+        self.assertEqual(more[0].strip(), "… %d more in backlog.md" % (4000 - drawn))
+        self.assertTrue(0 < drawn < 4000)
+        self.assertLessEqual(len(json.dumps({"id": 0, **answer}, ensure_ascii=False).encode()), self.shell.BACKLOG_ANSWER_BYTES)
+        self.assertLess(len(json.dumps({"id": 0, **answer}, ensure_ascii=False).encode()), 256 * 1024)       # what the host reads of an answer
+        # Past what is read at all (a file longer than the read limit): what was read is counted and the panel says there is more (`+`).
+        with mock.patch.object(self.status, "BACKLOG_READ_LIMIT", 100_000):
+            self.backlog(self.long_backlog(2000, note=60))
+            got = self.status.panel_lists(self.cwd, self.page(), {})["backlog"]
+            self.assertTrue(got["more"] and 0 < got["total"] < 2000, got)
+            self.assertTrue(got["has_doc"] and len(got["items"]) == 3)
+            answer = self.popup("list")
+            self.assertIn("list", answer)
+            self.assertIn("the file is longer than is read here", json.dumps(answer, ensure_ascii=False))
+            self.assertEqual(self.popup("doc")["has_doc"], True)
+
+    def test_the_status_read_of_a_long_backlog_is_bounded(self):
+        # A file of several MiB is read to the limit and no further.
+        with mock.patch.object(self.status, "BACKLOG_READ_LIMIT", 50_000):
+            self.backlog(self.long_backlog(3000, note=100))
+            self.assertGreater((self.root / "backlog.md").stat().st_size, 500_000)
+            lines, cut = self.status.read_backlog(str(self.root))
+            self.assertTrue(cut)
+            self.assertLessEqual(sum(len(line.encode()) + 1 for line in lines), 50_000)
+            self.assertFalse(lines[-1].startswith("- 시험용 나중 일 3000"))
 
     # -- the review of #1793, the three it left -------------------------------------------------------------------------
 
@@ -558,6 +691,50 @@ same([api.backlogDoc().items.map(i=>i.text),api.backlogDoc().total],[['a','b'],2
 // The panel model got both values with the read (the drawing reads from it, nothing else).
 assert(ctx.panelModel.status_doc&&ctx.panelModel.backlog_doc);
 })().catch(e=>{console.error(e);process.exit(1);});
+""")
+
+    def test_an_item_with_lines_under_it_asks_for_them_once_when_it_is_opened(self):
+        self.node(r"""(async()=>{
+const asked=[];let answer={ok:true,part:'detail',open:'i:x',styles:[{}],rows:[[['    note',0,8]]]};
+const ctx={Set,Array,Number,String,Math,Promise,statusList,selection:1,table:null,statusRoutes:()=>[],statusHeld:()=>({}),ownFolder:()=>'2026-11-02_camp',
+  POPUP_KIND:{BACKLOG:'backlog'},process,queueDisplay:()=>{},tableParts:r=>statusList.rowsOf(r),
+  panelView:{},readAction:(extra)=>{asked.push(JSON.parse(JSON.stringify(extra)));return Promise.resolve(answer);}};
+vm.createContext(ctx);
+vm.runInContext(cut('function askDetail(t,key){','// PgUp/PgDn on the list screen')+'\nthis.askDetail=askDetail;',ctx);
+const entry=(key,lazy)=>({rows:[[{text:'  '},{text:key}]],key,...(lazy?{lazy:true}:{})});
+const settle=()=>new Promise(r=>setTimeout(r,10));
+const t={kind:'BACKLOG',width:100,listing:[entry('i:x',true),entry('i:y',false)],items:new Set(['i:x','i:y']),more:{},moreAsking:new Set()};
+ctx.table=t;
+ctx.askDetail(t,'i:y');ctx.askDetail(t,'i:nothere');assert.equal(asked.length,0);              // an item with no lines under it, or none at all: no ask
+ctx.askDetail(t,'i:x');ctx.askDetail(t,'i:x');assert.equal(asked.length,1);                      // one ask at a time
+await settle();
+const a=asked[0];assert.deepEqual([a.kind,a.part,a.open,a.own,a.columns],['backlog','detail','i:x','2026-11-02_camp',96]);
+assert.equal(t.more['i:x'].map(r=>r.map(p=>p.text).join('')).join('|'),'    note');
+ctx.askDetail(t,'i:x');assert.equal(asked.length,1);                                              // kept: not asked again
+// Closed: not asked. An answer that cannot be read leaves nothing under the item; an answer for a list that was read again is dropped.
+const u={kind:'BACKLOG',width:100,listing:[entry('i:x',true)],items:new Set(),more:{},moreAsking:new Set()};ctx.table=u;
+ctx.askDetail(u,'i:x');assert.equal(asked.length,1);
+u.items.add('i:x');answer={ok:false};ctx.askDetail(u,'i:x');await settle();assert.equal(JSON.stringify(u.more['i:x']),'[]');
+const w={kind:'BACKLOG',width:100,listing:[entry('i:x',true)],items:new Set(['i:x']),more:{},moreAsking:new Set()};ctx.table=w;
+answer={ok:true,part:'detail',styles:[{}],rows:[[['late',0,4]]]};ctx.askDetail(w,'i:x');w.listing=[entry('i:x',true)];await settle();assert.equal(w.more['i:x'],undefined);
+})().catch(e=>{console.error(e);process.exit(1);});
+""")
+
+    def test_page_keys_move_the_chosen_line_a_screen_on_and_stay_inside_the_list(self):
+        self.node(r"""
+const entries=[{rows:[[{text:'head'}]]},...Array.from({length:110},(_,i)=>({rows:[[{text:'  '},{text:'item '+i}]],key:'i:g:'+String(i).padStart(3,'0')})),{rows:[[{text:'  '},{text:'full'}]],key:'full'}];
+const ctx={Set,Array,Number,String,Math,statusList,queueDisplay:()=>{}};vm.createContext(ctx);
+vm.runInContext(cut('function moveLines(t,delta){','// The document read whole')+'\nthis.moveLines=moveLines;',ctx);
+const t={listing:entries,sel:'',fold:new Set(),items:new Set(),reveal:false};
+const at=()=>statusList.layout(entries,t).sel;
+ctx.moveLines(t,20);assert.equal(at(),'i:g:020');assert.equal(t.reveal,true);                  // the first line stood on is item 0: a screen of 20 on
+ctx.moveLines(t,20);assert.equal(at(),'i:g:040');
+ctx.moveLines(t,-20);assert.equal(at(),'i:g:020');
+for(let i=0;i<10;i++)ctx.moveLines(t,20);assert.equal(at(),'full');                          // the end stays
+for(let i=0;i<10;i++)ctx.moveLines(t,-20);assert.equal(at(),'i:g:000');                       // and the top
+// An opened item takes its rows: the screen is counted in rows, so the line lands where it should.
+const more=[{rows:[[{text:'  '},{text:'a'}]],key:'i:a',more:[[{text:'x'}],[{text:'y'}]]},{rows:[[{text:'  '},{text:'b'}]],key:'i:b'},{rows:[[{text:'  '},{text:'c'}]],key:'i:c'}];
+const u={listing:more,sel:'i:a',fold:new Set(),items:new Set(['i:a']),reveal:false};ctx.moveLines(u,4);assert.equal(statusList.layout(more,u).sel,'i:c');ctx.moveLines(u,-1);assert.equal(statusList.layout(more,u).sel,'i:b');
 """)
 
     def test_a_press_on_an_item_opens_the_popup_standing_on_it_and_the_backlog_is_a_listed_kind(self):

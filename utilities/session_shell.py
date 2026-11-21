@@ -1634,6 +1634,7 @@ def popup_rows(grid, *, colors=256, no_color=False):
 
 
 POPUP_ANSWER_BYTES = 60 * 1024    # what a table's answer may weigh: the host reads 64 KB of one, and an answer past it is no table
+BACKLOG_ANSWER_BYTES = 200 * 1024   # what the backlog's list answer may weigh (its titles only; the host reads 256 KiB of an answer): 500 titles stand whole
 
 
 def _popup_table(kind, rows, styles, hits, total, *, colors, no_color, **extra):
@@ -1737,9 +1738,11 @@ def _status_popup(binding, request, columns, colors, no_color, kind="status"):
         return {"ok": False, "reason": "invalid-status"}
     part = request.get("part")
     backlog = kind == "backlog"
-    if part not in (None, "doc", "fleet", "list") or (backlog and part == "fleet"):
+    if part not in (None, "doc", "fleet", "list", "detail") or (backlog and part == "fleet") or (part == "detail" and not backlog):
         return {"ok": False, "reason": "invalid-status"}
     from fleet import session_status
+    if part == "detail":
+        return _backlog_detail(named, request, columns, colors, no_color, session_status)
     view = {}
     if part != "fleet" and not backlog:
         view = session_status.held(named[0], request.get("status")) or session_status.read(*named)
@@ -1801,18 +1804,37 @@ def _status_popup(binding, request, columns, colors, no_color, kind="status"):
         return len(json.dumps({"id": 0, **value}, ensure_ascii=False).encode())
     if listing:
         known = len(styles)
-        entries = [{**{k: v for k, v in entry.items() if k not in ("rows", "alt", "more")}, "rows": lay(entry["rows"]),
-                    **({"alt": lay(entry["alt"])} if entry.get("alt") else {}),
-                    **({"more": lay(entry["more"])} if entry.get("more") else {})} for entry in listing]
+
+        def entries_of(drawn):
+            return [{**{k: v for k, v in entry.items() if k not in ("rows", "alt", "more")}, "rows": lay(entry["rows"]),
+                     **({"alt": lay(entry["alt"])} if entry.get("alt") else {}),
+                     **({"more": lay(entry["more"])} if entry.get("more") else {})} for entry in drawn]
+
+        def forget():
+            del styles[known:]            # (the styles only the list used go with it, and the names that pointed at them)
+            for name in [k for k, at in index.items() if at >= known]:
+                del index[name]
         # The list screen's answer carries the list alone: the document's rows are the other answer (``doc``), asked for when
         # the document is read whole, so the two never share the answer's size. A list that alone does not fit is left out and
-        # the answer is the document's, as it always was.
-        listed = {**result, "list": entries}
-        if weight(listed) <= POPUP_ANSWER_BYTES:
-            return listed
-        del styles[known:]            # (the styles only the list used go with it, and the names that pointed at them: the answer is the document's alone)
-        for name in [k for k, at in index.items() if at >= known]:
-            del index[name]
+        # the answer is the document's, as it always was.  The backlog's list is a function of how many items it draws: the most
+        # that fit stand, and the rest is one line (`… N more in backlog.md`), so a long backlog is never a page with no list.
+        if callable(listing):
+            listed = {**result, "list": entries_of(listing())}
+            if weight(listed) <= BACKLOG_ANSWER_BYTES:
+                return listed
+            low, high = -1, listing.total      # the most items that fit (-1: not even none)
+            while high - low > 1:
+                middle = (low + high) // 2
+                forget()
+                low, high = (middle, high) if weight({**result, "list": entries_of(listing(middle))}) <= BACKLOG_ANSWER_BYTES else (low, middle)
+            forget()
+            if low >= 0:
+                return {**result, "list": entries_of(listing(low))}
+        else:
+            listed = {**result, "list": entries_of(listing)}
+            if weight(listed) <= POPUP_ANSWER_BYTES:
+                return listed
+        forget()
     runs = lay(rows + (later() if later else []))
     result["rows"] = runs
     if weight(result) <= POPUP_ANSWER_BYTES:
@@ -1823,6 +1845,33 @@ def _status_popup(binding, request, columns, colors, no_color, kind="status"):
         middle = (low + high) // 2
         low, high = (middle, high) if weight({**result, "rows": runs[:middle] + [[["…", dim, 1]]]}) <= POPUP_ANSWER_BYTES else (low, middle)
     return {**result, "rows": runs[:low] + [[["…", dim, 1]]]}
+
+
+def _backlog_detail(named, request, columns, colors, no_color, session_status):
+    """The indented lines under one backlog item (``open`` is its key), asked for when the person opens the item: the list answer
+    carries titles only.  ``ok: False`` where the document or the item is not there (the host shows the item as it was)."""
+    import time
+    key = request.get("open")
+    own = request.get("own") if isinstance(request.get("own"), str) and len(request["own"]) <= 200 and "/" not in request["own"] else ""
+    if not isinstance(key, str) or not key.startswith("i:") or len(key) > 64:
+        return {"ok": False, "reason": "invalid-status"}
+    rows = session_status.backlog_detail(session_status._root(named[0], time.time()), own, key, columns)
+    if rows is None:
+        return {"ok": False, "reason": "no-item"}
+    styles, index = [], {}
+    from fleet.explorer.grid import cell_width
+    runs = []
+    for row in rows:
+        out = []
+        for text, name in row:
+            if text:
+                if name not in index:
+                    index[name] = len(styles)
+                    styles.append(_runs([("", name)], colors, no_color)[0] if name else {})
+                    styles[-1].pop("text", None)
+                out.append([text, index[name], cell_width(text)])
+        runs.append(out)
+    return {"ok": True, "kind": "backlog", "part": "detail", "open": key, "rows": runs, "styles": styles, "hits": [], "page": False}
 
 
 def _now_popup(binding, request, columns, colors, no_color):

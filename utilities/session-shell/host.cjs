@@ -337,7 +337,7 @@ function readAction(extra,operation='action',own=false) {
     worker.stdout.setEncoding('utf8');
     worker.stdout.on('data',bytes=>{
       if(settled)return;
-      raw+=bytes;if(Buffer.byteLength(raw)>65536){finish({ok:false,reason:'action-unavailable'});return;}
+      raw+=bytes;if(Buffer.byteLength(raw)>262144){finish({ok:false,reason:'action-unavailable'});return;}   // (256 KiB: the backlog's list of titles is up to 200 KiB; every other answer is kept to 60 KiB by the backend)
       if(raw.includes('\n'))try{finish(JSON.parse(raw.split('\n')[0]));}catch{finish({ok:false,reason:'action-unavailable'});}
     });
     worker.stdin.end(JSON.stringify({op:operation,binding:binding(),...extra})+'\n');
@@ -688,7 +688,7 @@ function statusDoc(){
 function backlogDoc(){
   if(!(statusValue&&typeof statusValue.word==='string'))return null;
   const items=listItems(panelLists.backlog);
-  return {word:'BACKLOG',has_doc:panelLists.backlog?.has_doc===true,items,total:listTotal(panelLists.backlog,items)};}
+  return {word:'BACKLOG',has_doc:panelLists.backlog?.has_doc===true,items,total:listTotal(panelLists.backlog,items),more:panelLists.backlog?.more===true};}
 function askStatus(dirty=false,routes=statusRoutes()){
   if(statusAsking){statusAgain=true;statusAgainDirty=statusAgainDirty||dirty;return;}
   statusAsking=true;statusAgain=false;statusAgainDirty=false;
@@ -958,6 +958,8 @@ function askTable(){
         // while the whole document is on screen it stays until the new one comes (`askDoc`, below).
         if(t.screen==='list'&&(t.docGeneration!==generation||t.docWidth!==width))t.doc=null;
         t.docError=false;
+        // (what was asked of the list's items belongs to the list that was read: an item still open asks again)
+        t.more={};t.moreAsking=new Set();for(const key of t.items||[])askDetail(t,key);
         keepStatus(t,generation);
       }else{
         t.screen='';t.doc=tableParts(result);t.rows=[...(t.head||[]),...t.doc];
@@ -1125,7 +1127,7 @@ function openPopup(name,open='',page=false){
     ...(name==='NOW'?{sel:'',list:null,read:null,reveal:true,listScroll:0,loaded:false}:{}),
     // 11-21: the status popup's list screen state: the line chosen, the groups and items opened (by their own words).
     // (a press on one of the panel's items opens it standing on that item: `open` is the item's key, taken if the list has it)
-    ...(listed(name)?{listing:null,screen:'',sel:open,fold:new Set(),items:new Set(),reveal:true,listScroll:0}:{})};
+    ...(listed(name)?{listing:null,screen:'',sel:open,fold:new Set(),items:new Set(),more:{},moreAsking:new Set(),reveal:true,listScroll:0}:{})};
   // The status popup's rows as read last, while no watch event came and the width is the same.
   const kept=name==='STATUS'&&statusPopup&&statusPopup.width===table.width&&statusPopup.generation===statusGeneration;
   if(kept)Object.assign(table,{rows:statusPopup.rows,head:statusPopup.head,doc:statusPopup.doc,title:statusPopup.title,loaded:true,
@@ -1201,7 +1203,28 @@ function enterRow(){
 function statusActivate(t,key){
   const did=statusList.press(t,statusList.layout(t.listing,t),key);
   if(did==='full')statusFull(t);
-  else if(did){t.reveal=true;queueDisplay();}
+  else if(did){t.reveal=true;if(did==='item')askDetail(t,key);queueDisplay();}
+}
+// 11-21: an item of the backlog whose indented lines are not in the list answer (`lazy`, the titles being all the answer carries) has them asked for
+// when it is opened (`part: 'detail'`, one small read), and kept in `t.more` for the as long as the list stands. One ask per item at a time; an answer
+// that cannot be read leaves the item as it was (nothing under it).
+function askDetail(t,key){
+  if(t.kind!=='BACKLOG'||!t.listing||!t.items.has(key))return;
+  const entry=t.listing.find(e=>e.key===key);
+  if(!entry||!entry.lazy||(t.more&&t.more[key])||(t.moreAsking&&t.moreAsking.has(key)))return;
+  t.more=t.more||{};t.moreAsking=t.moreAsking||new Set();t.moreAsking.add(key);
+  const columns=Math.max(20,Math.min(200,t.width-4)),selected=selection,listing=t.listing;
+  readAction({kind:POPUP_KIND.BACKLOG,columns,open:key,page:false,rows:6,cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),own:ownFolder(),part:'detail'},'popup',true).then(result=>{
+    if(t.moreAsking)t.moreAsking.delete(key);
+    if(selected!==selection||table!==t||t.listing!==listing)return;
+    t.more[key]=result?.ok?tableParts(result):[];
+    queueDisplay();
+  });
+}
+// PgUp/PgDn on the list screen move the chosen line a screen on (the window follows it), so the line Enter opens is the one in view.
+function moveLines(t,delta){
+  const to=statusList.jump(statusList.layout(t.listing,t),delta);
+  if(to&&to!==t.sel){t.sel=to;t.reveal=true;queueDisplay();}
 }
 // The document read whole: its own answer, unless the one the popup has is of this page and width (asked for when the popup was here
 // before, and kept), then Fleet's lines, unless those are the page's and width's too.
@@ -2095,6 +2118,7 @@ function tableInput(data){
       else if(key==='\x1b[C')moveSection(1);else if(key==='\x1b[D')moveSection(-1);
       else if(key==='\x1b[Z')moveRow(-1);
       else if((key==='\x1b[5~'||key==='\x1b[6~')&&table.kind==='NOW'&&!table.page&&table.list)moveSel((key==='\x1b[5~'?-1:1)*Math.max(1,(table.space||2)-1),true);
+      else if((key==='\x1b[5~'||key==='\x1b[6~')&&statusListing(table))moveLines(table,(key==='\x1b[5~'?-1:1)*Math.max(1,(table.space||2)-1));
       else if(key==='\x1b[5~'||key==='\x1b[6~'){table.scroll=Math.max(0,table.scroll+(key==='\x1b[5~'?-1:1)*Math.max(1,(table.space||2)-1));if(table.kind==='ROUTE')table.follow=false;}
       continue;
     }
