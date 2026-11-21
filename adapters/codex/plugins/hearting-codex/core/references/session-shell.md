@@ -1163,7 +1163,15 @@ less 4 (116 at most; the routes popup 196 at most: 11-18, the read for it takes 
 window under 28; its content's height, at most the rows above the strip less 2,
 paging inside. A low window gives up the empty rows round the frame first (under
 8 rows), then its bottom line (3 rows or fewer), so a 20×6 window still shows the
-content. A popup that is not drawn (while the host is handed over) owns no keys. The focused question editor uses existing `questions list/answer`
+content. While an answer is being typed, its editor marks the answer's end explicitly,
+including an empty draft; every paint leaves the terminal cursor at that cell.
+Scrolling the question does not scroll the active answer out of view. Native
+typing keeps unchanged terminal input modes: a redraw sends mode transitions
+only when their requested values change, and keeps cursor movement inside the
+synchronized paint. A whole-screen repaint (resize, Fleet, veil changes or host
+resume, including SIGCONT) clears the remembered modes and cursor, and sends
+all modes once; ordinary typing and periodic paints do not reassert them.
+Normal exit also disables remembered application-cursor and x10 mouse modes. A popup that is not drawn (while the host is handed over) owns no keys. The focused question editor uses existing `questions list/answer`
 choice, text and decision operations; original questions, exact binding, claims
 and receipts remain with that common API. Marked Codex questions use the same
 board, never a new question store. Runtime notices that carry these answers

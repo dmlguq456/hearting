@@ -100,6 +100,10 @@ RUNTIME_OWNED_EXACT = ("_scratch",)          # `.`-prefix is a separate predicat
 ENTRANCE_NAMES = ("README.md", "index.html", "all-campaigns.md", "all-campaigns.html",
                   "recent-route-reports.md", "recent-route-reports.html",
                   "all-spec.md", "all-spec.html")
+# CORE §3 root documents that a person or a session writes (`backlog.md`). Not canonical records:
+# admission, census and residue never take them as input, and Hearting only reads them. They are
+# not entrance files (Hearting does not rewrite them), so they stay out of ENTRANCE_NAMES.
+ROOT_DOCUMENT_NAMES = ("backlog.md",)
 COMPAT_OVERRIDE_FIELDS = ("schema_version", "contract", "canonical_root",
                           "reason", "issuer", "created_at", "expires_at")
 WAIVER_FIELDS = ("reason", "issuer", "created_at", "expires_at")
@@ -558,7 +562,8 @@ def transition_window_closed(root: Path) -> bool:
 
 
 def _is_runtime_owned_top_level(name: str) -> bool:
-    return name.startswith(".") or name in RUNTIME_OWNED_EXACT or name in ENTRANCE_NAMES
+    return (name.startswith(".") or name in RUNTIME_OWNED_EXACT or name in ENTRANCE_NAMES
+            or name in ROOT_DOCUMENT_NAMES)
 
 
 def _legacy_content_names(root: Path, *, exhaustive: bool = False) -> List[str]:

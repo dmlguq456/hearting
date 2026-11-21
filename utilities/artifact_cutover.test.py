@@ -921,6 +921,13 @@ class CloseoutTest(unittest.TestCase):
         self.assertEqual(quiesce["external_open_cycles"], [])
         self.assertTrue(quiesce["proven"])
 
+    def test_a_root_document_is_not_in_the_closeout_residue_plan(self):
+        self.w("backlog.md", "# Backlog\n갱신 2026-11-21 23:10\n\n## 2026-01-01_some-campaign\n- a job\n")
+        _route_package, closeout_package = self.packages()
+        selected = {row["path"] for row in closeout_package["plan"]["source_inventory"]}
+        self.assertIn("plan.md", selected)  # a loose root file is still residue
+        self.assertNotIn("backlog.md", selected)
+
     def test_false_approval_refuses_both_apply_surfaces(self):
         route_package, closeout_package = self.packages()
         approval = self.approval(route_package, closeout_package, False)
