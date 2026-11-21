@@ -412,7 +412,8 @@ class WorkerDispatchPromptTest(unittest.TestCase):
                      "human_gates": [], "human_gate_bindings": [],
                      "nodes": [{"id": "prd-transaction", "kind": "capability-owner", "unit": "_kernel/owner",
                                 "terminal": True, "dispatch_depth": 1, "depends_on": [],
-                                "completion_gate": "spec-atomic-transaction", "outputs": ["spec/prd.md"]}]}
+                                "completion_gate": "spec-atomic-transaction", "outputs": ["spec/prd.md"],
+                                "write_scope": ["spec/prd.md", "spec/_internal/versions/**"]}]}
             route_path = root / "spec-route.json"
             route_path.write_text(json.dumps(route), encoding="utf-8")
             blocks = {}

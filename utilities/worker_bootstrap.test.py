@@ -1650,7 +1650,9 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
         transaction = {"id": "prd-transaction", "kind": "capability-owner", "unit": "_kernel/owner",
                        "terminal": True, "dispatch_depth": 1, "completion_gate": "spec-atomic-transaction",
                        "depends_on": ["review"] if staged else [],
-                       "outputs": ["spec/prd.md", "spec/pipeline_state.yaml", "version-snapshot"]}
+                       "outputs": ["spec/prd.md", "spec/pipeline_state.yaml", "version-snapshot"],
+                       "write_scope": ["spec/prd.md", "spec/pipeline_state.yaml", "spec/pipeline_summary.md",
+                                       "spec/_internal/versions/**"]}
         stages = [{"id": "research", "kind": "pipeline-stage", "depends_on": [], "inputs": ["task"],
                    "outputs": ["research.md"], "dispatch_depth": 2},
                   {"id": "review", "kind": "review-worker", "depends_on": ["research"], "inputs": ["research.md"],

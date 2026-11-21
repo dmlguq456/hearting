@@ -713,26 +713,29 @@ class CycleLayoutTest(unittest.TestCase):
   cmd=[sys.executable,str(ROOT/"utilities/spec-transaction.py"),"run","--artifact-root",str(self.artifact),"--worktree",str(self.repo),"--route",str(self.spec_route),"--node","prd-transaction","--events",str(events),*selector,"--",sys.executable,"-c",code]
   return subprocess.run(cmd,text=True,capture_output=True,env=env)
 
- def test_owner_route_steps_command_runs_the_transaction_on_both_spec_route_shapes(self):
-  # The owner of a spec route runs prd-transaction itself and may run only printed commands, so the
-  # command its Route steps print must succeed as printed from the owner's environment: its own cycle
-  # bound, its route file, and no route node.
+ def test_owner_route_steps_command_runs_the_transaction_on_every_spec_route_shape(self):
+  # The owner of a spec route writes the PRD itself (prd-transaction, or the quick route's one-shot) and
+  # may run only printed commands, so the command its Route steps print must succeed as printed from the
+  # owner's environment: its own cycle bound, its route file, and no route node.
   import shlex, types, worker_bootstrap as W
   self._shared_v1()
   candidates=[{"harness":harness,"surface":"registered-headless","transport":"headless","status":"supported",
                "probe_source":"fixture","probe_time":"2026-07-16T00:00:00Z"} for harness in ("codex","claude")]
-  for shape in ("prd-transaction alone","stages, then prd-transaction"):
+  # Compose before any cycle opens: a compose after the first cycle would have to name its campaign.
+  route_paths={"stages, then prd-transaction":self.spec_route}
+  for shape,name,kw in (("prd-transaction alone","alone",{"shape":"staged","graph":"prd-transaction",
+                                                         "signals":["shared-contract"]}),
+                        ("quick owner","quick",{"shape":"solo","graph":None,"intensity":"quick"})):
+   route=R.compose_route(capability="autopilot-spec",capability_mode="update",slug=f"prd-{name}",cwd=self.repo,
+    artifact_root=self.artifact,spec_read="fixture",dispatch_evidence=dispatch(self.repo),
+    registered_headless_evidence={"candidates":candidates},**kw)
+   route_paths[shape]=self.repo/f"route-{name}.json"; route_paths[shape].write_text(json.dumps(route))
+  for shape in ("prd-transaction alone","stages, then prd-transaction","quick owner"):
    with self.subTest(shape=shape):
-    if shape=="prd-transaction alone":
-     route=R.compose_route(capability="autopilot-spec",capability_mode="update",shape="staged",graph="prd-transaction",
-      slug="prd-alone",cwd=self.repo,artifact_root=self.artifact,spec_read="fixture",signals=["shared-contract"],
-      dispatch_evidence=dispatch(self.repo),registered_headless_evidence={"candidates":candidates})
-     route_path=self.repo/"route-alone.json"; route_path.write_text(json.dumps(route))
-    else:
-     route_path=self.spec_route; route=json.loads(route_path.read_text())
+    route_path=route_paths[shape]; route=json.loads(route_path.read_text())
     ids=[n["id"] for n in route["nodes"]]
-    self.assertEqual(ids[-1],"prd-transaction")
-    self.assertEqual(len(ids)==1,shape=="prd-transaction alone",ids)
+    self.assertEqual(ids[-1],"one-shot" if shape=="quick owner" else "prd-transaction")
+    self.assertEqual(len(ids)==1,shape!="stages, then prd-transaction",ids)
     begun=self.P.begin(self.artifact,route_file=route_path,capability="autopilot-spec",intensity=route["effective_intensity"])
     owner=types.SimpleNamespace(worker_type="owner",route_file=None,route_node=None,worktree=str(self.repo),
                                 owner_route_binding=types.SimpleNamespace(route_file=str(route_path)))

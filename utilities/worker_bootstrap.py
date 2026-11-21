@@ -1310,10 +1310,12 @@ def _dispatchable_stage(node) -> bool:
 
 
 def _owner_spec_transaction(node) -> bool:
-    """A node the owner runs itself whose completion is the atomic PRD transaction."""
+    """A node the owner runs itself that writes the PRD (a staged route's prd-transaction or a quick route's
+    one-shot owner); every prd.md change goes through the atomic transaction."""
     import dispatch_contract
     return (isinstance(node, dict) and dispatch_contract._owner_executed_node(node)
-            and node.get("completion_gate") == "spec-atomic-transaction")
+            and any(isinstance(scope, str) and scope.startswith("spec/") and scope.endswith("/prd.md")
+                    for scope in node.get("write_scope") or ()))
 
 
 def spec_transaction_command(route, route_file, node_id: str, worktree) -> str:
