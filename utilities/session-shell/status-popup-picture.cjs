@@ -39,8 +39,8 @@ function screen(all, scroll, own, reveal, span = 1) {
   }
   clamp(); lay(); clamp();
   const body = [...all.slice(scroll, scroll + space), ...guide.map(text => [{ text, dim: true }])];
-  const title = [{ text: 'STATUS', dim: true }, { text: input.title_rest }];
-  const view = panelView.popup({ cols: input.cols, rows: input.rows, band: 0, kind: 'table', title, body, sections: names, current: 0,
+  const title = [{ text: input.word || 'STATUS', dim: true }, { text: input.title_rest }];
+  const view = panelView.popup({ cols: input.cols, rows: input.rows, band: 0, kind: 'table', title, body, sections: names, current: input.current || 0,
     model: { colors: 256, no_color: true }, cellWidth, background: '' });
   // The frame alone: the empty cells round it (one a side, one above and below where the window has them) are left out.
   const above = view.frame.top - view.top, left = view.frame.left - view.left, right = view.left + view.width - (view.frame.left + view.frame.width);
@@ -50,7 +50,7 @@ function screen(all, scroll, own, reveal, span = 1) {
 
 const answer = input.answer, entries = statusList.entriesOf(answer);
 const documentRows = statusList.rowsOf(input.document || answer), fleetRows = input.fleet ? statusList.rowsOf(input.fleet) : [];
-const state = { sel: '', fold: new Set(), items: new Set() };
+const state = { sel: '', fold: new Set(), items: new Set(), more: {} };
 const out = [];
 let scroll = 0;
 const listScreen = label => {
@@ -72,11 +72,17 @@ for (const step of input.steps) {
   }
   if (step === 'item') {        state.items.clear(); // the first item whose row was cut: its whole words stand in place of the row
     const key = first('i:', m => m.text);
-    if (key) { statusList.press(state, statusList.layout(entries, state), key); listScreen('an item opened'); } else out.push('--- an item opened ---\n(this document has no item cut at this width)');
+    if (key) { statusList.press(state, statusList.layout(entries, state), key); if (input.details && input.details[key]) state.more[key] = statusList.rowsOf(input.details[key]); listScreen('an item opened'); } else out.push('--- an item opened ---\n(this document has no item cut at this width)');
   }
   if (step === 'short') {       state.items.clear(); // the first item that fits its row: there is nothing to open, the screen does not change
     const key = first('i:', m => !m.text);
     if (key) { statusList.press(state, statusList.layout(entries, state), key); listScreen('a short item pressed (nothing to open)'); } else out.push('--- a short item pressed ---\n(this document has no item that fits its row)');
+  }
+  if (step === 'pgdn' || step === 'pgup' || step === 'end') {   // PgDn / PgUp: the chosen line goes a screen on with the window; `end`: as far as it goes
+    const view = statusList.layout(entries, state, { width: inner, measure: cellWidth }), space = Math.max(1, room - 3);
+    const to = statusList.jump(view, (step === 'pgup' ? -1 : 1) * (step === 'end' ? 1e9 : Math.max(1, space - 1)));
+    if (to) state.sel = to;
+    listScreen(step === 'end' ? 'the end of the list' : step === 'pgdn' ? 'PgDn' : 'PgUp');
   }
   if (step === 'all') {
     const key = first('a:');

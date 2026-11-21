@@ -395,7 +395,7 @@ const make=()=>{
   const calls=[],held=[];
   const ctx={process,Promise,setImmediate,Date,Math,Array,Number,JSON,String,Set,Buffer,console,statusList,calls,held,
     table:null,tableAsking:false,tableAgain:false,selection:1,statusGeneration:2,rows:30,expanded:true,statusPopup:null,popupKeys:{},
-    POPUP_KIND:{STATUS:'status'},panelView:{popupRoom:()=>20},statusRoutes:()=>[],statusHeld:()=>({}),height:()=>0,queueDisplay:()=>{},
+    POPUP_KIND:{STATUS:'status',BACKLOG:'backlog'},listed:k=>k==='STATUS'||k==='BACKLOG',ownFolder:()=>'',panelView:{popupRoom:()=>20},statusRoutes:()=>[],statusHeld:()=>({}),height:()=>0,queueDisplay:()=>{},
     actionLines:[],panelModel:{labels:{}},label:(n,f)=>f,cellWidth:t=>[...t].length,
     tableParts:r=>statusList.rowsOf(r),statusEntries:r=>statusList.entriesOf(r),
     readAction:asked=>new Promise(resolve=>{calls.push(asked.part);held.push({part:asked.part,resolve});})};
@@ -588,7 +588,7 @@ const statusList=require(path.join(root,'status-list.cjs'));
 const log=[];
 const ctx={process,Promise,Date,Math,Array,Number,JSON,String,Set,statusList,log,table:null,expanded:false,panelModel:{labels:{}},
   label:(n,f)=>f,cellWidth:t=>[...t].length,actionLines:[],queueDisplay:()=>log.push('display'),askTable:()=>log.push('askTable'),
-  moveSel:(d)=>log.push('moveSel '+d),enterNow:()=>log.push('enterNow'),statusListing:()=>false,panelView:{}};
+  moveSel:(d)=>log.push('moveSel '+d),enterNow:()=>log.push('enterNow'),statusListing:()=>false,listed:k=>k==='STATUS'||k==='BACKLOG',panelView:{}};
 vm.createContext(ctx);
 vm.runInContext(cut('function tableGuide(kind){','// Key words packed')+cut('function moveRow(delta){','// Enter in the NOW popup:')
   +cut('function nowRows(t){','function popupNow(){')+one('tableParts')+cut('function tableRows(inner){','// The NOW popup\'s rows:'),ctx);

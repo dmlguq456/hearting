@@ -370,7 +370,8 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working", pop
     # The host puts the status button's value in the model (``host.cjs`` ``statusDoc``).
     status = world.status(sid)
     if isinstance(status, dict) and isinstance(status.get("word"), str):
-        payload["panel"] = {**payload["panel"], "status_doc": {"word": status["word"], "has_doc": status.get("has_doc") is True}}
+        payload["panel"] = {**payload["panel"], "status_doc": {"word": status["word"], "has_doc": status.get("has_doc") is True},
+                            "backlog_doc": {"word": "BACKLOG", "has_doc": False}}      # (11-21: the BACKLOG part stands beside STATUS)
     return payload
 
 
@@ -438,7 +439,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const plain=part=>({text:part.text,fg:part.foreground??null,bg:part.background??null,
   dim:part.dim===true,bold:part.bold===true,reverse:part.reverse===true});
 const cellWidth=s=>[...String(s)].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
-const SECTIONS=['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES','MEM'];
+const SECTIONS=['STATUS','BACKLOG','NOW','QUESTIONS','ROUTE','MESSAGES','MEM'];
 // host.cjs: tableParts, statusDoc, sections, label, tableGuide, wrapGuide, tableTitle
 // (the same code, over the job's model and table instead of the host's globals).
 function tableParts(result){
@@ -449,7 +450,7 @@ function tableParts(result){
 const statusDoc=m=>m.status_doc&&typeof m.status_doc.word==='string'?m.status_doc:null;
 function sections(m,block,table){
   const list=v=>Array.isArray(v)&&v.length>0;
-  const has={STATUS:!!statusDoc(m),NOW:!!m.now,QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
+  const has={STATUS:!!statusDoc(m),BACKLOG:!!(m.backlog_doc&&typeof m.backlog_doc.word==='string'),NOW:!!m.now,QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
     MESSAGES:list(m.messages)||list(m.requests),MEM:list(m.memory_items)};
   const current=table?table.kind:'QUESTIONS';
   return SECTIONS.filter(name=>has[name]||name===current);

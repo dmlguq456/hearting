@@ -341,7 +341,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const summary=(()=>{if(typeof brief!=='function')return null;try{const b=brief();return b&&b.count>0?b:null;}catch{return null;}})();
   // `groups` names the statusline groups a row paints (head, git, context, wait, jobs, route, quota).
   const contentGroups=[];
-  function add(parts,action,groups){const row=content.length;if(action)hits.push({row:row+1,left:2,right:width-3,action});content.push(parts);contentGroups.push(groups||[]);}
+  function add(parts,action,groups){const row=content.length;if(Array.isArray(action))for(const span of action)hits.push({row:row+1,left:2+span.left,right:2+span.right,action:span.action});else if(action)hits.push({row:row+1,left:2,right:width-3,action});content.push(parts);contentGroups.push(groups||[]);}
   // Spec rule 34 (a): a row breaks only between tokens. A token is a word (text with no
   // space in it, across parts too), a model name with its version (`Sonnet 5.5`,
   // `(Opus 5.5·xhigh)`), or a lone `·`/`›` with the word after it (`· failed`, `› test`).
@@ -693,6 +693,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const nowKey=state==='working'||state==='submitting'||state==='blocked'?'loc_repo':'dim';
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
     const top=[],spacers=new Set(),metaGaps=new Set(),rules=new Set(),optional=new Set(),gitRows=new Set(),jobRows=new Set(),topGroups=new Map();
+    // 11-21: the STATUS and BACKLOG parts under the REPO group: each a head row and its first items (all of them `listRows`). They are laid out last, after
+    // everything else has its rows (the same layout a window without them has): they take the empty rows and, short of those, rows MESSAGES and MEM fold; they are the first to go.
+    const lists=[],listRows=new Set(),listHeads=new Map(),listItemAt=new Map();
+    let repoAt=-1,repoButtons=null;
     // A value that runs over several rows (spec rule 29 (c)): its rows after the first go
     // first when rows run short, and the first row then ends in `…`.
     const extra=new Set(),oneRow=new Map();
@@ -765,37 +769,43 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       for(let keep=total;keep>=1;keep--){const row=build(keep);if(size(row)<=room)return row;}
       return cut(build(1),room);
     };
-    // 11-15 (the person: "현황은 REPO 옆에 버튼을 만드는게 나을거 같은데", design 2 as recommended): the status
-    // button `STATUS ›` (11-20: English, as the section's other names) at the right end of the REPO row: the word in
-    // the body color, `›` dim as a section head's, no ground, no count; no status document: all of it dim
-    // (a press still opens it). 11-20 (the person: "현황은 미리보기 없이 버튼만 만들자"): the button is all the panel has of the status, with a
-    // document or without one; the popup it opens holds the list. Short of cells the name is cut (to eight cells at least) before the word goes,
-    // then `· wt N`, then the word (`›` stays); the name and `›` stay to the last. A press anywhere on the row opens the
-    // status popup. No artifact root: no button (`status_doc` absent).
-    const statusDoc=model.status_doc&&typeof model.status_doc==='object'&&clean(model.status_doc.word).trim()?model.status_doc:null;
+    // 11-15 (the person: "현황은 REPO 옆에 버튼을 만드는게 나을거 같은데"), 11-20 ("현황은 미리보기 없이 버튼만 만들자"), 11-21 (the person: "버튼을 REPO의 아래에
+    // 각각을 두고 +? 숫자 띄우고 백로그랑 현황을 나열하자" / "각각 3줄 정도씩 목록으로 만들고 추가분을 +? 형식으로"): beside the native area the REPO group ends in a STATUS
+    // part and a BACKLOG part, each a section head (`STATUS +2 ──── ›`, a press opens that popup) and its first three items (one row each; a press
+    // opens the popup standing on it); `+N` on the head counts the items not shown, as MESSAGES' does. The REPO row has no button. In the bottom
+    // layout the first row ends in the two buttons `STATUS +N ›  BACKLOG +N ›` (nothing is listed there). `status_doc` and `backlog_doc` are
+    // `{word, has_doc, items: [{mark, text, key}], total}` (the host's; no artifact root: neither); a document that is not there is dim, and pressable.
+    const docOf=v=>v&&typeof v==='object'&&clean(v.word).trim()?v:null;
+    const statusDoc=docOf(model.status_doc),backlogDoc=docOf(model.backlog_doc);
     const topActions=new Map();
-    const statusButton=whole=>{const arrow=text('›','dim');if(!whole)return [arrow];
-      return [text(clean(statusDoc.word).trim(),statusDoc.has_doc===true?'loc_repo':'dim'),text(' '),arrow];};
-    // `name` and `count` with the button at the right end of `room` cells, or null without a button.
-    // 11-20: the REPO row is the REPO group's head: its free cells are a thin rule (a section head's, its color) where `n` allows one.
     const ruleRun=n=>({...text('─'.repeat(Math.max(1,n)),'dim'),role:'messages'});
-    const fillMid=n=>n>=4?[text(' '),ruleRun(n-2),text(' ')]:[pad(n)];
     const fillEnd=n=>n>=3?[text(' '),ruleRun(n-1)]:[pad(n)];
-    const withButton=(name,count,room)=>{
-      if(!statusDoc)return null;
-      // 11-20 (the word is `STATUS`, six cells): the name is cut (down to REPO_NAME_MIN cells) before the word goes, and the count goes before the name
-      // is cut below that; only then the word goes (`›` stays), with the count and then without it.
-      const word=statusButton(true);
-      for(const keep of count.length?[count,[]]:[[]]){
-        const left=room-size(word)-1-size(keep);
-        if(left<Math.min(size(name),REPO_NAME_MIN))continue;
-        const lead=[...(size(name)<=left?name:cut(name,left)),...keep];
-        return [...lead,...fillMid(room-size(lead)-size(word)),...word];
+    // One bottom-layout button of a document at a stage (0: word, count and `›`; 1: word and `›`; 2: `›`), its pieces.
+    // `+N` and, where the document has more than was read (a very long backlog), a `+` after it: `+2997+` (`+` alone where nothing is hidden by the rows).
+    const countWords=(n,more)=>n>0?'+'+n+(more?'+':''):'+';
+    const listTotalOf=doc=>Math.max(0,Math.min(Number.isInteger(doc.total)?doc.total:0,99999));
+    const listButton=(doc,stage)=>{const arrow=text('›','dim');if(stage>=2)return [arrow];
+      const n=listTotalOf(doc);
+      return [text(clean(doc.word).trim(),doc.has_doc===true?'loc_repo':'dim'),...(stage===0&&(n>0||doc.more===true)?[text(' '),text(countWords(n,doc.more===true),'loc_repo')]:[]),text(' '),arrow];};
+    // The REPO row where the two heads do not stand: `REPO   hearting · wt 12 ──── STATUS +N ›  BACKLOG +N ›`, the bottom layout's first row's buttons (the same words, the same
+    // order of giving way: the counts, then the words, then the name is cut). `offset` cells of the row stand left of `room`; a press on a button opens its popup, on the rest of the row the status popup.
+    const buttonsAt=(room,name,count,offset)=>{
+      const docs=[['STATUS',statusDoc],['BACKLOG',backlogDoc]].filter(([,d])=>d);
+      if(!docs.length)return null;
+      const place=stage=>{const parts=[],spans=[];let used=0;
+        docs.forEach(([n,d],i)=>{const b=listButton(d,stage),gap=i?[text('  ')]:[];parts.push(...gap,...b);used+=size(gap);spans.push({name:n,left:used});used+=size(b);});
+        return {parts,spans,used};};
+      const build=(lead,made)=>{const at=offset+room-made.used;
+        return {parts:[...lead,pad(room-size(lead)-made.used),...made.parts],
+          actions:made.spans.map((sp,i)=>({left:i?at+sp.left:0,right:i===made.spans.length-1?inner-1:at+made.spans[i+1].left-1,action:'popup:'+sp.name}))};};
+      for(const stage of [0,1,2]){
+        const made=place(stage);
+        for(const lead of count.length?[[...name,...count],name]:[name])if(size(lead)+1+made.used<=room)return build(lead,made);
+        const left=room-made.used-1;
+        if(left>=Math.min(size(name),REPO_NAME_MIN))return build(cut(name,left),made);
       }
-      for(const lead of [[...name,...count],...(count.length?[name]:[])]){
-        const b=statusButton(false);if(size(lead)+1+size(b)<=room)return [...lead,...fillMid(room-size(lead)-size(b)),...b];
-      }
-      return [...cut(name,Math.max(1,room-2)),...fillMid(Math.max(1,room-Math.min(size(name),Math.max(1,room-2))-1)),...statusButton(false)];
+      const made=place(2);
+      return build(cut(name,Math.max(1,room-made.used-1)),made);
     };
     // A group's head row: its name (the title role, as a section's), a thin rule to the row's end.
     const groupHead=name=>{const lead=[{...text(name,'dim'),role:'title'}],rest=inner-size(lead);
@@ -825,9 +835,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
         const word=labelWidth?null:text('REPO ','dim'),room=inner-labelWidth-(word?5:0);
         const withCount=count.length>0&&size(sideRepo)+size(count)<=room;
-        const button=withButton(sideRepo,count,room),value=withCount?[...sideRepo,...count]:cut(sideRepo,room);
-        if(button)topActions.set(top.length,'popup:STATUS');
-        const row=button||[...value,...fillEnd(room-size(value))];
+        const value=withCount?[...sideRepo,...count]:cut(sideRepo,room);
+        const row=[...value,...fillEnd(room-size(value))];
+        // Where the two heads under REPO do not stand the row ends in the two buttons, as the bottom layout's first row does (`buttonsAt`, below).
+        if(statusDoc||backlogDoc){
+          const lead=word?5:labelWidth;
+          const made=buttonsAt(room,sideRepo,withCount?count:[],lead);
+          repoButtons=made&&{parts:word?[word,...made.parts]:labelled('REPO',made.parts),actions:made.actions};
+        }
+        repoAt=top.length;
         top.push(word?[word,...row]:labelled('REPO',row));mark(top.length-1,'head',...(withCount&&!sideGit.length?['git']:[]));
       }
       // Short of cells the first part (the branch, the model name) gives way so what follows
@@ -839,6 +855,19 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       };
       if(sideGit.length){gitRows.add(top.length);top.push(labelled('GIT',firstGives(sideGit,inner-labelWidth)));mark(top.length-1,'git');}
       {const peerParts=peerRow(inner-labelWidth);if(peerParts.length){gitRows.add(top.length);top.push(labelled('PEERS',peerParts));}}
+      // 11-21: the STATUS and BACKLOG parts: each a head and its items (what a part shows is chosen after the layout, below).
+      for(const [name,doc] of [['STATUS',statusDoc],['BACKLOG',backlogDoc]]){
+        if(!doc)continue;
+        const items=(Array.isArray(doc.items)?doc.items:[]).filter(i=>i&&typeof i==='object'&&clean(i.text).trim()).slice(0,3),entry={name,doc,items,total:Math.max(items.length,listTotalOf(doc))};
+        listRows.add(top.length);topActions.set(top.length,'popup:'+name);listHeads.set(top.length,entry);top.push([]);
+        items.forEach((item,j)=>{
+          const at=top.length,mark=item.mark==='!'?text('! ','lvl_y'):text('· ','dim');
+          listRows.add(at);listItemAt.set(at,{entry,j});
+          topActions.set(at,'popup:'+name+(typeof item.key==='string'&&item.key?':'+item.key:''));
+          top.push(cut([mark,text(clean(item.text).trim(),'loc_repo')],inner));
+        });
+        lists.push(entry);
+      }
       // 11-20: the SESSION group's head stands where the empty row between the two groups of metadata stood (and goes with it).
       metaGaps.add(top.length);top.push(groupHead('SESSION'));
       if(labelWidth){
@@ -885,10 +914,28 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // The bottom layout has few rows: the metadata row (or rows) first, then one
       // content row; the row break parts them (no rule).
       const first=joined([repo,selected,contextParts]);
-      // The status button at the first row's right end (the word first gives way, then the row is cut).
-      const atEnd=row=>{if(!statusDoc)return row;topActions.set(0,'popup:STATUS');
-        for(const whole of [true,false]){const b=statusButton(whole);if(size(row)+1+size(b)<=inner)return [...row,pad(inner-size(row)-size(b)),...b];}
-        return [...cut(row,Math.max(1,inner-2)),pad(Math.max(1,inner-Math.min(size(row),Math.max(1,inner-2))-1)),...statusButton(false)];};
+      // The two buttons at the first row's right end, `STATUS +N ›  BACKLOG +N ›` (the counts give way first, then the words; then the row is cut).
+      // A press on a button opens its popup; on the rest of the row, the status popup. (`topActions` carries the spans.)
+      const atEnd=row=>{
+        const docs=[['STATUS',statusDoc],['BACKLOG',backlogDoc]].filter(([,d])=>d);
+        if(!docs.length)return row;
+        const place=(lead,stage)=>{
+          const parts=[],spans=[];let used=size(lead);
+          docs.forEach(([name,d],i)=>{const b=listButton(d,stage),gap=i?[text('  ')]:[];parts.push(...gap,...b);used+=size(gap);spans.push({name,left:used,width:size(b)});used+=size(b);});
+          return {parts,spans,used:size(parts)};
+        };
+        for(const stage of [0,1,2]){
+          const made=place([],stage);
+          if(size(row)+1+made.used<=inner){
+            const start=inner-made.used;
+            topActions.set(0,made.spans.map((sp,i)=>({left:i?start+sp.left-0:0,right:i===made.spans.length-1?inner-1:start+made.spans[i+1].left-1,action:'popup:'+sp.name})));
+            return [...row,pad(inner-size(row)-made.used),...made.parts];
+          }
+        }
+        const made=place([],2),room=Math.max(1,inner-made.used-1),keep=Math.min(size(row),room);
+        topActions.set(0,made.spans.map((sp,i)=>({left:i?inner-made.used+sp.left:0,right:i===made.spans.length-1?inner-1:inner-made.used+made.spans[i+1].left-1,action:'popup:'+sp.name})));
+        return [...cut(row,room),pad(Math.max(1,inner-keep-made.used)),...made.parts];
+      };
       if(size(first)<=inner){top.push(atEnd(first));mark(0,'head',...(contextParts.length?['context']:[]));}
       else{put(top,joined([repo,selected]),1);top[0]=atEnd(top[0]);mark(0,'head');const from=top.length;put(top,contextParts,1);mark(from,'context');}
       // Running jobs join that row when they fit; otherwise they take a row (below Git) that can give way.
@@ -923,8 +970,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // tag in dark gray upper case, the counts by state, a thin rule, and `›` where a press opens the
     // section's popup (Fleet's own table, whole). A press on the head or on any row of a section
     // opens it there; nothing opens in place. The rows are the table's own columns, picked.
-    const sectionHead=(count,name,after=[],rights=[[]],arrow=true)=>{
-      const lead=[...count,...(count.length?[text(' ')]:[]),{...text(name,'dim'),role:'title'}];
+    const sectionHead=(count,name,after=[],rights=[[]],arrow=true,faint=false)=>{
+      const lead=[...count,...(count.length?[text(' ')]:[]),faint?text(name,'dim'):{...text(name,'dim'),role:'title'}];
       const close=arrow?[text(' '),text('›','dim')]:[];
       for(const a of [after,[]])for(const r of rights){
         const head=[...lead,...(a.length?[text(' '),...a]:[])],tail=[...(r.length?[text(' '),...r]:[]),...close];
@@ -1811,6 +1858,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       {name:'MEM',on:memItems.length>0,max:MEM_MAX,head:()=>sectionHead([],'MEM',[],[[]],true),rows:n=>memItems.slice(0,n).flatMap(memRows),action:'popup:MEM',rowAction:i=>'popup:MEM:'+i}];
     const take={},kept={};
     for(const s of SECTIONS){take[s.name]=s.max;kept[s.name]=s.on;}
+    // (the items each part of the lists shows: three at most, given up by `give` below)
+    for(const e of lists)take[e.name+'_ITEMS']=e.items.length;
+    const listShown=()=>lists.reduce((n,e)=>n+Math.min(take[e.name+'_ITEMS'],e.items.length),0);
+    // The lists count only in the second pass (below), once the rest has its rows as it has in a window without them.
+    let listsOn=false,keepLists=true;
+    const listNeed=()=>listsOn&&keepLists?lists.length+listShown():0;
     // 11-16 (the person: "질문은 이전처럼 그냥 붉은색 블록으로 감싸는게 모양은 제일 나아" / "붉은 바운더리 말이야"): the QUESTIONS
     // section is one thin rounded box again (v4.33.1's, as the route box's line), its name `N QUESTIONS ›` in
     // the top border; the line is the rose where this window has a question to answer, dim otherwise. The rows
@@ -1821,7 +1874,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const questionRowsIn=()=>boxedQuestions()?within(questionRows):questionRows();
     const sectionRows=s=>s.name==='QUESTIONS'?questionRowsIn():s.rows(take[s.name]);
     const sectionSize=s=>!kept[s.name]?0:s.box?routeBox():(s.name==='QUESTIONS'&&boxedQuestions()?2:1)+sectionRows(s).length;
-    const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size;
+    const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size-listRows.size;
     let keepGit=true,keepSpacers=true,keepMetaGap=true,keepRules=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0,keepFootRule=true,keepQuestionBox=true;
     // 11-16 (the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을 USAGE로 해서 넣자"): the
     // panel's bottom is the USAGE section: its name row (the thin rule above the last row, now named), then
@@ -1984,7 +2037,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // head's rule, its color) parts the bottom sections (MESSAGES, MEM) from the last row (5h/7d, the gear and
     // the fold button); short of rows it goes before any content row.
     const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)
-      +(keepRules?rules.size:0)+(keepOptional?optional.size:0)+SECTIONS.reduce((n,s)=>n+sectionSize(s),0)+footRule()+1;
+      +(keepRules?rules.size:0)+(keepOptional?optional.size:0)+listNeed()+SECTIONS.reduce((n,s)=>n+sectionSize(s),0)+footRule()+1;
     const budget=rows;
     // Short of rows (spec rule 34 (b), 11-15): the empty rows, the rule above the last row (11-16) and a
     // value's further rows first (a route title's second row too); then MEM and the question step down
@@ -2068,10 +2121,38 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const was=choices();undo();
       if(need()>budget){if(family)stuck.add(family);restore(was);}
     }
+    // 11-22 (the person's STATUS and BACKLOG lists under REPO; one rule): the lists are the first to give way and nothing else gives way for them. The rest stands as it stands
+    // in a window without them (the layout above); the lists take the empty rows and, short of those, rows MESSAGES and MEM fold (both keep their head and one row), in this order:
+    // the empty rows, the BACKLOG items (3, 2, 1, none: only the empty rows are theirs), MESSAGES and MEM folding, the STATUS items (they may stand on what was folded), then the two heads
+    // together (a fold that frees several rows at once and leaves empty ones is no reason to leave the BACKLOG items short: they stand on those again), where the REPO row ends in the two buttons and everything else is the window's own (what was folded unfolds).
+    if(lists.length>0){
+      listsOn=true;
+      const own=[keepSpacers,messageOne,take.MEM,take.MESSAGES];
+      const steps=[[()=>keepSpacers,()=>{keepSpacers=false;}],
+        [()=>take.BACKLOG_ITEMS>0,()=>{take.BACKLOG_ITEMS--;}],
+        [()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;}],
+        [()=>kept.MEM&&take.MEM>2,()=>{take.MEM--;}],
+        [()=>kept.MESSAGES&&take.MESSAGES>2,()=>{take.MESSAGES--;}],
+        [()=>kept.MEM&&take.MEM>1,()=>{take.MEM--;}],
+        [()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;}],
+        [()=>take.STATUS_ITEMS>0,()=>{take.STATUS_ITEMS--;}]];
+      const backlogFull=take.BACKLOG_ITEMS;
+      for(const [can,apply] of steps)while(need()>budget&&can())apply();
+      if(need()>budget){keepLists=false;[keepSpacers,messageOne,take.MEM,take.MESSAGES]=own;}
+      // A fold can free several rows at once and leave empty ones: the BACKLOG items stand on them again (up to what they were, and the STATUS items stand already).
+      else while(need()<budget&&take.BACKLOG_ITEMS<backlogFull)take.BACKLOG_ITEMS++;
+    }
     const order=[];
     top.forEach((row,i)=>{
-      if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
-        order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});});
+      if(!keepLists&&listRows.has(i))return;
+      if(!keepLists&&i===repoAt&&repoButtons){order.push({parts:repoButtons.parts,groups:topGroups.get(i),action:repoButtons.actions});return;}
+      const at=listItemAt.get(i);
+      if(at&&at.j>=take[at.entry.name+'_ITEMS'])return;
+      if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i))){
+        const head=listHeads.get(i);
+        // A list part's head: `STATUS +2 ──── ›` (the count of the items not shown, as MESSAGES' head; the word dim, not titled, where its document is not there).
+        const hidden=head?head.total-Math.min(take[head.name+'_ITEMS'],head.items.length):0;
+        order.push({parts:head?sectionHead([],head.name,hidden>0||head.doc.more===true?[text(countWords(hidden,head.doc.more===true),'loc_repo')]:[],[[]],true,head.doc.has_doc!==true):!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});}});
     for(const item of order)add(item.parts,item.action,item.groups);
     const headRows=content.length;
     // Each section stands whole (its head and the rows it kept), one after another from the top; the

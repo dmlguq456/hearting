@@ -158,7 +158,8 @@ class ChoiceTest(StatusTest):
     def test_the_value_is_the_roots_existence_not_a_document(self):
         view = self.read()
         self.assertFalse(view["has_doc"])
-        self.assertEqual((view["slot"], view["watch"]), ("", []))
+        self.assertEqual(view["slot"], "")
+        self.assertEqual([os.path.basename(w) for w in view["watch"]], ["backlog.md"])      # (11-21: only the backlog, which the panel's BACKLOG part reads)
 
     def test_english_screen_word(self):
         self.campaign("alpha")
