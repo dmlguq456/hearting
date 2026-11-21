@@ -52,6 +52,7 @@ import stat
 import subprocess
 import sys
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import quote
@@ -594,7 +595,20 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
 
 
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-_BACKLOG_UPDATED = re.compile(r"^(?:갱신|Updated)\s+(\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2})?)\s*$")
+_BACKLOG_UPDATED = re.compile(r"^갱신 ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2})$")
+_BACKLOG_HEADING = re.compile(r"^##(?:[ \t]|$)")
+
+
+def _backlog_updated(line: str) -> str:
+    """`갱신 YYYY-MM-DD HH:MM` as `YYYY-MM-DD HH:MM`, or "" when the line is another shape or no real time."""
+    found = _BACKLOG_UPDATED.match(line.strip())
+    if not found:
+        return ""
+    try:
+        datetime.strptime(found.group(1), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return ""
+    return found.group(1)
 
 
 def _backlog(root: Path) -> Optional[Dict[str, Any]]:
@@ -602,7 +616,7 @@ def _backlog(root: Path) -> Optional[Dict[str, Any]]:
 
     Read by name from a no-follow fd, never written, never followed (a link is no file).  A file that
     cannot be read or is over MAX_BACKLOG_BYTES keeps the line but has no count (`count` None).
-    A job is one top-level `- ` bullet outside a code fence; indented lines and sub-bullets are not."""
+    A job is a top-level `- ` bullet under a `##` heading (core/ARTIFACT_META.md `backlog.md`)."""
     try:
         if not stat.S_ISREG(os.lstat(str(Path(root) / BACKLOG_NAME)).st_mode):
             return None
@@ -641,12 +655,11 @@ def _backlog(root: Path) -> Optional[Dict[str, Any]]:
         if opened:
             fence = (opened.group(1)[0], len(opened.group(1)))
             continue
-        if line.startswith("## "):
+        if _BACKLOG_HEADING.match(line):
             headed = True
         elif not headed and not updated:
-            found = _BACKLOG_UPDATED.match(line.strip())
-            updated = found.group(1) if found else ""
-        if line.startswith("- "):
+            updated = _backlog_updated(line)
+        elif headed and line.startswith("- "):
             count += 1
     entry.update({"count": count, "updated": updated})
     return entry

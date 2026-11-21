@@ -279,7 +279,7 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   be read or is over 64 KiB) and **records** (a link to the recent
   route reports page and a link to the ID index `campaigns/INDEX.md`), plus the root
   totals. The line counts are the constants `ENTRANCE_SPEC_LINES` and
-  `ENTRANCE_CAMPAIGN_LINES` (not settings). Under the spec and campaigns titles one
+  `ENTRANCE_CAMPAIGN_LINES` (not settings). Under the spec, campaigns and backlog titles one
   explanatory line says what the section is (the spec line carries the topic count), and
   the "recent route reports" line carries one line saying the page is not usually opened;
   none of these lines is numbered. `all-spec.*` lists every spec topic in the entrance's
@@ -332,12 +332,16 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
 ### `backlog.md` — what was put off
 
 - **Place.** One file at the artifact root: `<artifact root>/backlog.md`, for the whole repo.
-- **Form.** A title line, then `갱신 <YYYY-MM-DD HH:MM>`, then one `## <campaign folder name>`
+- **Form.** A title line, then `갱신 YYYY-MM-DD HH:MM`, then one `## <campaign folder name>`
   heading per campaign, with `## Unassigned` for work with no campaign. A job is one top-level
   `- ` bullet (a title line of at most 60 columns) with optional indented `date:`, `source:` and
-  `note:` lines (when it came up, where from, what the person said then).
-  Indented lines, sub-bullets and anything in a code block are not jobs. No per-line tag,
+  `note:` lines (when it came up, where from, what the person said then). No per-line tag,
   status or owner mark.
+- **Counting rule.** A job is the top-level `- ` bullet under a `##` heading. A `- ` before the
+  first `##` is not a job; neither are `*`, `+` or numbered items, indented lines, sub-bullets
+  and anything in a code block (a fence closes only with the same character, at least as long).
+- **`갱신` line.** Read only before the first `##`, and only in the shape `갱신 YYYY-MM-DD HH:MM`
+  with a date and time that exist; any other line, or `갱신 2026-13-45 99:99`, is no date.
 - **Who and when.** The session that puts a job off adds one line, at that moment, under the
   campaign's heading (and refreshes `갱신`). A person writes it by hand.
 - **Done.** The line is deleted. The file holds open work only.

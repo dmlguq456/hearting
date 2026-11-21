@@ -191,6 +191,19 @@ class ClassificationTests(ResidueFixture):
         self.assertEqual(plan["empty_dirs"], [])
         self.assertEqual(RES._prune_empty(self.root), [])
 
+    def test_a_root_document_is_never_residue(self):
+        self.seed("backlog.md", "# Backlog\n## 2026-01-01_some-campaign\n- a job\n")
+        for name in P.ROOT_DOCUMENT_NAMES:
+            self.assertTrue(RES._is_runtime_owned(name), name)
+        self.assertEqual(list(RES.iter_residue_files(self.root)), [])
+        status = RES.status(self.root)
+        self.assertEqual(status["legacy_top_level"], "empty")
+        self.assertEqual(status["legacy_top_level_files"], 0)
+        plan = RES.build_plan(self.root)
+        self.assertEqual(plan["totals"]["files"], 0)
+        self.assertEqual(RES._prune_empty(self.root), [])
+        self.assertEqual((self.root / "backlog.md").read_text(encoding="utf-8").splitlines()[0], "# Backlog")
+
     def test_sealed_evidence_moves_and_map_is_repointed(self):
         evidence = C.SEALED_EVIDENCE_PATHS[2]  # plans/2026-08-25_artifact-knowledge-index-w7-e2-e3
         self.seed(f"{evidence}/evidence/note.md")

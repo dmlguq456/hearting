@@ -1697,7 +1697,7 @@ class SectionTests(SectionFixture):
 BACKLOG = """# Backlog
 갱신 2026-11-21 23:10
 
-## 2026-11-02_v4-open
+## 2026-01-01_some-campaign
 - First job
   date: 2026-11-20
   source: a talk
@@ -1751,11 +1751,59 @@ class BacklogTests(SectionFixture):
     def test_only_a_top_level_bullet_outside_a_code_block_is_a_job(self):
         self._setup()
         self.assertIn("3 items", self.entrance())
-        self._setup("# B\n- one\n  - nested\n    - deeper\n\n````\n```\n- fenced\n````\n- two\n")
+        self._setup("# B\n## C\n- one\n  - nested\n    - deeper\n\n````\n```\n- fenced\n````\n- two\n")
         self.assertIn("2 items", self.entrance())
         self.assertNotIn("updated", self.entrance())  # no 갱신 line, no date
         self._setup("# B\n")
         self.assertIn("0 items", self.entrance())
+
+    def _count(self, text):
+        (self.root / "backlog.md").write_text(text, encoding="utf-8")
+        return E._backlog(self.root)["count"]
+
+    def test_a_job_is_the_top_level_dash_bullet_under_a_heading(self):
+        self.spec(5)
+        self.assertEqual(self._count("# B\n- before\n- any heading\n## C\n- one\n- two\n"), 2)
+        self.assertEqual(self._count("# B\n- a\n- b\n"), 0)
+        self.assertEqual(self._count("## C\n* star\n+ plus\n1. numbered\n2) numbered\n-tight\n- one\n"), 1)
+        self.assertEqual(self._count("## C\n  - indented\n\t- tabbed\n- one\n    - deeper\n"), 1)
+        self.assertEqual(self._count("## A\n- one\n### sub\n- two\n## B\n- three\n"), 3)
+
+    def test_a_fence_closes_only_with_the_same_character_at_least_as_long(self):
+        self.spec(5)
+        self.assertEqual(self._count("## C\n````\n```\n- fenced\n````\n- one\n"), 1)      # shorter does not close
+        self.assertEqual(self._count("## C\n```\n~~~\n- fenced\n```\n- one\n"), 1)       # another character does not close
+        self.assertEqual(self._count("## C\n```\n- fenced\n`````\n- one\n"), 1)          # longer closes
+        self.assertEqual(self._count("## C\n~~~\n- fenced\n~~~\n- one\n- two\n"), 2)
+        self.assertEqual(self._count("## C\n```\n- never closed\n- still fenced\n"), 0)    # an open fence runs to the end
+        self.assertEqual(self._count("## C\n    ```\n- one\n"), 1)                        # four spaces is no fence
+
+    def test_the_counting_rule_is_written_in_the_backlog_section_of_the_meta_contract(self):
+        meta = (HERE.parent / "core" / "ARTIFACT_META.md").read_text(encoding="utf-8")
+        section = meta[meta.index("### `backlog.md`"):]
+        self.assertIn("A job is the top-level `- ` bullet under a `##` heading.", section)
+        self.assertIn("a fence closes only with the same character, at least as long", section)
+        self.assertIn("`갱신 YYYY-MM-DD HH:MM`", section)
+
+    def test_the_update_line_is_only_a_real_date_and_time_before_the_first_heading(self):
+        self.spec(5)
+        def updated(text):
+            (self.root / "backlog.md").write_text(text, encoding="utf-8")
+            return E._backlog(self.root)["updated"]
+        self.assertEqual(updated("# B\n갱신 2026-11-21 23:10\n## C\n- a\n"), "2026-11-21 23:10")
+        self.assertEqual(updated("# B\n갱신 2026-13-45 99:99\n## C\n- a\n"), "")
+        self.assertEqual(updated("# B\n갱신 2026-02-30 10:00\n## C\n"), "")
+        self.assertEqual(updated("# B\n갱신 2026-11-21 24:00\n## C\n"), "")
+        self.assertEqual(updated("# B\n## C\n갱신 2026-11-21 23:10\n- a\n"), "")          # after the first heading
+        for line in ("갱신 2026-11-21", "갱신: 2026-11-21 23:10", "Updated 2026-11-21 23:10",
+                     "갱신 2026-11-21T23:10", "갱신 2026-11-21 23:10 · memo", "갱신  2026-11-21 23:10",
+                     "갱신 ２０２６-11-21 23:10"):
+            self.assertEqual(updated(f"# B\n{line}\n## C\n"), "", line)
+        self.assertEqual(updated("# B\n갱신 2026-13-45 99:99\n갱신 2026-11-21 23:10\n## C\n"), "2026-11-21 23:10")
+        (self.root / "backlog.md").write_text("# B\n갱신 2026-13-45 99:99\n## C\n- a\n", encoding="utf-8")
+        self.refresh()
+        self.assertIn("1 items", self.entrance())
+        self.assertNotIn("updated", self.entrance())
 
     def test_no_backlog_file_draws_no_section_and_changes_no_other_number(self):
         self.spec(5)
@@ -1779,14 +1827,14 @@ class BacklogTests(SectionFixture):
         self.assertEqual(self.entrance(), without)
 
     def test_an_unreadable_or_oversized_backlog_keeps_one_line_without_a_count(self):
-        self._setup("# B\n갱신 2026-11-21 23:10\n" + "- job\n" * 20000)
+        self._setup("# B\n갱신 2026-11-21 23:10\n## C\n" + "- job\n" * 20000)
         self.assertGreater((self.root / "backlog.md").stat().st_size, E.MAX_BACKLOG_BYTES)
         readme = self.entrance()
         self.assertIn("[Open backlog.md](<backlog.md>)", readme)
         self.assertNotIn("items", readme)
         self.assertNotIn("updated", readme)
         self.assertEqual(self.entrance("index.html").count('href="backlog.md"'), 1)
-        self._setup("# B\n- job\n" + "x" * (E.MAX_BACKLOG_BYTES - 10))  # exactly the limit still counts
+        self._setup("# B\n## C\n- job\n" + "x" * (E.MAX_BACKLOG_BYTES - 15))  # exactly the limit still counts
         self.assertEqual((self.root / "backlog.md").stat().st_size, E.MAX_BACKLOG_BYTES)
         self.assertIn("1 items", self.entrance())
         path = self.root / "backlog.md"
