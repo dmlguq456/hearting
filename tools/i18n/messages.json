@@ -1854,6 +1854,14 @@
    "en": "as read at {time} · could not read again",
    "ko": "{time}에 읽은 내용 · 다시 읽지 못함"
   },
+  "fleet.session_panel.popup_status": {
+   "en": "↑↓ · Enter open",
+   "ko": "↑↓ · Enter 열기"
+  },
+  "fleet.session_panel.popup_status_page": {
+   "en": "Esc or Enter back to the list",
+   "ko": "Esc 또는 Enter 목록으로 돌아가기"
+  },
   "fleet.session_panel.popup_unfold": {
    "en": "p open panel",
    "ko": "p 패널 펼치기"
@@ -2245,6 +2253,30 @@
   "fleet.status.group.waiting": {
    "en": "Waiting for you",
    "ko": "기다리는 것"
+  },
+  "fleet.status.popup.all": {
+   "en": "all {count}",
+   "ko": "전체 {count}"
+  },
+  "fleet.status.popup.cut": {
+   "en": "… {count} more in the full document",
+   "ko": "… {count}개 더는 문서 전체에서"
+  },
+  "fleet.status.popup.full": {
+   "en": "full document",
+   "ko": "문서 전체"
+  },
+  "fleet.status.popup.old": {
+   "en": "old document",
+   "ko": "오래된 문서"
+  },
+  "fleet.status.popup.updated": {
+   "en": "updated {when}",
+   "ko": "갱신 {when}"
+  },
+  "fleet.status.popup.updated_unknown": {
+   "en": "updated: could not read the time",
+   "ko": "갱신: 시각을 읽지 못함"
   },
   "frame.note_truncated": {
    "en": "…(truncated)",

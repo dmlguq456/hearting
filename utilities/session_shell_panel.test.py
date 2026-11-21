@@ -173,7 +173,7 @@ assert.equal(waiting.color,'g_blocked'); // The frame is the state word's color:
             states["resolved"] = project()
             models[harness] = states
         script = r"""
-const assert=require('node:assert/strict'),view=require(process.argv[1]),models=JSON.parse(process.argv[2]);
+const assert=require('node:assert/strict'),view=require(process.argv[1]),models=JSON.parse(require('node:fs').readFileSync(0,'utf8'));   // (stdin: the models weigh near an argument's 128 KiB limit)
 const qs=['Q: where?','1 here','2 there','› draft','Tab next'];
 const paint=(m,width,asking)=>view.render({width,height:width===80?14:24,side:width<80,fill:width<80,focused:asking,configuration:{},
  model:{...m,answerable:asking},questions:o=>asking?qs.slice(0,o.budget).map(text=>[{text}]):[]}).rows.map(r=>r.map(s=>s.text).join(''));
@@ -196,8 +196,8 @@ for(const [harness,states] of Object.entries(models))for(const width of [35,40,8
  }
 }
 """
-        result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
-                                 json.dumps(models, ensure_ascii=False)], capture_output=True, text=True, timeout=20)
+        result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs")],
+                                input=json.dumps(models, ensure_ascii=False), capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_top_groups_and_quota_stay_while_a_question_takes_the_rows(self):

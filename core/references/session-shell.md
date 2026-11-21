@@ -993,16 +993,34 @@ something in it. A press on a panel section (its head or a row) or on a group of
 the folded strip opens that section's popup, and a new question or a failed
 route never opens one. The popups are six
 kinds over one frame and one set of keys: STATUS (11-15, design 2: the REPO row's button; the table
-popup's frame, width and keys; its title `STATUS <campaign> · <age>`, `STATUS` alone without a document;
-Fleet's status lines for the project as its project page draws them, an empty row, then the whole
-document's first 64 KiB as Fleet's cards, fences as written and markdown tables aligned,
-`session_status.popup_rows`; without a document Fleet's `fleet.repo.no_status` and where it would
-stand. The value, `session_status.read`, is read in its own worker at the first projection, when this
+popup's frame, width and keys; its title `STATUS <campaign> · <age>`, `STATUS` alone without a document.
+11-21 (the person chose design C, "정할 것 먼저"): for the campaign document Hearting generates (its first line is the marker
+`<!-- hearting:campaign-document v1 -->`, read whole) the popup opens on a **list screen**, of the document's own words and nothing
+else (`session_status.popup_doc`; the host lays it out, `status-list.cjs`): the head (title, `updated MM-DD HH:MM · <age>`, the one line
+folded to two rows; a document older than Fleet's own limit of three days says `! … old document`, a time that cannot be read says so),
+then `기다리는 것` (every bullet, each marked `!`, the group's other lines dim under them) and `하는 중` (the first three, then
+`all N ›` for the rest), the two named by `parse_groups`' own word reading, then every other heading as one folded line `› <heading> <count>`
+in the document's order (a heading the screen does not know is one of them), and `full document ›`. A group the document has not is not
+drawn; a waiting list of zero is its heading with `0` and the document's own note. ↑↓ and Tab (Shift+Tab back) choose a line (`> ` and the
+chosen ground tell it), Enter or a press opens it: a folded heading opens in place (`▾`; again folds it), `all N ›` opens the whole running
+list, an item opens its whole words wrapped under its row (its row is cut with `…` at the width; again closes it), `full document ›` is the
+screen the popup had before this (Fleet's status lines, then the whole document: tables, fences and the lines outside any list are read
+there), Esc or Enter going back to the list on the line it left and a second Esc closing. ←→ are still the sections and `p` `f` `r` `w`,
+Esc, Ctrl+], `✕` and a press outside are unchanged; PgUp/PgDn and the wheel read a longer list on. A document read again while the popup
+stands keeps the chosen line on the same words (else the top) and opens the same groups by their heading. The first screen reads the
+document alone and asks nothing of Fleet: Fleet's lines are asked for when `full document ›` is opened. Every other document (a
+hand-written page, none, one that cannot be read, one cut at 64 KiB) draws the rows it always drew: Fleet's status lines for the project as
+its project page draws them, an empty row, then the whole document's first 64 KiB as Fleet's cards, fences as written and markdown tables
+aligned, `session_status.popup_rows`; without a document Fleet's `fleet.repo.no_status` and where it would
+stand. The words the screen puts in (`updated`, `all N`, `full document`, the keys) are English and come the way the panel's do
+(`ui_text`, the panel labels); the document's own are not changed. `utilities/status_popup_picture.py` draws these screens as text from one
+document in an isolated environment. The value, `session_status.read`, is read in its own worker at the first projection, when this
 session's route list changes and at an event of the existing file watch on the paths it names, never
 per paint, and the rows it read stand until such an event or another width; a read that failed or ran out its time is asked
 again at the next projection event, one worker at a time. The popup reads in two parts: the document at once, from the value the button
-already read (`session_status.held`, a path only inside the folder's own artifact root), then Fleet's lines, which stand above it when
-they arrive; a popup read that failed shows Fleet's `fleet.output.unreadable`, dim, and is read again at the next opening (a document it
+already read (`session_status.held`, a path only inside the folder's own artifact root; the answer carries the whole document's rows and,
+for the generated page, its `list`, which gives way to nothing and to which the rows give way past the answer's size), then Fleet's lines, which stand above it when
+they arrive (for a page with a list screen, when `full document ›` is opened); a popup read that failed shows Fleet's `fleet.output.unreadable`, dim, and is read again at the next opening (a document it
 cannot read is that same failure, not a `?`), and the Fleet part holds no place of the document's: a popup opened again while it is out
 stands at once, and its lines are kept only for the width and value they were asked at), QUESTIONS (the question editor),
 ROUTE (Fleet's own table: the backend's `popup` reading draws

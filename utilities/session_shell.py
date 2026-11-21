@@ -1723,7 +1723,9 @@ def _status_popup(binding, request, columns, colors, no_color):
     status lines for this project (``session_status.popup_head_rows``), which the host puts above the document
     when they arrive. A document that cannot be read answers ``ok: False`` (the host draws its own dim word and
     keeps nothing, so the next opening reads it again) and Fleet's part is not asked. Without ``part``: both, as
-    one answer."""
+    one answer. For the generated campaign page the document part also carries ``list`` (11-21): the list screen the
+    popup opens on, as entries the host lays out by its own state (``session_status.listing_entries``); the rows
+    stay the whole document, which the screen's ``full document ›`` shows. Any other document has no ``list``."""
     named = _status_request(request)
     if named is None:
         return {"ok": False, "reason": "invalid-status"}
@@ -1751,8 +1753,9 @@ def _status_popup(binding, request, columns, colors, no_color):
             if part == "fleet":
                 return {"ok": False, "reason": "no-fleet"}
         rows = session_status.popup_head_rows(status, columns)
+    listing = None
     if part != "fleet":
-        doc = session_status.popup_doc_rows(view, columns)
+        doc, listing = session_status.popup_doc(view, columns)
         if doc is None:
             return {"ok": False, "reason": "doc-unreadable"}
         rows = rows + doc
@@ -1776,6 +1779,15 @@ def _status_popup(binding, request, columns, colors, no_color):
 
     def weight(value):
         return len(json.dumps({"id": 0, **value}, ensure_ascii=False).encode())
+    if listing:
+        def lay(rows_of):
+            return [[[text, style(key), cell_width(text)] for text, key in row if text] for row in rows_of]
+        entries = [{**{k: v for k, v in entry.items() if k not in ("rows", "alt")}, "rows": lay(entry["rows"]),
+                    **({"alt": lay(entry["alt"])} if entry.get("alt") else {})} for entry in listing]
+        # The list comes first: the document's rows give way to it (as they give way to the answer's size), and a list
+        # that alone does not fit is left out, the popup then drawing the document as it did.
+        if weight({**result, "rows": [], "list": entries}) <= POPUP_ANSWER_BYTES:
+            result = {**result, "list": entries}
     if weight(result) <= POPUP_ANSWER_BYTES:
         return result
     low, high = 0, len(runs)      # the most rows that fit with a dim `…` under them
