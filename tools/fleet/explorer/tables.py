@@ -2247,7 +2247,8 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
     from .state import (question_action_supported, question_answer_supported,
                         question_choice_click_allowed, question_decisions,
                         question_draft_supported, question_free_text_available, question_items,
-                        question_multiple_select, question_values_valid, _question_text_draft)
+                        question_multiple_select, question_values_valid, _question_text_draft, question_mark,
+                        _question_draft_response)
     detail = private.get("detail")
     envelope = detail if hasattr(detail, "get") else {}
     specs = question_items(envelope)
@@ -2284,7 +2285,7 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
     can_draft = question_draft_supported(envelope) and request_state == "open"
     can_answer = question_answer_supported(envelope)
     draft = private.get("draft")
-    answers = draft.get("answers", {}) if hasattr(draft, "get") else {}
+    answers = (_question_draft_response(private) or {}).get("answers", {})
     complete = True
     native_only = False
     for spec in () if approval else specs:
@@ -2306,9 +2307,11 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
         for number, (value, label) in enumerate(choices, 1):
             if y >= bottom:
                 break
-            chosen = value in values
+            selection = question_mark(private, spec) if request_state == "open" else None
+            chosen = selection[0] == number - 1 if selection is not None else value in values
             selectable = can_draft and question_choice_click_allowed(envelope, qid, value, values)
-            mark = ("●" if chosen else "○") if (selectable or chosen) else " "
+            mark = (("▸" if chosen else " ") if selection is not None else
+                    ("●" if chosen else "○") if (selectable or chosen) else " ")
             cursor = grid.put(indent, y, mark, "hearting" if chosen else "dim", limit=right)
             # The number is the question's rose and bold, as `◑` and the popup's numbers are (11-17).
             cursor = grid.put(cursor + 1, y, f"{number}  ", "lvl_r", limit=right)
@@ -2326,7 +2329,7 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
         if free and y < bottom:
             editing = private.get("editing") and (private.get("editing_question_id") or qid) == qid
             choice_values = {value for value, _label in choices}
-            typed = (_question_text_draft(private, qid) if editing else
+            typed = (_question_text_draft(private, qid) if editing or question_mark(private, spec) is not None else
                      " · ".join(str(value) for value in values if value not in choice_values))
             if secret:
                 typed = "•" * min(len(typed), 32)

@@ -239,6 +239,116 @@ class NoResponseRoutes(unittest.TestCase):
         self.assertIn("route 0 │ no response 1", overview[-1])
 
 
+class DrawnAnswerRules(unittest.TestCase):
+    def setup_question(self, harness="codex", **extra):
+        ref = {"id": "S4:synthetic", "harness": harness, "session_id": "synthetic-session",
+               "request_id": "synthetic-request", "question_id": "q"}
+        question = {"id": "q", "question": "합성 질문", "recommended": 1, "is_other": True,
+                    "choices": [{"value": f"v{n}", "label": f"항목 {n}"} for n in (1, 2, 3)], **extra}
+        envelope = {"kind": "question", "state": "open", "harness": harness, "questions": [question],
+                    "support": {"supported": True}, "native_ref": {"transport": "hearting-message-answer"}}
+        row = {"id": ref["id"], "tag": ref["id"], "ref": ref, "kind": "question", "h": harness,
+               "session_tag": "a1", "source": "S4", "wait": "1m"}
+        vm = ExplorerViewModel(questions=(row,), system={"answer_waits": {"total": 1, "complete": True}})
+        state = NavState(view="QUESTIONS", title="QUESTIONS", folds=(("qsel:QUESTIONS", ref["id"]),),
+                         question_overlay={"ref": ref, "detail": envelope, "draft": None, "state": "open",
+                                           "editing": False, "pending": False})
+        return state, vm
+
+    def sequence(self, keys, *, reducer=reduce, harness="codex", **extra):
+        state, vm = self.setup_question(harness, **extra)
+        for key in keys:
+            if key == "click-write":
+                event = {"type": "click", "action": ("question.edit", "q")}
+            elif key == "click-3":
+                event = {"type": "click", "action": ("question.choice", "q", "v3")}
+            else:
+                event = {"type": "key", "key": key, "tabs": ["QUESTIONS", "OVERVIEW"]}
+            state, _ = reducer(state, event)
+        rows = draw(vm, state, 100, 35).text_rows()
+        marks = [n for n in (1, 2, 3) if any(f"▸ {n}  항목 {n}" in line for line in rows)]
+        before = state
+        state, effects = reducer(state, {"type": "key", "key": "enter"})
+        payload = next((effect[2]["answers"]["q"] for effect in effects if effect[0] == "questions.submit"), None)
+        return marks, payload, state, before, rows
+
+    def test_marks_match_submissions_for_all_harnesses(self):
+        cases = [([], [2], ["v2"]), (["text:가나"], [], ["가나"]),
+                 (["3", "text:가나"], [3], ["v3", "가나"]),
+                 (["down", "text:가나"], [3], ["v3", "가나"]),
+                 (["3", "3", "text:가나"], [], ["가나"]),
+                 (["text:가나", "up", "1"], [1], ["v1", "가나"]),
+                 (["click-write", "text:1가"], [], ["1가"]),
+                 (["text:가", "backspace"], [], None),
+                 (["3", "tab", "tab"], [3], ["v3"]),
+                 (["2", "text:가나"], [2], ["v2", "가나"]),
+                 (["click-write"], [2], ["v2"]),
+                 (["click-3", "text:가나"], [3], ["v3", "가나"]),
+                 (["3", "down", "text:1가"], [3], ["v3", "1가"])]
+        for harness in ("claude", "codex", "opencode"):
+            for keys, mark, payload in cases:
+                with self.subTest(harness=harness, keys=keys):
+                    actual, sent, state, before, rows = self.sequence(keys, harness=harness)
+                    self.assertEqual((actual, sent), (mark, payload), "\n".join(rows))
+                    if payload is None:
+                        self.assertIn("empty answer", state.question_overlay["status"])
+                    if payload and len(payload) == 2:
+                        self.assertTrue(any("가" in line and "> " in line for line in rows))
+                    print("FLEET_RULE=" + json.dumps({"harness": harness, "keys": keys, "mark": actual,
+                                                      "sent": sent}, ensure_ascii=False), flush=True)
+
+    def test_local_mark_stays_authoritative_over_an_older_draft_receipt(self):
+        from dataclasses import replace
+        state, vm = self.setup_question()
+        state, _ = reduce(state, {"type": "key", "key": "3"})
+        overlay = dict(state.question_overlay)
+        overlay["draft"] = {"answers": {"q": ["v2", "가나"]}}
+        state = replace(state, question_overlay=overlay)
+        rows = draw(vm, state, 100, 35).text_rows()
+        self.assertTrue(any("▸ 3  항목 3" in row for row in rows))
+        _, effects = reduce(state, {"type": "key", "key": "enter"})
+        self.assertEqual(effects[0][2]["answers"]["q"], ["v3", "가나"])
+        self.assertEqual(self.sequence(["text: " ])[:2], ([], None))
+
+    def test_new_rules_reject_the_previous_reducer(self):
+        import subprocess
+        import types
+        root = Path(__file__).resolve().parents[3]
+        source = subprocess.check_output(["git", "show", "773a57382:tools/fleet/explorer/state.py"],
+                                         text=True, cwd=root, timeout=10)
+        name = "tools.fleet.explorer._previous_question_state"
+        previous = types.ModuleType(name)
+        previous.__package__ = "tools.fleet.explorer"
+        sys.modules[name] = previous
+        self.addCleanup(sys.modules.pop, name, None)
+        exec(compile(source, str(root / "tools/fleet/explorer/state.py"), "exec"), previous.__dict__)
+        for keys, expected in [([], ([2], ["v2"])),
+                               (["down", "text:가나"], ([3], ["v3", "가나"])),
+                               (["3", "3", "text:가나"], ([], ["가나"]))]:
+            with self.subTest(keys=keys):
+                current = self.sequence(keys)
+                old = self.sequence(keys, reducer=previous.reduce)
+                self.assertEqual(current[:2], expected)
+                self.assertNotEqual(old[:2], expected)
+
+    def test_fallback_no_choices_decision_and_choice_only(self):
+        self.assertEqual(self.sequence([], recommended=None)[:2], ([1], ["v1"]))
+        self.assertEqual(self.sequence(["down", "text:가"], recommended=2)[:2], ([], ["가"]))
+        self.assertEqual(self.sequence(["text:가나"], choices=[])[:2], ([], ["가나"]))
+        state, vm = self.setup_question(is_other=False)
+        rows = draw(vm, state, 100, 35).text_rows()
+        self.assertFalse(any("▸ 2  항목" in row for row in rows))
+        self.assertTrue(any("○ 2  항목" in row for row in rows))
+        unchanged, effects = reduce(state, {"type": "key", "key": "t"})
+        self.assertEqual((unchanged, effects), (state, ()))
+        overlay = dict(state.question_overlay)
+        overlay["detail"] = {**overlay["detail"], "kind": "approval", "questions": []}
+        from dataclasses import replace
+        decision = replace(state, question_overlay=overlay)
+        unchanged, effects = reduce(decision, {"type": "key", "key": "enter"})
+        self.assertFalse(any(effect[0] == "questions.submit" for effect in effects))
+
+
 class MessageQuestions(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "utilities"))
@@ -315,6 +425,23 @@ class MessageQuestions(unittest.TestCase):
                 self.assertEqual(len(records), 1)
                 self.assertNotIn("PRIVATE QUESTION", json.dumps(records))
         self.assertEqual(len(tidy_decisions.list_pending()), 3)
+
+    def test_choice_and_typed_note_survive_the_board_and_courier(self):
+        for harness in ("claude", "codex", "opencode"):
+            signal, _ = self.f.ask(harness, "combined-"+harness, choices=["original-value", "other"])
+            vm, row = self.board(signal)
+            state, _ = self.action(NavState(view="QUESTIONS"), ("question.select", row["id"], row["ref"]), vm)
+            state, _ = self.action(state, ("question.choice", "message-response", "original-value"), vm)
+            state, effects = reduce(state, {"type": "key", "key": "text:A separate note"})
+            for effect in effects:
+                state, _ = self.effect(state, effect, vm)
+            self.assertEqual(state.question_overlay["draft"]["answers"]["message-response"], ["original-value", "A separate note"])
+            state, _ = self.action(state, ("question.submit",), vm)
+            self.assertEqual(state.question_overlay["state"], "submitted")
+            calls, _, pending = self.f.courier(signal)
+            self.assertEqual(len(calls), 1)
+            self.assertIn('["original-value", "A separate note"]', pending["text"])
+            self.f.consume(signal, pending["text"])
 
     def test_editor_preserves_raw_free_text_secret_and_changed_request_draft(self):
         import human_wait_state as waits

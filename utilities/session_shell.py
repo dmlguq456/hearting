@@ -1295,7 +1295,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     states = ("open", "submitted", "received", "applied", "expired", "cancelled", "unknown",
               "answer_below", "answer_there", "answer_parent", "answer_sending", "answer_closed")
     labels = {key: ui_text("fleet.session_block." + key) for key in (
-        *states, "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more", "more_choose",
+        *states, "choose", "choose_write", "writing_choices", "send", "navigate", "navigate_write", "text", "changed", "complete", "busy", "empty", "more", "more_choose",
         "more_page", "sent", "questions")}
     if editor < 64:
         for key in states:

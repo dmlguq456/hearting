@@ -35,6 +35,8 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   const text=(name,fallback)=>labels[name]||fallback;
   const span=(value,style='dim')=>({text:String(value),...(styles[style]||{dim:style==='dim'})});
   const choices=row=>row.item.answer_kind==='decision'?['approve','reject','defer']:row.question.choices||[];
+  const writable=row=>!!row&&row.item.answer_kind!=='decision'&&(row.question.free_text===true||(row.question.free_text===undefined&&!choices(row).length));
+  const measure=cellWidth|| (s=>[...s].reduce((n,c)=>n+(/\p{Mark}/u.test(c)?0:c.codePointAt(0)>=0x2e80?2:1),0));
   const value=choice=>typeof choice==='object'?choice.value??choice.label:choice;
   // Spec rule 18: the highlighted choice, moved by ↑↓ and sent by Enter as
   // Claude's own question does. It starts on the recommended choice, else the
@@ -42,10 +44,10 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   // is highlighted until ↑↓ or a number picks one (-1).
   function cursorOf(row){
     const local=state(row.item),id=row.question.id,count=choices(row).length;
-    if(Number.isInteger(local.cursor[id]))return Math.max(0,Math.min(count-1,local.cursor[id]));
+    if(Number.isInteger(local.cursor[id]))return Math.max(-1,Math.min(count-1,local.cursor[id]));
     const picked=local.answers[id]?.[0],at=choices(row).findIndex(c=>value(c)===picked);
     if(at>=0)return at;
-    if(row.item.answer_kind==='decision')return -1;
+    if(row.item.answer_kind==='decision'||!count)return -1;
     const recommended=row.question.recommended;
     return Number.isInteger(recommended)&&recommended>=0&&recommended<count?recommended:0;
   }
@@ -121,10 +123,9 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     const local=state(row.item),result={};
     for(const question of row.item.questions||[]){
       const id=question.id;
-      if(local.typing[id]){
-        const draft=local.drafts[id]||'';
-        if(draft.trim())result[id]=[draft];
-      }else if(local.answers[id]?.length)result[id]=[...local.answers[id]];
+      const selected=local.answers[id]||[],draft=local.drafts[id]||'';
+      const values=[...selected,...(writable({item:row.item,question})&&draft.trim()?[draft]:[])];
+      if(values.length)result[id]=values;
     }
     return result;
   }
@@ -143,7 +144,8 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     // Spec E9 rule 54: a wait not answerable here shows the backend's whole words for its
     // reason (never the machine reason); a send state of its own shows nothing more.
     const options=status!=='open'?(status===unanswerable(row)&&view?.options?view.options:[]):view?.options||(choices(row).length?choices(row).map((c,i)=>[span(`${i+1}  `,'g_blocked'),span(typeof c==='object'?c.label||c.value:c,'loc_repo')]):[[span(text('text','type answer'))]]);
-    const marked=status==='open'&&choices(row).length?highlight(options,choosing(row)?cursorOf(row):-1,choosing(row)):options;
+    const selected=choosing(row)||focused&&writable(row)&&cursorOf(row)>=0;
+    const marked=status==='open'&&choices(row).length?highlight(options,selected?cursorOf(row):-1,!!selected,writable(row)):options;
     // 11-17 (the person: "질문이랑 선지가 잘 구분되게" / "구분선 위에 여백도 하나 두고"): a question with choices
     // ends its words with one empty row and a thin line (the frame's own color, dim where the frame is bright)
     // before its choices; a question answered in words has neither. Short of rows the empty row goes first.
@@ -153,12 +155,17 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     let content=lines();
     const tail=[];
     const picked=local.answers[id];
-    if(focused&&local.typing[id]){
-      // Keep the editing caret visible; the original UTF-8 answer stays intact.
+    if(status==='open'&&writable(row)){
       const draft=local.drafts[id]||'',safe=row.question.secret?'•'.repeat([...draft].length):draft;
-      const chars=[...safe];let shown='',width=0;
-      for(let i=chars.length-1;i>=0;i--){const w=chars[i].charCodeAt(0)<128?1:2;if(width+w>Math.max(1,columns-9))break;shown=chars[i]+shown;width+=w;}
-      tail.push(chosenRow([{...span('› '+(shown!==safe?'…':'')+shown,'loc_repo'),caret:true}],active(row)));
+      const wrapped=[];let shown='› ',width=2;
+      for(const c of safe.replace(/[\x00-\x1f\x7f-\x9f]/g,' ')){
+        const w=measure(c);
+        if(width+w>Math.max(3,columns-1)){wrapped.push(shown);shown='  ';width=2;}
+        shown+=c;width+=w;
+      }
+      wrapped.push(shown);
+      wrapped.forEach((line,i)=>tail.push(chosenRow([{...span(line,'loc_repo'),answerRow:true,
+        ...(focused&&local.typing[id]&&i===wrapped.length-1?{caret:true}:{})}],focused&&!!local.typing[id])));
     }else if(picked&&!choosing(row)){
       const selected=picked.map(v=>{if(row.question.secret)return '•'.repeat([...String(v)].length);const n=choices(row).findIndex(c=>value(c)===v);return (n>=0?String(n+1)+' · ':'')+v;});
       tail.push(chosenRow([span('› '+selected.join(', '),'loc_repo')],active(row)));
@@ -166,13 +173,15 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     if(local.notice)tail.push([span(local.notice,stale?'lvl_r':'dim')]);
     if(focused){
       const ready=complete(row,formValues(row));
-      const instruction=active(row)?(choosing(row)?text('choose','↑↓ choose · Enter send · t text'):ready?text('send','Enter send'):text('text','type answer')):text(status,status);
-      const navigate=text('navigate','Tab next · Esc/Ctrl+] back');
-      tail.push(...keys([...(active(row)?[instruction]:[]),navigate],Math.max(1,Math.max(2,budget)-2)));
+      const instruction=active(row)?(choosing(row)?text('choose','↑↓ choose · Enter send'):ready?text('send','Enter send'):text('text','type answer')):text(status,status);
+      const editing=active(row)&&writable(row);
+      const navigate=text(editing?'navigate_write':'navigate','Tab next · Esc/Ctrl+] back');
+      const writeHint=local.typing[id]?(choices(row).length?text('writing_choices','Enter send · ↑ choices'):text('send','Enter send')):text('choose_write','↑↓ choose · type to write · Enter send');
+      tail.push(...keys([...(active(row)?[writable(row)?writeHint:instruction]:[]),navigate],editing?1:Math.max(1,Math.max(2,budget)-2)));
     }else if(status==='open')tail.push([span('Ctrl+] · '+text('open','answer needed'))]);
     const limit=Math.max(2,budget),tailLimit=Math.min(tail.length,Math.max(1,limit-2));
     let footer=tail.slice(-tailLimit);
-    const edit=tail.find(line=>line.some(part=>part.caret));
+    const edit=tail.find(line=>line.some(part=>part.caret))||tail.findLast(line=>line.some(part=>part.answerRow));
     // At small heights notices and key hints yield before the live input cell.
     if(edit&&!footer.includes(edit))footer=[edit,...(tailLimit>1?tail.slice(-(tailLimit-1)):[])];
     const space=Math.max(0,limit-1-footer.length);
@@ -207,14 +216,14 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   const chosenRow=(parts,on=true)=>on?parts.map(part=>({...part,tint:true})):parts;
   // 11-17: the number is the question's rose and bold on every row (the mark `◑`'s own color; where there is no
   // color, its weight tells it from the words), two cells before the words.
-  function highlight(options,at,choosing){
+  function highlight(options,at,choosing,canPick){
     let n=-1;
     const bold=part=>({...part,bold:true});
     return options.map(parts=>{
       const lead=String(parts[0]?.text??''),number=/^(\d+)\s+$/.exec(lead);
       if(number)n=Number(number[1])-1;else if(lead.trim())n=-1;
       const [head,...rest]=number?[bold(parts[0]),...parts.slice(1)]:[null,...parts];
-      const first=head?[head]:[];
+      const first=head?[{...head,...(canPick?{choiceIndex:n}:{})}]:[];
       if(!choosing||at<0)return [span('  ',''),...first,...rest];
       if(n!==at)return [span('  ',''),...first,...rest.map(part=>({...part,...(styles.dim||{dim:true}),bold:false}))];
       const words=rest.map(part=>({...part,...(styles.loc_repo||{}),bold:true,dim:false}));
@@ -255,18 +264,14 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     if(busy){local.notice=text('busy','action pending · wait for receipt');changed();return;}
     if(!active(row)){const word=terminalState(row)==='open'?unanswerable(row):terminalState(row);
       local.notice=stale?text('changed','question changed · Tab next'):text(word,word);changed();return;}
-    if(local.typing[id]){
-      const draft=local.drafts[id]||'';
-      if(!draft.trim()){local.notice=text('empty','empty answer');changed();return;}
-      local.typing[id]=false;local.answers[id]=[draft];
-    }
-    const values=formValues(row);local.answers=values;
+    const values=formValues(row);
+    if(writable(row)&&!values[id]){local.notice=text('empty','empty answer');changed();return;}
     if(!complete(row,values)){local.notice=text('complete','answer every field · Tab next');changed();return;}
     busy=true;local.sending=true;local.notice='';changed();
     let sent=false;const started=moves;
     try{
       const result=await answer({question_id:row.item.id,revision:row.item.revision,...(row.item.answer_kind==='decision'?{decision:values[id][0]}:{answers:values})});
-      if(['submitted','received','applied'].includes(result.state)){local.state=result.state;sent=true;local.sentAt=Date.now();}
+      if(['submitted','received','applied'].includes(result.state)){local.answers=values;local.drafts={};local.typing={};local.state=result.state;sent=true;local.sentAt=Date.now();}
       else{local.state=null;local.notice=result.reason||text('unknown','unknown · check receipt');}
     }catch{local.state='unknown';local.notice=text('unknown','unknown · check receipt');}
     finally{
@@ -282,16 +287,31 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
       changed();
     }
   }
+  function pick(row,at,toggle=false){
+    const local=state(row.item),id=row.question.id,choice=choices(row)[at];
+    if(!active(row)||choice===undefined)return;
+    if(toggle&&writable(row)&&local.cursor[id]===at&&local.answers[id]?.length){local.answers[id]=[];local.cursor[id]=-1;}
+    else{local.answers[id]=[value(choice)];local.cursor[id]=at;}
+    local.typing[id]=false;local.notice='';follow=true;
+  }
+  // A cursor without an answer is the default, not a choice the person made.
+  // Clear it on the first accepted character, including paste or a clicked row.
+  function append(row,c){
+    const local=state(row.item),id=row.question.id;
+    if(Buffer.byteLength((local.drafts[id]||'')+c)>4096)return;
+    if(!Number.isInteger(local.cursor[id])||local.cursor[id]<0){local.cursor[id]=-1;local.answers[id]=[];}
+    local.typing[id]=true;local.drafts[id]=(local.drafts[id]||'')+c;
+  }
   function character(c){
     const row=current(),local=row&&state(row.item),id=row?.question.id;
-    if(pasting){if(row&&active(row)&&Buffer.byteLength((local.drafts[id]||'')+c)<=4096){local.typing[id]=true;local.drafts[id]=(local.drafts[id]||'')+c;}return;}
+    if(pasting){if(row&&active(row)&&writable(row))append(row,c);return;}
     if(c==='\x1d'||c==='\x1b'){leave();return;}
     if(c==='\t'){move(1);return;}
     if(c==='\r'||c==='\n'){
       if(!row)return;
       if(changeArmed){changeArmed=false;local.notice='';changed();return;}
       // Enter sends the highlighted choice, the same value its number key picks.
-      if(choosing(row)&&cursorOf(row)>=0){
+      if(active(row)&&cursorOf(row)>=0){
         local.answers[id]=[value(choices(row)[cursorOf(row)])];local.notice='';
         if(!complete(row,formValues(row))&&(row.item.questions||[]).length>1){move(1);return;}
       }
@@ -300,13 +320,12 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     if(!row){if('rwfp'.includes(c))action(c);return;}
     if(!active(row))return;
     if(c==='\x7f'||c==='\b'){local.drafts[id]=[...(local.drafts[id]||'')].slice(0,-1).join('');return;}
-    if(local.typing[id]){if(c>=' '&&Buffer.byteLength((local.drafts[id]||'')+c)<=4096)local.drafts[id]=(local.drafts[id]||'')+c;return;}
-    if(c==='t'){local.typing[id]=true;return;}
+    if(local.typing[id]){if(c>=' ')append(row,c);return;}
     if(/^[1-9]$/.test(c)&&choices(row).length){
-      const choice=choices(row)[Number(c)-1];if(choice!==undefined){local.answers[id]=[value(choice)];local.cursor[id]=Number(c)-1;local.notice='';follow=true;}return;
+      pick(row,Number(c)-1,true);return;
     }
-    if('rwfp'.includes(c)&&choices(row).length){action(c);return;}
-    if(!choices(row).length&&c>=' '){local.typing[id]=true;local.drafts[id]=c;}
+    if(writable(row)&&c>=' '){append(row,c);return;}
+    if('rwfp'.includes(c)){action(c);return;}
   }
   function input(data){
     for(let i=0;i<data.length;i++){
@@ -336,7 +355,12 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
             if(escape==='\x1b[Z')move(-1);
             // ←→ move to the next section's popup (11-15), as in every popup.
             else if((escape==='\x1b[C'||escape==='\x1b[D'||escape==='\x1bOC'||escape==='\x1bOD')&&section)section(escape.endsWith('C')?1:-1);
-            else if((up||down)&&choosing(row)){const local=state(row.item),n=choices(row).length;const at=cursorOf(row);local.cursor[row.question.id]=at<0?0:Math.max(0,Math.min(n-1,at+(up?-1:1)));scroll=0;follow=true;}
+            else if(up&&row&&state(row.item).typing[row.question.id]&&choices(row).length){state(row.item).typing[row.question.id]=false;scroll=0;follow=true;}
+            else if((up||down)&&choosing(row)){const local=state(row.item),id=row.question.id,n=choices(row).length,at=cursorOf(row);
+              if(down&&at===n-1&&writable(row))local.typing[id]=true;
+              else{local.cursor[id]=at<0?0:Math.max(0,Math.min(n-1,at+(up?-1:1)));local.answers[id]=[value(choices(row)[local.cursor[id]])];}
+              scroll=0;follow=true;}
+            else if(down&&row&&active(row)&&writable(row)){state(row.item).typing[row.question.id]=true;}
             else if(up||escape==='\x1b[5~'){scroll-=escape.includes('5')?4:1;follow=false;}else if(down||escape==='\x1b[6~'){scroll+=escape.includes('6')?4:1;follow=false;}
           }
           escape='';
@@ -373,6 +397,8 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     get question(){return !!current();},
     get typing(){const row=current();return focused&&!!row&&!!state(row.item).typing[row.question.id];},
     enter,leave,update,input,detail:preview,summary,sent:sentLines,references,
+    choose(at){const row=current();if(focused&&row){pick(row,at);changed();}},
+    write(){const row=current();if(focused&&row&&active(row)&&writable(row)){state(row.item).typing[row.question.id]=true;changed();}},
     // The wheel over the popup reads the question on, a row at a time, as ↑↓ and PgUp/PgDn do.
     wheel(delta){if(!focused||!current())return;scroll+=delta;follow=false;changed();}};
 };

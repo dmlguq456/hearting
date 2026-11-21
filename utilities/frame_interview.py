@@ -279,13 +279,16 @@ def _native_option_index(value, labels):
 
 def _restatement_outcome(row):
     """`(confirmed, correction)` of the restatement's reply, or None when it is not an answer."""
+    note = _text(row.get("note")).strip()
     options = list(row.get("options") or [])
     reply = _text(row.get("answer")).strip()
     if not _plain(reply):
         return None
     index = _native_option_index(reply, options)
     if options and index == 0:
-        return True, ""
+        return True, note
+    if note:
+        return False, note
     if index is not None:
         return None                                   # "no" without saying what is wrong: ask for it
     return False, reply
@@ -1019,7 +1022,7 @@ def render_intent(interview: dict, answers: dict, *, now: str | None = None, app
         "",
         _inline(interview.get("understanding")) or "-",
     ]
-    if not confirmed:
+    if not confirmed or _text(answers.get("correction")).strip():
         lines += ["", f"**{speaker}'s correction:** " + (_inline(answers.get("correction")) or "-")]
     section = {
         "problem": "Problem", "outcome": "Proposed Outcome",

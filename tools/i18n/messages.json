@@ -1343,8 +1343,12 @@
    "ko": "질문 변경됨 · Tab 다음"
   },
   "fleet.session_block.choose": {
-   "en": "↑↓ choose · Enter send · t text",
-   "ko": "↑↓ · Enter 보내기 · t 답 입력"
+   "en": "↑↓ choose · Enter send",
+   "ko": "↑↓ · Enter 보내기"
+  },
+  "fleet.session_block.choose_write": {
+   "en": "↑↓ choose · type to write · Enter send",
+   "ko": "↑↓ 선택 · 바로 답 입력 · Enter 보내기"
   },
   "fleet.session_block.compact_answer_below": {
    "en": "answer below",
@@ -1434,6 +1438,10 @@
    "en": "Tab next · ←→ section · Esc/Ctrl+] back",
    "ko": "Tab 다음 · ←→ 구획 · Esc/Ctrl+] 돌아가기"
   },
+  "fleet.session_block.navigate_write": {
+   "en": "Tab next · Esc/Ctrl+] back",
+   "ko": "Tab 다음 · Esc/Ctrl+] 돌아가기"
+  },
   "fleet.session_block.open": {
    "en": "answer needed",
    "ko": "답 필요"
@@ -1485,6 +1493,10 @@
   "fleet.session_block.wait_old_shell": {
    "en": "reopen that window or type once there to deliver it",
    "ko": "그 창을 다시 열거나 한 번 입력하면 받음"
+  },
+  "fleet.session_block.writing_choices": {
+   "en": "Enter send · ↑ choices",
+   "ko": "Enter 보내기 · ↑ 선택지"
   },
   "fleet.session_page.generation": {
    "en": "generation {count}",

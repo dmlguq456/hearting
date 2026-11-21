@@ -2384,6 +2384,11 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],curren
   painted=painted.map(row=>row.map(({popupLine,popupTitle,chosenRow,tint,...part})=>part));
   // Presses, in window cells: `✕` closes, a section's name opens its popup.
   const hits=[];
+  list.forEach((parts,i)=>{
+    if(parts.some(p=>p.answerRow))hits.push({row:y+i+1,left:x+2,right:x+W-3,action:'answer-write'});
+    const choice=parts.find(p=>Number.isInteger(p.choiceIndex));
+    if(choice)hits.push({row:y+i+1,left:x+2,right:x+W-3,action:'answer-choice:'+choice.choiceIndex});
+  });
   if(close.length>1)hits.push({row:y,left:x+W-4,right:x+W-3,action:'popup-close'});
   let at=x+3;for(let i=0;i<sections.length&&shut&&listed.length>2;i++){const n=measure(clean(named(i)));hits.push({row:y+H-1,left:at,right:at+n-1,action:'popup:'+sections[i]});at+=n+3;}
   return {rows:painted,left:x-left,top:y-above,width:W+left+right,height:out.length,frame:{left:x,top:y,width:W,height:H},inner,body:list.length,hits};

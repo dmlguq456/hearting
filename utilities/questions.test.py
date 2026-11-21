@@ -38,6 +38,14 @@ class BuildResponseTest(unittest.TestCase):
          "choices": [{"value": "Small", "label": "Small"}, {"value": "Both", "label": "Both"}]},
     ]}}
 
+    def test_single_value_native_form_does_not_offer_combined_input(self):
+        envelope = {"harness": "opencode", "native_ref": {"transport": "opencode-http-v2"},
+                    "detail": {"questions": [{"id": "q", "question": "Pick", "choices": ["one"],
+                                               "field_type": "string", "is_other": True}]}}
+        self.assertFalse(questions.questions_of(envelope)[0]["free_text"])
+        envelope["native_ref"]["transport"] = "hearting-message-answer"
+        self.assertTrue(questions.questions_of(envelope)[0]["free_text"])
+
     def test_one_choice_per_question_maps_to_the_native_values(self):
         response, error = questions.build_response(self.INTERVIEW, choices=[1, 2])
         self.assertIsNone(error)
@@ -412,7 +420,7 @@ class MessageQuestionTest(unittest.TestCase):
     def test_raw_answer_limits_private_receipt_and_tamper_rejection(self):
         import session_notice
         s, e = self.f.ask()
-        for text in ("", "   ", "x" * 601, "가" * 601):
+        for text in ("", "   ", "x" * 4097, "가" * 1366):
             with self.subTest(length=len(text)):
                 self.f.submit(e, text)
                 self.assertIsNone(self.f.record(s))
@@ -433,7 +441,7 @@ class MessageQuestionTest(unittest.TestCase):
             state.message_answer_body(binding)
         self.assertEqual(state._read(state._signal_path(s))["lifecycle"], "open")
 
-    def test_draft_utf8_boundaries_and_600_character_answer_boundary(self):
+    def test_draft_utf8_boundaries_and_4096_byte_answer_boundary(self):
         s, e = self.f.ask()
         for size in (4095, 4096, 4097):
             text = "가" * (size // 3) + "x" * (size % 3)
@@ -442,12 +450,11 @@ class MessageQuestionTest(unittest.TestCase):
                 self.assertEqual(result["draft"], text)
             else:
                 self.assertNotEqual(result.get("draft"), text)
-        # Independent size limits: 600 Unicode characters fit at most 2400
-        # UTF-8 bytes; the 4096-byte draft limit does not license 601 chars.
-        for length in (599, 600, 601):
+        # The accepted answer has the same byte limit as the editor's draft.
+        for length in (4095, 4096, 4097):
             s, e = self.f.ask(text="length " + str(length))
-            result = self.f.submit(e, "🙂" * length, action="length-" + str(length))
-            self.assertEqual(self.f.record(s) is not None, length <= 600)
+            result = self.f.submit(e, "🙂" * (length // 4) + "x" * (length % 4), action="length-" + str(length))
+            self.assertEqual(self.f.record(s) is not None, length <= 4096)
 
     def test_same_precheck_two_submitters_make_one_claim_and_one_notice(self):
         _s, e = self.f.ask()

@@ -60,7 +60,7 @@ setImmediate(()=>{
  // Rule 5 (11-14): a sent answer returns the person to the native input.
  assert.equal(block.focused,false);
  block.update([{id:'replacement',answerable:true,questions:[{id:'new-q',question:'New?',choices:[]}]}]);
- block.enter();block.input(Buffer.from('t한글\r'));
+ block.enter();block.input(Buffer.from('한글\r'));
  setImmediate(()=>{
   assert.equal(sent[1].question_id,'replacement');assert.deepEqual(sent[1].answers,{'new-q':['한글']});
   assert.equal(block.focused,false);block.enter();block.input(Buffer.from('\x1d'));assert.equal(block.focused,false);
@@ -269,7 +269,7 @@ let now=Date.now();Date.now=()=>now;
  // A secret stays hidden on the line.
  const s=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
  s.update([{id:'s',revision:'r',answerable:true,questions:[{id:'q',question:'Secret?',secret:true}]}]);
- s.enter();s.input(Buffer.from('tFAKE_SECRET\r'));await tick();
+ s.enter();s.input(Buffer.from('FAKE_SECRET\r'));await tick();
  assert.deepEqual(lines(s),['✓ answer sent · •••']);
  assert.equal(s.answeredEscape(Buffer.from('x')),false);assert.equal(s.answeredEscape(Buffer.from('\x1b')),false,'typing first: Esc is the native\'s');
  // A delivery that failed brings the question back with its existing word.
@@ -345,7 +345,7 @@ let now=Date.now();Date.now=()=>now;
  // A secret stays hidden, in the same colors.
  const s=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
  s.update([{id:'s',revision:'r',answerable:true,questions:[{id:'q',question:'Secret?',secret:true}]}],'',{styles,labels:{sent:'✓ 답 보냄'}});
- s.enter();s.input(Buffer.from('tFAKE_SECRET\r'));await tick();
+ s.enter();s.input(Buffer.from('FAKE_SECRET\r'));await tick();
  assert.deepEqual(look(s),[[['✓ 답 보냄',150,false],[' · ',-1,true],['•••',253,false]]]);
  // A wait answered elsewhere is summarized but never one a press answers here; beside an open one,
  // the open one is summarized.
@@ -443,7 +443,7 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]);
  let sent=[],left,exit;
  const block=create({changed(){if(exit&&!block.focused)exit();},answer:async value=>{sent.push(value);return {ok:true,state:'submitted'};},action(){}});
  const a={id:'a',revision:'one',answerable:true,questions:[{id:'q',question:'First?',choices:[]}]};
- block.update([a]);block.enter();block.input(Buffer.from('tdraft'));
+ block.update([a]);block.enter();block.input(Buffer.from('draft'));
  block.update([a,{id:'b',revision:'one',answerable:true,questions:[{id:'q2',question:'Other?',choices:[]}]}]);
  assert.ok(JSON.stringify(block.detail()).includes('draft'));
  block.input(Buffer.from('\r'));await new Promise(resolve=>setImmediate(resolve));
@@ -452,7 +452,7 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]);
  // the sent answer returned the person to the native input; Ctrl+] opens the new one.
  assert.equal(block.focused,false);
  const fresh={...a,id:'fresh'};block.update([fresh]);
- block.enter();block.input(Buffer.from('tpreserved'));
+ block.enter();block.input(Buffer.from('preserved'));
  block.update([{...fresh,revision:'two'}]);block.input(Buffer.from('\r'));
  await new Promise(resolve=>setImmediate(resolve));assert.equal(sent.length,1);
  assert.ok(JSON.stringify(block.detail()).includes('preserved'));
@@ -480,7 +480,8 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
  for(const harness of ['claude','codex','opencode'])for(const mode of ['replace','revision','number','text','stable','insert']){
   const sent=[],block=create({changed(){},answer:async v=>{sent.push(v);return {state:'received'};},action(){}});
   const owner={harness,session_id:'s'},a={...item('old','r1'),owner},b={...item(mode==='revision'?'old':'new',mode==='revision'?'r2':'r1'),owner};
-  block.update([a]);block.enter();block.input(Buffer.from(mode==='number'?'2':mode==='text'?'tDRAFT':'\x1b[B'));
+  if(mode==='text')a.questions[0].free_text=true;
+  block.update([a]);block.enter();block.input(Buffer.from(mode==='number'?'2':mode==='text'?'DRAFT':'\x1b[B'));
   block.update(mode==='stable'?[a]:mode==='insert'?[b,a]:[b]);
   block.input(Buffer.from('\r'));await tick();block.input(Buffer.from('\r'));await tick();
   const label=harness+' '+mode+' '+JSON.stringify(sent);
