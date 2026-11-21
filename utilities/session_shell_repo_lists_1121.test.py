@@ -157,33 +157,118 @@ for(const width of [59,44,40,36,32,30]){
  assert(lines(v).every(l=>cells(l)===30));}
 """)
 
-    def test_short_of_rows_the_items_give_way_in_their_order_and_the_other_three_keep_their_rows(self):
-        self.node(r"""
-const base={routes:3,messages:7,mem:5,question:true};
-const pick=v=>{const a=inside(v);return {b:a.filter(l=>/^· 시험용 나중 일/.test(l)).length,s:a.filter(l=>/^[!·] 시험용 (정할|하는)/.test(l)).length,
-  msg:a.filter(l=>/^[←→] /.test(l)).length,two:a.filter(l=>/^  시험용 메시지/.test(l)).length,mem:a.filter(l=>/^◆ /.test(l)).length,
-  heads:a.filter(l=>/^(STATUS|BACKLOG)\b/.test(l)).length,git:a.some(l=>/^GIT /.test(l)),peers:a.some(l=>/^PEERS /.test(l)),
-  now:a.filter(l=>/^NOW /.test(l)).length,q:a.filter(l=>/◑|1 가 · 2 나|↵ answer|QUESTIONS/.test(l)).length,route:a.filter(l=>(/^│ .*│$/.test(l)&&!/◑|1 가|↵ answer/.test(l))||/^╭─ \d+ ROUTE/.test(l)).length};};
+    # The one rule (11-22): the lists are the first to give way and the rest of the panel is what it is without them. The helper below draws a panel
+    # (messages 0 is none) and sorts its rows by what each is, from the rows' own presses: `list` (a head or an item of STATUS or BACKLOG), `blank`, `mm-head`, `mm-item`
+    # (MESSAGES' and MEM's rows under their head), the REPO row, and any other row.
+    SORT = r"""
+const drawN=o=>view.render({width:o.width,height:o.height,side:true,model:{...model(o),messages:MSGS.slice(7-(o.messages??0))},state:'working',harness:'claude',frame:1000,since:990,
+  brief:o.question?brief:undefined,sent:()=>[],cellWidth:cells,configuration:{side_width:o.width,rule_motion:'off',theme:'terminal',position:'right'}});
+function sort(v){
+  const ins=lines(v).map(l=>l.slice(2,-2)),act=new Map();
+  for(const h of v.hits){if(!act.has(h.row))act.set(h.row,[]);act.get(h.row).push(h.action);}
+  const out=[];let prev='';
+  for(let i=1;i<ins.length-1;i++){
+    const first=(act.get(i)||[])[0]||'';let k='row';
+    if(i===1)k='repo';
+    else if(/^popup:(STATUS|BACKLOG)/.test(first))k='list';
+    else if(/^popup:(MESSAGES|MEM)/.test(first)){const n=first.startsWith('popup:MESSAGES')?'MESSAGES':'MEM';k=prev===n?'mm-item':'mm-head:'+n;prev=n;}
+    else if(!ins[i].trim())k='blank';
+    if(!k.startsWith('mm-'))prev='';
+    out.push({k,t:ins[i]});
+  }
+  return {lines:lines(v),rows:out};
+}
+// What the panel is apart from the lists, the empty rows and the rows under MESSAGES' and MEM's heads (their heads stand, their words are not compared: a count in them moves).
+const rest=p=>p.rows.filter(r=>!['list','blank','mm-item'].includes(r.k)).map(r=>r.k==='repo'?'REPO':r.k.startsWith('mm-head')?r.k:r.t);
+const items=(p,name)=>{let on=false,n=0;for(const r of p.rows){if(r.k==='list'){if(/^(STATUS|BACKLOG)\b/.test(r.t))on=r.t.startsWith(name);else if(on)n++;}else on=false;}return n;};
+const mmRows=(p,name)=>{let on=false,n=0;for(const r of p.rows){if(r.k==='mm-head:'+name)on=true;else if(on&&r.k==='mm-item')n++;else on=false;}return n;};
+"""
+
+    def test_the_lists_never_move_the_rest_of_the_panel(self):
+        # Every list state at every height from 6 to 60, at the four widths: with the lists up the panel, but for their rows, the empty rows and the rows under MESSAGES' and
+        # MEM's heads, is the panel without them; where the heads are not up the whole panel but its REPO row is, byte for byte, and the REPO row ends in the two buttons.
+        self.node(self.SORT + r"""
+const lists=[[status(3,5),backlog(3,14)],[status(1,1),backlog(1,1)],[status(0,0),backlog(0,0)],[status(0,0,false),backlog(0,0,false)],[status(3,5),undefined]];   // the last: no BACKLOG value at all (the older host)
+let cases=0,up=0,off=0;
+for(const width of [59,44,40,30])for(let height=6;height<=60;height++)for(const question of [false,true])for(const routes of [0,3])for(const messages of [0,7])for(const mem of [0,5]){
+  const peers=height%2===0,o={width,height,question,routes,messages,mem,peers},base=sort(drawN({...o,status:undefined,backlog:undefined}));
+  lists.forEach(([s,b],n)=>{
+    if(n>=3&&(height%3||width!==44))return;   // the mixed document states: a third of the heights
+    const v=drawN({...o,status:s,backlog:b}),p=sort(v),where=JSON.stringify(o)+n+'\n'+p.lines.join('\n')+'\n'+base.lines.join('\n');
+    assert.equal(p.lines.length,height,where);assert(p.lines.every(l=>cells(l)===width),where);cases++;
+    const heads=p.rows.filter(r=>r.k==='list'&&/^(STATUS|BACKLOG)\b/.test(r.t)).length;
+    if(heads){
+      up++;assert.equal(heads,n===4?1:2,where);
+      assert.deepEqual(rest(p),rest(base),where);
+      assert(!v.hits.some(h=>h.row===1&&/^popup:(STATUS|BACKLOG)/.test(h.action)),'no buttons beside the heads\n'+where);
+    }else{
+      off++;
+      assert.deepEqual(p.lines.filter((_,i)=>i!==1),base.lines.filter((_,i)=>i!==1),where);
+      const press=new Set(v.hits.filter(h=>h.row===1).map(h=>h.action));
+      assert(press.has('popup:STATUS')&&(n===4?!press.has('popup:BACKLOG'):press.has('popup:BACKLOG')),JSON.stringify([...press])+'\n'+where);
+      assert(/›/.test(p.lines[1]),where);
+    }
+  });
+}
+assert(up>1000&&off>1000,[cases,up,off].join(' '));
+""")
+
+    def test_the_lists_give_way_first_and_in_their_order_as_the_height_falls(self):
+        # Height by height: the BACKLOG items, then MESSAGES and MEM fold (each keeps its head and one row), then the STATUS items, then the two heads (the REPO row takes the buttons).
+        self.node(self.SORT + r"""
+const o={width:44,question:true,routes:3,messages:7,mem:5,peers:true};
 const seen=[];
-for(let h=70;h>=10;h--){const v=draw({...base,height:h,status:status(),backlog:backlog()});seen.push({h,...pick(v)});assert.equal(lines(v).length,h);}
-const full=seen[0];assert.deepEqual([full.b,full.s,full.heads],[3,3,2],JSON.stringify(full));
-for(const r of seen){
-  // Items go in the order BACKLOG, then (after MESSAGES is down to one message and MEM to one record) STATUS.
-  if(r.msg>1||r.two>0)assert.equal(r.b===3||r.h>=40,true,'BACKLOG goes before the messages fold: '+JSON.stringify(r));
-  if(r.s<3&&r.heads>0)assert(r.b===0&&r.msg<=1&&r.mem<=1,JSON.stringify(r));
-  if(r.b<3)assert(r.heads>=0&&true);
-  // A head never stands without Git, and the heads go together with Git and PEERS.
-  if(r.heads>0)assert(r.git,JSON.stringify(r));
-  if(!r.git)assert.equal(r.heads,0,JSON.stringify(r));
-  // Items stand under a head only.
-  if(r.heads===0)assert.deepEqual([r.b,r.s],[0,0],JSON.stringify(r));
+for(let h=70;h>=14;h--){
+  const p=sort(drawN({...o,height:h,status:status(),backlog:backlog()})),base=sort(drawN({...o,height:h}));
+  const r={h,b:items(p,'BACKLOG'),s:items(p,'STATUS'),heads:p.rows.filter(x=>x.k==='list'&&/^(STATUS|BACKLOG)\b/.test(x.t)).length,msg:mmRows(p,'MESSAGES'),mem:mmRows(p,'MEM'),
+    msg0:mmRows(base,'MESSAGES'),mem0:mmRows(base,'MEM'),gap:p.rows.filter(x=>x.k==='blank').length};
+  seen.push(r);const w=JSON.stringify(r)+'\n'+p.lines.join('\n');
+  assert.deepEqual(rest(p),rest(base),w);
+  if(r.heads){
+    // BACKLOG items stand only on empty rows: where they stand nothing is folded.
+    if(r.b>0)assert.deepEqual([r.msg,r.mem],[r.msg0,r.mem0],w);
+    // STATUS items give way only once MESSAGES and MEM are down to one row each, and then BACKLOG has none.
+    if(r.s<3)assert(r.b===0&&r.msg<=1&&r.mem<=1,w);
+    // A BACKLOG item missing while nothing is folded and a row is empty: never.
+    if(r.b<3&&r.msg===r.msg0&&r.mem===r.mem0)assert.equal(r.gap,0,w);
+  }else{
+    // The heads gone: MESSAGES and MEM are what they are without the lists.
+    assert.deepEqual([r.b,r.s,r.msg,r.mem],[0,0,r.msg0,r.mem0],w);
+  }
 }
-// The lowest height with the three kept: NOW, QUESTIONS and the route box have, with the parts on, at least the rows they have with the parts off.
-const rowsOf=h=>pick(draw({...base,height:h}));
-for(const [w,extra] of [[59,{}],[40,{}],[30,{}]])for(const h of [34,24,20,14])for(const question of [false,true])for(const routes of [1,3])for(const messages of [3,7])for(const mem of [2,5]){
-  const o={width:w,height:h,question,routes,messages,mem},off=pick(draw(o)),on=pick(draw({...o,status:status(),backlog:backlog()}));
-  assert(on.now>=off.now&&on.q>=off.q&&on.route>=off.route,JSON.stringify({o,off,on}));
+// Falling, each part only goes (BACKLOG items, STATUS items, the heads never come back as the height falls).
+for(let i=1;i<seen.length;i++){const a=seen[i-1],b=seen[i];assert(b.b<=a.b&&b.s<=a.s&&b.heads<=a.heads,JSON.stringify([a,b]));}
+// And the four steps all stand in this run, in this order.
+const first=f=>seen.findIndex(f);
+const at=[first(r=>r.heads&&r.b<3),first(r=>r.heads&&r.b===0&&(r.msg<r.msg0||r.mem<r.mem0)),first(r=>r.heads&&r.s<3),first(r=>!r.heads)];
+assert(at.every(x=>x>0)&&at[0]<at[1]&&at[1]<at[2]&&at[2]<at[3],JSON.stringify({at,seen:seen.slice(0,3)}));
+// The full panel stands whole and the same at a height with room to spare.
+assert.deepEqual([seen[0].b,seen[0].s,seen[0].heads],[3,3,2]);
+""")
+
+    def test_the_repo_row_ends_in_the_two_buttons_where_the_heads_go_and_gives_way_as_the_bottom_row_does(self):
+        self.node(self.SORT + r"""
+const press=(v,a)=>v.hits.find(h=>h.row===1&&h.action===a);
+for(const [w,want] of [[59,/^REPO   hearting · wt 12 +STATUS \+5 ›  BACKLOG \+14 ›$/],[44,/^REPO   hearting +STATUS ›  BACKLOG ›$/],[40,/^REPO   hearting +STATUS ›  BACKLOG ›$/],[30,/^REPO hearting · wt 12 ›  ›$/]]){
+  const v=drawN({width:w,height:14,question:true,routes:3,messages:7,mem:5,peers:true,status:status(),backlog:backlog()}),p=sort(v);
+  assert(!p.rows.some(r=>r.k==='list'),w+'\n'+p.lines.join('\n'));
+  assert.match(p.rows[0].t.trimEnd(),want,w+' '+p.rows[0].t);
+  assert(p.lines.every(l=>cells(l)===w));
+  // A press on a button opens that popup; on the rest of the row, the status popup.
+  const a=press(v,'popup:STATUS'),b=press(v,'popup:BACKLOG');
+  assert(a&&b&&a.left===2&&b.right===w-3&&a.right+1===b.left,w+' '+JSON.stringify(v.hits.filter(h=>h.row===1)));
+  const row=p.lines[1],cell=x=>[...row].reduce((s,c)=>s+(s.n<x?(s.n+=cells(c),c):''),{n:0,toString(){return ''}});
+  assert(row.slice(0,2)==='│ '||true);
 }
+// The counts give way first, then the words, as the bottom layout's first row: the same pieces at widths that cut them.
+{const at=(w,s,b)=>sort(drawN({width:w,height:14,question:true,routes:3,messages:7,mem:5,peers:true,status:status(3,s),backlog:backlog(3,b)})).rows[0].t.trimEnd();
+ assert.match(at(59,5,14),/STATUS \+5 ›  BACKLOG \+14 ›$/);assert.match(at(50,5,14),/STATUS \+5 ›  BACKLOG \+14 ›$/);assert.match(at(44,5,14),/hearting +STATUS ›  BACKLOG ›$/);
+ // Only the STATUS value (no backlog value): one button, the whole row is its press.
+ const v=drawN({width:44,height:14,question:true,routes:3,messages:7,mem:5,peers:true,status:status(3,5)}),h=v.hits.filter(x=>x.row===1);
+ assert.deepEqual(h.map(x=>x.action),['popup:STATUS']);assert.equal(h[0].right,44-3);}
+// Where the heads stand there is no button on the row.
+{const v=drawN({width:44,height:40,routes:1,messages:3,mem:2,peers:true,status:status(),backlog:backlog()});
+ assert(!v.hits.some(h=>h.row===1),JSON.stringify(v.hits.filter(h=>h.row===1)));assert(!/›/.test(lines(v)[1]));}
 """)
 
     def test_the_bottom_layout_has_two_buttons_and_no_list_and_is_no_taller(self):

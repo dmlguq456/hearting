@@ -358,7 +358,7 @@ Then the metadata, one block. Beside the native area the repository and Git rows
 start with dim labels in the label column of `TITLE` and `NOW` (`REPO`, `GIT`;
 narrower than 30 cells inside the labels go first): `REPO   hearting · wt 12`,
 the repository name in its color with no trailing `/` and the worktree count
-dim (none for zero or an unknown count), (11-21: the row has no status button any more; the STATUS and BACKLOG parts stand under the REPO group, below, and the bottom layout's first row ends in two buttons),
+dim (none for zero or an unknown count), (11-21: the row has no status button where the STATUS and BACKLOG parts stand under the REPO group, below; short of rows, where their heads go, it ends in the two buttons, 11-22; and the bottom layout's first row ends in two buttons),
 and `GIT    main ✓`, all dim with no
 parentheses: the branch and dirty mark cut at 20 cells (32 with 60 cells
 inside), then `✓` when ahead and behind are both known to be 0, else `↑N`/`↓N`
@@ -423,7 +423,7 @@ layout keeps the metadata row (or rows) first and one content row
 
 Two groups (11-20, the person: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" / "REPO ---- SESSION ----"), beside the native area. REPO is the repository's: the
 REPO row, which is the group's head (`REPO   hearting · wt 12 ────`: the word in the label column, the rule dim in a section head's color running to the row's end,
-no button; narrower than 30 cells inside the word stands first as `REPO `), and under
+no button while the two heads below stand, the two buttons where they do not; narrower than 30 cells inside the word stands first as `REPO `), and under
 it GIT, PEERS, then (11-21, the person: "버튼을 REPO의 아래에 각각을 두고 +? 숫자 띄우고 백로그랑 현황을 나열하자" / "각각 3줄 정도씩 목록으로 만들고 추가분을 +? 형식으로")
 the **STATUS part** and the **BACKLOG part**: each a section head (`STATUS +2 ────── ›`, the section heads' own shape, the word in the title role, `+N` in the MESSAGES head's
 color and place, `›` last; a press opens that popup) and its first three items, one row each, cut with `…` (`! ` in the status list's yellow before what waits for the person,
@@ -431,10 +431,17 @@ color and place, `›` last; a press opens that popup) and its first three items
 then what is in progress (`session_status.panel_items`, from `parse_listing`, the one reading the list screen uses; the recent and the folded count nothing); the BACKLOG items
 are `<artifact root>/backlog.md`'s, this window's campaign group (the `##` heading that is, letter for letter, the name of the folder this window's status document is in) first,
 then the other groups in the document's order. `+N` is the count of the items of the whole document not shown (nothing for zero; a `+` after it, `+2997+`, where the file is longer than is read: the first 1 MiB is read and what was read is counted; `+` alone where nothing is hidden by the rows and there is more); no item: the head alone; no document, or one that
-cannot be read: the word plain dim, no item, a press still opens the popup; no artifact root: neither part. Short of rows (the same `give` order as the other sections, no
-budget of its own): the BACKLOG items go first (3, 2, 1, none: `+N` grows by as many), then the order MESSAGES and MEM already had down to one row each, then the STATUS items;
-where the three it must not touch would still give a row, the SESSION head and the rule above the title go, then MESSAGES and MEM (rows, then heads), then Git, PEERS and the
-two heads together (a head never stands without Git), so NOW, QUESTIONS and the route box keep every row they had without the parts. The bottom layout has no list and no more rows:
+cannot be read: the word plain dim, no item, a press still opens the popup; no artifact root: neither part. **One rule (11-22, the person's STATUS and BACKLOG lists are the first to give way): the
+two parts never take a row from anything else.** The panel is laid out as it is without them (the same layout, the same `give` order, byte for byte what a window with no list value draws; the
+REPO row alone differs), and the parts take only what that layout leaves empty and, short of those, rows MESSAGES and MEM fold: the empty rows (the row between the head's block and the route
+box, the rows left over), then the BACKLOG items (3, 2, 1, none: `+N` grows by as many; they stand on empty rows only), then MESSAGES and MEM folding as they fold short of rows (the messages
+in their one-row form, MEM to two records, MESSAGES to two messages, then one each: both keep their head and one row, and stand where the panel without the parts has them), then the STATUS
+items (they may stand on what was folded), then the two heads together. Nothing else gives way for the parts: NOW, QUESTIONS and the route box (their rows and their shape, folded or
+open), Git, PEERS, the SESSION head and the rule above the title, MODEL, CTX, TITLE, RESOURCES, the notices and the last row have the rows and the form they have without the parts, and none
+has more. Where the two heads do not stand the REPO row ends in the two buttons, `STATUS +N ›  BACKLOG +N ›` (the bottom layout's first row's pieces, the same order of giving way: the counts
+go, then the words, then the repository's name is cut; the worktree count goes before the words; a press on a button opens that popup, on the rest of the row the status popup), and everything
+but that row is what the panel without the parts draws, byte for byte (MESSAGES and MEM unfolded as without them); where the heads stand the row has no button. (The layout is made once, then the
+parts are fitted in that order; there is no second budget and nothing is drawn twice.) The bottom layout has no list and no more rows:
 its first row ends in `STATUS +N ›  BACKLOG +N ›` (`N` the whole count, nothing for zero; short of cells the counts go, then the words, then the row is cut; the rest of the row opens the
 status popup). The two parts' items come with the status button's value, in the same read and the same worker, only where a document changed (the host sends the documents' path,
 modification time and size back as `have`; an unchanged one is neither read nor parsed again); the panel's drawing reads no file. SESSION is this session's: its head `SESSION ────` stands where the empty row between the two groups of
