@@ -11433,4 +11433,107 @@ class DeterministicSmokeOwnerRunTest(unittest.TestCase):
   self.assertEqual((marker["reviewer_kind"],marker["review_independence"]),("owner-inline","degraded"))
   self.assertIn("completed-review-degraded",result.stderr)
 
+class MarkerModelRecordTest(unittest.TestCase):
+ """The marker transaction hands the row it closed to the per-model record, after every lock is released.
+
+ The real `complete_node` runs to the end on an invented route; only the record call is observed.
+ """
+ def setUp(self):
+  import fcntl, model_outcome_record
+  self.fcntl=fcntl
+  self.M=model_outcome_record
+  self.temp=tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+  self.base=Path(self.temp.name)
+  patcher=mock.patch.dict(os.environ,{"XDG_STATE_HOME":str(self.base/"state"),
+   "FLEET_USAGE_STATE_DIR":str(self.base/"usage")})
+  patcher.start(); self.addCleanup(patcher.stop)
+  self.count=0
+ def _fixture(self,*,row_status="open",extra=None,refused=True):
+  """A fresh route with one attempt row of node `execute`; returns the pieces `complete_node` takes."""
+  self.count+=1
+  fixture=TestContinuation(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+  base=self.base/f"case{self.count}"; base.mkdir()
+  route=fixture._source(base/"artifacts")
+  node=next(n for n in route["nodes"] if n["id"]=="execute")
+  jobs=fixture._jobs; attempt="att-marker-fixture"
+  meta=dict(attempt_id=attempt,attempt_schema_version="2",dispatch_depth=str(node["dispatch_depth"]),
+   transport="headless",execution_surface="registered-headless",registered_worker="1",
+   fallback_hop="same-harness-headless",route_id=route["route_id"],route_hash=route["route_hash"],
+   route_node=node["id"],harness="codex",model="model-x",model_source="explicit",launch_started="1")
+  meta.update(extra or {})
+  jobs.write_text("\t".join(["2026-11-01T00:00:00Z",row_status,route["cwd"],route["cwd"],"fixture",
+   ",".join(f"{k}={v}" for k,v in meta.items())])+"\n")
+  evidence=base/"result.md"; evidence.write_text("execute exact output\n")
+  if refused: self.M.record_unavailable("codex","codex","model-x","unscoped","model-unavailable")
+  return route,node,jobs,attempt,evidence
+ def _state(self):
+  return self.M.read("codex","codex","model-x","unscoped")["state"]
+ def _complete(self,fixture,explicit):
+  route,node,jobs,attempt,evidence=fixture
+  return R.complete_node(route,node,node["id"],evidence,jobs=jobs,attempt_id=attempt if explicit else None)
+ def _spy(self,fixture,seen):
+  """Wrap the record call: note each metadata and whether both completion locks can be taken now."""
+  route,node,jobs,_attempt,_evidence=fixture
+  real=self.M.note_row_closed
+  locks=[Path(f"{jobs}.lock"),R.completion_dir(route["route_id"])/f".{node['id']}.completion.lock"]
+  def note(meta):
+   free=[]
+   for path in locks:
+    with open(path,"a") as handle:
+     try: self.fcntl.flock(handle.fileno(),self.fcntl.LOCK_EX|self.fcntl.LOCK_NB); free.append(True)
+     except BlockingIOError: free.append(False)
+   seen.append((dict(meta),free))
+   return real(meta)
+  return mock.patch.object(self.M,"note_row_closed",side_effect=note)
+ def test_an_explicit_and_an_omitted_attempt_id_both_lift_the_refusal_once_outside_the_locks(self):
+  for explicit in (True,False):
+   with self.subTest(explicit=explicit):
+    fixture=self._fixture(); seen=[]
+    self.assertEqual(self._state(),"unavailable")
+    with self._spy(fixture,seen):
+     marker,first=self._complete(fixture,explicit)
+     state=self._state()
+     _marker,replay=self._complete(fixture,explicit)
+    self.assertEqual((first["status"],replay["status"],state,self._state()),("closed","already-closed","usable","usable"))
+    self.assertEqual(len(seen),1)
+    (meta,free),=seen
+    self.assertEqual((meta["attempt_id"],meta["note"],meta["model"]),("att-marker-fixture","completed-marker","model-x"))
+    self.assertEqual(free,[True,True])
+    self.assertEqual(set(first),{"attempt_id","status"})
+    self.assertEqual(json.dumps(first,sort_keys=True),'{"attempt_id": "att-marker-fixture", "status": "closed"}')
+ def test_a_marker_appended_to_a_row_another_writer_closed_calls_nothing(self):
+  fixture=self._fixture(row_status="done",extra={"note":"completed-supervisor","failure_class":"pass"})
+  seen=[]
+  with self._spy(fixture,seen):
+   _marker,row=self._complete(fixture,True)
+  self.assertEqual((row["status"],seen,self._state()),("marker-appended",[],"unavailable"))
+ def test_a_record_that_cannot_be_kept_leaves_the_return_as_it_was(self):
+  kept=self._complete(self._fixture(),True)
+  failures={"raises":mock.patch.object(self.M,"note_row_closed",side_effect=RuntimeError("boom")),
+   "missing-module":mock.patch.dict(sys.modules,{"model_outcome_record":None})}
+  for label,failure in failures.items():
+   with self.subTest(label):
+    with failure:
+     marker,row=self._complete(self._fixture(),True)
+    self.assertEqual((row,sorted(marker),marker["sequence"]),(kept[1],sorted(kept[0]),kept[0]["sequence"]))
+ def test_the_record_reads_no_registry_of_its_own(self):
+  opened=[]
+  def hook(event,args):
+   if event=="open" and opened is not None and getattr(self,"_counting",None) and str(args[0])==self._counting:
+    opened.append(args[0])
+  sys.addaudithook(hook)
+  counts={}
+  for label,patched in (("record",None),("no-record",mock.patch.dict(sys.modules,{"model_outcome_record":None}))):
+   fixture=self._fixture()
+   self._counting=str(fixture[2]); before=len(opened)
+   try:
+    if patched is None: self._complete(fixture,True)
+    else:
+     with patched: self._complete(fixture,True)
+   finally:
+    self._counting=None
+   counts[label]=len(opened)-before
+  self.assertGreater(counts["no-record"],0)
+  self.assertEqual(counts["record"],counts["no-record"])
+
 if __name__=="__main__": unittest.main()
