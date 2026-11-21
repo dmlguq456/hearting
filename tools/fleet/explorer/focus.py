@@ -971,17 +971,21 @@ _CLI_SEEN = {}                       # harness -> (version, path): what the CLI 
 _CLI_SEEN_LOCK = threading.Lock()
 
 
-def _cli_probe(refresh):
+def _cli_probe(refresh, catalogs=None):
     """The ``probe`` ``fleet_view`` asks the harness CLI's version through.
 
     The first background read (``refresh``) for a harness asks the CLI itself and remembers the answer;
-    the background reads after it, and a read made inside the input handling, never start a process:
-    they are given the remembered answer (``(None, None)``, not known, for a harness never asked about).
-    A harness whose CLI was not found is asked again (finding it starts no process)."""
+    the background reads after it use the remembered answer (no process), except when it is another
+    version than the list this read holds (``catalogs``, compared as ``model_follow`` compares them):
+    that read asks the CLI again and remembers the new answer, so "the list is another CLI's" is never
+    said from memory alone. A list that names no version has nothing to compare. A read made inside the
+    input handling never starts a process: it is given the remembered answer (``(None, None)``, not
+    known, for a harness never asked about). A harness whose CLI was not found is asked again (finding
+    it starts no process)."""
     def probe(harness):
         with _CLI_SEEN_LOCK:
             seen = _CLI_SEEN.get(harness)
-        if seen is not None and (not refresh or seen[1]):
+        if seen is not None and (not refresh or (seen[1] and not _other_than_list(seen[0], harness, catalogs))):
             return seen
         if not refresh:
             return (None, None)
@@ -992,12 +996,21 @@ def _cli_probe(refresh):
     return probe
 
 
+def _other_than_list(version, harness, catalogs):
+    """Whether the remembered CLI version is known and is not the version of the list this read holds."""
+    if version is None:
+        return False
+    follow = utility("model_follow")
+    wanted = follow._numbers(getattr(catalogs.get(harness), "client_version", None)) if catalogs else None
+    return wanted is not None and not follow._same_version(version, wanted)
+
+
 def _read_follow(catalogs, refresh=True):
     """What ``model_follow.fleet_view()`` says about the tables, reading the lists this read already
     holds (no list is asked for again); None when it cannot say."""
     try:
         return utility("model_follow").fleet_view(read_catalog=lambda harness: catalogs[harness],
-                                                  probe=_cli_probe(refresh))
+                                                  probe=_cli_probe(refresh, catalogs))
     except Exception:
         return None
 
@@ -1191,7 +1204,8 @@ def read_model_config(refresh=True):
 
     ``refresh=False`` is the read made inside the input handling after a write: it asks no harness
     CLI anything (the CLI notes use what the CLI was last asked). A background read asks a harness's
-    CLI only the first time; the reads after it use that answer."""
+    CLI the first time, and again only when what it remembers is another version than the harness's
+    list names; otherwise it uses the remembered answer."""
     import importlib.util
     model_config = utility("model_config")
     profile_map, choices, main_only, context, profile_target = {}, {}, {}, {}, {}

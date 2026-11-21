@@ -772,6 +772,13 @@ def _isolated(root, *, followed=True, slow_claude=False, list_version="0.170.0")
             "PATH": f"{root / 'bin'}:/usr/bin:/bin"}
 
 
+def _new_version(root, version):
+    """The codex list and the fake codex CLI both say ``version`` from now on (as after the CLI was raised)."""
+    cache, script = root / "codex" / "models_cache.json", root / "bin" / "codex"
+    cache.write_text(cache.read_text().replace('"client_version":"0.170.0"', '"client_version":"%s"' % version))
+    script.write_text(script.read_text().replace("0.170.0 (fake", f"{version} (fake"))
+
+
 def _env(root, **kw):
     """The environment of an isolated HOME and nothing else (a pinned config home of the caller is not kept)."""
     return mock.patch.dict(os.environ, _isolated(root, **kw), clear=True)
@@ -941,6 +948,67 @@ class NoProcessInTheInput(unittest.TestCase):
                     again = focus.read_model_config()
                 self.assertEqual(_calls(root), asked)
                 self.assertEqual(again["follow"], first["follow"])
+
+    def _another_line(self, models):
+        return [note for note in models["follow"]["cli"] if note["kind"] == "list-from-another-cli"]
+
+    def test_a_list_and_a_cli_raised_together_make_the_next_background_read_ask_again_and_the_line_never_stands(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with _env(root, list_version="0.170.0"):
+                focus.read_model_config()                               # Fleet remembers 0.170.0
+                self.assertEqual(_calls(root).count("codex"), 1)
+                _new_version(root, "0.171.0")                           # the CLI is raised and writes its list
+                models = focus.read_model_config()                      # the same version no longer: asks again
+                self.assertEqual(_calls(root).count("codex"), 2)
+                self.assertEqual(self._another_line(models), [])
+                self.assertFalse(any("model list is from" in row for row in
+                                     picture.section_text(models, 140, "balanced-deep/codex", TODAY)))
+                for _again in range(3):                                 # and the reads after it are quiet again
+                    models = focus.read_model_config()
+                self.assertEqual(_calls(root).count("codex"), 2)
+                self.assertEqual(self._another_line(models), [])
+
+    def test_a_list_alone_of_another_version_asks_once_per_background_read_and_the_line_stands(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with _env(root, list_version="0.163.0"):
+                for count in (1, 2, 3):
+                    models = focus.read_model_config()
+                    self.assertEqual(_calls(root).count("codex"), count)
+                    self.assertEqual([(n["version"], n["list_version"]) for n in self._another_line(models)],
+                                     [("0.170.0", "0.163.0")])
+                self.assertFalse((root / "refreshed").exists())          # nothing asked codex for its list
+                _new_version(root, "0.163.0")                           # the CLI is changed to the list's version
+                self.assertEqual(self._another_line(focus.read_model_config()), [])
+                self.assertEqual(_calls(root).count("codex"), 4)
+                focus.read_model_config()
+                self.assertEqual(_calls(root).count("codex"), 4)
+
+    def test_the_input_read_starts_no_process_with_the_list_the_same_or_another(self):
+        for list_version in ("0.170.0", "0.163.0"):
+            with self.subTest(list_version=list_version), TemporaryDirectory() as temp:
+                root = Path(temp)
+                focus._CLI_SEEN.clear()
+                with _env(root, list_version=list_version):
+                    self.assertEqual(focus.read_model_config(refresh=False)["follow"]["cli"], [])   # never asked
+                    self.assertEqual(_calls(root), [])
+                    focus.read_model_config()
+                    asked = _calls(root)
+                    for _again in range(3):
+                        focus.read_model_config(refresh=False)
+                    self.assertEqual(_calls(root), asked)
+
+    def test_a_list_that_names_no_version_uses_the_remembered_answer(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with _env(root, list_version="0.170.0"):
+                focus.read_model_config()
+                cache = root / "codex" / "models_cache.json"
+                cache.write_text(cache.read_text().replace('"client_version":"0.170.0",', ""))
+                _new_version(root, "0.171.0")
+                focus.read_model_config()
+                self.assertEqual(_calls(root).count("codex"), 1)
 
     def test_a_harness_the_background_read_never_asked_about_is_not_known_to_the_input_read(self):
         with TemporaryDirectory() as temp:
