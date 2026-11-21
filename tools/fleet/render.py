@@ -3300,8 +3300,10 @@ def _explorer_apply_effects(effects, vm, *, snapshot=None):
     if not isinstance(result, Mapping) or not result.get("model_action"):
         return result
 
+    from .explorer.state import finish_follow_draft
     state = _explorer_state_for(_EXPLORER_STATE, 0)
-    _EXPLORER_STATE = _replace_state(state, status=str(result.get("message") or "model set finished"))
+    _EXPLORER_STATE = finish_follow_draft(
+        _replace_state(state, status=str(result.get("message") or "model set finished")), model_actions, result)
     refreshed = result.get("models")
     if isinstance(refreshed, Mapping):
         for name in ("_EXPLORER_MODEL", "_EXPLORER_PUBLISHED_MODEL", "_EXPLORER_COMPOSE_MODEL"):

@@ -2,6 +2,7 @@
 from collections.abc import Mapping
 
 from ..config import ui_text
+from . import follow as follow_view
 from .grid import CellGrid, cell_width, clip_cells
 
 X = 34
@@ -66,6 +67,213 @@ def _wrapped_chips(grid, x, y, items, current, chosen, key, right):
         if x + size <= right:
             x = _chips(grid, x, y, (item,), current, chosen, key, right)
     return x, y
+
+
+# ---- model follow: marks beside the table's cells, the lines under the table, the chosen cell's box ----
+
+_MARK_KEY = {"^": "success", "=": "lvl_y", "!": "g_blocked"}
+_GROUP_KEY = {"followed": "success", "next": "soft", "held": "g_blocked", "proposal": "lvl_y"}
+_UNDO = "[ undo ]"
+_OPEN = "ui:fopen:"
+
+
+def _plural(count, word):
+    return f"{count} {word}" if count == 1 else f"{count} {word}s"
+
+
+def _follow(vm, data):
+    """The follow facts for this frame, or None (nothing about following is drawn)."""
+    try:
+        return follow_view.Follow.read(data, getattr(vm, "clock", None))
+    except Exception:
+        return None
+
+
+def _summary_plan(view, profiles, shown, values):
+    """The rows under the table: ``[{"kind": group|item|note|legend, ...}]``, [] when there is nothing to say."""
+    try:
+        name_of = lambda model: shown.get(model, model)               # noqa: E731
+        out = []
+        for name, rows in view.groups(profiles):
+            opened = values.get(_OPEN + name) == "open"
+            one = rows[0] if len(rows) == 1 else None
+            fit = None
+            if name == "followed":
+                date = max(row["cell"]["since"]["date"] for row in rows)[5:]
+                moved = len(view.moved_lines(rows))
+                text = f"followed {date} · " + (f"{one['harness']} {one['target']}" if one
+                                                else _plural(len(rows), "cell") + (
+                                                    f" + {_plural(moved, 'linked line')}" if moved else ""))
+            elif name == "next":
+                linked = len(view.linked(rows))
+                text = "next " + (f"{one['harness']} {one['target']}" if one else
+                                  _plural(len(rows), "cell") + (f" + {_plural(linked, 'linked line')}"
+                                                                if linked else ""))
+                note, short = view.table_note(rows), view.table_note(rows, short=True)
+                if not note:                       # no read-only table: the line promises the next update
+                    text += " · on the next update or refresh"
+                else:                              # the notice first: a narrow row cuts the promise, never the notice
+                    fit = (text + note, [(text, note, 12), (text, short, 12), short.removeprefix(" · ")])
+                    text += note if view.every_read_only(rows) else note + " · on the next update or refresh"
+            elif name == "held":
+                text = "held " + (f"{one['harness']} {one['target']} · back on {name_of(one['cell']['model'])}"
+                                  if one else _plural(len(rows), "cell"))
+            else:
+                following = one["cell"]["next"] if one else None
+                reason = f" ({following['reason']})" if one and following["reason"] else ""
+                text = "proposal " + (f"{one['harness']} {one['target']} · {name_of(following['model'])}{reason}"
+                                      if one else _plural(len(rows), "cell"))
+            out.append({"kind": "group", "name": name, "text": text, "opened": opened, "fit": fit})
+            if opened:
+                out += [{"kind": "item", "text": row["text"], "profile": row["profile"],
+                         "harness": row["harness"]} for row in rows]
+                if name == "next":
+                    out += [{"kind": "item", "text": line, "profile": None, "harness": None}
+                            for line in view.linked(rows)]
+                elif name == "followed":
+                    out += [{"kind": "item", "text": "linked " + follow_view.line_label(key), "profile": None,
+                             "harness": None} for key in view.moved_lines(rows)]
+        out += [{"kind": "note", "text": line} for line in view.cli_lines()]
+        return out
+    except Exception:
+        return []
+
+
+def _draw_summary(grid, plan, legend, x, y, right):
+    """Draw the summary rows from ``y``; returns how many rows were used."""
+    room = right - x + 1
+    start = y
+    for item in plan:
+        kind = item["kind"]
+        if kind == "group":
+            glyph = follow_view.GLYPH[item["name"]]
+            grid.put(x, y, glyph, _GROUP_KEY[item["name"]], limit=right + 1)
+            text = item["text"]
+            if item["fit"] and cell_width(text) > room - 4:       # a read-only notice: cut the promise, then the head
+                must, fallback = item["fit"]
+                text = clip_cells(text, room - 4) if cell_width(must) <= room - 4 else _fit(fallback, room - 4)
+            end = grid.put(x + 2, y, clip_cells(text, room - 4), "soft", limit=right + 1)
+            grid.put(end + 1, y, "▾" if item["opened"] else "▸", "soft", limit=right + 1)
+            grid.add_hit(y, x, right + 1, ("ui", "fopen:" + item["name"], "closed" if item["opened"] else "open"))
+        elif kind == "item":
+            grid.put(x + 2, y, clip_cells(item["text"], room - 2), "dim", limit=right + 1)
+            if item["profile"]:
+                grid.add_hit(y, x + 2, right + 1, ("ui", "sel", f"{item['profile']}/{item['harness']}"))
+        else:
+            grid.put(x, y, clip_cells(item["text"], room), "dim", limit=right + 1)
+        y += 1
+    if legend:
+        cursor = x
+        for glyph, word in legend:
+            if cursor > x:
+                cursor += 3
+            cursor = grid.put(cursor, y, glyph, _MARK_KEY[glyph], limit=right + 1)
+            cursor = grid.put(cursor, y, " " + word, "dim", limit=right + 1)
+        y += 1
+    return y - start
+
+
+def _fit(candidates, room):
+    """The first candidate that fits in ``room`` cells, else the last one cut with an ellipsis.
+
+    A candidate may be ``(name, tail[, keep])``: when it does not fit whole, the ``name`` is cut and
+    the ``tail`` stays, as long as the name keeps ``keep`` (8) cells; else the next candidate is tried."""
+    for text in candidates:
+        if isinstance(text, tuple):
+            name, tail, keep = (*text, 8)[:3] if len(text) == 2 else text
+            left = room - cell_width(tail)
+            if left >= min(keep, cell_width(name)):
+                return clip_cells(name, left) + tail
+        elif cell_width(text) <= room:
+            return text
+    last = candidates[-1]
+    return clip_cells(last if isinstance(last, str) else "".join(last), max(1, room))
+
+
+def _box_plan(view, harness, profile, shown, values, table_effort=None):
+    """What the chosen cell's box adds: status lines, the ``follow`` row and the draft, or None."""
+    try:
+        cell = view.cell(harness, profile)
+        if cell is None:
+            return None
+        name_of = lambda model: shown.get(model, model)               # noqa: E731
+        since, following = cell["since"], cell["next"]
+        lines = []
+        if cell["state"] == "follow" and cell["why"] == "followed" and since:
+            date, before = since["date"], name_of(since["from"] or "?")
+            back = follow_view.effort_after_undo(cell, table_effort)       # what the cell shows once put back
+            effort = f" · {back}" if back else ""
+            lines.append(("followed", [f"{date} · from {before}{effort}", f"{date} · from {before}",
+                                       f"{date[5:]} · from {before}"], _UNDO))
+        elif cell["state"] == "keep" and since:
+            date = since["date"]
+            if cell["why"] == "reverted":
+                undone = name_of(since["to"] or "?")
+                lines.append(("kept", [f"{date} · undone from {undone}", f"{date[5:]} · undone from {undone}"], None))
+            else:
+                lines.append(("kept", [date], None))
+        elif cell["state"] == "held":
+            date = (since or {}).get("date") or "?"
+            refused = name_of(cell["held"] or (since or {}).get("to") or "?")
+            lines.append(("held", [f"{date} · {refused} rejected · back on {name_of(cell['model'])}",
+                                   f"{date[5:]} · {refused} rejected · back on {name_of(cell['model'])}"], None))
+        if following and cell["state"] != "keep":
+            idle = view.table_note([{"harness": harness}])
+            ro = ((name_of(following["model"]), idle), (name_of(following["model"]), " · read-only"), "read-only")
+            if following["branch"] == "will-follow":
+                lines.append(("next", list(ro) if idle else
+                                      [f"{name_of(following['model'])} · on the next update or refresh"], None))
+            elif following["branch"] == "proposal":
+                reason = f" · {following['reason']}" if following["reason"] else ""
+                lines.append(("proposal", [f"{name_of(following['model'])}{reason} · choose it yourself",
+                                           f"{name_of(following['model'])}{reason}"], None))
+            elif following["branch"] == "revert":
+                lines.append(("next", list(ro) if idle else
+                                      [f"{name_of(following['model'])} · back on the next update or refresh"], None))
+        word = values.get("ui:fol")
+        undo = follow_view.undo_request(cell)
+        requested = None
+        if word == "keep" and cell["state"] != "keep":
+            requested = "keep"
+        elif word == "follow" and cell["state"] in ("keep", "held"):
+            requested = "follow"
+        elif word == "undo" and undo:
+            requested = undo
+        moved = len((since or {}).get("lines") or ())
+        then = ["then Keep" + (f" · linked line{'s' if moved > 1 else ''} stay{'' if moved > 1 else 's'}"
+                               if moved else ""), "then Keep"]
+        return {"cell": cell, "lines": lines, "rows": len(lines) + 1, "word": word, "requested": requested,
+                "undo": undo, "kept": cell["state"] == "keep", "then": then,
+                "back_effort": follow_view.effort_after_undo(cell, table_effort),
+                "skips": name_of(cell["held"]) if cell["state"] == "held" and cell["held"] else None}
+    except Exception:
+        return None
+
+
+def _draw_box_follow(grid, box, harness, bx, y, right):
+    """The status lines and the ``follow`` row of the chosen cell, from row ``y``; one row each."""
+    for index, (label, candidates, chip) in enumerate(box["lines"]):
+        grid.put(bx - 9, y, label, "label", limit=right)
+        chip_x = right - 13
+        room = (chip_x - 2 if chip else right - 1) - bx
+        text = _fit(candidates, room)
+        grid.put(bx, y, text, "soft", limit=right)
+        if chip:
+            drafted = box["word"] == "undo" and box["requested"]
+            grid.put(chip_x, y, _UNDO, "chip_on" if drafted else "title_dim", limit=right)
+            grid.add_hit(y, chip_x, chip_x + len(_UNDO), ("ui", "fol", "undo"))
+        y += 1
+    grid.put(bx - 9, y, "follow", "label", limit=right)
+    chosen = box["word"] if box["word"] in ("keep", "follow") and box["requested"] else None
+    end = _chips(grid, bx, y, ("follow", "keep"), "keep" if box["kept"] else "follow", chosen, "fol",
+                 right - 2, {"follow": "Follow", "keep": "Keep"})
+    if box["skips"]:
+        grid.put(end + 1, y, "skips " + box["skips"], "dim", limit=right - 1)
+    elif box["requested"] and box["word"] == "undo":      # the end of this row: the list below keeps its own note row
+        room = right - 1 - (end + 2)
+        text = next((item for item in box["then"] if cell_width(item) <= room), None)
+        if text:
+            grid.put(end + 2, y, text, "dim", limit=right - 1)
 
 
 PICK_ROWS = 8          # visible rows of the model list; the box grows by this many rows, the list scrolls
@@ -636,6 +844,8 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
     if not slim:
         grid.put(x + pool_col, y, "DISPATCH POOL", "head", tint=234, limit=right + 1)
     y += 1
+    view = _follow(vm, data)
+    shown_marks = set()
     for prof in profiles:
         grid.put(x + 3, y, prof, "soft" if prof != "top" else "dim")
         for h, col in columns.items():
@@ -645,6 +855,11 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
             if (prof, h) == (profile, harness):
                 grid.fill(hit_left, min(right, hit_right + 1), y, " ", tint=236)
                 grid.put(x + col - 2, y, "▶", "soft")
+            elif view is not None and current is not None:
+                mark = view.mark(h, prof)
+                if mark:
+                    grid.put(x + col - 2, y, mark, _MARK_KEY[mark])
+                    shown_marks.add(mark)
             _model_cell(grid, x + col, y, h, current, shown, effort_keys,
                         col_width + (6 if h == "opencode" else 0))
             if (prof, h) == (profile, harness):
@@ -685,7 +900,12 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
             if index:
                 cursor = grid.put(cursor, y, "  ·  ", "dim", limit=right + 1)
             cursor = grid.put(cursor, y, f"{harness_name} {display}", "dim", limit=right + 1)
-    y += 2
+    summary = []
+    if view is not None:
+        summary = _summary_plan(view, profiles, shown, values)
+    legend = tuple(item for item in follow_view.LEGEND if item[0] in shown_marks)
+    used = _draw_summary(grid, summary, legend, x, y + (1 if main_items else 0), right) if (summary or legend) else 0
+    y += 2 + used
     current = _dict(profile_map.get(harness)).get(profile)
     model_choice = values.get("ui:model")
     effort_choice = values.get("ui:effort")
@@ -697,7 +917,9 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
     harness_choices = tuple(choices.get(harness, ()))
     picking = not _chips_fit(harness_choices, shown, right - 2 - (x + 13))
     extra = PICK_ROWS if picking else 0
-    box_top, box_bottom = y, y + 8 + extra
+    box = (_box_plan(view, harness, profile, shown, values, current_effort) if view is not None else None)
+    extra_rows = box["rows"] if box else 0           # the status lines and the follow row
+    box_top, box_bottom = y, y + 8 + extra + extra_rows
     box_left = x + 1
     for col in range(box_left + 1, right):
         grid.put(col, box_top, "─", "line")
@@ -716,14 +938,24 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
         cursor = grid.put(cursor, box_top, text, key)
     grid.put(cursor, box_top, " ", "branch_s")
     grid.put(box_left + 3, y + 1, "now", "label")
-    _model_cell(grid, box_left + 12, y + 1, harness, current, shown, effort_keys, 40, limit=right)
+    now_end = _model_cell(grid, box_left + 12, y + 1, harness, current, shown, effort_keys, 40, limit=right)
     catalog = _dict(_dict(data.get("catalog_sources")).get(harness))
     missing_current = (current_model and catalog.get("state") in ("available", "empty")
                        and not any(_same_model(item, current_model) for item in harness_choices))
+    draft = box["requested"] if box else None            # a keep / follow / undo waiting for [ apply ]
+    if draft:
+        changed = False
+    if draft and box["word"] == "undo":
+        grid.put(now_end + 2, y + 1, "→", "line", limit=right)
+        _model_cell(grid, now_end + 5, y + 1, harness,
+                    (box["cell"]["since"]["from"], box["back_effort"]), shown, effort_keys, 40, limit=right)
     if changed:
         grid.put(box_left + 56, y + 1, "→", "line", limit=right)
         _model_cell(grid, box_left + 59, y + 1, harness, (model_choice, effort_choice), shown, effort_keys, 40,
                     limit=right)
+    if box:
+        _draw_box_follow(grid, box, harness, box_left + 12, y + 2, right)
+    y += extra_rows
     grid.put(box_left + 3, y + 3, "model", "label")
     if picking:
         _model_picker(grid, box_left + 12, y + 3, right - 1, harness_choices, current_model,
@@ -745,37 +977,45 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
     _chips(grid, box_left + 12, y + 4 + extra, effort_options, current_effort, values.get("ui:effort"), "effort",
            right - 2)
     command = f"hearting model set {harness} profile/{profile} {model_choice}@{effort_choice}"
+    if draft:
+        command = f"hearting model set {harness} {box['cell']['target']} {draft}"
     command_y = y + 6 + extra
     grid.put(box_left + 3, command_y, "$ ", "line")
     edge = right                   # the box's right border is column ``right``: nothing crosses it
     # the two buttons follow the command on its row and stay inside the box; a long model id
     # gives up the command's tail, never the buttons
     dry_x = min(box_left + 5 + cell_width(command) + 3, right - 25)
-    grid.put(box_left + 5, command_y, command, "soft" if changed else "dim",
-             limit=dry_x - 2 if changed else edge)
-    if changed:
-        grid.put(dry_x, command_y, "[ dry-run ]", "title_dim", limit=edge)
-        grid.add_hit(command_y, dry_x, dry_x + 11,
-                     ("models.apply", harness, "profile", profile, model_choice,
-                      effort_choice, True))
+    button_y = command_y
+    if draft and dry_x < box_left + 5 + cell_width(command) + 3:
+        # a keep / follow / undo command is shown whole: its buttons take the row above when they do not fit beside it
+        dry_x, button_y = box_left + 5, command_y - 1
+    grid.put(box_left + 5, command_y, command, "soft" if changed or draft else "dim",
+             limit=dry_x - 2 if (changed or draft) and button_y == command_y else edge)
+    if draft:
+        actions = (("models.apply", harness, "follow", box["cell"]["target"], draft, True),
+                   ("models.apply", harness, "follow", box["cell"]["target"], draft, False))
+    else:
+        actions = (("models.apply", harness, "profile", profile, model_choice, effort_choice, True),
+                   ("models.apply", harness, "profile", profile, model_choice, effort_choice, False))
+    if changed or draft:
+        grid.put(dry_x, button_y, "[ dry-run ]", "title_dim", limit=edge)
+        grid.add_hit(button_y, dry_x, dry_x + 11, actions[0])
         apply_x = dry_x + 11 + 2
-        grid.put(apply_x, command_y, "[ apply ]", "chip_on", limit=edge)
-        grid.add_hit(command_y, apply_x, apply_x + 9,
-                     ("models.apply", harness, "profile", profile, model_choice,
-                      effort_choice, False))
+        grid.put(apply_x, button_y, "[ apply ]", "chip_on", limit=edge)
+        grid.add_hit(button_y, apply_x, apply_x + 9, actions[1])
     y += 10 + extra
     if slim:
-        grid.put(box_left + 3, box_top + 7 + extra, "pool", "label")
+        grid.put(box_left + 3, box_top + 7 + extra + extra_rows, "pool", "label")
         pool = pools.get(profile)
         if pool:
             order, note = pool
             pool_order = order[0] if order and isinstance(order[0], (list, tuple)) else order
-            cursor = grid.put(box_left + 12, box_top + 7 + extra, " › ".join(pool_order), "soft",
+            cursor = grid.put(box_left + 12, box_top + 7 + extra + extra_rows, " › ".join(pool_order), "soft",
                               limit=right - 2)
             if note:
-                grid.put(cursor, box_top + 7 + extra, "  " + note, "dim", limit=right - 2)
+                grid.put(cursor, box_top + 7 + extra + extra_rows, "  " + note, "dim", limit=right - 2)
         else:
-            grid.put(box_left + 12, box_top + 7 + extra, "route-sealed explicit choice only", "dim", limit=right - 2)
+            grid.put(box_left + 12, box_top + 7 + extra + extra_rows, "route-sealed explicit choice only", "dim", limit=right - 2)
     foot = "models.conf → .bak backup · new sessions and launches only · routes keep their depth, launches read this table"
     grid.put(box_left + 2, box_bottom, " ", "branch_s")
     grid.put(box_left + 3, box_bottom, foot, "dim", limit=right)
