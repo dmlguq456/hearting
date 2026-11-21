@@ -1858,10 +1858,6 @@
    "en": "↑↓ · Enter open",
    "ko": "↑↓ · Enter 열기"
   },
-  "fleet.session_panel.popup_status_page": {
-   "en": "Esc or Enter back to the list",
-   "ko": "Esc 또는 Enter 목록으로 돌아가기"
-  },
   "fleet.session_panel.popup_unfold": {
    "en": "p open panel",
    "ko": "p 패널 펼치기"
@@ -2257,10 +2253,6 @@
   "fleet.status.popup.all": {
    "en": "all {count}",
    "ko": "전체 {count}"
-  },
-  "fleet.status.popup.cut": {
-   "en": "… {count} more in the full document",
-   "ko": "… {count}개 더는 문서 전체에서"
   },
   "fleet.status.popup.full": {
    "en": "full document",

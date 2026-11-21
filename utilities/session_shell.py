@@ -1717,20 +1717,21 @@ def _panel_status(binding, request):
 
 
 def _status_popup(binding, request, columns, colors, no_color):
-    """The status popup, in the two parts the host asks for one after the other (``part``): ``doc`` is the whole
-    document at the popup's width, with no wait on Fleet's collection (the value the button already read comes
-    with the request: ``session_status.held``, and only a request without one reads it); ``fleet`` is Fleet's
-    status lines for this project (``session_status.popup_head_rows``), which the host puts above the document
-    when they arrive. A document that cannot be read answers ``ok: False`` (the host draws its own dim word and
-    keeps nothing, so the next opening reads it again) and Fleet's part is not asked. Without ``part``: both, as
-    one answer. For the generated campaign page the document part also carries ``list`` (11-21): the list screen the
-    popup opens on, as entries the host lays out by its own state (``session_status.listing_entries``); the rows
-    stay the whole document, which the screen's ``full document ›`` shows. Any other document has no ``list``."""
+    """The status popup, in the parts the host asks for (``part``): ``doc`` is the whole document at the popup's width, with
+    no wait on Fleet's collection (the value the button already read comes with the request: ``session_status.held``, and
+    only a request without one reads it); ``fleet`` is Fleet's status lines for this project (``session_status.popup_head_rows``),
+    which the host puts above the document when they arrive. A document that cannot be read answers ``ok: False`` (the host
+    draws its own dim word and keeps nothing, so the next opening reads it again) and Fleet's part is not asked. Without
+    ``part``: both, as one answer. ``list`` (11-21) is the popup's first screen: for the campaign page Hearting generates it
+    answers ``list``, the list screen as entries the host lays out by its own state (``session_status.listing_entries``),
+    and no rows (the document read whole is asked for with ``doc`` when ``full document ›`` is opened, and is the
+    answer it always was, rows and budget, whatever the list weighs); a list that alone passes the answer's size, and any
+    other document (a hand-written page, none, a cut one), answers as ``doc`` does, with no ``list``."""
     named = _status_request(request)
     if named is None:
         return {"ok": False, "reason": "invalid-status"}
     part = request.get("part")
-    if part not in (None, "doc", "fleet"):
+    if part not in (None, "doc", "fleet", "list"):
         return {"ok": False, "reason": "invalid-status"}
     from fleet import session_status
     view = {}
@@ -1739,7 +1740,7 @@ def _status_popup(binding, request, columns, colors, no_color):
         if view is None:
             return {"ok": False, "reason": "no-status"}
     rows = []
-    if part != "doc":
+    if part not in ("doc", "list"):
         status = None
         try:
             from fleet.session_tags import assigned_tag
@@ -1755,7 +1756,7 @@ def _status_popup(binding, request, columns, colors, no_color):
         rows = session_status.popup_head_rows(status, columns)
     listing = None
     if part != "fleet":
-        doc, listing = session_status.popup_doc(view, columns)
+        doc, listing = session_status.popup_doc(view, columns, want_list=part == "list")
         if doc is None:
             return {"ok": False, "reason": "doc-unreadable"}
         rows = rows + doc
@@ -1780,14 +1781,19 @@ def _status_popup(binding, request, columns, colors, no_color):
     def weight(value):
         return len(json.dumps({"id": 0, **value}, ensure_ascii=False).encode())
     if listing:
+        known = len(styles)
+
         def lay(rows_of):
             return [[[text, style(key), cell_width(text)] for text, key in row if text] for row in rows_of]
         entries = [{**{k: v for k, v in entry.items() if k not in ("rows", "alt")}, "rows": lay(entry["rows"]),
                     **({"alt": lay(entry["alt"])} if entry.get("alt") else {})} for entry in listing]
-        # The list comes first: the document's rows give way to it (as they give way to the answer's size), and a list
-        # that alone does not fit is left out, the popup then drawing the document as it did.
-        if weight({**result, "rows": [], "list": entries}) <= POPUP_ANSWER_BYTES:
-            result = {**result, "list": entries}
+        # The list screen's answer carries the list alone: the document's rows are the other answer (``doc``), asked for when
+        # the document is read whole, so the two never share the answer's size. A list that alone does not fit is left out and
+        # the answer is the document's, as it always was.
+        listed = {**result, "rows": [], "list": entries}
+        if weight(listed) <= POPUP_ANSWER_BYTES:
+            return listed
+        del styles[known:]            # (the styles only the list used go with it: the answer is the document's alone)
     if weight(result) <= POPUP_ANSWER_BYTES:
         return result
     low, high = 0, len(runs)      # the most rows that fit with a dim `…` under them

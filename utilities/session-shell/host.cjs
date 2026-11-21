@@ -711,7 +711,8 @@ function tableGuide(kind){
   const own=kind==='ROUTE'?label(table?.page?'popup_route_page':'popup_route','↑↓ route · Enter open')
     :kind==='NOW'?label(table?.page?'popup_now_page':'popup_now',table?.page?'Enter back to the list':'↑↓ · Enter read that part')
     // 11-21: the status popup with a list screen names its keys; one without (a hand-written page, none) keeps the keys it had.
-    :kind==='STATUS'&&table?.listing?(table.screen==='full'?label('popup_status_page','Esc or Enter back to the list'):label('popup_status','↑↓ · Enter open')):'';
+    // (the document read whole has the keys every popup has: its Esc goes back to the list, and Enter does too)
+    :kind==='STATUS'&&table?.listing&&table.screen!=='full'?label('popup_status','↑↓ · Enter open'):'';
   const fold=label(expanded?'popup_fold':'popup_unfold',expanded?'p fold panel':'p open panel');
   return [own,label('popup_keys','←→ section · PgUp/PgDn').replace('{panel}',fold)].filter(Boolean);
 }
@@ -759,6 +760,11 @@ function tableRows(inner){
     t.listView=view;t.hits=statusList.hits(view);
     return view.rows;
   }
+  // The document read whole of a page that has a list screen: its own answer (`part: 'doc'`), Fleet's lines above it.
+  if(t.kind==='STATUS'&&t.listing){
+    if(!Array.isArray(t.doc))return [[{text:t.docError?label('popup_unread','could not read'):'⠏',dim:true}]];
+    return [...(t.head||[]),...t.doc];
+  }
   return t.rows;
 }
 // The status popup is on its list screen (a generated campaign page; the document read whole is `full document ›`).
@@ -802,8 +808,9 @@ function popupNow(){
     }
     // The list screen's chosen row comes into view (the head above it too while it is within the first screen).
     if(statusListing(table)&&table.reveal&&table.listView){
-      const at=table.listView.at;
-      for(let pass=0;pass<2;pass++){if(at<table.scroll)table.scroll=at<space?0:at;else if(at>=table.scroll+space)table.scroll=at-space+1;clamp();lay();}
+      // (an item opened in place has several rows: all of them come into view when they fit, else its first stands at the top)
+      const at=table.listView.at,span=table.listView.span||1;
+      for(let pass=0;pass<2;pass++){if(at<table.scroll)table.scroll=at<space?0:at;else if(at+span>table.scroll+space)table.scroll=Math.min(at,at+span-space);clamp();lay();}
       table.reveal=false;
     }
     clamp();lay();clamp();
@@ -885,7 +892,7 @@ function askTable(){
   const openAsked=t.open||'',keyAsked=popupKeys.ROUTE,atAsked=Date.now()/1000;
   // A first screen that said `could not read again` is being read again now.
   if(t.kind==='ROUTE'&&t.stale?.failed)t.stale={...t.stale,failed:false};
-  ask(status?{part:'doc'}:{}).then(result=>{
+  ask(status?{part:'list'}:{}).then(result=>{
     if(stale())return;
     // Read at a width the popup no longer has: its rows are not this popup's; the read made for the new width stands.
     if(t.width!==width){tableAgain=true;return;}
@@ -917,15 +924,22 @@ function askTable(){
       if(reuse&&Date.now()/1000-t.readAt>=HELD_READ_AGE){t.stale={at:t.readAt,failed:false};t.collect=true;tableAgain=true;}
     }
     if(status){
-      // The document first (it waits on nothing of Fleet's); Fleet's lines come after and stand above it.
-      t.title=typeof result.title==='string'?result.title:'';t.doc=tableParts(result);t.rows=[...(t.head||[]),...t.doc];
-      // 11-21: a generated campaign page comes with its list screen, which the popup opens on; what was chosen and opened is
-      // kept by the lines' own words (a line the page no longer has falls to the top). Any other document has none.
+      // The first screen is `part: 'list'`: for a generated campaign page the page's list screen (what was chosen and opened is kept by
+      // the lines' own ids; a line the page no longer has falls to the top) and none of its rows, the document read whole being the
+      // other answer (`askDoc`); for any other document the rows as they always came, with Fleet's lines after.
+      t.title=typeof result.title==='string'?result.title:'';
       t.listing=statusEntries(result);
-      if(t.listing&&!t.screen)t.screen='list';
-      if(!t.listing)t.screen='';
-      // The first screen needs nothing of Fleet's: what is asked for the list screen is kept for the next opening at once.
-      if(t.listing&&generation===statusGeneration)statusPopup={rows:t.rows,head:t.head,doc:t.doc,title:t.title,listing:t.listing,fleetGeneration:t.fleetGeneration,width,generation};
+      if(t.listing){
+        t.rows=[];
+        if(!t.screen)t.screen='list';
+        // What the document read whole had was of an older page or width: it goes while the list is on screen (nothing draws it), and
+        // while the whole document is on screen it stays until the new one comes (`askDoc`, below).
+        if(t.screen==='list'&&(t.docGeneration!==generation||t.docWidth!==width))t.doc=null;
+        t.docError=false;
+        keepStatus(t,generation);
+      }else{
+        t.screen='';t.doc=tableParts(result);t.rows=[...(t.head||[]),...t.doc];
+      }
     }else{
       t.rows=tableParts(result);
       // The pressed or tabbed route comes into view (when no scroll of the person's came after); else the route at the
@@ -945,12 +959,52 @@ function askTable(){
   }).finally(()=>{
     tableAsking=false;
     if(tableAgain)askTable();
-    // Fleet's lines stand above the document read whole: with a list screen they are asked for when that is opened.
+    // Fleet's lines stand above the document read whole: on a list screen neither are asked for until `full document ›` is opened
+    // (and a page read again while that is on screen asks for its document and Fleet's lines again, as the popup always did).
     else if(status&&loaded&&!t.listing)askFleet();
+    else if(status&&loaded&&t.screen==='full')askDoc();
   });
 }
+// What the status popup has read, kept for the next opening (the same width and page): its first screen at once, and what the document
+// read whole and Fleet's lines already brought.
+function keepStatus(t,generation){
+  statusPopup={rows:t.rows,head:t.head,doc:t.doc,title:t.title,listing:t.listing,docGeneration:t.docGeneration,docWidth:t.docWidth,
+    fleetGeneration:t.fleetGeneration,fleetWidth:t.fleetWidth,width:t.width,generation};
+}
+// The document read whole of a page with a list screen: the document's own answer (`part: 'doc'`, the rows and budget it always had),
+// asked for when `full document ›` is opened and again when the page is read again while that is on screen; Fleet's lines follow it.
+// One at a time like Fleet's; an answer for another width or page, a gone popup or another session is not kept.
+let docAsking=false,docAgain=false,docWidth=0,docGeneration=0;
+function askDoc(){
+  const t=table;if(!t||t.kind!=='STATUS'||!t.loaded||!t.listing)return;
+  const width=t.width,generation=statusGeneration,selected=selection;
+  if(docAsking){
+    if(docWidth!==width||docGeneration!==generation)docAgain=true;
+    return;
+  }
+  docAsking=true;docAgain=false;docWidth=width;docGeneration=generation;t.docError=false;
+  const columns=Math.max(20,Math.min(200,width-4));
+  const room=Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
+  readAction({kind:POPUP_KIND.STATUS,columns,open:'',page:false,rows:room,cwd:process.cwd(),
+    routes:statusRoutes(),status:statusHeld(),part:'doc'},'popup',true).then(result=>{
+    const cur=table;
+    if(selected!==selection||!cur||cur.kind!=='STATUS'||!cur.listing)return;
+    if(cur.width!==width||statusGeneration!==generation)return;
+    if(!result?.ok){cur.docError=true;queueDisplay();return;}
+    cur.doc=tableParts(result);cur.docGeneration=generation;cur.docWidth=width;cur.docError=false;
+    keepStatus(cur,generation);
+    queueDisplay();
+  }).finally(()=>{
+    docAsking=false;
+    if(docAgain){docAgain=false;askDoc();return;}
+    const cur=table;
+    if(cur&&cur.kind==='STATUS'&&cur.listing&&cur.screen==='full'&&docFresh(cur)&&!headFresh(cur))askFleet();
+  });
+}
+function docFresh(t){return Array.isArray(t.doc)&&t.docGeneration===statusGeneration&&t.docWidth===t.width;}
+function headFresh(t){return t.head!==undefined&&t.fleetGeneration===statusGeneration&&t.fleetWidth===t.width;}
 function askFleet(){
-  const t=table;if(!t||t.kind!=='STATUS'||!t.loaded||!Array.isArray(t.doc))return;
+  const t=table;if(!t||t.kind!=='STATUS'||!t.loaded||!(t.listing||Array.isArray(t.doc)))return;
   const width=t.width,generation=statusGeneration;
   if(fleetAsking){
     // The one under way answers this popup too when it was asked at its width and generation; else once more after it.
@@ -964,14 +1018,15 @@ function askFleet(){
     routes:statusRoutes(),status:statusHeld(),part:'fleet'},'popup',true).then(more=>{
     const cur=table;
     // A failed or late Fleet part leaves the document as it stands; it is not kept, so the next opening reads again.
-    if(!more?.ok||!cur||cur.kind!=='STATUS'||!cur.loaded||!Array.isArray(cur.doc))return;
+    if(!more?.ok||!cur||cur.kind!=='STATUS'||!cur.loaded||!(cur.listing||Array.isArray(cur.doc)))return;
     // Rows laid out at another width, or read before the value changed, are not this popup's.
     if(cur.width!==width||statusGeneration!==generation)return;
     const head=tableParts(more),before=(cur.head||[]).length;
-    cur.head=head;cur.rows=[...head,...cur.doc];cur.fleetGeneration=generation;
+    cur.head=head;cur.fleetGeneration=generation;cur.fleetWidth=width;
+    if(!cur.listing)cur.rows=[...head,...cur.doc];
     // What the person was reading stays where it is when lines come in above it.
     if(cur.scroll>0&&!statusListing(cur))cur.scroll=Math.max(0,cur.scroll+head.length-before);
-    statusPopup={rows:cur.rows,head:cur.head,doc:cur.doc,title:cur.title,listing:cur.listing,fleetGeneration:generation,width,generation};
+    keepStatus(cur,generation);
     queueDisplay();
   }).finally(()=>{fleetAsking=false;if(fleetAgain){fleetAgain=false;askFleet();}});
 }
@@ -1042,7 +1097,7 @@ function openPopup(name,open='',page=false){
   if(name==='ROUTE'&&!open)open=String((rankedRoutes()[0]||{}).id||'');
   // A routes first screen (`stale`) is not carried over: the reopened popup picks its first screen again, so the
   // rows that are not a reading's own keep saying so. A route's page is not carried either (its rows are not a table's).
-  const carry=was?.kind===name&&!(name==='ROUTE'&&(was.stale||was.page||pageFirst));
+  const carry=was?.kind===name&&!(name==='ROUTE'&&(was.stale||was.page||pageFirst))&&!(name==='STATUS'&&was.listing);
   table={kind:name,rows:carry?was.rows:[],hits:[],scroll:0,open,follow:!!open&&!pageFirst,page:pageFirst,pageTop:pageFirst,routes:[],loaded:carry&&was.loaded,width:panelView.popupWidth(cols,tableKind(name)),
     ...(name==='NOW'?{sel:'',list:null,read:null,reveal:true,listScroll:0,loaded:false}:{}),
     // 11-21: the status popup's list screen state: the line chosen, the groups and items opened (by their own words).
@@ -1050,7 +1105,8 @@ function openPopup(name,open='',page=false){
   // The status popup's rows as read last, while no watch event came and the width is the same.
   const kept=name==='STATUS'&&statusPopup&&statusPopup.width===table.width&&statusPopup.generation===statusGeneration;
   if(kept)Object.assign(table,{rows:statusPopup.rows,head:statusPopup.head,doc:statusPopup.doc,title:statusPopup.title,loaded:true,
-    listing:statusPopup.listing||null,screen:statusPopup.listing?'list':'',fleetGeneration:statusPopup.fleetGeneration});
+    listing:statusPopup.listing||null,screen:statusPopup.listing?'list':'',docGeneration:statusPopup.docGeneration,docWidth:statusPopup.docWidth,
+    fleetGeneration:statusPopup.fleetGeneration,fleetWidth:statusPopup.fleetWidth});
   if(name==='ROUTE'&&!table.loaded)Object.assign(table,routeFirst(table)||{});
   if(block.focused)block.leave();
   if(name==='MESSAGES')blockAction('r');
@@ -1123,9 +1179,12 @@ function statusActivate(t,key){
   if(did==='full')statusFull(t);
   else if(did){t.reveal=true;queueDisplay();}
 }
+// The document read whole: its own answer, unless the one the popup has is of this page and width (asked for when the popup was here
+// before, and kept), then Fleet's lines, unless those are the page's and width's too.
 function statusFull(t){
   t.listScroll=t.scroll;t.screen='full';t.scroll=0;
-  if(t.head===undefined||t.fleetGeneration!==statusGeneration)askFleet();
+  if(!docFresh(t))askDoc();
+  else if(!headFresh(t))askFleet();
   queueDisplay();
 }
 function statusBack(t){t.screen='list';t.scroll=t.listScroll||0;t.reveal=true;queueDisplay();}
@@ -1427,7 +1486,7 @@ function applyLayout() {
   // old width (Fleet's lines above the status document) are not drawn at the new one: the document stands
   // alone until the new read.
   if(table&&POPUP_KIND[table.kind]&&table.width!==panelView.popupWidth(cols,tableKind(table.kind))){table.width=panelView.popupWidth(cols,tableKind(table.kind));
-    if(table.kind==='STATUS'&&table.loaded&&Array.isArray(table.doc)){table.head=[];table.rows=[...table.doc];}
+    if(table.kind==='STATUS'&&table.loaded&&Array.isArray(table.doc)){table.head=[];if(!table.listing)table.rows=[...table.doc];}
     askTable();}
   emit('\x1b[0m\x1b[2J');rebuildDisplay();schedule();queueProjection();
 }

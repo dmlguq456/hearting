@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
 """The status popup's screens as text, from one document and a size (11-21, design C).
 
-    python3 -I -B utilities/status_popup_picture.py <campaign.md | -> [--width 100] [--height 26] [--steps first,group,item,full]
+    python3 -I -B utilities/status_popup_picture.py <campaign.md | -> [--width 100] [--height 26] [--steps first,group,item,short,full]
                                                     [--fleet-line TEXT] [--now EPOCH] [--out FILE]
 
 ``<document>`` is a ``campaign.md`` (the generated page) or any other status page; ``-`` is no document. ``--width`` and
 ``--height`` are the popup frame's size in cells (100 x 26 by default). The steps draw, in order: ``first`` the screen the
-popup opens on, ``group`` the same with the first folded group opened, ``item`` with the first item opened, ``all`` with
+popup opens on, ``group`` the same with the first folded group opened, ``item`` with the first item cut at the width opened in place,
+``short`` with the first item that is not cut pressed (it has nothing to open: the screen stays), ``all`` with
 ``all N ›`` opened, ``full`` the document read whole (``full document ›``). A page that is not the generated one has no list
 screen: ``first`` and ``full`` draw the one screen it always had.
 
 What it runs is the product's: the backend's own answer (``session_shell._status_popup``, which reads the document the way the
 popup does) laid out by the host's own list code (``utilities/session-shell/status-list.cjs``) and drawn in the popup's own frame
-(``panel-view.cjs``). It runs in an environment of its own: the document is copied into a private temporary folder, the
+(``panel-view.cjs``): the list screen from the backend's ``list`` answer and ``full document`` from its ``doc`` answer, the two the popup asks
+for. It runs in an environment of its own: the document is copied into a private temporary folder, the
 environment is emptied (no real session, setting or artifact root is read), nothing is written outside that folder, and the
 folder is removed at the end. Fleet's status lines (the ``full`` screen) are one fixture line (``--fleet-line``), never a real
 collection. The keys row is put together from the product's own words.
+
+One limit: the cell widths the pictures are laid out by are a plain rule (every character from U+2E80 up is two cells, the rest one), not
+the terminal's Unicode tables the real popup measures with, which the picture's isolated environment does not have. A combining mark, a
+zero-width character or a jamo can be one cell wider or narrower here than in the real popup (the backend's own row cut, which uses
+Fleet's measure, is the same in both).
 """
 import argparse
 import json
@@ -36,7 +43,7 @@ def main(argv=None):
     parser.add_argument("document", help="a campaign.md (or another status page), or - for no document")
     parser.add_argument("--width", type=int, default=100)
     parser.add_argument("--height", type=int, default=26)
-    parser.add_argument("--steps", default="first,group,item,full")
+    parser.add_argument("--steps", default="first,group,item,short,full")
     parser.add_argument("--fleet-line", default="fixture: Fleet's status line stands here")
     parser.add_argument("--now", type=float, default=None, help="the time the age is told against (default: now)")
     parser.add_argument("--out", default="")
@@ -100,20 +107,22 @@ def picture(args, scratch):
         "sessions": [{"tag": "e1", "repo_id": "proj", "harness": "claude", "state": "idle"}]})
     real_doc = getattr(session_status, "popup_doc", None)       # (a tree before the list screen has none: its screen is the one it had)
     with mock.patch.object(session_status, "held", lambda cwd, claim, now=None: view), \
-            mock.patch.object(session_status, "popup_doc", lambda v, w, now_=None: real_doc(v, w, now), create=True), \
+            mock.patch.object(session_status, "popup_doc", lambda v, w, now_=None, want_list=False: real_doc(v, w, now, want_list), create=True), \
             mock.patch.object(session_shell, "_popup_view_model", lambda harness, sid, kind: model), \
             mock.patch.object(session_tags, "assigned_tag", lambda harness, sid: "e1"):
+        # (a tree before the list screen answers `doc` for both: its one screen)
+        first = session_shell._status_popup(binding, dict(request, part="list" if real_doc else "doc"), columns, 256, True)
         doc = session_shell._status_popup(binding, dict(request, part="doc"), columns, 256, True)
         fleet = session_shell._status_popup(binding, dict(request, part="fleet"), columns, 256, True)
-    if not doc.get("ok"):
+    if not first.get("ok") or not doc.get("ok"):
         raise SystemExit("the document could not be read: " + json.dumps(doc))
     from fleet.config import ui_text
-    keys = {"list": ui_text("fleet.session_panel.popup_status"), "full": ui_text("fleet.session_panel.popup_status_page"),
+    keys = {"list": ui_text("fleet.session_panel.popup_status"),
             "popup_keys": ui_text("fleet.session_panel.popup_keys"), "fold": ui_text("fleet.session_panel.popup_unfold")}
-    title = str(doc.get("title") or "STATUS")
+    title = str(first.get("title") or "STATUS")
     rest = title[len("STATUS"):] if title.startswith("STATUS") else ""
     steps = [step for step in args.steps.split(",") if step]
-    drawn = run_node(node, helper, scratch, {"mode": "draw", "cols": cols, "rows": rows, "answer": doc, "fleet": fleet if fleet.get("ok") else None,
+    drawn = run_node(node, helper, scratch, {"mode": "draw", "cols": cols, "rows": rows, "answer": first, "document": doc, "fleet": fleet if fleet.get("ok") else None,
                                        "sections": SECTIONS, "keys": keys, "title_rest": rest, "steps": steps})
     return "{} x {} popup frame\n\n{}\n".format(args.width, args.height, drawn.rstrip("\n"))
 
