@@ -596,7 +596,7 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
 
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _BACKLOG_UPDATED = re.compile(r"^갱신 ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2})$")
-_BACKLOG_HEADING = re.compile(r"^##(?:[ \t]|$)")
+_BACKLOG_HEADING = re.compile(r"^ {0,3}##(?:[ \t]|$)")
 
 
 def _backlog_updated(line: str) -> str:

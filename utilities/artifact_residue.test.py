@@ -193,8 +193,9 @@ class ClassificationTests(ResidueFixture):
 
     def test_a_root_document_is_never_residue(self):
         self.seed("backlog.md", "# Backlog\n## 2026-01-01_some-campaign\n- a job\n")
+        self.assertTrue(P.ROOT_DOCUMENT_NAMES)  # the loop below has something to do
         for name in P.ROOT_DOCUMENT_NAMES:
-            self.assertTrue(RES._is_runtime_owned(name), name)
+            self.assertTrue(RES._is_runtime_owned_entry(self.root / name), name)
         self.assertEqual(list(RES.iter_residue_files(self.root)), [])
         status = RES.status(self.root)
         self.assertEqual(status["legacy_top_level"], "empty")
@@ -203,6 +204,20 @@ class ClassificationTests(ResidueFixture):
         self.assertEqual(plan["totals"]["files"], 0)
         self.assertEqual(RES._prune_empty(self.root), [])
         self.assertEqual((self.root / "backlog.md").read_text(encoding="utf-8").splitlines()[0], "# Backlog")
+
+    def test_a_folder_or_a_link_named_as_a_root_document_is_residue(self):
+        outside = Path(self._tmp.name) / "elsewhere.md"
+        outside.write_text("x\n", encoding="utf-8")
+        (self.root / "backlog.md").mkdir()
+        self.seed("backlog.md/x.md")
+        self.assertFalse(RES._is_runtime_owned_entry(self.root / "backlog.md"))
+        self.assertEqual(list(RES.iter_residue_files(self.root)), ["backlog.md/x.md"])
+        shutil.rmtree(self.root / "backlog.md")
+        for target in (outside, Path(self._tmp.name) / "no-such-file.md"):  # a link, then a broken link
+            (self.root / "backlog.md").symlink_to(target)
+            self.assertFalse(RES._is_runtime_owned_entry(self.root / "backlog.md"))
+            self.assertEqual(list(RES.iter_residue_files(self.root)), ["backlog.md"])
+            (self.root / "backlog.md").unlink()
 
     def test_sealed_evidence_moves_and_map_is_repointed(self):
         evidence = C.SEALED_EVIDENCE_PATHS[2]  # plans/2026-08-25_artifact-knowledge-index-w7-e2-e3

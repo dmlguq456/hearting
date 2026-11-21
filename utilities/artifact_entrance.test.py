@@ -1778,12 +1778,45 @@ class BacklogTests(SectionFixture):
         self.assertEqual(self._count("## C\n```\n- never closed\n- still fenced\n"), 0)    # an open fence runs to the end
         self.assertEqual(self._count("## C\n    ```\n- one\n"), 1)                        # four spaces is no fence
 
+    def test_a_heading_may_be_indented_up_to_three_spaces(self):
+        self.spec(5)
+        self.assertEqual(self._count("# B\n ## C\n- a\n"), 1)
+        self.assertEqual(self._count("# B\n   ## C\n- a\n"), 1)
+        self.assertEqual(self._count("# B\n   ##\n- a\n"), 1)
+        self.assertEqual(self._count("# B\n    ## C\n- a\n"), 0)       # four spaces is no heading
+        self.assertEqual(self._count("# B\n\t## C\n- a\n"), 0)
+        self.assertEqual(self._count("# B\n ### C\n- a\n"), 0)
+        self.assertEqual(self._count("# B\n ## C\n - indented\n- a\n"), 1)  # the job itself stays at the left edge
+
+    def test_the_update_line_ends_at_an_indented_heading_but_not_at_a_four_space_one(self):
+        self.spec(5)
+        def updated(text):
+            (self.root / "backlog.md").write_text(text, encoding="utf-8")
+            return E._backlog(self.root)["updated"]
+        self.assertEqual(updated("# B\n ## C\n갱신 2026-11-21 23:10\n- a\n"), "")
+        self.assertEqual(updated("# B\n    ## C\n갱신 2026-11-21 23:10\n## D\n"), "2026-11-21 23:10")
+
+    def test_the_counting_rule_is_by_the_shape_of_the_line_not_by_markdown(self):
+        self.spec(5)
+        self.assertEqual(self._count("## C\n- - -\n"), 1)                             # a rule in Markdown, a job here
+        self.assertEqual(self._count("## C\n<!--\n- hidden\n-->\n- one\n"), 2)     # a comment is not read
+        self.assertEqual(self._count("## C\n```\n## D\n```\n- one\n"), 1)           # a fenced heading is no heading
+        self.assertEqual(self._count("```\n## D\n```\n- one\n"), 0)                 # so no heading opens the jobs
+        self.assertEqual(self._count("## C\n```\n- f\n``` x\n- g\n"), 0)            # text after a closer: still fenced
+        self.assertEqual(self._count("## C\n```\n- f\n```  \n- one\n"), 1)          # trailing spaces still close
+        self.assertEqual(self._count("## C\n```\n- f\n   ```\n- one\n"), 1)         # up to three spaces before a closer
+        self.assertEqual(self._count("## C\n> - quoted\n-\n- one\n"), 1)
+
     def test_the_counting_rule_is_written_in_the_backlog_section_of_the_meta_contract(self):
         meta = (HERE.parent / "core" / "ARTIFACT_META.md").read_text(encoding="utf-8")
         section = meta[meta.index("### `backlog.md`"):]
-        self.assertIn("A job is the top-level `- ` bullet under a `##` heading.", section)
-        self.assertIn("a fence closes only with the same character, at least as long", section)
+        self.assertIn("A job is a line whose first two characters are `- `,", section)
+        self.assertIn("at most three\n    spaces", section)
+        self.assertIn("`- - -`, and a `- ` line inside an HTML comment, each count", section)
+        self.assertIn("an unclosed fence runs to\n    the end of the file", section)
+        self.assertIn("at least as long", section)
         self.assertIn("`갱신 YYYY-MM-DD HH:MM`", section)
+        self.assertIn("surrounding\n  whitespace is ignored", section)
 
     def test_the_update_line_is_only_a_real_date_and_time_before_the_first_heading(self):
         self.spec(5)
@@ -1800,6 +1833,7 @@ class BacklogTests(SectionFixture):
                      "갱신 ２０２６-11-21 23:10"):
             self.assertEqual(updated(f"# B\n{line}\n## C\n"), "", line)
         self.assertEqual(updated("# B\n갱신 2026-13-45 99:99\n갱신 2026-11-21 23:10\n## C\n"), "2026-11-21 23:10")
+        self.assertEqual(updated("# B\n   갱신 2026-11-21 23:10   \n## C\n"), "2026-11-21 23:10")  # surrounding spaces ignored
         (self.root / "backlog.md").write_text("# B\n갱신 2026-13-45 99:99\n## C\n- a\n", encoding="utf-8")
         self.refresh()
         self.assertIn("1 items", self.entrance())

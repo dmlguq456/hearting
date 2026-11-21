@@ -562,8 +562,18 @@ def transition_window_closed(root: Path) -> bool:
 
 
 def _is_runtime_owned_top_level(name: str) -> bool:
-    return (name.startswith(".") or name in RUNTIME_OWNED_EXACT or name in ENTRANCE_NAMES
-            or name in ROOT_DOCUMENT_NAMES)
+    return name.startswith(".") or name in RUNTIME_OWNED_EXACT or name in ENTRANCE_NAMES
+
+
+def is_root_document(entry: Path) -> bool:
+    """A root document by name that is a regular file (CORE §3 "(file)").  A link, broken or not,
+    or a folder of that name is ordinary legacy content, as everywhere else."""
+    entry = Path(entry)
+    return entry.name in ROOT_DOCUMENT_NAMES and entry.is_file() and not entry.is_symlink()
+
+
+def _is_runtime_owned_entry(entry: Path) -> bool:
+    return _is_runtime_owned_top_level(entry.name) or is_root_document(entry)
 
 
 def _legacy_content_names(root: Path, *, exhaustive: bool = False) -> List[str]:
@@ -579,7 +589,7 @@ def _legacy_content_names(root: Path, *, exhaustive: bool = False) -> List[str]:
     found: List[str] = []
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
         name = entry.name
-        if _is_runtime_owned_top_level(name):
+        if _is_runtime_owned_entry(entry):
             continue
         has_content = False
         if entry.is_symlink():
