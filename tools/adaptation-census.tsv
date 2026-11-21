@@ -319,6 +319,7 @@ utility-deferred	model-config.sh
 utility-deferred	model-worker-governor.py
 utility-deferred	model_config.py
 utility-deferred	model_follow.py
+utility-deferred	model_follow_mark.py
 utility-deferred	model_outcome_record.py
 utility-deferred	model_profile.py
 utility-deferred	native_agents.py

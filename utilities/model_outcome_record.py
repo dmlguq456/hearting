@@ -14,7 +14,9 @@ replaced inside the file's lock; a writer that cannot take the lock within
 `LOCK_WAIT` seconds drops its line instead of writing, so a writer that resumes
 late never overwrites another's work. One close spends one wait, however many
 calls it makes. Nothing here changes how a close ends, which harness is chosen, or
-any retry: the lines are only recorded and read.
+any retry: the lines are only recorded and read. The one thing a confirmed refusal also
+does, inside that same wait, is hand the model to `model_follow.revert_rejected`, which
+takes a table cell that followed to it back to its earlier value.
 
 OpenCode keeps its own classification, record and reader in the usage cache;
 `read` hands it to that reader so one call reads every harness.
@@ -212,6 +214,55 @@ def read(harness, provider, model, account_scope, *, now=None, usable_max_age=US
     return dict(row)
 
 
+# The reasons an OpenCode usage-cache `unavailable` line gives when the provider refused the
+# MODEL itself. The other reasons that line carries (`credential-expired`,
+# `authentication-rejected`, `subscription-missing`, from `opencode_runtime`) say the account
+# or its key was refused, not the model: they are never read as a refusal of a model.
+OPENCODE_MODEL_REASONS = frozenset({"model-not-found", "model-unavailable"})
+
+
+def _opencode_rejected() -> frozenset:
+    """`provider/model` names OpenCode's usage cache holds as refused for the account in use.
+
+    Only a model-level reason counts, for every line of the cache (none cut), and a line is
+    read the way OpenCode itself reads it for this account (`model_availability`: its scope,
+    and a line of another credential generation is unknown).
+    """
+    tools = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from fleet.collectors import usage_cache
+    try:
+        import opencode_runtime
+    except ImportError:  # package import in focused unit tests
+        from utilities import opencode_runtime
+    found = set()
+    for row in usage_cache.unavailable_provider_rows("opencode"):
+        name = f"{row['provider']}/{row['model']}"
+        if row["model"] == "*" or row.get("reason") not in OPENCODE_MODEL_REASONS or name.lower() in found:
+            continue
+        now = opencode_runtime.model_availability(name)
+        if now.get("state") == "unavailable" and now.get("reason") in OPENCODE_MODEL_REASONS:
+            found.add(name.lower())
+    return frozenset(found)
+
+
+def rejected_models(harness) -> frozenset:
+    """The models this harness's record holds as `unavailable`, for any account scope.
+
+    Claude and Codex name a model as the record keeps it (`model_key`). OpenCode keeps its lines
+    in the usage cache and names `provider/model`; only a model-level reason counts there, for
+    the account in use (see `_opencode_rejected`). Read only; an absent or unreadable record
+    gives an empty set.
+    """
+    if harness == "opencode":
+        return _opencode_rejected()
+    lines = _load(harness) if harness in HARNESSES else None
+    return frozenset(model_key(row.get("model")) for row in (lines or {}).values()
+                     if isinstance(row, dict) and row.get("state") == "unavailable"
+                     and row.get("model"))
+
+
 def _model_launched(meta) -> str:
     """The concrete model a closed attempt launched, or "" when none was settled.
 
@@ -239,6 +290,19 @@ def _answered(note: str, failure_class: str, reason: str) -> bool:
     if failure_class in _ANSWERED_CLASSES or note.startswith("completed-"):
         return True
     return note == "dead-contract" and bool(reason) and reason != "final-handoff-invalid"
+
+
+def _go_back(harness, model, deadline) -> None:
+    """A confirmed refusal: the table cells that followed to `model` go back and hold it.
+
+    Part of this one close, so it shares the close's single wait (`deadline`); it opens the
+    table only here, when a refusal was confirmed, and never raises.
+    """
+    try:
+        import model_follow
+        model_follow.revert_rejected(harness, model, deadline=deadline)
+    except Exception:  # noqa: BLE001 - a table that cannot be edited never changes the close
+        pass
 
 
 def note_row_closed(meta) -> bool:
@@ -269,9 +333,11 @@ def note_row_closed(meta) -> bool:
         scope = str(meta.get("quota_scope") or "") if harness == "claude" else ""
         deadline = time.monotonic() + LOCK_WAIT
         if rejected:
-            return record_unavailable(harness, harness, model, scope or "unscoped",
-                                      "model-unavailable", source="registry-close",
-                                      deadline=deadline)
+            recorded = record_unavailable(harness, harness, model, scope or "unscoped",
+                                          "model-unavailable", source="registry-close",
+                                          deadline=deadline)
+            _go_back(harness, model, deadline)
+            return recorded
         return lift_unavailable(harness, harness, model, scope or "unscoped",
                                 source="registry-close", deadline=deadline)
     except Exception:  # noqa: BLE001 - a record that cannot be kept never changes the close

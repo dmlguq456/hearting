@@ -623,6 +623,47 @@ class ManagedCopyProjectionHealthTest(unittest.TestCase):
             self.assertEqual(activation._entries_healthy([entry]), (False, True))
 
 
+class ModelFollowOrderTest(unittest.TestCase):
+    """A refresh settles the user's model table before the agent definitions are drawn."""
+
+    def test_refresh_follows_the_table_first_and_the_definitions_see_the_new_table(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utilities"))
+        import model_follow
+        source = Path(__file__).resolve().parents[2]
+        rows = tuple({"id": name, "family": "gpt", "version": version, "visible": True,
+                      "deprecated": False, "efforts": None, "cost": None, "upgrade": None,
+                      "min_cli": None}
+                     for name, version in (("gpt-6.1-sol", (6, 1)), ("gpt-6-luna", (6,)),
+                                           ("gpt-6.2-sol", (6, 2))))
+        catalog = SimpleNamespace(state="available", rows=rows, client_version=None)
+        with tempfile.TemporaryDirectory() as temporary:
+            with fixture_env.patched_environment(Path(temporary) / "fixture", source):
+                activation.activate("codex", "linked", str(source))
+                conf = activation.paths.runtime_home("codex") / "agent-config" / "models.conf"
+                shipped = conf.read_bytes()
+                seen = []
+                real = activation._native_agent_entries
+
+                def spy(*args, **kwargs):
+                    seen.append(conf.read_bytes())
+                    return real(*args, **kwargs)
+
+                with mock.patch.object(model_follow, "_catalog", return_value=catalog), \
+                        mock.patch.object(model_follow, "installed_cli", return_value=(None, None)), \
+                        mock.patch.object(activation, "_native_agent_entries", side_effect=spy):
+                    report = activation.refresh("codex")
+                    again = activation.refresh("codex")
+                self.assertIn(b"CFG_TIER_DEEP_MODEL=gpt-6.1-sol", shipped)
+                self.assertTrue(seen)
+                # every drawing of the definitions (the first refresh's included) saw the new table
+                self.assertTrue(all(b"CFG_TIER_DEEP_MODEL='gpt-6.2-sol'" in text for text in seen))
+                self.assertTrue(any(line.startswith("model follow: codex tier/deep gpt-6.1-sol -> gpt-6.2-sol")
+                                    for line in report["model_follow_lines"]), report["model_follow_lines"])
+                self.assertTrue(list(conf.parent.glob("models.conf.bak*")))
+                self.assertEqual(again["model_follow_lines"], [])  # the second run changes nothing
+                self.assertEqual(again["freshness"], "fresh")
+
+
 class CodexHookTrustTest(unittest.TestCase):
     def test_codex_projection_binds_the_herdr_home_consumer_path(self):
         with tempfile.TemporaryDirectory() as temporary:

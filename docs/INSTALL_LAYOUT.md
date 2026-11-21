@@ -99,8 +99,16 @@ Every adapter ships its release default at
 once to `<runtime-home>/agent-config/models.conf`. The runtime-home copy is a
 user-owned Hearting preference surface, not a managed projection:
 
-- an existing regular file is preserved byte-for-byte on install, refresh,
-  update, reapply, and uninstall;
+- an existing regular file is preserved byte-for-byte on reapply and uninstall.
+  Every path that runs an activation changes the lines of cells that follow a newer
+  model of the user's own harness list, and leaves every other line as it is: `harness
+  runtime activate` and `refresh`, a managed release's install and `hearting update`
+  (which activate), the OpenCode install driver's guard refresh, and `hearting update`'s
+  end pass for the harnesses it handles (the chosen `--runtime`, else the activated
+  ones). Each goes through the table's edit path, with a `.bak` and a line-end record
+  (see `core/MODEL_CONFIG.md`), before the agent definitions are drawn from it. A
+  read-only table, or one whose lock another process holds, is left as it is with one
+  line; session-start, stage launch, Fleet and the status commands never write it;
 - the file is never a symlink and is not recorded as a managed copy-once file;
 - runtime model/profile consumers use the complete user file only when it is
   safe and contains every shipped key, otherwise they use the complete shipped

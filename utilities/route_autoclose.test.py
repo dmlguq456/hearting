@@ -1545,5 +1545,18 @@ class LeftoverCyclesTest(PRODUCER_FIXTURE.ProducerTestBase):
         self.assertNotIn("withdrawn", self._sweep())
 
 
+class RegistriesTest(unittest.TestCase):
+    def test_an_api_without_root_reads_only_the_explicit_registry_and_never_raises(self):
+        # artifact_cross_root_move hands the sweep the artifact_producer module, which has no ROOT.
+        import types
+        import route_autoclose
+        explicit = str(Path(tempfile.gettempdir()) / "explicit-jobs.log")
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": explicit}):
+            self.assertEqual(route_autoclose._registries(types.SimpleNamespace()), [Path(explicit)])
+            os.environ.pop("AGENT_DISPATCH_JOBS")
+            self.assertEqual(route_autoclose._registries(types.SimpleNamespace()), [])
+            self.assertEqual(route_autoclose.registries_at(None), [])
+
+
 if __name__ == "__main__":
     unittest.main()
