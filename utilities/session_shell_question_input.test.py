@@ -8,6 +8,7 @@ import importlib.util
 import json
 import re
 import shlex
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -146,6 +147,13 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                     command=shlex.join([sys.executable,str(SHELL/'entry.py'),'claude',sys.executable,str(case/'native.py')])
                     tm('new-session','-d','-s','qi','-x',str(cols),'-y','30','-c',str(case/'project'),command)
                     server=int(tm('display-message','-p','#{pid}').strip())
+                    birth=Path(f'/proc/{server}/stat').read_text().rsplit(') ',1)[1].split()[19]
+                    def stop_server():
+                        try:
+                            stat=Path(f'/proc/{server}/stat').read_text().rsplit(') ',1)[1].split()
+                            if stat[19]==birth:os.kill(server,signal.SIGTERM)
+                        except ProcessLookupError:pass
+                        except FileNotFoundError:pass
                     try:
                         def screen():return tm('capture-pane','-p','-t','qi:0.0').splitlines()
                         def waitfor(word):
@@ -219,9 +227,8 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                             frame_checks.extend(dict(layout=layout,**json.loads(line)) for line in Path(cfg['frames']).read_text().splitlines())
                         send('\x04')
                     finally:
-                        try:tm('kill-server')
-                        except subprocess.CalledProcessError:pass
-                        # Only this test's private server; its pane descendants ended with it.
+                        stop_server()
+                        # Only the recorded server PID with the same birth, never a process-name match.
                         for _ in range(50):
                             if not Path(f'/proc/{server}').exists():break
                             time.sleep(.02)
@@ -230,6 +237,8 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                 (plain/'state').write_text('idle');(plain/'config').write_text(json.dumps(cfg));(plain/'native.py').write_text(NATIVE)
                 e=dict(env,LOOP_CONFIG=str(plain/'config'),TERM='xterm-256color');sock=str(plain/'tmux.sock')
                 tm('new-session','-d','-s','qi','-x','100','-y','30',shlex.join([sys.executable,str(plain/'native.py')]))
+                server=int(tm('display-message','-p','#{pid}').strip())
+                birth=Path(f'/proc/{server}/stat').read_text().rsplit(') ',1)[1].split()[19]
                 try:
                     time.sleep(.3);begin=Path(cfg['native_output']).stat().st_size;clock=time.monotonic()
                     for _ in range(10):send('x',.1)
@@ -238,8 +247,7 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                     self.assertEqual(raw,b'x'*10)
                     send('\x04')
                 finally:
-                    try:tm('kill-server')
-                    except subprocess.CalledProcessError:pass
+                    stop_server()
                 evidence=dict(caret=measured,frame_checks=frame_checks,rates=rates,transport=transport,plain=plain_result)
                 print('QI_MEASURE='+json.dumps(evidence,ensure_ascii=False),flush=True)
                 self.assertTrue(all(x['equal'] for x in transport),transport)
