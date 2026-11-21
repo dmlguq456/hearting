@@ -1568,7 +1568,7 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
         inline = re.search(r"`([^`]*capability-route\.py complete[^`]*)`", text).group(1)
         self.assertEqual(shlex.split(inline)[3:9], ["--inline", "--node", "plan", "--evidence", f"{self.output_dir}/plan.md", "--reason"])
         self.assertNotIn("<node>", text)
-        self.assertIn("do not export or pass them", text)
+        self.assertIn("do not export them or add them to the printed commands", text)
 
     def test_unbound_cycle_states_it_and_never_guesses_a_path(self):
         text = self.steps(environ={})
@@ -1644,6 +1644,55 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
         self.assertEqual(W.owner_route_steps_prompt(SimpleNamespace(worker_type="owner", route_file=None), {}), "")
         missing = SimpleNamespace(worker_type="owner", route_file=str(self.root / "missing.json"))
         self.assertEqual(W.owner_route_steps_prompt(missing, {}), "")
+
+    def spec_route(self, *, staged):
+        """An autopilot-spec update route shape: the owner-run PRD transaction, alone or after two stages."""
+        transaction = {"id": "prd-transaction", "kind": "capability-owner", "unit": "_kernel/owner",
+                       "terminal": True, "dispatch_depth": 1, "completion_gate": "spec-atomic-transaction",
+                       "depends_on": ["review"] if staged else [],
+                       "outputs": ["spec/prd.md", "spec/pipeline_state.yaml", "version-snapshot"],
+                       "write_scope": ["spec/prd.md", "spec/pipeline_state.yaml", "spec/pipeline_summary.md",
+                                       "spec/_internal/versions/**"]}
+        stages = [{"id": "research", "kind": "pipeline-stage", "depends_on": [], "inputs": ["task"],
+                   "outputs": ["research.md"], "dispatch_depth": 2},
+                  {"id": "review", "kind": "review-worker", "depends_on": ["research"], "inputs": ["research.md"],
+                   "outputs": ["review.md"], "dispatch_depth": 2}] if staged else []
+        return {"route_id": "rt-spec", "route_hash": "sha256:" + "b" * 64,
+                "artifact_root": str(self.root / "reports dir"), "cwd": str(self.root / "repo"),
+                "human_gates": [], "human_gate_bindings": [], "nodes": [*stages, transaction]}
+
+    def test_an_owner_run_prd_transaction_gets_its_exact_spec_transaction_command(self):
+        route_path = self.root / "route with space.json"
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                text = self.steps(self.spec_route(staged=staged))
+                self.assertEqual(text.count("Route steps (sealed route rt-spec"), 1)
+                commands = re.findall(r"`([^`]*spec-transaction\.py run[^`]*)`", text)
+                self.assertEqual(len(commands), 1, text)
+                argv = shlex.split(commands[0])
+                self.assertEqual(argv[0], "python3")
+                self.assertTrue(Path(argv[1]).is_file())
+                self.assertEqual(argv[2:], ["run", "--artifact-root", str(self.root / "reports dir"),
+                                            "--worktree", str(self.root / "repo"), "--route", str(route_path),
+                                            "--node", "prd-transaction", "--", "<apply", "command>"])
+                self.assertIn("Replace only `<apply command>`", text)
+                self.assertIn("prd-transaction" + (" after review" if staged else "") + " [you run it yourself]", text)
+                help_text = subprocess.run([sys.executable, argv[1], "run", "--help"], text=True,
+                                           capture_output=True).stdout
+                for flag in ("--artifact-root", "--worktree", "--route", "--node"):
+                    self.assertIn(flag, help_text)
+                if staged:
+                    self.assertIn("once every node it runs after is finished", text)
+                    self.assertIn("Start now: `" + W.route_start_command(route_path, "research") + "`", text)
+                else:
+                    self.assertNotIn("Start now", text)
+                    self.assertNotIn("--start", text)
+                    self.assertNotIn("complete --inline", text)
+                    self.assertNotIn("Use each node's printed start command", text)
+        assigned = self.steps(self.spec_route(staged=False), worktree=str(self.root / "owner worktree"))
+        self.assertIn(shlex.join(["--worktree", str(self.root / "owner worktree")]), assigned)
+        code_route = self.steps()
+        self.assertNotIn("spec-transaction", code_route)
 
     def test_the_assignment_carries_the_block_once_and_drops_the_template_marker(self):
         path = self.write(steps_route())

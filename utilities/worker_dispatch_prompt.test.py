@@ -404,6 +404,45 @@ class WorkerDispatchPromptTest(unittest.TestCase):
             self.assertEqual(len(set(blocks.values())), 1)
 
 
+    def test_owner_adapters_print_one_spec_transaction_command_for_a_lone_owner_prd_transaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            route = {"route_id": "rt-spec-adapters", "route_hash": "sha256:" + "f" * 64,
+                     "artifact_root": str(root / "reports"), "cwd": str(root),
+                     "human_gates": [], "human_gate_bindings": [],
+                     "nodes": [{"id": "prd-transaction", "kind": "capability-owner", "unit": "_kernel/owner",
+                                "terminal": True, "dispatch_depth": 1, "depends_on": [],
+                                "completion_gate": "spec-atomic-transaction", "outputs": ["spec/prd.md"],
+                                "write_scope": ["spec/prd.md", "spec/_internal/versions/**"]}]}
+            route_path = root / "spec-route.json"
+            route_path.write_text(json.dumps(route), encoding="utf-8")
+            blocks = {}
+            for harness, (wrapper, model, _suffix) in ADAPTERS.items():
+                with self.subTest(harness=harness):
+                    spec = importlib.util.spec_from_file_location("owner_spec_steps_" + harness, wrapper)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    args = module.parser().parse_args([
+                        "--worktree", str(root), "--slug", "owner-spec", "--capability", "autopilot-spec",
+                        "--capability-mode", "update", "--intensity", "quick", "--dispatch-depth", "1",
+                        "--worker-type", "owner", "--unit", "_kernel/owner", "--prompt-text", "TASK",
+                        "--jobs", str(root / "missing-jobs.log"), *model])
+                    args.route_file = None
+                    args.route_node = None
+                    args.artifact_root = str(root / "reports")
+                    args.agent_home = module.resolve_agent_home()
+                    args.owner_route_binding = SimpleNamespace(
+                        route_file=str(route_path), route_id=route["route_id"], route_hash=route["route_hash"])
+                    render = module.prompt if harness == "opencode" else module.dispatch_prompt
+                    with mock.patch.dict(os.environ, {"AGENT_ARTIFACT_OUTPUT_DIR": str(root / "reports" / "c")}):
+                        prompt, _ = render(args)
+                    self.assertEqual(prompt.count("Route steps (sealed route rt-spec-adapters"), 1)
+                    self.assertEqual(prompt.count(f"--route {route_path} --node prd-transaction -- <apply command>"), 1)
+                    self.assertIn("spec-transaction.py run --artifact-root", prompt)
+                    blocks[harness] = prompt[prompt.index("Route steps (sealed route"):].split("\n\n")[0]
+            self.assertEqual(len(set(blocks.values())), 1)
+
+
 class FrameAssignmentPromptTest(unittest.TestCase):
     def test_real_adapter_prompts_distinguish_goal_report_from_current_frame_output(self):
         with tempfile.TemporaryDirectory() as tmp:
