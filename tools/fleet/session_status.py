@@ -15,6 +15,12 @@ The value does not read the document (11-20: the panel has the button alone, no 
 title and its age.  ``parse_groups`` / ``read_groups`` (the document's lists: what is in progress, what waits for the person,
 what ended lately, what comes later) are kept for the popup's coming list and are not called on the panel's refresh path.
 
+``popup_doc(view, width)`` is the popup's document part: the document's rows (``popup_doc_rows``) and, for the
+campaign document Hearting generates (its first line is the marker and it was read whole), ``listing``: the
+list screen the popup opens on (11-21, design C: what waits for the person first), as entries the host lays out
+by its state (which row is chosen, which groups and items are open).  Any other document (a hand-written page,
+a cut one, none) has no listing and the popup draws exactly the rows it always drew.
+
 ``held(cwd, claim)`` is the value the host already holds (its button's) taken for the popup, so the popup
 does not read what the button read: it stands only where the claim names a status document inside this
 folder's own artifact root (else ``None``, and the popup reads).
@@ -27,6 +33,7 @@ asks, gates or starts a process; ``project_status`` and ``artifact_campaign_docu
 are called, not changed.
 """
 from collections.abc import Mapping
+import hashlib
 import json
 import os
 import re
@@ -410,10 +417,29 @@ def popup_doc_rows(view, width):
 
     ``None`` when the document cannot be read (``read_text`` gave nothing): the caller answers the
     failure rather than drawing a row that looks like a document, and remembers nothing."""
-    rows = _doc_rows(view, max(1, int(width)))
-    if rows is None:
-        return None
-    return [[(transcript.clean(text), key) for text, key in row] for row in rows]
+    return popup_doc(view, width)[0]
+
+
+def popup_doc(view, width, now=None, want_list=False):
+    """``(rows, listing)``: the document's rows at ``width`` cells and, when asked, its list screen, from one read.
+
+    ``rows`` is ``None`` when the document cannot be read (see ``popup_doc_rows``).  ``listing`` is ``None`` unless
+    ``want_list`` and the document is the generated campaign page (marker on its first line) read whole; then it is
+    ``[entry]`` (see ``listing_entries``).  Without ``want_list`` the rows are the ones the popup always drew and no list
+    is made at all: the document read whole (``full document ›``) asks this way."""
+    width = max(1, int(width))
+    if not view.get("has_doc"):
+        rows, lines, cut = _doc_rows_of(view, width, None, False), None, False
+    else:
+        lines, cut = read_text(view["path"])
+        if lines is None:
+            return None, None
+        rows = _doc_rows_of(view, width, lines, cut)
+    rows = [[(transcript.clean(text), key) for text, key in row] for row in rows]
+    if not want_list or lines is None or cut or not is_generated(lines):
+        return rows, None
+    now = time.time() if now is None else now
+    return rows, listing_entries(parse_listing(lines), width, _doc_old(view, now), now)
 
 
 def _clean_all(value):
@@ -427,16 +453,202 @@ def _clean_all(value):
     return value
 
 
-def _doc_rows(view, width):
-    """The document's rows at ``width``; ``None`` when it cannot be read (no row to mistake for one)."""
-    if not view.get("has_doc"):
+def _doc_rows_of(view, width, lines, cut):
+    """The document's rows at ``width`` (``lines``: what ``read_text`` gave; None without a document)."""
+    if lines is None:
         none = ui_text("fleet.repo.no_status")
         place = [(" · " + transcript.clean(view["slot"]), "dim")] if view.get("slot") else []
         return [transcript._cut([(none, "dim")] + place, width)]
-    lines, cut = read_text(view["path"])
-    if lines is None:
-        return None
     rows = transcript.doc_rows(lines, width)
     if cut:
         rows.append([("… 64 KiB", "dim")])
     return rows
+
+
+# -- the list screen of the generated campaign document (11-21, design C) ----------------------------------------------
+#
+# The screen is the document's own words: the head (title, when it was updated, the one line),
+# what waits for the person (every bullet, each marked ``!``), what is in progress (three, then ``all N ›``), every other
+# heading as a folded line with its count, and ``full document ›``.  Which heading is which is ``_group_kind``'s reading (no
+# new rule); a heading it does not know is a folded group like the rest.  Nothing is invented: a group the document has
+# not is not drawn, a bullet is counted as written, a line that is no bullet is the group's note.
+
+CAMPAIGN_MARKER = "<!-- hearting:campaign-document v1 -->"       # utilities/campaign_document.MARKER (a test holds them equal)
+RUNNING_FIRST = 3      # in-progress items shown before ``all N ›``
+_UPDATED = re.compile(r"^(?:갱신|updated)\s*[:：]?\s*(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})", re.IGNORECASE)
+_ONE_LINE = re.compile(r"^\*\*(?:한 줄|one line)\*\*\s*[:：]\s*(.*)$", re.IGNORECASE)
+_RULE = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
+_SLOT = ("  ", None)          # the two cells in front of a chosen-able row: the host writes ``> `` there when it is chosen
+
+
+def is_generated(lines):
+    """Whether the document is the generated campaign page: its first line is the marker."""
+    return bool(lines) and str(lines[0]).strip() == CAMPAIGN_MARKER
+
+
+def parse_listing(lines):
+    """``{title, updated, summary, groups}`` of a generated campaign document's lines.
+
+    ``updated`` is ``(year, month, day, hour, minute)`` or None, ``summary`` the one line's text or ''.  ``groups`` is
+    ``[{kind, name, items, notes}]`` in the document's order: ``kind`` is ``waiting`` or ``running`` (the first heading
+    of each, by ``_group_kind``) or ``other``; ``name`` the heading as written (markdown taken off); ``items`` the
+    top-level bullets' words; ``notes`` the group's other lines (a table row, a rule, a comment and what is indented
+    or in a fence are left to the full document)."""
+    title, updated, summary, groups = "", None, "", []
+    current, level, fence, seen = None, None, False, set()
+    for raw in lines:
+        stripped = str(raw).strip()
+        if stripped.startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence:
+            continue
+        heading = _HEADING.match(stripped)
+        if heading:
+            depth, words = len(heading.group(1)), project_status._plain(heading.group(2))
+            if depth == 1:
+                title = title or words
+                current = None
+            elif level is None or depth <= level:
+                kind = _group_kind(words)
+                kind = kind if kind in ("waiting", "running") and kind not in seen else "other"
+                seen.add(kind)
+                level = level or depth
+                current = {"kind": kind, "name": words, "items": [], "notes": []}
+                groups.append(current)
+            continue
+        if current is None:
+            found = _UPDATED.match(stripped)
+            if found and updated is None:
+                updated = tuple(int(part) for part in found.groups())
+            found = _ONE_LINE.match(stripped)
+            if found and not summary:
+                summary = project_status._plain(found.group(1))
+            continue
+        if not stripped or raw[:1] in (" ", "\t") or stripped.startswith(("<!--", "|")) or _RULE.match(stripped):
+            continue
+        bullet = _BULLET.match(raw)
+        if bullet:
+            text = project_status._plain(bullet.group(1))
+            if text:
+                current["items"].append(text)
+        else:
+            current["notes"].append(project_status._plain(stripped))
+    return {"title": title, "updated": updated, "summary": summary, "groups": groups}
+
+
+def _doc_old(view, now):
+    """Whether the document is older than Fleet's own limit (``live.STATUS_STALE_DAYS``): the panel's rule."""
+    stamp = _mtime(view["path"]) if view.get("path") else None
+    try:
+        from .explorer.live import STATUS_STALE_DAYS
+    except Exception:  # noqa: BLE001 -- the limit is three days wherever Fleet's own cannot be read
+        STATUS_STALE_DAYS = 3
+    return stamp is not None and now - stamp >= STATUS_STALE_DAYS * 86400
+
+
+def _wrapped(text, width, rows, key):
+    """``text`` wrapped to ``rows`` rows at ``width`` cells; what does not fit ends the last row in ``…``."""
+    wrapped = transcript.wrap_spans([(transcript.clean(text), key)], width)
+    if len(wrapped) > rows:
+        wrapped = wrapped[:rows - 1] + [transcript._cut(wrapped[rows - 1] + [("…", key)], width)]
+    return wrapped
+
+
+def _cut_row(segments, width):
+    return transcript._cut([(transcript.clean(text), key) for text, key in segments], width)
+
+
+def _entry(rows, key=None, group=None, when=None, alt=None, text=None):
+    """One part of the screen.  ``key`` makes it a row the person can choose; ``group`` the heading it belongs to
+    (the id of the group the host's open state is kept by); ``when="open"`` shows it only while that group is open;
+    ``alt`` the rows shown instead while the group is open; ``text`` (the whole words of an item whose row was cut)
+    is what the host sets in place of the cut row, wrapped, while the person has the item open."""
+    entry = {"rows": rows}
+    for name, value in (("key", key), ("group", group), ("when", when), ("alt", alt), ("text", text)):
+        if value:
+            entry[name] = value
+    return entry
+
+
+def _digest(*parts):
+    """A short stable name for words: the keys and group ids are made of these, never of the words themselves (a heading
+    or an item can be of any length and a document can say the same words twice)."""
+    return hashlib.sha256("\0".join(parts).encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _group_ids(groups):
+    """One id per group, in order: the digest of its heading, and ``-N`` for the Nth group that says the same heading."""
+    seen, ids = {}, []
+    for group in groups:
+        base = _digest(group["name"])
+        seen[base] = seen.get(base, 0) + 1
+        ids.append(base if seen[base] == 1 else f"{base}-{seen[base]}")
+    return ids
+
+
+def listing_entries(parsed, width, old=False, now=None):
+    """The list screen at ``width`` cells as entries (see ``_entry``), the host laying them out by its state.
+
+    Every item of a group is there: the screen has no count of its own to stop at, and an answer too big for the popup's
+    limit is the caller's to leave out (the popup then draws the document as it always did).  A row that can be chosen
+    has a key made of ids (``g:<group>``, ``a:<group>``, ``i:<group>:<words digest>[:N]``, ``full``) and an item
+    whose row was cut carries its whole words (``text``)."""
+    width = max(8, int(width))
+    ui = ui_text
+    out = []
+    if parsed["title"]:
+        out.append(_entry(_wrapped(parsed["title"], width, 2, "sect")))
+    stamp = parsed["updated"]
+    if stamp:
+        year, month, day, hour, minute = stamp
+        when = f"{month:02d}-{day:02d} {hour:02d}:{minute:02d}"
+        if year != time.localtime(time.time() if now is None else now).tm_year:
+            when = f"{year}-{when}"
+        said = ui("fleet.status.popup.updated", when=when)
+    else:
+        said = ui("fleet.status.popup.updated_unknown")
+    # (how long ago is in the title band: the second line says the document's own time, and that it is old)
+    said = " · ".join(part for part in (said, ui("fleet.status.popup.old") if old else "") if part)
+    out.append(_entry([_cut_row(([("! ", "lvl_y")] if old else []) + [(said, "dim")], width)]))
+    if parsed["summary"]:
+        out.append(_entry(_wrapped(parsed["summary"], width, 2, "soft")))
+    out.append(_entry([[]]))
+    # What waits for the person first, then what is in progress, then every other heading in the document's order.
+    ids = _group_ids(parsed["groups"])
+    order = sorted(zip(parsed["groups"], ids), key=lambda pair: {"waiting": 0, "running": 1}.get(pair[0]["kind"], 2))
+    for group, gid in order:
+        name, kind, items = group["name"], group["kind"], group["items"]
+        count = len(items)
+        head = [(name, "sect"), (f" {count}", "dim")]
+        folded = kind == "other"
+        lead_rows, lead_open = ([[_SLOT, ("› ", "soft")] + head], [[_SLOT, ("▾ ", "soft")] + head]) if folded else ([[*head]], None)
+        out.append(_entry([_cut_row(lead_rows[0], width)], key=("g:" + gid) if folded else None, group=gid if folded else None,
+                          alt=[_cut_row(lead_open[0], width)] if lead_open else None))
+        taken = {}
+        for index, text in enumerate(items):
+            seen = taken[text] = taken.get(text, 0) + 1
+            # (the words' own digest in the key: the choice follows the same words when the page is read again; the same words
+            # twice in a group are told by their order)
+            key = f"i:{gid}:{_digest(text)}" + (f":{seen}" if seen > 1 else "")
+            lead = [_SLOT] + ([("  ", None)] if folded else []) + ([("! ", "lvl_y")] if kind == "waiting" else [])
+            whole = lead + [(transcript.clean(text), "soft")]
+            row = _cut_row(whole, width)
+            cut = "".join(part for part, _ in row) != "".join(part for part, _ in whole)
+            when = "open" if folded or (kind == "running" and index >= RUNNING_FIRST) else None
+            # (the group id goes only where it is used: an item that shows whenever the screen does needs none, which is most of the bytes)
+            out.append(_entry([row], key=key, group=gid if when else None, when=when, text=transcript.clean(text) if cut else None))
+        if kind == "running" and count > RUNNING_FIRST:
+            label = ui("fleet.status.popup.all", count=count)
+            out.append(_entry([_cut_row([_SLOT, (label + " ›", "soft")], width)], key="a:" + gid, group=gid,
+                              alt=[_cut_row([_SLOT, (label + " ▾", "soft")], width)]))
+        for note in group["notes"]:
+            out.append(_entry([[("    ", None)] + row for row in
+                               transcript.wrap_spans([(transcript.clean(note), "dim")], max(8, width - 4))],
+                              group=gid, when="open" if folded else None))
+        if kind != "other":
+            out.append(_entry([[]]))
+    if not (out and out[-1]["rows"] == [[]]):
+        out.append(_entry([[]]))
+    out.append(_entry([_cut_row([_SLOT, (ui("fleet.status.popup.full") + " ›", "soft")], width)], key="full"))
+    return out

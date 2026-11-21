@@ -448,5 +448,337 @@ class GroupsTest(StatusTest):
         self.assertNotIn("groups", self.read(self.route(1, "alpha")))
 
 
+# -- 11-21: the popup's list screen (design C: what waits for the person first) ---------------------------------------------
+
+import campaign_document  # noqa: E402
+
+GENERATED = campaign_document.MARKER + """
+# 시험용 캠페인
+
+갱신 2025-11-15 11:02
+
+**한 줄**: 시험용 한 줄.
+
+## 하는 중
+- 일 하나 · #11 · 기록 1
+- 일 둘 · #12 · 기록 2
+- 일 셋 · 기록 1
+- 일 넷 · 기록 1
+- 일 다섯 · 기록 1
+6시간 넘게 움직임 없는 열린 일 23개는 접어 둠.
+
+## 기다리는 것
+- 결정: 첫 질문의 첫 줄
+- 둘째 질문?
+질문판 기준 11:01
+
+## 최근에 끝난 것
+- 11-21 끝난 일 · #1 · 기록 6
+앞서 끝난 기록 1,392개는 접어 둠.
+"""
+
+
+def shown(entries, key=None):
+    """The first row of each entry as text (the rows of the ones with ``key`` set, if asked)."""
+    return [text(entry["rows"][0]) for entry in entries if key is None or entry.get("key")]
+
+
+class ListTest(StatusTest):
+    def setUp(self):
+        super().setUp()
+        english = mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"})     # the words the screen puts in are English
+        english.start()
+        self.addCleanup(english.stop)
+
+    def page(self, body=GENERATED, age=600, name="campaign.md"):
+        self.pages = getattr(self, "pages", 0) + 1
+        key = "page%d" % self.pages
+        self.campaign(key, doc=False)
+        path = self.root / "campaigns" / ("2026-11-10_" + key) / name
+        path.write_text(body, encoding="utf-8")
+        os.utime(path, (NOW - age, NOW - age))
+        return self.read(self.route(100 + self.pages, key))
+
+    def listing(self, body=GENERATED, width=92, age=600, name="campaign.md"):
+        view = self.page(body, age, name)
+        rows, listing = session_status.popup_doc(view, width, NOW, want_list=True)
+        self.assertIsNotNone(rows)
+        return listing, view
+
+    @staticmethod
+    def gid(name, nth=1):
+        """The id of the ``nth`` group that says ``name``: a digest of the heading (never the heading), ``-N`` after the first."""
+        return session_status._digest(name) + ("" if nth == 1 else "-%d" % nth)
+
+    def test_the_marker_is_the_documents_own(self):
+        self.assertEqual(session_status.CAMPAIGN_MARKER, campaign_document.MARKER)
+
+    def test_the_screen_is_the_head_then_what_waits_then_what_runs_then_the_folded_headings_then_the_full_document(self):
+        entries, _ = self.listing()
+        lines = shown(entries)
+        self.assertEqual(lines[:3], ["시험용 캠페인", "updated 11-15 11:02", "시험용 한 줄."])          # (how long ago is the title band's)
+        self.assertEqual(lines[3], "")
+        # The document has `하는 중` first; the screen puts `기다리는 것` before it (every bullet, each marked `!`).
+        self.assertEqual(lines[4:8], ["기다리는 것 2", "  ! 결정: 첫 질문의 첫 줄", "  ! 둘째 질문?", "    질문판 기준 11:01"])
+        self.assertEqual(lines[8], "")
+        self.assertEqual(lines[9:13], ["하는 중 5", "  일 하나 · #11 · 기록 1", "  일 둘 · #12 · 기록 2", "  일 셋 · 기록 1"])
+        self.assertEqual(lines[13:17], ["  일 넷 · 기록 1", "  일 다섯 · 기록 1", "  all 5 ›", "    6시간 넘게 움직임 없는 열린 일 23개는 접어 둠."])
+        self.assertEqual(lines[17:], ["", "  › 최근에 끝난 것 1", "    11-21 끝난 일 · #1 · 기록 6", "    앞서 끝난 기록 1,392개는 접어 둠.", "",
+                                      "  full document ›"])
+
+    def test_which_entries_can_be_chosen_and_when_they_show(self):
+        entries, _ = self.listing()
+        kinds = [entry["key"].split(":")[0] for entry in entries if entry.get("key")]
+        self.assertEqual(kinds, ["i", "i", "i", "i", "i", "i", "i", "a", "g", "i", "full"])
+        by_key = {entry["key"]: entry for entry in entries if entry.get("key")}
+        self.assertFalse([key for key in by_key if "\n" in key or len(key) > 40])      # a key is short and one line, whatever the words are
+        self.assertFalse([key for key in by_key if "하는" in key or "끝난" in key])      # (and is no part of the words)
+        run = next(entry["group"] for entry in entries if entry.get("key", "").startswith("a:"))
+        self.assertEqual(run, self.gid("하는 중"))
+        running = [entry for entry in entries if entry.get("key", "").startswith("i:" + run)]
+        self.assertEqual([entry.get("when") for entry in running], [None, None, None, "open", "open"])   # three, then the rest on `all N ›`
+        self.assertEqual(text(by_key["a:" + run]["rows"][0]), "  all 5 ›")
+        self.assertEqual(text(by_key["a:" + run]["alt"][0]), "  all 5 ▾")
+        head = next(entry for entry in entries if entry.get("key", "").startswith("g:"))
+        self.assertEqual((text(head["rows"][0]), text(head["alt"][0])), ("  › 최근에 끝난 것 1", "  ▾ 최근에 끝난 것 1"))
+        done = [entry for entry in entries if entry.get("group") == head["group"] and not entry.get("key", "g:").startswith("g:")]
+        self.assertTrue(done and all(entry.get("when") == "open" for entry in done))     # the folded group's items and notes: open only
+
+    def test_a_running_list_of_three_or_fewer_has_no_all_row(self):
+        entries, _ = self.listing(GENERATED.replace("- 일 넷 · 기록 1\n- 일 다섯 · 기록 1\n", ""))
+        self.assertFalse([entry for entry in entries if entry.get("key", "").startswith("a:")])
+        self.assertNotIn("open", [entry.get("when") for entry in entries if entry.get("key", "").startswith("i:" + self.gid("하는 중"))])
+
+    def test_a_waiting_list_of_zero_is_its_heading_a_zero_and_the_documents_note_only(self):
+        entries, _ = self.listing(GENERATED.replace("- 결정: 첫 질문의 첫 줄\n- 둘째 질문?\n", "지금 없음.\n"))
+        lines = shown(entries)
+        at = lines.index("기다리는 것 0")
+        self.assertEqual(lines[at + 1], "    지금 없음.")
+        self.assertEqual(lines[at + 2], "    질문판 기준 11:01")
+        self.assertFalse([entry for entry in entries if entry.get("key", "").startswith("i:" + self.gid("기다리는 것"))])
+
+    def test_a_heading_the_screen_does_not_know_is_a_folded_group_in_the_documents_order(self):
+        body = GENERATED + "\n## 나중에 할 것\n- 첫째\n- 둘째\n\n## 아무도 모르는 머리말\n- 하나\n덧말 하나\n"
+        entries, _ = self.listing(body)
+        heads = [text(entry["rows"][0]) for entry in entries if entry.get("key", "").startswith("g:")]
+        self.assertEqual(heads, ["  › 최근에 끝난 것 1", "  › 나중에 할 것 2", "  › 아무도 모르는 머리말 1"])      # the headings as written, the count of bullets
+        note = [entry for entry in entries if text(entry["rows"][0]) == "    덧말 하나"]
+        self.assertEqual((len(note), note[0].get("when"), note[0]["rows"][0][-1][1]), (1, "open", "dim"))   # a note: dim, at the group's end
+
+    def test_the_folded_group_with_nothing_in_it_still_stands_with_its_zero(self):
+        entries, _ = self.listing(GENERATED.replace("## 최근에 끝난 것\n- 11-21 끝난 일 · #1 · 기록 6\n", "## 최근에 끝난 것\n"))
+        self.assertIn("  › 최근에 끝난 것 0", shown(entries))
+
+    def test_a_second_heading_of_a_kind_is_a_folded_group_and_a_hand_written_near_spelling_is_read_the_same_way(self):
+        body = GENERATED.replace("## 하는 중", "## 진행 중") + "\n## 진행 중\n- 또 하나\n"
+        entries, _ = self.listing(body)
+        lines = shown(entries)
+        self.assertIn("진행 중 5", lines)
+        self.assertIn("  › 진행 중 1", lines)
+
+    def test_a_table_a_code_fence_and_an_indented_line_are_left_to_the_full_document(self):
+        body = GENERATED.replace("질문판 기준 11:01\n", "질문판 기준 11:01\n\n| 가 | 나 |\n|--|--|\n| 1 | 2 |\n\n```\n- 코드 안의 글머리\n## 코드 안의 머리말\n```\n  - 들여쓴 글머리\n")
+        entries, _ = self.listing(body)
+        lines = shown(entries)
+        for left_out in ("| 가 | 나 |", "- 코드 안의 글머리", "코드 안의 머리말", "들여쓴 글머리", "|--|--|"):
+            self.assertFalse([line for line in lines if left_out in line], left_out)
+        self.assertIn("기다리는 것 2", lines)
+
+    def test_a_long_item_is_cut_in_its_row_and_carries_its_whole_words_and_a_short_one_carries_none(self):
+        long = "긴 글 " + "가나다라 마바사아 " * 30 + "끝"
+        entries, _ = self.listing(GENERATED.replace("- 둘째 질문?", "- " + long), width=60)
+        entry = next(entry for entry in entries if entry.get("text", "").startswith("긴 글"))
+        row = text(entry["rows"][0])
+        self.assertTrue(row.endswith("…"), row)
+        self.assertLessEqual(cell_width(row), 60)
+        self.assertEqual(entry["text"], long)               # nothing is dropped: the host sets these words in place of the row
+        # An item that is not cut has nothing to open: it carries no words of its own (they would be shown twice).
+        short = next(entry for entry in entries if text(entry["rows"][0]) == "  ! 결정: 첫 질문의 첫 줄")
+        self.assertNotIn("text", short)
+        self.assertFalse([entry for entry in entries if "text" in entry and not text(entry["rows"][0]).endswith("…")])
+        # The line that just fits is not cut, one cell more is.
+        for extra, cut in ((0, False), (1, True)):
+            fits = "가" * ((60 - 4) // 2) + "a" * extra
+            entries, _ = self.listing(GENERATED.replace("- 둘째 질문?", "- " + fits), width=60)
+            entry = next(entry for entry in entries if entry.get("key", "").startswith("i:") and ("가" * 10) in text(entry["rows"][0]))
+            self.assertEqual("text" in entry, cut, (extra, text(entry["rows"][0])))
+
+    def test_the_same_words_twice_in_a_group_are_two_choices(self):
+        entries, _ = self.listing(GENERATED.replace("- 둘째 질문?", "- 결정: 첫 질문의 첫 줄"))
+        keys = [entry["key"] for entry in entries if entry.get("key", "").startswith("i:" + self.gid("기다리는 것"))]
+        self.assertEqual(len(keys), 2)
+        self.assertEqual(len(set(keys)), 2)
+
+    def test_every_item_is_on_the_screen_whatever_the_count(self):
+        """No count of the screen's own stops a group: what waits, `all N`, and a folded group are every bullet of the document."""
+        for count in (60, 61, 300):
+            body = GENERATED.replace("- 둘째 질문?\n", "".join("- 질문 %04d?\n" % n for n in range(count)))
+            body = body.replace("- 일 하나 · #11 · 기록 1\n", "".join("- 일 %04d\n" % n for n in range(count)))
+            body = body.replace("- 11-21 끝난 일 · #1 · 기록 6\n", "".join("- 끝 %04d\n" % n for n in range(count)))
+            entries, _ = self.listing(body)
+            items = lambda name: [text(entry["rows"][0]) for entry in entries if entry.get("key", "").startswith("i:" + self.gid(name))]
+            self.assertEqual(len(items("기다리는 것")), count + 1, count)
+            self.assertEqual(items("기다리는 것")[-1], "  ! 질문 %04d?" % (count - 1))
+            self.assertEqual(len(items("하는 중")), count + 4, count)
+            self.assertEqual(items("하는 중")[-1], "  일 다섯 · 기록 1")
+            self.assertEqual(len(items("최근에 끝난 것")), count, count)
+            self.assertIn("기다리는 것 %d" % (count + 1), shown(entries))
+            self.assertIn("  all %d ›" % (count + 4), shown(entries))
+            self.assertFalse([line for line in shown(entries) if "more in the full document" in line])
+            self.assertEqual(len({entry["key"] for entry in entries if entry.get("key")}), len([1 for entry in entries if entry.get("key")]))
+
+    def test_two_headings_that_say_the_same_words_are_two_groups_with_their_own_keys_and_open_states(self):
+        body = GENERATED + "\n## Other\n- A\n\n## Other\n- B\n- A\n"
+        entries, _ = self.listing(body)
+        heads = [entry for entry in entries if entry.get("key", "").startswith("g:")]
+        self.assertEqual([text(entry["rows"][0]) for entry in heads], ["  › 최근에 끝난 것 1", "  › Other 1", "  › Other 2"])
+        keys = [entry["key"] for entry in entries if entry.get("key")]
+        self.assertEqual(len(keys), len(set(keys)))                                  # every line that can be chosen has a key of its own
+        ids = [entry["group"] for entry in heads]
+        self.assertEqual(ids[1:], [self.gid("Other"), self.gid("Other", 2)])         # which of the two is open is told apart too
+        self.assertNotEqual(ids[1], ids[2])
+        # Each one's items stand under its own group, and the same words in the two are two choices.
+        a_items = [entry for entry in entries if entry.get("group") == ids[1] and entry.get("key", "").startswith("i:")]
+        b_items = [entry for entry in entries if entry.get("group") == ids[2] and entry.get("key", "").startswith("i:")]
+        self.assertEqual((len(a_items), len(b_items)), (1, 2))
+        self.assertTrue({e["key"] for e in a_items}.isdisjoint({e["key"] for e in b_items}))
+        # Taking one of them out, or putting them in another order, does not change what the other is called.
+        solo, _ = self.listing(GENERATED + "\n## Other\n- B\n- A\n")
+        self.assertEqual([entry["group"] for entry in solo if entry.get("key", "").startswith("g:")][-1], self.gid("Other"))
+
+    def test_a_key_is_never_made_of_the_words_so_a_very_long_heading_and_any_script_keep_it_short(self):
+        for heading in ("h" * 1100, "가" * 1100, "😀" * 600, "e\u0301" * 700, "제목 " + "x" * 5000):
+            body = GENERATED + "\n## %s\n- HIDDEN_ITEM\n" % heading
+            entries, _ = self.listing(body)
+            keys = [entry["key"] for entry in entries if entry.get("key")]
+            self.assertTrue(all(len(key) <= 40 for key in keys), heading[:6])
+            self.assertEqual(len(keys), len(set(keys)))
+            head = [entry for entry in entries if entry.get("key", "").startswith("g:") and heading[:3] in text(entry["rows"][0])]
+            self.assertEqual(len(head), 1)                                           # the folded group can be chosen
+            self.assertTrue(head[0]["group"] and len(head[0]["group"]) <= 40)
+            self.assertTrue([entry for entry in entries if "HIDDEN_ITEM" in text(entry["rows"][0]) and entry.get("when") == "open"
+                             and entry.get("group") == head[0]["group"]])
+
+    def test_the_whole_words_of_an_item_are_carried_at_any_length_the_answer_may_hold(self):
+        for size in (4000, 4001, 12000):
+            words = "가" * (size - 1) + "끝"
+            entries, _ = self.listing(GENERATED.replace("- 둘째 질문?", "- " + words), width=80)
+            entry = next(entry for entry in entries if entry.get("text", "").startswith("가"))
+            self.assertEqual(entry["text"], words)
+        emoji = "😀가e\u0301" * 900 + "끝"
+        entries, _ = self.listing(GENERATED.replace("- 둘째 질문?", "- " + emoji), width=80)
+        self.assertEqual(next(entry for entry in entries if entry.get("text", "").startswith("😀"))["text"], emoji)
+
+    def test_a_second_heading_of_the_kind_that_waits_is_a_folded_group_and_only_the_first_comes_first(self):
+        """``parse_groups`` reads the first heading of each of the two kinds; a second `기다리는 것` is one of the folded groups."""
+        entries, _ = self.listing(GENERATED + "\n## 기다리는 것\n- 둘째 머리말의 글\n")
+        lines = shown(entries)
+        self.assertEqual(lines[lines.index("기다리는 것 2") + 1], "  ! 결정: 첫 질문의 첫 줄")
+        self.assertIn("  › 기다리는 것 1", lines)
+        self.assertNotIn("  ! 둘째 머리말의 글", lines)
+        self.assertEqual(lines.index("  › 기다리는 것 1") > lines.index("기다리는 것 2"), True)
+
+    def test_the_list_is_made_only_when_it_is_asked_for(self):
+        view = self.page()
+        rows, listing = session_status.popup_doc(view, 80, NOW)
+        self.assertIsNone(listing)                                                   # the document read whole is the rows it always had
+        self.assertEqual(rows, session_status.popup_doc_rows(view, 80))
+        with mock.patch.object(session_status, "listing_entries", side_effect=AssertionError("a list was made")), \
+                mock.patch.object(session_status, "parse_listing", side_effect=AssertionError("a list was read")):
+            session_status.popup_doc(view, 80, NOW)
+            session_status.popup_doc_rows(view, 80)
+
+    def test_a_very_long_title_and_one_line_are_folded_to_two_rows_with_the_rest_marked(self):
+        body = GENERATED.replace("# 시험용 캠페인", "# " + "제목 " * 80).replace("시험용 한 줄.", "요약 " * 120)
+        entries, _ = self.listing(body, width=50)
+        head = [entry for entry in entries[:3]]
+        self.assertEqual([len(entry["rows"]) for entry in (head[0], head[2])], [2, 2])
+        for entry in (head[0], head[2]):
+            self.assertTrue(text(entry["rows"][-1]).endswith("…"))
+            self.assertTrue(all(cell_width(text(row)) <= 50 for row in entry["rows"]))
+
+    def test_the_age_and_an_old_document(self):
+        fresh, _ = self.listing(age=600)
+        self.assertEqual(text(fresh[1]["rows"][0]), "updated 11-15 11:02")       # the age is said once, in the title band
+        old, _ = self.listing(age=4 * 86400 + 3600)
+        row = old[1]["rows"][0]
+        self.assertEqual(text(row), "! updated 11-15 11:02 · " + session_status.ui_text("fleet.status.popup.old"))
+        self.assertNotIn("ago", text(row))
+        self.assertEqual(row[0], ("! ", "lvl_y"))              # a mark, not the colour alone
+        edge, _ = self.listing(age=3 * 86400)                   # the panel's own limit: three days (live.STATUS_STALE_DAYS)
+        self.assertTrue(text(edge[1]["rows"][0]).startswith("! "))
+        almost, _ = self.listing(age=3 * 86400 - 60)
+        self.assertFalse(text(almost[1]["rows"][0]).startswith("! "))
+
+    def test_a_time_that_cannot_be_read_is_said_not_left_empty(self):
+        entries, _ = self.listing(GENERATED.replace("갱신 2025-11-15 11:02", "갱신 어제 오후"))
+        said = text(entries[1]["rows"][0])
+        self.assertIn(session_status.ui_text("fleet.status.popup.updated_unknown"), said)
+        self.assertTrue(said)
+        entries, _ = self.listing(GENERATED.replace("갱신 2025-11-15 11:02\n", ""))
+        self.assertIn(session_status.ui_text("fleet.status.popup.updated_unknown"), text(entries[1]["rows"][0]))
+
+    def test_a_year_that_is_not_this_one_is_said(self):
+        entries, _ = self.listing(GENERATED.replace("2025-11-15", "2019-11-15"))
+        self.assertIn("updated 2019-11-15 11:02", text(entries[1]["rows"][0]))
+
+    def test_every_row_of_the_screen_fits_the_width(self):
+        body = GENERATED + "\n## 나중에 할 것\n" + "".join("- 한 줄 %d " % n + "글 " * (n * 7) + "\n" for n in range(1, 6))
+        for width in (20, 30, 41, 60, 92, 116, 200):
+            entries, _ = self.listing(body, width=width)
+            for entry in entries:
+                for part in ("rows", "alt"):
+                    for row in entry.get(part) or ():
+                        self.assertLessEqual(cell_width(text(row)), max(8, width), (width, text(row)))
+
+    def test_no_control_character_reaches_the_screen(self):
+        entries, _ = self.listing(GENERATED.replace("둘째 질문?", "둘째\x1b[31m 질문\u202e?\x07"))
+        for entry in entries:
+            for part in ("rows", "alt"):
+                for row in entry.get(part) or ():
+                    self.assertNotRegex(text(row), "[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+    def test_a_page_that_is_not_the_generated_one_has_no_list_screen_and_the_rows_it_always_had(self):
+        for body, name in ((DOC.format(name="alpha") + TABLE, "현황.md"),
+                           (GENERATED.split("\n", 1)[1], "campaign.md"),             # the marker gone
+                           ("\n" + GENERATED, "campaign.md"),                        # not on the first line
+                           (GENERATED.replace(campaign_document.MARKER, "<!-- hearting:campaign-document v2 -->"), "campaign.md")):
+            view = self.page(body, name=name)
+            rows, listing = session_status.popup_doc(view, 80, NOW, want_list=True)
+            self.assertIsNone(listing, name)
+            lines = body.splitlines()
+            expected = [[(session_status.transcript.clean(t), k) for t, k in row] for row in session_status.transcript.doc_rows(lines, 80)]
+            self.assertEqual(rows, expected)
+            self.assertEqual(rows, session_status.popup_doc_rows(view, 80))
+
+    def test_no_document_an_unreadable_one_and_a_cut_one_keep_their_screens(self):
+        self.campaign("beta", doc=False)
+        none = self.read(self.route(2, "beta"))
+        rows, listing = session_status.popup_doc(none, 80, NOW)
+        self.assertEqual((listing, [text(row) for row in rows]), (None, [session_status.ui_text("fleet.repo.no_status") + " · campaigns/2026-11-10_beta/현황.md"]))
+        view = self.page()
+        with mock.patch.object(session_status, "read_text", return_value=(None, False)):
+            self.assertEqual(session_status.popup_doc(view, 80, NOW), (None, None))
+            self.assertIsNone(session_status.popup_doc_rows(view, 80))
+        big = GENERATED + "".join("- 하나 %05d 가나다라마바사아자차\n" % n for n in range(6000))
+        view = self.page(big)
+        rows, listing = session_status.popup_doc(view, 80, NOW, want_list=True)
+        self.assertIsNone(listing)                               # cut at 64 KiB: the document as it was, with its `… 64 KiB`
+        self.assertEqual(text(rows[-1]), "… 64 KiB")
+
+    def test_a_real_generated_document_gives_the_screen(self):
+        from datetime import timezone
+        unit = {"key": "pr:7", "pr": 7, "v": "v4.1.0", "title": "무언가를 고침", "impl": {"slug": "x"}, "count": 3,
+                "closed_at": NOW - 3600, "routes": 2, "activity": NOW}
+        waits = {"status": "ok", "at": NOW, "items": ["첫째?", "둘째?"]}
+        doc = campaign_document.render_document("alpha 캠페인", "알파 작업 중.", {"active": [unit], "active_folded": 4, "done": [unit],
+                                                                          "done_folded": 12}, waits, now=NOW, tz=timezone.utc)
+        entries, _ = self.listing(doc)
+        lines = shown(entries)
+        for part in ("alpha 캠페인", "updated 11-15 ", "알파 작업 중.", "기다리는 것 2", "  ! 첫째?", "  ! 둘째?", "하는 중 1",
+                     "  무언가를 고침 · #7 · v4.1.0 · 기록 3", "  › 최근에 끝난 것 1", "  full document ›"):
+            self.assertTrue(any(line.startswith(part) or line == part for line in lines), (part, lines))
+
+
 if __name__ == "__main__":
     unittest.main()
