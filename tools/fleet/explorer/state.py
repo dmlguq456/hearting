@@ -49,6 +49,40 @@ VIEWS = ("OVERVIEW", "PEERS", "ROUTES", "QUESTIONS", "HISTORY", "COMPUTE", "MEMO
 _MODEL_FIND_FOLDS = ("ui:mfind", "ui:mfocus", "ui:mcursor")
 
 
+def _draft(folds, offsets, key):
+    """Drop the drafts that cannot stand beside the one ``key`` is about to start.
+
+    A keep / follow / undo draft (``ui:fol``) and a model or effort draft exclude each other, and
+    choosing a cell drops them all. Every path that starts one goes through here."""
+    if key == "ui:sel":
+        gone = ("ui:sel", "ui:model", "ui:effort", "ui:fol") + _MODEL_FIND_FOLDS
+    elif key == "ui:fol":
+        gone = ("ui:model", "ui:effort") + _MODEL_FIND_FOLDS
+    elif key in ("ui:model", "ui:effort"):
+        gone = ("ui:fol",)
+    else:
+        return
+    for name in gone:
+        folds.pop(name, None)
+    if key in ("ui:sel", "ui:fol"):
+        offsets.pop("mpick", None)
+
+
+def finish_follow_draft(state, effects, result):
+    """``state`` without its keep / follow / undo draft once that draft was written (not before).
+
+    A written draft is a ``("models.apply", harness, "follow", target, word, False)`` effect whose
+    result says the table was changed or already was so; a refused or failed write, and a dry-run,
+    leave the draft where it was."""
+    if not isinstance(result, Mapping) or result.get("status") not in ("changed", "unchanged"):
+        return state
+    if not any(isinstance(effect, (tuple, list)) and len(effect) == 6 and effect[:1] == ("models.apply",)
+               and effect[-1] is False for effect in effects or ()):
+        return state
+    folds = {key: value for key, value in state.fold_map().items() if key != "ui:fol"}
+    return replace(state, folds=tuple(sorted(folds.items())))
+
+
 def models_finding(state):
     """The MODELS model list holds the keyboard: typed characters filter it instead of acting."""
     return (getattr(state, "view", None) == "MODELS" and getattr(state, "scope", "-") == "-"
@@ -72,6 +106,7 @@ def _models_find_key(state, key, hit):
         if not item:
             return state
         folds["ui:model"] = str(item)
+        _draft(folds, offsets, "ui:model")
     elif key == "backspace" or (isinstance(key, str) and key.startswith("text:")):
         text = folds.get("ui:mfind", "")
         text = text[:-1] if key == "backspace" else (text + key[5:])[:80]
@@ -1059,10 +1094,7 @@ def _reduce(state, event, frame=None):
         if action[0] == "ui" and len(action) > 2:
             folds = state.fold_map()
             offsets = dict(state.scroll)
-            if action[1] == "sel":
-                folds = {key: value for key, value in folds.items()
-                         if key not in ("ui:sel", "ui:model", "ui:effort") + _MODEL_FIND_FOLDS}
-                offsets.pop("mpick", None)
+            _draft(folds, offsets, "ui:" + str(action[1]))
             folds["ui:" + str(action[1])] = str(action[2])
             return replace(state, folds=tuple(sorted(folds.items())),
                            scroll=tuple(sorted(offsets.items()))), ()
@@ -1070,7 +1102,7 @@ def _reduce(state, event, frame=None):
             folds = state.fold_map()
             folds["ui:mfocus"] = "1"
             return replace(state, folds=tuple(sorted(folds.items()))), ()
-        if action[0] == "models.apply" and len(action) in (5, 7):
+        if action[0] == "models.apply" and len(action) in (5, 6, 7):
             return state, (action,)
         if action[0] == "alloc.apply" and len(action) == 3:
             return state, (action,)

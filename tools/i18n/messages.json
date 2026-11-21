@@ -338,6 +338,22 @@
    "en": "Back to the entrance",
    "ko": "입구로 돌아가기"
   },
+  "entrance.backlog_count": {
+   "en": "{count} items",
+   "ko": "일 {count}개"
+  },
+  "entrance.backlog_note": {
+   "en": "Work handed off, and what you said then. The session that postpones work writes one line each.",
+   "ko": "맡긴 일과 그때 하신 말. 일을 미루는 세션이 한 줄씩 적습니다."
+  },
+  "entrance.backlog_open": {
+   "en": "Open backlog.md",
+   "ko": "backlog.md 열기"
+  },
+  "entrance.backlog_updated": {
+   "en": "updated {date}",
+   "ko": "갱신 {date}"
+  },
   "entrance.campaigns_note": {
    "en": "One document per stream of work. No new document appears; this one is rewritten.",
    "ko": "일의 흐름 하나에 문서 한 장. 새 문서가 생기지 않고 이 문서가 고쳐집니다."
@@ -385,6 +401,10 @@
   "entrance.rewrite": {
    "en": "Hearting rewrites this file. Editing it is overwritten; deleting it comes back at the next publish.",
    "ko": "이 파일은 하팅이 다시 씁니다. 직접 고치면 덮어씁니다. 지우면 다음 발행 때 다시 생깁니다."
+  },
+  "entrance.section_backlog": {
+   "en": "Backlog",
+   "ko": "백로그"
   },
   "entrance.section_campaigns": {
    "en": "Campaigns",

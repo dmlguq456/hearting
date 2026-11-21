@@ -1,0 +1,19 @@
+│ MODEL PROFILE  profile → model · effort, per harness ────────────
+│    PROFILE         CLAUDE             CODEX              OPENCODE
+│    top             Opus · max         gpt-6-… · xhigh    glm-5.3-
+│    deep            Opus · xhigh       gpt-6-… · high     glm-5.3-
+│    balanced-deep   Opus · medium      gpt-6.… · xhigh    glm-5.3-
+│    balanced      ▶ Sonnet · high      gpt-6.… · xhigh    deepseek
+│    light           Sonnet · medium    gpt-6-… · xhigh    muse-spa
+│    mini            Haiku … · medium   gpt-6-… · high     deepseek
+│    main session only, never dispatched:  claude Fable
+│
+│  ┌─ claude · balanced ──────────────────────────────────────────┐
+│  │  now      Sonnet · high                                      │
+│  │                                                              │
+│  │  model      Opus   [ Sonnet ]   Haiku 5.5                    │
+│  │  effort     low     medium   [ high ]   xhigh     max        │
+│  │                                                              │
+│  │  $ hearting model set claude profile/balanced sonnet@high    │
+│  │  pool     claude › codex  last resort codex                  │
+│  └─ models.conf → .bak backup · new sessions and launches only  ┘

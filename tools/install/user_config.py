@@ -166,7 +166,8 @@ def status(ids=None) -> list[dict]:
 
 
 def with_model_follow(rows) -> list[dict]:
-    """Add "newer n · proposal n" to each models.conf reading (read-only; omitted at 0)."""
+    """Add "newer n · proposal n · followed n · kept n · held n" to each models.conf reading
+    (read-only; a count of 0 is not written)."""
     try:
         utilities = str(Path(__file__).resolve().parents[2] / "utilities")
         if utilities not in sys.path:
@@ -179,10 +180,14 @@ def with_model_follow(rows) -> list[dict]:
         if not runtime or row["status"] != "valid":
             continue
         try:
-            newer, proposal = model_follow.counts(model_follow.survey_harness(runtime))
+            result = model_follow.survey_harness(runtime)
+            newer, proposal = model_follow.counts(result)
+            followed, kept, held = model_follow.state_counts(result)
         except Exception:
             continue
-        notes = [f"{name} {count}" for name, count in (("newer", newer), ("proposal", proposal)) if count]
+        notes = [f"{name} {count}" for name, count in
+                 (("newer", newer), ("proposal", proposal), ("followed", followed),
+                  ("kept", kept), ("held", held)) if count]
         if notes:
             row["reading"] += " · " + " · ".join(notes)
     return rows
