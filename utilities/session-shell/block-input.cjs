@@ -44,10 +44,10 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   // is highlighted until ↑↓ or a number picks one (-1).
   function cursorOf(row){
     const local=state(row.item),id=row.question.id,count=choices(row).length;
-    if(Number.isInteger(local.cursor[id]))return Math.max(0,Math.min(count-1,local.cursor[id]));
+    if(Number.isInteger(local.cursor[id]))return Math.max(-1,Math.min(count-1,local.cursor[id]));
     const picked=local.answers[id]?.[0],at=choices(row).findIndex(c=>value(c)===picked);
     if(at>=0)return at;
-    if(row.item.answer_kind==='decision'||writable(row))return -1;
+    if(row.item.answer_kind==='decision'||!count)return -1;
     const recommended=row.question.recommended;
     return Number.isInteger(recommended)&&recommended>=0&&recommended<count?recommended:0;
   }
@@ -144,8 +144,8 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     // Spec E9 rule 54: a wait not answerable here shows the backend's whole words for its
     // reason (never the machine reason); a send state of its own shows nothing more.
     const options=status!=='open'?(status===unanswerable(row)&&view?.options?view.options:[]):view?.options||(choices(row).length?choices(row).map((c,i)=>[span(`${i+1}  `,'g_blocked'),span(typeof c==='object'?c.label||c.value:c,'loc_repo')]):[[span(text('text','type answer'))]]);
-    const selected=choosing(row)||focused&&writable(row)&&local.answers[id]?.length;
-    const marked=status==='open'&&choices(row).length?highlight(options,selected?cursorOf(row):-1,!!selected):options;
+    const selected=choosing(row)||focused&&writable(row)&&cursorOf(row)>=0;
+    const marked=status==='open'&&choices(row).length?highlight(options,selected?cursorOf(row):-1,!!selected,writable(row)):options;
     // 11-17 (the person: "질문이랑 선지가 잘 구분되게" / "구분선 위에 여백도 하나 두고"): a question with choices
     // ends its words with one empty row and a thin line (the frame's own color, dim where the frame is bright)
     // before its choices; a question answered in words has neither. Short of rows the empty row goes first.
@@ -173,7 +173,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     if(local.notice)tail.push([span(local.notice,stale?'lvl_r':'dim')]);
     if(focused){
       const ready=complete(row,formValues(row));
-      const instruction=active(row)?(choosing(row)?text('choose','↑↓ choose · Enter send · t text'):ready?text('send','Enter send'):text('text','type answer')):text(status,status);
+      const instruction=active(row)?(choosing(row)?text('choose','↑↓ choose · Enter send'):ready?text('send','Enter send'):text('text','type answer')):text(status,status);
       const editing=active(row)&&writable(row);
       const navigate=text(editing?'navigate_write':'navigate','Tab next · Esc/Ctrl+] back');
       const writeHint=local.typing[id]?(choices(row).length?text('writing_choices','Enter send · ↑ choices'):text('send','Enter send')):text('choose_write','↑↓ choose · type to write · Enter send');
@@ -216,14 +216,14 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   const chosenRow=(parts,on=true)=>on?parts.map(part=>({...part,tint:true})):parts;
   // 11-17: the number is the question's rose and bold on every row (the mark `◑`'s own color; where there is no
   // color, its weight tells it from the words), two cells before the words.
-  function highlight(options,at,choosing){
+  function highlight(options,at,choosing,canPick){
     let n=-1;
     const bold=part=>({...part,bold:true});
     return options.map(parts=>{
       const lead=String(parts[0]?.text??''),number=/^(\d+)\s+$/.exec(lead);
       if(number)n=Number(number[1])-1;else if(lead.trim())n=-1;
       const [head,...rest]=number?[bold(parts[0]),...parts.slice(1)]:[null,...parts];
-      const first=head?[head]:[];
+      const first=head?[{...head,...(canPick?{choiceIndex:n}:{})}]:[];
       if(!choosing||at<0)return [span('  ',''),...first,...rest];
       if(n!==at)return [span('  ',''),...first,...rest.map(part=>({...part,...(styles.dim||{dim:true}),bold:false}))];
       const words=rest.map(part=>({...part,...(styles.loc_repo||{}),bold:true,dim:false}));
@@ -287,16 +287,31 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
       changed();
     }
   }
+  function pick(row,at,toggle=false){
+    const local=state(row.item),id=row.question.id,choice=choices(row)[at];
+    if(!active(row)||choice===undefined)return;
+    if(toggle&&writable(row)&&local.cursor[id]===at&&local.answers[id]?.length){local.answers[id]=[];local.cursor[id]=-1;}
+    else{local.answers[id]=[value(choice)];local.cursor[id]=at;}
+    local.typing[id]=false;local.notice='';follow=true;
+  }
+  // A cursor without an answer is the default, not a choice the person made.
+  // Clear it on the first accepted character, including paste or a clicked row.
+  function append(row,c){
+    const local=state(row.item),id=row.question.id;
+    if(Buffer.byteLength((local.drafts[id]||'')+c)>4096)return;
+    if(!Number.isInteger(local.cursor[id])||local.cursor[id]<0){local.cursor[id]=-1;local.answers[id]=[];}
+    local.typing[id]=true;local.drafts[id]=(local.drafts[id]||'')+c;
+  }
   function character(c){
     const row=current(),local=row&&state(row.item),id=row?.question.id;
-    if(pasting){if(row&&active(row)&&writable(row)&&Buffer.byteLength((local.drafts[id]||'')+c)<=4096){local.typing[id]=true;local.drafts[id]=(local.drafts[id]||'')+c;}return;}
+    if(pasting){if(row&&active(row)&&writable(row))append(row,c);return;}
     if(c==='\x1d'||c==='\x1b'){leave();return;}
     if(c==='\t'){move(1);return;}
     if(c==='\r'||c==='\n'){
       if(!row)return;
       if(changeArmed){changeArmed=false;local.notice='';changed();return;}
       // Enter sends the highlighted choice, the same value its number key picks.
-      if(choosing(row)&&cursorOf(row)>=0&&(!writable(row)||Number.isInteger(local.cursor[id])||local.answers[id]?.length)){
+      if(active(row)&&cursorOf(row)>=0){
         local.answers[id]=[value(choices(row)[cursorOf(row)])];local.notice='';
         if(!complete(row,formValues(row))&&(row.item.questions||[]).length>1){move(1);return;}
       }
@@ -305,11 +320,11 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     if(!row){if('rwfp'.includes(c))action(c);return;}
     if(!active(row))return;
     if(c==='\x7f'||c==='\b'){local.drafts[id]=[...(local.drafts[id]||'')].slice(0,-1).join('');return;}
-    if(local.typing[id]){if(c>=' '&&Buffer.byteLength((local.drafts[id]||'')+c)<=4096)local.drafts[id]=(local.drafts[id]||'')+c;return;}
+    if(local.typing[id]){if(c>=' ')append(row,c);return;}
     if(/^[1-9]$/.test(c)&&choices(row).length){
-      const choice=choices(row)[Number(c)-1];if(choice!==undefined){local.answers[id]=[value(choice)];local.cursor[id]=Number(c)-1;local.notice='';follow=true;}return;
+      pick(row,Number(c)-1,true);return;
     }
-    if(writable(row)&&c>=' '){local.typing[id]=true;if(Buffer.byteLength((local.drafts[id]||'')+c)<=4096)local.drafts[id]=(local.drafts[id]||'')+c;return;}
+    if(writable(row)&&c>=' '){append(row,c);return;}
     if('rwfp'.includes(c)){action(c);return;}
   }
   function input(data){
@@ -382,6 +397,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     get question(){return !!current();},
     get typing(){const row=current();return focused&&!!row&&!!state(row.item).typing[row.question.id];},
     enter,leave,update,input,detail:preview,summary,sent:sentLines,references,
+    choose(at){const row=current();if(focused&&row){pick(row,at);changed();}},
     write(){const row=current();if(focused&&row&&active(row)&&writable(row)){state(row.item).typing[row.question.id]=true;changed();}},
     // The wheel over the popup reads the question on, a row at a time, as ↑↓ and PgUp/PgDn do.
     wheel(delta){if(!focused||!current())return;scroll+=delta;follow=false;changed();}};

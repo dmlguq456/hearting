@@ -821,16 +821,26 @@ every row of it (each row of a wrapped one) has its words bold in the bright
 body color, while every
 other choice keeps the mark's column blank and reads dim grey (without color
 the mark and the weight alone tell them apart). Enter
-sends it. A choice-only question starts on its recommended choice, else the first,
-and keeps its existing guidance and number keys. A free-text question starts with
-no selection: its always-visible `› ` row takes printable input immediately,
-including `r/w/f/p/t`; numbers select until writing starts. Down past the last
-choice or a click enters the row; up returns to choices without discarding text.
-Enter sends `[original choice value, typed text]`, omitting whichever is absent;
-with neither, `empty answer` keeps it open. Its one localized guidance row reads
+sends it. A question with choices starts on its recommended choice, else the first.
+That mark is a default until a number, an arrow choosing an option, or a click
+explicitly picks a choice. A free-text question's always-visible `› ` row takes
+printable input immediately, including `r/w/f/p/t`; numbers select until writing
+starts. The first accepted character clears a default mark, including after a
+click on the answer row or down past the last choice. An explicitly chosen mark
+stays while writing. Repeating its number before writing clears that choice.
+Down past the last choice enters the row without changing the mark's provenance;
+up returns to choices without discarding text. Enter sends exactly the marked
+original choice value and the separate typed text, `[original choice value, typed
+text]`, omitting whichever is absent; with neither, `empty answer` keeps it open.
+Tab and closing/reopening retain each question's mark, its default/explicit
+provenance, and its draft. Enter's existing next-field behavior stays.
+Its one localized guidance row reads
 `↑↓ choose · type to write · Enter send · Tab next · Esc/Ctrl+] back` before writing,
 and `Enter send · ↑ choices · Tab next · Esc/Ctrl+] back` while writing (without
 `↑ choices` when no choices exist). The existing key packing shortens narrow rows.
+Choice-only questions keep their selection behavior; their guidance omits the
+retired `t text` / `t 답 입력`. Fleet's separate editor follows the same default,
+explicit choice, first-character clearing, repeated-number and empty-answer rules.
 A decision (approve/reject/defer) highlights nothing until ↑↓ or a number picks one, so
 Enter alone still sends nothing. With the popup closed, arrows and Enter stay
 the native's. Do not reserve a standalone

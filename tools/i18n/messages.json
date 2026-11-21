@@ -1343,8 +1343,8 @@
    "ko": "질문 변경됨 · Tab 다음"
   },
   "fleet.session_block.choose": {
-   "en": "↑↓ choose · Enter send · t text",
-   "ko": "↑↓ · Enter 보내기 · t 답 입력"
+   "en": "↑↓ choose · Enter send",
+   "ko": "↑↓ · Enter 보내기"
   },
   "fleet.session_block.choose_write": {
    "en": "↑↓ choose · type to write · Enter send",
