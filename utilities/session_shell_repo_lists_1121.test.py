@@ -694,14 +694,26 @@ console.log(JSON.stringify(out));
         heads = [e for e in self.popup("list", own="A")["list"] if e.get("rows") and "".join(r[0] for r in e["rows"][0]).startswith("A ")]
         self.assertEqual("".join(r[0] for r in heads[0]["rows"][0]), "A 2")
 
-    # What the artifact entrance (`utilities/artifact_entrance.py` `_backlog`, the PR that reads `core/ARTIFACT_META.md`'s rule) counts and reads for the same
-    # texts: (name, text, its count, its `갱신` as `YYYY-MM-DD HH:MM` or ''). The expectations are written out (the entrance is not in this tree yet) from running its
-    # function on these texts; the panel's reading (`parse_backlog`) and the popup's list must give the same count and the same date.
+    # What the artifact entrance (`utilities/artifact_entrance.py` `_backlog`, `core/ARTIFACT_META.md`'s rule) counts and reads for the same
+    # texts: (name, text, its count, its `갱신` as `YYYY-MM-DD HH:MM` or ''). The expectations are written out from running its function on these texts (and the
+    # test below runs the entrance's own function on them too); the panel's reading (`parse_backlog`), the popup's list and the `갱신` boundary must give the same
+    # count and the same date.
     ENTRANCE = [
         ('before_first_heading', '- 앞\n## A\n- 하나\n', 1, ''),
         ('no_heading_at_all', '# T\n- a\n- b\n', 0, ''),
-        ('indented_heading', '# T\n - x\n  ## A\n- 앞이라 세지 않는다\n## B\n- 하나\n', 1, ''),
-        ('only_indented_heading', '  ## A\n- 앞\n', 0, ''),
+        # (the entrance's rule since #1803: a heading is `##` after at most three spaces)
+        ('indented_heading', '# T\n - x\n  ## A\n- 앞이라 세지 않는다\n## B\n- 하나\n', 2, ''),
+        ('only_indented_heading', '  ## A\n- 앞\n', 1, ''),
+        ('heading_three_spaces', '   ## A\n- 하나\n', 1, ''),
+        ('heading_four_spaces_is_none', '    ## A\n- 앞\n## B\n- 하나\n', 1, ''),
+        ('heading_tab_before_is_none', '\t## A\n- 앞\n## B\n- 하나\n', 1, ''),
+        ('heading_indented_alone', '  ##\n- 하나\n', 1, ''),
+        ('heading_indented_tab_after', ' ##\tA\n- 하나\n', 1, ''),
+        ('heading_indented_three_hashes_is_none', '  ### A\n- 앞\n## B\n- 하나\n', 1, ''),
+        ('heading_indented_without_space_is_none', ' ##A\n- 앞\n## B\n- 하나\n', 1, ''),
+        ('updated_after_an_indented_heading', '# T\n  ## A\n갱신 2026-11-21 11:02\n- 일\n', 1, ''),
+        ('updated_before_an_indented_heading', '갱신 2026-11-21 11:02\n  ## A\n- 일\n', 1, '2026-11-21 11:02'),
+        ('indented_heading_in_fence', '```\n  ## 안\n```\n- 앞\n## A\n- 하나\n', 1, ''),
         ('heading_without_space', '##A\n- 하나\n## B\n- 둘\n', 1, ''),
         ('heading_alone', '##\n- 하나\n', 1, ''),
         ('heading_tab', '##\tA\n- 하나\n', 1, ''),
@@ -746,7 +758,11 @@ console.log(JSON.stringify(out));
     ]
 
     def test_the_count_and_the_date_are_the_entrances_on_the_same_texts(self):
+        import artifact_entrance
         for name, text, count, updated in self.ENTRANCE:
+            self.backlog(text)
+            seen = artifact_entrance._backlog(self.root)                            # the entrance itself, on the same text
+            self.assertEqual((seen["count"], seen["updated"]), (count, updated), name)
             parsed = self.status.parse_backlog(text.splitlines())
             when = "%04d-%02d-%02d %02d:%02d" % parsed["updated"] if parsed["updated"] else ""
             self.assertEqual((self.status.backlog_total(parsed), when), (count, updated), name)

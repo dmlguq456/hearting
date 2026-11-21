@@ -690,8 +690,8 @@ BACKLOG_WORDS = {"updated": "updated", "old": "old document", "full": "full docu
 
 # The backlog is counted by the rule the artifact entrance counts it by (core/ARTIFACT_META.md, `backlog.md`; `utilities/artifact_entrance.py`
 # `_backlog`), not by the status page's reading:
-#  - a task is a top-level `- ` bullet under a `##` heading; a heading is `##` at the very start of the line followed by a blank or the end of it
-#    (an indented `##` and `###` are none); a `- ` before the first `##` is none, `*` `+` `-<tab>` and numbered lists are none, an indented line and a
+#  - a task is a top-level `- ` bullet under a `##` heading; a heading is `##`, after at most three spaces, followed by a blank or the end of the line
+#    (` ## C` is one; four spaces, a tab before it, and `###` are none); a `- ` before the first `##` is none, `*` `+` `-<tab>` and numbered lists are none, an indented line and a
 #    sub-bullet are none; a line that only looks like a rule (`- - -`) and a `- ` inside an HTML comment are counted, nothing filters them;
 #  - a code fence (up to three spaces in, three or more of ``` or ~~~, whatever follows) is not read; it closes on the same character and the same or
 #    a longer length only, on a line with nothing else; one never closed runs to the end;
@@ -699,7 +699,7 @@ BACKLOG_WORDS = {"updated": "updated", "old": "old document", "full": "full docu
 #    where the date and the time are real; the first real one is the one.
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _BACKLOG_UPDATED = re.compile(r"^갱신 ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2})$")
-_BACKLOG_HEADING = re.compile(r"^##(?:[ \t]|$)")
+_BACKLOG_HEADING = re.compile(r"^ {0,3}##(?:[ \t]|$)")
 
 
 def _real_stamp(line):
