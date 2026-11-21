@@ -843,7 +843,9 @@ and `Enter send · ↑ choices · Tab next · Esc/Ctrl+] back` while writing (wi
 Choice-only questions keep their selection behavior; their guidance omits the
 retired `t text` / `t 답 입력`. Fleet's question board shows recommendations as
 `(recommended)` and marks only choices picked by number or click. Repeating the
-number clears the choice. ↑↓ move among waits, with ↑ leaving the answer row first
+number clears the choice, but only in the question that number would pick for
+(the first unanswered one, else the first); the same number on the next question
+answers it. ↑↓ move among waits, with ↑ leaving the answer row first
 when editing. Enter on an unfolded question submits only chosen values and typed
 text, once all required fields are answered. Enter on a folded or untouched wait
 keeps its usual open or read behavior. Direct typing belongs to the unfolded row.

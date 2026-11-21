@@ -296,6 +296,80 @@ class DrawnAnswerRules(unittest.TestCase):
                     print("FLEET_RULE=" + json.dumps({"harness": harness, "keys": keys, "mark": actual,
                                                       "sent": sent}, ensure_ascii=False), flush=True)
 
+    def multi_form(self, harness, ids, choice_counts=None):
+        from dataclasses import replace
+        state, vm = self.setup_question(harness)
+        overlay = state.question_overlay
+        detail = overlay["detail"]
+        spec = detail["questions"][0]
+        questions = []
+        for qid in ids:
+            count = (choice_counts or {}).get(qid, 3)
+            questions.append(dict(spec, id=qid, recommended=0 if count == 1 else spec["recommended"],
+                                  choices=[{"value": f"{qid}-{n}", "label": f"{qid} 선택 {n}"}
+                                           for n in range(1, count + 1)]))
+        detail = dict(detail, questions=questions)
+        return replace(state, question_overlay=dict(overlay, detail=detail)), vm, overlay["ref"]
+
+    def test_same_number_answers_the_next_question_and_clears_only_the_one_it_picks_for(self):
+        forms = (("claude", ("a", "b")), ("codex", ("a", "b")), ("opencode", ("a", "b")),
+                 ("claude", ("_understanding", "q1", "q2")))
+        for harness, ids in forms:
+            counts = {"_understanding": 1} if ids[0] == "_understanding" else None
+            state0, vm, ref = self.multi_form(harness, ids, counts)
+
+            def run(keys):
+                state = state0
+                effects = ()
+                for key in keys:
+                    state, effects = reduce(state, {"type": "key", "key": key, "question_refs": [ref]})
+                draft = state.question_overlay.get("draft") or {}
+                return state, effects, (draft.get("answers") if isinstance(draft, dict) else None)
+
+            def sent(effects):
+                return next((effect[2]["answers"] for effect in effects if effect[0] == "questions.submit"), None)
+
+            with self.subTest(harness=harness, ids=ids, keys="same number twice"):
+                for digit in ("1", "2"):
+                    if ids[0] == "_understanding" and digit == "2":
+                        continue
+                    state, _, answers = run([digit, digit])
+                    first, second = ids[0], ids[1]
+                    self.assertEqual(answers[first], [f"{first}-{1 if first == '_understanding' else digit}"])
+                    self.assertEqual(answers[second], [f"{second}-{digit}"])
+                    if len(ids) == 2:
+                        _, effects, _ = run([digit, digit, "enter"])
+                        self.assertEqual(sent(effects), {first: [f"{first}-{digit}"],
+                                                         second: [f"{second}-{digit}"]})
+            with self.subTest(harness=harness, ids=ids, keys="different numbers"):
+                _, _, answers = run(["1", "2"])
+                self.assertEqual(answers[ids[1]], [f"{ids[1]}-2"])
+                if len(ids) == 2:
+                    _, effects, _ = run(["1", "2", "enter"])
+                    self.assertEqual(sent(effects), {"a": ["a-1"], "b": ["b-2"]})
+            if len(ids) == 3:
+                with self.subTest(harness=harness, ids=ids, keys="all answered then same number"):
+                    state, _, answers = run(["1", "1", "1"])
+                    self.assertEqual({k: v for k, v in answers.items() if v},
+                                     {"_understanding": ["_understanding-1"], "q1": ["q1-1"], "q2": ["q2-1"]})
+                    state, effects, answers = run(["1", "1", "1", "1"])
+                    self.assertEqual(answers["_understanding"], [])
+                    self.assertEqual({k: v for k, v in answers.items() if v},
+                                     {"q1": ["q1-1"], "q2": ["q2-1"]})
+                    rows = draw(vm, state, 100, 40).text_rows()
+                    self.assertFalse(any("_understanding 선택 1" in row and "▸" in row for row in rows))
+            else:
+                with self.subTest(harness=harness, ids=ids, keys="all answered then same number"):
+                    state, _, answers = run(["1", "1", "1"])
+                    self.assertEqual(answers["a"], [])
+                    self.assertEqual(answers["b"], ["b-1"])
+
+    def test_single_question_same_number_still_clears(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                actual, sent, _, _, _ = self.sequence(["3", "3"], harness=harness)
+                self.assertEqual((actual, sent), ([], None))
+
     def test_folded_question_uses_list_keys_and_blocks_hidden_edits(self):
         from tools.fleet import render
         state, vm = self.setup_question()
@@ -362,8 +436,12 @@ class DrawnAnswerRules(unittest.TestCase):
                 self.assertFalse(any("▸ 2  항목" in row for row in draw(vm, state, 100, 24).text_rows()))
                 self.assertEqual(reduce(state, enter)[1], (("questions.read", overlay["ref"]),))
                 picked, _ = reduce(state, {"type": "key", "key": "2"})
-                cleared, _ = reduce(picked, {"type": "key", "key": "2"})
-                self.assertEqual(reduce(cleared, enter)[1], (("questions.read", overlay["ref"]),))
+                self.assertEqual(reduce(picked, enter)[1], ())
+                answered = state
+                for qid in ids:
+                    answered, _ = reduce(answered, {"type": "click", "action": ("question.choice", qid, "v2")})
+                cleared, _ = reduce(answered, {"type": "key", "key": "2"})
+                self.assertEqual(reduce(cleared, enter)[1], ())
                 for index, qid in enumerate(ids):
                     state, _ = reduce(state, {"type": "click", "action": ("question.choice", qid, "v2")})
                     _, effects = reduce(state, enter)

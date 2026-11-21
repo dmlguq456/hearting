@@ -1306,24 +1306,23 @@ def _reduce(state, event, frame=None):
             return _reduce(state, {"type": "click", "action": ("question.edit",)}, frame)
         if (unfolded and isinstance(key, str) and len(key) == 1 and key in "123456789"
                 and not overlay.get("editing")):
-            # Repeating the chosen number clears it. Other numbers pick a choice
-            # in the first question still waiting for an answer.
+            # A number picks a choice in the first question still waiting for an
+            # answer (the first question once all are answered). Repeating the
+            # number that is already marked on that same question clears it.
             detail = overlay.get("detail")
             answers = ((_question_draft_response(overlay) or {}).get("answers", {}))
             specs = [item for item in question_items(detail)
                      if isinstance(item.get("choices", item.get("options")), (list, tuple))
                      and item.get("choices", item.get("options"))]
             index = int(key) - 1
-            current = next((item for item in specs if item["id"] == overlay.get("editing_question_id")),
-                           specs[0] if specs else None)
-            if current and question_mark(overlay, current) == (index, True):
-                note = _question_text_draft(overlay, current["id"])
-                state = _question_mark_state(state, current["id"], (-1, False))
-                return _question_store_answers(state, current["id"], [note] if note else [])
             target = next((item for item in specs if not question_values_valid(
                 detail, item["id"], answers.get(item["id"], ()))), specs[0] if specs else None)
             if target is None:
                 return state, ()
+            if question_mark(overlay, target) == (index, True):
+                note = _question_text_draft(overlay, target["id"])
+                state = _question_mark_state(state, target["id"], (-1, False))
+                return _question_store_answers(state, target["id"], [note] if note else [])
             values = [value for value in (_question_choice_value(choice) for choice in
                                           target.get("choices", target.get("options")))
                       if value]
