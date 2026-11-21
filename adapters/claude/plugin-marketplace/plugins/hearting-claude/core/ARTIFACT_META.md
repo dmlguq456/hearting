@@ -337,11 +337,25 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   `- ` bullet (a title line of at most 60 columns) with optional indented `date:`, `source:` and
   `note:` lines (when it came up, where from, what the person said then). No per-line tag,
   status or owner mark.
-- **Counting rule.** A job is the top-level `- ` bullet under a `##` heading. A `- ` before the
-  first `##` is not a job; neither are `*`, `+` or numbered items, indented lines, sub-bullets
-  and anything in a code block (a fence closes only with the same character, at least as long).
-- **`갱신` line.** Read only before the first `##`, and only in the shape `갱신 YYYY-MM-DD HH:MM`
-  with a date and time that exist; any other line, or `갱신 2026-13-45 99:99`, is no date.
+- **Counting rule.** Lines are read by their shape, not by what Markdown makes of them (lines end
+  as Python's `str.splitlines` ends them). A job is a line whose first two characters are `- `,
+  below the first heading line and outside a code fence.
+  - A heading line is `##` followed by a space, a tab or the end of the line, after at most three
+    spaces: ` ## C` is a heading, four spaces make it no heading, and `###` is none.
+  - A `- ` line before the first heading is not a job. Neither is any line that does not start
+    with `- ` at its left edge: `*`, `+` and numbered items, `-` with no space after it,
+    indented lines, sub-bullets, `> - `.
+  - Markdown's meaning is not read: `- - -`, and a `- ` line inside an HTML comment, each count
+    as a job.
+  - A fence line is at most three spaces, then three or more of one character, `` ` `` or `~`;
+    the rest of an opening line is not read. A fence closes only with a line of the same
+    character, at least as long, followed by nothing but whitespace; an unclosed fence runs to
+    the end of the file. Fence lines and everything between them are not counted and are no
+    heading.
+- **`갱신` line.** Read only before the first heading line and outside a code fence, in the shape
+  `갱신 YYYY-MM-DD HH:MM` (ASCII digits) with a date and time that exist; surrounding
+  whitespace is ignored. The first line of that shape and a real time is the date; any other
+  line, or `갱신 2026-13-45 99:99`, is no date.
 - **Who and when.** The session that puts a job off adds one line, at that moment, under the
   campaign's heading (and refreshes `갱신`). A person writes it by hand.
 - **Done.** The line is deleted. The file holds open work only.

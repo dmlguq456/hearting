@@ -14,6 +14,7 @@ import contextlib
 import fcntl
 import json
 import hashlib
+import shutil
 import os
 import subprocess
 import stat
@@ -1067,6 +1068,7 @@ class ClassifyRootTest(ProducerTestBase):
         self.assertEqual(P.classify_root(self.root)["state"], "inactive-empty")
 
     def test_root_document_only_root_is_inactive_empty(self):
+        self.assertTrue(P.ROOT_DOCUMENT_NAMES)  # the loop below has something to do
         for name in P.ROOT_DOCUMENT_NAMES:
             (self.root / name).write_text("# Backlog\n", encoding="utf-8")
         klass = P.classify_root(self.root, collect_legacy_top_level=True)
@@ -1074,7 +1076,33 @@ class ClassifyRootTest(ProducerTestBase):
         self.assertEqual(klass["legacy_top_level"], [])
 
     def test_a_root_document_is_not_an_entrance_file(self):
+        self.assertTrue(P.ROOT_DOCUMENT_NAMES)
         self.assertEqual(set(P.ROOT_DOCUMENT_NAMES) & set(P.ENTRANCE_NAMES), set())
+
+    def test_only_a_regular_file_of_that_name_is_a_root_document(self):
+        outside = Path(self._tmp.name) / "elsewhere.md"
+        outside.write_text("x\n", encoding="utf-8")
+        path = self.root / "backlog.md"
+        for shape in ("folder with content", "link to a file", "broken link"):
+            with self.subTest(shape):
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
+                elif path.is_dir():
+                    shutil.rmtree(path)
+                if shape == "folder with content":
+                    path.mkdir()
+                    (path / "x.md").write_text("x\n", encoding="utf-8")
+                elif shape == "link to a file":
+                    path.symlink_to(outside)
+                else:
+                    path.symlink_to(Path(self._tmp.name) / "no-such-file.md")
+                self.assertFalse(P.is_root_document(path))
+                klass = P.classify_root(self.root, collect_legacy_top_level=True)
+                self.assertEqual(klass["state"], "inactive-with-legacy")
+                self.assertEqual(klass["legacy_top_level"], ["backlog.md"])
+        path.unlink()
+        path.write_text("# Backlog\n", encoding="utf-8")
+        self.assertTrue(P.is_root_document(path))
 
     def test_root_document_beside_real_legacy_content_does_not_hide_it(self):
         (self.root / "backlog.md").write_text("# Backlog\n", encoding="utf-8")
@@ -1327,6 +1355,36 @@ class CheckWriteTest(ProducerTestBase):
         self.assertEqual((after["verdict"], after["reason"]), ("allow", "root-document"))
         nested = P.check_write(self.root, self.root / "plans" / "backlog.md")
         self.assertEqual((nested["verdict"], nested["reason"]), ("deny", "legacy-top-level-write-denied"))
+        # a path under the root document's own name is no root document either
+        under = P.check_write(self.root, self.root / "backlog.md" / "x.md")
+        self.assertEqual((under["verdict"], under["reason"]), ("deny", "legacy-top-level-write-denied"))
+
+    def test_a_folder_or_a_link_named_as_a_root_document_is_still_denied(self):
+        outside = Path(self._tmp.name) / "elsewhere.md"
+        outside.write_text("x\n", encoding="utf-8")
+        inside = self.root / "inside.md"
+        inside.write_text("x\n", encoding="utf-8")
+        target = self.root / "backlog.md"
+        for activate in (False, True):
+            if activate:
+                self.activate()
+            for shape in ("folder", "link to a file in the root", "broken link"):
+                with self.subTest(activate=activate, shape=shape):
+                    if target.is_symlink():
+                        target.unlink()
+                    elif target.is_dir():
+                        target.rmdir()
+                    if shape == "folder":
+                        target.mkdir()
+                    elif shape == "broken link":
+                        target.symlink_to(Path(self._tmp.name) / "no-such-file.md")
+                    else:
+                        target.symlink_to(inside)
+                    verdict = P.check_write(self.root, target)
+                    self.assertNotEqual(verdict["reason"], "root-document", verdict)
+                    if activate:  # before activation every legacy write is allowed in the compat window
+                        self.assertEqual((verdict["verdict"], verdict["reason"]),
+                                         ("deny", "legacy-top-level-write-denied"))
 
     def test_shared_is_immutable_in_both_states(self):
         target = self.root / "shared" / "spec" / ("ref_" + "1" * 32) / "revisions" / ("rrev_" + "2" * 32) / "prd.md"
