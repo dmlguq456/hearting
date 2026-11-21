@@ -928,6 +928,64 @@ def _profile_cell(values, profile):
     return [model, effort]
 
 
+def _profile_target(values, profile):
+    """The cell a profile gets its value from, as ``model_follow`` names it: ``profile/<name>`` for a
+    line that names a model, ``tier/<name>`` for one that points at a tier; None when it has neither."""
+    name = profile.upper().replace("-", "_")
+    if str(values.get("CFG_MODEL_PROFILE_GRANULARITY_" + name, "")).startswith("collapsed"):
+        return None
+    raw = values.get("CFG_MODEL_PROFILE_" + name)
+    if not raw or ":" not in raw:
+        return None
+    target = raw.rsplit(":", 1)[0]
+    return f"profile/{profile}" if target.startswith("model/") else "tier/" + target.lower().replace("_", "-")
+
+
+def follow_into(models, answer, unlisted=()):
+    """Put the follow facts of ``model_follow.fleet_view()``'s ``answer`` into the MODELS view ``models``.
+
+    ``models["follow"]`` is the normalized answer, and each model it names gets a shown name; an
+    answer of a shape this does not know leaves ``models`` without ``follow`` (nothing about following
+    is drawn). Never raises."""
+    from . import follow
+    models.pop("follow", None)
+    try:
+        found = follow.normalize(answer, unlisted)
+        if found is None:
+            return models
+        shown = dict(models.get("shown") or {})
+        try:
+            from .. import render
+            for name in follow.model_names(found):
+                shown.setdefault(name, render._clean_model(render._dispatch_display_model(name)) or name)
+        except Exception:
+            pass
+        models["shown"] = shown
+        models["follow"] = found
+    except Exception:
+        models.pop("follow", None)
+    return models
+
+
+def _read_follow(catalogs):
+    """``(answer, unlisted)``: what ``model_follow.fleet_view()`` says about the tables, reading the lists
+    this read already holds (no list is asked for again), and the ``(harness, model)`` pairs a list lacks."""
+    try:
+        answer = utility("model_follow").fleet_view(read_catalog=lambda harness: catalogs[harness])
+    except Exception:
+        return None, ()
+    unlisted = set()
+    for item in answer if isinstance(answer, (list, tuple)) else ():
+        catalog = catalogs.get(item.get("harness")) if isinstance(item, dict) else None
+        rows = getattr(catalog, "rows", None) or ()
+        if getattr(catalog, "state", None) != "available" or not rows:
+            continue
+        known = {row["id"] for row in rows}
+        unlisted.update((item["harness"], cell["model"]) for cell in item.get("cells") or ()
+                        if isinstance(cell, dict) and cell.get("model") not in known)
+    return answer, unlisted
+
+
 def _allocation_fields(policy, field_view=None):
     """The DISPATCH ALLOCATION lines as ``[label, [[text, colour key], ...]]``."""
     allocation = policy.get("allocation") or {}
@@ -1116,13 +1174,14 @@ def read_model_config():
     """MODELS view data from the harnesses' models.conf and the dispatch defaults (read once, cached)."""
     import importlib.util
     model_config = utility("model_config")
-    profile_map, choices, main_only, context = {}, {}, {}, {}
+    profile_map, choices, main_only, context, profile_target = {}, {}, {}, {}, {}
     for adapter in ("claude", "codex", "opencode"):
         try:
             values, _receipt = model_config.resolve_config(adapter)
         except Exception:
             continue
         profile_map[adapter] = {profile: _profile_cell(values, profile) for profile in _PROFILES}
+        profile_target[adapter] = {profile: _profile_target(values, profile) for profile in _PROFILES}
         if adapter == "opencode":
             try:
                 # Use the selected runtime config's normal resolver: an omitted
@@ -1196,12 +1255,15 @@ def read_model_config():
                 shown[model] = render._clean_model(render._dispatch_display_model(model)) or model
     except Exception:
         shown = {}
-    return {"profiles": [p for p in _PROFILES if any(m.get(p) for m in profile_map.values())],
-            "profile_map": profile_map, "model_choices": choices, "main_only": main_only,
-            "efforts": list(_EFFORTS), "pools": pools, "effort_keys": dict(_EFFORT_KEYS), "shown": shown,
-            "context": context, "context_source": dict(_CONTEXT_SOURCE), "catalog_sources": catalog_sources,
-            "tidy": _read_tidy_points(),
-            "token_units": dict(_TOKEN_UNITS), "allocation": allocation, "steward": steward}
+    config = {"profiles": [p for p in _PROFILES if any(m.get(p) for m in profile_map.values())],
+              "profile_map": profile_map, "model_choices": choices, "main_only": main_only,
+              "efforts": list(_EFFORTS), "pools": pools, "effort_keys": dict(_EFFORT_KEYS), "shown": shown,
+              "context": context, "context_source": dict(_CONTEXT_SOURCE), "catalog_sources": catalog_sources,
+              "tidy": _read_tidy_points(),
+              "token_units": dict(_TOKEN_UNITS), "allocation": allocation, "steward": steward,
+              "profile_target": profile_target}
+    answer, unlisted = _read_follow(catalogs)
+    return follow_into(config, answer, unlisted)
 
 
 def collect_aux(request, *, snapshot=None, now=None, aux_reader=None):

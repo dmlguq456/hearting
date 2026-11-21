@@ -987,8 +987,14 @@ def _reduce(state, event, frame=None):
             offsets = dict(state.scroll)
             if action[1] == "sel":
                 folds = {key: value for key, value in folds.items()
-                         if key not in ("ui:sel", "ui:model", "ui:effort") + _MODEL_FIND_FOLDS}
+                         if key not in ("ui:sel", "ui:model", "ui:effort", "ui:fol") + _MODEL_FIND_FOLDS}
                 offsets.pop("mpick", None)
+            elif action[1] == "fol":          # a keep / follow / undo draft and a model draft exclude each other
+                folds = {key: value for key, value in folds.items()
+                         if key not in ("ui:model", "ui:effort") + _MODEL_FIND_FOLDS}
+                offsets.pop("mpick", None)
+            elif action[1] in ("model", "effort"):
+                folds.pop("ui:fol", None)
             folds["ui:" + str(action[1])] = str(action[2])
             return replace(state, folds=tuple(sorted(folds.items())),
                            scroll=tuple(sorted(offsets.items()))), ()
@@ -996,7 +1002,10 @@ def _reduce(state, event, frame=None):
             folds = state.fold_map()
             folds["ui:mfocus"] = "1"
             return replace(state, folds=tuple(sorted(folds.items()))), ()
-        if action[0] == "models.apply" and len(action) in (5, 7):
+        if action[0] == "models.apply" and len(action) in (5, 6, 7):
+            if len(action) == 6 and action[-1] is False:      # a keep / follow / undo that is written: its draft is done
+                folds = {key: value for key, value in state.fold_map().items() if key != "ui:fol"}
+                return replace(state, folds=tuple(sorted(folds.items()))), (action,)
             return state, (action,)
         if action[0] == "alloc.apply" and len(action) == 3:
             return state, (action,)

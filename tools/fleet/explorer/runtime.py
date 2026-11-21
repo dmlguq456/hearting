@@ -884,6 +884,18 @@ class ExplorerRuntime:
                     raise ValueError("context window is not a displayed choice")
                 target_name, requested = "context-window", str(amount)
                 variant_observation = None
+            elif len(effect) == 6:
+                _kind, harness, target, name, requested, dry_run = effect
+                if target != "follow" or not isinstance(name, str):
+                    raise ValueError("unsupported model setting")
+                cells = ((models.get("follow") or {}).get("cells") or {}).get(harness)
+                cell = next((item for item in cells or () if item.get("target") == name), None)
+                if cell is None:
+                    raise ValueError("cell is not a displayed one")
+                from . import follow
+                if not isinstance(requested, str) or requested not in ("keep", "follow", follow.undo_request(cell)):
+                    raise ValueError("not a choice of this cell")
+                target_name, variant_observation = name, None
             elif len(effect) == 7:
                 _kind, harness, target, profile, model, effort, dry_run = effect
                 profiles = models.get("profiles", ())
