@@ -1579,7 +1579,7 @@ def _block_answer(binding, request):
 # 11-15 (popup design B): the routes popup is Fleet's own table, drawn by Fleet's own functions into a
 # grid of the popup's width; nothing here draws a table of its own. (The LAB and sessions popups went
 # with their panel sections, 11-15.)
-POPUP_KINDS = frozenset({"routes", "status", "now"})
+POPUP_KINDS = frozenset({"routes", "status", "now", "backlog"})
 POPUP_ROWS = 160     # rows a table popup carries at most (the popup pages them with PgUp/PgDn)
 
 
@@ -1713,11 +1713,16 @@ def _panel_status(binding, request):
         return {"ok": False, "reason": "invalid-status"}
     registry_root()
     from fleet import session_status
-    return {"ok": True, "status": session_status.read(*named)}
+    value = session_status.read(*named)
+    have = request.get("have") if isinstance(request.get("have"), dict) else {}
+    # (11-21: the two short lists the panel shows under REPO come with it, read only where the document changed since the host's `have`)
+    lists = session_status.panel_lists(named[0], value, {key: have.get(key) for key in ("status", "backlog") if isinstance(have.get(key), str)}) if value else None
+    return {"ok": True, "status": value, "lists": lists}
 
 
-def _status_popup(binding, request, columns, colors, no_color):
-    """The status popup, in the parts the host asks for (``part``): ``doc`` is the whole document at the popup's width, with
+def _status_popup(binding, request, columns, colors, no_color, kind="status"):
+    """The status popup, in the parts the host asks for (``part``); as ``kind="backlog"`` the backlog popup (the same answer from
+    ``<artifact root>/backlog.md``, with no Fleet part). ``doc`` is the whole document at the popup's width, with
     no wait on Fleet's collection (the value the button already read comes with the request: ``session_status.held``, and
     only a request without one reads it); ``fleet`` is Fleet's status lines for this project (``session_status.popup_head_rows``),
     which the host puts above the document when they arrive. A document that cannot be read answers ``ok: False`` (the host
@@ -1731,16 +1736,17 @@ def _status_popup(binding, request, columns, colors, no_color):
     if named is None:
         return {"ok": False, "reason": "invalid-status"}
     part = request.get("part")
-    if part not in (None, "doc", "fleet", "list"):
+    backlog = kind == "backlog"
+    if part not in (None, "doc", "fleet", "list") or (backlog and part == "fleet"):
         return {"ok": False, "reason": "invalid-status"}
     from fleet import session_status
     view = {}
-    if part != "fleet":
+    if part != "fleet" and not backlog:
         view = session_status.held(named[0], request.get("status")) or session_status.read(*named)
         if view is None:
             return {"ok": False, "reason": "no-status"}
     rows = []
-    if part not in ("doc", "list"):
+    if part not in ("doc", "list") and not backlog:
         status = None
         try:
             from fleet.session_tags import assigned_tag
@@ -1754,11 +1760,22 @@ def _status_popup(binding, request, columns, colors, no_color):
             if part == "fleet":
                 return {"ok": False, "reason": "no-fleet"}
         rows = session_status.popup_head_rows(status, columns)
-    listing = None
+    listing, later = None, None
     if part != "fleet":
-        doc, listing = session_status.popup_doc(view, columns, want_list=part == "list")
+        if backlog:
+            import time
+            # (the backlog needs no status value: the folder of this window's status document, which only says which group stands first,
+            # is the host's word, kept to a folder name)
+            own = request.get("own") if isinstance(request.get("own"), str) and len(request["own"]) <= 200 and "/" not in request["own"] else ""
+            doc, listing, shown = session_status.backlog_view(session_status._root(named[0], time.time()), own, columns, want_list=part == "list")
+            view = {"title": shown["title"], "has_doc": shown["has_doc"]}
+        else:
+            doc, listing = session_status.popup_doc(view, columns, want_list=part == "list")
         if doc is None:
             return {"ok": False, "reason": "doc-unreadable"}
+        # (with a list the document's rows are made only if the list is dropped, below)
+        if callable(doc):
+            later, doc = doc, []
         rows = rows + doc
     styles, index = [], {}
 
@@ -1771,8 +1788,10 @@ def _status_popup(binding, request, columns, colors, no_color):
     # Each run carries its cells as Fleet measured them (``cell_width``), so the host lays the rows out by
     # the same measure Fleet drew them with (its own differs for some characters: Thai marks, jamo, new emoji).
     from fleet.explorer.grid import cell_width
-    runs = [[[text, style(key), cell_width(text)] for text, key in row if text] for row in rows]
-    result = {"ok": True, "kind": "status", "rows": runs, "styles": styles, "hits": [], "page": False}
+
+    def lay(rows_of):
+        return [[[text, style(key), cell_width(text)] for text, key in row if text] for row in rows_of]
+    result = {"ok": True, "kind": kind, "rows": [], "styles": styles, "hits": [], "page": False}
     if part != "fleet":
         result.update(title=view.get("title") or view.get("word") or "", has_doc=view.get("has_doc") is True)
     if part:
@@ -1782,18 +1801,20 @@ def _status_popup(binding, request, columns, colors, no_color):
         return len(json.dumps({"id": 0, **value}, ensure_ascii=False).encode())
     if listing:
         known = len(styles)
-
-        def lay(rows_of):
-            return [[[text, style(key), cell_width(text)] for text, key in row if text] for row in rows_of]
-        entries = [{**{k: v for k, v in entry.items() if k not in ("rows", "alt")}, "rows": lay(entry["rows"]),
-                    **({"alt": lay(entry["alt"])} if entry.get("alt") else {})} for entry in listing]
+        entries = [{**{k: v for k, v in entry.items() if k not in ("rows", "alt", "more")}, "rows": lay(entry["rows"]),
+                    **({"alt": lay(entry["alt"])} if entry.get("alt") else {}),
+                    **({"more": lay(entry["more"])} if entry.get("more") else {})} for entry in listing]
         # The list screen's answer carries the list alone: the document's rows are the other answer (``doc``), asked for when
         # the document is read whole, so the two never share the answer's size. A list that alone does not fit is left out and
         # the answer is the document's, as it always was.
-        listed = {**result, "rows": [], "list": entries}
+        listed = {**result, "list": entries}
         if weight(listed) <= POPUP_ANSWER_BYTES:
             return listed
-        del styles[known:]            # (the styles only the list used go with it: the answer is the document's alone)
+        del styles[known:]            # (the styles only the list used go with it, and the names that pointed at them: the answer is the document's alone)
+        for name in [k for k, at in index.items() if at >= known]:
+            del index[name]
+    runs = lay(rows + (later() if later else []))
+    result["rows"] = runs
     if weight(result) <= POPUP_ANSWER_BYTES:
         return result
     low, high = 0, len(runs)      # the most rows that fit with a dim `…` under them
@@ -1892,8 +1913,8 @@ def _panel_popup(binding, request):
         return {"ok": False, "reason": "invalid-popup"}
     colors, no_color = _paint_mode()
     harness, sid = binding["harness"], binding["sid"]
-    if kind == "status":
-        return _status_popup(binding, request, columns, colors, no_color)
+    if kind in ("status", "backlog"):
+        return _status_popup(binding, request, columns, colors, no_color, kind)
     if kind == "now":
         return _now_popup(binding, request, columns, colors, no_color)
     opened = request.get("open") if isinstance(request.get("open"), str) and len(request["open"]) <= 64 else ""

@@ -1,11 +1,9 @@
 """11-15 (design 2, "현황은 REPO 옆에 버튼을 만드는게 나을거 같은데" / "권장안대로하고"; "대기 중인건 점멸을 시키자" /
 "질문만"; review RV-PR1652-A A5): the panel's status button, the waiting blink and the folded strip at 30-32 cells.
 
-1. `STATUS ›` (11-20: English whatever the declared language; it was `현황 ›`) at the right end of the REPO row: the word in the body color, `›` dim in the section
-   heads' column, no ground, no count. Short of cells (11-20, the word is six cells) the name is cut down to eight cells, then `· wt N` goes, then the
-   word; `›` stays. The unlabelled head and the bottom layout carry it at the first
-   row's end; the folded strip has none. No document: all of it dim. No artifact root: no button. A press on
-   the row opens the status popup.
+1. (11-21: the REPO row has no button any more: the STATUS and BACKLOG parts stand under the REPO group, `session_shell_repo_lists_1121.test.py`.) The REPO row is the
+   group's head, its rule running to the row's end; no press on it. The bottom layout's first row ends in the two buttons `STATUS +N ›  BACKLOG +N ›` (the counts
+   give way first, then the words; `›` stays); the folded strip has none. No document: the word dim. No artifact root: no buttons.
 2. What waits for the person's answer goes between two reds (`FACES.*.waitBlink`) on the waiting breath's
    beat: the red letters of the question answered here, the `◑` of one answered elsewhere and the guide
    line's count, `◑답 대기 N` on the strip. Only those cells move; nothing moves with `rule motion` off, mono,
@@ -50,87 +48,64 @@ class StatusButtonTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
-    def test_the_button_gives_way_in_order_and_its_row_opens_the_status_popup(self):
+    def test_the_repo_row_has_no_button_and_its_name_gives_way_alone(self):
         # Every side width 24-60 × names of 8, 15, 23 and 32 cells, with and without the worktree count.
         self.node(r"""
 const names=['hearting','shell-tools-kit','speech-separation-bench','very-long-project-name-for-tests'];
-let stages=new Set();
+const doc={word:'STATUS',has_doc:true},backlog={word:'BACKLOG',has_doc:true};
 for(const name of names)for(const wt of [true,false])for(let w=24;w<=60;w++){
- const model={repo_side:[p(name,{foreground:116})],...(wt?{}:{worktrees:[]}),status_doc:{word:'STATUS',has_doc:true}};
+ const model={repo_side:[p(name,{foreground:116})],...(wt?{}:{worktrees:[]}),status_doc:doc,backlog_doc:backlog};
  const v=render({width:w,model}),rows=v.rows.map(str),row=rows[1],tag=w+' '+name+' '+wt+'\n'+rows.join('\n');
- const inner=w-4,label=inner>=30?7:0,value=row.slice(2+(label?7:0),-2);
  assert.equal(cells(row),w,tag);
- // `›` in the last inside cell (the section heads' column), dim; no ground on the row.
- const parts=columns(v.rows[1]),arrow=parts.findLast(x=>x.text==='›');
- assert(arrow&&arrow.at===w-3&&arrow.dim===true,tag);
- assert(v.rows[1].every(x=>x.background===undefined),tag);
- if(label)assert(row.startsWith('│ REPO   '),tag);
- // The stage this width shows, and the order (11-20, the word being `STATUS`): the name is cut (to eight cells at least) before the word goes, the count goes
- // before the name is cut below that, and the word goes last (down to `›`, then the name cut with `…`).
- const word=value.includes('STATUS ›'),count=value.includes('· wt 12'),cut=value.includes('…'),whole=value.includes(name);
- assert(whole||cut,tag);
- if(w>=26)assert(word,tag+' (the word stands while the name keeps eight cells)');
- if(word&&cut)assert(cells(value.slice(0,value.indexOf('…')+1))>=Math.min(cells(name),8),tag+' (the name keeps eight cells)');
- stages.add([word,count,cut].join());
- // The press: the whole row opens the status popup; no other press on it.
- const hits=v.hits.filter(h=>h.row===1);
- assert.deepEqual(hits.map(h=>[h.left,h.right,h.action]),[[2,w-3,'popup:STATUS']],tag);
+ assert(!row.includes('STATUS')&&!row.includes('›'),tag);
+ assert(v.hits.filter(h=>h.row===1).length===0,tag);
+ const inner=w-4,label=inner>=30;
+ if(label)assert(row.startsWith('│ REPO   '),tag);else assert(row.startsWith('│ REPO '),tag);
+ // The rule runs to the end of the row (a thin rule where three cells or more are free).
+ assert(/(─+|[^─]) │$/.test(row),tag);
+ // The name is whole, or cut with `…`.
+ assert(row.includes(name)||row.includes('…'),tag);
 }
-// Each stage is reached somewhere: whole, the name cut with the count kept, the count gone (name whole, then cut), and below 26 cells the word goes.
-for(const s of ['true,true,false','true,true,true','true,false,false','true,false,true'])assert(stages.has(s),[...stages].join(' | '));
-assert([...stages].some(x=>x.startsWith('false')),[...stages].join(' | '));
-// The design's 40-cell rows (the name's room 29 cells).
-const at40=name=>str(render({width:40,model:{repo_side:[p(name)],status_doc:{word:'STATUS',has_doc:true}}}).rows[1]);
-// (11-20: the REPO row is the REPO group's head, its free cells a thin rule.)
-assert.equal(at40('hearting'),'│ REPO   hearting · wt 12 ─── STATUS › │');
-// (11-20: the word is `STATUS`, six cells: a name too long for it is cut, down to eight cells, before the word goes.)
-assert.equal(at40('shell-tools-kit'),'│ REPO   shell-tools… · wt 12 STATUS › │');
-assert.equal(at40('speech-separation-bench'),'│ REPO   speech-sepa… · wt 12 STATUS › │');
-assert.equal(at40('very-long-project-name-for-tests'),'│ REPO   very-long-p… · wt 12 STATUS › │');
-// Narrow panels (32 to 36 cells; the side panel is never narrower in the product): the name is cut first, then the count goes, and the word stays.
-const atW=(w,name)=>str(render({width:w,model:{repo_side:[p(name)],status_doc:{word:'STATUS',has_doc:true}}}).rows[1]);
-assert.equal(atW(32,'my-project'),'│ REPO my-project ─── STATUS › │');
-assert.equal(atW(32,'shell-tools-kit'),'│ REPO shell-tools-k… STATUS › │');
-assert.equal(atW(34,'speech-separation-bench'),'│ REPO   speech-separa… STATUS › │');
-assert.equal(atW(36,'my-project'),'│ REPO   my-proj… · wt 12 STATUS › │');
-for(const w of [32,33,34,35,36])for(const n of ['a','my-project','speech-separation-bench','very-long-project-name-for-tests']){const r=atW(w,n);
-  assert(cells(r)===w&&r.includes('STATUS ›'),w+' '+r);}
-// The word in the body color (Fleet's `soft`, the panel's `loc_repo`: 253), `›` dim.
-{const v=render({width:54,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true}}});
- assert.equal(str(v.rows[1]),'│ REPO   hearting · wt 12 ───────────────── STATUS › │');
- const w=v.rows[1].find(x=>x.text==='STATUS');assert(w.foreground===253&&w.dim!==true&&w.bold!==true,JSON.stringify(w));}
-// English: `STATUS ›`.
-assert.equal(str(render({width:54,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true}}}).rows[1]),'│ REPO   hearting · wt 12 ───────────────── STATUS › │');
+const at40=name=>str(render({width:40,model:{repo_side:[p(name)],status_doc:doc,backlog_doc:backlog}}).rows[1]);
+assert.equal(at40('hearting'),'│ REPO   hearting · wt 12 ──────────── │');
+assert.equal(at40('speech-separation-bench'),'│ REPO   speech-separation-bench ───── │');   // (the count goes before the name is cut)
 """)
 
-    def test_no_document_dims_the_button_and_no_root_shows_none(self):
+    def test_no_document_dims_the_head_and_no_root_shows_none(self):
         self.node(r"""
-// No document: the whole button dim, and a press still opens the popup.
-{const v=render({width:54,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:false}}});
- const w=v.rows[1].find(x=>x.text==='STATUS'),a=v.rows[1].findLast(x=>x.text==='›');
- assert(w.dim===true&&a.dim===true&&w.foreground!==253,JSON.stringify(v.rows[1]));
- assert(v.hits.some(h=>h.row===1&&h.action==='popup:STATUS'));}
-// No artifact root (no value): the row as before, no button and no press on it.
+// No document: the word dim (not in the title role), `›` dim, and a press on the head still opens the popup.
+{const v=render({width:54,height:30,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:false,items:[],total:0}}});
+ const at=v.rows.findIndex(r=>str(r).includes('│ STATUS'));assert(at>0,v.rows.map(str).join('\n'));
+ const w=v.rows[at].find(x=>x.text==='STATUS'),a=v.rows[at].findLast(x=>x.text==='›');
+ assert(w.dim===true&&a.dim===true&&w.role!=='title',JSON.stringify(v.rows[at]));
+ assert(v.hits.some(h=>h.row===at&&h.action==='popup:STATUS'));}
+// No artifact root (no value): nothing under the REPO row, no press, no word anywhere.
 for(const status_doc of [undefined,null,{word:'',has_doc:true}]){
- const v=render({width:54,model:{repo_side:[p('hearting')],status_doc}});
+ const v=render({width:54,height:30,model:{repo_side:[p('hearting')],status_doc}});
  assert.match(str(v.rows[1]),/^│ REPO   hearting · wt 12 ─+ │$/,JSON.stringify(status_doc));
- assert(!v.hits.some(h=>h.row===1),JSON.stringify(status_doc));
+ assert(!v.hits.some(h=>/STATUS|BACKLOG/.test(h.action)));
  assert(!v.rows.flat().some(x=>x.text==='STATUS'));}
 """)
 
     def test_the_unlabelled_head_the_bottom_layout_and_the_folded_strip(self):
         self.node(r"""
-// Narrower than 30 cells inside (the 32-cell side panel): the first row, unlabelled, the same order.
-{const v=render({width:32,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true}}});
- assert.equal(str(v.rows[1]),'│ REPO hearting ───── STATUS › │');assert(v.hits.some(h=>h.row===1&&h.action==='popup:STATUS'));}
-// The bottom layout: the right end of the first row (`repo │ model │ context`); short of cells the word goes, then the row is cut.
-for(const [w,want] of [[80,/│ hearting │ Opus 5\.5 │ ctx 46% +STATUS › │$/],[34,/│ hearting │ Opus 5\.5 │ ctx 4… › │$/]]){
- const v=render({width:w,side:false,height:8,model:{repo:[p('hearting')],context:[p('ctx 46%')],status_doc:{word:'STATUS',has_doc:true}}});
- assert.match(str(v.rows[1]),want,str(v.rows[1]));assert.equal(cells(str(v.rows[1])),w);
- assert(v.hits.some(h=>h.row===1&&h.action==='popup:STATUS'&&h.left===2&&h.right===w-3),JSON.stringify(v.hits));}
+// Narrower than 30 cells inside (the 32-cell side panel): the first row, unlabelled; no button.
+{const v=render({width:32,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true},backlog_doc:{word:'BACKLOG',has_doc:true}}});
+ assert.equal(str(v.rows[1]),'│ REPO hearting · wt 12 ────── │');assert(!v.hits.some(h=>h.row===1));}
+// The bottom layout: the right end of the first row (`repo │ model │ context`) holds two buttons; the counts go first, then the words (`›` stays), then the row is cut.
+const two=(w,s,b)=>render({width:w,side:false,height:8,model:{repo:[p('hearting')],context:[p('ctx 46%')],status_doc:{word:'STATUS',has_doc:true,total:s},backlog_doc:{word:'BACKLOG',has_doc:true,total:b}}});
+for(const [w,want] of [[120,/│ hearting │ Opus 5\.5 │ ctx 46% +STATUS \+2 ›  BACKLOG \+11 › │$/],[60,/│ hearting │ Opus 5\.5 │ ctx 46% STATUS \+2 ›  BACKLOG \+11 › │$/],[56,/│ hearting │ Opus 5\.5 │ ctx 46% +STATUS ›  BACKLOG › │$/],[52,/│ hearting │ Opus 5\.5 │ ctx 46% +›  › │$/],[34,/│ hearting │ Opus 5\.5 │ ct… ›  › │$/]]){
+ const v=two(w,2,11);
+ assert.match(str(v.rows[1]),want,w+' '+str(v.rows[1]));assert.equal(cells(str(v.rows[1])),w);
+ // The rest of the row opens the status popup, the BACKLOG button its own.
+ const [a,b]=['popup:STATUS','popup:BACKLOG'].map(x=>v.hits.find(h=>h.row===1&&h.action===x));
+ assert(a&&b&&a.left===2&&b.right===w-3&&a.right+1===b.left,JSON.stringify(v.hits));
+ const text=str(v.rows[1]).slice(1);assert(b.left>=2);
+}
+{const v=two(120,0,0);assert.match(str(v.rows[1]),/ctx 46% +STATUS ›  BACKLOG › │$/,str(v.rows[1]));}
 // The folded strip carries no button.
-{const v=render({width:120,folded:true,height:1,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true}}});
- assert(!str(v.rows[0]).includes('STATUS')&&!v.hits.some(h=>h.action==='popup:STATUS'),str(v.rows[0]));}
+{const v=render({width:120,folded:true,height:1,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true},backlog_doc:{word:'BACKLOG',has_doc:true}}});
+ assert(!str(v.rows[0]).includes('STATUS')&&!v.hits.some(h=>/popup:(STATUS|BACKLOG)/.test(h.action)),str(v.rows[0]));}
 """)
 
     def test_the_waiting_blink_moves_only_the_waiting_red_cells(self):
