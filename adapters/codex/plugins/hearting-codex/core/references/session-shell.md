@@ -358,14 +358,8 @@ Then the metadata, one block. Beside the native area the repository and Git rows
 start with dim labels in the label column of `TITLE` and `NOW` (`REPO`, `GIT`;
 narrower than 30 cells inside the labels go first): `REPO   hearting · wt 12`,
 the repository name in its color with no trailing `/` and the worktree count
-dim (none for zero or an unknown count), the status button `STATUS ›` (11-20: English, the panel's section names are, whatever the
-declared language; it was `현황 ›`) at the row's right end (11-15, design 2: the word in the body color, `›` dim in
-the section heads' `›` column, no ground and no count; short of cells (11-20, the word being the six cells of `STATUS`) the name is cut with `…`
-down to eight cells before the word goes, then `· wt N` goes before the name is cut below that, and only then the word, with `›` staying; the unlabelled head and the
-bottom layout carry it at their first row's right end; no status document: all of it dim, a press
-still opens it; no artifact root: no button; a press anywhere on the row opens the status popup; 11-20, the person: "현황은 미리보기 없이 버튼만 만들자.. 팝업으로 띄워서
-사용자가 직관적으로 목록을 볼 수 있게 하는 UI 작업에 집중해": the panel draws no preview of the status, no box and no list, only this button, and a drawing with a document and one without
-are the same letter for letter, the word's brightness apart; the button's value does not read the document), and `GIT    main ✓`, all dim with no
+dim (none for zero or an unknown count), (11-21: the row has no status button where the STATUS and BACKLOG parts stand under the REPO group, below; short of rows, where their heads go, it ends in the two buttons, 11-22; and the bottom layout's first row ends in two buttons),
+and `GIT    main ✓`, all dim with no
 parentheses: the branch and dirty mark cut at 20 cells (32 with 60 cells
 inside), then `✓` when ahead and behind are both known to be 0, else `↑N`/`↓N`
 (nothing when unknown: no upstream to compare with), then the existing merge
@@ -429,10 +423,34 @@ layout keeps the metadata row (or rows) first and one content row
 
 Two groups (11-20, the person: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" / "REPO ---- SESSION ----"), beside the native area. REPO is the repository's: the
 REPO row, which is the group's head (`REPO   hearting · wt 12 ────`: the word in the label column, the rule dim in a section head's color running to the row's end,
-the status button at its end; no row more than before; narrower than 30 cells inside the word stands first as `REPO `), and under
-it GIT and PEERS. SESSION is this session's: its head `SESSION ────` stands where the empty row between the two groups of
+no button while the two heads below stand, the two buttons where they do not; narrower than 30 cells inside the word stands first as `REPO `), and under
+it GIT, PEERS, then (11-21, the person: "버튼을 REPO의 아래에 각각을 두고 +? 숫자 띄우고 백로그랑 현황을 나열하자" / "각각 3줄 정도씩 목록으로 만들고 추가분을 +? 형식으로")
+the **STATUS part** and the **BACKLOG part**: each a section head (`STATUS +2 ────── ›`, the section heads' own shape, the word in the title role, `+N` in the MESSAGES head's
+color and place, `›` last; a press opens that popup) and its first three items, one row each, cut with `…` (`! ` in the status list's yellow before what waits for the person,
+`· ` dim before the rest; a press on an item opens the popup standing on that item). The STATUS items are the status list screen's own order, what waits for the person and
+then what is in progress (`session_status.panel_items`, from `parse_listing`, the one reading the list screen uses; the recent and the folded count nothing); the BACKLOG items
+are `<artifact root>/backlog.md`'s, this window's campaign group (the `##` heading that is, letter for letter, the name of the folder this window's status document is in) first,
+then the other groups in the document's order. `+N` is the count of the items of the whole document not shown (nothing for zero; a `+` after it, `+2997+`, where the file is longer than is read: the first 1 MiB is read and what was read is counted; `+` alone where nothing is hidden by the rows and there is more); no item: the head alone; no document, or one that
+cannot be read: the word plain dim, no item, a press still opens the popup; no artifact root: neither part. **One rule (11-22, the person's STATUS and BACKLOG lists are the first to give way): the
+two parts never take a row from anything else.** The panel is laid out as it is without them (the same layout, the same `give` order, byte for byte what a window with no list value draws; the
+REPO row alone differs), and the parts take only what that layout leaves empty and, short of those, rows MESSAGES and MEM fold: the empty rows (the row between the head's block and the route
+box, the rows left over), then the BACKLOG items (3, 2, 1, none: `+N` grows by as many; they stand on empty rows), then MESSAGES and MEM folding as they fold short of rows (the messages
+in their one-row form, MEM to two records, MESSAGES to two messages, then one each: both keep their head and one row, and stand where the panel without the parts has them), then the STATUS
+items (they may stand on what was folded), then the two heads together. **At no height is a BACKLOG item left short while an empty row is left after the parts gave way:** a fold that frees several
+rows at once leaves empty ones, and the BACKLOG items stand on those again (up to three, as many as the empty rows; the STATUS items stand before them, never a BACKLOG item with a STATUS
+item short). So as the height falls the BACKLOG items may be more again at a height; the layout without the parts is not monotonic in the height either. Nothing else gives way for the parts: NOW, QUESTIONS and the route box (their rows and their shape, folded or
+open), Git, PEERS, the SESSION head and the rule above the title, MODEL, CTX, TITLE, RESOURCES, the notices and the last row have the rows and the form they have without the parts, and none
+has more. Where the two heads do not stand the REPO row ends in the two buttons, `STATUS +N ›  BACKLOG +N ›` (the bottom layout's first row's pieces, the same order of giving way: the counts
+go the way the bottom row's go, but the repository's own `· wt N` goes first: `· wt N`, then the name is cut (to eight cells), then the buttons' counts, then their words; at the `›  ›` stage
+`· wt N` stands again where it fits; a press on a button opens that popup, on the rest of the row the status popup), and everything
+but that row is what the panel without the parts draws, byte for byte (MESSAGES and MEM unfolded as without them); where the heads stand the row has no button. (The layout is made once, then the
+parts are fitted in that order; there is no second budget and nothing is drawn twice.) The bottom layout has no list and no more rows:
+its first row ends in `STATUS +N ›  BACKLOG +N ›` (`N` the whole count, nothing for zero; short of cells the counts go, then the words, then the row is cut; the rest of the row opens the
+status popup). The two parts' items come with the status button's value, in the same read and the same worker, only where a document changed (the host sends the documents' path,
+modification time, size, inode and change time back as `have` and, for the backlog, the folder its order was made for (this window's campaign group stands first, so another folder is another
+order); an unchanged one is neither read nor parsed again); the panel's drawing reads no file. SESSION is this session's: its head `SESSION ────` stands where the empty row between the two groups of
 metadata stood and goes with it short of rows, then MODEL, CTX, TITLE, NOW, QUESTIONS, the route box, MESSAGES, MEM. RESOURCES and USAGE keep their own heads, place and shape
-at the panel's bottom (they read under SESSION; they belong to neither group). The bottom layout has no group heads: its first row carries the repository and the session together,
+at the panel's bottom (they read under SESSION; they belong to neither group). The bottom layout has no group heads: its first row carries the repository and the session together (and the two buttons),
 then GIT, PEERS, then the title and NOW row and the route box. The REPO row is the group's head in every width; there is no head row of its own over it.
 
 Under the head the panel is a few rows per section (11-15, popup design E), each
@@ -1015,8 +1033,8 @@ the panel together; above the folded strip, never over it): the question popup
 while a question waits to be answered here, else the first section with
 something in it. A press on a panel section (its head or a row) or on a group of
 the folded strip opens that section's popup, and a new question or a failed
-route never opens one. The popups are six
-kinds over one frame and one set of keys: STATUS (11-15, design 2: the REPO row's button; the table
+route never opens one. The popups are seven
+kinds over one frame and one set of keys: STATUS (11-15, design 2, 11-21: the STATUS head under the REPO group; the table
 popup's frame, width and keys; its title `STATUS <campaign> · <age>`, `STATUS` alone without a document.
 11-21 (the person chose design C, "정할 것 먼저"): for the campaign document Hearting generates (its first line is the marker
 `<!-- hearting:campaign-document v1 -->`, read whole) the popup opens on a **list screen**, of the document's own words and nothing
@@ -1037,7 +1055,7 @@ nothing to open and Enter changes nothing, and `full document ›` is the screen
 document: tables, fences and the lines outside any list are read there), Esc or Enter going back to the list on the line it left and a second Esc
 closing; its one row of keys is the popups' own, which say Esc once. ←→ are still the sections and `p` `f` `r` `w`,
 Esc, Ctrl+], `✕` and a press outside are unchanged; PgUp/PgDn and the wheel read a longer list on. A document read again while the popup
-stands keeps the chosen line on the same words (else the top) and opens the same groups by their heading. The first screen is the list alone
+stands keeps the chosen line on the same words (else the top) and opens the same groups by their heading (headings of the same name are joined in order: the Nth of them is the one the chosen line and the open state follow). The first screen is the list alone
 (`part: list`) and asks nothing of the document's rows or of Fleet: the document read whole is its own answer (`part: doc`, the rows and budget
 it always had, whatever the list weighs), asked for when `full document ›` is opened and kept for the next entry, with Fleet's lines after it; a
 page read again while that screen stands asks for both again, as the popup always did. Every other document (a hand-written
@@ -1054,14 +1072,29 @@ already read (`session_status.held`, a path only inside the folder's own artifac
 alone and the document's rows are asked for apart, when `full document ›` is opened), then Fleet's lines, which stand above it when
 they arrive (for a page with a list screen, after the document read whole is asked for); a popup read that failed shows Fleet's `fleet.output.unreadable`, dim, and is read again at the next opening (a document it
 cannot read is that same failure, not a `?`), and the Fleet part holds no place of the document's: a popup opened again while it is out
-stands at once, and its lines are kept only for the width and value they were asked at), QUESTIONS (the question editor),
+stands at once, and its lines are kept only for the width and value they were asked at), BACKLOG (11-21: the status popup's list screen over
+`<artifact root>/backlog.md`, drawn by the same `status-list.cjs` with the same keys and the same frame; its answer is the status popup's own (`part: list` / `doc`, no Fleet part;
+`session_status.backlog_view`, `session_shell._status_popup(kind="backlog")`). The document's form (written by another task, only read here): a title, `갱신 YYYY-MM-DD HH:MM`, then `##` headings, each a campaign folder name or `Unassigned`, and under
+each the top-level `- ` bullets, one item each (the artifact entrance's own counting rule, `parse_backlog`, checked against `artifact_entrance._backlog` on the same texts, not the status page's looser reading: a heading is `##`, after at most three spaces,
+followed by a blank or the end of the line (` ## C` is one; four spaces, a tab before it and `###` are none; the count, the group split of this popup and the `갱신` boundary all use that one judgement); a `- ` before the first `##` is none; `*`, `+`, `-<tab>` and numbered lists are none; an indented line and a sub-bullet are none;
+`- - -` and a `- ` inside an HTML comment are counted; a code fence (up to three spaces in, whatever follows) is not read, closes on the same character and the same or a longer length only, and one never closed runs to
+the end; `갱신 YYYY-MM-DD HH:MM` (ASCII digits, one blank, the line's own surrounding blanks cut) is read before the first `##` only, and only where the date and the time are real, shown as `updated MM-DD HH:MM`, with `! … old document` after three days). The indented lines under an item
+(`date:`, `source:`, `note:`) are its detail. The list screen is the title, `updated …`, this window's campaign group open on top (its heading and its items), every other group one folded line
+`› <heading> N` in the document's order, then `full document ›` (the document read whole, its first 64 KiB, `… 64 KiB` after a longer one). **The list answer carries titles only** (and the groups and
+counts): an item with indented lines under it is `lazy`, and opening it (Enter or a press; again closes) asks for its lines (`part: detail`, `open` the item's key; one `⠏` stands under it until they come), so a
+backlog of 256 KiB and 500 items stands as a list. The list's answer may weigh 200 KiB (`BACKLOG_ANSWER_BYTES`; the host reads 256 KiB of an answer); a document whose titles alone pass it draws
+the most that fit, then one line `… N more in backlog.md`; a file longer than the 1 MiB read limit adds `… the file is longer than is read here: more items follow`. PgUp/PgDn on a list screen (the status
+popup's too) move the chosen line a screen on, the window following it. The headings are the document's words as written, never invented. The words Hearting puts there (`BACKLOG`, `updated`, `old document`, `full document`,
+`No backlog document yet.`) are English whatever the language. No document, a folder or link of that name, one that cannot be read: the popup's one dim line, no list.
+A document of another form (no headings, no `- ` bullets) shows as much as is read and no item is none. The title is `BACKLOG · <age>`.),
+QUESTIONS (the question editor),
 ROUTE (Fleet's own table: the backend's `popup` reading draws
 Fleet's `draw_routes` with one route unfolded and Fleet's route page into a grid of
 the popup's width and sends the painted cells, Fleet's row tints left out; narrow,
 Fleet's columns leave as Fleet leaves them), NOW (11-17, below), MESSAGES (the requests and messages whole, then
 the peer delivery reading `r`) and MEM (11-20: the records whole, drawn from the panel's own values as MESSAGES' are, no reading). The bottom line lists the sections with
-something in them in the panel's order, `STATUS · NOW · QUESTIONS · ROUTE · MESSAGES · MEM` (STATUS in English like the rest,
-there while the button stands; NOW while the panel holds a NOW; `Ctrl+]` still opens what it opened before, never NOW), the current one bright; ←→ (or a press on a name) moves to
+something in them in the panel's order, `STATUS · BACKLOG · NOW · QUESTIONS · ROUTE · MESSAGES · MEM` (STATUS and BACKLOG in English like the rest,
+there while the parts stand; NOW while the panel holds a NOW; `Ctrl+]` still opens what it opened before, never NOW), the current one bright; ←→ (or a press on a name) moves to
 the next or previous one. A popup row reaches the terminal with every control character (C0, DEL and
 C1) as a space. In a table ↑↓, Tab and Shift+Tab unfold the next or
 previous route (Fleet's `▶`) or read on a row; Enter opens the

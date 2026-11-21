@@ -5,7 +5,9 @@
 // row for a row that can be chosen), and may carry `key` (it can be chosen), `group` (the id of the heading its open state is kept by),
 // `when: 'open'` (shown only while that group is open), `alt` (the rows shown instead while it is open) and `text` (the whole
 // words of an item whose row was cut: set in place of that row, wrapped, while the person has the item open; an item whose
-// row was not cut has none, so there is nothing to open). Keys and ids are short names, never the words themselves. This file
+// row was not cut has none, so there is nothing to open) and `more` (rows that stand under the item's row while the person has it
+// open: the backlog's indented lines; an item that has them can be opened as one whose row was cut can) or `lazy` (the same, the lines being asked for
+// when it is opened). Keys and ids are short names, never the words themselves. This file
 // lays those out by the host's state and moves it. It reads
 // nothing, asks nothing and starts nothing: a state is `{sel, fold: Set of group ids, items: Set of item keys}`.
 //
@@ -21,9 +23,15 @@ function layout(entries, state, { width = 0, measure = defaultMeasure } = {}) {
   const rows = [], marks = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (entry.when === 'open' && !open(entry.group)) continue;
-    const opened = !!entry.key && !!entry.text && state.items.has(entry.key);
-    const own = opened && width > 0 ? unfold(entry, width, measure) : entry.alt && open(entry.group) ? entry.alt : entry.rows;
-    if (entry.key) marks.push({ key: entry.key, at: rows.length, rows: own.length, group: entry.group || '', text: !!entry.text, open: opened });
+    const openable = !!entry.text || !!entry.more || !!entry.lazy;
+    const opened = !!entry.key && openable && state.items.has(entry.key);
+    const shown = opened && width > 0 && entry.text ? unfold(entry, width, measure) : entry.alt && open(entry.group) ? entry.alt : entry.rows;
+    // `lazy`: the lines under the item are not in the answer (the backlog's long notes); the host asks for them when the item is opened and keeps
+    // them in `state.more[key]` (until they come, one dim `⠏` stands under the row).
+    const later = opened && entry.lazy ? (state.more && state.more[entry.key]) || [[{ text: '    ⠏', dim: true }]] : null;
+    const below = entry.more || later;
+    const own = opened && below ? [...shown, ...below] : shown;
+    if (entry.key) marks.push({ key: entry.key, at: rows.length, rows: own.length, group: entry.group || '', text: openable, open: opened, lazy: !!entry.lazy });
     for (const row of own) rows.push(row);
   }
   const found = marks.find(m => m.key === state.sel), chosen = found || marks[0] || null;
@@ -62,6 +70,17 @@ function unfold(entry, width, measure) {
   const used = lead.reduce((n, part) => n + (Number.isInteger(part.cells) ? part.cells : measure(part.text)), 0);
   const pieces = wrap(entry.text, Math.max(1, width - used), measure);
   return pieces.map((piece, i) => i === 0 ? [...lead, { ...style, text: piece }] : [{ text: ' '.repeat(used) }, { ...style, text: piece }]);
+}
+
+// The key of the line a screen away: the first line that can be chosen at or past `delta` rows from the chosen one (up: at or before it), the ends staying
+// (PgUp/PgDn: the chosen line goes with the window, so the line Enter opens is the one in view). '' where nothing can be chosen.
+function jump(view, delta) {
+  const marks = view.marks;
+  if (!marks.length) return '';
+  const at = Math.max(0, marks.findIndex(m => m.key === view.sel)), goal = marks[at].at + delta;
+  let to = at;
+  if (delta > 0) { while (to < marks.length - 1 && marks[to].at < goal) to++; } else { while (to > 0 && marks[to].at > goal) to--; }
+  return marks[to].key;
 }
 
 // The key of the row `delta` rows of choices away from the chosen one (the ends stay), or '' where nothing can be chosen.
@@ -112,7 +131,8 @@ function entriesOf(result) {
   return result.list.filter(e => e && typeof e === 'object').map(e => ({ rows: rowsIn(e.rows),
     ...(typeof e.key === 'string' && e.key ? { key: e.key } : {}), ...(typeof e.group === 'string' ? { group: e.group } : {}),
     ...(e.when === 'open' ? { when: 'open' } : {}), ...(Array.isArray(e.alt) ? { alt: rowsIn(e.alt) } : {}),
-    ...(typeof e.text === 'string' && e.text ? { text: e.text } : {}) }));
+    ...(typeof e.text === 'string' && e.text ? { text: e.text } : {}), ...(Array.isArray(e.more) && e.more.length ? { more: rowsIn(e.more) } : {}),
+    ...(e.lazy ? { lazy: true } : {}) }));
 }
 
-module.exports = { layout, neighbour, press, hits, runParts, rowsOf, entriesOf, wrap };
+module.exports = { layout, neighbour, jump, press, hits, runParts, rowsOf, entriesOf, wrap };
