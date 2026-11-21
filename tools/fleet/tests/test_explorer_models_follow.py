@@ -313,6 +313,67 @@ class Summary(unittest.TestCase):
                             self.assertLessEqual(cell_width(row[2:]), width - 35, row)
 
 
+class AnotherListDay(unittest.TestCase):
+    """The codex list was written by another CLI version: the cells are unknown, the line says why, and
+    what the table already followed stays drawn (the answer's `null` meets the old rule `_shown`)."""
+
+    def _row(self, shown):
+        return next(row for row in shown if "CLI" in row)
+
+    def test_the_line_comes_in_the_known_order_and_what_to_do_is_always_shown(self):
+        for width in (80, 100, 140):
+            with self.subTest(width=width):
+                shown = _pic("another-list", width, "balanced/claude")
+                self.assertEqual(len([row for row in shown if "CLI" in row]), 1)
+                self.assertIn("codex CLI 0.171.0 · start codex once", self._row(shown))
+        self.assertTrue(self._row(_pic("another-list", 140, "balanced/claude")).endswith(
+            "codex CLI 0.171.0 · start codex once · model list is from 0.163.0"))
+        self.assertEqual(follow.Follow({"cells": {}, "cli": [follow._note(samples.CLI_ANOTHER)]}, {}, None).cli_lines(),
+                         ["codex CLI 0.171.0 · start codex once · model list is from 0.163.0"])
+
+    def test_the_five_followed_cells_keep_their_marks_the_summary_and_the_undo(self):
+        for width in (100, 140):
+            with self.subTest(width=width):
+                shown = _pic("another-list", width)
+                self.assertEqual([" ^ " in shown[i] for i in (2, 4)], [True, True])   # top, balanced-deep
+                self.assertIn("▶", shown[3])                                          # deep: the chosen cell
+                self.assertTrue(any(row.startswith("│ ^ followed 11-22 · 5 cells") for row in shown))
+                self.assertIn("[ undo ]", _box(shown)[2])
+        before = _pic("another-list", 140, "mini/codex")
+        self.assertTrue(any(row.startswith("│ ^ followed") for row in before))
+
+    def test_the_drawing_is_the_followed_day_with_one_more_line(self):
+        for width in (100, 140):
+            for select in ("deep/codex", "top/codex", "balanced/claude"):
+                with self.subTest(width=width, select=select):
+                    before, after = _pic("followed", width, select), _pic("another-list", width, select)
+                    rest = [row for row in after if "CLI" not in row]
+                    self.assertEqual(len(after), len(before) + 1)
+                    self.assertEqual(rest, before)
+
+    def test_a_cell_with_no_record_of_a_follow_is_not_offered_one_on_a_list_that_is_not_the_cli_s(self):
+        self.assertIn("[ Follow ]", "\n".join(_pic("followed", 140, "light/codex")))
+        self.assertNotIn("[ Follow ]", "\n".join(_pic("another-list", 140, "light/codex")))
+
+    def test_a_note_of_an_odd_shape_drops_only_its_line(self):
+        for odd in ({"list_version": 5}, {"list_version": None}, {"list_version": ""}, {"version": 7},
+                    {"version": ""}, {"harness": "nobody"}, {"kind": "list-from-nobody"}):
+            with self.subTest(odd=odd):
+                answer = copy.deepcopy(ALL["another-list"])
+                answer[1]["cli"] = {**samples.CLI_ANOTHER, **odd}
+                models = _models(answer=answer)
+                self.assertEqual(models["follow"]["cli"], [])
+                shown = picture.section_text(models, 140, "deep/codex", TODAY)
+                self.assertEqual(shown, _pic("followed", 140))
+
+    def test_cells_the_answer_cannot_tell_and_that_have_nothing_to_show_are_not_drawn(self):
+        answer = samples.another_list([samples.item("claude"), samples.item("codex", samples.plain_codex()),
+                                       samples.item("opencode")])
+        models = _models(answer=answer)
+        self.assertEqual(models["follow"]["cells"]["codex"], [])
+        self.assertEqual(len(models["follow"]["cli"]), 1)
+
+
 class Box(unittest.TestCase):
     def _lines(self, name, select, width=140, **kw):
         box = _box(_pic(name, width, select, **kw))
@@ -673,7 +734,7 @@ class OneBoxOneThing(unittest.TestCase):
             self.assertEqual([call[2] for call in seen], [asked])
 
 
-def _isolated(root, *, followed=True, slow_claude=False):
+def _isolated(root, *, followed=True, slow_claude=False, list_version="0.170.0"):
     """An isolated HOME: the shipped codex table (``deep:medium`` through a tier whose effort is xhigh), a made-up
     list, and fake CLIs that only count their calls (the real ones are never on the PATH)."""
     import datetime
@@ -688,7 +749,7 @@ def _isolated(root, *, followed=True, slow_claude=False):
     (home / "agent-config" / "models.conf").write_text(text)
     levels = '"supported_reasoning_levels":["low","medium","high","xhigh"]'
     rows = ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"] + (["gpt-6.2-sol"] if followed else [])
-    (home / "models_cache.json").write_text('{"client_version":"0.170.0","models":[' + ",".join(
+    (home / "models_cache.json").write_text('{"client_version":"%s","models":[' % list_version + ",".join(
         '{"slug":"%s","visibility":"list",%s}' % (slug, levels) for slug in rows) + ']}')
     if slow_claude:
         shutil.copyfile(AGENT_HOME / "adapters/claude/config/models.conf", root / "claude/agent-config/models.conf")
@@ -698,8 +759,10 @@ def _isolated(root, *, followed=True, slow_claude=False):
             '{"id":"claude-sonnet-5-5","section":"main"},{"id":"claude-haiku-5-5","section":"main"}]}}}')
     for name in ("claude", "codex", "opencode"):
         script = root / "bin" / name
+        version = "0.170.0" if name == "codex" else "2.1.0"   # the codex list below was written by this one
         script.write_text(f'#!/bin/sh\necho {name} >> "{calls}"\n[ {name} = opencode ] && exit 1\n'
-                          f'echo "2.1.0 (fake {name})"\n')
+                          f'[ "$1" = debug ] && echo x >> "{root / "refreshed"}"\n'
+                          f'echo "{version} (fake {name})"\n')
         script.chmod(0o755)
     kept = {key: os.environ[key] for key in ("PYTHONPYCACHEPREFIX", "PYTHONDONTWRITEBYTECODE", "LANG", "LC_ALL")
             if key in os.environ}
@@ -742,6 +805,29 @@ class TheTableReadAgain(unittest.TestCase):
                 self.assertEqual(result["status"], "changed")
                 again = result["models"]["profile_map"]["codex"]["balanced-deep"]
                 self.assertEqual(f"{again[0]} · {again[1]}", said)
+
+
+class AnotherListRead(unittest.TestCase):
+    """The real read on an isolated HOME whose codex list was written by another CLI version."""
+
+    def test_the_cells_are_unknown_the_line_is_there_and_nothing_refreshes_the_list(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with _env(root, list_version="0.163.0"):
+                path = root / "codex" / "models_cache.json"
+                stat = (path.read_bytes(), path.stat().st_mtime_ns)
+                models = focus.read_model_config()
+                self.assertFalse((root / "refreshed").exists())              # nothing asked codex for its list
+                self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), stat)
+                notes = {note["harness"]: note for note in models["follow"]["cli"]}
+                self.assertEqual((notes["codex"]["kind"], notes["codex"]["version"], notes["codex"]["list_version"]),
+                                 ("list-from-another-cli", "0.170.0", "0.163.0"))
+                shown = picture.section_text(models, 140, "balanced-deep/codex", TODAY)
+                self.assertTrue(any("codex CLI 0.170.0 · start codex once · model list is from 0.163.0" in r
+                                    for r in shown))
+                self.assertTrue(any(row.startswith("│ ^ followed") for row in shown))   # the table's follow stays drawn
+                path.write_text(path.read_text().replace("0.163.0", "0.170.0"))     # the list is the CLI's again
+                self.assertEqual([note["harness"] for note in focus.read_model_config()["follow"]["cli"]], [])
 
 
 class TheKeyboardAndTheMouse(unittest.TestCase):

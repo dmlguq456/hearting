@@ -71,6 +71,23 @@ CLI_PREVIOUS = {"harness": "codex", "version": "0.163.0", "kind": "previous-gene
                 "models": ["gpt-6.1-sol", "gpt-6-astra"], "command": None}
 
 
+CLI_ANOTHER = {"harness": "codex", "version": "0.171.0", "kind": "list-from-another-cli",
+               "list_version": "0.163.0", "models": [], "command": None}
+
+
+def another_list(answer, cli=CLI_ANOTHER):
+    """The same answer on a day the codex list was written by another CLI version: its cells are
+    unknown (`followable` null, no next update) and the CLI says why."""
+    import copy
+    out = copy.deepcopy(answer)
+    for entry in out:
+        if entry["harness"] == "codex":
+            entry["cli"] = copy.deepcopy(cli)
+            for found in entry["cells"]:
+                found.update(followable=None, reason="list-from-another-cli", next=None)
+    return out
+
+
 def samples():
     out = {}
     out["quiet"] = [item("claude"), item("codex", plain_codex()), item("opencode", plain_opencode())]
@@ -85,6 +102,7 @@ def samples():
                        followed("tier/deep", "gpt-6.1-sol", "gpt-6.2-sol", "high"),
                        followed("tier/light", "gpt-6-luna", "gpt-6.1-luna", "medium")]),
         item("opencode", plain_opencode())]
+    out["another-list"] = another_list(out["followed"])
     # the same table, the last follow dated three and four days before TODAY
     out["followed-3d"] = _redate(out["followed"], "2026-11-19")
     out["followed-4d"] = _redate(out["followed"], "2026-11-18")

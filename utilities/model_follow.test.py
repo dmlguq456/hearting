@@ -300,7 +300,6 @@ class SurveyTests(unittest.TestCase):
                          "model follow: codex CLI 0.163.0 lists deep-1, light-1 as previous "
                          "generation with no successor · update the Codex CLI yourself")
         for case, kwargs in (
-                ("list is another CLI version", {"client_version": "0.170.0", "probe": probe}),
                 ("no list version", {"client_version": None, "probe": probe}),
                 ("installed version unknown", {"client_version": "0.163.0"}),
                 ("not marked", {"client_version": "0.163.0", "probe": probe,
@@ -313,6 +312,18 @@ class SurveyTests(unittest.TestCase):
                 found = self.run_survey("codex", kwargs.pop("rows", rows), **kwargs)
                 self.assertIsNone(found["cli"])
                 self.assertFalse([t for t in model_follow.lines([found]) if "CLI" in t])
+
+    def test_a_list_another_cli_version_wrote_gives_its_own_note_and_no_previous_generation_one(self):
+        self.user_file("codex")
+        rows = [row("deep-1", deprecated=True), row("light-1", family="light", deprecated=True)]
+        probe = lambda _harness: ((0, 163, 0), "/usr/bin/codex")  # noqa: E731
+        found = self.run_survey("codex", rows, client_version="0.170.0", probe=probe)
+        self.assertEqual(found["cli"], {"harness": "codex", "version": "0.163.0", "models": [],
+                                        "kind": "list-from-another-cli", "list_version": "0.170.0",
+                                        "command": None})
+        self.assertEqual(model_follow.lines([found]),
+                         ["model follow: codex: the model list was written by CLI 0.170.0, installed is "
+                          "0.163.0 · start codex once to refresh it · nothing followed"])
 
     def test_when_no_candidate_is_usable_the_codex_cli_note_still_shows(self):
         self.user_file("codex")

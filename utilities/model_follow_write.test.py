@@ -94,6 +94,9 @@ class Home(unittest.TestCase):
             config.mkdir(parents=True)
             (config / "models.conf").write_text(conf_text(adapter))
         self.src = str(self.root / "src")
+        day = mock.patch.object(K, "today", return_value=TODAY)  # the close has no `today` argument
+        day.start()
+        self.addCleanup(day.stop)
         # a close reaches the table without being told where the shipped file is
         root = mock.patch.object(model_config, "repository_root", return_value=self.root / "src")
         root.start()
@@ -1199,6 +1202,230 @@ class OpenCodeRejectionTests(Home):
         result = self.apply("opencode", rows, rejected=None)
         self.assertTrue(result["reverted"])
         self.assertEqual(K.read_marks(path.read_text())["CFG_TIER_DEEP_MODEL"]["kind"], "held")
+
+
+FAKE_CODEX = """#!/bin/sh
+d="$FAKE_DIR"
+case "$1" in
+  --version) echo "codex-cli 0.171.0" ;;
+  debug)
+    echo x >> "$d/count"
+    case "$(cat "$d/mode")" in
+      ok) printf '{"client_version":"0.171.0","newer":true}' > "$CODEX_HOME/models_cache.json" ;;
+      fail) exit 3 ;;
+      same) : ;;
+      sleep) echo $$ > "$d/pid"; exec sleep 30 ;;
+    esac ;;
+esac
+"""
+
+
+class StaleListTests(Home):
+    """A list another CLI version wrote is refreshed once by the installed CLI, else nothing follows."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake = self.root / "fake"
+        (self.fake / "bin").mkdir(parents=True)
+        cli = self.fake / "bin" / "codex"
+        cli.write_text(FAKE_CODEX)
+        cli.chmod(0o755)
+        self.cli = str(cli)
+        os.environ.update(FAKE_DIR=str(self.fake), PATH=f"{self.fake / 'bin'}:/usr/bin:/bin")
+        self.addCleanup(self.reap)
+        (self.root / "codex").mkdir(exist_ok=True)
+
+    def reap(self):
+        pid = self.fake / "pid"
+        if pid.exists():
+            try:
+                os.killpg(int(pid.read_text()), 9)
+            except (OSError, ValueError):
+                pass
+
+    def mode(self, mode):
+        (self.fake / "mode").write_text(mode)
+
+    def calls(self):
+        count = self.fake / "count"
+        return len(count.read_text().split()) if count.exists() else 0
+
+    def cache(self, version, newer=False):
+        document = {"newer": newer}
+        if version is not None:
+            document["client_version"] = version
+        (self.root / "codex" / "models_cache.json").write_text(json.dumps(document))
+
+    def read(self, _harness):
+        document = json.loads((self.root / "codex" / "models_cache.json").read_text())
+        rows = self.newer("codex") if document.get("newer") else [
+            row("deep-1"), row("light-1", family="light"), row("top-1", family="top")]
+        return SimpleNamespace(state="available", rows=tuple(rows),
+                               client_version=document.get("client_version"))
+
+    def go(self, **kwargs):
+        kwargs.setdefault("read_catalog", self.read)
+        kwargs.setdefault("probe", lambda _h: ((0, 171, 0), self.cli))
+        return model_follow.apply_harness("codex", source_root=self.src, today=TODAY, **kwargs)
+
+    def stat(self, path):
+        info = path.stat()
+        return path.read_bytes(), info.st_mtime_ns, info.st_size
+
+    def tree(self):
+        return {str(p): (p.stat().st_size, p.stat().st_mtime_ns) for p in self.root.rglob("*") if p.is_file()}
+
+    LINE = ("model follow: codex: the model list was written by CLI 0.163.0, installed is 0.171.0 "
+            "· start codex once to refresh it · nothing followed")
+
+    def test_a_refresh_that_brings_the_installed_version_lets_the_pass_follow(self):
+        path = self.table("codex")
+        self.cache("0.163.0")
+        self.mode("ok")
+        result = self.go()
+        self.assertEqual(self.calls(), 1)
+        self.assertEqual((result["error"], result["cli"], result["reason"]), (None, None, ""))
+        self.assertEqual(model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"], "deep-2")
+        self.assertFalse([t for t in model_follow.lines([result]) if "nothing followed" in t])
+        again = self.go()  # the list is the installed CLI's now: no second refresh
+        self.assertEqual((self.calls(), again["written"]), (1, []))
+
+    def test_a_refresh_that_fails_times_out_or_changes_nothing_leaves_the_table_and_says_so(self):
+        for case in ("fail", "same", "sleep"):
+            with self.subTest(case=case):
+                (self.fake / "count").unlink(missing_ok=True)
+                path = self.table("codex")
+                self.cache("0.163.0")
+                self.mode(case)
+                before = self.stat(path)
+                started = time.monotonic()
+                result = self.go(refresh_wait=0.5)
+                self.assertLess(time.monotonic() - started, 5)
+                self.assertEqual(self.calls(), 1)
+                self.assertEqual(self.stat(path), before)
+                self.assertEqual(self.baks("codex"), [])
+                self.assertEqual((result["status"], result["error"], result["written"]), ("ok", None, []))
+                self.assertEqual(result["cli"], {"harness": "codex", "version": "0.171.0", "models": [],
+                                                 "kind": "list-from-another-cli", "list_version": "0.163.0",
+                                                 "command": None})
+                self.assertEqual(model_follow.lines([result]), [self.LINE])
+                if case == "sleep":
+                    pid = int((self.fake / "pid").read_text())
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(pid, 0)
+
+    def test_the_same_line_is_in_the_update_output_through_apply_lines(self):
+        self.table("codex")
+        self.cache("0.163.0")
+        self.mode("fail")
+        found = model_follow.apply_lines(["codex"], source_root=self.src, today=TODAY, read_catalog=self.read,
+                                         probe=lambda _h: ((0, 171, 0), self.cli))
+        self.assertEqual(found, [self.LINE])
+
+    def test_a_newer_list_than_the_installed_cli_is_not_followed_either(self):
+        path = self.table("codex")
+        self.cache("0.180.0", newer=True)
+        self.mode("fail")
+        before = self.stat(path)
+        result = self.go()
+        self.assertEqual((self.stat(path), result["cli"]["list_version"]), (before, "0.180.0"))
+
+    def test_no_refresh_when_versions_agree_the_list_has_none_or_the_cli_is_unknown(self):
+        for case, version, probe in (("same", "0.171.0", None), ("no version in the list", None, None),
+                                     ("cli version unknown", "0.163.0", lambda _h: (None, self.cli))):
+            with self.subTest(case=case):
+                (self.fake / "count").unlink(missing_ok=True)
+                path = self.table("codex")
+                self.cache(version, newer=True)
+                self.mode("ok")
+                result = self.go(**({"probe": probe} if probe else {}))
+                self.assertEqual((self.calls(), result["cli"]), (0, None))
+                self.assertEqual(model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"], "deep-2")
+
+    def test_a_harness_without_a_refresh_command_is_not_refreshed(self):
+        path = self.table("claude")
+        before = self.stat(path)
+        catalog = SimpleNamespace(state="available", rows=tuple(self.newer("claude")), client_version="1.0.0")
+        result = model_follow.apply_harness("claude", source_root=self.src, today=TODAY,
+                                            read_catalog=lambda _h: catalog,
+                                            probe=lambda _h: ((2, 0, 0), self.cli))
+        self.assertEqual((self.calls(), self.stat(path)), (0, before))
+        self.assertEqual(result["cli"]["kind"], "list-from-another-cli")
+
+    def test_the_going_back_of_a_refused_model_goes_on_with_a_list_of_another_version(self):
+        path = self.table("codex")
+        self.cache("0.171.0", newer=True)
+        self.go()
+        self.assertEqual(model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"], "deep-2")
+        self.cache("0.163.0")  # an older CLI writes the shared list again
+        self.mode("fail")
+        result = self.go(rejected=["deep-2"])
+        self.assertEqual(model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"], "deep-1")
+        self.assertTrue(result["reverted"])
+        text = model_follow.lines([result])
+        self.assertIn(self.LINE, text)
+        self.assertTrue([t for t in text if "back to deep-1" in t])
+
+    def test_the_default_probe_asks_the_cli_once_and_the_refresh_runs_once(self):
+        path = self.table("codex")
+        self.cache("0.163.0")
+        self.mode("ok")
+        result = model_follow.apply_harness("codex", source_root=self.src, today=TODAY, read_catalog=self.read)
+        self.assertEqual(self.calls(), 1)
+        self.assertEqual(model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"], "deep-2")
+        self.assertIsNone(result["cli"])
+
+    def test_the_view_says_unknown_never_refreshes_and_reads_only(self):
+        path = self.table("codex")
+        self.cache("0.171.0", newer=True)
+        self.go()
+        self.assertEqual(model_config.parse_config(path)["CFG_TIER_DEEP_MODEL"], "deep-2")
+        self.cache("0.163.0")
+        self.mode("ok")
+        asked = []
+
+        def probe(harness):
+            asked.append(harness)
+            return (0, 171, 0), self.cli
+
+        before = self.tree()
+        view = model_follow.fleet_view(["codex"], source_root=self.src, today=TODAY,
+                                       read_catalog=self.read, probe=probe)
+        self.assertEqual((self.tree(), self.calls(), asked), (before, 0, ["codex"]))
+        codex = view[0]
+        self.assertEqual(codex["status"], "ok")
+        self.assertEqual(codex["cli"], {"harness": "codex", "version": "0.171.0", "models": [],
+                                        "kind": "list-from-another-cli", "list_version": "0.163.0",
+                                        "command": None})
+        self.assertEqual(codex["plan"], [])
+        cells = {c["target"]: c for c in codex["cells"]}
+        self.assertTrue(cells)
+        for cell in cells.values():
+            self.assertEqual((cell["followable"], cell["reason"], cell["next"]),
+                             (None, "list-from-another-cli", None))
+        followed = cells["tier/deep"]
+        self.assertEqual((followed["state"], followed["why"], followed["since"]["to"]),
+                         ("follow", "followed", "deep-2"))
+
+    def test_the_view_gives_a_refusal_back_as_usual_and_nothing_else(self):
+        self.cache("0.171.0", newer=True)
+        self.table("codex")
+        self.go()
+        self.cache("0.163.0")
+        view = model_follow.fleet_view(["codex"], source_root=self.src, today=TODAY, read_catalog=self.read,
+                                       probe=lambda _h: ((0, 171, 0), self.cli), rejected=["deep-2"])
+        reverts = [c for c in view[0]["cells"] if c["next"] and c["next"]["branch"] == "revert"]
+        self.assertTrue(reverts)
+        self.assertTrue(view[0]["plan"])
+        self.assertTrue(all(i["action"] == "revert" for i in view[0]["plan"]))
+        self.assertEqual(self.calls(), 0)
+
+    def test_a_view_without_a_probe_asks_only_for_the_version(self):
+        self.table("codex")
+        self.cache("0.163.0")
+        self.mode("ok")
+        view = model_follow.fleet_view(["codex"], source_root=self.src, today=TODAY, read_catalog=self.read)
+        self.assertEqual((self.calls(), view[0]["cli"]["kind"]), (0, "list-from-another-cli"))
 
 
 if __name__ == "__main__":
