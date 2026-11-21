@@ -6,6 +6,10 @@ from pathlib import Path
 import fcntl
 import importlib.util
 import json
+import pty
+import struct
+import termios
+import threading
 import re
 import shlex
 import signal
@@ -83,7 +87,52 @@ if(process.argv.some(a=>a.endsWith('/session-shell/host.cjs'))){
 }
 '''
 
+class PrivateClient:
+    """An attached client on an owned PTY, used only with a private server."""
+    def __init__(self, sock, env, cols, rows):
+        self.output=bytearray()
+        pid,fd=pty.fork()
+        if pid==0:
+            fcntl.ioctl(0,termios.TIOCSWINSZ,struct.pack('HHHH',rows,cols,0,0))
+            os.execvpe('tmux',['tmux','-S',sock,'-f','/dev/null','attach','-t','qi'],env)
+        self.pid,self.fd=pid,fd
+        self.thread=threading.Thread(target=self.read,daemon=True);self.thread.start()
+    def read(self):
+        while True:
+            try:data=os.read(self.fd,65536)
+            except OSError:return
+            if not data:return
+            if len(self.output)+len(data)<=2097152:self.output.extend(data)
+    def close(self):
+        try:os.kill(self.pid,signal.SIGTERM)
+        except ProcessLookupError:pass
+        os.waitpid(self.pid,0);os.close(self.fd);self.thread.join(timeout=2)
+
+
 class QuestionInputTest(unittest.TestCase):
+    def test_normal_exit_disables_remembered_cursor_keys_and_x10(self):
+        script=r"""
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const source=fs.readFileSync(process.argv[1]+'/host.cjs','utf8');
+const body=source.slice(source.indexOf('function wireDisplay() {'),source.indexOf('// ---- release detection'));
+(async()=>{
+ for(const enabled of [false,true]){
+  let exit,output='',code;
+  const ctx={terminal:{onData(){},onWriteParsed(){},onTitleChange(){}},
+   child:{onData(){},onExit(fn){exit=fn}},process:{on(){},stdin:{on(){}},stdout:{on(){}},exit(n){code=n}},
+   userInput(){},switched:true,ended:false,heldStop(){},clearTimeout(){},frameTimer:0,projectionTimer:0,beatTimer:0,
+   watchers:new Map(),releaseWatchers:[],server:{close(){}},source:async()=>{},backend:null,
+   paintedModes:new Map([[1,enabled],[9,enabled]]),emit(s){output+=s},fs:{rmSync(){}},socketPath:'fixture',nextPath:'fixture-next',seedFile:null};
+  vm.runInNewContext(body+'\nwireDisplay();',ctx);await exit({exitCode:7});
+  const extra=enabled?'\x1b[?1l\x1b[?9l':'';
+  assert.equal(output,'\x1b[0m'+extra+'\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?25h\x1b[?1049l');
+  assert.equal(code,7);
+ }
+})().catch(e=>{console.error(e);process.exitCode=1});
+"""
+        result=subprocess.run(['node','-e',script,str(SHELL)],capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+
     def test_small_nonediting_preview_keeps_its_existing_choice(self):
         script=r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]+'/block-input.cjs');
@@ -188,7 +237,8 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                                 y,line=candidates[-1];begin=line.index('│ › ')+2;answer=line[begin:line.index('│',begin)].rstrip();answer=answer if answer!='›' else '› '
                                 expected=[cells(line[:begin]+answer),y]
                             measured.append(dict(layout=layout,case=name,actual=actual,expected=expected,ok=actual==expected))
-                        waitfor('READY');waitfor('QUESTIONS');time.sleep(.5)
+                        # Let the initial asynchronous projection settle its bottom-panel height.
+                        waitfor('READY');waitfor('QUESTIONS');time.sleep(2)
                         for state in ('idle','working'):
                             (case/'state').write_text(state);time.sleep(.6)
                             begin=Path(cfg['output']).stat().st_size;clock=time.monotonic()
@@ -206,6 +256,27 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                             raw_mode=Path(cfg['output']).read_bytes()[start_mode:]
                             for mode in (b'2004',b'1004',b'25'):
                                 self.assertEqual(raw_mode.count(b'\x1b[?'+mode+flag),1,(mode,raw_mode))
+                        # Lose modes outside the host, then ask for a whole repaint.
+                        # Check the real pane state AND delivered paste/focus bytes.
+                        tm('set','-g','focus-events','on')
+                        client=PrivateClient(sock,e,cols,30)
+                        try:
+                            time.sleep(.4)
+                            pane_tty=tm('display-message','-p','-t','qi:0.0','#{pane_tty}').strip()
+                            with open(pane_tty,'wb',buffering=0) as tty:
+                                tty.write(b'\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?25l')
+                            time.sleep(.15)
+                            self.assertEqual(tm('display-message','-p','-t','qi:0.0','#{mouse_button_flag}#{mouse_sgr_flag}#{cursor_flag}').strip(),'000')
+                            tm('resize-window','-t','qi:0','-x',str(cols-1),'-y','30');time.sleep(.3)
+                            self.assertEqual(tm('display-message','-p','-t','qi:0.0','#{mouse_button_flag}#{mouse_sgr_flag}#{cursor_flag}').strip(),'111')
+                            start=Path(cfg['received']).stat().st_size
+                            tm('set-buffer','-b','qf','PASTE');tm('paste-buffer','-p','-b','qf','-t','qi:0.0');time.sleep(.2)
+                            os.write(client.fd,b'\x1b[O');time.sleep(.2);os.write(client.fd,b'\x1b[I');time.sleep(.2)
+                            delivered=Path(cfg['received']).read_bytes()[start:]
+                            self.assertIn(b'\x1b[200~PASTE\x1b[201~',delivered)
+                            self.assertIn(b'\x1b[O',delivered);self.assertIn(b'\x1b[I',delivered)
+                            tm('resize-window','-t','qi:0','-x',str(cols),'-y','30');time.sleep(.3)
+                        finally:client.close()
                         send('\x1d');waitfor('시험 문구')
                         for index,kind in enumerate(['choice','text','secret','scroll']):
                             if index:send('\t')
