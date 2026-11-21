@@ -268,12 +268,15 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
 
 - **When.** Right after a seal (the first seal and a re-seal refresh alike), and whenever
   `hearting reports` or `hearting open` runs. No other write path touches them.
-- **Content.** The entrance has three sections, top to bottom: **spec** (the 3 most
+- **Content.** The entrance has up to four sections, top to bottom: **spec** (the 3 most
   recently changed spec topics, each with the day it was last changed and its title, and
   one "N more" line, N being the topics not shown, absent when none is hidden, that opens
   `all-spec.*`), **campaigns** (the 3 most recent campaigns with date, title and the
   campaign's one-line summary from `meta.json`, then one "All N campaigns" line, N being
-  every campaign, that opens `all-campaigns.*`) and **records** (a link to the recent
+  every campaign, that opens `all-campaigns.*`), **backlog** (one line that opens the
+  root's `backlog.md`, see the next section; its meta is the job count and the file's `갱신` date;
+  there is no section when that regular file is absent or a link, and no count when it cannot
+  be read or is over 64 KiB) and **records** (a link to the recent
   route reports page and a link to the ID index `campaigns/INDEX.md`), plus the root
   totals. The line counts are the constants `ENTRANCE_SPEC_LINES` and
   `ENTRANCE_CAMPAIGN_LINES` (not settings). Under the spec and campaigns titles one
@@ -325,6 +328,22 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   completion summary whose primary report lies in that cycle adds one "Artifact list:
   `<root>/README.md`" line above its artifact line. Only the first user-facing cycle
   qualifies, so a root whose entrance was made by hand from the CLI stays quiet.
+
+### `backlog.md` — what was put off
+
+- **Place.** One file at the artifact root: `<artifact root>/backlog.md`, for the whole repo.
+- **Form.** A title line, then `갱신 <YYYY-MM-DD HH:MM>`, then one `## <campaign folder name>`
+  heading per campaign, with `## Unassigned` for work with no campaign. A job is one top-level
+  `- ` bullet (a title line of at most 60 columns) with optional indented `date:`, `source:` and
+  `note:` lines (when it came up, where from, what the person said then).
+  Indented lines, sub-bullets and anything in a code block are not jobs. No per-line tag,
+  status or owner mark.
+- **Who and when.** The session that puts a job off adds one line, at that moment, under the
+  campaign's heading (and refreshes `갱신`). A person writes it by hand.
+- **Done.** The line is deleted. The file holds open work only.
+- **Readers.** The panel's BACKLOG and the entrance only read it; no code writes it.
+  The entrance reads it by name, never through a link, at most 64 KiB.
+  No command, setting or step is added.
 
 ### Optional local artifact viewer
 

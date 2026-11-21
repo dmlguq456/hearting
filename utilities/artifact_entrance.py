@@ -5,8 +5,9 @@ Writes `README.md`, `index.html`, `all-campaigns.md`, `all-campaigns.html`,
 `all-spec.md`, `all-spec.html`, `recent-route-reports.md` and
 `recent-route-reports.html` directly under the
 artifact root so a person can see what exists and open it, without any external
-tool.  The entrance (`README.md`/`index.html`) has three sections: spec topics,
-recent campaigns (with their one-line summary) and the records (links to the
+tool.  The entrance (`README.md`/`index.html`) has up to four sections: spec topics,
+recent campaigns (with their one-line summary), the backlog (one line that opens the
+root's `backlog.md`, drawn only when that regular file exists) and the records (links to the
 recent route reports page and the ID index).  The spec and campaign sections
 show `ENTRANCE_SPEC_LINES` / `ENTRANCE_CAMPAIGN_LINES` lines and fold the rest
 into one line that opens `all-spec.*` / `all-campaigns.*`.  The route reports themselves are
@@ -85,6 +86,8 @@ MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 HEAD_BYTES = 16 * 1024
 SUMMARY_CHARS = 120
 MARKER = "<!-- hearting:artifact-entrance v1 -->"
+BACKLOG_NAME = "backlog.md"
+MAX_BACKLOG_BYTES = 64 * 1024
 
 # Hook for rows that are not cycle folders (see the module header).
 def _campaign_target_path(folder: str, campaign_path: Path) -> str:
@@ -147,6 +150,12 @@ def _fallback_translator(message: str, /, **fields: Any) -> str:
         "entrance.section_spec": "spec",
         "entrance.section_campaigns": "Campaigns",
         "entrance.section_records": "Records",
+        "entrance.section_backlog": "Backlog",
+        "entrance.backlog_note": ("Work handed off, and what you said then. "
+                                  "The session that postpones work writes one line each."),
+        "entrance.backlog_open": "Open backlog.md",
+        "entrance.backlog_count": "{count} items",
+        "entrance.backlog_updated": "updated {date}",
         "entrance.recent_routes": "Recent route reports",
         "entrance.spec_note": "How this repo works now. {count} topics; each change edits the same document.",
         "entrance.campaigns_note": "One document per stream of work. No new document appears; this one is rewritten.",
@@ -454,6 +463,7 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
         "recent": [],
         "topics": [],
         "campaigns": [],
+        "backlog": None,
         "all_campaigns": [],
         "totals": {"campaigns": 0, "cycles": 0, "open": 0},
         "selected_by": {"audience": 0, "name-rule": 0},
@@ -579,7 +589,67 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
         _topic_title(row)
     snapshot["topics"] = topics
     snapshot["campaigns"] = [dict(row) for row in snapshot["all_campaigns"][:campaign_limit]]
+    snapshot["backlog"] = _backlog(root)
     return snapshot
+
+
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_BACKLOG_UPDATED = re.compile(r"^(?:갱신|Updated)\s+(\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2})?)\s*$")
+
+
+def _backlog(root: Path) -> Optional[Dict[str, Any]]:
+    """The root's `backlog.md` as `{"count", "updated"}`, or None when there is no such regular file.
+
+    Read by name from a no-follow fd, never written, never followed (a link is no file).  A file that
+    cannot be read or is over MAX_BACKLOG_BYTES keeps the line but has no count (`count` None).
+    A job is one top-level `- ` bullet outside a code fence; indented lines and sub-bullets are not."""
+    try:
+        if not stat.S_ISREG(os.lstat(str(Path(root) / BACKLOG_NAME)).st_mode):
+            return None
+    except OSError:
+        return None
+    entry: Dict[str, Any] = {"count": None, "updated": ""}
+    try:
+        root_fd = open_root(os.path.realpath(str(root)))
+        try:
+            fd = open_relative(root_fd, [BACKLOG_NAME])
+        finally:
+            os.close(root_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            raw = b""
+            while len(raw) <= MAX_BACKLOG_BYTES:
+                chunk = os.read(fd, MAX_BACKLOG_BYTES + 1 - len(raw))
+                if not chunk:
+                    break
+                raw += chunk
+        finally:
+            os.close(fd)
+    except (OSError, RuntimeError):
+        return entry
+    if len(raw) > MAX_BACKLOG_BYTES:
+        return entry
+    count, fence, updated, headed = 0, None, "", False
+    for line in raw.decode("utf-8", "replace").splitlines():
+        opened = _FENCE.match(line)
+        if fence is not None:
+            if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= fence[1] \
+                    and not line.strip().strip(fence[0]):
+                fence = None
+            continue
+        if opened:
+            fence = (opened.group(1)[0], len(opened.group(1)))
+            continue
+        if line.startswith("## "):
+            headed = True
+        elif not headed and not updated:
+            found = _BACKLOG_UPDATED.match(line.strip())
+            updated = found.group(1) if found else ""
+        if line.startswith("- "):
+            count += 1
+    entry.update({"count": count, "updated": updated})
+    return entry
 
 
 _SPEC_TAIL = re.compile(r" — [^—]*\bPRD\b[^—]*$")
@@ -874,6 +944,17 @@ def entrance_sections(snapshot: Dict[str, Any], t) -> List[Dict[str, Any]]:
                           "all-campaigns.md", "all-campaigns.html", "all-campaigns.html"))
     sections.append({"key": "campaigns", "title": t("entrance.section_campaigns"),
                      "note": t("entrance.campaigns_note"), "lines": lines})
+    backlog = snapshot.get("backlog")
+    if backlog:
+        meta = []
+        if backlog["count"] is not None:
+            meta.append(t("entrance.backlog_count", count=_count(backlog["count"])))
+        if backlog["updated"]:
+            meta.append(t("entrance.backlog_updated", date=backlog["updated"]))
+        sections.append({"key": "backlog", "title": t("entrance.section_backlog"),
+                         "note": t("entrance.backlog_note"), "lines": [
+            line("backlog", t("entrance.backlog_open"), _md_href(BACKLOG_NAME), _href(BACKLOG_NAME),
+                 BACKLOG_NAME, note=" · ".join(meta))]})
     sections.append({"key": "records", "title": t("entrance.section_records"), "note": "", "lines": [
         line("recent-routes", t("entrance.recent_routes"), RECORDS_MD, RECORDS_HTML, RECORDS_HTML,
              note=t("entrance.records_note")),
