@@ -71,14 +71,20 @@ PRELOAD = r'''
 const fs=require('node:fs'),cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG));
 if(process.argv.some(a=>a.endsWith('/session-shell/host.cjs'))){
  process.env.HEARTING_SHELL_PYTHON=cfg.backend;
- const cp=require('node:child_process');
+ const cp=require('node:child_process'),path=require('node:path');
+ let caretText=null;
+ const blockPath=path.join(path.dirname(process.argv.find(a=>a.endsWith('/session-shell/host.cjs'))),'block-input.cjs');
+ const create=require(blockPath);
+ require.cache[blockPath].exports=(...args)=>{const b=create(...args),detail=b.detail;
+  b.detail=options=>{const rows=detail(options);caretText=null;if(b.typing)for(const row of rows){const at=row.findIndex(p=>p.caret);if(at>=0)caretText=row.slice(0,at+1).map(p=>p.text).join('');}return rows;};return b;};
  const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
  let observations=0;
  function observe(){
   try{
    const snap=cp.execFileSync('tmux',['-S',cfg.socket,'capture-pane','-p','-t','qi:0.0',';','display-message','-p','-t','qi:0.0','CURSOR=#{cursor_x},#{cursor_y}'],{encoding:'utf8',stdio:['ignore','pipe','ignore'],timeout:2000}).trimEnd().split('\n');
    const actual=snap.pop().slice(7).split(',').map(Number),candidates=[];
-   snap.forEach((line,y)=>{const at=line.indexOf('│ › ');if(at<0)return;const start=at+2,end=line.indexOf('│',start);let answer=line.slice(start,end).trimEnd();if(answer==='› 설명을 적으세요.')return;if(answer==='›')answer='› ';candidates.push({actual,expected:[cells(line.slice(0,start)+answer),y]});});
+   if(caretText===null)return;
+   snap.forEach((line,y)=>{const at=line.indexOf('│ '+caretText);if(at>=0)candidates.push({actual,expected:[cells(line.slice(0,at+2)+caretText),y]});});
    if(candidates.length&&observations++<2000)fs.appendFileSync(cfg.frames,JSON.stringify(candidates.at(-1))+'\n');
   }catch{}
  }
@@ -110,6 +116,139 @@ class PrivateClient:
 
 
 class QuestionInputTest(unittest.TestCase):
+    def test_always_visible_answer_baseline_negative(self):
+        script=r"""
+const assert=require('node:assert/strict'),Module=require('node:module'),fs=require('node:fs');
+const dir=process.argv[1],old=fs.readFileSync(0,'utf8').replace('↑↓ choose · Enter send · t text','↑↓ choose · Enter send');
+const previous=new Module(dir+'/block-input.cjs');previous.filename=dir+'/block-input.cjs';previous.paths=module.paths;previous._compile(old,previous.filename);
+const current=require(dir+'/block-input.cjs');
+const measure=s=>[...s].reduce((n,c)=>n+(/\p{Mark}/u.test(c)?0:c.codePointAt(0)>=0x2e80?2:1),0);
+function setup(create,extra={}){let sent,actions=[];const b=create({cellWidth:measure,changed(){},action:c=>actions.push(c),answer:async x=>(sent=x,{state:'submitted'})});
+ b.update([{id:'synthetic',revision:'one',answerable:true,questions:[{id:'q',question:'Synthetic question',free_text:true,choices:[{value:'v1',label:'First'},{value:'v2',label:'Second'}],...extra}]}],'',{});b.enter();
+ return {b,actions,send:async keys=>{b.input(Buffer.from(keys));await new Promise(r=>setImmediate(r));return sent},rows:(columns=96,budget=24)=>b.detail({columns,budget}),get sent(){return sent}};}
+const words=rows=>rows.map(r=>r.map(p=>p.text).join('')).join('\n');
+const cases={
+ visible:async create=>{const x=setup(create);assert(x.rows().some(r=>r.map(p=>p.text).join('')==='› '));},
+ letters:async create=>{for(const first of ['r','w','f','p','t','한','!']){const x=setup(create);assert.deepEqual((await x.send(first+'note\r'))?.answers.q,[first+'note']);assert.deepEqual(x.actions,[]);}},
+ mixed:async create=>{const x=setup(create);assert.deepEqual((await x.send('2hello\r'))?.answers.q,['v2','hello']);assert(words(x.b.sent()).includes('Second, hello'));},
+ down_digits:async create=>{const x=setup(create);assert.deepEqual((await x.send('2\x1b[B123\r'))?.answers.q,['v2','123']);},
+ up_retains:async create=>{const x=setup(create);assert.deepEqual((await x.send('note\x1b[A2\r'))?.answers.q,['v2','note']);},
+ click:async create=>{const x=setup(create);x.b.write();assert.deepEqual((await x.send('12\r'))?.answers.q,['12']);},
+ empty:async create=>{const x=setup(create);assert.equal(await x.send('가\x7f\r'),undefined);assert(words(x.rows()).includes('empty answer'));},
+ wrap:async create=>{for(const columns of [96,56,17])for(const budget of [30,6,2]){const x=setup(create);x.b.input(Buffer.from('한글 답변 '.repeat(30)+'끝'));const rows=x.rows(columns,budget),edit=rows.find(r=>r.some(p=>p.caret));assert(edit);const text=edit.map(p=>p.text).join('');assert(text.endsWith('끝'));assert(text.startsWith('  '));assert(measure(text)<columns);assert(!text.includes('…'));if(budget===30)assert(rows.filter(r=>r.some(p=>p.answerRow)).length>1);}},
+ secret:async create=>{const x=setup(create,{secret:true});x.b.input(Buffer.from('private'));assert(!words(x.rows()).includes('private'));assert(words(x.rows()).includes('•••••••'));},
+ split_utf8:async create=>{for(let at=1;at<Buffer.byteLength('한글');at++){const x=setup(create),s=Buffer.from('한글');x.b.input(s.subarray(0,at));x.b.input(s.subarray(at));assert.deepEqual((await x.send('\r'))?.answers.q,['한글']);}},
+ paste_mixed:async create=>{const x=setup(create);assert.deepEqual((await x.send('2\x1b[200~hello\x1b[201~\r'))?.answers.q,['v2','hello']);},
+ tab:async create=>{const x=setup(create);x.b.update([{id:'synthetic',revision:'one',answerable:true,questions:['q','q2'].map(id=>({id,question:id,free_text:true,choices:['one','two']}))}],'',{});assert.deepEqual((await x.send('2note\t1other\r'))?.answers,{q:['two','note'],q2:['one','other']});},
+};
+(async()=>{for(const [name,test] of Object.entries(cases)){await test(current);let failed=false;try{await test(previous.exports);}catch{failed=true;}assert(failed,'baseline must fail '+name);console.log('NEW_CASE '+name+' current=PASS baseline=FAIL');}
+ for(const columns of [96,56,17])for(const budget of [24,6,2]){const draw=create=>JSON.stringify(setup(create,{free_text:false}).rows(columns,budget),(k,v)=>k==='choiceIndex'?undefined:v).replace(' · t text','');assert.equal(draw(current),draw(previous.exports));}
+ for(const columns of [96,56,17])for(const budget of [24,6,2])for(const keys of ['', '\r']){
+  const draw=create=>{const x=setup(create);x.b.leave();x.b.update([{id:'decision',revision:'one',answerable:true,answer_kind:'decision',questions:[{id:'q',question:'Decision'}]}],'',{});x.b.enter();x.b.input(Buffer.from(keys));return JSON.stringify(x.rows(columns,budget),(k,v)=>k==='choiceIndex'?undefined:v).replace(' · t text','');};assert.equal(draw(current),draw(previous.exports));
+ }
+ const x=setup(current);assert.deepEqual((await x.send('2\r')).answers.q,['v2']);
+ const y=setup(current);y.b.input(Buffer.from('a'.repeat(4096)+'한\x7fZ'));assert.equal((await y.send('\r')).answers.q[0],'a'.repeat(4095)+'Z');
+ for(const close of ['\x1d','\x1b']){const z=setup(current);z.b.input(Buffer.from('note'+close));await new Promise(r=>setTimeout(r,35));assert(!z.sent);assert(!z.b.focused);}
+ console.log('COMPAT choice-only bytes, choice, limit, backspace, dismissal PASS');
+})().catch(e=>{console.error(e);process.exit(1)});
+"""
+        baseline=subprocess.check_output(['git','show','15784ff83:utilities/session-shell/block-input.cjs'],text=True,timeout=10,cwd=ROOT)
+        result=subprocess.run(['node','-e',script,str(SHELL)],input=baseline,capture_output=True,text=True,timeout=30)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        print(result.stdout,flush=True)
+
+    def test_reading_while_writing_section_arrows_and_full_answers(self):
+        script = r"""
+const assert=require('node:assert/strict'),Module=require('node:module'),fs=require('node:fs');
+const dir=process.argv[1],filename=dir+'/block-input.cjs';
+const previous=new Module(filename);previous.filename=filename;previous.paths=module.paths;
+previous._compile(fs.readFileSync(0,'utf8'),filename);
+const current=require(filename);
+const body=Array.from({length:30},(_,i)=>[{text:'body line '+i}]);
+
+function setup(create,{choices=['one','two'],long=false,labels={}}={}){
+  const sections=[];
+  let answer;
+  const b=create({changed(){},action(){},section:delta=>sections.push(delta),
+    answer:async request=>(answer=request.answers.q,{state:'submitted'})});
+  const q={id:'q',question:'Synthetic',free_text:true,choices,...(long?{display:{body}}:{})};
+  b.update([{id:'synthetic',revision:'one',answerable:true,questions:[q]}],'',{labels});
+  b.enter();
+  return {b,sections,keys:keys=>b.input(Buffer.from(keys)),
+    rows:(budget=10)=>b.detail({columns:60,budget}).map(row=>row.map(part=>part.text).join('')),
+    get answer(){return answer;}};
+}
+
+const cases={
+  choiceless_scroll(create){
+    const x=setup(create,{choices:[],long:true});
+    assert.equal(x.rows()[1],'body line 0');
+    x.keys('\x1b[B'.repeat(3));
+    assert.equal(x.rows()[1],'body line 3');
+    assert(!x.b.typing);
+    x.keys('\x1b[A');
+    assert.equal(x.rows()[1],'body line 2');
+  },
+  scroll_while_typing(create){
+    const x=setup(create,{long:true});
+    x.keys('draft');
+    assert(x.rows().some(line=>line.includes('more · ↓ to read')));
+    x.keys('\x1bOB'.repeat(3));
+    assert.equal(x.rows()[1],'body line 3');
+    assert(x.b.typing);
+    x.keys('\x1b[A');
+    assert(!x.b.typing);
+    x.keys('\r');
+    assert.deepEqual(x.answer,['draft']);
+  },
+  section_arrows(create){
+    const x=setup(create);
+    x.keys('\x1b[D\x1bOC');
+    assert.deepEqual(x.sections,[-1,1]);
+    x.b.write();
+    x.keys('\x1b[D\x1b[C');
+    assert.deepEqual(x.sections,[-1,1]);
+    x.keys('draft\x1b[A\x1bOD\x1b[C');
+    assert.deepEqual(x.sections,[-1,1]);
+    x.keys('\r');
+    assert.deepEqual(x.answer,['draft']);
+  },
+  full_answer(create){
+    const x=setup(create);
+    x.keys('a'.repeat(4096));
+    assert(!x.rows().some(line=>line.includes('answer is full')));
+    x.keys('b');
+    assert(x.rows().includes('answer is full · 4,096 bytes'));
+    assert(x.rows(4).includes('answer is full · 4,096 bytes'));
+    x.keys('\x7f');
+    assert(!x.rows().some(line=>line.includes('answer is full')));
+    x.keys('x\r');
+    assert.deepEqual(x.answer,['a'.repeat(4095)+'x']);
+  },
+  full_paste(create){
+    const full='답 입력 한도 · 4,096바이트';
+    const x=setup(create,{labels:{full}});
+    x.keys('\x1b[200~'+'가'.repeat(2000)+'\x1b[201~');
+    assert(x.rows().includes(full));
+    x.keys('\x1b[B');
+    assert(!x.rows().includes(full));
+    x.keys('\r');
+    assert.deepEqual(x.answer,['가'.repeat(1365)]);
+  },
+};
+for(const [name,test] of Object.entries(cases)){
+  test(current);
+  assert.throws(()=>test(previous.exports),assert.AssertionError,name);
+  console.log(name+' current=PASS baseline=FAIL');
+}
+"""
+        baseline = subprocess.check_output(
+            ['git', 'show', '59839e05f:utilities/session-shell/block-input.cjs'], cwd=ROOT, text=True, timeout=10)
+        result = subprocess.run(['node', '-e', script, str(SHELL)], input=baseline,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        print(result.stdout, flush=True)
+
     def test_normal_exit_disables_remembered_cursor_keys_and_x10(self):
         script=r"""
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
@@ -133,13 +272,13 @@ const body=source.slice(source.indexOf('function wireDisplay() {'),source.indexO
         result=subprocess.run(['node','-e',script,str(SHELL)],capture_output=True,text=True,timeout=10)
         self.assertEqual(result.returncode,0,result.stderr)
 
-    def test_small_nonediting_preview_keeps_its_existing_choice(self):
+    def test_small_free_text_preview_keeps_the_answer_row(self):
         script=r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]+'/block-input.cjs');
 const b=create({changed(){},action(){},answer(){}});
-b.update([{id:'fixture',revision:'one',answerable:true,questions:[{id:'q',question:'Keep this body',choices:['one','two']}]}],'',{});
+b.update([{id:'fixture',revision:'one',answerable:true,questions:[{id:'q',question:'Keep this body',choices:['one','two'],free_text:true}]}],'',{});
 b.enter();const rows=b.detail({budget:2,columns:20});
-assert.equal(rows[1].map(p=>p.text).join(''),'▸ 1  one');
+assert.equal(rows[1].map(p=>p.text).join(''),'› ');
 assert.equal(b.typing,false);
 b.input(Buffer.from('t'));const edit=b.detail({budget:2,columns:20});
 assert(edit[1].some(p=>p.caret),'the same small budget keeps the live draft while editing');
@@ -174,6 +313,133 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
         self.assertEqual(result.returncode,0,result.stderr)
         print(result.stdout.strip(),flush=True)
 
+    def test_private_tmux_visible_choice_payload_table(self):
+        if not shutil.which('tmux'):
+            self.skipTest('tmux unavailable')
+        with tempfile.TemporaryDirectory(prefix='qm-') as temp:
+            root = Path(temp)
+            runner = load('qm_isolation', ROOT/'tools/run-tests.py')
+            env = runner.build_isolated_env(root, repo_root=ROOT)
+            env.update(FLEET_NOW_LANG='en', CLAUDE_CONFIG_DIR=str(root/'native-config'))
+            for key in ('cache', 'devdir'):
+                env['npm_config_'+key] = str(root/('npm-'+key))
+            env['npm_config_userconfig'] = str(root/'npmrc')
+            (root/'npmrc').write_text('')
+            sys.path[:0] = [str(ROOT/'tools/install'), str(ROOT/'utilities')]
+            import session_shell_install
+            with mock.patch.dict(os.environ, env, clear=True):
+                session_shell_install.prepare_assets()
+            policy = Path(env.get('XDG_CONFIG_HOME', str(Path(env['HOME'])/'.config')))/'hearting/session-shell.json'
+            policy.parent.mkdir(parents=True, exist_ok=True)
+            fixture = load('qm_backend', ROOT/'utilities/session_shell_wait_blink_pty.test.py')
+            cases = [([], [2], ['v2']), (['가나'], [], ['가나']),
+                     (['3', '가나'], [3], ['v3', '가나']),
+                     (['\x1b[B', '가나'], [3], ['v3', '가나']),
+                     (['3', '3', '가나'], [], ['가나']),
+                     (['가나', '\x1b[A', '1'], [1], ['v1', '가나']),
+                     (['click-write', '1가'], [], ['1가']),
+                     (['가', '\x7f'], [], None),
+                     (['3', '\t', '\t', '\t'], [3], ['v3']),
+                     (['click-3', '가나'], [3], ['v3', '가나'])]
+            for layout, cols in [('bottom', 100), ('side', 160)]:
+                case = root/layout
+                case.mkdir()
+                (case/'project').mkdir()
+                policy.write_text(json.dumps(dict(enabled=True, layout=layout, side_width=40,
+                    side_min_columns=132, shade='none', theme='dark', rule_motion='rule')))
+                policy.chmod(0o600)
+                qp = case/'questions.json'
+                qp.write_text('{}')
+                backend = case/'backend'
+                code = fixture.BACKEND.format(python=sys.executable, utilities=str(ROOT/'utilities'),
+                                              tools=str(ROOT/'tools'), sid=SID, questions=str(qp))
+                code = code.replace('raise SystemExit(m._backend())',
+                    "def answer(binding, request):\n    with open(" + repr(str(case/'answers')) +
+                    ", 'a') as log: log.write(json.dumps(request, ensure_ascii=False)+'\\n')\n" +
+                    "    return {'ok': True, 'state': 'unknown', 'reason': 'synthetic recorded'}\n" +
+                    "m._block_answer=answer\nraise SystemExit(m._backend())")
+                backend.write_text(code)
+                backend.chmod(0o700)
+                cfg = dict(sid=SID, backend=str(backend), socket=str(case/'tmux.sock'), frames=str(case/'frames'),
+                           output=str(case/'output'), received=str(case/'received'),
+                           native_output=str(case/'native-output'), state=str(case/'state'))
+                (case/'state').write_text('idle')
+                (case/'config').write_text(json.dumps(cfg))
+                (case/'native.py').write_text(NATIVE)
+                (case/'preload.cjs').write_text(PRELOAD)
+                e = dict(env, LOOP_CONFIG=str(case/'config'), NODE_OPTIONS='--require '+str(case/'preload.cjs'),
+                         TERM='xterm-256color')
+                sock = str(case/'tmux.sock')
+                def tm(*args):
+                    return subprocess.check_output(['tmux', '-S', sock, '-f', '/dev/null', *args], env=e,
+                                                   stderr=subprocess.STDOUT, text=True, timeout=10)
+                command = shlex.join([sys.executable, str(SHELL/'entry.py'), 'claude', sys.executable, str(case/'native.py')])
+                tm('new-session', '-d', '-s', 'qi', '-x', str(cols), '-y', '30', '-c', str(case/'project'), command)
+                server = int(tm('display-message', '-p', '#{pid}').strip())
+                birth = Path(f'/proc/{server}/stat').read_text().rsplit(') ', 1)[1].split()[19]
+                def screen():
+                    return tm('capture-pane', '-p', '-t', 'qi:0.0').splitlines()
+                def waitfor(predicate):
+                    until = time.monotonic()+25
+                    while time.monotonic() < until:
+                        rows = screen()
+                        if predicate(rows):
+                            return rows
+                        time.sleep(.08)
+                    self.fail('missing synthetic screen: '+'\n'.join(screen()))
+                def send(data):
+                    raw = data.encode()
+                    tm('send-keys', '-t', 'qi:0.0', '-H', *[f'{v:02x}' for v in raw])
+                    time.sleep(.15)
+                def click(needle):
+                    rows = screen()
+                    y = next(y for y, row in enumerate(rows) if needle in row)
+                    x = cells(rows[y].split(needle)[0])+1+(2 if needle.startswith('│ ') else 0)
+                    send(f'\x1b[<0;{x};{y+1}M\x1b[<0;{x};{y+1}m')
+                try:
+                    waitfor(lambda rows: any('READY' in row for row in rows))
+                    for index, (keys, mark, payload) in enumerate(cases):
+                        prompt = f'Synthetic choice {index}'
+                        q = dict(id='q', question=prompt, free_text=True, recommended=1,
+                                 choices=[dict(value=f'v{n}', label=f'Item {n}') for n in (1, 2, 3)])
+                        items = [dict(id=f'fixture-{index}', revision=f'{index+1:064x}', answerable=True, questions=[q]),
+                                 dict(id=f'other-{index}', revision=f'{index+1:064x}', answerable=True,
+                                      questions=[dict(q, id='q2', question='Other synthetic question')])]
+                        qp.write_text(json.dumps({SID: items}))
+                        (case/'state').write_text('working' if index % 2 == 0 else 'idle')
+                        waitfor(lambda rows: any(prompt in row for row in rows))
+                        send('\x1d')
+                        waitfor(lambda rows: any('▸ 2  Item 2' in row for row in rows))
+                        for key in keys:
+                            if key == 'click-write':
+                                click('│ › ')
+                            elif key == 'click-3':
+                                click('3  Item 3')
+                            else:
+                                send(key)
+                        rows = screen()
+                        actual = [int(m.group(1)) for row in rows if (m := re.search(r'▸ ([123])  Item', row))]
+                        self.assertEqual(actual, mark, (layout, keys, rows))
+                        before = (case/'answers').read_text().splitlines() if (case/'answers').exists() else []
+                        send('\r')
+                        if payload is None:
+                            waitfor(lambda rows: any('empty answer' in row for row in rows))
+                        else:
+                            waitfor(lambda rows: any('synthetic recorded' in row for row in rows))
+                        after = (case/'answers').read_text().splitlines() if (case/'answers').exists() else []
+                        sent = json.loads(after[-1])['answers']['q'] if len(after) > len(before) else None
+                        self.assertEqual(sent, payload, (layout, keys))
+                        print('TMUX_RULE='+json.dumps(dict(layout=layout, keys=keys, mark=actual, sent=sent), ensure_ascii=False), flush=True)
+                        send('\x1d')
+                    send('\x04')
+                finally:
+                    try:
+                        stat = Path(f'/proc/{server}/stat').read_text().rsplit(') ', 1)[1].split()
+                        if stat[19] == birth:
+                            os.kill(server, signal.SIGTERM)
+                    except FileNotFoundError:
+                        pass
+
     def test_private_tmux_caret_and_native_bytes(self):
         if not shutil.which('tmux'):self.skipTest('tmux unavailable')
         with tempfile.TemporaryDirectory(prefix='qi-') as temp:
@@ -199,7 +465,7 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                 for layout,cols in [('side',160),('bottom',100)]:
                     case=root/layout;case.mkdir();(case/'project').mkdir()
                     policy.write_text(json.dumps(dict(enabled=True,layout=layout,side_width=40,side_min_columns=132,shade='none',theme='dark',rule_motion='rule')));policy.chmod(0o600)
-                    questions=[dict(id='choice',question='시험 문구를 고르세요.',choices=['진행','보류','수정 — 고칠 것을 적는다']),dict(id='text',question='› 설명을 적으세요.'),dict(id='secret',question='시험 암호를 적으세요.',secret=True),dict(id='scroll',question='긴 질문',display={'body':[[{'text':f'설명 {i}'}] for i in range(45)]})]
+                    questions=[dict(id='choice',question='시험 문구를 고르세요.',choices=['진행','보류','수정 — 고칠 것을 적는다'],free_text=True),dict(id='text',question='› 설명을 적으세요.'),dict(id='secret',question='시험 암호를 적으세요.',secret=True),dict(id='scroll',question='긴 질문',display={'body':[[{'text':f'설명 {i}'}] for i in range(45)]})]
                     qp=case/'questions.json';qp.write_text(json.dumps({SID:[dict(id='fixture',revision='a'*64,answerable=True,questions=questions)]}))
                     backend=case/'backend';backend.write_text(fixture.BACKEND.format(python=sys.executable,utilities=str(ROOT/'utilities'),tools=str(ROOT/'tools'),sid=SID,questions=str(qp)));backend.chmod(0o700)
                     cfg=dict(sid=SID,backend=str(backend),socket=str(case/'tmux.sock'),frames=str(case/'frames'),output=str(case/'output'),received=str(case/'received'),native_output=str(case/'native-output'),state=str(case/'state'))
@@ -229,13 +495,19 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                         def send(data,delay=.12):
                             if isinstance(data,str):data=data.encode()
                             tm('send-keys','-t','qi:0.0','-H',*[f'{v:02x}' for v in data]);time.sleep(delay)
+                        def click_answer_row():
+                            for y, line in enumerate(screen(), 1):
+                                match = re.search(r'│ (› ) *│', line)
+                                if match:
+                                    x = cells(line[:match.start(1)]) + 1
+                                    send(f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m')
+                                    return
+                            self.fail('missing empty answer row')
+
                         def position(name):
                             s=screen();actual=list(map(int,tm('display-message','-p','-t','qi:0.0','#{cursor_x},#{cursor_y}').strip().split(',')))
-                            candidates=[(y,line) for y,line in enumerate(s) if '│ › ' in line]
-                            expected=None
-                            if candidates:
-                                y,line=candidates[-1];begin=line.index('│ › ')+2;answer=line[begin:line.index('│',begin)].rstrip();answer=answer if answer!='›' else '› '
-                                expected=[cells(line[:begin]+answer),y]
+                            observations=[json.loads(line) for line in Path(cfg['frames']).read_text().splitlines()] if Path(cfg['frames']).exists() else []
+                            expected=observations[-1]['expected'] if observations else None
                             measured.append(dict(layout=layout,case=name,actual=actual,expected=expected,ok=actual==expected))
                         # Let the initial asynchronous projection settle its bottom-panel height.
                         waitfor('READY');waitfor('QUESTIONS');time.sleep(2)
@@ -280,7 +552,11 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                         send('\x1d');waitfor('시험 문구')
                         for index,kind in enumerate(['choice','text','secret','scroll']):
                             if index:send('\t')
-                            send('t');position(kind+'-empty')
+                            if kind == 'choice':
+                                send('가\x7f')
+                            else:
+                                click_answer_row()
+                            position(kind+'-empty')
                             send('\r');position(kind+'-empty-enter')
                             tm('resize-window','-t','qi:0','-x','20','-y','8');time.sleep(.3);position(kind+'-small-empty')
                             tm('resize-window','-t','qi:0','-x',str(cols),'-y','30');time.sleep(.3)

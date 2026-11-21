@@ -95,7 +95,9 @@ def questions_of(envelope):
                         "choices": choices,
                         "recommended": recommended if type(recommended) is int
                         and 0 <= recommended < len(choices) else None,
-                        "free_text": bool(question.get("is_other", not choices)),
+                        "free_text": bool(question.get("is_other", not choices)) and not (
+                            choices and (envelope.get("native_ref") or {}).get("transport") == "opencode-http-v2"
+                            and question.get("field_type") != "multiselect"),
                         "secret": bool(question.get("is_secret"))})
         return out
     question_id = envelope.get("question_id") if isinstance(envelope, dict) else None

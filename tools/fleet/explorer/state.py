@@ -669,20 +669,24 @@ def _question_draft_for_backend(draft, detail=None):
                     value for value in values
                     if (isinstance(value, (str, bool, int))
                         or isinstance(value, float) and math.isfinite(value))]
+    text_only = [key for key in normalized if key in draft.get("text_only", ())]
     fields = _question_schema_items(detail)
     native = detail.get("native_ref") if isinstance(detail, Mapping) else None
     v2_form = isinstance(native, Mapping) and native.get("transport") == "opencode-http-v2"
     single_string = (not v2_form or bool(fields)
                      and fields[0].get("field_type") == "string")
-    if (len(fields) == 1 and single_string
-            and len(normalized) == 1 and len(next(iter(normalized.values()))) <= 1
-            and all(isinstance(value, str) for value in next(iter(normalized.values())))):
+    if (len(fields) == 1 and single_string and not text_only and len(normalized) == 1):
         values = next(iter(normalized.values()))
-        return values[0] if values else ""
+        if not values:
+            return ""
+        if len(values) == 1 and isinstance(values[0], str) and not values[0].startswith(_QUESTION_DRAFT_PREFIX):
+            return values[0]
     if not normalized:
         return ""
-    return _QUESTION_DRAFT_PREFIX + json.dumps({"answers": normalized}, ensure_ascii=False,
-                                                separators=(",", ":"))
+    stored = {"answers": normalized}
+    if text_only:
+        stored["text_only"] = text_only
+    return _QUESTION_DRAFT_PREFIX + json.dumps(stored, ensure_ascii=False, separators=(",", ":"))
 
 
 def question_draft_from_backend(detail, draft):
@@ -696,12 +700,16 @@ def question_draft_from_backend(detail, draft):
         answers = value.get("answers") if isinstance(value, Mapping) else None
         if not isinstance(answers, Mapping):
             return None
-        return {"answers": {str(key): [
-                            item for item in values
-                            if (isinstance(item, (str, bool, int))
-                                or isinstance(item, float) and math.isfinite(item))]
-                            for key, values in answers.items()
-                            if isinstance(values, (list, tuple))}}
+        result = {"answers": {str(key): [
+                              item for item in values
+                              if (isinstance(item, (str, bool, int))
+                                  or isinstance(item, float) and math.isfinite(item))]
+                              for key, values in answers.items()
+                              if isinstance(values, (list, tuple))}}
+        text_only = value.get("text_only")
+        if isinstance(text_only, list):
+            result["text_only"] = [key for key in text_only if isinstance(key, str) and key in answers]
+        return result
     questions = _question_schema_items(detail)
     if not questions:
         return None
@@ -726,6 +734,7 @@ def _question_selection(state, ref):
     if _question_binding_complete(ref):
         retained = previous.get("draft") if previous.get("ref") == ref else None
         overlay = {"ref": ref, "state": "loading", "detail": None, "draft": retained,
+                   "choice_marks": previous.get("choice_marks", {}) if previous.get("ref") == ref else {},
                    "editing": False, "pending": False, "status": "Loading selected request…"}
         effects = (("questions.read", ref),)
     else:
@@ -736,11 +745,36 @@ def _question_selection(state, ref):
     return replace(state, folds=tuple(sorted(folds.items())), question_overlay=overlay), effects
 
 
+def question_mark(overlay, question):
+    """The explicit choice for a writable question, or -1 when no choice was picked."""
+    detail = overlay.get("detail")
+    qid = question["id"]
+    choices = question.get("choices", question.get("options", ()))
+    if (not choices or not question_free_text_supported(detail, qid)
+            or question_multiple_select(detail, qid)):
+        return None
+    mark = overlay.get("choice_marks", {}).get(qid)
+    if mark is not None:
+        return mark
+    draft = overlay.get("draft")
+    if isinstance(draft, Mapping) and qid in draft.get("text_only", ()):
+        return (-1, False)
+    values = draft.get("answers", {}).get(qid, ()) if isinstance(draft, Mapping) else ()
+    at = next((i for i, c in enumerate(choices) if values and _question_choice_value(c) == values[0]), -1)
+    return (at, at >= 0)
+
+
+def _question_mark_state(state, question_id, mark):
+    overlay = dict(_question_overlay(state))
+    marks = dict(overlay.get("choice_marks", {}))
+    marks[question_id] = mark
+    overlay["choice_marks"] = marks
+    return replace(state, question_overlay=overlay)
+
+
 def _question_draft_response(overlay, *, require_complete=False):
     draft = overlay.get("draft")
-    if not isinstance(draft, Mapping):
-        return None
-    answers = draft.get("answers")
+    answers = draft.get("answers", {}) if isinstance(draft, Mapping) else {}
     if not isinstance(answers, Mapping):
         return None
     questions = question_items(overlay.get("detail"))
@@ -751,9 +785,15 @@ def _question_draft_response(overlay, *, require_complete=False):
     for question in questions:
         question_id = question["id"]
         values = answers.get(question_id, ())
+        mark = question_mark(overlay, question)
+        if mark is not None and mark[1]:
+            choices = question.get("choices", question.get("options"))
+            allowed = {_question_choice_value(choice) for choice in choices}
+            note = values[-1] if values and (len(values) > 1 or values[0] not in allowed) else ""
+            values = [_question_choice_value(choices[mark[0]])] + ([note] if note else [])
         if isinstance(values, (list, tuple)):
             clean = [value for value in values if (
-                isinstance(value, str) and value != ""
+                isinstance(value, str) and (bool(value.strip()) if mark is not None else value != "")
                 or type(value) is bool
                 or isinstance(value, (int, float)) and not isinstance(value, bool)
                 and (not isinstance(value, float) or math.isfinite(value)))]
@@ -775,8 +815,14 @@ def _question_text_draft(overlay, question_id=None):
     values = answers.get(question_id, ()) if question_id else ()
     if values and question_free_text_supported(overlay.get("detail"), question_id):
         question = next((item for item in questions if item["id"] == question_id), None)
-        if question and question_multiple_select(overlay.get("detail"), question_id):
-            allowed = set(question.get("option_values", ()))
+        mark = question_mark(overlay, question) if question else None
+        if mark is not None:
+            return str(values[-1]) if mark[0] < 0 or len(values) > 1 else ""
+        if question and (question_multiple_select(overlay.get("detail"), question_id)
+                         or _question_uses_workflow_transport(overlay.get("detail"))):
+            allowed = {_question_choice_value(c) for c in question.get("choices", ())} | set(question.get("option_values", ()))
+            if _question_uses_workflow_transport(overlay.get("detail")) and len(values) > 1:
+                return str(values[-1])
             return str(next((value for value in values if value not in allowed), ""))
     return str(values[0]) if values else ""
 
@@ -792,6 +838,17 @@ def _question_store_answers(state, question_id, values, *, editing=False):
                for key, value in answers.items()} if isinstance(answers, Mapping) else {}
     answers[question_id] = list(values)
     draft["answers"] = answers
+    # A one-value draft normally stores just its value. Preserve how it was entered
+    # when typed text matches a listed choice and could be marked on reload.
+    text_only = set(draft.get("text_only", ()))
+    text_only.discard(question_id)
+    if (len(values) == 1 and overlay.get("choice_marks", {}).get(question_id) == (-1, False)
+            and _question_choice_allowed(detail, question_id, values[0])):
+        text_only.add(question_id)
+    if text_only:
+        draft["text_only"] = sorted(text_only)
+    else:
+        draft.pop("text_only", None)
     detail = question_ui_detail(detail, draft)
     supported = question_answer_supported(detail)
     overlay.update(detail=detail, draft=draft, editing=editing, editing_question_id=question_id,
@@ -815,11 +872,17 @@ def _question_set_answer(state, question_id, answer):
                                                 (_question_draft_response(overlay) or {}).get(
                                                     "answers", {}).get(question_id, ()))):
         return state, ()
+    question = next(item for item in question_items(detail) if item["id"] == question_id)
+    mark = question_mark(overlay, question)
+    if mark == (-1, False):
+        state = _question_mark_state(state, question_id, mark)
     existing = ((_question_draft_response(overlay) or {}).get("answers", {}).get(question_id, ()))
-    if question_multiple_select(detail, question_id):
-        question = next(item for item in question_items(detail) if item["id"] == question_id)
-        allowed = set(question.get("option_values", ()))
-        values = [value for value in existing if value in allowed]
+    if question_multiple_select(detail, question_id) or _question_uses_workflow_transport(detail):
+        choices = question.get("choices", question.get("options")) or ()
+        allowed = {_question_choice_value(choice) for choice in choices} | set(question.get("option_values", ()))
+        values = [] if mark == (-1, False) else [value for value in existing if value in allowed]
+        if _question_uses_workflow_transport(detail):
+            values = values[:1]
         maximum = question.get("max_items")
         if answer and type(maximum) is int and len(values) >= maximum:
             return state, ()
@@ -952,7 +1015,9 @@ def _reduce(state, event, frame=None):
             folds = state.fold_map()
             if question_open_tag(state) == tag:
                 folds[QUESTION_OPEN_FOLD] = "-"
-                return replace(state, folds=tuple(sorted(folds.items()))), ()
+                overlay = dict(_question_overlay(state), editing=False)
+                overlay.pop("answer_full", None)
+                return replace(state, folds=tuple(sorted(folds.items())), question_overlay=overlay), ()
             folds[QUESTION_OPEN_FOLD] = tag
             state = replace(state, folds=tuple(sorted(folds.items())))
             if isinstance(ref, Mapping) and ref.get("id"):
@@ -964,6 +1029,9 @@ def _reduce(state, event, frame=None):
             return replace(state, folds=tuple(sorted(folds.items()))), ()
         if action[0] == "question.select" and len(action) > 2:
             return _question_selection(state, action[2])
+        if (action[0] in ("question.choice", "question.edit", "question.submit")
+                and state.opened_for(QUESTION_OPEN_FOLD) == "-"):
+            return state, ()
         if action[0] == "question.choice" and len(action) > 2:
             detail = _question_overlay(state).get("detail")
             question_id, answer = str(action[1]), str(action[2])
@@ -978,7 +1046,13 @@ def _reduce(state, event, frame=None):
                 return state, ()
             if question_multiple_select(detail, question_id):
                 return _question_toggle_choice(state, question_id, answer)
-            return _question_store_answers(state, question_id, [answer])
+            note = _question_text_draft(_question_overlay(state), question_id) if _question_uses_workflow_transport(detail) else ""
+            question = next(item for item in question_items(detail) if item["id"] == question_id)
+            if question_mark(_question_overlay(state), question) is not None:
+                choices = question.get("choices", question.get("options"))
+                at = next(i for i, c in enumerate(choices) if _question_choice_value(c) == answer)
+                state = _question_mark_state(state, question_id, (at, True))
+            return _question_store_answers(state, question_id, [answer] + ([note] if note else []))
         if action[0] == "question.edit":
             overlay = dict(_question_overlay(state))
             detail = overlay.get("detail")
@@ -1201,30 +1275,57 @@ def _reduce(state, event, frame=None):
         overlay = _question_overlay(state)
         refs = _question_refs(event)
         selected = state.opened_for("qsel:QUESTIONS", "")
+        unfolded = state.opened_for(QUESTION_OPEN_FOLD) != "-"
+        if overlay.get("answer_full"):
+            overlay = dict(overlay)
+            overlay.pop("answer_full")
+            state = replace(state, question_overlay=overlay)
+        if key == "up" and unfolded and overlay.get("editing"):
+            overlay = dict(overlay, editing=False)
+            return replace(state, question_overlay=overlay), ()
         if key in ("up", "down") and refs:
             ids = [ref.get("id", "") for ref in refs]
             index = ids.index(selected) if selected in ids else (-1 if key == "down" else 0)
             step = -1 if key == "up" else 1
             return _question_selection(state, refs[(index + step) % len(refs)])
+        if (unfolded and overlay.get("state") == "open" and isinstance(key, str)
+                and (key.startswith("text:") or len(key) == 1 and key.isprintable())):
+            detail = overlay.get("detail")
+            specs = question_items(detail)
+            qid = overlay.get("editing_question_id") or (specs[0]["id"] if specs else "")
+            if qid and question_free_text_supported(detail, qid):
+                addition = key[5:] if key.startswith("text:") else key
+                question = next(item for item in specs if item["id"] == qid)
+                choices = question.get("choices", question.get("options"))
+                if overlay.get("editing") or not choices or not (len(addition) == 1 and addition in "123456789"):
+                    text = _question_text_draft(overlay, qid)
+                    if len((text + addition).encode("utf-8")) <= 4096:
+                        return _question_set_answer(state, qid, text + addition)
+                    return replace(state, question_overlay=dict(overlay, answer_full=True)), ()
         if key in ("e", "E"):
             return _reduce(state, {"type": "click", "action": ("question.edit",)}, frame)
-        if (isinstance(key, str) and len(key) == 1 and key in "123456789"
+        if (unfolded and isinstance(key, str) and len(key) == 1 and key in "123456789"
                 and not overlay.get("editing")):
-            # A number picks that choice of the first question still waiting for one,
-            # exactly as pressing its line does.
+            # A number picks a choice in the first question still waiting for an
+            # answer (the first question once all are answered). Repeating the
+            # number that is already marked on that same question clears it.
             detail = overlay.get("detail")
             answers = ((_question_draft_response(overlay) or {}).get("answers", {}))
             specs = [item for item in question_items(detail)
                      if isinstance(item.get("choices", item.get("options")), (list, tuple))
                      and item.get("choices", item.get("options"))]
+            index = int(key) - 1
             target = next((item for item in specs if not question_values_valid(
                 detail, item["id"], answers.get(item["id"], ()))), specs[0] if specs else None)
             if target is None:
                 return state, ()
+            if question_mark(overlay, target) == (index, True):
+                note = _question_text_draft(overlay, target["id"])
+                state = _question_mark_state(state, target["id"], (-1, False))
+                return _question_store_answers(state, target["id"], [note] if note else [])
             values = [value for value in (_question_choice_value(choice) for choice in
                                           target.get("choices", target.get("options")))
                       if value]
-            index = int(key) - 1
             if index >= len(values):
                 return state, ()
             return _reduce(state, {"type": "click",
@@ -1241,26 +1342,13 @@ def _reduce(state, event, frame=None):
             if text and question_id:
                 return _question_set_answer(state, question_id, text[:-1])
             return state, ()
-        if overlay.get("editing") and isinstance(key, str) and key.startswith("text:"):
-            questions = question_items(overlay.get("detail"))
-            question_id = overlay.get("editing_question_id") or (
-                questions[0]["id"] if questions else None)
-            text = _question_text_draft(overlay, question_id)
-            addition = key[5:]
-            if question_id and addition and len(text) + len(addition) <= 16000:
-                return _question_set_answer(state, question_id, text + addition)
-            return state, ()
         if key in ("enter", "\n"):
-            if overlay.get("editing"):
-                if question_answer_supported(overlay.get("detail")):
-                    return _question_submit(state)
-                overlay = dict(overlay)
-                overlay.update(editing=False,
-                               status="Private draft saved; use the native prompt to respond.")
-                return replace(state, question_overlay=overlay), ()
-            if (_question_draft_response(overlay) is not None
-                    and isinstance(overlay.get("detail"), Mapping)
-                    and overlay["detail"].get("state") == "open"):
+            if (unfolded and overlay.get("state") == "open"
+                    and _question_draft_response(overlay) is not None):
+                if overlay.get("editing") and not question_answer_supported(overlay.get("detail")):
+                    overlay = dict(overlay, editing=False,
+                                   status="Private draft saved; use the native prompt to respond.")
+                    return replace(state, question_overlay=overlay), ()
                 return _question_submit(state)
             if selected:
                 ref = next((item for item in refs if item.get("id") == selected), None)
