@@ -1283,6 +1283,8 @@ function observeSelectedModel(lines){
   }).finally(()=>{modelReading=false;});
 }
 let paintedCursor='',paintedModes=new Map();
+// A whole repaint also repairs terminal state lost outside the host.
+function repaintWhole(){last=[];paintedModes.clear();paintedCursor='';}
 function render() {
   frameTimer=undefined;if(ended||!activated||relay||succeeding)return;
   try {
@@ -1312,7 +1314,7 @@ function render() {
     if(selectedChanged)return;
     // Laying or lifting the veil writes every row whole (the cells the beat would swap included).
     const tone=veilTone();
-    if(tone!==veiledFrame){veiledFrame=tone;last=[];written=[];motionShown.clear();}
+    if(tone!==veiledFrame){veiledFrame=tone;repaintWhole();written=[];motionShown.clear();}
     popupBefore();const wrote=new Set();
     let text='';
     const view=fleetView?.terminal||terminal;
@@ -1475,7 +1477,7 @@ function openFleet() {
     const session=pty.spawn(process.env.HEARTING_SHELL_PYTHON,[exe,'--explorer'],
       {cols,rows,cwd:process.cwd(),env:{...process.env}});
     const view={terminal:vt,child:session,closing:false,inputTail:'',paste:false};
-    fleetView=view;table=null;heldStop();block.leave();last=[];emit('\x1b[2J');
+    fleetView=view;table=null;heldStop();block.leave();repaintWhole();emit('\x1b[2J');
     vt.onData(data=>session.write(data));vt.onWriteParsed(schedule);
     session.onData(data=>{try{vt.write(data);}catch{session.write('q');rawRelay();}});
     session.onExit(()=>{
@@ -1490,9 +1492,9 @@ let displayFooter='';
 function applyLayout() {
   if(relay)return;
   if(succeeding){layoutDeferred=true;return;}
-  if(fleetView){fleetView.child.resize(cols,rows);fleetView.terminal.resize(cols,rows);last=[];schedule();return;}
+  if(fleetView){fleetView.child.resize(cols,rows);fleetView.terminal.resize(cols,rows);repaintWhole();schedule();return;}
   refold();wasPinned=pinned();
-  pick=null;child.resize(nativeColumns(),nativeRows());terminal.resize(nativeColumns(),nativeRows());last=[];footerLast='\0';
+  pick=null;child.resize(nativeColumns(),nativeRows());terminal.resize(nativeColumns(),nativeRows());repaintWhole();footerLast='\0';
   // A table popup is Fleet's table at the popup's width: read again at the new one. Rows laid out at the
   // old width (Fleet's lines above the status document) are not drawn at the new one: the document stands
   // alone until the new read.
@@ -2278,6 +2280,10 @@ function wireDisplay() {
   });
   child.onData(data=>{if(relay)emit(data);else try{terminal.write(data);}catch{rawRelay();emit(data);}});
   process.stdin.on('data',userInput);
+  process.on('SIGCONT',()=>{
+    if(ended||relay||!switched)return;
+    repaintWhole();schedule();
+  });
   process.stdout.on('resize',()=>{
     cols=process.stdout.columns;rows=process.stdout.rows;
     try{if(relay)child.resize(cols,rows);else applyLayout();}catch{rawRelay();}
@@ -2289,7 +2295,8 @@ function wireDisplay() {
     for(const row of watchers.values())row.watch.close();watchers.clear();
     for(const watch of releaseWatchers)try{watch.close();}catch{}
     server.close();await source('unregister');backend?.stdin.end();
-    emit('\x1b[0m\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?25h\x1b[?1049l');
+    const remaining=[1,9].filter(mode=>paintedModes.get(mode)).map(mode=>`\x1b[?${mode}l`).join('');
+    emit('\x1b[0m'+remaining+'\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?25h\x1b[?1049l');
     fs.rmSync(socketPath,{force:true});fs.rmSync(nextPath,{force:true});if(seedFile)fs.rmSync(seedFile,{force:true});process.exit(event.exitCode);
   });
 }
@@ -2449,7 +2456,7 @@ async function resumeHost(failed=true) {
   // another end (not safe after all) waits a second so a persistent condition cannot spin.
   if(upgrade)upgrade.retryAfter=failed?0:Date.now()+1000;
   // A host that only asked also paints the whole screen once: whatever a dying successor wrote is overwritten.
-  if(!succeeding){if(upgrade)upgrade.requested=false;last=[];footerLast='\0';if(!relay&&!ended)schedule();checkRelease();return;}
+  if(!succeeding){if(upgrade)upgrade.requested=false;repaintWhole();footerLast='\0';if(!relay&&!ended)schedule();checkRelease();return;}
   let listenFailed=false;
   try{
     let ino=-1;try{ino=fs.statSync(socketPath).ino;}catch{}
@@ -2470,7 +2477,7 @@ async function resumeHost(failed=true) {
   if(upgrade)upgrade.requested=false;
   await source('register');
   child.resume();process.stdin.resume();
-  last=[];footerLast='\0';
+  repaintWhole();footerLast='\0';
   if(layoutDeferred){layoutDeferred=false;applyLayout();}
   schedule();queueProjection();
   for(const entry of bound.splice(0))if(!entry.conn.destroyed)serve(entry.conn,entry.line.subarray(0,entry.line.length-1));
