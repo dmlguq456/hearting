@@ -59,7 +59,7 @@ class UpdateSurfaceTests(unittest.TestCase):
         result = self.update({"status": "updated", "report_lines": [LINE, "x"]})
         self.assertEqual(result["report_lines"], [LINE, "x"])
 
-    def test_the_pass_runs_for_all_three_harnesses_and_a_failing_one_never_fails_the_update(self):
+    def test_the_pass_runs_for_the_harnesses_the_update_handles_and_a_failing_one_never_fails_the_update(self):
         seen = []
 
         def apply(harness, **_kw):
@@ -69,7 +69,8 @@ class UpdateSurfaceTests(unittest.TestCase):
             return {"harness": harness, "written": [], "reverted": []}
         with mock.patch.object(distribution, "_update_release", return_value={"status": "up-to-date"}), \
                 mock.patch.object(model_follow, "apply_harness", side_effect=apply):
-            self.assertEqual(distribution.update(), {"status": "up-to-date"})
+            self.assertEqual(distribution.update(runtimes=["claude", "codex", "opencode"]),
+                             {"status": "up-to-date"})
         self.assertEqual(seen[:1], ["claude"])  # the whole pass gives up quietly, update is untouched
 
     def test_the_pinned_automatic_run_is_covered_through_the_real_release_step(self):
@@ -167,7 +168,7 @@ for path in sys.argv[1:4]:
     sys.path.insert(0, path)
 import distribution
 with mock.patch.object(distribution, "_update_release", return_value={"status": "up-to-date"}):
-    print(json.dumps(distribution.update().get("report_lines", [])))
+    print(json.dumps(distribution.update(runtimes=["claude", "codex", "opencode"]).get("report_lines", [])))
 """
 
 

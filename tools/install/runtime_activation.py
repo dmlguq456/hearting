@@ -4542,22 +4542,33 @@ def activate(
     report["preserved"] = list(report.get("user_changed", []))
     report["report_lines"] = (list(context_report_lines) + list(agent_report_lines) + notices
                               + list(report.get("report_lines", [])))
-    report["notices"] = notices
+    # What was done to the model table is also a notice: a release that reads an activation
+    # report from a newer one carries over only `preserved` and `notices`, and would say
+    # nothing of the first edit to the person's table. This release takes the same line once.
+    report["notices"] = [*notices, *model_follow_lines]
     report["model_follow_lines"] = model_follow_lines
     return report
+
+
+# What this process's activations did to a model table so far. The report of an activation that
+# fails after its table was edited is not built, so the caller reads the lines here.
+MODEL_FOLLOW_LINES: List[str] = []
 
 
 def _follow_models(runtime: str, active_root: Path, scope: str) -> List[str]:
     """Let the cells of this runtime's models.conf follow the newer models its list shows.
 
-    Result lines for the person; any failure is one line and changes nothing here.
+    Result lines for the person; any failure is one line and changes nothing here. The
+    table's lock is waited for a short time only (the activation holds locks of its own).
     """
     try:
         import model_follow
-        return model_follow.apply_lines(
+        found = model_follow.apply_lines(
             [runtime], source_root=active_root, runtime=paths.runtime_home(runtime, scope))
     except Exception as exc:  # noqa: BLE001 - activation never fails on this
-        return [f"model follow: {runtime} table not updated ({type(exc).__name__})"]
+        found = [f"model follow: {runtime} table not updated ({type(exc).__name__})"]
+    MODEL_FOLLOW_LINES.extend(line for line in found if line not in MODEL_FOLLOW_LINES)
+    return found
 
 
 def _edited_render_lines(runtime: str, previous: Optional[dict], desired: List[dict]) -> List[str]:

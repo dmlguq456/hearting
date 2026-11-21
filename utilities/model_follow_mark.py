@@ -85,13 +85,17 @@ def _from_match(match: re.Match) -> dict | None:
 
 
 def parse_record(comment: str) -> dict | None:
-    """The record in a line's comment (the last well-formed one), or None."""
-    found = None
-    for match in _RECORD.finditer(comment or ""):
-        record = _from_match(match)
-        if record is not None:
-            found = record
-    return found
+    """The record in a line's comment, or None.
+
+    A line carries one record. A line a person made to carry several (well-formed ones) is
+    not read as the last of them: it reads as held by the person (`keep`, dated as the last
+    one), so nothing follows or goes back on it until they say so with `follow`.
+    """
+    found = [record for record in (_from_match(match) for match in _RECORD.finditer(comment or ""))
+             if record is not None]
+    if len(found) > 1:
+        return {"kind": "keep", "date": found[-1]["date"], "from": None, "to": None, "effort_was": None}
+    return found[0] if found else None
 
 
 def render(record: Mapping) -> str:
@@ -161,11 +165,12 @@ def cell_state(model: str, record: Mapping | None) -> dict:
     `kept` (a person asked to keep it), `held`, `changed` (a person chose another model;
     the record is old and the next write to this line replaces it).
     """
-    out = {"state": "follow", "why": "default", "date": None, "from": None, "to": None, "skip": None}
+    out = {"state": "follow", "why": "default", "date": None, "from": None, "to": None, "skip": None,
+           "effort_was": None}
     if not record:
         return out
     kind = record["kind"]
-    out.update(date=record["date"], to=record.get("to"))
+    out.update(date=record["date"], to=record.get("to"), effort_was=record.get("effort_was"))
     out["from"] = record.get("from")
     if kind == "keep":
         return {**out, "state": "keep", "why": "kept"}

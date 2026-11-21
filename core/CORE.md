@@ -102,7 +102,7 @@ never symlinked, replaced as a whole, reapplied, or removed by a harness update 
 uninstall. An update (and a refresh) changes only the cells that are not held: each
 is moved, through the table's own edit path, to the newer same-family model the user's
 own harness model list shows, and every such edit leaves a `.bak` and an end-of-line
-record (`# auto-follow ...`) on that line. Every other line stays byte for byte. Runtime consumers select a valid, complete user file as one unit and
+record (`# auto-follow ...`) on that line. An update handles the harnesses it is run for; a cell goes to no model the outcome record shows refused; a table that is read-only, or whose lock is held past a second, is left for the next run with one line; a cell that goes back takes back the lines its own follow moved. Every other line stays byte for byte. Runtime consumers select a valid, complete user file as one unit and
 otherwise fall back to the shipped adapter default as one unit; they never merge
 the two. INST-D-20 permits one narrow, memory-only normalization: when only
 the new balanced profile and its optional granularity are absent, retain the

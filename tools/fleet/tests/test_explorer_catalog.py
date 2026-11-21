@@ -672,8 +672,10 @@ class ModelCatalogTests(unittest.TestCase):
                 self._write_list(harness, document)
                 self._user_conf(harness)
                 result, lines = self._follow(harness)
-                self.assertEqual((result["status"], result["reason"], result["entries"], lines),
-                                 ("skipped", "no-catalog", [], []))
+                # the cells and their states are the table's own, so they are there; none follows
+                self.assertEqual((result["status"], result["reason"], lines), ("skipped", "no-catalog", []))
+                self.assertTrue(result["entries"])
+                self.assertEqual({entry["branch"] for entry in result["entries"]}, {"none"})
 
     def test_a_service_list_whose_rows_cannot_be_made_reads_as_before_and_follows_nothing(self):
         name = "elm-" + "9" * 5000
@@ -785,9 +787,9 @@ class ModelCatalogTests(unittest.TestCase):
         result, lines = self._follow("opencode", installed=((2, 0, 32), None))
         self.assertEqual([line.split(" · ")[0] for line in lines], [
             "model follow: proposal opencode tier/light opencode-go/deepseek-v4.1-flash -> "
-            "opencode-go/deepseek-v4.2-flash (price x5.0)",
+            "opencode-go/deepseek-v4.2-flash (price x5.00)",
             "model follow: proposal opencode tier/mini opencode-go/deepseek-v4.1-flash -> "
-            "opencode-go/deepseek-v4.2-flash (price x5.0)"])
+            "opencode-go/deepseek-v4.2-flash (price x5.00)"])
         plan = {item["target"]: (item["to"], item["effort"]) for item in result["plan"]}
         self.assertEqual(plan, {"profile/deep": ("opencode-go/muse-spark-1.3-contributor", "high")})
         self.assertIsNone(result["cli"])  # OpenCode never gets the CLI note

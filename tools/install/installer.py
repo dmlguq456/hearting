@@ -1341,6 +1341,7 @@ def cmd_runtime(args):
     snapshots = []
     snapshots_by_runtime = {}
     launcher_snapshot = None
+    runtime_activation.MODEL_FOLLOW_LINES.clear()
 
     try:
         # Validate the complete multi-runtime request before any snapshot,
@@ -1555,6 +1556,8 @@ def cmd_runtime(args):
                          else "runtime invocation rolled back across all selected runtimes")
         if rollback_errors:
             lines.append("rollback errors: " + "; ".join(rollback_errors))
+        # A table the activation already edited stays edited (its `.bak` is beside it): say so.
+        lines.extend(line for line in runtime_activation.MODEL_FOLLOW_LINES if line not in lines)
         lines.append(f"runtime {args.runtime_command}: blocked: {exc}")
         for snapshot in snapshots:
             runtime_activation.discard_runtime_state(snapshot)
