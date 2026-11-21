@@ -153,7 +153,7 @@ from artifact_producer_store import (  # noqa: F401
     read_campaign_tombstone, read_compat_override, read_cutover, read_cycle_record,
     read_relayout_state, RECORD_SEGMENTS, RELATED_KINDS, RELAYOUT_STATE_NAME,
     relayout_state_path, REVIEW_LEASE_REL, REVISION_RECORD_NAME, ROOT_CLASSES,
-    RUNTIME_OWNED_EXACT, shared_journal_path, SHARED_KINDS, STAGE_CAPABILITIES,
+    ROOT_DOCUMENT_NAMES, RUNTIME_OWNED_EXACT, shared_journal_path, SHARED_KINDS, STAGE_CAPABILITIES,
     STATUS_DOCUMENT_NAMES, SUPPORT_SEGMENTS, transition_window_closed, USAGE,
     USER_DOCUMENT_NAMES, validate_time_bounded_grant, WAIVER_FIELDS,
 )
@@ -1965,6 +1965,8 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
     top = parts[0]
     if top.startswith(".") or top == "_scratch":
         return {**base, "verdict": "allow", "reason": "runtime-owned", "layout": "runtime"}
+    if len(parts) == 1 and top in ROOT_DOCUMENT_NAMES:  # a person's or a session's root document, not a record
+        return {**base, "verdict": "allow", "reason": "root-document", "layout": "runtime"}
     if top == "shared":
         return {**base, "verdict": "deny", "reason": "shared-revision-immutable", "layout": "shared"}
     if top == "campaigns":
