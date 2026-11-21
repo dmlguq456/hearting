@@ -930,6 +930,18 @@ class NoProcessInTheInput(unittest.TestCase):
                         self.assertEqual(result["models"]["follow"]["cli"], models["follow"]["cli"])
                 self.assertTrue(any(r["models"] for r in results))
 
+    def test_the_background_reads_after_the_first_use_its_answer_and_start_no_process(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with _env(root, list_version="0.170.0"):
+                first = focus.read_model_config()                       # the first background read asks the CLI
+                asked = _calls(root)
+                self.assertEqual(asked.count("codex"), 1)
+                for _again in range(3):                                 # the interval reads after it do not
+                    again = focus.read_model_config()
+                self.assertEqual(_calls(root), asked)
+                self.assertEqual(again["follow"], first["follow"])
+
     def test_a_harness_the_background_read_never_asked_about_is_not_known_to_the_input_read(self):
         with TemporaryDirectory() as temp:
             root = Path(temp)

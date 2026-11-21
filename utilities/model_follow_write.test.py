@@ -1215,6 +1215,10 @@ case "$1" in
       fail) exit 3 ;;
       same) : ;;
       sleep) echo $$ > "$d/pid"; exec sleep 30 ;;
+      bg_ok) sleep 300 >/dev/null 2>&1 & echo $! >> "$d/kids"
+             printf '{"client_version":"0.171.0","newer":true}' > "$CODEX_HOME/models_cache.json" ;;
+      bg_fail) sleep 300 >/dev/null 2>&1 & echo $! >> "$d/kids"; exit 3 ;;
+      hang) trap '' TERM; sleep 300 >/dev/null 2>&1 & echo $! >> "$d/kids"; wait ;;
     esac ;;
 esac
 """
@@ -1242,6 +1246,32 @@ class StaleListTests(Home):
                 os.killpg(int(pid.read_text()), 9)
             except (OSError, ValueError):
                 pass
+        self.forget_kids()
+
+    def forget_kids(self):
+        for pid in self.kids():  # a `sleep` the test started is ended by its pid, pass or fail
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+        (self.fake / "kids").unlink(missing_ok=True)
+
+    def kids(self):
+        kids = self.fake / "kids"
+        return [int(text) for text in kids.read_text().split()] if kids.exists() else []
+
+    def gone(self, pid):
+        """Whether `pid` is no longer a running process (a zombie awaiting its reaper counts as gone)."""
+        end = time.monotonic() + 3
+        while time.monotonic() < end:
+            try:
+                state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            except OSError:
+                return True
+            if state in ("Z", "X"):
+                return True
+            time.sleep(0.02)
+        return False
 
     def mode(self, mode):
         (self.fake / "mode").write_text(mode)
@@ -1313,6 +1343,41 @@ class StaleListTests(Home):
                     pid = int((self.fake / "pid").read_text())
                     with self.assertRaises(ProcessLookupError):
                         os.kill(pid, 0)
+
+    def test_no_process_of_the_refresh_group_is_left_whether_the_cli_succeeded_failed_or_ran_out_of_time(self):
+        for case in ("bg_ok", "bg_fail", "hang"):
+            with self.subTest(case=case):
+                self.table("codex")
+                self.cache("0.163.0")
+                self.mode(case)
+                self.forget_kids()
+                result = self.go(refresh_wait=0.5)
+                kids = self.kids()
+                self.assertEqual(len(kids), 1)
+                self.assertTrue(self.gone(kids[0]), case)
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(bool(result["written"]), case == "bg_ok")
+
+    def test_the_group_is_signalled_only_while_the_child_is_unreaped_and_waitid_exists(self):
+        self.table("codex")
+        self.cache("0.163.0")
+        self.mode("bg_fail")
+        with mock.patch.object(model_follow.os, "waitid", None), \
+                mock.patch.object(model_follow.os, "killpg", wraps=os.killpg) as killpg:
+            self.go(refresh_wait=0.5)  # no waitid: today's behaviour, no group signal after a clean end
+        self.assertEqual(killpg.call_count, 0)
+        os.kill(self.kids()[0], 0)  # its `sleep` is still there (today's behaviour); the cleanup ends it
+        with mock.patch.object(model_follow.os, "waitid", None):
+            self.mode("hang")
+            self.forget_kids()
+            self.go(refresh_wait=0.5)  # no waitid, past the deadline: the group is ended as ever
+            self.assertTrue(self.gone(self.kids()[0]))
+        with mock.patch.object(model_follow.os, "waitid", side_effect=ChildProcessError), \
+                mock.patch.object(model_follow.os, "killpg", wraps=os.killpg) as killpg:
+            self.mode("bg_fail")
+            self.forget_kids()
+            self.go(refresh_wait=0.5)  # reaped by someone else: its pid is not ours to signal
+        self.assertEqual(killpg.call_count, 0)
 
     def test_the_same_line_is_in_the_update_output_through_apply_lines(self):
         self.table("codex")

@@ -26,9 +26,10 @@ version is asked once per survey, and a failure or a timeout counts as that one 
 A list that carries the version of the CLI that wrote it (`client_version`) is not the installed
 CLI's list when that version is not the installed one (a CLI left running from an older version
 rewrites the shared file). Such a list is never followed from: a write pass first has the
-installed CLI write it again, once, outside the table's lock (`_REFRESH`), and when that does not
-make the versions agree the harness's cells are left as they are and one line says so. A survey
-(`fleet_view`) only reports it and never starts the refresh.
+installed CLI write it again, once, outside the table's lock (`_REFRESH`; no process of its group
+is left behind), and when that does not make the versions agree the harness's cells are left as they
+are and one line says so. Versions are compared with trailing zeros dropped (0.171 is 0.171.0). A
+survey (`fleet_view`) only reports it and never starts the refresh.
 """
 from __future__ import annotations
 
@@ -79,6 +80,16 @@ _VERSION = re.compile(r"\d+(?:\.\d+)+")
 def _numbers(text) -> tuple[int, ...] | None:
     match = _VERSION.search(text) if isinstance(text, str) else None
     return tuple(int(part) for part in match.group(0).split(".")) if match else None
+
+
+def _same_version(one: tuple, other: tuple) -> bool:
+    """Whether two version numbers are the same version: trailing zeros do not count (0.171 is 0.171.0)."""
+    def trimmed(numbers):
+        parts = list(numbers)
+        while len(parts) > 1 and parts[-1] == 0:
+            parts.pop()
+        return parts
+    return trimmed(one) == trimmed(other)
 
 
 # ---- the rule ----------------------------------------------------------------------
@@ -327,36 +338,62 @@ def _other_cli(catalog, observe) -> tuple[str, str] | None:
     if wanted is None:
         return None
     have, _path = observe()
-    if have is None or have == wanted:
+    if have is None or _same_version(have, wanted):
         return None
     return ".".join(map(str, wanted)), ".".join(map(str, have))
+
+
+def _ended(proc, wait) -> bool:
+    """Wait until `proc` has ended, within `wait` seconds, without reaping it, so that its pid (the
+    group id) stays ours while its group is ended. Returns whether the group may still be signalled:
+    False when the child was already reaped (or `waitid` is missing, so it is reaped here), as then
+    the pid may be another process's. Raises `subprocess.TimeoutExpired` on the deadline."""
+    waitid = getattr(os, "waitid", None)  # not in Python before 3.13 on macOS
+    if waitid is None:
+        proc.wait(timeout=wait)
+        return False
+    end = time.monotonic() + wait
+    try:
+        while waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+            if time.monotonic() >= end:
+                raise subprocess.TimeoutExpired(proc.args, wait)
+            time.sleep(0.02)
+    except ChildProcessError:  # reaped by someone else: nothing here is ours to signal
+        return False
+    return True
 
 
 def _refresh(harness, observe, wait) -> bool:
     """Have the installed CLI write its list again, once, within `wait` seconds. True only when it
     ended cleanly; a missing command, a failure and a timeout are False and never raise. The run
-    is its own process group so a timeout leaves no child behind."""
+    is its own process group and no process of that group is left behind, whether the CLI ended or
+    ran out of time (one that left its group with `setsid` is out of reach). The group is ended
+    before the CLI is reaped, while the pid is still ours."""
     command = _REFRESH.get(harness)
     path = observe()[1]
     if not command or not path:
         return False
     proc = None
+    ours, clean = True, False  # `ours`: the group id is still this run's
     try:
         proc = subprocess.Popen([path, *command], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, start_new_session=True)
-        return proc.wait(timeout=wait) == 0
+        ours = _ended(proc, wait)
+        clean = True
     except Exception:  # noqa: BLE001 - not refreshed is the answer, never an error
-        return False
+        pass
     finally:
-        if proc is not None and proc.poll() is None:
-            try:
-                os.killpg(proc.pid, 9)
-            except OSError:
-                proc.kill()
+        if proc is not None and proc.returncode is None:
+            if ours:
+                try:
+                    os.killpg(proc.pid, 9)
+                except OSError:
+                    proc.kill()
             try:
                 proc.wait(timeout=2)
             except Exception:  # noqa: BLE001
                 pass
+    return clean and proc.returncode == 0
 
 
 def _cli_note(harness, catalog, entries, observe) -> dict | None:
@@ -373,7 +410,7 @@ def _cli_note(harness, catalog, entries, observe) -> dict | None:
         if not names or not catalog.client_version:
             return None
         have, path = observe()
-        if have is None or have != _numbers(catalog.client_version):
+        if have is None or not _same_version(have, _numbers(catalog.client_version) or ()):
             return None
         return {"harness": harness, "version": ".".join(map(str, have)), "models": names,
                 "kind": "previous-generation", "command": upgrade_command(harness, path)}

@@ -325,6 +325,15 @@ class SurveyTests(unittest.TestCase):
                          ["model follow: codex: the model list was written by CLI 0.170.0, installed is "
                           "0.163.0 · start codex once to refresh it · nothing followed"])
 
+    def test_trailing_zeros_do_not_make_another_version(self):
+        for listed, have, other in (("0.171", (0, 171, 0), None), ("0.171.0", (0, 171), None),
+                                    ("0.171.0", (0, 171, 1), ("0.171.0", "0.171.1")),
+                                    ("0.170", (0, 171, 0), ("0.170", "0.171.0")),
+                                    ("1.0.0", (1, 0), None), ("1.10", (1, 1), ("1.10", "1.1"))):
+            with self.subTest(listed=listed, have=have):
+                catalog = SimpleNamespace(client_version=listed)
+                self.assertEqual(model_follow._other_cli(catalog, lambda: (have, "/usr/bin/codex")), other)
+
     def test_when_no_candidate_is_usable_the_codex_cli_note_still_shows(self):
         self.user_file("codex")
         probe = lambda _harness: ((0, 163, 0), "/usr/bin/codex")  # noqa: E731

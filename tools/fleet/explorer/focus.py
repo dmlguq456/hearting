@@ -967,20 +967,24 @@ def follow_into(models, answer):
     return models
 
 
-_CLI_SEEN = {}                       # harness -> (version, path): what the last background read was told
+_CLI_SEEN = {}                       # harness -> (version, path): what the CLI was last asked and said
 _CLI_SEEN_LOCK = threading.Lock()
 
 
 def _cli_probe(refresh):
     """The ``probe`` ``fleet_view`` asks the harness CLI's version through.
 
-    A background read (``refresh``) asks the CLI itself and remembers the answer; a read made inside
-    the input handling never starts a process: it is given what the last background read was told
-    (``(None, None)``, not known, for a harness that read never asked about)."""
+    The first background read (``refresh``) for a harness asks the CLI itself and remembers the answer;
+    the background reads after it, and a read made inside the input handling, never start a process:
+    they are given the remembered answer (``(None, None)``, not known, for a harness never asked about).
+    A harness whose CLI was not found is asked again (finding it starts no process)."""
     def probe(harness):
+        with _CLI_SEEN_LOCK:
+            seen = _CLI_SEEN.get(harness)
+        if seen is not None and (not refresh or seen[1]):
+            return seen
         if not refresh:
-            with _CLI_SEEN_LOCK:
-                return _CLI_SEEN.get(harness, (None, None))
+            return (None, None)
         found = utility("model_follow").installed_cli(harness)
         with _CLI_SEEN_LOCK:
             _CLI_SEEN[harness] = found
@@ -1186,7 +1190,8 @@ def read_model_config(refresh=True):
     """MODELS view data from the harnesses' models.conf and the dispatch defaults (read once, cached).
 
     ``refresh=False`` is the read made inside the input handling after a write: it asks no harness
-    CLI anything (the CLI notes use what the last background read was told)."""
+    CLI anything (the CLI notes use what the CLI was last asked). A background read asks a harness's
+    CLI only the first time; the reads after it use that answer."""
     import importlib.util
     model_config = utility("model_config")
     profile_map, choices, main_only, context, profile_target = {}, {}, {}, {}, {}
