@@ -549,6 +549,7 @@ def select_model_settings(h, args, *, harness: str, label: str, knob: str,
             # ITS OWN sealed profile, not the owner's. Without this the route
             # compiles `top` onto the anchor and this wrapper refuses it.
             node=getattr(args, "route_node", None),
+            worker_type=args.worker_type,
         )
     except h.ModelProfileError as exc:
         raise h.ModelSelectionError(exc.reason, str(exc)) from exc
