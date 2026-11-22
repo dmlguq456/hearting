@@ -16,6 +16,7 @@ import json
 import shutil
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("AGENT_ARTIFACT_CHECKPOINT", "off")
 HERE = Path(__file__).resolve().parent
@@ -118,7 +119,7 @@ class RecordsFolderTest(F.ProducerTestBase):
         (folder / "records").mkdir(parents=True)
         (folder / "campaign.md").write_text(f"{CD.MARKER}\n# t\n", encoding="utf-8")
         (folder / "records" / "pr-1.md").write_text(PAGE, encoding="utf-8")
-        RS._prune_empty_tree(folder)
+        RS._prune_empty_tree(folder, campaign_dir=folder)
         self.assertFalse(folder.exists())
 
     def test_a_rollback_never_removes_a_file_in_records_that_is_not_the_generators(self):
@@ -128,7 +129,7 @@ class RecordsFolderTest(F.ProducerTestBase):
         (folder / "records" / "pr-1.md").write_text("a person wrote this\n", encoding="utf-8")
         (folder / "records" / "pr-2.md").write_text(PAGE, encoding="utf-8")
         with self.assertRaises(RS.ResplitError):
-            RS._prune_empty_tree(folder)
+            RS._prune_empty_tree(folder, campaign_dir=folder)
         self.assertEqual((folder / "records" / "pr-1.md").read_text(), "a person wrote this\n")
 
     def test_a_records_folder_inside_a_cycle_folder_is_not_the_campaigns_and_is_not_removed(self):
@@ -138,6 +139,14 @@ class RecordsFolderTest(F.ProducerTestBase):
         (cycle / "artifacts" / "records" / "note.md").write_text(PAGE, encoding="utf-8")
         with self.assertRaises(RS.ResplitError):
             RS._prune_empty_tree(cycle)
+        self.assertEqual((cycle / "artifacts" / "records" / "note.md").read_text(), PAGE)
+        # a marked copy of a campaign document beside it does not make that folder a campaign's
+        (cycle / "artifacts" / "campaign.md").write_text(f"{CD.MARKER}\n# t\n", encoding="utf-8")
+        with self.assertRaises(RS.ResplitError):
+            RS._prune_empty_tree(cycle)
+        self.assertEqual((cycle / "artifacts" / "records" / "note.md").read_text(), PAGE)
+        with self.assertRaises(RS.ResplitError):   # nor does the caller naming the campaign folder above the cycle
+            RS._prune_empty_tree(cycle, campaign_dir=cycle.parent)
         self.assertEqual((cycle / "artifacts" / "records" / "note.md").read_text(), PAGE)
 
     def test_the_records_pages_are_not_removed_before_a_blocker_beside_them_is_known(self):
@@ -150,7 +159,7 @@ class RecordsFolderTest(F.ProducerTestBase):
             (folder / sibling).mkdir()
             (folder / sibling / "kept.txt").write_text("a person's file\n", encoding="utf-8")
             with self.assertRaises(RS.ResplitError):
-                RS._prune_empty_tree(folder)
+                RS._prune_empty_tree(folder, campaign_dir=folder)
             self.assertEqual((folder / "records" / "pr-1.md").read_text(), PAGE)
             self.assertEqual((folder / sibling / "kept.txt").read_text(), "a person's file\n")
 
@@ -161,17 +170,48 @@ class RecordsFolderTest(F.ProducerTestBase):
         (folder / "campaign.json").write_text("{}", encoding="utf-8")
         (folder / "records" / "pr-1.md").write_text(PAGE, encoding="utf-8")
         with self.assertRaises(RS.ResplitError):
-            RS._prune_empty_tree(folder)
+            RS._prune_empty_tree(folder, campaign_dir=folder)
         self.assertEqual((folder / "records" / "pr-1.md").read_text(), PAGE)
 
-    def test_a_folder_that_is_no_campaign_folder_keeps_its_records_pages(self):
+    def test_a_folder_no_caller_names_keeps_its_records_pages_whatever_files_are_beside_them(self):
         import artifact_resplit as RS
-        folder = self.root / "campaigns" / "only-records"   # no campaign.json and no campaign.md: not known as a campaign's
+        folder = self.root / "campaigns" / "only-records"
         (folder / "records").mkdir(parents=True)
         (folder / "records" / "pr-1.md").write_text(PAGE, encoding="utf-8")
         with self.assertRaises(RS.ResplitError):
             RS._prune_empty_tree(folder)
         self.assertEqual((folder / "records" / "pr-1.md").read_text(), PAGE)
+        (folder / "campaign.md").write_text(f"{CD.MARKER}\n# t\n", encoding="utf-8")   # a document file is no name
+        with self.assertRaises(RS.ResplitError):
+            RS._prune_empty_tree(folder)
+        self.assertEqual((folder / "records" / "pr-1.md").read_text(), PAGE)
+
+    def test_a_rollback_of_a_campaign_whose_pages_were_written_before_its_document_goes_to_the_end(self):
+        import artifact_resplit as RS
+        folder = self.root / "campaigns" / "made-by-the-run"   # a pass wrote the pages and stopped before `campaign.md`
+        (folder / "records").mkdir(parents=True)
+        (folder / "campaign.json").write_text("{}", encoding="utf-8")
+        (folder / "records" / "pr-1.md").write_text(PAGE, encoding="utf-8")
+        run_dir = self.root.parent / "resplit-run"
+        run_dir.mkdir()
+        journal = {"pre_image": {"campaign_records": [
+            {"path": "campaigns/made-by-the-run/campaign.json", "created_by_this_run": True}]}}
+        RS._r2_rollback(self.root, journal, run_dir)
+        self.assertFalse(folder.exists())
+        self.assertEqual(json.loads((run_dir / "journal-r2.json").read_text())["phase"], "rolled-back")
+
+    def test_a_residue_rollback_prunes_the_campaign_folder_it_made_with_its_pages(self):
+        folder = self.root / "campaigns" / "made-by-the-residue"
+        (folder / "records").mkdir(parents=True)
+        (folder / "campaign.json").write_text("{}", encoding="utf-8")
+        (folder / "records" / "pr-1.md").write_text(PAGE, encoding="utf-8")
+        run_dir = self.root.parent / "residue-run"
+        run_dir.mkdir()
+        journal = {"pre_image": {"created_campaigns": ["camp_" + "9" * 32]}}
+        with mock.patch.object(RES.artifact_locator, "find_path_by_id", return_value=folder):
+            RES._rollback(self.root, run_dir, journal)
+        self.assertFalse(folder.exists())
+        self.assertEqual(journal["phase"], "rolled-back")
 
 if __name__ == "__main__":
     unittest.main()
