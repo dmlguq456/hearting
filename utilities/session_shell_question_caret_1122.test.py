@@ -118,6 +118,30 @@ class QuestionCaretTest(unittest.TestCase):
   }
 """)
 
+    def test_the_answer_rows_shown_are_one_unbroken_stretch_of_the_text_holding_the_place(self):
+        # A wrapped answer cut by a short limit leaves out rows only at its ends, never from the middle: the rows
+        # on the screen are consecutive rows of the whole answer, and the row with the place is one of them.
+        out = self.node(r"""
+  const columns=30,per=27,letters='ABCDEFGHIJ';
+  const text=Array.from({length:8},(_,i)=>letters[i].repeat(per)).join('').slice(0,per*7+1);   // 8 wrapped rows
+  let checked=0;
+  for(const choices of [undefined,[]])for(const budget of [4,5,6,7,8])for(const at of ['start','middle','end']){
+    const x=choices?setup({},choices):setup();x.keys(text);
+    const whole=x.rows(columns,40).filter(r=>r.some(p=>p.answerRow)).map(plain);assert.equal(whole.length,8);
+    if(at==='start')x.keys(HOME+RIGHT.repeat(3));
+    if(at==='middle')x.keys(HOME+RIGHT.repeat(per*3+5));
+    const rows=x.rows(columns,budget),tag=JSON.stringify({budget,at,hasChoices:!choices});
+    assert(rows.length<=budget,tag+' rows');
+    const shown=rows.filter(r=>r.some(p=>p.answerRow)).map(plain),first=whole.indexOf(shown[0]);
+    assert(shown.length>=1&&first>=0,tag+' some answer rows\n'+rows.map(plain).join('\n'));
+    assert.deepEqual(shown,whole.slice(first,first+shown.length),tag+' consecutive rows\n'+rows.map(plain).join('\n'));
+    const held=rows.findIndex(r=>r.some(p=>p.caret));assert(held>=0&&rows[held].some(p=>p.answerRow),tag+' the row with the place stands');
+    checked++;
+  }
+  console.log('CASES '+checked);
+""")
+        self.assertIn("CASES 30", out)
+
     def test_a_secret_answer_is_bullets_and_the_place_moves_over_them(self):
         self.node(r"""
   const x=setup({secret:true});x.keys('private'+LEFT+LEFT+LEFT);

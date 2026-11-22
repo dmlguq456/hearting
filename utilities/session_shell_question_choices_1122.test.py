@@ -4,8 +4,9 @@ choices always shows its choice rows.
 The popup's question view used to page the question's words and its choices as one block: a long question left no choice
 row on its first page (unfocused), and a focused one pushed all but the highlighted choice out. Now only the words page
 (`+N · more …`, PgUp/PgDn); the choices and the answer row stand. Short of rows the key hints go first, then the empty
-row and the thin line, then the words (down to one row and the `more` line), and last the choices slide to keep the
-highlighted one in sight with a line saying there are more. These run the real editor with synthetic values.
+row and the thin line, then the words (down to one row and the `more` line, never gone: PgUp/PgDn read them on), and
+last the choices slide to keep the highlighted one in sight with a line saying there are more. These run the real
+editor with synthetic values.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -50,7 +51,7 @@ class QuestionChoicesTest(unittest.TestCase):
     assert(rows.length<=budget,tag+' rows');
     assert(shown.length>=1,tag+' at least one choice row\n'+rows.join('\n'));
     assert.deepEqual(shown,[...shown].sort((a,b)=>a-b),tag+' in order');
-    if(budget>=choices+2)assert.equal(shown.length,choices,tag+' every choice that fits\n'+rows.join('\n'));
+    if(budget>=choices+3+(free?1:0))assert.equal(shown.length,choices,tag+' every choice that fits beside a row of words and its more line\n'+rows.join('\n'));
     if(free&&budget>=3)assert(rows.some(r=>r.startsWith('› ')),tag+' the answer row stands\n'+rows.join('\n'));
     checked++;
   }
@@ -94,13 +95,61 @@ class QuestionChoicesTest(unittest.TestCase):
   // Tighter: the empty row goes, then the thin line.
   rows=setup({lines:17,choices:3}).rows(8);assert(rows.some(r=>r.includes('─'))&&!rows.some(r=>r===''),rows.join('\n'));
   rows=setup({lines:17,choices:3}).rows(7);assert(!rows.some(r=>r.includes('─'))&&seen(rows).length===3&&rows.some(r=>r.includes('body line 1')),rows.join('\n'));
-  // The words have no row left: the head says they page, every choice still shows.
-  rows=setup({lines:17,choices:3}).rows(6);assert(seen(rows).length===3&&rows[0].includes('+17'),rows.join('\n'));
-  // Not enough for the choices: they slide around the highlighted one and say there are more.
-  x=setup({lines:17,choices:9});x.keys('\x1b[B'.repeat(6));rows=x.rows(6);
+  // The words go down to one row and the `more` line before a choice is given up: the choices slide around the
+  // highlighted one and say there are more; the words stay.
+  rows=setup({lines:17,choices:3}).rows(6);assert(rows.some(r=>r.includes('body line 1'))&&rows.some(r=>r.includes('+16 · more'))&&rows.some(r=>r.includes('more choices')),rows.join('\n'));
+  assert(rows.some(r=>r.includes('▸ 1')),rows.join('\n'));
+  // Tighter: one row of words with its `more` line and one choice; then one row of words with the head saying it pages
+  // and one choice; then (one row left) the choice alone, the head promising no words.
+  rows=setup({lines:17,choices:3}).rows(5);assert(rows.some(r=>r.includes('+16 · more'))&&seen(rows).length===1,rows.join('\n'));
+  rows=setup({lines:17,choices:3}).rows(4);assert(rows.some(r=>r.includes('body line 1'))&&rows[0].includes('+16')&&seen(rows).length===1,rows.join('\n'));
+  rows=setup({lines:17,choices:3}).rows(3);assert(seen(rows).length===1&&!rows.some(r=>r.includes('body line'))&&!rows[0].includes('PgUp'),rows.join('\n'));
+  // Not enough for the choices: they slide around the highlighted one and say there are more, the words beside them.
+  x=setup({lines:17,choices:9});x.keys('\x1b[B'.repeat(6));rows=x.rows(8);
   assert(rows.some(r=>r.includes('▸ 7')),rows.join('\n'));assert(rows.some(r=>r.includes('more choices')),rows.join('\n'));assert(seen(rows).length>=1);
-  x=setup({lines:17,choices:9,focus:false});rows=x.rows(6);assert(seen(rows)[0]===1&&rows.some(r=>r.includes('more choices')),rows.join('\n'));
+  assert(rows.some(r=>r.includes('body line 1')),'the words stay beside the sliding choices\n'+rows.join('\n'));
+  x=setup({lines:17,choices:9,focus:false});rows=x.rows(8);assert(seen(rows)[0]===1&&rows.some(r=>r.includes('more choices')),rows.join('\n'));
 """)
+
+    def test_the_repro_8_choices_in_10_rows_and_4_choices_in_6_rows_keep_the_words_and_they_page(self):
+        self.node(r"""
+  let x=setup({lines:40,choices:8}),rows=x.rows(10);
+  assert(rows.includes('body line 1')&&rows.some(r=>r.includes('more · PgUp/PgDn to read 1/40')),rows.join('\n'));
+  assert.deepEqual(seen(rows),[1,2,3,4,5],rows.join('\n'));assert(rows.some(r=>r.includes('+3 · more choices')));
+  x.keys('\x1b[6~');assert(!x.rows(10).includes('body line 1'),x.rows(10).join('\n'));
+  x=setup({lines:17,choices:4});rows=x.rows(6);
+  assert(rows.includes('body line 1')&&rows.some(r=>r.includes('+16 · more')),rows.join('\n'));assert(seen(rows).length===1&&rows.some(r=>r.includes('+3 · more choices')),rows.join('\n'));
+""")
+
+    def test_whenever_the_words_show_the_page_keys_read_them_to_the_last_row(self):
+        # Body 1·5·17·40·200 rows × 1·2·4·8 choices × limits 3..30 × focus none / choosing / typing × an answer row or none.
+        out = self.node(r"""
+  let reading=0,cells=0;
+  for(const lines of [1,5,17,40,200])for(const choices of [1,2,4,8])for(const budget of Array.from({length:28},(_,i)=>i+3))
+  for(const free of [true,false])for(const mode of ['none','choosing','typing']){
+    if(mode==='typing'&&!free)continue;
+    const x=setup({lines,choices,free,focus:mode!=='none'});if(mode==='typing')x.keys('x');
+    const rows=x.rows(budget),tag=JSON.stringify({lines,choices,budget,free,mode});cells++;
+    assert(rows.length<=budget,tag+' rows');
+    assert(seen(rows).length>=1,tag+' a choice row stands\n'+rows.join('\n'));
+    const shown=rows.filter(r=>/^body line \d+$/.test(r)).length;
+    // The words are there whenever the limit holds the head, a row of words and a choice row (and the answer row).
+    if(budget>=3+(free?1:0))assert(shown>=1,tag+' the words stay\n'+rows.join('\n'));
+    // No screen promises more words (the `more` line, the head's `+N`) while none is shown.
+    if(shown===0)assert(!rows.some(r=>/\+\d+ · more|PgUp|\+\d+ ↑↓/.test(r)&&!/more choices/.test(r)),tag+' no promise of words that are not there\n'+rows.join('\n'));
+    if(mode==='none'||shown===0||shown>=lines)continue;
+    // The page keys read the words on, to the last row, and back to the first.
+    let last=x.rows(budget),steps=0;
+    while(!last.includes('body line '+lines)&&steps++<400){x.keys('\x1b[6~');const next=x.rows(budget);assert.notDeepEqual(next,last,tag+' PgDn reads on\n'+last.join('\n'));last=next;assert(seen(next).length>=1,tag+' choices stay');}
+    assert(last.includes('body line '+lines),tag+' the last row is reached\n'+last.join('\n'));
+    for(let i=0;i<400&&!x.rows(budget).includes('body line 1');i++)x.keys('\x1b[5~');
+    assert(x.rows(budget).includes('body line 1'),tag+' back to the first row');
+    reading++;
+  }
+  console.log('CELLS '+cells+' READ '+reading);
+""")
+        self.assertIn("CELLS 2800", out)
+
 
     def test_a_question_without_choices_or_a_decision_pages_as_before(self):
         self.node(r"""

@@ -2311,20 +2311,29 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
     answers = (_question_draft_response(private) or {}).get("answers", {})
     complete = True
     native_only = False
-    for spec in () if approval else specs:
+    asked = () if approval else specs
+
+    def _asked(spec):
         qid = spec["id"]
         values = answers.get(qid, ()) if hasattr(answers, "get") else ()
         values = tuple(values) if isinstance(values, (list, tuple)) else ()
         choices = _question_choices(spec)
-        secret = bool(spec.get("is_secret") or spec.get("isSecret"))
         words = [wrapped for text in _question_text(spec, envelope).splitlines() or [""]
                  for wrapped in _wrap(text, width)]
+        return qid, values, choices, words, len(choices) + (1 if question_free_text_available(envelope, qid, values) else 0)
+
+    shapes = [_asked(spec) for spec in asked]
+    for index, spec in enumerate(asked):
+        qid, values, choices, words, own = shapes[index]
+        secret = bool(spec.get("is_secret") or spec.get("isSecret"))
         # 11-22: the choices (and the answer row and the action line) are never pushed out by a long question:
         # only the words give way, ending in `… +N more lines` (the shell's popup pages them instead). Short of
         # rows the empty row goes first, then the thin line, then the words down to one row and that line.
-        keep = len(choices) + (1 if question_free_text_available(envelope, qid, values) else 0) + 1
+        # With several questions in one item every one's choices and answer row, and the action line, are kept
+        # first (each later question's words keep their first row and the `more` line); this one's words get the rest.
+        later = sum(shape[4] + min(len(shape[3]), 2) for shape in shapes[index + 1:])
         gap = 2 if choices else 0
-        room = bottom - y - keep
+        room = bottom - y - own - 1 - later
         while gap and room - gap < min(len(words), 2):
             gap -= 1
         shown = max(0, room - gap)
