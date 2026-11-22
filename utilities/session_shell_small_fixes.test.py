@@ -7,7 +7,7 @@
 3. (The sessions section went from the panel, 11-15; its tests with it.)
 4. `veilRow` also turns colon-form SGR gray.
 5. The question summary's `answerable` is `active(row)`, the one formula.
-6. The head rule stands without a session title (the default `rule motion` must not wait on one).
+6. The head rule stands without a session title (the default `rule motion` must not wait on one). 11-22: the rule is the SESSION head's (the line between CTX and TITLE is gone), and the light runs over it alone.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -212,7 +212,8 @@ for(const [extra,want] of [[{},true],[{answerable:false},false]]){
 
     def test_the_head_rule_stands_without_a_session_title(self):
         # The default `rule motion` moves a light over the head rule; a session with no title (a new one, any
-        # harness) had no rule, so nothing moved. The rule now stands where something stands above it.
+        # harness) had no rule, so nothing moved. 11-22: the rule is the SESSION head's, always there; the light passes over its cells
+        # (not over the name), and no other rule stands between the metadata and the title.
         self.node(r"""
 const p=(text,extra={})=>({text,...extra});
 const styles={dim:{foreground:-1,dim:true},loc_repo:{foreground:253}};
@@ -221,11 +222,12 @@ const paint=(harness,extra,o={})=>view.render({width:o.width||40,height:o.height
  frame:0,brief:()=>null,sent:()=>[],configuration:{},background:''});
 for(const harness of ['claude','codex','opencode'])for(const [name,extra] of [['title',{session_title:'제목'}],['none',{}],['now',{now:'그리는 중'}]]){
  const v=paint(harness,extra),lines=v.rows.map(str),tag=harness+' '+name+'\n'+lines.join('\n');
- const rule=lines.findIndex(r=>/^│ ─{36} │$/.test(r));
+ const rule=lines.findIndex(r=>/^│ SESSION ─{28} │$/.test(r));
  assert(rule>0,'the head rule stands\n'+tag);
- assert(v.motion&&v.motion.cells.length>0&&v.motion.cells.every(c=>c.row===rule),'the default light moves over it\n'+tag);
- if(name==='none')assert.equal(lines[rule+1],'│'+' '.repeat(38)+'│','no title: the rule is the parting, no extra empty row\n'+tag);
- else assert.equal(lines[rule+1].includes('TITLE')||lines[rule+1].includes('NOW'),true,tag);
+ assert(!lines.some(r=>/^│ ─{36} │$/.test(r)),'no rule between the metadata and the title\n'+tag);
+ assert(v.motion&&v.motion.cells.length===28&&v.motion.cells.every(c=>c.row===rule&&c.col>=10&&c.col<=37),'the default light moves over the rule alone\n'+tag);
+ assert(lines[rule+1].includes('MODEL'),tag);
+ if(name!=='none')assert(lines.some(r=>r.includes('TITLE')||r.includes('NOW')),tag);
 }
 // The bottom layout has none (the border alone is bright).
 const bottom=view.render({width:120,height:6,side:false,fill:false,model:{...base},state:'working',sid:'s',harness:'claude',frame:0,brief:()=>null,sent:()=>[],configuration:{},background:''});

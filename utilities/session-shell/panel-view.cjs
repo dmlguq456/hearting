@@ -32,9 +32,14 @@ const MESSAGES_MAX=3;
 const REPO_NAME_MIN=8;
 // 11-20 (the person: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" / "REPO ---- SESSION ----"): the panel beside the native area has two groups: REPO
 // (the repository's: its row, GIT, PEERS) and SESSION (this session's: MODEL, CTX, TITLE, NOW, QUESTIONS, the route box, MESSAGES, MEM). Each group's head
-// is one row `REPO ────` / `SESSION ────`. REPO's head is the REPO row itself (`REPO   hearting · wt 12 ────`, no row more). SESSION's head stands
+// is one row `REPO ────` / `SESSION ────`. REPO's head is the REPO row itself (`REPO hearting · wt 12 ────`, no row more). SESSION's head stands
 // where the empty row between the two groups' metadata stood, so it costs no row either, and goes with it short of rows. The bottom layout has no group
 // heads: first row, GIT, PEERS, then the title and NOW row and the route box.
+// 11-22 (the person, on the three drafts of the panel's tidy-up: "두칸이 아니라 한칸만 띄우도록 하자 그러면"): the line forms are one table (`core/references/session-shell.md`, *Two groups*). A group
+// head is its bold name, its value and a rule, no indent (REPO, SESSION). The rows under it stand one cell in (GIT, PEERS, STATUS, BACKLOG; MODEL, CTX, TITLE, NOW), the items of STATUS and BACKLOG two. An activity
+// is a rounded box with its `›` at the right end of its top line (QUESTIONS, ROUTE). The sections at the bottom are their name and a `›` at the right end, no rule, their items one cell in, a message's second row two.
+// Every row a press opens ends in that one `›`. The line between CTX and TITLE is gone; `rule motion`'s light runs over the SESSION head's rule alone. Short of rows the SESSION head takes MODEL's value
+// and row (`SESSION Opus 5.5 xhigh ───`), so the rows give way in the order and at the heights they did. What a row shows is cut by the old rule in the cells the indent leaves.
 // 11-16 (the person: "메모리도 메시지랑 같은 맥락이야"): MEM shows the newest MEM_MAX records at most, each its
 // dim head row and its headline on up to two rows (spec rule 46 (b)). 11-18 (the person: "MEM는 최대 최근 3개만 띄워도 되겠다"): three at most.
 const MEM_MAX=3;
@@ -602,9 +607,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const ruleTick=t=>borderTick(t)+(anchored?1:0);
   // Spec rule 52: the thin rule under the metadata; under `rule` while the session runs, its cells
   // carry the light (`rule` marks them, so the host gets them as the moving cells).
-  const ruleLook=(i,tick)=>{const level=scanLevel(ruleTick(tick),i,inner);
+  // 11-22: the light runs over the cells of the SESSION head's rule alone (`n` of them: not the name, not the value), whatever length that rule has.
+  const ruleLook=(i,tick,n)=>{const level=scanLevel(ruleTick(tick),i,n);
     return level?{...text('─','g_spin'),role:'orbit',tone:'scan',level,rule:true}:{...text('─','dim'),role:'messages',rule:true};};
-  const ruleParts=()=>ruleMoving?Array.from({length:inner},(_,i)=>ruleLook(i,frame)):[{...text('─'.repeat(inner),'dim'),role:'messages',rule:true}];
+  const ruleParts=n=>ruleMoving?Array.from({length:n},(_,i)=>ruleLook(i,frame,n)):[{...text('─'.repeat(n),'dim'),role:'messages',rule:true}];
+  let ruleLen=1;
   // Values the host could not refresh for a while are shown, not claimed:
   // nothing spins and the frame takes no route state (spec rule 12).
   const stale=model.stale===true;
@@ -696,7 +703,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-21: the STATUS and BACKLOG parts under the REPO group: each a head row and its first items (all of them `listRows`). They are laid out last, after
     // everything else has its rows (the same layout a window without them has): they take the empty rows and, short of those, rows MESSAGES and MEM fold; they are the first to go.
     const lists=[],listRows=new Set(),listHeads=new Map(),listItemAt=new Map();
-    let repoAt=-1,repoButtons=null;
+    let repoAt=-1,repoButtons=null,sessionAt=-1,modelValueOf=null;
+    // The width of the rows under a group head: one cell less (`IND`, below) for what is laid out in them.
+    const narrow=fn=>{const was=inner;inner=Math.max(1,was-(side?1:0));try{return fn();}finally{inner=was;}};
     // A value that runs over several rows (spec rule 29 (c)): its rows after the first go
     // first when rows run short, and the first row then ends in `…`.
     const extra=new Set(),oneRow=new Map();
@@ -711,30 +720,35 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // column and every value starts at the same cell; its next rows start there too.
     // Narrower than 30 cells inside, the labels go before any value is cut.
     const labelWidth=inner>=30?7:0;
+    // 11-22: beside the native area the rows under a group head stand one cell in (GIT, PEERS, STATUS, BACKLOG; MODEL, CTX, TITLE, NOW), their items two.
+    const IND=side?1:0;
     // A row that ends a value cut short: its last cell becomes `…` (spec rule 36 (c), 37 (b)).
     const ellipsis=(row,limit)=>{const all=size(row);if(all+1<=limit)return [...row,{...(row.at(-1)||text('')),text:'…'}];
       const fit=clip(row,Math.max(0,limit-1));return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'}];};
     // `tail` stands after the value's last row and keeps its cells (the `›` of a row a press opens). The value is cut
     // and wrapped as it is without it: the tail takes room only where the last row has it, else it stands at that
     // row's end as `…›`, so neither the value's rows nor any row around them depend on the tail.
+    // 11-22: the mark stands at the row's right end (`pad` cells before it), the one place a press's `›` is looked for.
     const tailed=(row,limit,tail)=>{
-      if(!tail.length||size(row)+size(tail)<=limit)return [...row,...tail];
+      if(!tail.length)return row;
+      const mark=tail.filter(x=>clean(x.text).trim());
+      if(size(row)+size(tail)<=limit)return [...row,pad(limit-size(row)-size(mark)),...mark];
       const fit=clip(row,Math.max(0,limit-2));
       return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'},tail.at(-1)];
     };
     const field=(label,parts,max=Infinity,tail=[])=>{
-      const lead=labelWidth?text(label.padEnd(labelWidth),'dim'):null,rest=pad(labelWidth),room=inner-labelWidth;
+      const lead=[pad(IND),...(labelWidth?[text(label.padEnd(labelWidth),'dim')]:[])],rest=[pad(IND+labelWidth)],room=inner-IND-labelWidth;
       let rows=wrapAll(parts,room);const from=top.length;
       if(rows.length>max){rows=rows.slice(0,max);rows[max-1]=ellipsis(rows[max-1],room);}
-      rows.forEach((row,i)=>{top.push([...(lead?[i?rest:lead]:[]),...(i===rows.length-1?tailed(row,room,tail):row)]);if(i)extra.add(top.length-1);});
-      if(rows.length>1)oneRow.set(from,[...(lead?[lead]:[]),...tailed(cut(parts,room),room,tail)]);
+      rows.forEach((row,i)=>{top.push([...(i?rest:lead),...(i===rows.length-1?tailed(row,room,tail):row)]);if(i)extra.add(top.length-1);});
+      if(rows.length>1)oneRow.set(from,[...lead,...tailed(cut(parts,room),room,tail)]);
     };
     // Spec rules 37 (a), 41: beside the native area the worktree count stands beside the
-    // repository name (`REPO   hearting · wt 12`) and the Git row keeps the branch, whether it
+    // repository name (`REPO hearting · wt 12`) and the Git row keeps the branch, whether it
     // is up to date and the warnings (`GIT    main ✓`), the labels as TITLE's and NOW's.
     const worktrees=painted(model.worktrees),sideGit=Array.isArray(model.git_side)?painted(model.git_side):git;
     const sideRepo=Array.isArray(model.repo_side)?painted(model.repo_side):repo;
-    const labelled=(label,parts)=>labelWidth?[text(label.padEnd(labelWidth),'dim'),...parts]:parts;
+    const labelled=(label,parts)=>[...(IND?[pad(IND)]:[]),...(labelWidth?[text(label.padEnd(labelWidth),'dim')]:[]),...parts];
     // 11-17 (the person's PEERS sketch): `PEERS  [c7] ⚑  ─ [d4] [3b]`: the supervising session, its flag, two cells, a dash, then the
     // ones it supervises; the same order from every window. Each number is its harness's color (this window's own bold),
     // the flag alone Fleet's steward pink, the dash and the `·` between two groups dim. No state of any session. Short of
@@ -771,7 +785,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     // 11-15 (the person: "현황은 REPO 옆에 버튼을 만드는게 나을거 같은데"), 11-20 ("현황은 미리보기 없이 버튼만 만들자"), 11-21 (the person: "버튼을 REPO의 아래에
     // 각각을 두고 +? 숫자 띄우고 백로그랑 현황을 나열하자" / "각각 3줄 정도씩 목록으로 만들고 추가분을 +? 형식으로"): beside the native area the REPO group ends in a STATUS
-    // part and a BACKLOG part, each a section head (`STATUS +2 ──── ›`, a press opens that popup) and its first three items (one row each; a press
+    // part and a BACKLOG part, each a section head (` STATUS +2        ›`, one cell in, no rule, a press opens that popup) and its first three items (one row each; a press
     // opens the popup standing on it); `+N` on the head counts the items not shown, as MESSAGES' does. The REPO row has no button. In the bottom
     // layout the first row ends in the two buttons `STATUS +N ›  BACKLOG +N ›` (nothing is listed there). `status_doc` and `backlog_doc` are
     // `{word, has_doc, items: [{mark, text, key}], total}` (the host's; no artifact root: neither); a document that is not there is dim, and pressable.
@@ -787,9 +801,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const listButton=(doc,stage)=>{const arrow=text('›','dim');if(stage>=2)return [arrow];
       const n=listTotalOf(doc);
       return [text(clean(doc.word).trim(),doc.has_doc===true?'loc_repo':'dim'),...(stage===0&&(n>0||doc.more===true)?[text(' '),text(countWords(n,doc.more===true),'loc_repo')]:[]),text(' '),arrow];};
-    // The REPO row where the two heads do not stand: `REPO   hearting · wt 12 ──── STATUS +N ›  BACKLOG +N ›`, the bottom layout's first row's buttons (the same words, the same
+    // The REPO row where the two heads do not stand: `REPO hearting · wt 12 ──── STATUS +N ›  BACKLOG +N ›`, the bottom layout's first row's buttons (the same words, the same
     // order of giving way: the counts, then the words, then the name is cut). `offset` cells of the row stand left of `room`; a press on a button opens its popup, on the rest of the row the status popup.
-    const buttonsAt=(room,name,count,offset)=>{
+    // 11-22: `fit` is what the value and the buttons must fit in (the cells the row had when its label column stood: what is kept or dropped as the width falls is unchanged), `room` the row's cells.
+    const buttonsAt=(room,name,count,offset,fit=room)=>{
       const docs=[['STATUS',statusDoc],['BACKLOG',backlogDoc]].filter(([,d])=>d);
       if(!docs.length)return null;
       const place=stage=>{const parts=[],spans=[];let used=0;
@@ -800,16 +815,17 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
           actions:made.spans.map((sp,i)=>({left:i?at+sp.left:0,right:i===made.spans.length-1?inner-1:at+made.spans[i+1].left-1,action:'popup:'+sp.name}))};};
       for(const stage of [0,1,2]){
         const made=place(stage);
-        for(const lead of count.length?[[...name,...count],name]:[name])if(size(lead)+1+made.used<=room)return build(lead,made);
-        const left=room-made.used-1;
+        for(const lead of count.length?[[...name,...count],name]:[name])if(size(lead)+1+made.used<=fit)return build(lead,made);
+        const left=fit-made.used-1;
         if(left>=Math.min(size(name),REPO_NAME_MIN))return build(cut(name,left),made);
       }
       const made=place(2);
-      return build(cut(name,Math.max(1,room-made.used-1)),made);
+      return build(cut(name,Math.max(1,fit-made.used-1)),made);
     };
     // A group's head row: its name (the title role, as a section's), a thin rule to the row's end.
-    const groupHead=name=>{const lead=[{...text(name,'dim'),role:'title'}],rest=inner-size(lead);
-      return rest>=3?[...lead,text(' '),{...text('─'.repeat(rest-1),'dim'),role:'messages'}]:cut(lead,inner);};
+    // 11-22: SESSION's rule is the one `rule motion` moves (`ruleParts`); its value (MODEL's, short of rows) stands after the name.
+    const groupHead=(name,value=[])=>{const lead=[{...text(name,'dim'),role:'title'},...(value.length?[text(' '),...value]:[])],rest=inner-size(lead);
+      return rest>=3?[...lead,text(' '),...ruleParts(rest-1)]:cut(lead,inner);};
     // Spec rule 46: the newest saved memory records (this repository's and the global ones, MEM_MAX at
     // most) stand in their own section under the messages, one row each (below). An older backend
     // sends the newest one as painted pieces only (`3m decision headline`): that one record,
@@ -830,21 +846,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // effort, context]; without Git it parts the repository from the model.
       if(sideRepo.length){
         // The name keeps its color; the count (dim) shows whole or not at all.
-        // 11-20: the REPO group's head is this row: `REPO   hearting · wt 12 ────` (narrower than 30 cells inside the word stands first, `REPO `,
+        // 11-20: the REPO group's head is this row: `REPO hearting · wt 12 ────` (the same in every width: the word stands first, `REPO `,
         // as the other labels do not).
         const count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
-        const word=labelWidth?null:text('REPO ','dim'),room=inner-labelWidth-(word?5:0);
-        const withCount=count.length>0&&size(sideRepo)+size(count)<=room;
-        const value=withCount?[...sideRepo,...count]:cut(sideRepo,room);
+        // 11-22: a group head is its bold name, one cell, its value, then the rule (no label column: the rows under it are the ones in a column).
+        const word=[{...text('REPO','dim'),role:'title'},text(' ')],room=inner-5,fit=inner-(labelWidth||5);
+        const withCount=count.length>0&&size(sideRepo)+size(count)<=fit;
+        const value=withCount?[...sideRepo,...count]:cut(sideRepo,fit);
         const row=[...value,...fillEnd(room-size(value))];
         // Where the two heads under REPO do not stand the row ends in the two buttons, as the bottom layout's first row does (`buttonsAt`, below).
         if(statusDoc||backlogDoc){
-          const lead=word?5:labelWidth;
-          const made=buttonsAt(room,sideRepo,withCount?count:[],lead);
-          repoButtons=made&&{parts:word?[word,...made.parts]:labelled('REPO',made.parts),actions:made.actions};
+          const made=buttonsAt(room,sideRepo,withCount?count:[],5,fit);
+          repoButtons=made&&{parts:[...word,...made.parts],actions:made.actions};
         }
         repoAt=top.length;
-        top.push(word?[word,...row]:labelled('REPO',row));mark(top.length-1,'head',...(withCount&&!sideGit.length?['git']:[]));
+        top.push([...word,...row]);mark(top.length-1,'head',...(withCount&&!sideGit.length?['git']:[]));
       }
       // Short of cells the first part (the branch, the model name) gives way so what follows
       // it (the status and a warning, the effort) stays whole.
@@ -853,8 +869,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const rest=parts.slice(1),left=room-size(rest);
         return left>=6?[...cut(parts.slice(0,1),left),...rest]:cut(parts,room);
       };
-      if(sideGit.length){gitRows.add(top.length);top.push(labelled('GIT',firstGives(sideGit,inner-labelWidth)));mark(top.length-1,'git');}
-      {const peerParts=peerRow(inner-labelWidth);if(peerParts.length){gitRows.add(top.length);top.push(labelled('PEERS',peerParts));}}
+      if(sideGit.length){gitRows.add(top.length);top.push(labelled('GIT',firstGives(sideGit,inner-IND-labelWidth)));mark(top.length-1,'git');}
+      {const peerParts=peerRow(inner-IND-labelWidth);if(peerParts.length){gitRows.add(top.length);top.push(labelled('PEERS',peerParts));}}
       // 11-21: the STATUS and BACKLOG parts: each a head and its items (what a part shows is chosen after the layout, below).
       for(const [name,doc] of [['STATUS',statusDoc],['BACKLOG',backlogDoc]]){
         if(!doc)continue;
@@ -864,12 +880,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
           const at=top.length,mark=item.mark==='!'?text('! ','lvl_y'):text('· ','dim');
           listRows.add(at);listItemAt.set(at,{entry,j});
           topActions.set(at,'popup:'+name+(typeof item.key==='string'&&item.key?':'+item.key:''));
-          top.push(cut([mark,text(clean(item.text).trim(),'loc_repo')],inner));
+          top.push([pad(2),...cut([mark,text(clean(item.text).trim(),'loc_repo')],inner-2)]);
         });
         lists.push(entry);
       }
-      // 11-20: the SESSION group's head stands where the empty row between the two groups of metadata stood (and goes with it).
-      metaGaps.add(top.length);top.push(groupHead('SESSION'));
+      // 11-20: the SESSION group's head stands where the empty row between the two groups of metadata stood. 11-22: short of rows the head does not
+      // go: it takes MODEL's value and MODEL's row (`SESSION Opus 5.5 xhigh ───`), so the group keeps its name and the rows are as many as when it went.
+      metaGaps.add(top.length);top.push(groupHead('SESSION'));sessionAt=top.length-1;
       if(labelWidth){
         // Spec rule 42: `MODEL` and `CTX` as REPO's and GIT's; `CTX` stands for the word
         // `context` (a backend without `context_side` has its word taken off here).
@@ -877,22 +894,20 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
           return !first||rest===String(first.text)?parts:rest?[{...first,text:rest},...parts.slice(1)]:parts.slice(1);};
         const gauge=Array.isArray(model.context_side)?painted(model.context_side):word(painted(model.context));
         const value=mcp.length||cost.length?joined([gauge,mcp,cost]):gauge;
-        top.push(labelled('MODEL',firstGives(selected,inner-labelWidth)));
-        if(value.length){top.push(labelled('CTX',cut(value,inner-labelWidth)));mark(top.length-1,'context');}
+        modelValueOf=room=>firstGives(selected,room);
+        top.push(labelled('MODEL',firstGives(selected,inner-IND-labelWidth)));
+        if(value.length){top.push(labelled('CTX',cut(value,inner-IND-labelWidth)));mark(top.length-1,'context');}
       }else{
-        // Narrower than 30 cells inside, the rows as they were, without labels.
-        top.push(selected);
-        if(contextParts.length){top.push(contextParts);mark(top.length-1,'context');}
+        // Narrower than 30 cells inside, the rows as they were, without labels (one cell in, as the rows of the group above).
+        modelValueOf=room=>firstGives(selected,room);
+        top.push(labelled('MODEL',firstGives(selected,inner-IND)));
+        if(contextParts.length){top.push(labelled('CTX',cut(contextParts,inner-IND)));mark(top.length-1,'context');}
       }
-      if(jobs.length){const from=top.length;put(top,jobs,2);mark(from,'jobs');for(let i=from;i<top.length;i++){optional.add(i);jobRows.add(i);}}
-      if(work.length){optional.add(top.length);top.push(cut(work,inner));}
-      if(model.warning)top.push(line(model.warning,'lvl_r'));
+      if(jobs.length){const from=top.length;const rowsOf=[];narrow(()=>put(rowsOf,jobs,2));top.push(...rowsOf.map(r=>[pad(IND),...r]));mark(from,'jobs');for(let i=from;i<top.length;i++){optional.add(i);jobRows.add(i);}}
+      if(work.length){optional.add(top.length);top.push([pad(IND),...cut(work,inner-IND)]);}
+      if(model.warning)top.push([pad(IND),...cut(line(model.warning,'lvl_r'),inner-IND)]);
       const content=title||now||(tidy&&!asking);
-      // Spec rule 34 (c): the rule parts the head's block from what follows it; it is not an empty row
-      // but it stands without a title too (11-15 small fixes: what the default `rule motion` moves
-      // must not wait on a title), where something stands above it.
-      // Spec rule 47: it follows this session's state (above).
-      if(content||top.length){rules.add(top.length);top.push(ruleParts());}
+      // 11-22: no rule between CTX and TITLE any more; the rule `rule motion` moves is the SESSION head's.
       // Spec rule 44: the title's value bold, in this session's harness color (Fleet's `hb_*`;
       // the label stays dim). No color keeps the weight, as the steward's `⚑` (rule 35 (a)).
       const own='hb_'+(['claude','codex','opencode'].includes(harness)?harness:'other');
@@ -903,10 +918,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         // 11-16: a notice of something that ended well (`tidy_quiet`) is one or two dim rows without `⚠`; what
         // leaves the person something to do keeps the caution look on up to three rows.
         const quiet=model.tidy_quiet===true,key=quiet?'dim':'lvl_y',most=quiet?2:3;
-        const rows=[];wrap(quiet?line(tidy,key):line('⚠ '+tidy,key),most+1,undefined,rows);
+        const rows=[];narrow(()=>wrap(quiet?line(tidy,key):line('⚠ '+tidy,key),most+1,undefined,rows));
         const kept=rows.slice(0,most);
-        if(rows.length>kept.length){const last=kept.length-1,fit=clip(kept[last],inner-1);kept[last]=[...fit.parts,text('…',key)];}
-        top.push(...kept);
+        if(rows.length>kept.length){const last=kept.length-1,fit=clip(kept[last],inner-IND-1);kept[last]=[...fit.parts,text('…',key)];}
+        top.push(...kept.map(r=>[pad(IND),...r]));
       }
       // One empty row parts the head from the route box below it (a head with no content has its rule).
       if(content){spacers.add(top.length);top.push([]);}
@@ -976,7 +991,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       for(const a of [after,[]])for(const r of rights){
         const head=[...lead,...(a.length?[text(' '),...a]:[])],tail=[...(r.length?[text(' '),...r]:[]),...close];
         const rest=inner-size(head)-size(tail);
-        if(rest>=2)return [...head,text(' '),{...text('─'.repeat(rest-1),'dim'),role:'messages'},...tail];
+        // 11-22: beside the native area a section's head has no rule: its name and count, then the `›` at the right end.
+        if(rest>=2&&!side)return [...head,text(' '),{...text('─'.repeat(rest-1),'dim'),role:'messages'},...tail];
         if(rest>=0)return [...head,pad(rest),...tail];
       }
       return cut(lead,inner);
@@ -1307,8 +1323,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return out;
     };
     // A note on the right of a border (the route box's hidden counts) shows whole or not at all.
-    const boxTop=(label,key,{action,ellipsis=false,note=[],alt=[]}={})=>{
-      const room=Math.max(0,inner-2),tail=note.length&&size(note)+3<=room?[L(' ',key),...note,L(' ─',key)]:[];
+    // 11-22: a box that a press on its top line opens (`arrow`) ends that line in `›` at the right end (`╭─ 3 QUESTIONS ───── ›─╮`), after a hidden count where it has one.
+    const boxTop=(label,key,{action,ellipsis=false,note=[],alt=[],arrow=false}={})=>{
+      const room=Math.max(0,inner-2),mark=arrow&&room>=8?[text('›','dim')]:[],
+        tail=note.length&&size(note)+3+(mark.length?2:0)<=room?[L(' ',key),...note,...(mark.length?[L(' ',key),...mark,L('─',key)]:[L(' ─',key)])]:mark.length?[L(' ',key),...mark,L('─',key)]:[];
       // A shorter form of the title (the route box's `REQUEST`, then its route count alone, never a count without its
       // name) stands where the whole one does not fit.
       const fits=form=>form&&form.length&&size(form)<=room-size(tail)-3;
@@ -1777,7 +1795,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const inView=sorted.slice(routeOffset,routeOffset+routeLimit);
       const above=routeOffset,below=routeRows.length-routeOffset-inView.length+unsent;
       const hiddenNote=n=>[text(n,'loc_repo')];
-      const block=[{...boxTop(routeTitle,key,{action:'popup:ROUTE',note:above?hiddenNote('↑'+above):[],alt:routeTitleAlt}),groups:['route']}];
+      const block=[{...boxTop(routeTitle,key,{action:'popup:ROUTE',note:above?hiddenNote('↑'+above):[],alt:routeTitleAlt,arrow:true}),groups:['route']}];
       let before=null;
       (routeRows.length?inView:routeChecking).forEach(item=>{
         if(routeRule()&&item.zone&&(!before||before.zone!==item.zone))block.push(zoneRow(item.zone,key));
@@ -1800,8 +1818,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     let messageOne=false;
     const arrowOf=m=>text(m.way,m.way==='←'?'lvl_g':'loc_repo');
     const bodyOf=m=>String(m.body||m.text||'');
-    const messageLine=m=>cut([arrowOf(m),text(' '),text(String(m.who||''),'loc_repo'),text(' '),text(bodyOf(m),'loc_repo')],inner);
-    const messageTop=m=>{
+    // 11-22: beside the native area an item of MESSAGES and MEM stands one cell in (a message's second row two), laid out in the cells that leaves.
+    const itemIn=fn=>side?[pad(1),...narrow(fn)]:fn();
+    const messageLine=m=>itemIn(()=>cut([arrowOf(m),text(' '),text(String(m.who||''),'loc_repo'),text(' '),text(bodyOf(m),'loc_repo')],inner));
+    const messageTop=m=>itemIn(()=>{
       const arrow=arrowOf(m),who=text(String(m.who||''),'loc_repo');
       const delivery=Array.isArray(m.delivery)&&m.delivery[0]?[text(' · ','dim'),text(String(m.delivery[0]),m.delivery[1]||'dim')]:[];
       const pieces=[m.harness?[text(' '+m.harness,'dim')]:[],m.when?[text(' · '+m.when,'dim')]:[],m.kind?[text(' · '+m.kind,'dim')]:[]];
@@ -1819,7 +1839,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         return [...cut([arrow,text(' '),who],Math.max(1,inner-3-measure(word))),text(' · ','dim'),text(word,m.delivery[1]||'dim')];
       }
       return cut([arrow,text(' '),who,...delivery],inner);
-    };
+    });
     const messageBody=m=>{
       const body=wrapAll([text(bodyOf(m),'loc_repo')],inner-2),first=body[0]||[];
       return [text('  '),...(body.length>1?cut([...first,text(' '),...body[1].slice(0,1)],inner-2):first)];
@@ -1840,13 +1860,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-20 (the person: "메모리 내용은 한줄로 바꾸고 (지금은 두줄이네) 메시지 처럼 팝업이 가능하게"): a record is one row, as a message's one-row form
     // (`messageLine`): its mark, age and kind dim, then the headline in the body color (`…` where it goes on; the kind goes first where the
     // headline would be left under 14 cells). A press on it opens the MEM popup (below, `memoryBody`: the record whole).
-    const memLine=m=>{
+    const memLine=m=>itemIn(()=>{
       const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
       for(const lead of [[mark,m.age,m.kind],[mark,m.age]]){
         const head=text(lead.filter(Boolean).join(' ')+' ','dim');
         if(inner-size([head])>=14||lead.length===2)return cut([head,text(m.text,'loc_repo')],inner);
       }
-    };
+    });
     const memRows=m=>[memLine(m)];
     // The sections in order, each with the most rows it takes and its rows at a given count.
     const SECTIONS=[
@@ -2082,7 +2102,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});
     give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});
     give(()=>keepMetaGap,()=>{keepMetaGap=false;},()=>{keepMetaGap=true;});
-    give(()=>keepRules,()=>{keepRules=false;},()=>{keepRules=true;});
+    give(()=>keepRules&&rules.size>0,()=>{keepRules=false;},()=>{keepRules=true;});
     // (11-16: the QUESTIONS box's two border rows go after its content rows above, before the structural rows below.)
     give(()=>kept.QUESTIONS&&keepQuestionBox,()=>{keepQuestionBox=false;},()=>{keepQuestionBox=true;});
     // The box comes back with its context rows only while the workers stand.
@@ -2146,13 +2166,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     top.forEach((row,i)=>{
       if(!keepLists&&listRows.has(i))return;
       if(!keepLists&&i===repoAt&&repoButtons){order.push({parts:repoButtons.parts,groups:topGroups.get(i),action:repoButtons.actions});return;}
+      if(!keepMetaGap&&sessionAt>=0&&i===sessionAt+1&&modelValueOf){order.push({parts:groupHead('SESSION',modelValueOf(Math.max(1,inner-8))),groups:topGroups.get(i)});return;}
       const at=listItemAt.get(i);
       if(at&&at.j>=take[at.entry.name+'_ITEMS'])return;
       if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i))){
         const head=listHeads.get(i);
-        // A list part's head: `STATUS +2 ──── ›` (the count of the items not shown, as MESSAGES' head; the word dim, not titled, where its document is not there).
+        // A list part's head: ` STATUS +2        ›` (one cell in; the count of the items not shown, as MESSAGES' head; the word dim, not titled, where its document is not there).
         const hidden=head?head.total-Math.min(take[head.name+'_ITEMS'],head.items.length):0;
-        order.push({parts:head?sectionHead([],head.name,hidden>0||head.doc.more===true?[text(countWords(hidden,head.doc.more===true),'loc_repo')]:[],[[]],true,head.doc.has_doc!==true):!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});}});
+        order.push({parts:head?[pad(IND),...narrow(()=>sectionHead([],head.name,hidden>0||head.doc.more===true?[text(countWords(hidden,head.doc.more===true),'loc_repo')]:[],[[]],true,head.doc.has_doc!==true))]:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});}});
     for(const item of order)add(item.parts,item.action,item.groups);
     const headRows=content.length;
     // Each section stands whole (its head and the rows it kept), one after another from the top; the
@@ -2172,8 +2193,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       if(s.name==='QUESTIONS'&&boxedQuestions()){
         const key={key:here?'lvl_y':'dim',role:here?'accent-line':'messages',blink:here&&waitBlinks};
-        const label=[...(questionCount?[{...text(questionCount,'g_blocked'),role:'accent'},text(' ')]:[]),{...text(summary?.label||'QUESTIONS','dim'),role:'title'},text(' '),text('›','dim')];
-        add(boxTop(label,key,{action:'question'}).parts,'question',s.groups);
+        const label=[...(questionCount?[{...text(questionCount,'g_blocked'),role:'accent'},text(' ')]:[]),{...text(summary?.label||'QUESTIONS','dim'),role:'title'}];
+        add(boxTop(label,key,{action:'question',arrow:true}).parts,'question',s.groups);
         for(const row of questionRowsIn())add(boxRow({parts:row},key).parts,'question');
         add(boxBottom(key).parts,'question');
         continue;
@@ -2305,18 +2326,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(let y=H-2;y>0;y--)cells.push({row:y,col:0,ch:'│'});
   }else if(ruleMoving){
     // `rule`: the head rule's cells (where the rule stands; a panel short of rows that drops it moves nothing).
+    // 11-22: the SESSION head's rule alone: its cells, from its first to its last, wherever the head's name and value leave them.
     const y=rows.findIndex((r,i)=>i>0&&i<count-1&&r.some(part=>part.rule));
-    if(y>0)for(let x=0;x<inner;x++)cells.push({row:y,col:2+x,ch:'─',rule:x});
+    if(y>0){let col=0,k=0;const row=[];
+      for(const part of rows[y]){const w=cellsOf([part]);if(part.rule)for(let x=0;x<w;x++)row.push({row:y,col:col+x,ch:'─',rule:k++});col+=w;}
+      ruleLen=Math.max(1,row.length);cells.push(...row);}
   }
   // 11-15: the waiting blink's cells (the QUESTIONS rows' red letters) ride the same motion, on Fleet's beat (11-16).
   const framed=cells.length;
   if(waitBlinks)cells.push(...blinkCells(rows,measure,clean,1,count-1));
   const blinked=cells.length>framed;
   const motion=cells.length?{cells,
-    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(tick)}:c.rule!==undefined?ruleLook(c.rule,tick):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background,harness})[0],
+    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(tick)}:c.rule!==undefined?ruleLook(c.rule,tick,ruleLen):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background,harness})[0],
     next:tick=>Math.min(blinked?blinkNext(tick):Infinity,framed?frameNext(tick):Infinity)}:null;
   function frameNext(tick){const local=borderTick(tick),shift=Math.trunc(tick)-local;
-      if(ruleMoving){const r=ruleTick(tick);return Math.trunc(tick)+scanNext(r,inner)-r;}
+      if(ruleMoving){const r=ruleTick(tick);return Math.trunc(tick)+scanNext(r,ruleLen)-r;}
       if(moving==='scanners')return Math.trunc(tick)+1;
       if(moving==='border'){const k=Math.floor(local*around/BORDER_LAP);let n=Math.ceil((k+1)*BORDER_LAP/around);if(n<=local)n=local+1;return n+shift;}
       const now=breathStep(local,breathSteps);for(let t=local+1;t<=local+BORDER_BREATHE;t++)if(breathStep(t,breathSteps)!==now)return t+shift;return local+BORDER_BREATHE+shift;}

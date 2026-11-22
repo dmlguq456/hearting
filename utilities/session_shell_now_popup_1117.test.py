@@ -205,7 +205,7 @@ const v=view.render({width:40,height:24,side:true,model:m,state:'working',harnes
 console.log(JSON.stringify(lines(v)));"""
         def row(now):    # (24 rows: the NOW is short of rows in its one-row form at this height, as at the 30 it stood at before 11-20)
             out = subprocess.run([NODE, "-e", script, str(SHELL), now], capture_output=True, text=True, check=True)
-            return [line for line in json.loads(out.stdout) if line.startswith("│ NOW") or line.startswith("│        ")]
+            return [line for line in json.loads(out.stdout) if line.startswith("│  NOW") or line.startswith("│         ")]
         full = "가가가가 가가가가 가가가가 가가가가 가가가"      # fills the 32 cells of the NOW's row (a word of 3)
         rows = row(full)
         self.assertTrue(rows[-1].rstrip("│ ").rstrip().endswith("…›"), rows)   # no room: `…›` takes the row's end

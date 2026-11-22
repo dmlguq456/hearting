@@ -1,7 +1,7 @@
 """11-15 (design 2): the status button and popup, the waiting blink and the popup's control filter over the real
 host in a private PTY.
 
-The panel's STATUS head (under the REPO group: `STATUS ──── ›`) opens the status popup when it is pressed (the table popup's frame,
+The panel's STATUS head (under the REPO group: ` STATUS        ›`) opens the status popup when it is pressed (the table popup's frame,
 width and keys): its title `STATUS <campaign> · <age>`, Fleet's status lines for the project, the document with
 its markdown table aligned, and the sections `STATUS · BACKLOG · QUESTIONS · ROUTE · MESSAGES` on its bottom line (←→ in
 that order). PgDn reads it on. A change to the document (the existing file watch) reads the value and the
@@ -140,7 +140,7 @@ const frames={},checks={};
 // (Private, as the shared cache's reader requires.)
 const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.renameSync(file+'.new',file);};
 (async()=>{try{
-  let s=await until(s=>has('READY_'+cfg.harness)(s)&&s.some(l=>/STATUS( \+\d+)? ─+ ›/.test(l))&&has('QUESTIONS')(s),'the panel with its status button');
+  let s=await until(s=>has('READY_'+cfg.harness)(s)&&s.some(l=>/STATUS( \+\d+)? +›/.test(l))&&has('QUESTIONS')(s),'the panel with its status button');
   await sleep(600);s=await screen();frames.panel=s;
   const repo=await at('REPO'),button=await at('STATUS'),head=await at('QUESTIONS');
   checks.button_row=repo&&button&&button.y>repo.y&&button.y<=repo.y+4;   // (the head stands under the REPO group's rows)

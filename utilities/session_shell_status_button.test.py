@@ -60,29 +60,29 @@ for(const name of names)for(const wt of [true,false])for(let w=24;w<=60;w++){
  assert(!row.includes('STATUS')&&!row.includes('›'),tag);
  assert(v.hits.filter(h=>h.row===1).length===0,tag);
  const inner=w-4,label=inner>=30;
- if(label)assert(row.startsWith('│ REPO   '),tag);else assert(row.startsWith('│ REPO '),tag);
+ assert(row.startsWith('│ REPO '),tag);   // 11-22: the same in every width (the group head's name, one cell, its value)
  // The rule runs to the end of the row (a thin rule where three cells or more are free).
  assert(/(─+|[^─]) │$/.test(row),tag);
  // The name is whole, or cut with `…`.
  assert(row.includes(name)||row.includes('…'),tag);
 }
 const at40=name=>str(render({width:40,model:{repo_side:[p(name)],status_doc:doc,backlog_doc:backlog}}).rows[1]);
-assert.equal(at40('hearting'),'│ REPO   hearting · wt 12 ──────────── │');
-assert.equal(at40('speech-separation-bench'),'│ REPO   speech-separation-bench ───── │');   // (the count goes before the name is cut)
+assert.equal(at40('hearting'),'│ REPO hearting · wt 12 ────────────── │');
+assert.equal(at40('speech-separation-bench'),'│ REPO speech-separation-bench ─────── │');   // (the count goes before the name is cut)
 """)
 
     def test_no_document_dims_the_head_and_no_root_shows_none(self):
         self.node(r"""
 // No document: the word dim (not in the title role), `›` dim, and a press on the head still opens the popup.
 {const v=render({width:54,height:30,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:false,items:[],total:0}}});
- const at=v.rows.findIndex(r=>str(r).includes('│ STATUS'));assert(at>0,v.rows.map(str).join('\n'));
+ const at=v.rows.findIndex(r=>str(r).includes('│  STATUS'));assert(at>0,v.rows.map(str).join('\n'));
  const w=v.rows[at].find(x=>x.text==='STATUS'),a=v.rows[at].findLast(x=>x.text==='›');
  assert(w.dim===true&&a.dim===true&&w.role!=='title',JSON.stringify(v.rows[at]));
  assert(v.hits.some(h=>h.row===at&&h.action==='popup:STATUS'));}
 // No artifact root (no value): nothing under the REPO row, no press, no word anywhere.
 for(const status_doc of [undefined,null,{word:'',has_doc:true}]){
  const v=render({width:54,height:30,model:{repo_side:[p('hearting')],status_doc}});
- assert.match(str(v.rows[1]),/^│ REPO   hearting · wt 12 ─+ │$/,JSON.stringify(status_doc));
+ assert.match(str(v.rows[1]),/^│ REPO hearting · wt 12 ─+ │$/,JSON.stringify(status_doc));
  assert(!v.hits.some(h=>/STATUS|BACKLOG/.test(h.action)));
  assert(!v.rows.flat().some(x=>x.text==='STATUS'));}
 """)
