@@ -2076,16 +2076,28 @@ def _r2_disk_has_any_commit(root: Path, cycles: Sequence[Dict[str, Any]]) -> boo
     return any((Path(c["cycle_dir"]) / "manifest.json").exists() for c in cycles)
 
 
-def _prune_empty_tree(path: Path) -> None:
-    """Bottom-up rmdir of every now-empty directory under (and including) `path`."""
+def _prune_empty_tree(path: Path, campaign_dir: Optional[Path] = None) -> None:
+    """Bottom-up rmdir of every now-empty directory under (and including) `path`. A campaign's generated
+    `campaign.md` is derived and never counts as residue. `campaign_dir` is the campaign folder the caller
+    knows it is removing (it removed that campaign's `campaign.json`): the record pages in its own `records/`
+    are derived too, and they go at that folder's turn, once nothing else is left in it. No other `records/`
+    (one inside a cycle's artifacts, or under a folder no caller named) is ever treated so."""
     if not path.is_dir():
         return
+    own = Path(campaign_dir) if campaign_dir is not None else None
     for current, dirs, files in os.walk(path, topdown=False):
         cur = Path(current)
+        if own is not None and cur == own / "records":
+            continue   # its campaign folder's turn decides (below)
         if "campaign.md" in files:
             import campaign_document  # a campaign's derived document never counts as residue
             campaign_document.remove_generated(cur)
             files = [name for name in files if name != "campaign.md" or (cur / name).exists()]
+        records = cur / "records"
+        if (own is not None and cur == own and not files and os.listdir(cur) == ["records"]
+                and records.is_dir() and not records.is_symlink()):
+            import campaign_document   # a campaign's generated record pages are derived, as its document is
+            campaign_document.remove_generated_records(cur)
         if files:
             raise ResplitError("rollback-residue", str(cur))
         try:
@@ -2148,7 +2160,7 @@ def _r2_rollback(root: Path, journal: Dict[str, Any], run_dir: Path) -> None:
         if entry["created_by_this_run"]:
             if path.is_file():
                 path.unlink()
-            _prune_empty_tree(path.parent)
+            _prune_empty_tree(path.parent, campaign_dir=path.parent)   # the campaign folder this run made
         else:
             data = base64.b64decode(entry["bytes_b64"])
             P._write_atomic(path, data)

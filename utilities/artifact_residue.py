@@ -1243,7 +1243,7 @@ def _rollback(root: Path, run_dir: Path, journal: Dict[str, Any]) -> None:
         found = artifact_locator.find_path_by_id(root, campaign_id)
         if found is not None and (found / "campaign.json").is_file():
             (found / "campaign.json").unlink()
-            RS._prune_empty_tree(found)
+            RS._prune_empty_tree(found, campaign_dir=found)   # the campaign folder this run made
     RS._release_created_routes(root, pre.get("created_routes", []))
     compat_pre = pre.get("compat_json")
     if compat_pre is not None:

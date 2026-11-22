@@ -1249,7 +1249,8 @@ def request_refresh(root: Path, cycle_id: Optional[str] = None) -> None:
     if in_test_process():
         # A test process never spawns a detached child (the checkpoint trigger's
         # rule); refreshing in place keeps its fixtures free of stray writers.
-        _worker_pass(root, cycle_id)
+        # same-process pass: no git (the test-process rule: a test process starts no children)
+        _worker_pass(root, cycle_id, ask_git=False)
         return
     runtime = root / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -1276,14 +1277,14 @@ def request_refresh(root: Path, cycle_id: Optional[str] = None) -> None:
             os.close(fd)
 
 
-def _worker_pass(root: Path, cycle_id: Optional[str] = None) -> None:
+def _worker_pass(root: Path, cycle_id: Optional[str] = None, *, ask_git: bool = True) -> None:
     """One worker turn: bring the campaign documents up to date, then refresh the entrance.
 
     The documents come first so that the entrance written next already points at a document
     this turn created. A failing generator never stops the entrance."""
     try:
         import campaign_document
-        campaign_document.catch_up(root, cycle_id)
+        campaign_document.catch_up(root, cycle_id, git=None if ask_git else campaign_document._GitPass(budget=0))
     except Exception as exc:  # noqa: BLE001 -- the entrance never waits on the documents
         print(f"campaign_document skipped error={type(exc).__name__}", file=sys.stderr)
     refresh(root, cycle_id=cycle_id)
