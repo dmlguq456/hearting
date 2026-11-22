@@ -80,7 +80,7 @@ const routesOnly=draw({requests:[]}),requestsOnly=draw({routes:[]});
 assert.equal(rule(routesOnly,'dispatch'),1);assert.equal(rule(routesOnly,'request'),0);
 assert.equal(rule(requestsOnly,'dispatch'),0);assert.equal(rule(requestsOnly,'request'),1);
 assert(boxOf(requestsOnly),'a request alone still draws the box');
-assert(/^│ ╭─ ROUTE ─+╮ │$/.test(lines(requestsOnly)[boxOf(requestsOnly).a]),lines(requestsOnly).join('\n'));
+assert(/^│ ╭─ ROUTE ─+ ›─╮ │$/.test(lines(requestsOnly)[boxOf(requestsOnly).a]),lines(requestsOnly).join('\n'));
 // A route of the `direct` zone stands first, under its own rule: direct, dispatch, request.
 const zoned=draw({routes:[{...routes[1],id:'rt-d',zone:'direct'},...routes]}),zr=lines(zoned);
 const order=['direct','dispatch','request'].map(z=>zr.findIndex(s=>zoneRule(s,z)));
@@ -189,13 +189,13 @@ for(const width of [30,34,38,40,50,60]){
  const words=top.replace(/[╭╮─│]/g,' ').trim().split(/\s+/);
  assert(!/^\d+$/.test(words.at(-1)),'a count without its name: '+top);
  assert(words.includes('ROUTE'),top);
- assert(/^│ ╭─ 2 ROUTE ─+╮ │$/.test(top)&&!/REQUEST/.test(top),top);
+ assert(/^│ ╭─ 2 ROUTE ─+ ›─╮ │$/.test(top)&&!/REQUEST/.test(top),top);
 }
 // Below the native area the lower case form `route 2` stands alone too.
 const below=lines(draw({width:120,height:20,side:false}));
 assert(below.some(s=>/route 2/.test(s)&&!/request/.test(s)),below.join('\n'));
 // A request alone reads `ROUTE`, never a bare count.
-assert(lines(draw({routes:[]})).some(s=>/^│ ╭─ ROUTE ─+╮ │$/.test(s)),lines(draw({routes:[]})).join('\n'));
+assert(lines(draw({routes:[]})).some(s=>/^│ ╭─ ROUTE ─+ ›─╮ │$/.test(s)),lines(draw({routes:[]})).join('\n'));
 const tight=lines(draw({width:24,height:50})).find(s=>/^│ ╭─/.test(s));
 assert(!/│ \d+ ─|│ \d+╮|│ \d+ *$/.test(tight.replace(/ │$/,'')),tight);
 """)

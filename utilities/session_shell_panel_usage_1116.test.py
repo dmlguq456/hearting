@@ -70,7 +70,7 @@ class PanelUsage1116Test(unittest.TestCase):
         self.node(r"""
 const v=draw(),L=inside(v),a=at(v,'USAGE');
 assert(a>0,lines(v).join('\n'));
-assert.match(L[a],/^USAGE ─+$/,L[a]);                       // the name, then the thin line to the right end; no `›`
+assert.match(L[a],/^USAGE +$/,L[a]);                         // the name alone (11-22: no thin line), no `›`
 assert.deepEqual(L.slice(a+1,a+4).map(l=>l.trimEnd().split(/\s+/)[0]),['claude','codex','opencode'],L.slice(a).join('\n'));
 assert.match(L[a+1],/^claude +5h 12%\(↻ 2h\) │ 7d 66%\(↻ 5d\) │ fable 3%/,L[a+1]);   // the windows as the last row showed them
 assert.match(L[a+2].trimEnd(),/^codex +5h 30%\(↻ 1h\) │ 7d 8%\(↻ 6d\)$/,L[a+2]);
@@ -79,7 +79,7 @@ assert.equal(L.length-2,a+3,'the last row is the harness row');
 // Looks: the name dim, the section name as MESSAGES' and MEM's (dim, title role), the line in the messages' line role.
 const row=v.rows[a+1];assert.equal(row.find(p=>p.text.startsWith('claude')).role,'harness-name');
 const head=v.rows[a+1-1];assert(head.some(p=>p.role==='title'&&p.text==='USAGE'),JSON.stringify(head));
-assert(head.some(p=>p.role==='messages'&&/^─+$/.test(p.text)));
+assert(!head.some(p=>/─/.test(p.text)),'11-22: a section head beside the native area has no rule');
 const q=v.rows[a+3].find(p=>p.text==='?');assert.equal(q.dim,true);
 // The level colors are Fleet's.
 assert.equal(row.find(p=>p.text==='66%').foreground,186);assert.equal(row.find(p=>p.text==='12%').foreground,150);
@@ -176,7 +176,7 @@ assert(/5h 12%/.test(s),s);
     # 2 ---------------------------------------------------------------------------------------------------------
     def test_the_question_is_a_rose_bordered_box_with_its_name_in_the_top_line(self):
         self.node(r"""
-const v=draw(),L=inside(v),a=L.findIndex(l=>/^╭─ 1 QUESTIONS › ─+╮$/.test(l));
+const v=draw(),L=inside(v),a=L.findIndex(l=>/^╭─ 1 QUESTIONS ─+ ›─╮$/.test(l));
 assert(a>=0,lines(v).join('\n'));
 const b=L.findIndex((l,i)=>i>a&&/^╰─+╯$/.test(l));
 assert.equal(b,a+4,L.slice(a,b+1).join('\n'));               // the first row, the choices row and the action row inside
@@ -206,7 +206,7 @@ assert(v.rows.flat().every(p=>p.background===undefined));
     def test_a_question_answered_elsewhere_has_a_dim_line_and_no_question_no_box(self):
         self.node(r"""
 const elsewhere=()=>({count:1,answerable:false,choices:0,label:'QUESTIONS',rows:[[t('◑ ','g_blocked'),t('다른 창에서 답할 질문','loc_repo')]],one:[[t('◑ ','g_blocked'),t('다른 창에서 답할 질문','loc_repo')]]});
-let v=draw({brief:elsewhere}),L=inside(v),a=L.findIndex(l=>/^╭─ 1 QUESTIONS › ─+╮$/.test(l));
+let v=draw({brief:elsewhere}),L=inside(v),a=L.findIndex(l=>/^╭─ 1 QUESTIONS ─+ ›─╮$/.test(l));
 assert(a>=0,lines(v).join('\n'));
 const top=v.rows[a];
 assert(top.every(p=>p.role!=='accent-line'),'dim line');assert(top.some(p=>p.text==='╭'&&p.role==='messages'&&p.dim===true));
@@ -245,7 +245,7 @@ for(let width=30;width<=60;width++)for(const height of [60,46,30]){
     def test_short_of_rows_the_border_goes_after_the_content_and_the_section_reads_as_before(self):
         self.node(r"""
 const shape=h=>{const v=draw({height:h,width:50});const L=inside(v);
-  const boxed=L.some(l=>/^╭─ .*QUESTIONS/.test(l)),plain=L.some(l=>/^1 QUESTIONS ─+ ›$/.test(l));return {boxed,plain,L};};
+  const boxed=L.some(l=>/^╭─ .*QUESTIONS/.test(l)),plain=L.some(l=>/^1 QUESTIONS +›$/.test(l));return {boxed,plain,L};};
 let seen={boxed:false,plain:false};
 for(let h=8;h<=60;h++){const s=shape(h);
   assert(!(s.boxed&&s.plain),'one form at a time '+h);
@@ -412,7 +412,7 @@ assert.equal(cells(strip(run({},REL).footerLine(30))),30);
     def test_opencode_cost_stands_beside_its_context_in_its_panel(self):
         self.node(r"""
 const v=draw({model:{cost:[t('$1.23','loc_repo')],context_side:[t('━━━━','lvl_g'),t('────'),t(' 41%')]}});
-assert(inside(v).some(l=>/^CTX +━━━━──── 41% │ \$1\.23$/.test(l.trimEnd())),lines(v).join('\n'));
+assert(inside(v).some(l=>/^ CTX +━━━━──── 41% │ \$1\.23$/.test(l.trimEnd())),lines(v).join('\n'));
 const none=draw();assert(!lines(none).join('\n').includes('$'));
 """)
 
@@ -421,14 +421,14 @@ const none=draw();assert(!lines(none).join('\n').includes('$'));
 const direct={id:'rt-d',title:'작은 수정',kind:'working',state:'working',shape:'직접',kind_word:'code',elapsed:'3m',role:'',
   paint:{glyph:t('⠏','g_spin')},stages:[]};
 const v=draw({routes:[direct],model:{route_label:'route 1 ⠏1',route_count:1,route_total:1}}),L=inside(v);
-const a=L.findIndex(l=>/^╭─ 1 ROUTE ─+╮$/.test(l));assert(a>=0,L.join('\n'));
+const a=L.findIndex(l=>/^╭─ 1 ROUTE ─+ ›─╮$/.test(l));assert(a>=0,L.join('\n'));
 const box=L.slice(a,L.findIndex((l,i)=>i>a&&/^╰/.test(l))+1).join('\n');
 // (11-17, route row 5: the first line names the kind with its intensity in brackets, the title two cells in.)
 const rows=box.split('\n');
 // (11-17, route zones: a route with no zone is a `dispatch` one, its rule the box's first row.)
 assert(/^╭─ 1 ROUTE/.test(rows[0])&&/^│ ─ dispatch ─+ │$/.test(rows[1])&&/^│ ● code\(직접\) +3m │$/.test(rows[2])&&/^│   작은 수정 +│$/.test(rows[3])&&!/code · 직접/.test(box),box);
 // In the `direct` zone the zone's name says it: the word `(직접)` (the shape's) is left out of the kind.
-const own=draw({routes:[{...direct,zone:'direct'}],model:{route_label:'route 1 ⠏1',route_count:1,route_total:1}}),M=inside(own),c=M.findIndex(l=>/^╭─ 1 ROUTE ─+╮$/.test(l)),
+const own=draw({routes:[{...direct,zone:'direct'}],model:{route_label:'route 1 ⠏1',route_count:1,route_total:1}}),M=inside(own),c=M.findIndex(l=>/^╭─ 1 ROUTE ─+ ›─╮$/.test(l)),
  zoned=M.slice(c,M.findIndex((l,i)=>i>c&&/^╰/.test(l))+1);
 assert(/^│ ─ direct ─+ │$/.test(zoned[1])&&/^│ ● code +3m │$/.test(zoned[2])&&!zoned.join('\n').includes('직접')&&!zoned.some(l=>/dispatch/.test(l)),zoned.join('\n'));
 """)

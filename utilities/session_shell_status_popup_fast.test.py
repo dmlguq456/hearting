@@ -288,12 +288,12 @@ const flush=()=>new Promise(r=>term.write('',r));
 const cellsOf=y=>{const line=term.buffer.active.getLine(y),out=[];for(let x=0;x<cols;x++){const c=line?.getCell(x);out.push(!c?' ':c.getWidth()===0?'':c.getChars()||' ');}return out;};
 const screen=async()=>{await flush();return Array.from({length:rows},(_,y)=>cellsOf(y).join('').trimEnd());};
 const at=async needle=>{await flush();for(let y=0;y<rows;y++){const c=cellsOf(y),where=[];let text='';
-  c.forEach((ch,x)=>{for(const _ of ch)where.push(x);text+=ch;});const i=text.indexOf(needle);if(i>=0)return {x:where[i],y};}return null;};
+  c.forEach((ch,x)=>{for(const _ of ch)where.push(x);text+=ch;});const m=needle instanceof RegExp?needle.exec(text):null,i=needle instanceof RegExp?(m?m.index:-1):text.indexOf(needle);if(i>=0)return {x:where[i],y};}return null;};
 const until=async(test,what,ms=20000)=>{const began=Date.now();while(Date.now()-began<ms){const s=await screen();if(test(s))return {s,ms:Date.now()-began};await sleep(25);}
   throw Error('never '+what+'\n'+(await screen()).join('\n'));};
-const has=word=>s=>s.some(line=>line.includes(word));
-// 11-21: the STATUS head stands under the REPO group (`STATUS +N ──── ›`), the panel's only drawing of the status.
-const hasButton=s=>s.some(line=>/STATUS( \+\d+)? ─+ ›/.test(line));
+const has=word=>s=>s.some(line=>word instanceof RegExp?word.test(line):line.includes(word));
+// 11-21: the STATUS head stands under the REPO group (` STATUS +N        ›`), the panel's only drawing of the status.
+const hasButton=s=>s.some(line=>/STATUS( \+\d+)? +›/.test(line));
 const press=async(x,y,ms=100)=>{child.write(`\x1b[<0;${x+1};${y+1}M\x1b[<0;${x+1};${y+1}m`);await sleep(ms);};
 const key=async(bytes,ms=250)=>{child.write(bytes);await sleep(ms);};
 const box=s=>{const top=s.findIndex(l=>l.includes('╭─')&&l.includes('✕ ─╮'));if(top<0)return null;
@@ -417,10 +417,10 @@ const checks={};
   if(cfg.scenario==='backlog'){
     // 11-21: the BACKLOG part under the REPO group (its head and its first three items, `+N` for the rest); a press on an item opens the BACKLOG popup
     // standing on it; the group of this window's campaign is open on top and the others are folded; an item with detail opens under its row.
-    await until(s=>s.some(l=>/BACKLOG \+\d+ ─+ ›/.test(l)),'the BACKLOG head');
+    await until(s=>s.some(l=>/BACKLOG \+\d+ +›/.test(l)),'the BACKLOG head');
     const panel=await screen();
     checks.head=panel.find(l=>/BACKLOG \+/.test(l));checks.items=panel.filter(l=>/BL_ITEM/.test(l)).length;
-    checks.status_head=panel.some(l=>/STATUS( \+\d+)? ─+ ›/.test(l));
+    checks.status_head=panel.some(l=>/STATUS( \+\d+)? +›/.test(l));
     const spot=await at('BL_ITEM_TWO');await press(spot.x,spot.y,0);
     let r=await until(popupHas('BL_ITEM_ONE'),'the BACKLOG popup');
     const b=box(r.s);checks.title=b.rows[0];checks.band=b.rows.at(-1);
@@ -441,7 +441,7 @@ const checks={};
   }
   if(cfg.scenario==='mem'){
     // 11-20: the MEM section's records are one row each; a press on a record opens the MEM popup (the MESSAGES popup's frame and keys) on it.
-    await until(has('MEM ─'),'the MEM section');
+    await until(has(/│ MEM +› │/),'the MEM section');
     const panel=await screen();
     checks.rows=panel.filter(l=>l.includes('MEMREC')).length;
     checks.row_cut=panel.some(l=>l.includes('MEMREC_ONE')&&l.includes('…'))&&!panel.some(l=>l.includes('MEMREC_ONE_END'));
@@ -453,7 +453,7 @@ const checks={};
     checks.first_row=body(r.s)[0];
     await close();
     // The head opens it too; ←→ walk the sections (MEM is the last).
-    const head=await at('MEM ─');await press(head.x+2,head.y,0);
+    const head=await at(/MEM +› │/);await press(head.x+2,head.y,0);
     r=await until(popupHas('MEMREC_ONE_END'),'the MEM popup from its head');checks.head_first=body(r.s)[0];
     await key('\x1b[D',300);r=await until(s=>{const b=box(s);return !!b&&b.rows[0].includes('MESSAGES')||!!b&&!b.rows[0].includes('MEM');},'a section before MEM');
     await key('\x1b[C',300);r=await until(popupHas('MEMREC_ONE_END'),'MEM again by →');checks.walk=true;
@@ -610,7 +610,7 @@ class PtyTest(unittest.TestCase):
     def test_the_backlog_part_lists_three_items_and_its_popup_opens_on_the_one_pressed(self):
         checks = self.run_case('backlog')
         self.assertEqual(checks['items'], 3, checks)                                     # the first three; the others are `+N`
-        self.assertRegex(checks['head'], r'BACKLOG \+3 ─+ ›', checks)                     # six items in the document, three shown
+        self.assertRegex(checks['head'], r'BACKLOG \+3 +›', checks)                     # six items in the document, three shown
         self.assertTrue(checks['status_head'], checks)
         self.assertIn('BACKLOG', checks['title'], checks)
         self.assertIn('╰─ STATUS · BACKLOG · ', checks['band'], checks)
