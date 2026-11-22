@@ -1,5 +1,5 @@
 'use strict';
-// The status popup's list screen (11-21, design C: what waits for the person first).
+// The status popup's list screen (11-21, design C; since 11-22 no entry is a question: what is in progress stands first).
 //
 // The backend (`session_status.listing_entries`) sends the generated campaign page as entries: each is rows (painted parts, one
 // row for a row that can be chosen), and may carry `key` (it can be chosen), `group` (the id of the heading its open state is kept by),
