@@ -88,7 +88,7 @@ HEAD_BYTES = 16 * 1024
 SUMMARY_CHARS = 120
 MARKER = "<!-- hearting:artifact-entrance v1 -->"
 BACKLOG_NAME = "backlog.md"
-MAX_BACKLOG_BYTES = 64 * 1024
+MAX_BACKLOG_BYTES = 1 << 20      # the panel's own limit (tools/fleet/session_status.BACKLOG_READ_LIMIT): both count one file
 
 # Hook for rows that are not cycle folders (see the module header).
 def _campaign_target_path(folder: str, campaign_path: Path) -> str:
