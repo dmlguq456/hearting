@@ -540,7 +540,8 @@ const settle=()=>new Promise(r=>setTimeout(r,10)),texts=()=>ctx.api.backlogDoc()
         self.assertIsNone(self.status._sign(str(self.root / "none.md")))
 
     def test_a_panel_item_of_a_folded_group_is_a_line_of_the_popup_once_its_group_is_open(self):
-        self.backlog()
+        sorted_backlog = BACKLOG.replace("- 다른 일\n", "- 다른 일\n  kind: fix\n")        # (11-22: the groups are the sorts) one FIX item stands open, the rest are the folded TBD group
+        self.backlog(sorted_backlog)
         own = "2026-10-01_other-campaign"           # one item of its own: the panel fills up with the other group's
         items, _total = self.status.panel_backlog_items(self.status.parse_backlog(BACKLOG.splitlines()), own, first=2)
         pressed = items[1]["key"]                    # the first of the group that is a folded line in the popup
@@ -583,26 +584,27 @@ console.log(JSON.stringify({closed:list.layout(entries,closed).fellBack,open:lis
         self.assertTrue(answer["title"].startswith("BACKLOG"))
         entries = answer["list"]
         shown = [("".join(run[0] for run in e["rows"][0]), e.get("key", "")[:2]) for e in entries]
-        self.assertEqual([t for t, _ in shown], ["시험용 백로그", "updated 11-21 11:02", "", "2026-11-02_some-campaign 2", "  일 하나", "  일 둘", "",
-                                                  "  › 2026-10-01_other-campaign 1", "    다른 일", "  › Unassigned 1", "    정해지지 않은 일", "", "  full document ›"])
-        self.assertEqual([k for _, k in shown], ["", "", "", "", "i:", "i:", "", "g:", "i:", "g:", "i:", "", "fu"])
-        # The answer carries titles only: an item with indented lines under it is `lazy` (they are asked for when it is opened), and no entry holds them.
+        # (11-22) the items stand by sort; a document with no `kind:` line is all TBD, one open group, and the sorts it has not told are `?`
+        self.assertEqual([t for t, _ in shown], ["시험용 백로그", "updated 11-21 11:02", "FIX ? · IMPR ? · TBD 4 · NOTE ? · 4 total", "", "TBD 4",
+                                                  "  일 하나", "  일 둘", "  다른 일", "  정해지지 않은 일", "", "  full document ›"])
+        self.assertEqual([k for _, k in shown], ["", "", "", "", "", "i:", "i:", "i:", "i:", "", "fu"])
+        # The answer carries titles only: an item opens to its lines (its sort first), which are asked for when it is opened, and no entry holds them.
         self.assertTrue(all("more" not in e for e in entries))
-        self.assertEqual([bool(e.get("lazy")) for e in entries if e.get("key", "").startswith("i:")], [True, True, False, False])
+        self.assertEqual([bool(e.get("lazy")) for e in entries if e.get("key", "").startswith("i:")], [True, True, True, True])
         self.assertNotIn("date: 2026-11-20", json.dumps(answer, ensure_ascii=False))
         # The lines come with the item's own ask.
-        key = entries[4]["key"]
+        key = entries[5]["key"]
         got = self.popup("detail", open=key)
         self.assertEqual((got["ok"], got["part"], got["open"]), (True, "detail", key))
-        self.assertEqual(["".join(run[0] for run in row) for row in got["rows"]], ["    date: 2026-11-20", "    source: 어딘가", "    note: 맥락 하나"])
-        folded = [e for e in entries if e.get("key", "").startswith("i:") and e.get("when") == "open"][0]
-        self.assertEqual(self.popup("detail", open=folded["key"])["rows"], [])                     # an item with no lines under it: none
+        self.assertEqual(["".join(run[0] for run in row) for row in got["rows"]], ["    kind: TBD", "    date: 2026-11-20", "    source: 어딘가", "    note: 맥락 하나"])
+        last = [e for e in entries if e.get("key", "").startswith("i:")][-1]
+        self.assertEqual(["".join(run[0] for run in row) for row in self.popup("detail", open=last["key"])["rows"]], ["    kind: TBD"])   # an item with no lines of its own: its sort
         for bad in ("", "g:abc", "i:nothere", "x" * 80):
             self.assertFalse(self.popup("detail", open=bad)["ok"], bad)
         self.assertEqual(self.popup("detail", open=key, kind="status", own=""), {"ok": False, "reason": "invalid-status"})
-        # Not the campaign of this window: every group is a folded line, in the document's order.
-        other = [("".join(run[0] for run in e["rows"][0])) for e in self.popup("list", own="")["list"] if e.get("key", "").startswith("g:")]
-        self.assertEqual(other, ["  › 2026-11-02_some-campaign 2", "  › 2026-10-01_other-campaign 1", "  › Unassigned 1"])
+        # Not the campaign of this window: the document's order inside the sort.
+        other = [("".join(run[0] for run in e["rows"][0])) for e in self.popup("list", own="")["list"] if e.get("key", "").startswith("i:")]
+        self.assertEqual(other, ["  일 하나", "  일 둘", "  다른 일", "  정해지지 않은 일"])
         # The document read whole is the other answer; the Fleet part is not the backlog's.
         whole = self.popup("doc")
         self.assertNotIn("list", whole)
@@ -624,7 +626,7 @@ console.log(JSON.stringify({closed:list.layout(entries,closed).fellBack,open:lis
     def test_an_item_opens_to_its_indented_lines_in_the_status_lists_own_code_and_a_press_stands_on_it(self):
         self.backlog()
         answer = self.popup("list")
-        detail = self.popup("detail", open=answer["list"][4]["key"])
+        detail = self.popup("detail", open=answer["list"][5]["key"])
         with tempfile.TemporaryDirectory(prefix="rlj") as folder:
             path, more = Path(folder) / "answer.json", Path(folder) / "detail.json"
             path.write_text(json.dumps(answer, ensure_ascii=False), encoding="utf-8")
@@ -637,30 +639,26 @@ const detail=list.rowsOf(JSON.parse(fs.readFileSync(process.argv[3],'utf8')));
 const st={sel:'',fold:new Set(),items:new Set(),more:{}};
 const lines=()=>list.layout(entries,st,{width:60}).rows.map(text);
 const first=lines(),item=list.layout(entries,st).marks.find(m=>m.key.startsWith('i:')&&m.text);
-// (the first item has lines under it: it can be opened; an item with none is not lazy and has nothing to open)
-const plain=entries.find(e=>e.key&&e.key.startsWith('i:')&&!e.lazy);
-const out={item_can_open:!!item,item_lazy:item.lazy,plain_can_open:!!(plain.text||plain.more||plain.lazy)};
+// (every item opens: its sort stands on its first line)
+const out={item_can_open:!!item,item_lazy:item.lazy};
 out.pressed=list.press(st,list.layout(entries,st),item.key);
 // until the lines come one dim `⠏` stands under the row; then they do
 out.waiting=lines().slice(lines().findIndex(l=>l.startsWith('> '))+1)[0];
 st.more[item.key]=detail;
-const opened=lines();out.more=opened.length-first.length;out.shown=opened.filter(l=>/date:|source:|note:/.test(l));
+const opened=lines();out.more=opened.length-first.length;out.shown=opened.filter(l=>/kind:|date:|source:|note:/.test(l));
 const v=list.layout(entries,st,{width:60});out.tinted=v.rows.slice(v.at,v.at+v.span).every(r=>r.some(p=>p.tint));out.span=v.span;
 out.hits=list.hits(v).filter(h=>h.action[1]===item.key).length;
 out.press_again=list.press(st,list.layout(entries,st),item.key);out.closed=lines().length===first.length;
 // A press from the panel stands on the item (the popup is opened with its key as the chosen line).
 const sel={sel:item.key,fold:new Set(),items:new Set()};out.stands=list.layout(entries,sel).sel===item.key&&!list.layout(entries,sel).fellBack;
 const gone={sel:'i:nothere',fold:new Set(),items:new Set()};out.fell=list.layout(entries,gone).fellBack;
-// The second group is a folded line; pressing it opens its items.
-const g=list.layout(entries,st).marks.find(m=>m.key.startsWith('g:'));out.group=list.press(st,list.layout(entries,st),g.key);
-out.group_items=lines().filter(l=>/다른 일/.test(l)).length;
 console.log(JSON.stringify(out));
 """, str(SHELL), str(path), str(more)], capture_output=True, text=True, timeout=120)
         self.assertEqual(out.returncode, 0, out.stderr)
         got = json.loads(out.stdout)
-        self.assertEqual(got, {"item_can_open": True, "item_lazy": True, "plain_can_open": False, "pressed": "item", "waiting": "    ⠏", "more": 3,
-                               "shown": ["    date: 2026-11-20", "    source: 어딘가", "    note: 맥락 하나"], "tinted": True, "span": 4, "hits": 4,
-                               "press_again": "item", "closed": True, "stands": True, "fell": True, "group": "fold", "group_items": 1})
+        self.assertEqual(got, {"item_can_open": True, "item_lazy": True, "pressed": "item", "waiting": "    ⠏", "more": 4,
+                               "shown": ["    kind: TBD", "    date: 2026-11-20", "    source: 어딘가", "    note: 맥락 하나"], "tinted": True, "span": 5, "hits": 5,
+                               "press_again": "item", "closed": True, "stands": True, "fell": True})
 
     # -- the entrance's counting rule, and a backlog far longer than the first one -------------------------------------------
 
@@ -691,8 +689,8 @@ console.log(JSON.stringify(out));
         self.backlog(body)
         got = self.status.panel_lists(self.cwd, self.page(), {})["backlog"]
         self.assertEqual((got["total"], [i["text"] for i in got["items"]]), (2, ["하나", "넷"]))
-        heads = [e for e in self.popup("list", own="A")["list"] if e.get("rows") and "".join(r[0] for r in e["rows"][0]).startswith("A ")]
-        self.assertEqual("".join(r[0] for r in heads[0]["rows"][0]), "A 2")
+        heads = [e for e in self.popup("list", own="A")["list"] if e.get("rows") and "".join(r[0] for r in e["rows"][0]).startswith("TBD ")]
+        self.assertEqual("".join(r[0] for r in heads[0]["rows"][0]), "TBD 2")
 
     # What the artifact entrance (`utilities/artifact_entrance.py` `_backlog`, `core/ARTIFACT_META.md`'s rule) counts and reads for the same
     # texts: (name, text, its count, its `갱신` as `YYYY-MM-DD HH:MM` or ''). The expectations are written out from running its function on these texts (and the
@@ -770,8 +768,7 @@ console.log(JSON.stringify(out));
             got = self.status.panel_lists(self.cwd, self.page(), {})["backlog"]
             self.assertEqual(got["total"], count, name)
             if parsed["groups"]:
-                self.assertEqual(sum(int(e["rows"][0][-1][0].rsplit(" ", 1)[-1]) for e in self.popup("list", own="")["list"] if e.get("key", "").startswith("g:")),
-                                 count, name)
+                self.assertEqual(len([e for e in self.popup("list", own="")["list"] if e.get("key", "").startswith("i:")]), count, name)
         # 64 KiB: exactly it the entrance counts (8191 here), one byte over it has no count at all (`count` None: the line only). The panel is not so bounded
         # (it reads to 1 MiB and says `+` past that: an addition of the real backlog's size) and counts the same 8191.
         def sized(n):

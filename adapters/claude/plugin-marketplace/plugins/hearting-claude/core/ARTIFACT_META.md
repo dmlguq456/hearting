@@ -274,9 +274,9 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   `all-spec.*`), **campaigns** (the 3 most recent campaigns with date, title and the
   campaign's one-line summary from `meta.json`, then one "All N campaigns" line, N being
   every campaign, that opens `all-campaigns.*`), **backlog** (one line that opens the
-  root's `backlog.md`, see the next section; its meta is the job count and the file's `갱신` date;
-  there is no section when that regular file is absent or a link, and no count when it cannot
-  be read or is over 64 KiB) and **records** (a link to the recent
+  root's `backlog.md`, see the next section; its meta is the count of each sort, the total and
+  the file's `갱신` date; there is no section when that regular file is absent or a link, and
+  `Counts unavailable` instead of the counts when it cannot be read or is over 64 KiB) and **records** (a link to the recent
   route reports page and a link to the ID index `campaigns/INDEX.md`), plus the root
   totals. The line counts are the constants `ENTRANCE_SPEC_LINES` and
   `ENTRANCE_CAMPAIGN_LINES` (not settings). Under the spec, campaigns and backlog titles one
@@ -334,9 +334,19 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
 - **Place.** One file at the artifact root: `<artifact root>/backlog.md`, for the whole repo.
 - **Form.** A title line, then `갱신 YYYY-MM-DD HH:MM`, then one `## <campaign folder name>`
   heading per campaign, with `## Unassigned` for work with no campaign. A job is one top-level
-  `- ` bullet (a title line of at most 60 columns) with optional indented `date:`, `source:` and
-  `note:` lines (when it came up, where from, what the person said then). No per-line tag,
-  status or owner mark.
+  `- ` bullet (a title line of at most 60 columns) with optional indented `date:`, `source:`,
+  `note:` and `kind:` lines (when it came up, where from, what the person said then, what sort of
+  work it is). The title line carries no tag, status or owner mark; the sort is the optional
+  `kind:` line alone.
+- **`kind:` line.** An indented line under a job, `kind: <value>`; the value is `fix` (left
+  alone, the flow or result in use keeps a problem), `improve` (it can be used and is to be made
+  better) or `note` (worth knowing; its effect or follow-up is not settled). Case and the blanks
+  around the value are not read. A job with no `kind:` line, a value that is none of the three,
+  or two different values is unsorted (shown `TBD`): nothing is refused, warned or gated, and a
+  document with no `kind:` line at all opens as before, every job unsorted. A `kind:` line counts
+  only under a job (not under a heading or other text, not inside a code fence). What waits for
+  the person's answer is not put here: register it as a question and the status document's
+  `## 기다리는 것` stands for it.
 - **Counting rule.** Lines are read by their shape, not by what Markdown makes of them (lines end
   as Python's `str.splitlines` ends them). A job is a line whose first two characters are `- `,
   below the first heading line and outside a code fence.
@@ -357,9 +367,11 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   whitespace is ignored. The first line of that shape and a real time is the date; any other
   line, or `갱신 2026-13-45 99:99`, is no date.
 - **Who and when.** The session that puts a job off adds one line, at that moment, under the
-  campaign's heading (and refreshes `갱신`). A person writes it by hand.
+  campaign's heading (and refreshes `갱신`), with its `kind:` line then (left out when it is not
+  known). A person writes it by hand.
 - **Done.** The line is deleted. The file holds open work only.
-- **Readers.** The panel's BACKLOG and the entrance only read it; no code writes it.
+- **Readers.** The panel's BACKLOG and the entrance only read it; no code writes it. Both read
+  the sort by this one rule and count each sort the same (`FIX`, `IMPR`, `NOTE`, `TBD`).
   The entrance reads it by name, never through a link, at most 64 KiB.
   No command, setting or step is added.
 

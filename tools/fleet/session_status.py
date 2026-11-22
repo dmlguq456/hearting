@@ -685,7 +685,7 @@ TITLE_TEXT = 600       # characters of a cut title the list answer carries whole
 DETAIL_LINES = 12      # indented lines kept under one backlog item
 DETAIL_ROWS = 3        # rows one of them takes in the popup
 BACKLOG_WORDS = {"updated": "updated", "old": "old document", "full": "full document", "none": "No backlog document yet.",
-                 "cut": "… 64 KiB", "more": "… {n} more in backlog.md", "unread": "… the file is longer than is read here: more items follow"}
+                 "total": "total", "cut": "… 64 KiB", "more": "… {n} more in backlog.md", "unread": "… the file is longer than is read here: more items follow"}
 # (the words Hearting puts there are English, as the panel's section names are)
 
 # The backlog is counted by the rule the artifact entrance counts it by (core/ARTIFACT_META.md, `backlog.md`; `utilities/artifact_entrance.py`
@@ -697,6 +697,13 @@ BACKLOG_WORDS = {"updated": "updated", "old": "old document", "full": "full docu
 #    a longer length only, on a line with nothing else; one never closed runs to the end;
 #  - the `갱신 YYYY-MM-DD HH:MM` line (ASCII digits, one blank, the line's own surrounding blanks cut) is read before the first `##` only, and only
 #    where the date and the time are real; the first real one is the one.
+#  - the sort of a task (11-22): an indented line under it, `kind: <value>` (`kind` in any case, the value in any case with the blanks around it cut).  The value `fix`, `improve` or `note`
+#    is that sort; a task with no such line, a value that is none of the three, or two different values is unsorted (`None`, drawn `TBD`).  A line counts only under a task (a heading, a
+#    fence line or a line of other text ends the task: what is indented under those is no task's), and never inside a code fence.  `artifact_entrance._backlog` reads it the same way.
+KIND_ORDER = ("fix", "improve", None, "note")     # the order the lists stand in: what is to be fixed, what is to be improved, what is not sorted yet, what is only to know
+KIND_MARKS = {"fix": "FIX", "improve": "IMPR", "note": "NOTE", None: "TBD"}
+KIND_IDS = {"fix": "fix", "improve": "imp", "note": "note", None: "tbd"}      # a kind group's id (the `g:` and `i:` keys carry it)
+_KIND_LINE = re.compile(r"^kind:(.*)$", re.IGNORECASE)
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _BACKLOG_UPDATED = re.compile(r"^갱신 ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2})$")
 _BACKLOG_HEADING = re.compile(r"^ {0,3}##(?:[ \t]|$)")
@@ -714,14 +721,34 @@ def _real_stamp(line):
     return (when.year, when.month, when.day, when.hour, when.minute)
 
 
+def _kind_value(stripped):
+    """The value of an indented ``kind:`` line (``stripped`` is the line without its blanks), lower case; None for any other line."""
+    found = _KIND_LINE.match(stripped)
+    return found.group(1).strip().lower() if found else None
+
+
+def _kind_of(values):
+    """``fix``, ``improve`` or ``note`` when the ``kind:`` lines gave one value and it is one of those, else None (not sorted)."""
+    only = next(iter(values)) if len(values) == 1 else None
+    return only if only in ("fix", "improve", "note") else None
+
+
 def parse_backlog(lines, detail=True):
-    """``{title, updated, groups}`` of a backlog document's lines; ``groups`` is ``[{name, items: [{text, detail, has_detail}]}]``.
+    """``{title, updated, groups}`` of a backlog document's lines; ``groups`` is ``[{name, items: [{text, kind, detail, has_detail}]}]``.
 
     Counted by the rule above.  A ``##`` heading is a group (its words as written, the markdown taken off); the indented lines
-    under an item are its ``detail`` (kept only with ``detail``, ``DETAIL_LINES`` of them; ``has_detail`` is told either way).  A line
-    that is none of these is left to the full document."""
+    under an item are its ``detail`` (kept only with ``detail``, ``DETAIL_LINES`` of them; ``has_detail`` is told either way); ``kind`` is
+    its sort (``fix``, ``improve``, ``note`` or None).  The ``kind:`` lines of a sorted item are not among its ``detail`` (the popup says the
+    kind itself); those of an unsorted one are.  A line that is none of these is left to the full document."""
     title, updated, groups = "", None, []
     current, item, fence = None, None, None
+
+    def close():
+        if item is not None:
+            item["kind"] = _kind_of(item.pop("_values"))
+            lines_ = item.pop("_lines")
+            if detail:
+                item["detail"] = [text for is_kind, text in lines_ if not (is_kind and item["kind"])][:DETAIL_LINES]
     for raw in lines:
         raw = str(raw)
         found = _FENCE.match(raw)
@@ -731,9 +758,11 @@ def parse_backlog(lines, detail=True):
             continue
         if found:
             fence = (found.group(1)[0], len(found.group(1)))
+            close()
             item = None
             continue
         if _BACKLOG_HEADING.match(raw):
+            close()
             item = None
             heading = _HEADING.match(raw.strip())
             current = {"name": project_status._plain(heading.group(2)) if heading else "", "items": []}
@@ -747,9 +776,13 @@ def parse_backlog(lines, detail=True):
         if raw[:1] in (" ", "\t"):
             if item is not None:
                 item["has_detail"] = True
-                if detail and len(item["detail"]) < DETAIL_LINES:
-                    item["detail"].append(transcript.clean(project_status._plain(stripped)))
+                value = _kind_value(stripped)
+                if value is not None:
+                    item["_values"].add(value)
+                if detail and len(item["_lines"]) < 4 * DETAIL_LINES:
+                    item["_lines"].append((value is not None, transcript.clean(project_status._plain(stripped))))
             continue
+        close()
         item = None
         if current is None:
             heading = _HEADING.match(stripped)
@@ -757,30 +790,51 @@ def parse_backlog(lines, detail=True):
                 title = title or project_status._plain(heading.group(2))
             continue
         if raw.startswith("- "):
-            item = {"text": project_status._plain(raw[2:]) or "(empty)", "detail": [], "has_detail": False}
+            item = {"text": project_status._plain(raw[2:]) or "(empty)", "kind": None, "detail": [], "has_detail": False, "_values": set(), "_lines": []}
             current["items"].append(item)
+    close()
     return {"title": title, "updated": updated, "groups": groups}
 
 
-def _own_first(groups, own):
-    """``[(group, id, is_own)]``: the groups headed by ``own`` (this window's campaign folder name) first, then the rest in order."""
-    ids = _backlog_group_ids(groups)
-    rows = [(group, gid, bool(own) and group["name"] == own) for group, gid in zip(groups, ids)]
-    return [row for row in rows if row[2]] + [row for row in rows if not row[2]]
+def _kind_groups(parsed, own):
+    """``[(kind, id, [(campaign, item, key)])]``: the backlog by sort (``KIND_ORDER``), a sort with no item left out; inside a sort this window's
+    campaign (``own``: the heading that is, letter for letter, the name of this window's folder) first, then the others in the document's order.
+
+    A key is ``i:<sort id>:<digest of the campaign and the title>`` (``:N`` for the Nth of the same title in the same campaign and sort, in the document's
+    order), so it names one item whichever the window's campaign is and wherever the item stands."""
+    rows = {kind: [] for kind in KIND_ORDER}
+    taken = {}
+    for group in parsed["groups"]:
+        for item in group["items"]:
+            kind = item.get("kind")
+            base = (KIND_IDS[kind], _digest(group["name"] + "\n" + item["text"])[:8])
+            taken[base] = taken.get(base, 0) + 1
+            rows[kind].append((group["name"], item, _backlog_key(base[0], base[1], taken[base])))
+    out = []
+    for kind in KIND_ORDER:
+        mine = [row for row in rows[kind] if own and row[0] == own]
+        out.append((kind, KIND_IDS[kind], mine + [row for row in rows[kind] if not (own and row[0] == own)]))
+    return [row for row in out if row[2]]
 
 
-def _backlog_group_ids(groups):
-    """The backlog's group ids: eight characters of the heading's digest (the list answer is small), ``-N`` for the Nth of the same heading."""
-    seen, ids = {}, []
-    for group in groups:
-        base = _digest(group["name"])[:8]
-        seen[base] = seen.get(base, 0) + 1
-        ids.append(base if seen[base] == 1 else f"{base}-{seen[base]}")
-    return ids
+def _backlog_key(gid, digest, seen):
+    return f"i:{gid}:{digest}" + (f":{seen}" if seen > 1 else "")
 
 
-def _backlog_key(gid, text, seen):
-    return f"i:{gid}:{_digest(text)[:8]}" + (f":{seen}" if seen > 1 else "")
+def backlog_counts(parsed):
+    """``{fix, improve, note, tbd}``: the number of items of each sort."""
+    counts = {"fix": 0, "improve": 0, "note": 0, "tbd": 0}
+    for group in parsed["groups"]:
+        for item in group["items"]:
+            counts[item.get("kind") or "tbd"] += 1
+    return counts
+
+
+def backlog_counts_said(counts):
+    """The counts as drawn: ``{fix, improve, note, tbd}`` as text, the three sorts ``?`` where the document has no sorted item at all (an old
+    document: what is in it is not told, as against none)."""
+    unknown = counts["tbd"] > 0 and not (counts["fix"] or counts["improve"] or counts["note"])
+    return {name: "?" if unknown and name != "tbd" else str(counts[name]) for name in counts}
 
 
 def backlog_total(parsed):
@@ -790,11 +844,12 @@ def backlog_total(parsed):
 def backlog_entries(parsed, own, width, old=False, now=None, cut=False, limit=None):
     """The backlog's list screen at ``width`` cells as entries (see ``_entry``): the status screen's own parts, drawn by the same code.
 
-    Its head is the title and ``updated …``; the group of this window's campaign (``own``) stands open on top, every other group is
-    a folded line with its count (``› <heading> N``) in the document's order; ``full document ›`` ends it.  Keys are the status
-    screen's (``g:``, ``i:``, ``full``).  An item carries its title and no more: one with indented lines under it is ``lazy`` (the
-    host asks for them when the person opens it: ``backlog_detail``).  ``limit`` is how many items are drawn at most (the answer's
-    size decides it: the rest is one line, ``… N more in backlog.md``); ``cut``: the file is longer than is read."""
+    Its head is the title, ``updated …`` and the count of each sort with the whole count; the items stand by sort (``FIX``, ``IMPR``, ``TBD``,
+    ``NOTE``), this window's campaign first in each.  The first sort that has an item stands open on top, every other is a folded line with its
+    count (``› IMPR 26``) in that order; ``full document ›`` ends it.  Keys are the status screen's (``g:``, ``i:``, ``full``).  An item
+    carries its title and no more: its lines under it (its sort first) are ``lazy`` (the host asks for them when the person opens it:
+    ``backlog_detail``).  ``limit`` is how many items are drawn at most (the answer's size decides it: the rest is one line,
+    ``… N more in backlog.md``); ``cut``: the file is longer than is read."""
     width = max(8, int(width))
     out = []
     if parsed["title"]:
@@ -810,30 +865,30 @@ def backlog_entries(parsed, own, width, old=False, now=None, cut=False, limit=No
         said = BACKLOG_WORDS["updated"] + ": could not read the time"
     said = " · ".join(part for part in (said, BACKLOG_WORDS["old"] if old else "") if part)
     out.append(_entry([_cut_row(([("! ", "lvl_y")] if old else []) + [(said, "dim")], width)]))
+    counts, total = backlog_counts(parsed), backlog_total(parsed)
+    shown = backlog_counts_said(counts)
+    line = " · ".join(f"{KIND_MARKS[kind]} {shown[kind or 'tbd']}" for kind in KIND_ORDER) + f" · {total} {BACKLOG_WORDS['total']}"
+    out.append(_entry([_cut_row([(line, "dim")], width)]))
     out.append(_entry([[]]))
-    drawn, total = 0, backlog_total(parsed)
+    drawn = 0
     room = total if limit is None else max(0, int(limit))
-    for group, gid, mine in _own_first(parsed["groups"], own):
-        items = group["items"]
-        head = [(group["name"], "sect"), (f" {len(items)}", "dim")]
-        folded = not mine
+    for at, (kind, gid, rows) in enumerate(_kind_groups(parsed, own)):
+        head = [(KIND_MARKS[kind], "sect"), (f" {len(rows)}", "dim")]
+        folded = at > 0
         out.append(_entry([_cut_row(([_SLOT, ("› ", "soft")] if folded else []) + head, width)], key=("g:" + gid) if folded else None,
                           group=gid if folded else None, alt=[_cut_row([_SLOT, ("▾ ", "soft")] + head, width)] if folded else None))
-        taken = {}
-        for item in items:
-            text = item["text"]
-            seen = taken[text] = taken.get(text, 0) + 1
+        for _campaign, item, key in rows:
             if drawn >= room:
-                continue
+                break
             drawn += 1
+            text = item["text"]
             lead = [_SLOT] + ([("  ", None)] if folded else [])
             whole = lead + [(transcript.clean(text), "soft")]
             row = _cut_row(whole, width)
             cutoff = "".join(part for part, _ in row) != "".join(part for part, _ in whole)
-            out.append(_entry([row], key=_backlog_key(gid, text, seen), group=gid if folded else None, when="open" if folded else None,
+            out.append(_entry([row], key=key, group=gid if folded else None, when="open" if folded else None,
                               text=transcript.clean(text)[:TITLE_TEXT] if cutoff else None))
-            if item["has_detail"]:
-                out[-1]["lazy"] = 1
+            out[-1]["lazy"] = 1          # every item opens: its sort stands on its first line
         if not folded:
             out.append(_entry([[]]))
     if not (out and out[-1]["rows"] == [[]]):
@@ -936,21 +991,20 @@ def backlog_view(root, own, width, now=None, want_list=False):
 
 
 def backlog_detail(root, own, key, width):
-    """The rows of the indented lines under the item ``key`` (``None`` where the document or the item is not there): what the host asks for
+    """The rows of the lines under the item ``key``, its sort first (``None`` where the document or the item is not there): what the host asks for
     when the person opens an item of the list, laid out as the list would (two cells in from the title)."""
     lines, _cut = read_backlog(root) if root else (None, False)
     if lines is None:
         return None
     parsed = parse_backlog(lines, detail=True)
     width = max(8, int(width))
-    for group, gid, mine in _own_first(parsed["groups"], own):
-        taken = {}
-        for item in group["items"]:
-            seen = taken[item["text"]] = taken.get(item["text"], 0) + 1
-            if _backlog_key(gid, item["text"], seen) != key:
+    for at, (kind, _gid, rows) in enumerate(_kind_groups(parsed, own)):
+        for _campaign, item, item_key in rows:
+            if item_key != key:
                 continue
-            indent = 2 + (0 if mine else 2) + 2
-            return [[(" " * indent, None)] + line for text in item["detail"] for line in _wrapped(text, max(8, width - indent), DETAIL_ROWS, "dim")]
+            indent = 2 + (0 if at == 0 else 2) + 2
+            return [[(" " * indent, None)] + line
+                    for text in [f"kind: {KIND_MARKS[kind]}"] + item["detail"] for line in _wrapped(text, max(8, width - indent), DETAIL_ROWS, "dim")]
     return None
 
 
@@ -976,15 +1030,14 @@ def panel_items(parsed, first=PANEL_ITEMS):
 
 
 def panel_backlog_items(parsed, own, first=PANEL_ITEMS):
-    """``(items, total)`` of the backlog: this window's campaign group first, then the others in the document's order."""
+    """``(items, total)`` of the backlog: by sort (``FIX``, ``IMPR``, ``TBD``, ``NOTE``), this window's campaign first inside a sort, then the document's order.
+
+    Each item is ``{mark, kind, text, key}``: ``kind`` is ``fix``, ``improve``, ``note`` or ``tbd``; ``key`` is the item's key on the popup's list."""
     items = []
-    for group, gid, _mine in _own_first(parsed["groups"], own):
-        taken = {}
-        for item in group["items"]:
-            text = item["text"]
-            seen = taken[text] = taken.get(text, 0) + 1
+    for kind, _gid, rows in _kind_groups(parsed, own):
+        for _campaign, item, key in rows:
             if len(items) < first:
-                items.append({"mark": "", "text": transcript.clean(text)[:PANEL_TEXT], "key": _backlog_key(gid, text, seen)})
+                items.append({"mark": "", "kind": kind or "tbd", "text": transcript.clean(item["text"])[:PANEL_TEXT], "key": key})
     return items, backlog_total(parsed)
 
 
@@ -1029,12 +1082,14 @@ def panel_lists(cwd, view, have=None, now=None):
         if sign is not None and have.get("backlog") == sign:
             out["backlog"] = {"same": True}
         else:
-            items, total, has, more = [], 0, False, False
+            items, total, has, more, counts = [], 0, False, False, None
             lines, more = read_backlog(root) if sign is not None else (None, False)
             if lines is not None:
                 has = True
-                items, total = panel_backlog_items(parse_backlog(lines, detail=False), own)
-            out["backlog"] = {"sign": sign, "has_doc": has, "items": items, "total": total, "more": more is True}
+                parsed = parse_backlog(lines, detail=False)
+                items, total = panel_backlog_items(parsed, own)
+                counts = backlog_counts(parsed)
+            out["backlog"] = {"sign": sign, "has_doc": has, "items": items, "total": total, "more": more is True, "counts": counts}
         return out
     except Exception:  # noqa: BLE001 -- the panel draws on without its lists
         return None

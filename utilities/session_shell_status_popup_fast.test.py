@@ -417,15 +417,15 @@ const checks={};
   if(cfg.scenario==='backlog'){
     // 11-21: the BACKLOG part under the REPO group (its head and its first three items, `+N` for the rest); a press on an item opens the BACKLOG popup
     // standing on it; the group of this window's campaign is open on top and the others are folded; an item with detail opens under its row.
-    await until(s=>s.some(l=>/BACKLOG \+\d+ +›/.test(l)),'the BACKLOG head');
+    await until(s=>s.some(l=>/BACKLOG FIX \d+ · IMPR \d+ · \+\d+ +\/\d+ +›/.test(l)),'the BACKLOG head');
     const panel=await screen();
-    checks.head=panel.find(l=>/BACKLOG \+/.test(l));checks.items=panel.filter(l=>/BL_ITEM/.test(l)).length;
+    checks.head=panel.find(l=>/BACKLOG FIX/.test(l));checks.items=panel.filter(l=>/BL_ITEM/.test(l)).length;
     checks.status_head=panel.some(l=>/STATUS( \+\d+)? +›/.test(l));
     const spot=await at('BL_ITEM_TWO');await press(spot.x,spot.y,0);
     let r=await until(popupHas('BL_ITEM_ONE'),'the BACKLOG popup');
     const b=box(r.s);checks.title=b.rows[0];checks.band=b.rows.at(-1);
     checks.stands=body(r.s).some(l=>l.startsWith('> ')&&l.includes('BL_ITEM_TWO'));
-    checks.other_folded=body(r.s).some(l=>l.includes('›')&&l.includes('2026-02-11_camp-001'));
+    checks.other_folded=body(r.s).some(l=>l.includes('›')&&l.includes('TBD 2'));
     checks.other_hidden=!popupHas('BL_OTHER_ITEM')(r.s);
     await key('\x1b[A',250);await key('\r',400);r=await screen();
     checks.detail=popupHas('BL_DETAIL_NOTE')(r);
@@ -544,7 +544,7 @@ class PtyTest(unittest.TestCase):
             # 11-21: a backlog document in the artifact root: this window's campaign group (the newest document's folder) first, another group folded.
             (case / 'tree' / '.agent_reports' / 'backlog.md').write_text(
                 '# 시험용 백로그\n갱신 2026-11-21 11:02\n\n## 2026-02-11_camp-001\n- BL_OTHER_ITEM 다른 캠페인의 일\n\n'
-                '## 2026-01-10_camp-000\n- BL_ITEM_ONE 첫째 일\n  date: 2026-11-20\n  note: BL_DETAIL_NOTE 맥락\n- BL_ITEM_TWO 둘째 일\n- BL_ITEM_THREE 셋째 일\n- BL_ITEM_FOUR 넷째 일\n\n'
+                '## 2026-01-10_camp-000\n- BL_ITEM_ONE 첫째 일\n  kind: fix\n  date: 2026-11-20\n  note: BL_DETAIL_NOTE 맥락\n- BL_ITEM_TWO 둘째 일\n  kind: Fix\n- BL_ITEM_THREE 셋째 일\n  kind: fix\n- BL_ITEM_FOUR 넷째 일\n  kind: fix\n\n'
                 '## Unassigned\n- BL_LOOSE 캠페인 없는 일\n', encoding='utf-8')
         backend = case / 'backend'
         backend.write_text(BACKEND.format(python=sys.executable, utilities=str(ROOT / 'utilities'), tools=str(ROOT / 'tools'),
@@ -610,12 +610,12 @@ class PtyTest(unittest.TestCase):
     def test_the_backlog_part_lists_three_items_and_its_popup_opens_on_the_one_pressed(self):
         checks = self.run_case('backlog')
         self.assertEqual(checks['items'], 3, checks)                                     # the first three; the others are `+N`
-        self.assertRegex(checks['head'], r'BACKLOG \+3 +›', checks)                     # six items in the document, three shown
+        self.assertRegex(checks['head'], r'BACKLOG FIX 4 · IMPR 0 · \+1 +/6 +›', checks)  # six items in the document, four of them FIX, three shown
         self.assertTrue(checks['status_head'], checks)
         self.assertIn('BACKLOG', checks['title'], checks)
         self.assertIn('╰─ STATUS · BACKLOG · ', checks['band'], checks)
         self.assertTrue(checks['stands'], checks)                                         # the popup stands on the item pressed
-        self.assertTrue(checks['other_folded'] and checks['other_hidden'], checks)        # this window's group is open, the other one folded
+        self.assertTrue(checks['other_folded'] and checks['other_hidden'], checks)        # the FIX sort is open, the unsorted one folded
         self.assertTrue(checks['detail'] and checks['detail_closed'], checks)             # the indented lines under an item
         self.assertTrue(checks['group_opened'], checks)
         self.assertTrue(checks['pgdn_end'] and checks['pgup_top'], checks)                # PgDn/PgUp move the chosen line, not only the window

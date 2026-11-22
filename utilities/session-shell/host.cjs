@@ -678,7 +678,12 @@ function statusHeld(){const v=statusValue;
 // 11-20: the panel draws the button alone (the word, and whether a document stands: dim when none); the document's lists are the popup's.
 // The name of the folder this window's status document is in: the backlog puts the group of that name first.
 function ownFolder(){const p=statusValue&&typeof statusValue.path==='string'?statusValue.path:'';return p?path.basename(path.dirname(p)):'';}
-function listItems(v){return (Array.isArray(v?.items)?v.items:[]).filter(i=>i&&typeof i.text==='string').slice(0,3).map(i=>({mark:i.mark==='!'?'!':'',text:i.text,key:typeof i.key==='string'?i.key:''}));}
+const BACKLOG_KINDS=['fix','improve','note','tbd'];
+function listItems(v){return (Array.isArray(v?.items)?v.items:[]).filter(i=>i&&typeof i.text==='string').slice(0,3).map(i=>({mark:i.mark==='!'?'!':'',text:i.text,key:typeof i.key==='string'?i.key:'',
+  ...(BACKLOG_KINDS.includes(i.kind)?{kind:i.kind}:{})}));}
+// 11-22: the backlog's count of each sort (`fix`, `improve`, `note`, `tbd`), as the document was read; a backend that does not send them has none and the part is drawn as it was.
+function listCounts(v){const c=v?.counts;if(!c||typeof c!=='object')return null;const out={};
+  for(const name of BACKLOG_KINDS){if(!Number.isInteger(c[name])||c[name]<0)return null;out[name]=c[name];}return out;}
 function listTotal(v,items){return Math.max(items.length,Number.isInteger(v?.total)&&v.total>=0?v.total:0);}
 function statusDoc(){
   if(!(statusValue&&typeof statusValue.word==='string'))return null;
@@ -688,7 +693,7 @@ function statusDoc(){
 function backlogDoc(){
   if(!(statusValue&&typeof statusValue.word==='string'))return null;
   const items=listItems(panelLists.backlog);
-  return {word:'BACKLOG',has_doc:panelLists.backlog?.has_doc===true,items,total:listTotal(panelLists.backlog,items),more:panelLists.backlog?.more===true};}
+  return {word:'BACKLOG',has_doc:panelLists.backlog?.has_doc===true,items,total:listTotal(panelLists.backlog,items),more:panelLists.backlog?.more===true,...(listCounts(panelLists.backlog)?{counts:listCounts(panelLists.backlog)}:{})};}
 function askStatus(dirty=false,routes=statusRoutes()){
   if(statusAsking){statusAgain=true;statusAgainDirty=statusAgainDirty||dirty;return;}
   statusAsking=true;statusAgain=false;statusAgainDirty=false;
