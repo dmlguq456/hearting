@@ -518,6 +518,15 @@ class ValidationTest(ReviewBase):
 
 
 class TriggerTest(ReviewBase):
+    def setUp(self):
+        super().setUp()
+        # These tests count the processes the trigger starts. A campaign-document pass in this process may ask git
+        # where a closed route was merged, which is not what they are about (as in artifact_seal_abolition.test.py).
+        import campaign_document
+        no_git = mock.patch.object(campaign_document._GitPass, "base", return_value="")
+        no_git.start()
+        self.addCleanup(no_git.stop)
+
     def spawned(self):
         return mock.patch.object(R.subprocess, "Popen")
 
