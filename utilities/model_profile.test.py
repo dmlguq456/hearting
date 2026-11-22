@@ -642,10 +642,11 @@ class TopExceptionProfileTest(unittest.TestCase):
     def _stage_route(self, tmp, **over):
         route = {"owner_model_profile": "deep", "effective_intensity": "strong",
                  "explicit_profiles": {"inspect": "top"},
-                 "nodes": [{"id": "inspect", "dispatch_depth": 2, "model_profile": "top"},
-                           {"id": "report", "dispatch_depth": 2, "model_profile": "deep"}]}
+                 "nodes": [{"id": "inspect", "kind": "pipeline-stage", "dispatch_depth": 2, "model_profile": "top"},
+                           {"id": "report", "kind": "pipeline-stage", "dispatch_depth": 2, "model_profile": "deep"}]}
         route.update(over)
-        path = tmp / "stage-route.json"
+        # one file per route: the refusal table below builds every route before it checks any
+        path = tmp / f"stage-route-{len(list(tmp.glob('stage-route-*.json')))}.json"
         path.write_text(json.dumps(route), encoding="utf-8")
         return str(path)
 
@@ -662,12 +663,16 @@ class TopExceptionProfileTest(unittest.TestCase):
             "not named by the person": self._stage_route(tmp, explicit_profiles={}),
             "named for another node": self._stage_route(tmp, explicit_profiles={"report": "top"}),
             "node sealed something else": self._stage_route(tmp, nodes=[
-                {"id": "inspect", "dispatch_depth": 2, "model_profile": "deep"}]),
+                {"id": "inspect", "kind": "pipeline-stage", "dispatch_depth": 2, "model_profile": "deep"}]),
+            "a fan-out leg (launches as support)": self._stage_route(tmp, nodes=[
+                {"id": "inspect", "kind": "map-worker", "dispatch_depth": 2, "model_profile": "top"}]),
+            "a node with no kind": self._stage_route(tmp, nodes=[
+                {"id": "inspect", "dispatch_depth": 2, "model_profile": "top"}]),
             "node at depth 1": self._stage_route(tmp, nodes=[
-                {"id": "inspect", "dispatch_depth": 1, "model_profile": "top"}]),
+                {"id": "inspect", "kind": "pipeline-stage", "dispatch_depth": 1, "model_profile": "top"}]),
             "only the owner sealed top": self._stage_route(
                 tmp, owner_model_profile="top", explicit_profiles={},
-                nodes=[{"id": "inspect", "dispatch_depth": 2, "model_profile": "deep"}]),
+                nodes=[{"id": "inspect", "kind": "pipeline-stage", "dispatch_depth": 2, "model_profile": "deep"}]),
         }
         for label, path in refused.items():
             with self.subTest(label), self.assertRaises(PROFILE.ModelProfileError) as mismatch:

@@ -31,6 +31,11 @@ def load(name, file):
 F = load("route_fixtures", "capability_route.test.py")
 R = F.R
 BATCH = load("dispatch_batch_under_test", "dispatch-batch.py")
+import worker_bootstrap as WB
+_CLAUDE = importlib.util.spec_from_file_location(
+    "claude_dispatch_headless_under_test", ROOT / "adapters" / "claude" / "bin" / "dispatch-headless.py")
+CLAUDE = importlib.util.module_from_spec(_CLAUDE)
+_CLAUDE.loader.exec_module(CLAUDE)
 INTENSITIES = ("quick", "standard", "strong", "thorough", "adversarial")
 TOP_STAGE = ("strong", "thorough", "adversarial")
 
@@ -72,9 +77,9 @@ class ComposeAcceptsTopStageNodes(Fixture):
             self.staged(intensity="standard", explicit_profiles=keys, **self.AUDIT)
         text = str(refused.exception)
         self.assertTrue(text.startswith("profile-explicit-top-owner-only:inspect: "), text)
-        self.assertIn("owner at any intensity", text)
-        self.assertIn("strong or higher", text)
-        self.assertIn("(this route is standard)", text)
+        self.assertIn("this route is standard", text)
+        self.assertIn("below strong", text)
+        self.assertIn("can take `top` at any intensity", text)
 
     def test_only_the_named_nodes_hold_top_and_nothing_else_moves(self):
         plain = self.staged(**self.AUDIT)
@@ -120,12 +125,17 @@ class ComposeAcceptsTopStageNodes(Fixture):
 
     def test_a_depth_one_node_that_is_neither_owner_nor_frame_is_refused_even_at_adversarial(self):
         nodes = [{"id": "frame", "dispatch_depth": 1, "worker_type": "frame", "model_profile": "deep"},
-                 {"id": "prd-transaction", "dispatch_depth": 1, "worker_type": "owner", "model_profile": "light"},
-                 {"id": "execute", "dispatch_depth": 2, "model_profile": "light"}]
+                 {"id": "prd-transaction", "dispatch_depth": 1, "worker_type": "owner", "kind": "capability-owner",
+                  "model_profile": "light"},
+                 {"id": "execute", "dispatch_depth": 2, "kind": "pipeline-stage", "model_profile": "light"}]
         for key in ("prd-transaction",):
             with self.assertRaises(ValueError) as refused:
                 R._profile_input_maps(nodes, None, {key: "top"}, "adversarial")
             self.assertTrue(str(refused.exception).startswith("profile-explicit-top-owner-only:prd-transaction: "))
+            # the cause is the node's kind and depth, not the intensity, and the owner's key is named
+            self.assertIn("a step the owner runs itself", str(refused.exception))
+            self.assertIn("`__owner__`", str(refused.exception))
+            self.assertNotIn("this route is", str(refused.exception))
         self.assertEqual(R._profile_input_maps(nodes, None, {"execute": "top"}, "adversarial")[1], {"execute": "top"})
         for intensity in (None, "", "direct", "quick", "standard"):
             with self.assertRaises(ValueError):
@@ -139,6 +149,168 @@ class ComposeAcceptsTopStageNodes(Fixture):
             self.assertNotEqual(out.returncode, 0, script)
         with self.assertRaisesRegex(ValueError, "profile-explicit-unknown"):
             self.staged("autopilot-code", "dev", "adversarial", profile="top")
+
+
+class ComposeAndLaunchShareOnePredicate(Fixture):
+    """Every node compose accepts `top` on is one the launch path accepts, and the reverse for the
+    kinds launch refuses. The launch side is the wrapper's own model selection, called the way the
+    launchers call it: `worker_type` from the node's kind (`worker_type_for_kind`)."""
+
+    def setUp(self):
+        import tempfile
+        from unittest import mock
+        from types import SimpleNamespace
+        self.tmp = Path(tempfile.mkdtemp(prefix="top-matrix-"))
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+        policy = C.parse_config(ROOT / "adapters" / "claude" / "config" / "models.conf") \
+            if hasattr(C, "parse_config") else None
+        from model_config import parse_config
+        patcher = mock.patch.object(CLAUDE, "_model_policy",
+                                    side_effect=lambda: parse_config(ROOT / "adapters" / "claude" / "config" / "models.conf"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        env = mock.patch.dict(os.environ, {"AGENT_HOME": str(ROOT), "HEARTING_MODEL_CONFIG_HOME": ""})
+        env.start()
+        self.addCleanup(env.stop)
+        self.Namespace = SimpleNamespace
+
+    def launch(self, route, node):
+        """The model selection a launcher's argv reaches for this node of this sealed route."""
+        path = self.tmp / "route.json"
+        path.write_text(json.dumps(route), encoding="utf-8")
+        args = self.Namespace(
+            inherit_model_settings=False, model_profile="top", model_role="deep reviewer", model=None, effort=None,
+            registered_worker=1, dispatch_depth=node["dispatch_depth"], worker_type=WB.worker_type_for_kind(node["kind"]),
+            capacity_retry=0, route_file=str(path), route_node=node["id"])
+        try:
+            CLAUDE.resolve_model_settings(args)
+            return None
+        except CLAUDE.ModelSelectionError as exc:
+            return exc.reason
+
+    _rows = None
+
+    def matrix(self, kinds=None):
+        """(capability, mode, intensity, node id, kind, compose accepted, launch refusal reason)."""
+        if kinds is None and ComposeAndLaunchShareOnePredicate._rows is not None:
+            return ComposeAndLaunchShareOnePredicate._rows
+        rows = self._matrix(kinds)
+        if kinds is None:
+            ComposeAndLaunchShareOnePredicate._rows = rows
+        return rows
+
+    def _matrix(self, kinds):
+        registry = R.TOPO.load_registry()
+        rows = []
+        for recipe in registry["recipes"]:
+            if recipe["capability"] in R.TOPO.COMPILER_INTERNAL_CAPABILITIES:
+                continue
+            extra = {"field": recipe["field"]} if recipe.get("field") else {}
+            for intensity in TOP_STAGE:
+                try:
+                    base = self.staged(recipe["capability"], recipe["modes"][0], intensity, **extra)
+                except ValueError:
+                    continue
+                for node in base["nodes"]:
+                    if node.get("dispatch_depth") != 2 or R._no_model_node(node) or (
+                            kinds is not None and node["kind"] not in kinds):
+                        continue
+                    try:
+                        route = self.staged(recipe["capability"], recipe["modes"][0], intensity,
+                                            explicit_profiles={node["id"]: "top"}, **extra)
+                        R.verify_route(route, R.ROOT)
+                    except ValueError:
+                        rows.append((recipe["capability"], intensity, node["id"], node["kind"], False, None))
+                        continue
+                    sealed = next(n for n in route["nodes"] if n["id"] == node["id"])
+                    rows.append((recipe["capability"], intensity, node["id"], node["kind"], True,
+                                 self.launch(route, sealed)))
+        return rows
+
+    def test_every_node_compose_accepts_top_on_launches_and_fan_out_legs_are_refused_at_compose(self):
+        rows = self.matrix()
+        accepted = [r for r in rows if r[4]]
+        self.assertGreater(len(accepted), 30)
+        self.assertEqual([r for r in accepted if r[5] is not None], [])   # accepted at compose -> passes launch
+        for row in rows:
+            if row[3] == "map-worker":
+                self.assertFalse(row[4], row)   # a fan-out leg launches as `support`: refused at compose
+        self.assertTrue({"pipeline-stage", "review-worker"} <= {r[3] for r in accepted})
+        self.assertEqual({r[3] for r in accepted} - {"pipeline-stage", "review-worker"}, set())
+        self.assertTrue(any(r[3] == "map-worker" for r in rows))
+
+    def test_the_old_depth_only_predicate_would_leave_cells_launch_refuses(self):
+        from unittest import mock
+        depth_only = lambda node: isinstance(node, dict) and node.get("dispatch_depth") == 2
+        with mock.patch.object(P, "top_stage_node", depth_only):
+            rows = self.matrix(kinds={"map-worker"})
+        torn = [r for r in rows if r[4] and r[5] is not None]
+        self.assertGreater(len(torn), 0)
+        self.assertEqual({r[3] for r in torn}, {"map-worker"})
+        self.assertEqual({r[5] for r in torn}, {"invalid-dispatch-model-profile"})
+        self.assertEqual(len(torn), len(rows))   # every fan-out cell the old predicate took is one launch refuses
+        report = os.environ.get("HEARTING_TOP_MATRIX_REPORT")
+        if report:   # numbers for the change record: the depth-only predicate against the shared one
+            with mock.patch.object(P, "top_stage_node", depth_only):
+                old = self.matrix(kinds=set(WB.WORKER_KIND_TYPES))
+            new = self.matrix()
+            Path(report).write_text(json.dumps({
+                "before_accepted": sum(1 for r in old if r[4]), "before_mismatch": sum(1 for r in old if r[4] and r[5]),
+                "after_accepted": sum(1 for r in new if r[4]), "after_mismatch": sum(1 for r in new if r[4] and r[5]),
+                "before_nodes": sorted({(r[0], r[3]) for r in old if r[4] and r[5]}),
+                "cells": len(new)}), encoding="utf-8")
+
+    def test_a_fan_out_node_is_refused_at_compose_and_the_text_names_its_kind(self):
+        with self.assertRaises(ValueError) as refused:
+            self.staged("autopilot-research", "academic", "strong", explicit_profiles={"retrieval": "top"})
+        text = str(refused.exception)
+        self.assertTrue(text.startswith("profile-explicit-top-owner-only:retrieval: "), text)
+        self.assertIn("map-worker", text)
+        self.assertIn("support worker", text)
+        self.assertNotIn("this route is", text)        # the cause is the node's kind, not the intensity
+        for intensity in ("thorough", "adversarial"):
+            with self.assertRaises(ValueError):
+                self.staged("autopilot-research", "academic", intensity, explicit_profiles={"retrieval": "top"})
+        # a stage worker of the same route still takes it
+        route = self.staged("autopilot-research", "academic", "strong", explicit_profiles={"report": "top"}) \
+            if any(n["id"] == "report" for n in self.staged("autopilot-research", "academic", "strong")["nodes"]) else None
+        if route is not None:
+            R.verify_route(route, R.ROOT)
+
+    def test_a_hand_sealed_fan_out_top_is_refused_by_verify_and_by_launch(self):
+        good = self.staged("autopilot-research", "academic", "strong", explicit_profiles={"__owner__": "deep"})
+        forged = json.loads(json.dumps(good))
+        forged["explicit_profiles"] = {**forged.get("explicit_profiles", {}), "retrieval": "top"}
+        node = next(n for n in forged["nodes"] if n["id"] == "retrieval")
+        node["model_profile"] = "top"
+        node["profile_selection"] = {**node["profile_selection"], "source": "explicit",
+                                     "reason": "explicit-profile-choice", "resolved_profile": "top"}
+        forged["route_hash"] = R.route_hash(forged)
+        forged["route_id"] = "rt-" + forged["route_hash"].split(":", 1)[1][:16]
+        with self.assertRaises(ValueError):
+            R.verify_route(forged, R.ROOT)
+        self.assertEqual(self.launch(forged, node), "invalid-dispatch-model-profile")
+
+    def test_a_route_with_no_selection_contract_cannot_hold_a_depth_two_top(self):
+        good = self.staged("autopilot-code", "dev", "adversarial", explicit_profiles={"execute": "top"})
+        R.verify_route(good, R.ROOT)
+        legacy = json.loads(json.dumps(good))
+        for key in ("profile_selection_contract_version", "profile_demands", "explicit_profiles",
+                    "owner_profile_selection", "owner_profile_demand"):
+            legacy.pop(key, None)
+        for node in legacy["nodes"]:
+            node.pop("profile_selection", None)
+            node.pop("profile_demand", None)
+        legacy["route_hash"] = R.route_hash(legacy)
+        legacy["route_id"] = "rt-" + legacy["route_hash"].split(":", 1)[1][:16]
+        with self.assertRaises(ValueError) as refused:
+            R.verify_route(legacy, R.ROOT)
+        self.assertIn("top", str(refused.exception))
+        # the same shape without the depth-2 top is not refused for that reason
+        with self.assertRaises(ValueError) as probe:
+            R._verify_profile_contract({"nodes": [{"id": "execute", "dispatch_depth": 2, "model_profile": "top"}]})
+        self.assertTrue(str(probe.exception).startswith("profile-top-needs-selection-contract:execute"))
+        R._verify_profile_contract({"nodes": [{"id": "execute", "dispatch_depth": 2, "model_profile": "deep"}]})
 
 
 class VerifyReDerivesTheRule(Fixture):
@@ -199,7 +371,14 @@ class TiersLineShowsTheOwner(Fixture):
             flat = " ".join(out.split())
             self.assertIn("--explicit-profiles", flat, script)
             self.assertIn("__owner__", flat, script)
-            self.assertIn("top is for the owner at any intensity, or for a node you name at strong or higher", flat, script)
+            self.assertIn("top is for the owner at any intensity, or for a depth-2 stage worker or "
+                          "review/verification leg you name at strong or higher", flat, script)
+            self.assertIn("one top leg per parallel group", flat, script)
+            self.assertIn("a route-wide worker pin's model still wins", flat, script)
+        # `--intensity` (the strong-or-higher switch) is on the default --help, not only on --help-all
+        out = subprocess.run([sys.executable, str(ROOT / "utilities" / "capability-route.py"), "compose", "--help"],
+                             capture_output=True, text=True, env={"PATH": os.environ["PATH"]}).stdout
+        self.assertIn("--intensity", out)
 
 
 class NothingProducesTopOnItsOwn(Fixture):

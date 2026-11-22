@@ -10251,7 +10251,7 @@ class FrameBootstrapLayerTest(unittest.TestCase):
   self.assertEqual(explicit,{"execute":"top"})
   with self.assertRaises(ValueError) as refused:
    R._profile_input_maps(nodes,demands,{"execute":"top"},"standard")
-  self.assertIn("(this route is standard)",str(refused.exception))
+  self.assertIn("this route is standard",str(refused.exception))
   # a node that only LOOKS like a frame leg does not get the exception either
   impostor=[dict(nodes[0],id="frame",worker_type="stage")]+nodes[1:]
   with self.assertRaises(ValueError) as refused:

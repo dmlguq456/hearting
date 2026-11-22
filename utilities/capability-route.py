@@ -1871,7 +1871,7 @@ def main():
     c.add_argument("--campaign-key",help="explicit work stream passed to the producer owner")
     c.add_argument("--parent-cycle",help="open or sealed predecessor cycle; causal link, not input approval")
     c.add_argument("--profile-demands", help="JSON file mapping node ids and __owner__ to full SD-88 demands")
-    c.add_argument("--explicit-profiles", help="JSON file mapping node ids to explicit profiles; keys: __owner__ (the owner) or a node id (a parallel-group leg by its realized id, e.g. impl-review-alternative); a value of top is for the owner at any intensity, or for a node you name at strong or higher (never route-wide)")
+    c.add_argument("--explicit-profiles", help="JSON file mapping node ids to explicit profiles; keys: __owner__ (the owner) or a node id (a parallel-group leg by its realized id, e.g. impl-review-alternative); a value of top is for the owner at any intensity, or for a depth-2 stage worker or review/verification leg you name at strong or higher (set --intensity; one top leg per parallel group; a route-wide worker pin's model still wins; never route-wide)")
     c.add_argument("--intensity",default="auto"); c.add_argument("--cwd",required=True); c.add_argument("--artifact-root",required=True)
     c.add_argument("--predicate",action="append",default=[]); c.add_argument("--signal",action="append",default=[])
     c.add_argument("--transport",default=None); c.add_argument("--transport-evidence",default="caller-selected")
@@ -1901,7 +1901,7 @@ def main():
     cp.add_argument("--plan",default=None,help="optional declared capability sequence for this session's route chain, e.g. research,draft,apply; shown in Fleet, not sealed into the route")
     cp.add_argument("--route-plan",default=None,metavar="RECORD#INDEX",help="runtime-generated: leg INDEX of an approved route decision record; compiles without frame nodes and seals its reference")
     cp.add_argument("--profile-demands", help="JSON file mapping node ids and __owner__ to full SD-88 demands")
-    cp.add_argument("--explicit-profiles", help="JSON file mapping node ids to explicit profiles; keys: __owner__ (the owner) or a node id (a parallel-group leg by its realized id, e.g. impl-review-alternative); a value of top is for the owner at any intensity, or for a node you name at strong or higher (never route-wide)")
+    cp.add_argument("--explicit-profiles", help="JSON file mapping node ids to explicit profiles; keys: __owner__ (the owner) or a node id (a parallel-group leg by its realized id, e.g. impl-review-alternative); a value of top is for the owner at any intensity, or for a depth-2 stage worker or review/verification leg you name at strong or higher (set --intensity; one top leg per parallel group; a route-wide worker pin's model still wins; never route-wide)")
     cp.add_argument("--profile", choices=sorted(PROFILE.PORTABLE_PROFILES),
                     help="explicit model budget for owner and model nodes; node-specific --explicit-profiles takes precedence; mini only with --shape direct (a registered owner or stage needs light or higher)")
     cp.add_argument("--shape",choices=COMPOSE_SHAPES,default=None,help="direct (inline) | solo (one registered owner) | staged (capability recipe, optionally narrowed by --graph) | framed (two top frame legs propose the route by default; explicit quick/direct may use one deep leg for unprotected work; --capability, --capability-mode, --graph and --profile are recorded as hints only); default: framed; use --shape direct for inline work; --graph without --shape is a frame routing hint")
@@ -1932,7 +1932,7 @@ def main():
     cp.add_argument("--full-record",action="store_true",help="print all sealed evidence; default prints choices and the canonical route_file")
     cp.add_argument("--help-all",action="help",help="also show advanced/compatibility inputs")
     if "--help-all" not in sys.argv:
-        advanced = {"route_plan", "parent_cycle", "profile_demands", "intensity", "artifact_root",
+        advanced = {"route_plan", "parent_cycle", "profile_demands", "artifact_root",
                     "drift_verdict", "tracking", "artifact_guard", "parent_harness", "jobs",
                     "dispatch_evidence", "registered_headless_evidence", "transport_evidence", "output", "full_record"}
         for option in cp._actions:

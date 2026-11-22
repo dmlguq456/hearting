@@ -127,7 +127,7 @@ Route-bound registered work uses a second, independent execution-budget axis:
 | `balanced` | `sonnet` / `high` | long multi-step execution after the decision is settled |
 | `light` | `sonnet` / `medium` | routine implementation, verification, reporting, and breadth legs |
 | `mini` | `sonnet` / `low` | lifecycle and micro-semantic helpers only; substantive dispatch-depth-1/2 work is rejected |
-| `top` | `fable` / `max` | exception above deep: the main-session-only model, reachable only from a route that seals the explicit `top` profile on a dispatch-depth-1 owner, or, at intensity `strong`+, on a stage node or review leg the person named in `--explicit-profiles` (`model_source=profile-top`; the wrapper refuses `top` without that route); no cascade in or out, no `--model` override |
+| `top` | `fable` / `max` | exception above deep: the main-session-only model, reachable only from a route that seals the explicit `top` profile on a dispatch-depth-1 owner, or, at intensity `strong`+, on a depth-2 stage worker or review/verification leg the person named in `--explicit-profiles` (`model_source=profile-top`; the wrapper refuses `top` without that route); no cascade in or out, no `--model` override |
 
 These are the shipped defaults and equal the maintainer's runtime mapping
 (2026-09-09 maintainer decision: a runtime value changed by instruction becomes
@@ -217,7 +217,7 @@ need different models. The shipped deep point is the `deep` tier (`opus`/xhigh);
 balanced-deep rides its own `balanced-deep` tier (`opus`/medium), so the two
 deep-side profiles currently share a model and differ only in effort. The `top`
 tier (`fable`/max) is the one exception to `CFG_MAIN_SESSION_ONLY_MODELS`, and
-only through a route that sealed the `top` profile for its owner (or a person-named stage node or leg at `strong`+). A user-selected legacy tier continues to override the shipped profile.
+only through a route that sealed the `top` profile for its owner (or a person-named depth-2 stage worker or review/verification leg at `strong`+). A user-selected legacy tier continues to override the shipped profile.
 
 ## Window contract
 

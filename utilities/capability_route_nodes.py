@@ -364,11 +364,24 @@ def _profile_input_maps(nodes, demands, explicit, intensity=None):
             # person's) and the route's intensity is strong or higher: never a default, never a
             # route-wide choice, never an automatic promotion.
             node = by_id.get(key, {})
-            if node.get("dispatch_depth") != 2 or not PROFILE.top_stage_intensity(intensity):
+            if not PROFILE.top_stage_node(node):
+                depth, kind = node.get("dispatch_depth"), node.get("kind")
+                if depth == 2:
+                    why = (f"`{key}` is a depth-2 {kind} node that launches as a "
+                           f"{PROFILE.top_stage_node_type(node) or 'non-model'} worker, not a stage worker or "
+                           f"review/verification leg")
+                else:
+                    why = (f"`{key}` is a step the owner runs itself (depth {depth}); to give the owner `top` "
+                           f"name `__owner__`")
+                raise ValueError(f"profile-explicit-top-owner-only:{key}: {why} "
+                                 f"(top: the owner at any intensity, a depth-2 stage worker or "
+                                 f"review/verification leg at {PROFILE.TOP_STAGE_MIN_INTENSITY} or higher)")
+            if not PROFILE.top_stage_intensity(intensity):
                 raise ValueError(
-                    f"profile-explicit-top-owner-only:{key}: top is allowed for the owner at any intensity "
-                    f"and for a depth-2 stage node or review leg at {PROFILE.TOP_STAGE_MIN_INTENSITY} or "
-                    f"higher (this route is {intensity or 'unknown'})")
+                    f"profile-explicit-top-owner-only:{key}: this route is {intensity or 'of unknown intensity'}, "
+                    f"below {PROFILE.TOP_STAGE_MIN_INTENSITY}: `top` for a depth-2 stage worker or "
+                    f"review/verification leg needs {PROFILE.TOP_STAGE_MIN_INTENSITY} or higher "
+                    f"(the owner, `__owner__`, can take `top` at any intensity)")
     top_legs = {}
     for key, value in (explicit or {}).items():
         group = by_id.get(key, {}).get("parallel_group")
@@ -388,6 +401,11 @@ def _verify_profile_contract(route):
         if route.get("owner_profile_selection") is not None or any(
             "profile_selection" in n or "profile_demand" in n for n in route.get("nodes", [])):
             raise ValueError("profile-selection-contract-missing")
+        # A route with no profile-selection contract predates a stage `top`: none of its depth-2
+        # nodes may hold one.
+        for node in route.get("nodes", []):
+            if node.get("dispatch_depth") == 2 and node.get("model_profile") == PROFILE.TOP_PROFILE:
+                raise ValueError("profile-top-needs-selection-contract:" + str(node.get("id")))
         return
     if type(version) is not int or version != 1:
         raise ValueError("profile-selection-version-unsupported")

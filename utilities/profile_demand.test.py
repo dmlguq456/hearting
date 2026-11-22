@@ -610,8 +610,9 @@ class TopExceptionRoute(unittest.TestCase):
             R._profile_input_maps(nodes, demands, {"execute": "top"})
         # no intensity known (or one below strong): the refusal says who may hold top and from where
         self.assertTrue(str(refused.exception).startswith("profile-explicit-top-owner-only:execute: "))
-        self.assertIn("owner at any intensity", str(refused.exception))
-        self.assertIn("strong or higher", str(refused.exception))
+        self.assertIn("can take `top` at any intensity", str(refused.exception))
+        self.assertIn("needs strong or higher", str(refused.exception))
+        self.assertIn("this route is of unknown intensity", str(refused.exception))
         route = self.staged(profile_demands=self.owner_demand("predetermined"), explicit_profiles=self.TOP)
         self.assertEqual(route["owner_model_profile"], "top")
         R.verify_route(route, R.ROOT)

@@ -56,10 +56,10 @@ def stage_top_route(tmp: Path, name: str = "stage-top", **over) -> str:
     import json as _json
     route = {"route_id": "rt-stage-top-fixture", "owner_model_profile": "deep", "effective_intensity": "strong",
              "explicit_profiles": {"inspect": "top", "review-alternative": "top"},
-             "nodes": [{"id": "inspect", "dispatch_depth": 2, "model_profile": "top"},
-                       {"id": "report", "dispatch_depth": 2, "model_profile": "deep"},
-                       {"id": "review", "dispatch_depth": 2, "model_profile": "deep"},
-                       {"id": "review-alternative", "dispatch_depth": 2, "model_profile": "top"}]}
+             "nodes": [{"id": "inspect", "kind": "pipeline-stage", "dispatch_depth": 2, "model_profile": "top"},
+                       {"id": "report", "kind": "pipeline-stage", "dispatch_depth": 2, "model_profile": "deep"},
+                       {"id": "review", "kind": "review-worker", "dispatch_depth": 2, "model_profile": "deep"},
+                       {"id": "review-alternative", "kind": "review-worker", "dispatch_depth": 2, "model_profile": "top"}]}
     route.update(over)
     path = tmp / f"{name}.json"
     path.write_text(_json.dumps(route), encoding="utf-8")

@@ -499,7 +499,7 @@ Behavioral roles resolve through `preflight.sh role`; registered route profiles 
 | `balanced` | configured light tier / `high` |
 | `light` | configured light tier / `medium` |
 | `mini` | configured mini tier / `low`, lifecycle/micro-only |
-| `top` | configured top tier / `xhigh`; the main-session-only model, only through a route that sealed `top` for its depth-1 owner, or at `strong`+ for a stage node or leg the person named |
+| `top` | configured top tier / `xhigh`; the main-session-only model, only through a route that sealed `top` for its depth-1 owner, or at `strong`+ for a depth-2 stage worker or review/verification leg the person named |
 
 Non-route role compatibility overrides remain explicit and config-derived:
 

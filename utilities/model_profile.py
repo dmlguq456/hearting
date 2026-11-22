@@ -51,6 +51,22 @@ _TOP_STAGE_INTENSITIES = ("strong", "thorough", "adversarial")
 
 def top_stage_intensity(intensity) -> bool:
     return intensity in _TOP_STAGE_INTENSITIES
+
+
+def top_stage_node_type(node) -> str | None:
+    """The worker type launch gives a route node (the same `kind` -> type map the launchers use), or
+    None when the node has no model-worker kind."""
+    from worker_bootstrap import WORKER_KIND_TYPES
+    return WORKER_KIND_TYPES.get(node.get("kind")) if isinstance(node, dict) else None
+
+
+def top_stage_node(node) -> bool:
+    """The one place that says which route nodes may hold a person-named stage `top`: a dispatch-depth-2
+    node whose launch worker type is `stage` or `review`. Compose, verify and launch share it, so a
+    node compose accepts is one launch accepts (a fan-out `map-worker` leg launches as `support` and
+    is not one)."""
+    return (isinstance(node, dict) and node.get("dispatch_depth") == 2
+            and top_stage_node_type(node) in TOP_STAGE_WORKER_TYPES)
 RESOLVER_VERSION = "profile-demand/v1"
 DEMAND_SCHEMA_VERSION = 1
 DEMAND_JUDGMENTS = ("predetermined", "important", "difficult-uncertain")
@@ -501,7 +517,7 @@ def require_top_route(route_file, *, profile: str, node: str | None = None,
         entry = next((n for n in route.get("nodes", [])
                       if isinstance(n, dict) and n.get("id") == node), None) if node else None
         if (entry is None or entry.get("model_profile") != TOP_PROFILE
-                or entry.get("dispatch_depth") != 2
+                or not top_stage_node(entry)
                 or (route.get("explicit_profiles") or {}).get(node) != TOP_PROFILE
                 or not top_stage_intensity(route.get("effective_intensity"))):
             raise ModelProfileError(
