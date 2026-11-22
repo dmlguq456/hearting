@@ -59,8 +59,7 @@ ends without asking is not lost: a reason that comes during a look is taken up w
 the second's pause after an attempt that ended unsafe (or a reading the backend did not answer)
 ends in one more look. While a newer host is installed and not yet taken,
 the tidy-notice slot shows one lowest-priority line (`session_shell.upgrade_pending`, dim and
-without `⚠`, as a notice that leaves the person nothing to do), never over another notice; beside the native area the panel's thin rule that parts the
-session's content from the head goes with it, and nothing else on the screen changes.
+without `⚠`, as a notice that leaves the person nothing to do), never over another notice, and nothing else on the screen changes.
 A popup stands over the window: the panel under it keeps its notice slot.
 The host asks the PTY owner for a successor only at a safe moment: idle, an
 empty composer, no open form, no popup, settings,
@@ -420,7 +419,7 @@ layout keeps the metadata row (or rows) first and one content row
 (`title │ NOW …`, each keeping at least half of what is left).
 
 Two groups (11-20, the person: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" / "REPO ---- SESSION ----"), beside the native area. REPO is the repository's: the
-REPO row, which is the group's head (`REPO hearting · wt 12 ────`: the word bold (the title role), its value after one cell, the rule dim in a section head's color running to the row's end,
+REPO row, which is the group's head (`REPO hearting · wt 12 ────`: the word bold, in the title role's color, its value after one cell, the rule dim in a section head's color running to the row's end,
 no button while the two heads below stand, the two buttons where they do not; the same in every width), and under
 it GIT, PEERS, then (11-21, the person: "버튼을 REPO의 아래에 각각을 두고 +? 숫자 띄우고 백로그랑 현황을 나열하자" / "각각 3줄 정도씩 목록으로 만들고 추가분을 +? 형식으로")
 the **STATUS part** and the **BACKLOG part**: each a section head (` STATUS +2                  ›`, indented one cell like GIT, no rule, the word in the title role, `+N` in the MESSAGES head's
@@ -449,11 +448,11 @@ modification time, size, inode and change time back as `have` and, for the backl
 order); an unchanged one is neither read nor parsed again); the panel's drawing reads no file. SESSION is this session's: its head `SESSION ────` stands where the empty row between the two groups of
 metadata stood, then MODEL, CTX, TITLE, NOW (indented one cell like GIT), QUESTIONS, the route box, MESSAGES, MEM. Short of rows the head row does not go: it takes MODEL's value and
 MODEL's row (`SESSION Opus 5.5 xhigh ────`, the value after one cell, the rule after it where three cells are left), so the group keeps its name at every height and the
-row count is what it was when the head went. **The line forms (11-22, the person chose the one-cell indent over the two-cell draft):**
+row count is what it was when the head went; where MODEL's value does not stand whole on that row, the head does not take it: the head row goes and the MODEL row stands in its own width, as before the head was a group's. **The line forms (11-22, the person chose the one-cell indent over the two-cell draft):**
 
 | Layer | Form | Where |
 |---|---|---|
-| Group head | bold name + value + rule, no indent | REPO, SESSION |
+| Group head | bold name + value + rule, no indent (the weight is these two names' alone; the other section names keep the title role's color without it, in mono and `NO_COLOR` too) | REPO, SESSION |
 | Dependent row | one cell in | GIT, PEERS, STATUS, BACKLOG (under REPO); MODEL, CTX, TITLE, NOW (under SESSION) |
 | Dependent's item | one cell more (two in all) | the STATUS and BACKLOG items |
 | Activity | rounded box, `›` at the right end of its top line (`╭─ 3 QUESTIONS ───── ›─╮`) | QUESTIONS, ROUTE |
@@ -730,7 +729,7 @@ MESSAGES·MEM보다 먼저 자리를 받게") MESSAGES and MEM go down before an
 every message takes the one-row form (`← [e7] text`); MEM shows two records;
 MESSAGES two messages; MEM one record; MESSAGES one message (`+N` on its head counts the rest): from six rows (a record is one row since 11-20) down to two rows, then one;
 then the question's action row, its summary's second row and the guidance line;
-the structural rows (the empty row inside the metadata, the head's rule; the question box's two border lines); then the
+the structural rows (the SESSION head's own row, which then takes MODEL's value and row; the question box's two border lines); then the
 route box's own steps (11-17: its zone rules are not among them, they stay while a row of the zone shows), every
 route at the same step (v4.36.4, spec rules 34 (b), 38,
 48 (c); 11-18): the workers' closed box becomes the open one, each NOW's second row goes, each `CTX` row goes (its number joins the first row at the right
@@ -745,7 +744,7 @@ running jobs and them before MESSAGES); the running jobs; the question's head an
 rows, before the structural rows below them); this window's own usage row last of all. Rows a later step frees beyond its need go back to the steps
 before it, the most important first. A section is placed whole or not at all; the
 rows left over stand above MESSAGES and MEM (which keep to the bottom, with their
-press targets), or under the last section when there are none.
+press targets), or under the last section when there are none. A row that gave way and goes back goes back to the next step in this order (MESSAGES, MEM, a list item, a NOW's further row): the line that no longer stands between CTX and TITLE is not one of the steps, so the row it freed goes to whichever of those comes next.
 Groups are divided by `│`, stages joined by `›`. Fixed words are English
 (`context`, `route`, `messages`, stage names, `5h`/`7d`, the section names
 `QUESTIONS`, `ROUTE`, `MESSAGES`, `MEM` with their counts
