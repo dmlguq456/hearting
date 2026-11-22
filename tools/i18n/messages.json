@@ -1534,6 +1534,10 @@
    "en": "reopen that window or type once there to deliver it",
    "ko": "그 창을 다시 열거나 한 번 입력하면 받음"
   },
+  "fleet.session_block.waits_unread": {
+   "en": "not sent · reading the waits · Enter again soon",
+   "ko": "아직 안 보냄 · 대기 목록 읽는 중 · 잠시 뒤 다시 Enter"
+  },
   "fleet.session_block.writing_choices": {
    "en": "Enter send · ↑ choices",
    "ko": "Enter 보내기 · ↑ 선택지"
