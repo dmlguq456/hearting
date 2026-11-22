@@ -22,6 +22,7 @@ INDEX_JSON = "INDEX.json"
 INDEX_MD = "INDEX.md"
 CYCLE_BINDING = ".cycle.json"
 CAMPAIGN_EVENTS_DIR = "campaign.events"
+CAMPAIGN_RECORDS_DIR = "records"   # the generated record pages beside `campaign.md`: not a cycle folder
 MAX_SLUG_LENGTH = 48
 
 # id -> {title, started, status, campaign, path}, the row shape both the full
@@ -284,7 +285,7 @@ def iter_cycle_dirs(campaign: Path) -> Iterator[Tuple[Path, str]]:
     if not campaign.is_dir() or campaign.is_symlink():
         return
     for entry in campaign.iterdir():
-        if entry.name.startswith(".") or entry.name in {"cycles", "journals", CAMPAIGN_EVENTS_DIR}:
+        if entry.name.startswith(".") or entry.name in {"cycles", "journals", CAMPAIGN_EVENTS_DIR, CAMPAIGN_RECORDS_DIR}:
             continue
         if entry.is_dir() and not entry.is_symlink():
             rows.append((entry, "readable"))

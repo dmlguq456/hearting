@@ -216,6 +216,20 @@ question screens only** (the panel's QUESTIONS, Fleet's question board). An olde
 document that still has a `## 기다리는 것` section is read without it, and the document is
 written again as the work moves, without the section.
 
+- **Record pages.** Each line of the document ends `[기록 N ›](<records/<key>.md>)`, a link to
+  the record page of that work: `campaigns/<campaign>/records/<key>.md`, where `<key>` is
+  `pr-<N>` or, with no PR, the folder name of the work's first route (letters, digits, `.`,
+  `_`, `-`; any other name gets no link). The same code writes it: first line
+  `<!-- hearting:campaign-record v1 -->`, one line per record (a route, a publish, or the
+  supervisor's `RV-…PR<N>….md` review file, found by name and not counted in `N`; a review
+  route's rounds share its one line). It writes the pages of the lines the document shows and
+  only when their text changed; it never deletes a page, and a file of that name without the
+  marker, a link or a `records` that is not a folder is left as it is and its line has no link.
+  A route that closed with a commit (`head_commit` differs from `source_commit`) but no PR
+  number is joined to its PR by git ancestry (first `Merge pull request #N` between its head
+  and `origin/HEAD`, `origin/main` or `main`; read only, no fetch); a number already known is
+  never changed. `records/` is not a cycle folder: the locator, tidy, closeout and residue
+  passes skip it as they skip `journals/`.
 - **Where.** `campaigns/<campaign-locator>/campaign.md`, directly in the campaign
   folder, made by the code above. Fleet prefers these campaign pages, reads up to three
   newest summaries on the repo page, and keeps the newest summary on OVERVIEW. A

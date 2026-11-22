@@ -1820,7 +1820,7 @@ class CampaignReads:
                 for child in self.entries(entry):
                     if not child.name.startswith(".") and child.is_dir() and not child.is_symlink():
                         yield child, "legacy-id"
-            elif entry.name != EVENTS_DIR:
+            elif entry.name not in (EVENTS_DIR, locator.CAMPAIGN_RECORDS_DIR):
                 yield entry, "readable"
 
     def inputs(self, used=None):

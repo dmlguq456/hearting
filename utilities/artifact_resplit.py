@@ -2086,6 +2086,11 @@ def _prune_empty_tree(path: Path) -> None:
             import campaign_document  # a campaign's derived document never counts as residue
             campaign_document.remove_generated(cur)
             files = [name for name in files if name != "campaign.md" or (cur / name).exists()]
+        if cur.name == "records" and files:   # a campaign's generated record pages are derived, as its document is
+            import campaign_document
+            for name in files:
+                campaign_document.remove_generated(cur, name=name, marker=campaign_document.RECORD_MARKER)
+            files = [name for name in files if (cur / name).exists()]
         if files:
             raise ResplitError("rollback-residue", str(cur))
         try:

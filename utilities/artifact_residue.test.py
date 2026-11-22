@@ -53,6 +53,8 @@ def _files(root: Path, skip=(".runtime/artifact-producer/v1/journal", ".runtime/
             continue
         if any(rel.startswith(s) for s in skip) or rel.endswith("/campaign.md"):  # a campaign's derived document
             continue
+        if rel.startswith("campaigns/") and "/records/" in rel and rel.endswith(".md"):  # and its derived record pages
+            continue
         out[rel] = _sha(path)
     return out
 

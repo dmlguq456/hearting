@@ -1233,7 +1233,7 @@ def _scan_layout(root: Path) -> _LayoutScan:
             continue
         for child in children:
             path = entry / child
-            if child.startswith(".") or child in {"journals", artifact_locator.CAMPAIGN_EVENTS_DIR}:
+            if child.startswith(".") or child in {"journals", artifact_locator.CAMPAIGN_EVENTS_DIR, artifact_locator.CAMPAIGN_RECORDS_DIR}:
                 continue
             try:
                 mode = os.lstat(str(path)).st_mode

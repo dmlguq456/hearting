@@ -357,9 +357,13 @@ class Fixture(unittest.TestCase):
     def document(self, folder=None):
         return ((folder or self.folder) / "campaign.md").read_text()
 
-    def bullets(self, text, section):
+    def raw_bullets(self, text, section):
         body = text.split("## " + section + "\n", 1)[1].split("\n## ", 1)[0]
         return [line for line in body.split("\n") if line.startswith("- ")]
+
+    def bullets(self, text, section):
+        """The lines as a person reads them: the tail `[기록 N ›](<records/…>)` shows as `기록 N`."""
+        return [re.sub(r"\[(기록 \d+) ›\]\(<[^>]*>\)", r"\1", line) for line in self.raw_bullets(text, section)]
 
 
 class GeneratorTest(Fixture):
@@ -542,7 +546,7 @@ class GeneratorTest(Fixture):
         self.meta({cycle: "alpha-1700"})  # a title equal to the slug is not a title
         with mock.patch("work_intent.route_intent", return_value={"intent": "# Fix the thing now. Then more."}):
             self.catch_up()
-        self.assertIn("- 11-20 Fix the thing now. · #1700 · 기록 1", self.document())
+        self.assertEqual(self.bullets(self.document(), "최근에 끝난 것"), ["- 11-20 Fix the thing now. · #1700 · 기록 1"])
 
     def test_the_pr_comes_from_the_report_when_the_slug_has_none(self):
         self.route("alpha-x", closed=NOW - HOUR, evidence="# done\n\nPR #1800 opened\n")
@@ -1047,6 +1051,793 @@ class NoQuestionsTest(Fixture):
         self.assertNotIn("기다리는 것", text)
         self.assertNotIn("Old question?", text)
         self.assertEqual(self.bullets(text, "최근에 끝난 것"), ["- 11-20 alpha-1700 · #1700 · 기록 1"])
+
+
+class RecordFixture(Fixture):
+    """Routes with cycle folders, reports and the other things a record page reads."""
+
+    def day(self, moment):
+        return datetime.fromtimestamp(moment).strftime("%m-%d")
+
+    def cycle_dir(self, slug):
+        return self.folder / f"2026-11-20_{slug}"
+
+    def files(self, slug, **names):
+        """Write `artifacts/<name>` files (`__` stands for `/`) into the route's cycle folder."""
+        for name, text in names.items():
+            path = self.cycle_dir(slug) / "artifacts" / name.replace("__", "/")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+
+    def bump(self, number):
+        """Something that closes after the last pass: a new route, and the clock of the next pass."""
+        self.route(f"tick-{chr(96 + number)}", closed=NOW + 1000 * number - 10)
+        return NOW + 1000 * number
+
+    def more_cycle(self, rid, slug, *, started, locator=None, state="sealed", written=None):
+        """Another cycle of the same route (a review's later round)."""
+        self.serial += 1
+        cycle_id = f"cyc_{self.serial:032x}"
+        record = {"campaign_id": self.campaign_id, "cycle_id": cycle_id, "route_id": rid, "slug": slug,
+                  "route_capability": "audit", "started_on": stamp(started), "state": state,
+                  "locator": locator or f"2026-11-20_{slug}-r{self.serial}", "title": slug}
+        path = self.runtime / "artifact-producer/v1/cycles" / f"{cycle_id}.json"
+        path.write_text(json.dumps(record))
+        os.utime(path, (written or started, written or started))
+        return cycle_id, record["locator"]
+
+    def page(self, key):
+        return (self.folder / "records" / f"{key}.md").read_text()
+
+    def page_lines(self, key):
+        return [line for line in self.page(key).split("\n") if line.startswith("- ")]
+
+    def work_and_review(self):
+        """A PR's work, its two-round review and its publish: the shape of a real page."""
+        self.route("alpha-1700", started=NOW - 9 * HOUR, closed=NOW - 8 * HOUR)
+        self.files("alpha-1700", **{"final_report.md": "# done\n"})
+        rid, _cycle = self.route("rv-1700-unit", started=NOW - 7 * HOUR, closed=NOW - 5 * HOUR, capability="audit")
+        self.files("rv-1700-unit", **{"units__unit__report.md": "# Review\n최종 판정: 수정 후 병합 — head abc1234\n"})
+        return rid
+
+
+class RecordLinkTest(RecordFixture):
+    def test_the_tail_links_to_the_page_named_by_the_pr_or_by_the_first_routes_folder(self):
+        self.route("alpha-1700", closed=NOW - HOUR)
+        self.route("solo-work", closed=NOW - 2 * HOUR)
+        self.catch_up()
+        lines = self.raw_bullets(self.document(), "최근에 끝난 것")
+        self.assertEqual(lines, ["- 11-20 alpha-1700 · #1700 · [기록 1 ›](<records/pr-1700.md>)",
+                                 "- 11-20 solo-work · [기록 1 ›](<records/2026-11-20_solo-work.md>)"])
+
+    def test_a_key_with_a_character_outside_the_set_is_no_link(self):
+        for good in ("pr-1", "2026-11-20_a.b-c"):
+            self.assertEqual(cd.record_key(None, good), good)
+        for bad in ("a b", "a/b", "..", ".hidden", "a)b", "a\n", "", None, "é", "a" * 201):
+            self.assertIsNone(cd.record_key(None, bad), bad)
+        self.assertEqual(cd.record_key(1798, "a b"), "pr-1798")
+        self.route("odd name", closed=NOW - HOUR)
+        self.catch_up()
+        self.assertEqual(self.raw_bullets(self.document(), "최근에 끝난 것"), ["- 11-20 odd name · 기록 1"])
+        self.assertFalse((self.folder / "records").exists())
+
+    def test_a_file_of_that_name_that_is_not_the_generators_is_untouched_and_not_linked(self):
+        self.route("alpha-1700", closed=NOW - HOUR)
+        self.route("beta-1701", closed=NOW - 2 * HOUR)
+        (self.folder / "records").mkdir()
+        foreign = self.folder / "records" / "pr-1700.md"
+        foreign.write_text("a person wrote this\n")
+        os.utime(foreign, (1_700_000_000, 1_700_000_000))
+        self.catch_up()
+        self.assertEqual(foreign.read_text(), "a person wrote this\n")
+        self.assertEqual(foreign.stat().st_mtime, 1_700_000_000)
+        self.assertEqual(self.raw_bullets(self.document(), "최근에 끝난 것"),
+                         ["- 11-20 alpha-1700 · #1700 · 기록 1", "- 11-20 beta-1701 · #1701 · [기록 1 ›](<records/pr-1701.md>)"])
+        self.assertTrue((self.folder / "records" / "pr-1701.md").is_file())
+
+    def test_a_page_of_the_generator_is_replaced(self):
+        self.route("alpha-1700", closed=NOW - HOUR)
+        (self.folder / "records").mkdir()
+        old = self.folder / "records" / "pr-1700.md"
+        old.write_text(cd.RECORD_MARKER + "\nold words\n")
+        self.catch_up()
+        self.assertIn(f"#1700 · {self.day(NOW - HOUR)} · 기록 1 · 파일 0개", old.read_text())
+
+    def test_a_records_that_is_a_link_is_never_written_into_and_no_line_links(self):
+        elsewhere = self.root.parent / "elsewhere"
+        elsewhere.mkdir()
+        (self.folder / "records").symlink_to(elsewhere, target_is_directory=True)
+        self.route("alpha-1700", closed=NOW - HOUR)
+        self.catch_up()
+        self.assertEqual(os.listdir(elsewhere), [])
+        self.assertNotIn("›", self.document())
+
+    def test_a_records_that_is_a_file_is_left_as_it_is_and_no_line_links(self):
+        (self.folder / "records").write_text("file")
+        self.route("alpha-1700", closed=NOW - HOUR)
+        self.catch_up()
+        self.assertEqual((self.folder / "records").read_text(), "file")
+        self.assertNotIn("›", self.document())
+
+    def test_a_pure_unit_with_no_record_draws_as_it_always_did(self):
+        unit = {"key": "rt:x", "pr": 7, "v": "v1", "title": "t", "impl": {"slug": "x"}, "count": 2,
+                "closed_at": NOW, "routes": 1, "activity": NOW}
+        drawn = cd.render_document("T", "s", {"active": [], "done": [unit]}, now=NOW, tz=UTC)
+        self.assertIn("- 11-20 t · #7 · v1 · 기록 2\n", drawn)
+        drawn = cd.render_document("T", "s", {"active": [], "done": [dict(unit, record="pr-7")]}, now=NOW, tz=UTC)
+        self.assertIn("- 11-20 t · #7 · v1 · [기록 2 ›](<records/pr-7.md>)\n", drawn)
+
+    def test_the_same_key_twice_links_only_the_first_line(self):
+        self.route("same-a", closed=NOW - HOUR)
+        self.route("same-b", closed=NOW - 2 * HOUR)
+        for path in sorted((self.runtime / "artifact-producer/v1/cycles").glob("*.json")):   # both routes name one folder
+            value = json.loads(path.read_text())
+            value["locator"] = "shared-folder"
+            path.write_text(json.dumps(value))
+        self.catch_up()
+        tails = [line.rsplit(" · ", 1)[1] for line in self.raw_bullets(self.document(), "최근에 끝난 것")]
+        self.assertEqual(sorted(tails), ["[기록 1 ›](<records/shared-folder.md>)", "기록 1"])
+
+
+class RecordPageTest(RecordFixture):
+    def test_a_page_has_the_marker_the_head_and_one_line_per_record(self):
+        self.work_and_review()
+        self.files("alpha-1700", **{"extra.md": "x"})
+        self.route("fix-pr1700", started=NOW - 4 * HOUR, closed=NOW - 3 * HOUR)
+        self.files("fix-pr1700", **{"final_report.md": "# fix\n"})
+        pub, _c = self.route("publish-v4.1.0", started=NOW - 2 * HOUR, closed=NOW - 2 * HOUR, capability="autopilot-ship",
+                             evidence="# v4.1.0 — #1700\n")
+        self.catch_up()
+        text = self.page("pr-1700")
+        lines = text.split("\n")
+        self.assertEqual(lines[0], cd.RECORD_MARKER)
+        self.assertEqual(lines[1], "# alpha-1700")
+        total = int(re.search(r"기록 (\d+)", lines[3]).group(1))
+        self.assertEqual(total, len(self.page_lines("pr-1700")))   # one line is one record
+        self.assertEqual(lines[3], f"#1700 · v4.1.0 · {self.day(NOW - 2 * HOUR)} · 기록 4 · 파일 5개")
+        kinds = [line.split(" · ")[0] for line in self.page_lines("pr-1700")]
+        self.assertEqual(kinds, ["- 구현", "- 독립 검토", "- 고침", "- 출판"])
+        self.assertTrue(text.endswith("\n"))
+        self.assertEqual(self.bullets(self.document(), "최근에 끝난 것")[0].split(" · ")[-1], "기록 4")
+
+    def test_the_head_says_doing_for_open_work_and_drops_a_missing_pr_and_version(self):
+        self.route("solo-open", started=NOW - HOUR)
+        self.catch_up()
+        lines = self.page("2026-11-20_solo-open").split("\n")
+        self.assertEqual(lines[3], "하는 중 · 기록 1 · 파일 0개")
+        self.assertEqual(self.page_lines("2026-11-20_solo-open"), [f"- 구현 · {self.day(NOW - HOUR)} · solo-open · 보고 아직 없음 · 파일 0개"])
+
+    def test_a_closed_route_with_no_report_has_no_link_and_an_open_one_says_so(self):
+        self.route("alpha-1700", closed=NOW - HOUR)
+        self.catch_up()
+        self.assertEqual(self.page_lines("pr-1700"), [f"- 구현 · {self.day(NOW - HOUR)} · alpha-1700 · 파일 0개"])
+
+    def test_the_same_input_makes_the_same_bytes_and_a_changed_page_alone_is_written(self):
+        self.work_and_review()
+        self.route("other-1701", closed=NOW - 2 * HOUR)
+        self.catch_up()
+        page, other = self.folder / "records" / "pr-1700.md", self.folder / "records" / "pr-1701.md"
+        for path in (page, other):
+            os.utime(path, (1_700_000_000, 1_700_000_000))
+        before = page.read_bytes()
+        self.catch_up(now=NOW + 600)   # a later clock changes the document's stamp, not the pages
+        self.assertEqual(page.read_bytes(), before)
+        self.assertEqual((page.stat().st_mtime, other.stat().st_mtime), (1_700_000_000, 1_700_000_000))
+        self.route("alpha-1700-again", closed=NOW + 1190)   # a new route of the PR changes its page
+        self.catch_up(now=NOW + 1200)
+        self.assertNotEqual(page.stat().st_mtime, 1_700_000_000)
+        self.assertEqual(other.stat().st_mtime, 1_700_000_000)
+
+    def test_a_page_is_made_only_for_a_line_the_document_shows_and_one_that_folded_stays(self):
+        for index in range(4):
+            self.route(f"work-{1700 + index}", closed=NOW - (index + 1) * HOUR)
+        with mock.patch.object(cd, "DONE_LINES", 3):
+            self.catch_up()
+        pages = sorted(os.listdir(self.folder / "records"))
+        self.assertEqual(pages, ["pr-1700.md", "pr-1701.md", "pr-1702.md"])   # the fourth line is folded
+        self.route("work-1704", closed=NOW + 50)
+        with mock.patch.object(cd, "DONE_LINES", 3):
+            self.catch_up(now=NOW + 60)
+        self.assertEqual(sorted(os.listdir(self.folder / "records")),
+                         ["pr-1700.md", "pr-1701.md", "pr-1702.md", "pr-1704.md"])   # none removed
+
+    def test_a_foreign_campaign_md_stops_the_pages_too(self):
+        (self.folder / "campaign.md").write_text("by hand\n")
+        self.route("alpha-1700", closed=NOW - HOUR)
+        with redirect_stderr(io.StringIO()):
+            self.catch_up()
+        self.assertFalse((self.folder / "records").exists())
+        self.assertEqual((self.folder / "campaign.md").read_text(), "by hand\n")
+
+    def test_no_line_means_no_records_folder(self):
+        self.catch_up()
+        self.route("frame-x", closed=NOW + 50, capability="route-frame")
+        self.catch_up(now=NOW + 60)
+        self.assertFalse((self.folder / "records").exists())
+
+    def test_one_page_failing_does_not_stop_the_others(self):
+        self.route("alpha-1700", closed=NOW - 2 * HOUR)
+        self.route("beta-1701", closed=NOW - HOUR)
+        real = cd._write_document
+
+        def flaky(folder, text, **kw):
+            if kw.get("name") == "pr-1700.md":
+                raise OSError("disk")
+            return real(folder, text, **kw)
+        with mock.patch.object(cd, "_write_document", side_effect=flaky):
+            self.catch_up()
+        self.assertIn("skipped error=OSError", self.err)
+        self.assertTrue((self.folder / "records" / "pr-1701.md").is_file())
+        self.assertTrue((self.folder / "campaign.md").is_file())
+
+    def test_a_campaign_folder_a_begin_made_and_nothing_filled_can_be_cleared_of_the_generators_files(self):
+        self.route("open-x", started=NOW - HOUR)
+        self.catch_up()
+        records = self.folder / "records"
+        self.assertTrue(any(records.iterdir()))
+        (records / "by-hand.md").write_text("mine")
+        cd.remove_generated_records(self.folder)
+        self.assertEqual(os.listdir(records), ["by-hand.md"])   # only the generator's pages go, and the folder stays with a file in it
+        (records / "by-hand.md").unlink()
+        cd.remove_generated_records(self.folder)
+        self.assertFalse(records.exists())   # nothing else in it: the folder goes too
+        (self.folder / "campaign.md").write_text("by hand\n")
+        cd.remove_generated(self.folder)
+        self.assertEqual((self.folder / "campaign.md").read_text(), "by hand\n")
+
+    def test_the_page_writer_has_no_way_to_remove_anything(self):
+        import inspect
+        source = inspect.getsource(cd._write_records) + inspect.getsource(cd._Pages) + inspect.getsource(cd._GitPass)
+        for word in ("unlink", "rmdir", "rmtree", "os.remove", "os.rename", "shutil"):
+            self.assertNotIn(word, source)
+
+    def test_the_markup_in_a_title_cannot_break_a_page_line_or_a_link(self):
+        self.route("alpha-1700", closed=NOW - HOUR)
+        self.meta({self.cycle_of("alpha-1700"): "A [b](c) <x> `y` *z*"})
+        self.catch_up()
+        line = self.page_lines("pr-1700")[0]
+        self.assertIn(r"A \[b\](c) \<x\> `y` \*z\*", line)
+
+    def cycle_of(self, slug):
+        for path in (self.runtime / "artifact-producer/v1/cycles").glob("*.json"):
+            value = json.loads(path.read_text())
+            if value["slug"] == slug:
+                return value["cycle_id"]
+
+
+class RecordLabelTest(unittest.TestCase):
+    def unit(self, kinds, pubs=0):
+        facts = [{"rid": f"rt-{i:04d}", "kind": kind, "slug": f"s{i}", "cy": f"cy{i}", "st": 100 + i, "c": 200 + i, "ok": True,
+                  "pr": 5, "prs": [], "v": None, "t": None, "loc": f"loc{i}"} for i, kind in enumerate(kinds)]
+        out = cd.link_units(facts, [], {}, now=NOW)
+        unit = out["done"][0]
+        unit["pubs"] = [{"rid": f"rt-p{i}", "st": 500 + i, "c": 600 + i, "v": "v1", "kind": "publish"} for i in range(pubs)]
+        unit["count"] += pubs
+        return unit
+
+    def labels(self, unit):
+        return [label for label, _kind, _member in cd.record_labels(unit)]
+
+    def test_the_first_work_is_the_build_and_the_later_ones_fix_numbered_from_two(self):
+        self.assertEqual(self.labels(self.unit(["work"])), ["구현"])
+        self.assertEqual(self.labels(self.unit(["work", "work"])), ["구현", "고침"])
+        self.assertEqual(self.labels(self.unit(["work", "work", "work", "work"])), ["구현", "고침 1", "고침 2", "고침 3"])
+
+    def test_the_first_review_is_independent_and_the_later_ones_confirm_numbered_from_two(self):
+        self.assertEqual(self.labels(self.unit(["work", "review"])), ["구현", "독립 검토"])
+        self.assertEqual(self.labels(self.unit(["work", "review", "review"])), ["구현", "독립 검토", "닫힘 확인"])
+        self.assertEqual(self.labels(self.unit(["review", "review", "review"])), ["독립 검토", "닫힘 확인 1", "닫힘 확인 2"])
+
+    def test_lines_follow_the_start_then_the_route_id_and_a_publish_is_a_line(self):
+        unit = self.unit(["work", "review", "work"], pubs=1)
+        self.assertEqual(self.labels(unit), ["구현", "독립 검토", "고침", "출판"])
+        self.assertEqual(len(cd.record_labels(unit)), unit["count"])
+        tied = self.unit(["work", "work"])
+        for member in tied["closed"]:
+            member["st"] = 100
+        tied["closed"].sort(key=lambda m: m["rid"], reverse=True)
+        self.assertEqual([m["rid"] for _l, _k, m in cd.record_labels(tied)], ["rt-0000", "rt-0001"])
+
+    def test_a_piece_with_no_pr_has_its_first_route_as_the_build(self):
+        facts = [{"rid": "rt-1", "kind": "work", "slug": "s", "cy": "c", "st": 1, "c": 2, "ok": True, "pr": None, "prs": [],
+                  "v": None, "t": None, "loc": "l"}]
+        unit = cd.link_units(facts, [], {}, now=NOW)["done"][0]
+        self.assertEqual(self.labels(unit), ["구현"])
+
+
+class RecordRoundTest(RecordFixture):
+    def review_with_rounds(self, rounds=3, *, verdicts=None, closed=True):
+        self.route("alpha-1700", started=NOW - 9 * HOUR, closed=NOW - 8 * HOUR)
+        rid, _cycle = self.route("rv-1700-unit", started=NOW - 3 * HOUR, closed=(NOW - HOUR) if closed else None,
+                                 capability="audit")
+        locators = [f"2026-11-20_rv-1700-unit"]
+        for index in range(1, rounds):
+            _cy, loc = self.more_cycle(rid, "rv-1700-unit", started=NOW - 3 * HOUR + index * 600)
+            locators.append(loc)
+        verdicts = verdicts or ["수정 후 병합", "수정 후 병합", "병합 가능"]
+        for index, loc in enumerate(locators):
+            path = self.folder / loc / "artifacts" / "units" / "unit" / "report.md"
+            path.parent.mkdir(parents=True)
+            if index < len(verdicts) and verdicts[index]:
+                path.write_text(f"# r\n최종 판정: {verdicts[index]}\n")
+            else:
+                path.write_text("# r\n")
+        return rid, locators
+
+    def review_line(self):
+        return next(line for line in self.page_lines("pr-1700") if line.startswith("- 독립 검토"))
+
+    def test_the_cycles_of_one_review_route_are_its_rounds_on_one_line(self):
+        _rid, locators = self.review_with_rounds()
+        self.catch_up()
+        line = self.review_line()
+        self.assertEqual(len(self.page_lines("pr-1700")), 2)
+        self.assertEqual(self.bullets(self.document(), "최근에 끝난 것")[0].split(" · ")[-1], "기록 2")
+        self.assertIn("[1라운드 \"수정 후 병합\"]", line)
+        self.assertIn("[2라운드 \"수정 후 병합\"]", line)
+        self.assertIn("[3라운드 \"병합 가능\"]", line)
+        self.assertTrue(line.endswith("파일 3개"))
+        self.assertIn("(<../" + locators[0] + "/artifacts/units/unit/report.md>)", line)
+
+    def test_one_cycle_is_a_verdict_link_and_no_verdict_is_a_plain_report_link(self):
+        self.route("rv-1700-unit", closed=NOW - HOUR, capability="audit")
+        self.files("rv-1700-unit", **{"units__unit__report.md": "# r\n최종 판정: **병합 가능** — head abc123\n"})
+        self.catch_up()
+        self.assertEqual(self.page_lines("pr-1700"), [
+            f'- 독립 검토 · {self.day(NOW - HOUR)} · ["병합 가능"](<../2026-11-20_rv-1700-unit/artifacts/units/unit/report.md>) · 파일 1개'])
+        self.files("rv-1700-unit", **{"units__unit__report.md": "# r\nno verdict here\n"})
+        self.cache_reset()
+        self.catch_up(now=NOW + 5)
+        self.assertIn("· [보고](<../2026-11-20_rv-1700-unit/artifacts/units/unit/report.md>) ·", self.page_lines("pr-1700")[0])
+
+    def cache_reset(self):
+        for path in (self.runtime / "campaign-document").glob("camp_*.json"):
+            path.unlink()
+        (self.runtime / "campaign-document" / "watermark.json").write_text('{"v": 1, "ns": 1}')
+
+    def test_the_verdict_is_read_from_the_first_eight_lines_only_and_loses_the_head_tail(self):
+        self.assertEqual(cd.verdict_of("# a\n최종 판정: 병합 가능 — head abc\n"), "병합 가능")
+        self.assertEqual(cd.verdict_of("# a\n최종 판정 : `수정 후 병합` – head 12ab\n"), "수정 후 병합")
+        self.assertEqual(cd.verdict_of("\n" * 8 + "최종 판정: 늦음\n"), None)
+        self.assertEqual(cd.verdict_of("최종 판정: " + "가" * 100).__len__(), cd.VERDICT_CHARS)
+        self.assertIsNone(cd.verdict_of("no verdict\n"))
+
+    def test_an_open_last_round_with_no_report_says_so_and_an_earlier_round_with_none_is_plain(self):
+        rid, locators = self.review_with_rounds(verdicts=["수정 후 병합", None, None], closed=False)
+        import shutil
+        shutil.rmtree(self.folder / locators[2] / "artifacts")
+        (self.folder / locators[1] / "artifacts" / "units" / "unit" / "report.md").unlink()
+        self.catch_up()
+        line = self.review_line()
+        self.assertIn("[1라운드 \"수정 후 병합\"]", line)
+        self.assertIn(" · 2라운드 · ", line)
+        self.assertIn(" · 3라운드 보고 아직 없음 · ", line)
+
+    def test_a_cache_saved_before_rounds_were_kept_gets_them_once(self):
+        rid, locators = self.review_with_rounds()
+        self.catch_up()
+        cache_path = next((self.runtime / "campaign-document").glob("camp_*.json"))
+        saved = json.loads(cache_path.read_text())
+        self.assertTrue(saved.get("rounds"))
+        for member in saved["members"].values():
+            member.pop("cycles", None)
+        saved.pop("rounds")
+        cache_path.write_text(json.dumps(saved))
+        page = self.folder / "records" / "pr-1700.md"
+        page.unlink()
+        now = self.bump(1)   # something moved, so the campaign is drawn again
+        self.catch_up(now=now)
+        self.assertIn("[3라운드", page.read_text())
+        saved = json.loads(cache_path.read_text())
+        self.assertTrue(saved["rounds"])
+        with mock.patch.object(cd.store, "list_cycle_records", wraps=cd.store.list_cycle_records) as spy:
+            self.catch_up(now=self.bump(2))
+        self.assertEqual(spy.call_count, 0)   # the saved list is whole now: no record is listed again
+
+    def test_a_new_cycle_joins_the_route_and_the_cycle_a_line_stands_on_stays(self):
+        rid, locators = self.review_with_rounds(rounds=2, verdicts=["수정 후 병합", "병합 가능"])
+        self.catch_up()
+        cache_path = next((self.runtime / "campaign-document").glob("camp_*.json"))
+        before = json.loads(cache_path.read_text())["members"][rid]["cy"]
+        _cy, loc = self.more_cycle(rid, "rv-1700-unit", started=NOW - 3 * HOUR - 30, state="draft", written=NOW + 30)   # older and not sealed
+        path = self.folder / loc / "artifacts" / "units" / "unit" / "report.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("# r\n최종 판정: 병합 불가\n")
+        self.catch_up(now=NOW + 60)
+        member = json.loads(cache_path.read_text())["members"][rid]
+        self.assertEqual(len(member["cycles"]), 3)
+        self.assertEqual(member["cy"], before)
+        self.assertIn("[1라운드 \"병합 불가\"]", self.review_line())
+
+
+class RecordReportTest(RecordFixture):
+    def test_the_evidence_wins_then_the_final_report_then_a_unit_report_then_nothing(self):
+        self.route("a-1701", closed=NOW - HOUR, evidence="# evidence\n")
+        self.files("a-1701", **{"final_report.md": "f", "units__u__report.md": "u"})
+        self.route("b-1702", closed=NOW - 2 * HOUR)
+        self.files("b-1702", **{"final_report.md": "f", "units__u__report.md": "u"})
+        self.route("c-1703", closed=NOW - 3 * HOUR)
+        self.files("c-1703", **{"units__b__report.md": "u", "units__a__report.md": "u"})
+        self.route("d-1704", closed=NOW - 4 * HOUR)
+        self.files("d-1704", **{"note.md": "n"})
+        self.catch_up()
+        self.assertRegex(self.page_lines("pr-1701")[0], r"\[보고\]\(<\.\./\.\./\.\./reports/rt-\w+\.md>\)")
+        self.assertIn("(<../2026-11-20_b-1702/artifacts/final_report.md>)", self.page_lines("pr-1702")[0])
+        self.assertIn("(<../2026-11-20_c-1703/artifacts/units/a/report.md>)", self.page_lines("pr-1703")[0])
+        self.assertNotIn("](<", self.page_lines("pr-1704")[0])
+        self.assertNotIn("보고 아직 없음", self.page_lines("pr-1704")[0])
+
+    def test_a_link_stands_only_on_a_regular_file_inside_the_root(self):
+        outside = self.root.parent / "outside.md"
+        outside.write_text("out")
+        self.route("a-1701", closed=NOW - HOUR)
+        self.route("b-1702", closed=NOW - 2 * HOUR)
+        self.files("a-1701", **{"x.md": "x"})
+        (self.cycle_dir("a-1701") / "artifacts" / "final_report.md").symlink_to(outside)   # a link to a file outside
+        (self.cycle_dir("b-1702") / "artifacts").mkdir(parents=True)
+        (self.cycle_dir("b-1702") / "artifacts" / "final_report.md").mkdir()   # a folder with the name
+        self.catch_up()
+        for key in ("pr-1701", "pr-1702"):
+            self.assertNotIn("](<", self.page_lines(key)[0])
+        self.assertNotIn("outside", self.page("pr-1701"))
+
+    def test_the_path_is_relative_to_the_page_folder(self):
+        self.route("a-1701", closed=NOW - HOUR)
+        self.files("a-1701", **{"final_report.md": "f"})
+        self.catch_up()
+        self.assertIn("[보고](<../2026-11-20_a-1701/artifacts/final_report.md>)", self.page("pr-1701"))
+        target = (self.folder / "records" / "../2026-11-20_a-1701/artifacts/final_report.md").resolve()
+        self.assertTrue(target.is_file())
+
+    def test_a_target_with_a_character_a_link_cannot_carry_is_left_unlinked(self):
+        self.assertEqual(cd._link("보고", "a>b"), "보고")
+        self.assertEqual(cd._link("보고", "a\nb"), "보고")
+        self.assertEqual(cd._link("보고", "a b/c.md"), "[보고](<a b/c.md>)")
+
+    def test_the_files_of_a_closed_cycle_are_counted_once_and_an_open_one_every_pass(self):
+        self.route("a-1701", closed=NOW - HOUR)
+        self.files("a-1701", **{"one.md": "1", "sub__two.md": "2"})
+        (self.cycle_dir("a-1701") / "artifacts" / "link.md").symlink_to(self.cycle_dir("a-1701") / "artifacts" / "one.md")
+        self.route("open-1702", started=NOW - HOUR)
+        self.files("open-1702", **{"one.md": "1"})
+        with mock.patch.object(cd, "_count_files", wraps=cd._count_files) as spy:
+            self.catch_up()
+            first = spy.call_count
+            self.route("c-1703", closed=NOW + 50)
+            self.files("c-1703", **{"one.md": "1"})
+            self.catch_up(now=NOW + 60)
+        self.assertEqual(self.page_lines("pr-1701")[0].rsplit(" · ", 1)[1], "파일 2개")   # a link is not a file
+        self.assertEqual(first, 2)
+        self.assertEqual(spy.call_count - first, 2)   # the open route and the new one; the closed one is not counted again
+
+
+class RecordSupervisorTest(RecordFixture):
+    def inputs(self, **names):
+        folder = self.root / "research" / self.folder.name / "inputs"
+        folder.mkdir(parents=True, exist_ok=True)
+        for name, text in names.items():
+            (folder / name).write_text(text)
+        return folder
+
+    def test_the_names_that_carry_the_pr_with_no_digit_beside_it(self):
+        names = ["RV-PR1798-1119.md", "RV-PR17980-1.md", "RV-XPR1798.md", "RV-CLOSE-PR1798-R3.md", "RV-PR1798.txt",
+                 "CP-PR1798.md", "RV-PR179.md", "RV-1798.md"]
+        self.assertEqual(cd.supervisor_names(names, 1798), ["RV-CLOSE-PR1798-R3.md", "RV-PR1798-1119.md"])
+        self.assertEqual(cd.supervisor_names(names, None), [])
+
+    def test_the_supervisors_records_are_lines_of_the_page_but_not_in_the_count(self):
+        self.route("alpha-1798", closed=NOW - HOUR)
+        self.route("beta-1799", closed=NOW - 2 * HOUR)
+        self.inputs(**{"RV-PR1798-1119.md": "# a\n최종 판정: 병합 가능\n", "RV-CLOSE-PR1798-R3.md": "# b\n", "RV-PR1799.md": "x"})
+        self.catch_up()
+        lines = self.page_lines("pr-1798")
+        self.assertEqual(lines[1:], [
+            '- 감독의 검토 기록 · [RV-CLOSE-PR1798-R3.md](<../../../research/2026-11-01_demo/inputs/RV-CLOSE-PR1798-R3.md>)',
+            '- 감독의 검토 기록 · "병합 가능" · [RV-PR1798-1119.md](<../../../research/2026-11-01_demo/inputs/RV-PR1798-1119.md>)'])
+        self.assertIn("기록 1 · 파일 2개", self.page("pr-1798"))   # the lines are files of the page, not records
+        self.assertEqual(self.bullets(self.document(), "최근에 끝난 것")[0].split(" · ")[-1], "기록 1")
+
+    def test_no_folder_is_no_line_and_a_piece_with_no_pr_has_none(self):
+        self.route("alpha-1798", closed=NOW - HOUR)
+        self.route("solo", closed=NOW - 2 * HOUR)
+        self.catch_up()
+        self.assertEqual(len(self.page_lines("pr-1798")), 1)
+        self.inputs(**{"RV-PR1798.md": "x"})
+        self.catch_up(now=NOW + 5)
+        self.assertEqual(len(self.page_lines("pr-1798")), 1)   # nothing moved: the pages are as they were
+        self.route("zzz-1798b", closed=NOW + 50)
+        self.catch_up(now=NOW + 60)
+        self.assertEqual(len(self.page_lines("pr-1798")), 2)
+        self.assertEqual(len(self.page_lines("2026-11-20_solo")), 1)
+
+    def test_the_folder_is_listed_once_per_campaign_pass(self):
+        self.inputs(**{"RV-PR1798.md": "x"})
+        for number in (1798, 1799, 1800):
+            self.route(f"w-{number}", closed=NOW - number)
+        with mock.patch.object(cd, "_supervisor_listing", wraps=cd._supervisor_listing) as spy:
+            self.catch_up()
+        self.assertEqual(spy.call_count, 1)
+
+
+import subprocess  # noqa: E402
+
+
+class GitFixture(RecordFixture):
+    GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]
+
+    def setUp(self):
+        super().setUp()
+        self.env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+                    "GIT_AUTHOR_DATE": "2026-11-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-11-01T00:00:00Z"}
+        self.repo = self.root.parent / "repo"
+        self.repo.mkdir()
+        self.git("init", "-q", "-b", "main")
+        self.commit("start")
+        self.start = self.rev("HEAD")
+
+    def git(self, *args, repo=None):
+        done = subprocess.run([*self.GIT, "-C", str(repo or self.repo), *args], capture_output=True, text=True, env=self.env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout.strip()
+
+    def commit(self, name):
+        (self.repo / name).write_text(name)
+        self.git("add", name)
+        self.git("commit", "-q", "-m", name)
+
+    def rev(self, ref):
+        return self.git("rev-parse", ref)
+
+    def branch_commit(self, branch, name):
+        """A commit on `branch` (made from `main`'s tip when new); returns its hash."""
+        if branch in self.git("branch", "--list", branch):
+            self.git("checkout", "-q", branch)
+        else:
+            self.git("checkout", "-q", "-b", branch, "main")
+        self.commit(name)
+        head = self.rev("HEAD")
+        self.git("checkout", "-q", "main")
+        return head
+
+    def merge(self, branch, subject):
+        self.git("merge", "--no-ff", "-q", "-m", subject, branch)
+
+    def closed_work(self, slug, head, *, source=None, repo="same", closed=None, **kw):
+        rid, cycle = self.route(slug, closed=closed or NOW - HOUR, **kw)
+        self.link_commits(rid, head, source if source is not None else self.start, repo)
+        return rid, cycle
+
+    def link_commits(self, rid, head, source, repo="same"):
+        path = self.runtime / "routes" / f"{rid}.json"
+        route = json.loads(path.read_text())
+        route["source_commit"] = source
+        route["source_repository"] = {"worktree": {"path": str(self.repo if repo == "same" else repo)}}
+        path.write_text(json.dumps(route))
+        out = self.runtime / "routes" / f"{rid}.outcome.json"
+        value = json.loads(out.read_text())
+        value["head_commit"] = head
+        mtime = out.stat().st_mtime
+        out.write_text(json.dumps(value))
+        os.utime(out, (mtime, mtime))
+
+    def recorded(self):
+        """The git subcommands one pass runs."""
+        calls = []
+        real = subprocess.run
+
+        def spy(args, *a, **kw):
+            calls.append(args)
+            return real(args, *a, **kw)
+        return calls, mock.patch.object(cd.subprocess, "run", side_effect=spy)
+
+    def cache(self):
+        return json.loads(next((self.runtime / "campaign-document").glob("camp_*.json")).read_text())
+
+    def lines(self):
+        return self.bullets(self.document(), "최근에 끝난 것")
+
+
+class GitLinkTest(GitFixture):
+    def test_a_route_that_closed_before_its_pr_is_joined_to_it_and_the_first_build_names_the_line(self):
+        head = self.branch_commit("feature", "impl")
+        self.closed_work("build-it", head, started=NOW - 9 * HOUR, closed=NOW - 8 * HOUR)
+        self.branch_commit("feature", "fix")
+        self.merge("feature", "Merge pull request #1777 from owner/feature")
+        self.route("fix-pr1777", started=NOW - 5 * HOUR, closed=NOW - 4 * HOUR)
+        self.catch_up()
+        self.assertEqual(self.lines(), ["- 11-20 build-it · #1777 · 기록 2"])
+        self.assertEqual(self.cache()["git"][next(iter(self.cache()["git"]))]["pr"], 1777)
+        self.assertEqual(self.page_lines("pr-1777")[0].split(" · ")[0:1], ["- 구현"])
+        self.assertEqual(len(self.page_lines("pr-1777")), 2)
+
+    def test_the_first_pull_request_merge_is_taken_and_other_merges_are_skipped(self):
+        head = self.branch_commit("feature", "impl")
+        self.closed_work("build-it", head)
+        self.git("checkout", "-q", "feature")
+        self.merge("main", "Merge branch 'main' into feature")
+        self.git("checkout", "-q", "-q", "main")
+        self.commit("main-moves")
+        self.git("checkout", "-q", "feature")
+        self.git("merge", "--no-ff", "-q", "-m", "Merge remote-tracking branch 'origin/main' into feature", "main")
+        self.git("checkout", "-q", "main")
+        self.merge("feature", "Merge pull request #1778")   # a subject with nothing after the number
+        self.catch_up()
+        self.assertEqual(self.lines(), ["- 11-20 build-it · #1778 · 기록 1"])
+
+    def test_pr_from_merges_reads_only_pull_request_merges(self):
+        log = "a\tMerge branch 'x' into y\nb\tMerge remote-tracking branch 'o/m'\nc\tMerge pull request #12 from a/b\nd\tMerge pull request #13 from a/c"
+        self.assertEqual(cd.pr_from_merges(log), 12)
+        self.assertIsNone(cd.pr_from_merges("a\tMerge pull request #x\nb\tMerge branch #5"))
+        self.assertIsNone(cd.pr_from_merges(""))
+
+    def test_a_route_not_merged_yet_is_not_joined_and_is_not_asked_again_until_the_base_moves(self):
+        head = self.branch_commit("feature", "impl")
+        rid, _c = self.closed_work("build-it", head)
+        self.catch_up()
+        self.assertEqual(self.lines(), ["- 11-20 build-it · 기록 1"])
+        entry = self.cache()["git"][rid]
+        self.assertEqual((entry["pr"], entry["base"]), (None, self.rev("main")))
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up(now=self.bump(1))
+        self.assertTrue(calls)   # the base is looked up
+        self.assertEqual([c for c in calls if "log" in c], [])   # the base is the same: no `git log`
+        self.commit("main-moves")
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up(now=self.bump(2))
+        self.assertEqual(len([c for c in calls if "log" in c]), 1)   # the base moved: asked again, still not merged
+        self.merge("feature", "Merge pull request #1779 from o/feature")
+        self.catch_up(now=self.bump(3))
+        self.assertIn("- 11-20 build-it · #1779 · 기록 1", self.lines())
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up(now=self.bump(4))
+        self.assertEqual([c for c in calls if "log" in c], [])   # a found number is for good
+        self.assertEqual(self.cache()["git"][rid]["pr"], 1779)
+
+    def test_a_route_that_made_no_commit_is_not_asked(self):
+        self.branch_commit("feature", "impl")
+        self.merge("feature", "Merge pull request #1777 from o/feature")
+        self.closed_work("design-it", self.start, source=self.start)
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up()
+        self.assertEqual(calls, [])
+        self.assertEqual(self.lines(), ["- 11-20 design-it · 기록 1"])
+
+    def test_a_number_the_route_already_has_is_never_changed_and_never_asked(self):
+        head = self.branch_commit("feature", "impl")
+        self.merge("feature", "Merge pull request #1777 from o/feature")
+        self.closed_work("build-pr1700", head)
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up()
+        self.assertEqual(calls, [])
+        self.assertEqual(self.lines(), ["- 11-20 build-pr1700 · #1700 · 기록 1"])
+
+    def test_only_a_few_are_asked_in_a_pass_newest_first_and_the_next_pass_asks_the_rest(self):
+        heads = []
+        for index in range(4):
+            head = self.branch_commit(f"f{index}", f"impl{index}")
+            heads.append(head)
+            self.merge(f"f{index}", f"Merge pull request #{1780 + index} from o/f{index}")
+        for index, head in enumerate(heads):
+            self.closed_work(f"w{index}-x", head, closed=NOW - (index + 1) * HOUR)
+        with mock.patch.object(cd, "GIT_BUDGET", 2):
+            self.catch_up()
+        joined = [line for line in self.lines() if "#178" in line]
+        self.assertEqual(sorted(re.search(r"#(\d+)", line).group(1) for line in joined), ["1780", "1781"])   # the two newest closes
+        with mock.patch.object(cd, "GIT_BUDGET", 2):
+            self.catch_up(now=self.bump(1))
+        self.assertEqual(len([line for line in self.lines() if "#178" in line]), 4)
+
+    def test_a_working_tree_that_is_gone_is_asked_in_the_repository_that_holds_the_root(self):
+        head = self.branch_commit("feature", "impl")
+        self.merge("feature", "Merge pull request #1779 from o/feature")
+        outer = self.root.parent   # a repository around the artifact root, holding the same history
+        self.git("init", "-q", "-b", "other", repo=outer)
+        self.git("fetch", "-q", str(self.repo), "main:main", repo=outer)
+        rid, _c = self.closed_work("build-it", head, repo=str(outer / "gone-worktree"))
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up()
+        self.assertTrue(calls)
+        self.assertTrue(all(c[3] == str(self.root) for c in calls))
+        self.assertEqual(self.cache()["git"][rid]["pr"], 1779)
+
+    def test_git_missing_or_not_a_repository_leaves_the_document_as_it_was(self):
+        head = "a" * 40
+        rid, _c = self.closed_work("build-it", head)
+        with mock.patch.object(cd.subprocess, "run", side_effect=FileNotFoundError("git")):
+            self.catch_up()
+        self.assertEqual(self.lines(), ["- 11-20 build-it · 기록 1"])
+        self.assertIsNone(self.cache()["git"][rid]["base"])
+        shutil = __import__("shutil")
+        shutil.rmtree(self.repo / ".git")
+        self.catch_up(now=self.bump(1))
+        self.assertIn("- 11-20 build-it · 기록 1", self.lines())
+
+    def test_a_timeout_is_not_remembered_and_the_next_pass_asks_again(self):
+        head = self.branch_commit("feature", "impl")
+        rid, _c = self.closed_work("build-it", head)
+        real = cd.subprocess.run
+
+        def slow(args, *a, **kw):
+            if "log" in args:
+                raise subprocess.TimeoutExpired(args, 5)
+            return real(args, *a, **kw)
+        with mock.patch.object(cd.subprocess, "run", side_effect=slow):
+            self.catch_up()
+        self.assertIsNone(self.cache()["git"][rid]["base"])
+        self.merge("feature", "Merge pull request #1779 from o/feature")
+        self.catch_up(now=self.bump(1))
+        self.assertIn("- 11-20 build-it · #1779 · 기록 1", self.lines())
+
+    def test_a_commit_git_does_not_know_is_remembered_like_a_route_not_merged(self):
+        rid, _c = self.closed_work("build-it", "b" * 40)
+        self.catch_up()
+        self.assertEqual(self.cache()["git"][rid]["base"], self.rev("main"))
+        self.assertEqual(self.lines(), ["- 11-20 build-it · 기록 1"])
+
+    def test_only_rev_parse_and_log_are_run_nothing_is_fetched_and_no_lock_is_left(self):
+        head = self.branch_commit("feature", "impl")
+        self.closed_work("build-it", head)
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up()
+        self.assertTrue(calls)
+        self.assertEqual({c[4] for c in calls}, {"rev-parse", "log"})
+        self.assertTrue(all(c[:3] == ["git", "--no-pager", "-C"] for c in calls))
+        self.assertEqual(list((self.repo / ".git").glob("*.lock")), [])
+
+    def test_the_environment_git_runs_in_is_clean_and_read_only(self):
+        seen = {}
+
+        def look(args, *a, **kw):
+            seen.update(kw["env"])
+            raise FileNotFoundError("git")
+        with mock.patch.dict(os.environ, {"GIT_DIR": "/nowhere", "GIT_WORK_TREE": "/nowhere", "GIT_INDEX_FILE": "/nowhere"}):
+            with mock.patch.object(cd.subprocess, "run", side_effect=look):
+                cd._GitPass().base(str(self.repo))
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+            self.assertNotIn(name, seen)
+        self.assertEqual((seen["GIT_OPTIONAL_LOCKS"], seen["GIT_NO_LAZY_FETCH"], seen["GIT_TERMINAL_PROMPT"]), ("0", "1", "0"))
+
+    def test_the_base_is_the_first_of_origin_head_origin_main_main_that_resolves_once_per_repository(self):
+        self.git("update-ref", "refs/remotes/origin/main", self.start)
+        self.commit("main-moves")
+        git = cd._GitPass()
+        self.assertEqual(git.base(str(self.repo)), self.start)   # origin/main wins over main
+        calls = git.calls
+        git.base(str(self.repo))
+        self.assertEqual(git.calls, calls)
+
+
+class RecordReadersTest(RecordFixture):
+    def test_the_readers_show_the_tail_as_words_and_never_the_link(self):
+        from tools.fleet import session_status
+        from tools.fleet.explorer import transcript
+        self.route("alpha-1700", closed=NOW - HOUR)
+        self.route("open-x", started=NOW - HOUR)
+        self.catch_up()
+        text = self.document()
+        self.assertIn("[기록 1 ›](<records/pr-1700.md>)", text)
+        lines = text.split("\n")
+        parsed = session_status.parse_listing(lines)
+        shown = [item for group in parsed["groups"] for item in group["items"]]
+        self.assertTrue(shown)
+        for item in shown:
+            self.assertIn("기록 1 ›", item)
+            for hidden in ("records/", "](", "[기록", "<"):
+                self.assertNotIn(hidden, item)
+        rows = " ".join("".join(text for text, _key in row) for row in transcript.doc_rows(lines, 100))
+        self.assertIn("기록 1 ›", rows)
+        for hidden in ("records/", "](", "[기록"):
+            self.assertNotIn(hidden, rows)
+        plain = project_status._plain("- t · [기록 1 ›](<records/pr-1700.md>)")
+        self.assertIn("기록 1 ›", plain)
+        self.assertNotIn("records/", plain)
 
 
 if __name__ == "__main__":
