@@ -53,6 +53,14 @@ const styleOf=p=>JSON.stringify([p.foreground??null,!!p.dim,!!p.bold,p.backgroun
 const runs=row=>{const all=[];for(const p of row)for(const c of [...p.text])all.push([c,styleOf(p)]);
  const inner=all.slice(2,-2),out=[];for(const [c,s] of inner){const last=out.at(-1);if(last&&last[1]===s)last[0]+=c;else out.push([c,s]);}return out;};
 const strip=m=>{const {lab,sessions,memory_items,messages,wait,answerable,...rest}=m;return {...rest,messages:[]};};
+// 11-22: the box's top line ends in `›` at its right end (`╭─ 2 ROUTE ───── ›─╮`, after a hidden count where there is one); the golden's has none. The comparison is made
+// with that mark taken out: its cells go back to the line (with a hidden count: the cell the mark took from the line).
+const unarrow=row=>{const cs=[];for(const [t,s] of row)for(const c of t)cs.push([c,s]);
+ const at=cs.findIndex(([c])=>c==='›');if(at<0)return row;
+ const line=cs.find(([c])=>c==='─')[1];
+ if(cs[at-2]&&cs[at-2][0]==='─'){cs[at-1]=['─',line];cs[at]=['─',line];}
+ else{cs.splice(at,1);const rule=cs.findIndex(([c],i)=>c==='─'&&i>3);cs.splice(rule,0,['─',line]);}
+ const out=[];for(const [c,s] of cs){const last=out.at(-1);if(last&&last[1]===s)last[0]+=c;else out.push([c,s]);}return out;};
 let n=0,same=0,folded=0,soloSame=0,soloFolded=0,noTool=0;
 for(const c of golden.cases){
  const scene=c.alone?strip(golden.scenes[c.scene]):golden.scenes[c.scene];
@@ -108,7 +116,7 @@ for(const c of golden.cases){
   const rowsText=v.rows.slice(b.a,b.b+1).map(txt).join('\n');
   assert(!rowsText.includes('>_'),label+'\n'+rowsText);noTool++;
  }else if(!drawn){
-  const own=unzone(blankTime(v.rows.slice(b.a,b.b+1).map(runs)),hits),got=sessions(own.rows,own.hits),exp=sessions(want,c.hits);
+  const own=unzone(blankTime(v.rows.slice(b.a,b.b+1).map(runs).map((r,i)=>i?r:unarrow(r))),hits),got=sessions(own.rows,own.hits),exp=sessions(want,c.hits);
   // A box with no requests folds its routes one step sooner as well where the zone's rule row now takes one of its rows (the
   // rule stays while a row of its zone shows): then it draws fewer rows than the golden and the golden's rows no longer apply.
   if(got.rows.length<exp.rows.length&&c.side&&c.height<=16)soloFolded++;
@@ -117,7 +125,7 @@ for(const c of golden.cases){
    assert.deepEqual(got.hits,exp.hits,label);soloSame++;
   }
  }else{
-  const own0=unzone(blankTime(v.rows.slice(b.a,b.b+1).map(runs).map(r=>r.map(([t,s])=>[t,s]))),hits),own=sessions(own0.rows,own0.hits),oldSide=sessions(want,c.hits),got=mine(own.rows,own.hits),exp=mine(oldSide.rows,oldSide.hits);
+  const own0=unzone(blankTime(v.rows.slice(b.a,b.b+1).map(runs).map((r,i)=>i?r:unarrow(r)).map(r=>r.map(([t,s])=>[t,s]))),hits),own=sessions(own0.rows,own0.hits),oldSide=sessions(want,c.hits),got=mine(own.rows,own.hits),exp=mine(oldSide.rows,oldSide.hits);
   // The requests now take more rows than the one row v4.36.4 gave each, so a short box folds its routes one step
   // sooner: where it still draws the routes in the same form, they are v4.36.4's rows cell for cell (and their
   // press cells); where it folds them, the golden's rows no longer apply (the fold's own tests are below).
@@ -191,7 +199,7 @@ context.set({top:4,bottom:12,offset:0,max:0,step:3},0);context.mouse(65,93+1+10,
 const many={...golden.scenes.na,routes:Array.from({length:6},(_,i)=>({...golden.scenes.na.routes[1],id:'rt-'+String(i).repeat(16),title:'route '+i})),route_count:6,route_total:6};
 const at=s=>pv.render({width:40,height:18,side:true,fill:true,model:many,state:'working',configuration:{},routeScroll:s});
 const top=at(0),down=at(2);assert(top.routeArea&&top.routeArea.max>0,JSON.stringify(top.routeArea));
-assert.notDeepEqual(top.rows.map(txt),down.rows.map(txt));assert(down.rows.map(txt).some(s=>/ ↑2 ─╮/.test(s)),down.rows.map(txt).join('\n'));
+assert.notDeepEqual(top.rows.map(txt),down.rows.map(txt));assert(down.rows.map(txt).some(s=>/ ↑2 ›─╮/.test(s)),down.rows.map(txt).join('\n'));
 assert.equal(down.routeArea.offset,2);
 """)
 
@@ -215,8 +223,9 @@ for(const [side,width,height] of [[true,40,60],[true,32,46],[false,120,20]]){
  assert(inBox.length===2&&outside.length===0,label);
  const m=rows.findIndex(s=>/^│ (MESSAGES|messages)/.test(s));
  // MESSAGES: the three messages, two rows each (head, body), no `+N` for the requests.
- assert(m>b.b&&/^│ (MESSAGES|messages) ─+ › │$/.test(rows[m]),label);
- assert.deepEqual([1,3,5].map(i=>rows[m+i].slice(2,8)),['← [e7]','→ [52]','← [e1]'],label);
+ assert(m>b.b&&/^│ (MESSAGES +|messages ─+ )› │$/.test(rows[m]),label);
+ const ind=/^│ MESSAGES/.test(rows[m])?1:0;   // 11-22: beside the native area an item stands one cell in
+ assert.deepEqual([1,3,5].map(i=>rows[m+i].slice(2+ind,8+ind)),['← [e7]','→ [52]','← [e1]'],label);
 }
 const body=pv.messagesBody({model:scene,columns:72}).map(txt);
 const first=body.findIndex(s=>s.includes('검토 요청: 팝업 바탕')),msg=body.findIndex(s=>s.includes('[e1]'));

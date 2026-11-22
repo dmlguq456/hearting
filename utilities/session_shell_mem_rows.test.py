@@ -49,10 +49,10 @@ const brief=()=>({count:1,answerable:true,choices:2,label:'QUESTIONS',rows:[[t('
 const draw=(o={})=>view.render({width:o.width??50,height:o.height??60,side:true,model:model(o),state:'working',harness:'claude',frame:1000,since:990,brief,sent:()=>[],
   cellWidth:cells,configuration:{side_width:50,rule_motion:'rule',...(o.cfg||{})}});
 const lines=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
-const mem=v=>{const ls=lines(v),i=ls.findIndex(s=>/^│ MEM ─+ (› )?│$/.test(s));if(i<0)return null;const rows=[];
-  for(let k=i+1;k<ls.length&&/^│ [◆◇·] /.test(ls[k]);k++)rows.push(ls[k]);return {at:i,head:ls[i],rows};};
-const msgs=v=>{const ls=lines(v),a=ls.findIndex(s=>s.startsWith('│ MESSAGES')),b=ls.findIndex(s=>/^│ MEM ─/.test(s));
-  const rows=a<0?[]:ls.slice(a+1,b<0?ls.length-3:b);return {count:rows.filter(s=>/^│ [←→] /.test(s)).length,two:rows.some(s=>/^│   \S/.test(s))};};
+const mem=v=>{const ls=lines(v),i=ls.findIndex(s=>/^│ MEM +(› )?│$/.test(s));if(i<0)return null;const rows=[];
+  for(let k=i+1;k<ls.length&&/^│  [◆◇·] /.test(ls[k]);k++)rows.push(ls[k]);return {at:i,head:ls[i],rows};};
+const msgs=v=>{const ls=lines(v),a=ls.findIndex(s=>s.startsWith('│ MESSAGES')),b=ls.findIndex(s=>/^│ MEM +(› )?│$/.test(s));
+  const rows=a<0?[]:ls.slice(a+1,b<0?ls.length-3:b);return {count:rows.filter(s=>/^│  [←→] /.test(s)).length,two:rows.some(s=>/^│   \S/.test(s))};};
 """
 
 
@@ -66,15 +66,15 @@ class MemRowsTest(unittest.TestCase):
         self.node(r"""
 const v=draw(),m=mem(v);
 assert(m,lines(v).join('\n'));
-assert.match(m.head,/^│ MEM ─+ › │$/,'the head ends in `›` now: a press opens the popup');
+assert.match(m.head,/^│ MEM +› │$/,'the head ends in `›` now: a press opens the popup (11-22: no rule, one cell in for its records)');
 // One row a record, the newest first, the mark, the age and the kind, then the headline (`…` where it goes on).
 assert.equal(m.rows.length,3,m.rows.join('\n'));
-const rows=m.rows.map(s=>s.slice(2,-2).trimEnd());
+const rows=m.rows.map(s=>s.slice(2,-2).trim());
 assert(rows[0].startsWith('◆ 10m decision 접기 단추는 펼침')&&rows[1]==='◇ 2h lesson 점멸은 1초 박자로'&&rows[2].startsWith('◆ 3h 10m correction 메시지는'),rows.join('\n'));
 assert(rows[0].endsWith('…'),rows[0]);
 assert(!lines(v).join('\n').includes('패널 설정은')&&!lines(v).join('\n').includes('현황 단추')&&!lines(v).join('\n').includes('여섯째'),'the fourth and later records do not stand');
 // The lead (mark, age, kind) dim, the headline in the body color.
-const y=lines(v).findIndex(s=>s.startsWith('│ ◇ 2h'));
+const y=lines(v).findIndex(s=>s.startsWith('│  ◇ 2h'));
 assert(v.rows[y].filter(p=>/[◇a-z0-9]/.test(p.text)&&!/점멸/.test(p.text)).every(p=>p.dim===true),JSON.stringify(v.rows[y]));
 assert(v.rows[y].filter(p=>/점멸/.test(p.text)).every(p=>p.foreground===253&&p.dim!==true),JSON.stringify(v.rows[y]));
 // A press on the head or a record: the MEM popup, the record pressed named (`popup:MEM:<n>`).
@@ -84,19 +84,19 @@ assert.deepEqual(act(m.at),['popup:MEM']);m.rows.forEach((_,k)=>assert.deepEqual
 const ls=lines(v);assert(m.at>ls.findIndex(s=>s.startsWith('│ MESSAGES'))&&ls.indexOf(m.rows.at(-1))===ls.length-4&&/^│ ─+ │$/.test(ls.at(-3)),ls.join('\n'));
 // An older backend's painted record: its age, its headline on the one row.
 const old=draw({mem:[],model:{memory_items:undefined,memory:[t('3m '),t('decision '),t('예전 백엔드의 한 줄','loc_repo')]}}),om=mem(old);
-assert(om&&om.rows.length===1&&/^│ · 3m 예전 백엔드의 한 줄 +│$/.test(om.rows[0]),lines(old).join('\n'));
+assert(om&&om.rows.length===1&&/^│  · 3m 예전 백엔드의 한 줄 +│$/.test(om.rows[0]),lines(old).join('\n'));
 """)
 
     def test_short_of_cells_the_kind_goes_first_and_the_mark_and_the_age_stay(self):
         self.node(r"""
 for(let w=60;w>=14;w--){
   const m=mem(draw({width:w,mem:MEM.slice(0,1)})),h=m.rows[0],label=w+'\n'+m.rows.join('\n');
-  assert(h.startsWith('│ ◆ 10m ')&&cells(h)===w,label);
+  assert(h.startsWith('│  ◆ 10m ')&&cells(h)===w,label);
   // The kind stands while the headline keeps 14 cells at least.
-  if(w-4-cells('◆ 10m decision ')>=14)assert(h.includes('10m decision '),label);else assert(!h.includes('decision'),label);
+  if(w-5-cells('◆ 10m decision ')>=14)assert(h.includes('10m decision '),label);else assert(!h.includes('decision'),label);
 }
 // Mono and NO_COLOR keep the marks apart by shape.
-for(const o of [{cfg:{theme:'mono'}},{model:{no_color:true}}]){const m=mem(draw({...o,mem:[MEM[0],MEM[1],MEM[4]]}));assert(m.rows[0].startsWith('│ ◆ ')&&m.rows.some(r=>r.startsWith('│ ◇ '))&&m.rows.some(r=>r.startsWith('│ · ')),m.rows.join('\n'));}
+for(const o of [{cfg:{theme:'mono'}},{model:{no_color:true}}]){const m=mem(draw({...o,mem:[MEM[0],MEM[1],MEM[4]]}));assert(m.rows[0].startsWith('│  ◆ ')&&m.rows.some(r=>r.startsWith('│  ◇ '))&&m.rows.some(r=>r.startsWith('│  · ')),m.rows.join('\n'));}
 """)
 
     def test_short_of_rows_messages_fold_then_records_and_messages_show_fewer(self):

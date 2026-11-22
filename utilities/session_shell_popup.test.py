@@ -257,7 +257,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   s=await until(s=>!box(s),'the popup closing on Esc');
   frames.output_closed=s;checks.later_after_close=s.filter(l=>/LATER_\d\d/.test(l)).length;
   // A press on the panel's QUESTIONS rows opens it; keys stay in it; Tab moves to 2/2.
-  const label=await at('2 QUESTIONS ›');  // (11-16: the box's top line carries the name)
+  const label=await at('2 QUESTIONS ');  // (11-16: the box's top line carries the name)
   await press(label.x+2,label.y);
   s=await until(s=>!!box(s),'the popup by a press on QUESTIONS');
   frames.pressed=s;
@@ -456,7 +456,7 @@ class SessionShellPopupTest(unittest.TestCase):
         # Closed: the panel's questions section is a thin box (11-16) with its name in the top line and the summary
         # inside, no editor box.
         panel = '\n'.join(frames['closed'])
-        self.assertIn('╭─ 2 QUESTIONS › ─', panel)
+        self.assertIn('╭─ 2 QUESTIONS ─', panel)
         self.assertIn('│ │ ◑ 패널을 접었을 때의 모양을 어', panel)
         self.assertNotIn('……', panel)
         # 11-15 ("그냥 질문은 글자 자체를 붉은 색으로"): the question to answer here reads in red letters: its

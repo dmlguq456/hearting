@@ -75,17 +75,17 @@ class PanelListsTest(unittest.TestCase):
         self.node(r"""
 const v=draw({status:status(),backlog:backlog(),routes:1,messages:3,mem:2,height:40}),ls=lines(v);
 const want=[
-'│ REPO   hearting · wt 12 ─────────────────────────────── │',
-'│ GIT    branch ✓                                         │',
-'│ PEERS  [e9] ⚑  ─ [d4]                                   │',
-'│ STATUS +2 ─────────────────────────────────────────── › │',
-'│ ! 시험용 정할 것 하나                                   │',
-'│ · 시험용 하는 일 하나 · #101                            │',
-'│ · 시험용 하는 일 둘 — 제목이 길면 이렇게 잘린다 이렇게… │',
-'│ BACKLOG +11 ───────────────────────────────────────── › │',
-'│ · 시험용 나중 일 하나                                   │',
-'│ · 시험용 나중 일 둘                                     │',
-'│ · 시험용 나중 일 셋                                     │',
+'│ REPO hearting · wt 12 ───────────────────────────────── │',
+'│  GIT    branch ✓                                        │',
+'│  PEERS  [e9] ⚑  ─ [d4]                                  │',
+'│  STATUS +2                                            › │',
+'│   ! 시험용 정할 것 하나                                 │',
+'│   · 시험용 하는 일 하나 · #101                          │',
+'│   · 시험용 하는 일 둘 — 제목이 길면 이렇게 잘린다 이렇… │',
+'│  BACKLOG +11                                          › │',
+'│   · 시험용 나중 일 하나                                 │',
+'│   · 시험용 나중 일 둘                                   │',
+'│   · 시험용 나중 일 셋                                   │',
 '│ SESSION ─────────────────────────────────────────────── │'];
 assert.deepEqual(ls.slice(1,13),want,ls.join('\n'));
 assert(ls.every(l=>cells(l)===59));
@@ -94,16 +94,16 @@ const row=v.rows[4],plus=row.find(p=>p.text==='+2');assert(plus&&plus.foreground
 {const w=v.rows[5].find(p=>p.text==='! '),d=v.rows[6].find(p=>p.text==='· ');assert(w&&w.foreground===186&&d&&d.dim===true,JSON.stringify([v.rows[5],v.rows[6]]));}
 // No `+N` where every item shows (the total is the three), and none for a total that was not told.
 {const a=inside(draw({status:status(3,3),backlog:backlog(2,2),height:40}));
- assert(a.some(l=>/^STATUS ─+ ›$/.test(l))&&a.some(l=>/^BACKLOG ─+ ›$/.test(l)),a.join('\n'));}
+ assert(a.some(l=>/^ STATUS +›$/.test(l))&&a.some(l=>/^ BACKLOG +›$/.test(l)),a.join('\n'));}
 {const a=inside(draw({status:{word:'STATUS',has_doc:true,items:SI},backlog:{word:'BACKLOG',has_doc:true},height:40}));
- assert(a.some(l=>/^STATUS ─+ ›$/.test(l))&&a.some(l=>/^BACKLOG ─+ ›$/.test(l))&&a.filter(l=>/^[!·] /.test(l)).length===3,a.join('\n'));}
+ assert(a.some(l=>/^ STATUS +›$/.test(l))&&a.some(l=>/^ BACKLOG +›$/.test(l))&&a.filter(l=>/^  [!·] /.test(l)).length===3,a.join('\n'));}
 // No item: the head alone (no empty row). A total of nothing and a total with no items shown (the host holds the count only) say `+N`.
 {const a=inside(draw({status:status(0,0),backlog:backlog(0,0),height:40}));
- const at=a.findIndex(l=>/^STATUS/.test(l));assert(/^BACKLOG/.test(a[at+1])&&/^SESSION/.test(a[at+2]),a.join('\n'));}
-{const a=inside(draw({status:status(0,7),backlog:backlog(0,9),height:40}));assert(a.some(l=>/^STATUS \+7 ─+ ›$/.test(l))&&a.some(l=>/^BACKLOG \+9 ─+ ›$/.test(l)),a.join('\n'));}
+ const at=a.findIndex(l=>/^ STATUS/.test(l));assert(/^ BACKLOG/.test(a[at+1])&&/^SESSION/.test(a[at+2]),a.join('\n'));}
+{const a=inside(draw({status:status(0,7),backlog:backlog(0,9),height:40}));assert(a.some(l=>/^ STATUS \+7 +›$/.test(l))&&a.some(l=>/^ BACKLOG \+9 +›$/.test(l)),a.join('\n'));}
 // The REPO row has no button now, and the heads stand between PEERS and SESSION.
-{const a=inside(draw({status:status(),backlog:backlog(),height:40}));assert(!a[1].includes('›')&&/^REPO   hearting · wt 12 ─+$/.test(a[1]),a[1]);
- const at=n=>a.findIndex(l=>l.startsWith(n));assert(at('PEERS')<at('STATUS')&&at('STATUS')<at('BACKLOG')&&at('BACKLOG')<at('SESSION'));}
+{const a=inside(draw({status:status(),backlog:backlog(),height:40}));assert(!a[1].includes('›')&&/^REPO hearting · wt 12 ─+$/.test(a[1]),a[1]);
+ const at=n=>a.findIndex(l=>l.trimStart().startsWith(n));assert(at('PEERS')<at('STATUS')&&at('STATUS')<at('BACKLOG')&&at('BACKLOG')<at('SESSION'));}
 """)
 
     def test_a_missing_document_is_a_dim_word_and_no_root_has_no_part(self):
@@ -111,24 +111,24 @@ const row=v.rows[4],plus=row.find(p=>p.text==='+2');assert(plus&&plus.foreground
 // No document: the word plain dim (not the title role), `›` dim, no item, and a press still opens the popup.
 {const v=draw({status:status(0,0,false),backlog:backlog(0,0,false),height:40}),a=inside(v);
  for(const [word,action] of [['STATUS','popup:STATUS'],['BACKLOG','popup:BACKLOG']]){
-  const at=a.findIndex(l=>l.startsWith(word));assert(at>0);
+  const at=a.findIndex(l=>l.trimStart().startsWith(word));assert(at>0);
   const w=v.rows[at].find(p=>p.text===word),arrow=v.rows[at].findLast(p=>p.text==='›');
   assert(w.dim===true&&w.role===undefined&&arrow.dim===true,JSON.stringify(v.rows[at]));
   assert(v.hits.some(h=>h.row===at&&h.action===action));}
- assert(!a.some(l=>/^[!·] /.test(l)));}
+ assert(!a.some(l=>/^ *[!·] /.test(l)));}
 // With a document the word has the title role (as the other sections' heads).
-{const v=draw({status:status(),backlog:backlog(),height:40});const at=inside(v).findIndex(l=>l.startsWith('STATUS'));assert.equal(v.rows[at].find(p=>p.text==='STATUS').role,'title');}
+{const v=draw({status:status(),backlog:backlog(),height:40});const at=inside(v).findIndex(l=>l.trimStart().startsWith('STATUS'));assert.equal(v.rows[at].find(p=>p.text==='STATUS').role,'title');}
 // Only one of the two parts has a value: only that one stands. No value at all (no artifact root): nothing, no press.
-{const a=inside(draw({status:status(),height:40}));assert(a.some(l=>l.startsWith('STATUS'))&&!a.some(l=>l.startsWith('BACKLOG')));}
+{const a=inside(draw({status:status(),height:40}));assert(a.some(l=>l.trimStart().startsWith('STATUS'))&&!a.some(l=>l.trimStart().startsWith('BACKLOG')));}
 for(const status_doc of [undefined,null,{word:'',has_doc:true}]){const v=draw({status:status_doc,backlog:status_doc,height:40}),a=inside(v);
- assert(!a.some(l=>/^(STATUS|BACKLOG)/.test(l)),JSON.stringify(status_doc));assert(!v.hits.some(h=>/STATUS|BACKLOG/.test(h.action)));}
+ assert(!a.some(l=>/^ *(STATUS|BACKLOG)/.test(l)),JSON.stringify(status_doc));assert(!v.hits.some(h=>/STATUS|BACKLOG/.test(h.action)));}
 """)
 
     def test_presses_on_a_head_open_its_popup_and_on_an_item_open_it_standing_on_that_item(self):
         self.node(r"""
 const v=draw({status:status(),backlog:backlog(),height:40}),a=inside(v);
 const at=re=>a.findIndex(l=>re.test(l));
-const sh=at(/^STATUS/),bh=at(/^BACKLOG/);
+const sh=at(/^ STATUS/),bh=at(/^ BACKLOG/);
 const acts=v.hits.filter(h=>/popup:(STATUS|BACKLOG)/.test(h.action)).map(h=>[h.row,h.action]);
 assert.deepEqual(acts,[[sh,'popup:STATUS'],[sh+1,'popup:STATUS:i:a1'],[sh+2,'popup:STATUS:i:a2'],[sh+3,'popup:STATUS:i:a3'],
   [bh,'popup:BACKLOG'],[bh+1,'popup:BACKLOG:i:b1'],[bh+2,'popup:BACKLOG:i:b2'],[bh+3,'popup:BACKLOG:i:b3']],JSON.stringify(acts));
@@ -137,7 +137,7 @@ assert(v.hits.filter(h=>/popup:(STATUS|BACKLOG)/.test(h.action)).every(h=>h.left
 assert(!v.hits.some(h=>h.row<sh&&/STATUS|BACKLOG/.test(h.action)));
 // An item with no key opens the popup at its top: the head's own press.
 {const w=draw({status:{...status(),items:[{mark:'',text:'시험용 키 없음'}]},backlog:backlog(0,0),height:40});
- assert(w.hits.some(h=>h.action==='popup:STATUS'&&inside(w)[h.row]==='· 시험용 키 없음'),JSON.stringify(w.hits));}
+ assert(w.hits.some(h=>h.action==='popup:STATUS'&&inside(w)[h.row]==='  · 시험용 키 없음'),JSON.stringify(w.hits));}
 """)
 
     def test_narrow_panels_cut_the_head_and_the_items(self):
@@ -145,13 +145,13 @@ assert(!v.hits.some(h=>h.row<sh&&/STATUS|BACKLOG/.test(h.action)));
 for(const width of [59,44,40,36,32,30]){
   const v=draw({width,status:status(),backlog:backlog(),height:50}),ls=lines(v),a=inside(v);
   assert(ls.every(l=>cells(l)===width),width+'\n'+ls.join('\n'));
-  const sh=a.findIndex(l=>/^STATUS/.test(l)),bh=a.findIndex(l=>/^BACKLOG/.test(l));
+  const sh=a.findIndex(l=>/^ STATUS/.test(l)),bh=a.findIndex(l=>/^ BACKLOG/.test(l));
   assert(sh>0&&bh===sh+4,width+'\n'+ls.join('\n'));
-  assert(/^STATUS( \+2)? ─+ ›$/.test(a[sh])&&/^BACKLOG( \+11)? ─+ ›$/.test(a[bh]),a[sh]+'|'+a[bh]);
-  assert.equal(a[sh+1].slice(0,2),'! ');assert(a[sh+3].endsWith('…'),a[sh+3]);   // the long title is cut at the width
+  assert(/^ STATUS( \+2)? +›$/.test(a[sh])&&/^ BACKLOG( \+11)? +›$/.test(a[bh]),a[sh]+'|'+a[bh]);
+  assert.equal(a[sh+1].slice(0,4),'  ! ');assert(a[sh+3].endsWith('…'),a[sh+3]);   // the long title is cut at the width
 }
-// The least a head is: `STATUS +2 ─ ›` (the rule and the count give way to nothing but a space and `›` before the word does).
-{const v=draw({width:24,status:status(),backlog:backlog(),height:50}),a=inside(v);assert(a.some(l=>/^STATUS( \+2)? [─ ]*›$/.test(l)),a.join('\n'));}
+// The least a head is: ` STATUS +2 ›` (the count gives way to nothing but a space and `›` before the word does).
+{const v=draw({width:24,status:status(),backlog:backlog(),height:50}),a=inside(v);assert(a.some(l=>/^ STATUS( \+2)? *›$/.test(l)),a.join('\n'));}
 // Hangul is two cells: a row never passes the panel.
 {const v=draw({width:30,status:{...status(),items:[{mark:'!',text:'한글로만 이루어진 아주 긴 제목이라서 잘려야 합니다 한글로만',key:'i:x'}]},backlog:backlog(0,0),height:50});
  assert(lines(v).every(l=>cells(l)===30));}
@@ -180,7 +180,7 @@ function sort(v){
 }
 // What the panel is apart from the lists, the empty rows and the rows under MESSAGES' and MEM's heads (their heads stand, their words are not compared: a count in them moves).
 const rest=p=>p.rows.filter(r=>!['list','blank','mm-item'].includes(r.k)).map(r=>r.k==='repo'?'REPO':r.k.startsWith('mm-head')?r.k:r.t);
-const items=(p,name)=>{let on=false,n=0;for(const r of p.rows){if(r.k==='list'){if(/^(STATUS|BACKLOG)\b/.test(r.t))on=r.t.startsWith(name);else if(on)n++;}else on=false;}return n;};
+const items=(p,name)=>{let on=false,n=0;for(const r of p.rows){if(r.k==='list'){if(/^ (STATUS|BACKLOG)\b/.test(r.t))on=r.t.startsWith(' '+name);else if(on)n++;}else on=false;}return n;};
 const mmRows=(p,name)=>{let on=false,n=0;for(const r of p.rows){if(r.k==='mm-head:'+name)on=true;else if(on&&r.k==='mm-item')n++;else on=false;}return n;};
 """
 
@@ -196,7 +196,7 @@ for(const width of [59,44,40,30])for(let height=6;height<=60;height++)for(const 
     if(n>=3&&(height%3||width!==44))return;   // the mixed document states: a third of the heights
     const v=drawN({...o,status:s,backlog:b}),p=sort(v),where=JSON.stringify(o)+n+'\n'+p.lines.join('\n')+'\n'+base.lines.join('\n');
     assert.equal(p.lines.length,height,where);assert(p.lines.every(l=>cells(l)===width),where);cases++;
-    const heads=p.rows.filter(r=>r.k==='list'&&/^(STATUS|BACKLOG)\b/.test(r.t)).length;
+    const heads=p.rows.filter(r=>r.k==='list'&&/^ (STATUS|BACKLOG)\b/.test(r.t)).length;
     if(heads){
       up++;assert.equal(heads,n===4?1:2,where);
       assert.deepEqual(rest(p),rest(base),where);
@@ -225,7 +225,7 @@ const o={width:44,question:true,routes:3,messages:7,mem:5,peers:true};
 const seen=[];
 for(let h=70;h>=14;h--){
   const p=sort(drawN({...o,height:h,status:status(),backlog:backlog()})),base=sort(drawN({...o,height:h}));
-  const r={h,b:items(p,'BACKLOG'),s:items(p,'STATUS'),heads:p.rows.filter(x=>x.k==='list'&&/^(STATUS|BACKLOG)\b/.test(x.t)).length,msg:mmRows(p,'MESSAGES'),mem:mmRows(p,'MEM'),
+  const r={h,b:items(p,'BACKLOG'),s:items(p,'STATUS'),heads:p.rows.filter(x=>x.k==='list'&&/^ (STATUS|BACKLOG)\b/.test(x.t)).length,msg:mmRows(p,'MESSAGES'),mem:mmRows(p,'MEM'),
     msg0:mmRows(base,'MESSAGES'),mem0:mmRows(base,'MEM'),gap:p.rows.filter(x=>x.k==='blank').length};
   seen.push(r);const w=JSON.stringify(r)+'\n'+p.lines.join('\n');
   assert.deepEqual(rest(p),rest(base),w);
@@ -253,7 +253,7 @@ assert.deepEqual([seen[0].b,seen[0].s,seen[0].heads],[3,3,2]);
     def test_the_repo_row_ends_in_the_two_buttons_where_the_heads_go_and_gives_way_as_the_bottom_row_does(self):
         self.node(self.SORT + r"""
 const press=(v,a)=>v.hits.find(h=>h.row===1&&h.action===a);
-for(const [w,want] of [[59,/^REPO   hearting · wt 12 +STATUS \+5 ›  BACKLOG \+14 ›$/],[44,/^REPO   hearting +STATUS ›  BACKLOG ›$/],[40,/^REPO   hearting +STATUS ›  BACKLOG ›$/],[30,/^REPO hearting · wt 12 ›  ›$/]]){
+for(const [w,want] of [[59,/^REPO hearting · wt 12 +STATUS \+5 ›  BACKLOG \+14 ›$/],[44,/^REPO hearting +STATUS ›  BACKLOG ›$/],[40,/^REPO hearting +STATUS ›  BACKLOG ›$/],[30,/^REPO hearting · wt 12 ›  ›$/]]){
   const v=drawN({width:w,height:14,question:true,routes:3,messages:7,mem:5,peers:true,status:status(),backlog:backlog()}),p=sort(v);
   assert(!p.rows.some(r=>r.k==='list'),w+'\n'+p.lines.join('\n'));
   assert.match(p.rows[0].t.trimEnd(),want,w+' '+p.rows[0].t);
@@ -298,15 +298,15 @@ assert.match(lines(two(120,8,0,0))[1],/ctx 41% +STATUS ›  BACKLOG › │$/);
     def test_a_backlog_longer_than_is_read_says_so_with_a_plus_after_its_count(self):
         self.node(r"""
 const more=(n,total,has=true)=>({...backlog(n,total,has),more:true});
-const heads=(b,o={})=>inside(draw({status:status(),backlog:b,height:40,...o})).filter(l=>/^BACKLOG/.test(l));
+const heads=(b,o={})=>inside(draw({status:status(),backlog:b,height:40,...o})).filter(l=>/^ BACKLOG/.test(l));
 // `+N` is what the rows do not show, and the `+` after it that the file has more than was read.
-assert(/^BACKLOG \+2997\+ ─+ ›$/.test(heads(more(3,3000))[0]),heads(more(3,3000))[0]);
-assert(/^BACKLOG \+2997 ─+ ›$/.test(heads(backlog(3,3000))[0]));
+assert(/^ BACKLOG \+2997\+ +›$/.test(heads(more(3,3000))[0]),heads(more(3,3000))[0]);
+assert(/^ BACKLOG \+2997 +›$/.test(heads(backlog(3,3000))[0]));
 // Nothing hidden by the rows and still more in the file: `+` alone.
-assert(/^BACKLOG \+ ─+ ›$/.test(heads(more(3,3))[0]),heads(more(3,3))[0]);
+assert(/^ BACKLOG \+ +›$/.test(heads(more(3,3))[0]),heads(more(3,3))[0]);
 // The items go first and the count grows with them, the `+` stays.
 {const ls=inside(draw({status:status(),backlog:more(3,3000),routes:1,messages:3,mem:2,height:34}));
- assert(ls.some(l=>/^BACKLOG \+\d+\+ ─+ ›$/.test(l)),ls.join('\n'));}
+ assert(ls.some(l=>/^ BACKLOG \+\d+\+ +›$/.test(l)),ls.join('\n'));}
 // The bottom layout's button.
 const two=(w,s,b)=>draw({side:false,width:w,height:8,status:{word:'STATUS',has_doc:true,items:SI,total:s},backlog:{...b,word:'BACKLOG',has_doc:true,items:[]}});
 assert.match(lines(two(120,5,{total:2997,more:true}))[1],/STATUS \+5 ›  BACKLOG \+2997\+ › │$/);
