@@ -201,8 +201,20 @@ assert.equal(pictures,54);
  const row=txt=>v.rows.find(r=>r.map(p=>p.text).join('').includes(txt));
  const word=(txt,w)=>row(txt).find(p=>p.text===w);
  assert.equal(word('KIND_A','FIX ').foreground,186);assert.equal(word('KIND_B','IMPR').foreground,150);assert.equal(word('KIND_C','NOTE').dim,true);}
-// no more width than 30: the words give way, then the numbers
-{const {a}=at({width:30,height:40,backlog:host(docs.mixed)});assert(/^ BACKLOG \d+ \d+ \+\d+ +›$/.test(head(a))||/^ BACKLOG FIX \d+ · IMPR \d+ +›$/.test(head(a))||/^ BACKLOG FIX \d+ IMPR \d+ \+\d+ +›$/.test(head(a)),head(a));}
+// no more width than 30: the ` · ` and the `/N` have given way, the words stay (and `+N`); one stage narrower the `+N` goes before the words do
+{const {a}=at({width:30,height:40,backlog:host(docs.mixed)});assert(/^ BACKLOG FIX 3 IMPR 2 \+2 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:28,height:40,backlog:host(docs.mixed)});assert(/^ BACKLOG FIX 3 IMPR 2 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:20,height:40,backlog:host(docs.mixed)});assert(/^ BACKLOG 3 2 +›$/.test(head(a)),head(a));}
+// one cell wider never tells less: the stages (nothing, the numbers, the words, `+N`, the ` · `, `/N`) only ever come in that order as the width grows, and `+N` never stands alone
+{const rank=h=>{const t=h.replace(/^ BACKLOG/,'').replace(/ *›$/,'').trim();
+   if(!t)return 0;if(!/[A-Z]/.test(t))return 1;if(t.includes('/'))return 5;if(t.includes('·'))return 4;if(/\+\d+\+?$/.test(t))return 3;return 2;};
+ let tried=0;
+ for(const name of Object.keys(docs)){let last=-1,seen=new Set();
+  for(let width=14;width<=80;width++){const {a}=at({width,height:40,backlog:host(docs[name])});const h=head(a);tried++;
+   assert(!/^ BACKLOG \+\d+\+? +›$/.test(h),name+' '+width+': '+h);
+   const r=rank(h);assert(r>=last,name+' '+width+': '+h+' tells less than '+last);last=r;seen.add(r);}
+  if(name==='big'||name==='mixed')for(const r of [1,2,3,4,5])assert(seen.has(r),name+' never stands at stage '+r);}
+ assert.equal(tried,6*67);}
 // an old document (no sort written): FIX and IMPR are `?`, every row is TBD
 {const {a}=at({width:44,height:40,backlog:host(docs.legacy)});
  assert(/^ BACKLOG FIX \? · IMPR \? \/9 +›$/.test(head(a)),a.join('\n'));assert(rows(a).every(l=>l.startsWith('  TBD  ')),a.join('\n'));assert.equal(rows(a).length,3);}
@@ -216,7 +228,9 @@ assert.equal(pictures,54);
  const at2=a.findIndex(l=>/^ BACKLOG/.test(l));assert(v.rows[at2+1].map(p=>p.text).join('').includes('SESSION'));}
 // three-digit counts (and more) stand whole where there is room and give way where there is not
 {const {a}=at({width:59,height:40,backlog:host(docs.big)});assert(/^ BACKLOG FIX 866 · IMPR 433 · \+1296 \/1299 +›$/.test(head(a))||/^ BACKLOG FIX 866 · IMPR 433 · \+1296 +›$/.test(head(a)),head(a));}
-{const {a}=at({width:30,height:40,backlog:host(docs.big)});assert(/^ BACKLOG /.test(head(a))&&/›$/.test(head(a)),head(a));}
+{const {a}=at({width:30,height:40,backlog:host(docs.big)});assert(/^ BACKLOG 866 433 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:36,height:40,backlog:host(docs.big)});assert(/^ BACKLOG FIX 866 IMPR 433 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:37,height:40,backlog:host(docs.big)});assert(/^ BACKLOG FIX 866 IMPR 433 \+1296 +›$/.test(head(a)),head(a));}
 // a backend that sends no counts is drawn as it was
 {const {a}=at({width:44,height:40,backlog:backlog()});assert(a.some(l=>/^ BACKLOG \+11 +›$/.test(l)),a.join('\n'));assert(a.some(l=>/^  · 시험용 나중 일 하나/.test(l)));}
 """, self.docs())

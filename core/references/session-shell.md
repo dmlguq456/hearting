@@ -426,8 +426,8 @@ the **STATUS part** and the **BACKLOG part**: each a section head (` STATUS +2  
 color and place, `›` at the row's right end; a press opens that popup) and its first three items, one row each, indented two cells, cut with `…` within the cells left (`· ` dim before each; no item of the status list is a question, 11-22); a press on an item opens the popup standing on that item; a BACKLOG item stands behind its sort's word instead, in four cells and one blank more: `FIX ` yellow, `IMPR` green, `NOTE` and `TBD ` dim, so the sort is told by the letters as well as the color). The STATUS items are the status list screen's own: what is in progress (`session_status.panel_items`, from `parse_listing`, the one reading the list screen uses; the recent and the folded count nothing); the BACKLOG items
 are `<artifact root>/backlog.md`'s, by sort (`FIX`, `IMPR`, `TBD`, `NOTE`; an item with no valid `kind:` line is `TBD`, core/ARTIFACT_META.md `backlog.md`), and inside a sort this window's campaign group (the `##` heading that is, letter for letter, the name of the folder this window's status document is in) first,
 then the document's order. **The BACKLOG head (11-22) tells the sorts**: `BACKLOG FIX 14 · IMPR 26 · +37 /125` (the count of each of FIX and IMPR; `+N` the FIX and IMPR items not shown, left out for zero; `/N` every line of the document, a `+` after it where the file is longer than is read;
-`?` for FIX and IMPR where no item of the document is sorted yet, an old document: `FIX ? · IMPR ? /125`; a document with nothing in it `FIX 0 · IMPR 0 /0`). Short of cells it gives way in this order: `/N`, then the sorts' words (`14 26 +37`), then the numbers but `+N`, then all of it.
-For the STATUS head `+N` is the count of the items of the whole document not shown (nothing for zero; a `+` after it, `+2997+`, where the file is longer than is read: the first 1 MiB is read and what was read is counted; `+` alone where nothing is hidden by the rows and there is more); no item: the head alone; no document, or one that
+`?` for FIX and IMPR where no item of the document is sorted yet, an old document: `FIX ? · IMPR ? /125`; a document with nothing in it `FIX 0 · IMPR 0 /0`). Short of cells it gives way in this order: `/N`, then the ` · ` between the parts (`FIX 14 IMPR 26 +37`), then `+N` (`FIX 14 IMPR 26`), then the sorts' words (`14 26`), then all of it: the words outlast the numbers (the person asked for a word of three or four letters, not one), and a width one cell wider never tells less. The old document's `FIX ? · IMPR ?` and the zeros give way in the same order.
+For the STATUS head `+N` is the count of the items of the whole document not shown (nothing for zero). The BACKLOG head of a backend that sends no sorts is the same (`BACKLOG +N`). The `+` after the number is the BACKLOG head's alone: `+2997+` (and `+37+` in the sorted head), where the file is longer than is read (the first 1 MiB is read and what was read is counted), and `+` alone where nothing is hidden by the rows and there is more. No item: the head alone; no document, or one that
 cannot be read: the word plain dim, no item, a press still opens the popup; no artifact root: neither part. **One rule (11-22, the person's STATUS and BACKLOG lists are the first to give way): the
 two parts never take a row from anything else.** The panel is laid out as it is without them (the same layout, the same `give` order, byte for byte what a window with no list value draws; the
 REPO row alone differs), and the parts take only what that layout leaves empty and, short of those, rows MESSAGES and MEM fold: the empty rows (the row between the head's block and the route
@@ -1007,14 +1007,16 @@ an unsupported native request and any reason not named here; `answer in the
 parent` (`부모 창에서 답`) for a blocked worker's answer whose parent could not be
 confirmed; `sending` (`보내는 중`) while another answer is on its way; `closed`
 (`닫힘`) for a request already gone (an existing state word such as expired
-stays). A question the panel already shows has gone from this session's waits
-only when a complete observation of the waits leaves it out (11-22): while that
-observation is missing, past its display time or incomplete (the producer's
-failure record included), the question stands as its own request says, an open
-registered question with its choices and its answer row, and an answer sent
-before the next observation is refused with one line saying why (`not sent ·
-reading the waits · Enter again soon`, `아직 안 보냄 · 대기 목록 읽는 중 · 잠시 뒤
-다시 Enter`), the typed answer kept. The head carries the short form under 64 columns and the body row the
+stays). A registered question (`questions ask`) the panel already shows has gone
+from this session's waits only when a complete observation of the waits leaves it
+out (11-22): while that observation is missing, past its display time or incomplete
+(the producer's failure record included) and does not list it at all, the question
+stands as its own request says, an open one with its choices and its answer row, and
+an answer sent before the next observation is refused with one line saying why and
+what is left (`not sent · reading the waits · Enter again or answer below`,
+`아직 안 보냄 · 대기 목록 읽는 중 · 다시 Enter 또는 아래 입력창에 답`), the typed
+answer kept. Another kind of wait (a native form, a human gate) leaves the panel
+until the next observation. The head carries the short form under 64 columns and the body row the
 whole words. Every count of answer waits (Fleet's head and session rows, the
 `questions list` head, the status line, the panel's `◑ N` and the folded strip) counts every wait a person must answer, wherever
 it is answered: a question the panel answers, a Claude native request, a marker
