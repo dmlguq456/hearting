@@ -150,7 +150,7 @@ class KindRuleTest(unittest.TestCase):
         meta = (ROOT / "core" / "ARTIFACT_META.md").read_text(encoding="utf-8")
         section = meta[meta.index("### `backlog.md`"):]
         for words in ("`kind:`", "`fix`", "`improve`", "`note`", "unsorted", "`TBD`", "nothing is refused, warned or gated", "not inside a code fence",
-                      "The title line carries no tag, status or owner mark", "with its `kind:` line then", "`## 기다리는 것`"):
+                      "The title line carries no tag, status or owner mark", "with its `kind:` line then", "register it as a question"):
             self.assertIn(words, section)
 
 

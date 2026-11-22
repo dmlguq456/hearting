@@ -235,10 +235,13 @@ _ONE_LINE = re.compile(r"^\*\*\s*(?:한\s*줄|one[\s-]*line|summary|요약)\s*[:
 _UPDATED = re.compile(r"(?:갱신|updated)\s*[:：]?\s*[0-9]", re.IGNORECASE)
 # Heading words: the convention names "결정 필요" / "Decisions needed" (what waits on the
 # person: a decision or an action) and "다음" / "Next"; a few near spellings are read too.
-# The generated campaign document names them "기다리는 것" and "나중에 할 것".
 # A record of decisions already made is not counted.
 _DECISION_WORDS = ("결정 필요", "결정할", "결정 대기", "결정 기다리는", "기다리는 것", "사용자에게 필요", "decisions needed", "decision needed",
                    "needs decision", "to decide", "open decision", "pending decision", "needs you")
+# The campaign document Hearting generates (its first line is this marker) never lists what waits for the person: that is a
+# question, and stands on the question screens only (11-22).  An older one that still has a "기다리는 것" section is read
+# without it; a hand-written status page (no marker) keeps its decision section as written.
+CAMPAIGN_MARKER = "<!-- hearting:campaign-document v1 -->"       # utilities/campaign_document.MARKER (a test holds them equal)
 _RECORD_WORDS = ("기록", "내린", "log", "made", "history")
 _NEXT_WORDS = ("다음", "예정", "나중에 할", "next", "할 일", "to do", "todo")
 
@@ -271,8 +274,10 @@ def parse(text):
     section (else the first plain paragraph there that is not the ``갱신``/``Updated``
     stamp, else the title), and the top-level bullets under a "decisions needed" heading
     and a "next" heading.
-    Anything else is ignored; a missing part stays empty.
+    Anything else is ignored; a missing part stays empty.  A generated campaign document (marker on its first line) has
+    no ``decisions``: its ``기다리는 것`` section, where an older one still has it, is not read.
     """
+    generated = str(text).split("\n", 1)[0].strip() == CAMPAIGN_MARKER
     title = line = first_paragraph = None
     sections = {"decisions": [], "next": []}
     current, level, in_body = None, 0, False
@@ -318,7 +323,7 @@ def parse(text):
             paragraph.append(stripped)
     close_paragraph()
     return {"title": title, "line": line or first_paragraph or title,
-            "decisions": sections["decisions"], "next": sections["next"]}
+            "decisions": [] if generated else sections["decisions"], "next": sections["next"]}
 
 
 def read_document(path):

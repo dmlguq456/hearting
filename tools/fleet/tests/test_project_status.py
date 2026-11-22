@@ -180,8 +180,13 @@ class ArtifactRootTest(unittest.TestCase):
         self.assertEqual(parsed["decisions"], [])                      # "지금 없음." is not a bullet
         self.assertEqual(parsed["next"], ["Codex·OpenCode 위주로 동작 parity 검증 · 사용량 한도가 풀린 뒤",
                                           "등록부 보관 검토의 후속 · 열림"])
+        # 11-22: a question stands on the question screens only. An older generated page (marker) that still has the
+        # section is read without it; the same words with no marker are a person's page and keep their decisions.
         two = project_status.parse(CAMPAIGN_DOC.format(decisions=DECISIONS_TWO))
-        self.assertEqual(len(two["decisions"]), 2)
+        self.assertEqual(two["decisions"], [])
+        by_hand = project_status.parse(CAMPAIGN_DOC.split("\n", 1)[1].format(decisions=DECISIONS_TWO))
+        self.assertEqual(len(by_hand["decisions"]), 2)
+        self.assertEqual((by_hand["title"], by_hand["line"], by_hand["next"]), (two["title"], two["line"], two["next"]))
         self.assertTrue(project_status._UPDATED.match("갱신 2026-11-19 18:16"))
         for title in ("결정 기다리는 것", "하는 중", "끝난 일", "예정"):   # none reads as a record of decisions made
             self.assertFalse(any(word in title.casefold() for word in project_status._RECORD_WORDS), title)
@@ -300,7 +305,7 @@ class FindTest(unittest.TestCase):
         record = project_status.newest(str(self.root), now=self.now)
         self.assertEqual((record["name"], record["campaign"]), ("campaign.md", "stream"))
         self.assertEqual(record["title"], "하팅 4.0 공개 준비와 닫힌 캠페인 사이클 이동 결함 수정")
-        self.assertEqual(len(record["decisions"]), 2)
+        self.assertEqual(record["decisions"], [])                      # a generated page counts no question (11-22)
         self.assertEqual(record["next"][0], "Codex·OpenCode 위주로 동작 parity 검증 · 사용량 한도가 풀린 뒤")
         project_status.clear_cache()
         _touch(page, "# Large\n" + "x" * 70000, self.now)
@@ -336,7 +341,7 @@ class FindTest(unittest.TestCase):
 GENERATED_NOW = 1_763_640_000.0
 
 
-def _generated(waits, *, summary="한 줄 요약입니다.", done=1):
+def _generated(*, summary="한 줄 요약입니다.", done=1):
     """A campaign document as the generator writes it."""
     sys.path.insert(0, str(ROOT / "utilities"))
     import campaign_document
@@ -344,7 +349,7 @@ def _generated(waits, *, summary="한 줄 요약입니다.", done=1):
     unit = {"key": "pr:7", "pr": 7, "v": "v4.1.0", "title": "무언가를 고침", "impl": {"slug": "x"}, "count": 3,
             "closed_at": GENERATED_NOW - 3600, "routes": 2, "activity": GENERATED_NOW}
     units = {"active": [unit], "active_folded": 2, "done": [unit] * done, "done_folded": 1354}
-    return campaign_document.render_document("캠페인", summary, units, waits, now=GENERATED_NOW, tz=timezone.utc)
+    return campaign_document.render_document("캠페인", summary, units, now=GENERATED_NOW, tz=timezone.utc)
 
 
 class GeneratedDocumentTest(unittest.TestCase):
@@ -368,17 +373,29 @@ class GeneratedDocumentTest(unittest.TestCase):
                             ("사용자 결정 기록", None), ("끝난 일", None)):
             self.assertEqual(project_status._section_kind(title), kind, title)
 
-    def test_a_generated_document_gives_its_one_line_and_one_decision_per_open_question(self):
-        waits = {"status": "ok", "at": GENERATED_NOW, "items": ["첫째?", "둘째?", "셋째?"]}
-        parsed = project_status.parse(_generated(waits))
+    def test_a_generated_document_gives_its_one_line_and_no_decision(self):
+        text = _generated()
+        parsed = project_status.parse(text)
         self.assertEqual(parsed["title"], "캠페인")
         self.assertEqual(parsed["line"], "한 줄 요약입니다.")
-        self.assertEqual(parsed["decisions"], ["첫째?", "둘째?", "셋째?"])
+        self.assertEqual(parsed["decisions"], [])      # 11-22: the document lists no question
+        self.assertNotIn("기다리는 것", text)
         self.assertEqual(parsed["next"], [])           # no 나중에 할 것 section yet
-        for waits in ({"status": "ok", "at": GENERATED_NOW, "items": []}, {"status": "unreadable"}):
-            self.assertEqual(project_status.parse(_generated(waits))["decisions"], [])
-        later = _generated({"status": "ok", "at": GENERATED_NOW, "items": []}) + "\n## 나중에 할 것\n- 다음 일\n"
+        later = text + "\n## 나중에 할 것\n- 다음 일\n"
         self.assertEqual(project_status.parse(later)["next"], ["다음 일"])
+
+    def test_the_marker_here_is_the_generators_own(self):
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import campaign_document
+        self.assertEqual(project_status.CAMPAIGN_MARKER, campaign_document.MARKER)
+
+    def test_an_older_generated_page_with_the_waiting_section_counts_no_decision_and_a_hand_written_one_does(self):
+        older = _generated().replace("## 최근에 끝난 것", "## 기다리는 것\n- 첫째?\n- 둘째?\n\n## 최근에 끝난 것")
+        self.assertIn("- 첫째?", older)
+        self.assertEqual(project_status.parse(older)["decisions"], [])
+        for heading in ("기다리는 것", "결정 필요", "Decisions needed"):
+            by_hand = "# 제목\n\n**한 줄**: 줄\n\n## %s\n- 첫째?\n- 둘째?\n" % heading
+            self.assertEqual(project_status.parse(by_hand)["decisions"], ["첫째?", "둘째?"], heading)
 
     ESCAPES = [
         ("\\[4c\\] 산출물 논의 \\*중요\\* a\\_b\\_ \\<x\\> \\& \\\\ \\# \\!", "[4c] 산출물 논의 *중요* a_b_ <x> & \\ # !"),
@@ -413,23 +430,21 @@ class GeneratedDocumentTest(unittest.TestCase):
         from datetime import timezone
         titles = ["[4c] 산출물 논의 *중요* a_b_ <x> & \\ # !", "링크 [a](http://x) & <tag>", "경로 C:\\Users\\x 와 a\\b",
                   "_remove_empty_cycle 와 __init__ 정리", "`코드 a_b*c` 와 `짝 없는"]
-        waits = {"status": "ok", "at": GENERATED_NOW, "items": titles}
-        text = campaign_document.render_document(titles[0], titles[1], {"active": [], "done": []}, waits,
+        text = campaign_document.render_document(titles[0], titles[1], {"active": [], "done": []},
                                                  now=GENERATED_NOW, tz=timezone.utc)
         parsed = project_status.parse(text)
-        shown = titles[:4] + ["코드 a_b*c 와 `짝 없는"]                  # a code span's ticks are not drawn; a lone one is
+        shown = titles[:4]
         self.assertEqual(parsed["title"], shown[0])
         self.assertEqual(parsed["line"], shown[1])
-        self.assertEqual(parsed["decisions"], shown)
 
     def test_a_marker_never_becomes_the_one_line_even_without_a_summary(self):
-        parsed = project_status.parse(_generated({"status": "unreadable"}, summary=""))
+        parsed = project_status.parse(_generated(summary=""))
         self.assertEqual(parsed["line"], "캠페인")
 
     def test_a_campaign_with_campaign_md_is_not_walked_for_cycle_folders(self):
         campaigns = self.root / "campaigns"
         mine, plain = campaigns / "2026-11-06_mine", campaigns / "2026-11-06_plain"
-        _touch(mine / "campaign.md", _generated({"status": "unreadable"}), GENERATED_NOW)
+        _touch(mine / "campaign.md", _generated(), GENERATED_NOW)
         for number in range(300):
             (mine / ("2026-11-06_c%03d" % number)).mkdir()
             (plain / ("2026-11-06_c%03d" % number)).mkdir(parents=True, exist_ok=True)

@@ -3,15 +3,16 @@
 
 The entrance refresh worker calls `catch_up` before it writes the entrance: code, not a
 session, makes and edits the document (no model call, no resident process, no new command).
-A campaign's document has three sections, in this order: `## 하는 중`, `## 기다리는 것`,
-`## 최근에 끝난 것`. One piece of work is one line: routes that carry the same PR number are
+A campaign's document has two sections, in this order: `## 하는 중`, `## 최근에 끝난 것`. What waits for
+a person's answer is a registered question and stands on the question screens only; the document says
+nothing about it. One piece of work is one line: routes that carry the same PR number are
 joined (`link_units`), a route with no number is its own line.
 
 Three layers:
 
 - pure functions that read no file, clock or environment (`pr_from_slug`, `pr_from_report`,
   `publish_facts`, `route_kind`, `link_units`, `render_document`);
-- reads without writes (`read_waits`, `collect`; `collect(persist=False)` draws a document from
+- reads without writes (`collect`; `collect(persist=False)` draws a document from
   real records and touches nothing);
 - one writer, `catch_up`, which only creates `campaign.md` or replaces a file whose first line
   is `MARKER`. A same-named file without the marker, a link, a directory, and the hand-written
@@ -32,8 +33,6 @@ counts for nothing, and a replacement attempt of the same route counts as the ro
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import re
 import stat
@@ -58,7 +57,6 @@ REPORT_LINES = 30
 PUBLISH_LINES = 80
 HEAD_BYTES = 16 * 1024
 TITLE_CHARS = 90
-WAIT_CHARS = 120
 SIZE_LIMIT = 60 * 1024
 HEADING_CHARS = 200
 SUMMARY_CHARS = 400
@@ -76,7 +74,6 @@ _REVIEW_SLUG = re.compile(r"^(rv|review|audit)[-_]|[-_]close[-_]unit$")
 _UPDATED_LINE = re.compile(r"^갱신 \d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
 _CONTROLS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff]")   # C0, C1 (not tab or line breaks) and unpaired surrogates, which UTF-8 cannot write
 _INTENT_PR = re.compile(r"(?<![A-Za-z])PR\s*#(\d{1,5})(?!\d)")
-_QUESTION_FILE = re.compile(r"[0-9a-f]{64}")
 
 
 # ---------------------------------------------------------------------------
@@ -259,22 +256,21 @@ def _unit_line(unit, *, prefix=""):
     return "- " + prefix + " · ".join(parts)
 
 
-def render_document(title, summary, units, waits, *, now, tz=None):
-    """The campaign document's text. Description lines are never bullets, so a reader counting
-    bullets under `## 기다리는 것` counts open questions and nothing else.
+def render_document(title, summary, units, *, now, tz=None):
+    """The campaign document's text: the head, `## 하는 중`, `## 최근에 끝난 것`. What waits for a person is a
+    question and stands on the question screens, never here.
 
     The text always fits `SIZE_LIMIT`, which is under the readers' limit: the title and the one-line
     summary are clipped, and when the lines still do not fit, finished lines are folded first, then
-    the oldest open work, and questions last (they are what a person must answer). Each fold is counted on a line that is not a bullet."""
+    the oldest open work. Each fold is counted on a line that is not a bullet."""
     stamp = datetime.fromtimestamp(now, tz).strftime("%Y-%m-%d %H:%M")
     heading = _escape(_clip(title, HEADING_CHARS))
     one_line = _escape(_clip(summary, SUMMARY_CHARS)) or heading
     active = list(units.get("active") or [])
     done = list(units.get("done") or [])
     done_folded = int(units.get("done_folded") or 0)
-    items = list(waits.get("items") or []) if waits and waits.get("status") == "ok" else []
 
-    def build(keep_done, keep_waits, keep_active):
+    def build(keep_done, keep_active):
         shown_done = done[:keep_done]
         folded = done_folded + sum(unit["routes"] or 1 for unit in done[keep_done:])
         out = [MARKER, f"# {heading}", "", f"갱신 {stamp}", "", f"**한 줄**: {one_line}", "", "## 하는 중"]
@@ -285,18 +281,6 @@ def render_document(title, summary, units, waits, *, now, tz=None):
             out.append(f"6시간 넘게 움직임 없는 열린 일 {units['active_folded']:,}개는 접어 둠.")
         if len(active) > keep_active:
             out.append(f"크기 한도로 접은 열린 일 {len(active) - keep_active:,}개.")
-        out += ["", "## 기다리는 것"]
-        if waits and waits.get("status") == "ok":
-            out += [f"- {_escape(_clip(item, WAIT_CHARS))}" for item in items[:keep_waits]]
-            if not items:
-                out.append("지금 없음.")
-            if len(items) > keep_waits:
-                out.append(f"크기 한도로 접은 질문 {len(items) - keep_waits:,}개.")
-            seen = datetime.fromtimestamp(waits["at"], tz)
-            today = seen.date() == datetime.fromtimestamp(now, tz).date()
-            out.append("질문판 기준 " + seen.strftime("%H:%M" if today else "%m-%d %H:%M"))
-        else:
-            out.append("질문판을 읽지 못했습니다.")
         out += ["", "## 최근에 끝난 것"]
         out += [_unit_line(unit, prefix=datetime.fromtimestamp(unit["closed_at"], tz).strftime("%m-%d") + " ")
                 for unit in shown_done]
@@ -316,8 +300,8 @@ def render_document(title, summary, units, waits, *, now, tz=None):
             low, high = (middle, high) if fit(middle) else (low, middle - 1)
         return low
 
-    counts = [len(done), len(items), len(active)]   # build's order: done, waits, active
-    for index in (0, 2, 1):   # finished lines first, then open work, and the questions last
+    counts = [len(done), len(active)]   # build's order: done, active
+    for index in (0, 1):   # finished lines first, then open work
         if fits(*counts):
             break
         counts[index] = most(counts[index], lambda k, i=index: fits(*[k if j == i else c for j, c in enumerate(counts)]))   # 0 when even none of them would make it fit
@@ -327,92 +311,6 @@ def render_document(title, summary, units, waits, *, now, tz=None):
 # ---------------------------------------------------------------------------
 # reads
 # ---------------------------------------------------------------------------
-
-
-def _first_line(value):
-    for line in _CONTROLS.sub("", str(value or "")).split("\n"):   # an unpaired surrogate cannot be written
-        if line.strip():
-            return line.strip()
-    return ""
-
-
-def _open_question_files():
-    """The open question files of the board's own state folder, read once: a list of their values.
-
-    Only names the board writes (64 hexadecimal digits) are read, so the board's copies in the same
-    folder are not; a file that cannot be read, or whose `id` is not text, is left out. Read only."""
-    import human_wait_state
-    found = []
-    for path in sorted(human_wait_state.state_root().glob("*.json")):
-        if not _QUESTION_FILE.fullmatch(path.stem):
-            continue
-        value = human_wait_state._read(path)
-        if value and isinstance(value.get("id"), str) and value.get("lifecycle") == "open":
-            found.append(value)
-    return found
-
-
-def _folder_root(cwd, root_real):
-    """Whether an absolute folder resolves to the artifact root `root_real` (a relative one would
-    resolve against the worker's own folder, so it never does)."""
-    if not isinstance(cwd, str) or not os.path.isabs(cwd):
-        return False
-    from tools.fleet.collectors import project_status
-    found = project_status.artifact_root(cwd)
-    return bool(found) and os.path.realpath(str(found)) == root_real
-
-
-def read_waits(root, now):
-    """This repo's open questions from the question board's saved copy (never refreshed here).
-
-    `{"status": "ok", "at": observed_at, "items": [first lines]}`, or `{"status": "unreadable"}`
-    only when there is no copy or reading it fails; a copy of any age is used and its time is
-    shown. An item is open when a person must answer it and it is not folded as old. A route's
-    item belongs here when its route is one of this root's. An `S4` item reads its question and
-    folder from the question file with the same id (open only; none found means left out) and
-    belongs here when that folder resolves to this root. An open `S4` question file made after the
-    copy (its `since` is later than the copy's `observed_at`) and not on it is added when its folder
-    resolves to this root, once however many files carry its id. Anything else is left out."""
-    try:
-        import human_wait_state
-        view = human_wait_state.cached_view(now=now, request=False, max_age=float("inf"))
-        if view is None:
-            return {"status": "unreadable"}
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        root_real = os.path.realpath(str(root))
-        open_items = [item for item in view["items"]
-                      if human_wait_state.person_wait(item) and item.get("stale") not in (True, "older")]
-        wanted = {item.get("id") for item in open_items if str(item.get("source")) == "S4"}
-        opened = _open_question_files()   # the one look at the state folder
-        files = {value["id"]: value for value in opened if value["id"] in wanted}
-        items = []
-        for item in open_items:
-            question, cwd = item.get("question"), item.get("cwd")
-            if str(item.get("source")) == "S4":
-                record = files.get(item.get("id"))
-                if record is None:
-                    continue
-                question, cwd = record.get("question"), record.get("cwd")
-            route_id = item.get("route_id")
-            here = isinstance(route_id, str) and _ROUTE_FILE.match(route_id + ".json") is not None \
-                and (Path(root) / ".runtime" / "routes" / (route_id + ".json")).is_file()
-            if not here and cwd:
-                here = _folder_root(cwd, root_real)
-            if here:
-                items.append(_first_line(question) or "질문 (본문 없음)")
-        # A question asked after the copy was made is not on it yet: its own file says it is open.
-        observed, listed = float(view["observed_at"]), {item.get("id") for item in view["items"]}
-        for value in opened:
-            if (value.get("mode") != "message" or value["id"] in listed or not value.get("cwd")
-                    or not isinstance(value.get("since"), (int, float)) or value["since"] <= observed
-                    or human_wait_state.wait_fold(value["since"], now) is not None):
-                continue
-            if _folder_root(value["cwd"], root_real):
-                items.append(_first_line(value.get("question")) or "질문 (본문 없음)")
-                listed.add(value["id"])
-        return {"status": "ok", "at": observed, "items": items}
-    except Exception:  # noqa: BLE001 -- an unreadable copy is a stated state, never a failure
-        return {"status": "unreadable"}
 
 
 def _list_routes(root):
@@ -570,7 +468,7 @@ def _cache_member(entry):
     return isinstance(entry, dict) and isinstance(entry.get("slug"), str)
 
 
-def collect(root, campaign_dir, *, now, waits, cache=None, persist=False, listing=None, new_records=None, tz=None,
+def collect(root, campaign_dir, *, now, cache=None, persist=False, listing=None, new_records=None, tz=None,
             live=None):
     """`(document text, cache)` for one campaign, from its records. Writes nothing itself;
     `persist=False` is a faithful drawing from real records, `catch_up` persists."""
@@ -696,7 +594,7 @@ def collect(root, campaign_dir, *, now, waits, cache=None, persist=False, listin
                 unit["title"] = found
     title = meta_campaign.get("title") or campaign.get("title") or campaign_dir.name
     summary = meta_campaign.get("summary") or ""
-    return render_document(title, summary, units, waits, now=now, tz=tz), cache
+    return render_document(title, summary, units, now=now, tz=tz), cache
 
 
 # ---------------------------------------------------------------------------
@@ -805,13 +703,6 @@ def _cached_campaigns(root):
     return [name[:-len(".json")] for name in names if name.endswith(".json") and name != "watermark.json"]
 
 
-def _waits_signature(board):
-    """What the question list says, apart from the time it was read."""
-    if not isinstance(board, dict) or board.get("status") != "ok":
-        return "unreadable"
-    return hashlib.sha256(json.dumps(board.get("items") or []).encode()).hexdigest()[:16]   # ASCII escapes: any text, even an unpaired surrogate
-
-
 def _records_of_closes(root, listing, mark, have):
     """Records for routes whose close result changed after `mark` but whose cycle record did not (a close
     promoted later): found through the saved campaign lists, which hold each route's cycle id, and for
@@ -869,13 +760,12 @@ def _former_campaigns(root, rid, record, mark):
     return found
 
 
-def catch_up(root, cycle_id=None, *, now=None, waits=None):
+def catch_up(root, cycle_id=None, *, now=None):
     """Bring the documents of the campaigns that moved since the last pass up to date.
 
     A campaign moved when one of its cycle records was written or one of its routes closed after the
     saved mark (the first pass looks back ten minutes), or when `cycle_id` is its cycle. Only campaigns that are
-    still active are written, and so is each one that already has a document when the repo's
-    question list changed since the last pass. One campaign failing never stops another. Returns the names of
+    still active are written. One campaign failing never stops another. Returns the names of
     the campaign folders whose document was written or already current."""
     root = Path(root)
     if not (root / ".runtime" / "routes").is_dir():
@@ -900,13 +790,6 @@ def catch_up(root, cycle_id=None, *, now=None, waits=None):
     for rid, record in _choose(records).items():
         for other in _former_campaigns(root, rid, record, mark):
             by_campaign.setdefault(other, [])   # its document is written again, and drops the route
-    board = waits if waits is not None else read_waits(root, now)
-    signature = _waits_signature(board)
-    if signature != saved.get("waits"):
-        # The questions are the repo's, the same on every document: when they changed (one answered,
-        # one asked) each campaign that has a document is written again, with no route event needed.
-        for campaign_id in _cached_campaigns(root):
-            by_campaign.setdefault(campaign_id, [])
     written = []
     if by_campaign:
         for campaign_id, rows in sorted(by_campaign.items()):
@@ -915,7 +798,7 @@ def catch_up(root, cycle_id=None, *, now=None, waits=None):
                 record = store._read_json(folder / "campaign.json")
                 if not record or record.get("campaign_id") != campaign_id or record.get("state") != "active":
                     continue
-                text, cache = collect(root, folder, now=now, waits=board, cache=_load_cache(root, campaign_id),
+                text, cache = collect(root, folder, now=now, cache=_load_cache(root, campaign_id),
                                       persist=True, listing=listing, new_records=records, live=live)
                 if _write_document(folder, text):
                     written.append(folder.name)
@@ -925,7 +808,7 @@ def catch_up(root, cycle_id=None, *, now=None, waits=None):
             except Exception as exc:  # noqa: BLE001 -- one campaign never stops the others
                 print(f"campaign_document skipped error={type(exc).__name__}", file=sys.stderr)
     try:
-        _write_state(root, "watermark.json", {"v": 1, "ns": started - WATERMARK_SLACK_NS, "waits": signature})
+        _write_state(root, "watermark.json", {"v": 1, "ns": started - WATERMARK_SLACK_NS})
     except OSError:
         pass
     return written
