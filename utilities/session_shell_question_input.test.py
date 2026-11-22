@@ -563,6 +563,12 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                             send('a');position(kind+'-ascii')
                             send('\x7f한');position(kind+'-wide')
                             send(' 긴 한글 답변입니다.'*12);position(kind+'-long')
+                            # 11-22: the terminal cursor stands inside the text where the place is (Home, a few
+                            # characters right, an insert, then back to the end for what follows).
+                            send('\x1b[H');position(kind+'-home')
+                            send('\x1b[C'*9);position(kind+'-mid')
+                            send('끼');position(kind+'-mid-insert')
+                            send('\x1b[F');position(kind+'-end')
                             time.sleep(1.1);position(kind+'-beat')
                             send('\x1b[6~');position(kind+'-page')
                             tm('resize-window','-t','qi:0','-x','60','-y','12');time.sleep(.3);position(kind+'-resize60')

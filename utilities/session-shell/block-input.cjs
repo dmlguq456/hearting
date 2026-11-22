@@ -7,6 +7,8 @@ const {keyRows}=require('./panel-view.cjs');
 // leaves at the first update or paint past that, on the path it always left by (no timer of its own).
 const SENT_KEEP_MS=10*60*1000;
 const ANSWER_FULL=Symbol('answer full');
+// Home and End as terminals send them: `ESC [ H/F`, SS3, and the `~` forms of tmux/screen and rxvt.
+const START=['\x1b[H','\x1bOH','\x1b[1~','\x1b[7~'],END=['\x1b[F','\x1bOF','\x1b[4~','\x1b[8~'];
 module.exports=function({changed,answer,action,section,cellWidth}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false;
@@ -14,7 +16,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   const entries=new Map();
   const key=item=>item.id+'@'+item.revision;
   const state=item=>{
-    if(!entries.has(key(item)))entries.set(key(item),{answers:{},drafts:{},typing:{},cursor:{},notice:'',state:null,sentAt:0});
+    if(!entries.has(key(item)))entries.set(key(item),{answers:{},drafts:{},typing:{},cursor:{},caret:{},notice:'',state:null,sentAt:0});
     return entries.get(key(item));
   };
   // Rule 5 (11-14): the moment the person's answer is sent it has left their hands. While it
@@ -39,6 +41,14 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   const writable=row=>!!row&&row.item.answer_kind!=='decision'&&(row.question.free_text===true||(row.question.free_text===undefined&&!choices(row).length));
   const measure=cellWidth|| (s=>[...s].reduce((n,c)=>n+(/\p{Mark}/u.test(c)?0:c.codePointAt(0)>=0x2e80?2:1),0));
   const value=choice=>typeof choice==='object'?choice.value??choice.label:choice;
+  // 11-22: the place inside the typed text is a screen value only (`local.caret[id]`, a count of characters
+  // before it; absent = the end). One step is one character as the person sees it: a character with the
+  // marks that join it (the unit Backspace removes and the arrows cross). The draft, the sent answer and
+  // the questions API never see it.
+  const joins=c=>/[\p{M}\u200d\u{1f3fb}-\u{1f3ff}\u1160-\u11ff\ud7b0-\ud7ff]/u.test(c);
+  function after(chars,at){let i=at+1;while(i<chars.length&&joins(chars[i])){const zwj=chars[i]==='\u200d';i++;if(zwj&&i<chars.length)i++;}return Math.min(i,chars.length);}
+  function before(chars,at){let i=at-1;while(i>0&&(joins(chars[i])||chars[i-1]==='\u200d'))i--;return Math.max(i,0);}
+  function caretAt(local,id){const n=[...(local.drafts[id]||'')].length,c=local.caret[id];return Number.isInteger(c)?Math.max(0,Math.min(n,c)):n;}
   // Spec rule 18: the highlighted choice, moved by ↑↓ and sent by Enter as
   // Claude's own question does. It starts on the recommended choice, else the
   // first. A decision (approve/reject/defer) keeps its explicit choice: nothing
@@ -104,11 +114,12 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}
     changed();
   }
-  function leave(){clearFullNotice(current());focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
+  function forgetPlaces(){for(const entry of entries.values())entry.caret={};}
+  function leave(){forgetPlaces();clearFullNotice(current());focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
   const seatOf=row=>row?key(row.item)+'\0'+row.question.id:null;
   function move(delta){
     const count=flat().length;index=(index+delta+count+1)%(count+1);
-    moves++;changeArmed=false;seat=seatOf(flat()[index]);
+    moves++;changeArmed=false;forgetPlaces();seat=seatOf(flat()[index]);
     frozen=undefined;stale=false;scroll=0;follow=true;resetParser();changed();
   }
   function terminalState(row){return row.item.request_state||state(row.item).state||'open';}
@@ -158,15 +169,23 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     const picked=local.answers[id];
     if(status==='open'&&writable(row)){
       const draft=local.drafts[id]||'',safe=row.question.secret?'•'.repeat([...draft].length):draft;
-      const wrapped=[];let shown='› ',width=2;
-      for(const c of safe.replace(/[\x00-\x1f\x7f-\x9f]/g,' ')){
+      const shownChars=[...safe.replace(/[\x00-\x1f\x7f-\x9f]/g,' ')],lines=[];let shown='› ',width=2,start=0;
+      shownChars.forEach((c,i)=>{
         const w=measure(c);
-        if(width+w>Math.max(3,columns-1)){wrapped.push(shown);shown='  ';width=2;}
+        if(width+w>Math.max(3,columns-1)){lines.push({text:shown,start});shown='  ';width=2;start=i;}
         shown+=c;width+=w;
-      }
-      wrapped.push(shown);
-      wrapped.forEach((line,i)=>tail.push(chosenRow([{...span(line,'loc_repo'),answerRow:true,
-        ...(focused&&local.typing[id]&&i===wrapped.length-1?{caret:true}:{})}],focused&&!!local.typing[id])));
+      });
+      lines.push({text:shown,start});
+      // The row holding the place: the last row whose first character is at or before it.
+      const live=focused&&!!local.typing[id],at=caretAt(local,id);
+      let home=lines.length-1;for(let i=0;i<lines.length;i++)if(lines[i].start<=at)home=i;
+      lines.forEach((one,i)=>{
+        const mark={...span(one.text,'loc_repo'),answerRow:true};
+        if(!live||i!==home){tail.push(chosenRow([mark],focused&&!!local.typing[id]));return;}
+        const end=i+1<lines.length?lines[i+1].start:shownChars.length,rel=at-one.start;
+        const front=one.text.slice(0,2)+shownChars.slice(one.start,one.start+rel).join(''),rest=shownChars.slice(one.start+rel,end).join('');
+        tail.push(chosenRow([{...mark,text:front,caret:true},...(rest?[{...span(rest,'loc_repo'),answerRow:true}]:[])],true));
+      });
     }else if(picked&&!choosing(row)){
       const selected=picked.map(v=>{if(row.question.secret)return '•'.repeat([...String(v)].length);const n=choices(row).findIndex(c=>value(c)===v);return (n>=0?String(n+1)+' · ':'')+v;});
       tail.push(chosenRow([span('› '+selected.join(', '),'loc_repo')],active(row)));
@@ -281,7 +300,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     let sent=false;const started=moves;
     try{
       const result=await answer({question_id:row.item.id,revision:row.item.revision,...(row.item.answer_kind==='decision'?{decision:values[id][0]}:{answers:values})});
-      if(['submitted','received','applied'].includes(result.state)){local.answers=values;local.drafts={};local.typing={};local.state=result.state;sent=true;local.sentAt=Date.now();}
+      if(['submitted','received','applied'].includes(result.state)){local.answers=values;local.drafts={};local.typing={};local.caret={};local.state=result.state;sent=true;local.sentAt=Date.now();}
       else{local.state=null;local.notice=result.reason||text('unknown','unknown · check receipt');}
     }catch{local.state='unknown';local.notice=text('unknown','unknown · check receipt');}
     finally{
@@ -302,7 +321,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     if(!active(row)||choice===undefined)return;
     if(toggle&&writable(row)&&local.cursor[id]===at&&local.answers[id]?.length){local.answers[id]=[];local.cursor[id]=-1;}
     else{local.answers[id]=[value(choice)];local.cursor[id]=at;}
-    local.typing[id]=false;local.notice='';follow=true;
+    local.typing[id]=false;delete local.caret[id];local.notice='';follow=true;
   }
   function clearFullNotice(row){
     if(row&&state(row.item).notice===ANSWER_FULL)state(row.item).notice='';
@@ -310,10 +329,22 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
   // A cursor without an answer is the default, not a choice the person made.
   // Clear it on the first accepted character, including paste or a clicked row.
   function append(row,c){
-    const local=state(row.item),id=row.question.id;
-    if(Buffer.byteLength((local.drafts[id]||'')+c)>4096){local.notice=ANSWER_FULL;return;}
+    const local=state(row.item),id=row.question.id,chars=[...(local.drafts[id]||'')],at=caretAt(local,id);
+    const joined=chars.slice(0,at).join('')+c+chars.slice(at).join('');
+    if(Buffer.byteLength(joined)>4096){local.notice=ANSWER_FULL;return;}
     if(!Number.isInteger(local.cursor[id])||local.cursor[id]<0){local.cursor[id]=-1;local.answers[id]=[];}
-    local.typing[id]=true;local.drafts[id]=(local.drafts[id]||'')+c;
+    local.typing[id]=true;local.drafts[id]=joined;local.caret[id]=at+[...c].length;
+  }
+  // The place moves and deletes only in a row being typed to that has text (11-22).
+  function placing(row){return !!row&&active(row)&&writable(row)&&!!state(row.item).typing[row.question.id]&&!!state(row.item).drafts[row.question.id];}
+  function place(row,to){
+    const local=state(row.item),id=row.question.id,chars=[...local.drafts[id]],at=caretAt(local,id);
+    local.caret[id]=to==='home'?0:to==='end'?chars.length:to>0?after(chars,at):at>0?before(chars,at):0;
+  }
+  function removeAt(row){
+    const local=state(row.item),id=row.question.id,chars=[...local.drafts[id]],at=caretAt(local,id);
+    if(at>=chars.length)return;
+    chars.splice(at,after(chars,at)-at);local.drafts[id]=chars.join('');local.caret[id]=at;
   }
   function character(c){
     const row=current(),local=row&&state(row.item),id=row?.question.id;
@@ -333,7 +364,11 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     }
     if(!row){if('rwfp'.includes(c))action(c);return;}
     if(!active(row))return;
-    if(c==='\x7f'||c==='\b'){local.drafts[id]=[...(local.drafts[id]||'')].slice(0,-1).join('');return;}
+    if(c==='\x01'||c==='\x05'){if(placing(row))place(row,c==='\x01'?'home':'end');return;}
+    if(c==='\x7f'||c==='\b'){
+      const chars=[...(local.drafts[id]||'')],at=caretAt(local,id),from=before(chars,at);
+      chars.splice(from,at-from);local.drafts[id]=chars.join('');local.caret[id]=from;return;
+    }
     if(local.typing[id]){if(c>=' ')append(row,c);return;}
     if(/^[1-9]$/.test(c)&&choices(row).length){
       pick(row,Number(c)-1,true);return;
@@ -372,8 +407,11 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
             else if(escape==='\x1b[C'||escape==='\x1b[D'||escape==='\x1bOC'||escape==='\x1bOD'){
               const local=row&&state(row.item),id=row?.question.id;
               if(!local?.typing[id]&&!local?.drafts[id])section?.(escape.endsWith('C')?1:-1);
+              else if(placing(row))place(row,escape.endsWith('C')?1:-1);
             }
-            else if(up&&row&&state(row.item).typing[row.question.id]&&choices(row).length){state(row.item).typing[row.question.id]=false;scroll=0;follow=true;}
+            else if(START.includes(escape)||END.includes(escape)){if(placing(row))place(row,START.includes(escape)?'home':'end');}
+            else if(escape==='\x1b[3~'){if(placing(row))removeAt(row);}
+            else if(up&&row&&state(row.item).typing[row.question.id]&&choices(row).length){state(row.item).typing[row.question.id]=false;delete state(row.item).caret[row.question.id];scroll=0;follow=true;}
             else if((up||down)&&choosing(row)){const local=state(row.item),id=row.question.id,n=choices(row).length,at=cursorOf(row);
               if(down&&at===n-1&&writable(row))local.typing[id]=true;
               else{local.cursor[id]=at<0?0:Math.max(0,Math.min(n-1,at+(up?-1:1)));local.answers[id]=[value(choices(row)[local.cursor[id]])];}

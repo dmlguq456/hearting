@@ -1657,6 +1657,30 @@ def _clip(text, width):
     return clip_cells(text, int(width))
 
 
+def _caret_window(text, place, room):
+    """``(before, after)`` of the place, together within ``room`` cells (the place's mark is one more).
+
+    What does not fit is cut with ``…`` from the far side of the place: the text before it keeps its end
+    (two thirds of the room at most while text follows), the text after it its start.
+    """
+    from .grid import cell_width
+    text, room = str(text), max(1, int(room))
+    front, back = text[:place], text[place:]
+    if cell_width(front) + cell_width(back) <= room:
+        return front, back
+    left_room = room if not back else max(1, room - max(1, min(cell_width(back), room // 3)))
+    if cell_width(front) > left_room:
+        kept, used = [], 1
+        for char in reversed(front):
+            cells = cell_width(char)
+            if used + cells > left_room:
+                break
+            kept.append(char)
+            used += cells
+        front = "…" + "".join(reversed(kept))
+    return front, _clip(back, max(1, room - cell_width(front))) if back else ""
+
+
 def _clip_cut(text, width):
     """Cut to ``width`` cells with ``…`` even when the text exactly fills the cell."""
     from .grid import cell_width
@@ -2329,15 +2353,25 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
             choice_values = {value for value, _label in choices}
             typed = (_question_text_draft(private, qid) if editing or question_mark(private, spec) is not None else
                      " · ".join(str(value) for value in values if value not in choice_values))
+            from .state import question_caret
+            place = question_caret(private, qid, typed) if editing else len(typed)
             if secret:
                 typed = "•" * min(len(typed), 32)
+                place = min(place, len(typed))
             cursor = grid.put(indent, y, "> ", "hearting" if can_draft else "dim", limit=right)
-            if typed:
+            if editing and typed:
+                # 11-22: the place stands between the characters; a text wider than the row slides so the
+                # place stays in sight (the text's end, as before, when the place is there).
+                front, back = _caret_window(typed, place, max(1, right - cursor - 1))
+                cursor = grid.put(cursor, y, front, "soft", limit=right)
+                cursor = grid.put(cursor, y, "▏", "hearting", limit=right)
+                grid.put(cursor, y, back, "soft", limit=right)
+            elif typed:
                 cursor = grid.put(cursor, y, _clip(typed, max(1, right - cursor - 1)), "soft",
                                   limit=right)
             elif not editing:
                 cursor = grid.put(cursor, y, "…", "dim", limit=right)
-            if editing:
+            if editing and not typed:
                 grid.put(cursor, y, "▏", "hearting", limit=right)
             if can_draft:
                 grid.add_hit(y, x, right, ("question.edit", qid))

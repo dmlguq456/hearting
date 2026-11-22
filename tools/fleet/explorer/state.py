@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 import json
 import math
+import unicodedata
 
 
 @dataclass(frozen=True)
@@ -174,6 +175,51 @@ def _question_binding_complete(ref):
 
 def _question_overlay(state):
     return state.question_overlay if isinstance(state.question_overlay, Mapping) else {}
+
+
+def _question_joins(char):
+    """A mark that belongs to the character before it (the shell's question input reads the same)."""
+    return (unicodedata.category(char).startswith("M") or char == "\u200d"
+            or "\U0001f3fb" <= char <= "\U0001f3ff" or "\u1160" <= char <= "\u11ff"
+            or "\ud7b0" <= char <= "\ud7ff")
+
+
+def question_char_after(text, at):
+    """The place after the character at ``at``: one character as the person sees it (with its marks)."""
+    i = at + 1
+    while i < len(text) and _question_joins(text[i]):
+        joiner = text[i] == "\u200d"
+        i += 1
+        if joiner and i < len(text):
+            i += 1
+    return min(i, len(text))
+
+
+def question_char_before(text, at):
+    i = at - 1
+    while i > 0 and (_question_joins(text[i]) or text[i - 1] == "\u200d"):
+        i -= 1
+    return max(i, 0)
+
+
+def question_caret(overlay, question_id, text):
+    """The place inside the typed text: a screen value only, the end unless set while typing (11-22)."""
+    caret = overlay.get("caret") if isinstance(overlay, Mapping) else None
+    if (isinstance(overlay, Mapping) and overlay.get("editing") and isinstance(caret, tuple)
+            and len(caret) == 2 and caret[0] == question_id and type(caret[1]) is int):
+        return max(0, min(len(text), caret[1]))
+    return len(text)
+
+
+def _question_with_caret(result, question_id, place):
+    state, effects = result
+    return replace(state, question_overlay=dict(_question_overlay(state), caret=(question_id, place))), effects
+
+
+def _question_without_caret(overlay):
+    overlay = dict(overlay)
+    overlay.pop("caret", None)
+    return overlay
 
 
 def _question_supports_reply(detail):
@@ -1281,7 +1327,7 @@ def _reduce(state, event, frame=None):
             overlay.pop("answer_full")
             state = replace(state, question_overlay=overlay)
         if key == "up" and unfolded and overlay.get("editing"):
-            overlay = dict(overlay, editing=False)
+            overlay = _question_without_caret(dict(overlay, editing=False))
             return replace(state, question_overlay=overlay), ()
         if key in ("up", "down") and refs:
             ids = [ref.get("id", "") for ref in refs]
@@ -1299,8 +1345,11 @@ def _reduce(state, event, frame=None):
                 choices = question.get("choices", question.get("options"))
                 if overlay.get("editing") or not choices or not (len(addition) == 1 and addition in "123456789"):
                     text = _question_text_draft(overlay, qid)
-                    if len((text + addition).encode("utf-8")) <= 4096:
-                        return _question_set_answer(state, qid, text + addition)
+                    at = question_caret(overlay, qid, text)
+                    joined = text[:at] + addition + text[at:]
+                    if len(joined.encode("utf-8")) <= 4096:
+                        return _question_with_caret(_question_set_answer(state, qid, joined), qid,
+                                                    at + len(addition))
                     return replace(state, question_overlay=dict(overlay, answer_full=True)), ()
         if key in ("e", "E"):
             return _reduce(state, {"type": "click", "action": ("question.edit",)}, frame)
@@ -1331,16 +1380,42 @@ def _reduce(state, event, frame=None):
             return _reduce(state, {"type": "click",
                                    "action": ("question.choice", target["id"], values[index])}, frame)
         if key in ("escape", "esc") and overlay.get("editing"):
-            overlay = dict(overlay)
+            overlay = _question_without_caret(overlay)
             overlay.update(editing=False, status="Editing paused; draft retained.")
             return replace(state, question_overlay=overlay), ()
+        if unfolded and overlay.get("editing") and overlay.get("state") == "open" and key in (
+                "left", "right", "home", "end", "ctrl-a", "ctrl-e", "delete"):
+            # 11-22: while an answer is typed, these keys move inside its text, or delete at the place
+            # (Delete and Ctrl+A/E belong to the text whether or not it has any yet). With no text
+            # ←→ and Home/End keep their meaning (the view switch, the pane scroll).
+            questions = question_items(overlay.get("detail"))
+            question_id = overlay.get("editing_question_id") or (
+                questions[0]["id"] if questions else None)
+            text = _question_text_draft(overlay, question_id) if question_id else ""
+            if text or key in ("delete", "ctrl-a", "ctrl-e"):
+                at = question_caret(overlay, question_id, text)
+                if key == "delete":
+                    if at < len(text):
+                        end = question_char_after(text, at)
+                        return _question_with_caret(
+                            _question_set_answer(state, question_id, text[:at] + text[end:]),
+                            question_id, at)
+                    return state, ()
+                place = (0 if key in ("home", "ctrl-a") else len(text) if key in ("end", "ctrl-e")
+                         else question_char_after(text, at) if key == "right"
+                         else question_char_before(text, at) if at else 0)
+                return replace(state, question_overlay=dict(overlay, caret=(question_id, place))), ()
         if overlay.get("editing") and key == "backspace":
             questions = question_items(overlay.get("detail"))
             question_id = overlay.get("editing_question_id") or (
                 questions[0]["id"] if questions else None)
             text = _question_text_draft(overlay, question_id)
-            if text and question_id:
-                return _question_set_answer(state, question_id, text[:-1])
+            at = question_caret(overlay, question_id, text)
+            if text and question_id and at:
+                start = question_char_before(text, at)
+                return _question_with_caret(
+                    _question_set_answer(state, question_id, text[:start] + text[at:]),
+                    question_id, start)
             return state, ()
         if key in ("enter", "\n"):
             if (unfolded and overlay.get("state") == "open"

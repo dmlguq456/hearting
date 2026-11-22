@@ -852,6 +852,26 @@ the body. With no choices, ↑↓ scroll the body. Enter sends exactly the marke
 original choice value and the separate typed text, `[original choice value, typed
 text]`, omitting whichever is absent; with neither, `empty answer` keeps it open.
 Input beyond 4,096 UTF-8 bytes shows a one-line notice until the next key.
+The typed text has a place inside it (11-22, the person: "질문에 다른 사항을 입력할때
+텍스트 수정이 중간으로 가서 하는게 안되네? 화살표로"), the same in the shell's question
+input (the panel's QUESTIONS box once focused, and the popup) and in Fleet's question board.
+`←` `→` move it one character at a time, where a character is what the person sees as one
+(a Hangul syllable, a wide character, or a base with its combining marks, the unit
+Backspace removes); `Home` `End` (also `Ctrl+A` `Ctrl+E`, and the `ESC [ H/F`,
+`ESC [ 1~/4~` and SS3 forms) go to the text's start and end; typed characters and a
+paste go in at the place; Backspace removes the character before it and `Delete`
+(`ESC [ 3~`) the one at it. The 4,096-byte limit refuses an insert in the middle as it
+refuses one at the end; a secret answer is still `•` and the place moves over those.
+Wrapped, the place is drawn on its row at its cell (the terminal cursor in the shell; at
+the end of a row `→` goes to the first cell of the next), and a short budget that cuts rows
+keeps the row holding the place, as it kept the last. The place is a screen value only:
+the sent answer (`[value, text]`), the saved draft and the questions API are as before, and
+returning to a question starts it at the text's end. No word jumps, no line-up/down in the
+wrapped text, no selection, no undo. In the shell `←` `→` still change sections when there is
+no text and keep `↑` `↓` Tab, numbers, Enter and Esc as they were; only with text do they move
+the place (before, dead keys). In Fleet `←` `→` (otherwise the view switch, with Tab and
+Shift+Tab) move the place only while an answer is being typed (`editing`) and has text;
+`Home` `End` likewise, otherwise they scroll the pane; its key legend then names them.
 Tab and closing/reopening retain each question's mark, its default/explicit
 provenance, and its draft. Enter's existing next-field behavior stays.
 Its one localized guidance row reads
@@ -1150,7 +1170,7 @@ The sender wraps a single value when its text itself parses as a JSON array.
 
 The question popup answers this session's own questions. Answer another session's wait in
 its own window or in Fleet. In free-text questions, `f`, `r`, `p` and `w` enter text.
-←→ switch sections when the answer row is inactive and its draft is empty. While the popup
+←→ switch sections when the answer row is inactive and its draft is empty; with text in the draft they move the place in it (see the question input rules above). While the popup
 stands every key and press is its own (none reaches the native, a native that
 reads the mouse included; whatever follows an Esc, in the same read or within its
 25 ms, other than `[` or `O` (an arrow or function key) is dropped, neither closing
