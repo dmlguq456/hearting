@@ -87,6 +87,7 @@ _RECORD_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")   # a viewer shows a n
 _VERDICT = re.compile(r"최종\s*판정\s*[:：]\s*(.+)")
 _HEAD_TAIL = re.compile(r"\s*[—–]\s*head\b.*$", re.IGNORECASE)
 _MERGED_PR = re.compile(r"^Merge pull request #(\d+)(?=\s|$)")
+_COMMIT = re.compile(r"[0-9a-f]{40}")   # the only shape of commit that is handed to git
 _LINK_UNSAFE = re.compile(r"[<>\\\r\n\x00]")
 
 
@@ -349,14 +350,16 @@ def render_document(title, summary, units, *, now, tz=None, shown=None):
 # ---------------------------------------------------------------------------
 
 
-def record_labels(unit):
+def record_labels(unit, firsts=None):
     """`[(label, kind, member)]` for every line of a piece of work's record page, in order: its work and
-    review routes and its publishes by when they started (then route id), as many lines as the unit's
+    review routes and its publishes by when they started (then route id; `firsts` is route id -> the start
+    of its first cycle, for a route that ran in more than one round), as many lines as the unit's
     `count`. The first work route is `구현` and the later ones `고침` (`고침 1`, `고침 2` from two), the first
     review is `독립 검토` and the later ones `닫힘 확인` (numbered from two), a publish is `출판`."""
     members = [("route", m) for m in unit.get("closed", []) + unit.get("open", [])]
     members += [("publish", p) for p in unit.get("pubs", [])]
-    members.sort(key=lambda pair: (_start(pair[1]), pair[1]["rid"]))
+    firsts = firsts or {}
+    members.sort(key=lambda pair: (firsts.get(pair[1]["rid"], _start(pair[1])), pair[1]["rid"]))
     later_work = sum(1 for kind, m in members if kind == "route" and m.get("kind") != "review") - 1
     later_review = sum(1 for kind, m in members if kind == "route" and m.get("kind") == "review") - 1
     work_seen = review_seen = 0
@@ -396,13 +399,21 @@ def supervisor_names(listing, pr):
     return sorted(name for name in (listing or ()) if name.startswith("RV-") and name.endswith(".md") and mark.search(name))
 
 
-def pr_from_merges(log_text):
-    """The number of the first `Merge pull request #N` among `<hash>\\t<subject>` lines, else None.
-    `Merge branch …` and `Merge remote-tracking branch …` are other merges and are skipped."""
+def pr_from_merges(log_text, head):
+    """The number of the pull request merge that brought `head` in, from `<hash> <parents>\\t<subject>` lines of
+    `git log --ancestry-path --topo-order --reverse head..base` (parents first), else None. A line counts when
+    it is a `Merge pull request #N` with two or more parents whose first parent is not yet a descendant of
+    `head` (one that is was merged on top of a commit pushed straight to the base, or on top of an earlier
+    merge of a stacked pull request, so it did not bring `head` in). `Merge branch …` is another merge."""
+    seen = {head}
     for line in str(log_text or "").split("\n"):
-        found = _MERGED_PR.match(line.split("\t", 1)[1] if "\t" in line else line)
-        if found:
+        meta, _, subject = line.partition("\t")
+        sha, *parents = meta.split() or [""]
+        found = _MERGED_PR.match(subject)
+        if found and len(parents) > 1 and parents[0] not in seen:
             return int(found.group(1))
+        if sha:
+            seen.add(sha)
     return None
 
 
@@ -751,7 +762,12 @@ class _Pages:
         """`(lines, files)` of a unit's page: one line per record, the supervisor's after them."""
         open_ids = {m["rid"] for m in unit.get("open", [])}
         out, files = [], 0
-        for label, kind, member in record_labels(unit):
+        firsts = {}
+        for member in unit.get("closed", []) + unit.get("open", []):
+            held = (self.members.get(member["rid"]) or {}).get("cycles")
+            starts = [c["st"] for c in held if isinstance(c, dict) and isinstance(c.get("st"), (int, float))] if isinstance(held, list) else []
+            firsts[member["rid"]] = min(starts + [_start(member)])
+        for label, kind, member in record_labels(unit, firsts):
             rid = member["rid"]
             closed = rid not in open_ids
             if kind == "publish":
@@ -822,19 +838,28 @@ class _Pages:
 class _GitPass:
     """One pass's git reads. Only `rev-parse` and `log` are ever run, each with a time limit and a clean
     environment, and nothing is fetched: what is not in the repository now is left for a later pass.
-    `budget` is how many `git log` calls are left this pass (the newest closes first, the rest next time)."""
+    `budget` is how many git calls are left this pass (the newest closes first, the rest next time); 0 starts
+    nothing, and a call that timed out sets it to 0."""
 
     def __init__(self, budget=None):
         self.budget, self.calls, self.bases = GIT_BUDGET if budget is None else budget, 0, {}
 
     def _run(self, repo, *args):
-        """`(exit code, stdout)`; the code is None when git did not answer (not installed, timed out)."""
+        """`(exit code, stdout)`; the code is None when git did not answer (not installed, timed out, or the
+        pass has no budget left: nothing is started then). Every start is counted, and one that timed out
+        ends git for the rest of the pass."""
+        if self.budget <= 0:
+            return None, ""
         env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
         env.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"})
+        self.budget -= 1
         self.calls += 1
         try:
             done = subprocess.run(["git", "--no-pager", "-C", str(repo), *args], capture_output=True, text=True,
                                   timeout=GIT_TIMEOUT, env=env, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            self.budget = 0
+            return None, ""
         except (OSError, subprocess.SubprocessError, ValueError):
             return None, ""
         return done.returncode, done.stdout
@@ -857,13 +882,13 @@ class _GitPass:
 
     def first_pr(self, repo, head, base):
         """`("ok", N or None)`, `("error", None)` (git refused: an unknown commit) or `("timeout", None)`."""
-        self.budget -= 1
-        code, out = self._run(repo, "log", "--ancestry-path", "--merges", "--reverse", "--format=%H%x09%s", f"{head}..{base}")
+        code, out = self._run(repo, "log", "--ancestry-path", "--topo-order", "--reverse", "--no-show-signature",
+                              "--format=%H %P%x09%s", "--end-of-options", f"{head}..{base}")
         if code is None:
             return "timeout", None
         if code != 0:
             return "error", None
-        return "ok", pr_from_merges(out)
+        return "ok", pr_from_merges(out, head)
 
 
 def _inside_repository(path):
@@ -907,11 +932,13 @@ def _link_by_git(root, cache, rows, git):
             row["pr"] = entry["pr"]
             continue
         head, source = entry.get("h"), entry.get("s")
-        if not isinstance(head, str) or not isinstance(source, str) or head == source:
+        if not (isinstance(head, str) and isinstance(source, str) and _COMMIT.fullmatch(head) and _COMMIT.fullmatch(source)) or head == source:
+            continue
+        if git.budget <= 0:
             continue
         repo = _git_repo(root, entry)
         base = git.base(repo)
-        if not base or entry.get("base") == base or git.budget <= 0:
+        if not base or entry.get("base") == base:
             continue
         status, number = git.first_pr(repo, head, base)
         if status == "timeout":
@@ -973,7 +1000,7 @@ def collect(root, campaign_dir, *, now, cache=None, persist=False, listing=None,
     if cache is not None and (cache.get("v") != 1 or not isinstance(cache.get("members"), dict)):
         cache = None
     fresh = cache is None
-    cache = {"v": 1, "horizon_ns": None, "members": {}, "facts": {}, "titles": {}, "git": {}, "rounds": True} if fresh else cache
+    cache = {"v": 1, "horizon_ns": None, "members": {}, "facts": {}, "titles": {}, "git": {}} if fresh else cache
     members, facts, cached_titles = cache["members"], cache["facts"], cache.setdefault("titles", {})
     cached_prs = cache.setdefault("prs", {})   # open route -> the PR its intent's first sentence names (0: none)
 
@@ -1001,14 +1028,17 @@ def collect(root, campaign_dir, *, now, cache=None, persist=False, listing=None,
         if _cache_member(member):
             _add_cycle(member, _cycle_entry(record))
     members = cache["members"] = {rid: m for rid, m in members.items() if _cache_member(m)}
-    if not cache.get("rounds"):   # a list saved before rounds were kept: its reviews' other cycles are read once
-        reviews = [rid for rid, m in members.items() if route_kind(m["cap"], m["slug"]) == "review"]
-        if reviews:
-            for record in store.list_cycle_records(root, route_ids=reviews):
-                member = members.get(record.get("route_id")) if record.get("campaign_id") == campaign_id else None
-                if _cache_member(member):
-                    _add_cycle(member, _cycle_entry(record))
-        cache["rounds"] = True
+    reviews = [rid for rid, m in members.items() if route_kind(m["cap"], m["slug"]) == "review" and "rk" not in m]
+    if reviews:   # a list an older version wrote (or replaced a member of): its reviews' cycles are read once, and `rk` marks them read
+        read = store.list_cycle_records(root, route_ids=reviews)
+        for record in read:
+            member = members.get(record.get("route_id")) if record.get("campaign_id") == campaign_id else None
+            if _cache_member(member):
+                _add_cycle(member, _cycle_entry(record))
+        for rid in reviews:
+            member = members[rid]
+            mine = next((r for r in read if r.get("route_id") == rid and r.get("cycle_id") == member.get("cy")), None)
+            member["rk"] = list(_rank(mine)) if mine else [False, ""]
 
     kinds = {rid: route_kind(m["cap"], m["slug"]) for rid, m in members.items()}
     closed = {rid: listing[rid][1] for rid in members if rid in listing and listing[rid][1] is not None}
@@ -1229,8 +1259,8 @@ def remove_generated_records(campaign_dir):
 
 
 def _write_records(campaign_dir, pages):
-    """Write the record pages (`key -> text`) into `records/`: made when there is a page to write, never a
-    folder that is a link or a file, a page changed only when its text changed, a file of that name that
+    """Write the record pages (`key -> text`) into `records/`: made (inside a campaign folder that is there;
+    never its parents) when there is a page to write, never a folder that is a link or a file, a page changed only when its text changed, a file of that name that
     is not the generator's left as it is. Nothing is removed: a page whose line has folded stays."""
     if not pages:
         return
@@ -1239,7 +1269,17 @@ def _write_records(campaign_dir, pages):
         if not stat.S_ISDIR(os.lstat(folder).st_mode):
             return
     except FileNotFoundError:
-        store._ensure_dir(folder)
+        try:
+            os.mkdir(folder)   # one level: a campaign folder that is gone is not made again
+        except FileExistsError:
+            pass
+        except OSError:
+            return
+        try:
+            if not stat.S_ISDIR(os.lstat(folder).st_mode):
+                return
+        except OSError:
+            return
     for key, text in sorted(pages.items()):
         if not _RECORD_KEY.fullmatch(key):
             continue
@@ -1339,7 +1379,7 @@ def _former_campaigns(root, rid, record, mark):
     return found
 
 
-def catch_up(root, cycle_id=None, *, now=None):
+def catch_up(root, cycle_id=None, *, now=None, git=None):
     """Bring the documents of the campaigns that moved since the last pass up to date.
 
     A campaign moved when one of its cycle records was written or one of its routes closed after the
@@ -1370,7 +1410,7 @@ def catch_up(root, cycle_id=None, *, now=None):
         for other in _former_campaigns(root, rid, record, mark):
             by_campaign.setdefault(other, [])   # its document is written again, and drops the route
     written = []
-    git = _GitPass()
+    git = git if git is not None else _GitPass()   # a caller that must start no process gives `_GitPass(budget=0)`
     if by_campaign:
         for campaign_id, rows in sorted(by_campaign.items()):
             try:
