@@ -218,19 +218,25 @@ written again as the work moves, without the section.
 
 - **Record pages.** Each line of the document ends `[기록 N ›](<records/<key>.md>)`, a link to
   the record page of that work: `campaigns/<campaign>/records/<key>.md`, where `<key>` is
-  `pr-<N>` or, with no PR, the folder name of the work's first route (letters, digits, `.`,
-  `_`, `-`, not starting with `.`, at most 200 characters; any other name gets no link). The
+  `pr-<N>` or, with no PR, the folder name of the work's first route (an ASCII letter or digit
+  first, then letters, digits, `.`, `_` or `-`, at most 200 characters; any other name gets no
+  link). The
   same code writes it: first line `<!-- hearting:campaign-record v1 -->`, one line per record
   (a route, a publish, or the supervisor's `RV-…PR<N>….md` review file, found by name and not
   counted in `N`; a review route's rounds share its one line). It writes the pages of the lines the document shows and
   only when their text changed; it never deletes a page, and a file of that name without the
   marker, a link or a `records` that is not a folder is left as it is and its line has no link.
   A route that closed with a commit (`head_commit` differs from `source_commit`) but no PR
-  number is joined to the pull request merge that brought its head in (a `Merge pull request #N`
-  between its head and `origin/HEAD`, `origin/main` or `main` whose first parent is not already
-  a descendant of the head, so a commit pushed straight to `main` has no PR; only a full 40-hex
-  `head_commit` and `source_commit` are asked, and one timeout ends git for that pass; read
-  only, no fetch); a number already known is never changed. `records/` is not a cycle folder:
+  number is joined to the pull request merge that brought its head in: the first
+  `Merge pull request #N` between its head and `origin/HEAD`, `origin/main` or `main` whose
+  first parent is not already a descendant of the head. A head on that base's own first-parent
+  line has no PR: a commit pushed straight to `main` (even when a longer branch later took
+  `main` in by a pull request and came back) or a head that is itself a merge there. A head that
+  went through a longer branch is joined to its own pull request into that branch, and a merge
+  with three or more parents counts by its subject. Only a full 40-hex `head_commit` and
+  `source_commit` are asked; a pass makes at most 40 `git log` calls (its `rev-parse` base
+  lookups are not counted) and one timeout ends git for that pass; read only, no fetch. A
+  number already known is never changed. `records/` is not a cycle folder:
   the locator, tidy, closeout and residue passes skip it as they skip `journals/`.
 - **Where.** `campaigns/<campaign-locator>/campaign.md`, directly in the campaign
   folder, made by the code above. Fleet prefers these campaign pages, reads up to three
