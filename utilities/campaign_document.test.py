@@ -1791,6 +1791,21 @@ class GitLinkTest(GitFixture):
         self.assertTrue(all(c[:3] == ["git", "--no-pager", "-C"] for c in calls))
         self.assertEqual(list((self.repo / ".git").glob("*.lock")), [])
 
+    def test_a_folder_with_no_git_in_or_above_it_is_not_asked_and_a_fatal_answer_stops_the_search(self):
+        nowhere = self.root.parent / "nowhere"
+        nowhere.mkdir()
+        with mock.patch.object(cd.subprocess, "run", side_effect=AssertionError("git was started")):
+            self.assertEqual(cd._GitPass().base(str(nowhere)), "")
+        fatal = mock.Mock(returncode=128, stdout="")
+        with mock.patch.object(cd.subprocess, "run", return_value=fatal) as run:
+            git = cd._GitPass()
+            self.assertEqual(git.base(str(self.repo)), "")
+        self.assertEqual(run.call_count, 1)   # not a repository for one ref is not a repository for the next
+        missing = mock.Mock(returncode=1, stdout="")
+        with mock.patch.object(cd.subprocess, "run", return_value=missing) as run:
+            self.assertEqual(cd._GitPass().base(str(self.repo)), "")
+        self.assertEqual(run.call_count, 3)   # no such ref: the next one is tried
+
     def test_the_environment_git_runs_in_is_clean_and_read_only(self):
         seen = {}
 

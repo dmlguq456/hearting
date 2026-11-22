@@ -841,15 +841,16 @@ class _GitPass:
 
     def base(self, repo):
         """The commit of the first of `origin/HEAD`, `origin/main`, `main` that resolves; "" when none does
-        (not a repository, or git is missing). Looked up once per repository in a pass."""
+        (not a repository, or git is missing). Looked up once per repository in a pass; a folder with no
+        `.git` in it or above it is not asked at all (starting git costs tens of milliseconds)."""
         if repo not in self.bases:
             found = ""
-            for ref in ("origin/HEAD", "origin/main", "main"):
+            for ref in () if not _inside_repository(repo) else ("origin/HEAD", "origin/main", "main"):
                 code, out = self._run(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
-                if code is None:
-                    break
                 if code == 0 and out.strip():
                     found = out.strip().split()[0]
+                    break
+                if code != 1:   # 1 is "no such ref"; anything else (not a repository, git missing, timed out) holds for every ref
                     break
             self.bases[repo] = found
         return self.bases[repo]
@@ -863,6 +864,18 @@ class _GitPass:
         if code != 0:
             return "error", None
         return "ok", pr_from_merges(out)
+
+
+def _inside_repository(path):
+    """True when `path` or a folder above it holds a `.git` (a folder, or the file a working tree has)."""
+    current = os.path.abspath(str(path))
+    while True:
+        if os.path.lexists(os.path.join(current, ".git")):
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
 
 
 def _git_repo(root, entry):

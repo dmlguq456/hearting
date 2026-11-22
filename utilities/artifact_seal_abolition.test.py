@@ -4099,6 +4099,13 @@ class E2BeginWaitsForAdmissionTest(B1RefreshBase):
         self.addCleanup(in_test.stop)
         self.popen = fake.start().Popen
         self.addCleanup(fake.stop)
+        # The refresh worker runs in this process here. Its campaign-document pass may ask git where a closed
+        # route was merged (a process start of tens of ms each); that is not what these tests are about, and the
+        # one locked read they count only happens while the index is younger than its 100 ms settle margin.
+        import campaign_document
+        no_git = mock.patch.object(campaign_document._GitPass, "base", return_value="")
+        no_git.start()
+        self.addCleanup(no_git.stop)
 
     def test_e2_busy_then_free_is_one_begin_with_one_locked_read_and_no_double_writes(self):
         parent = self.closed("e2-parent", {"plans/cycle/plan.md": b"plan\n"})
