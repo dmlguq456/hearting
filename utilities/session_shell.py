@@ -859,7 +859,7 @@ def session_questions(harness, sid, *, view=None, retained=(), elsewhere=None):
     and in no count, yet comes here as its receipt: the panel's one dim line (rule 5).
     A question already shown has left the session's waits only when a complete observation
     leaves it out (11-22): with none (missing, past its display time, the producer's failure
-    record) it stands as its own request says.
+    record) and none that lists it at all, it stands as its own request says.
     """
     import time
     import human_wait_state
@@ -884,6 +884,7 @@ def session_questions(harness, sid, *, view=None, retained=(), elsewhere=None):
     # A current wait left out above stays out: a retained display reference keeps only a
     # question that has left this session's waits (its receipt), never one judged here.
     known = {item["id"] for item in result} | current
+    listed = {item.get("id") for item in view.get("items", ())}
     for old in list(retained or ())[:8]:
         if not isinstance(old, dict) or old.get("id") in known or len(result) >= 8:
             continue
@@ -893,9 +894,9 @@ def session_questions(harness, sid, *, view=None, retained=(), elsewhere=None):
                 "owner": {"harness": harness, "session_id": sid}}
         described = questions.describe(item, now=time.time())
         if described.get("revision") == old.get("revision"):
-            if (described.get("answerable") is True and not observed
+            if (described.get("answerable") is True and not observed and old["id"] not in listed
                     and (described.get("request_state") or "open") == "open"):
-                # No observation says it left: it stands as its own request says (11-22).
+                # No observation says it left, and none lists it (as `stale`, say): it stands as its own request says (11-22).
                 result.insert(sum(1 for row in result if row.get("answerable") is True), described)
                 known.add(described["id"])
                 continue

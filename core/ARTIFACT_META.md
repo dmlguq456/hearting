@@ -275,7 +275,7 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   campaign's one-line summary from `meta.json`, then one "All N campaigns" line, N being
   every campaign, that opens `all-campaigns.*`), **backlog** (one line that opens the
   root's `backlog.md`, see the next section; its meta is the count of each sort, the total and
-  the file's `갱신` date; there is no section when that regular file is absent or a link, and
+  the file's `갱신` date (`FIX 2 · IMPR 1 · NOTE 1 · TBD 2 · 6 total`; a document with no sort written on any line says `FIX ? · IMPR ? · NOTE ?` and its `TBD`); there is no section when that regular file is absent or a link, and
   `Counts unavailable` instead of the counts when it cannot be read or is over 64 KiB) and **records** (a link to the recent
   route reports page and a link to the ID index `campaigns/INDEX.md`), plus the root
   totals. The line counts are the constants `ENTRANCE_SPEC_LINES` and

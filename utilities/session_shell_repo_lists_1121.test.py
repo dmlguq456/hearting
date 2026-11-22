@@ -543,7 +543,7 @@ const settle=()=>new Promise(r=>setTimeout(r,10)),texts=()=>ctx.api.backlogDoc()
         sorted_backlog = BACKLOG.replace("- 다른 일\n", "- 다른 일\n  kind: fix\n")        # (11-22: the groups are the sorts) one FIX item stands open, the rest are the folded TBD group
         self.backlog(sorted_backlog)
         own = "2026-10-01_other-campaign"           # one item of its own: the panel fills up with the other group's
-        items, _total = self.status.panel_backlog_items(self.status.parse_backlog(BACKLOG.splitlines()), own, first=2)
+        items, _total = self.status.panel_backlog_items(self.status.parse_backlog(sorted_backlog.splitlines()), own, first=2)       # (the panel's keys are of the document the popup reads)
         pressed = items[1]["key"]                    # the first of the group that is a folded line in the popup
         with tempfile.TemporaryDirectory(prefix="rlj") as folder:
             path = Path(folder) / "answer.json"

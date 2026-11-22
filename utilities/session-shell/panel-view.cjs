@@ -803,9 +803,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const listTotalOf=doc=>Math.max(0,Math.min(Number.isInteger(doc.total)?doc.total:0,99999));
     // 11-22 (the person: "알파벳 하나가 아니라 그래도 적절히 3~4자로 약어든 단어든 붙이는게 맞지"): a BACKLOG item's sort word and its colour (colours of the table the panel has).
     const KIND_WORDS={fix:{word:'FIX',key:'lvl_y'},improve:{word:'IMPR',key:'lvl_g'},note:{word:'NOTE',key:'dim'},tbd:{word:'TBD',key:'dim'}};
-    // The BACKLOG head's text after the word, widest first (what is dropped as the width falls: the whole count, then the sorts' words, then the numbers):
-    // `FIX 14 · IMPR 26 · +37 /125`, … `14 26 +37`, `+37`. `+N` is the FIX and IMPR not shown (none: left out), `/N` every line of the document, `?` the sorts of a document
-    // nothing in is sorted yet; a `+` after the number where the document has more than was read.
+    // The BACKLOG head's text after the word, widest first (what is dropped as the width falls; the sorts' words outlast the numbers, as the person wanted a word of 3~4 letters, not one):
+    // `FIX 14 · IMPR 26 · +37 /125`, then `/N`, then the ` · `, then `+N` (`FIX 14 IMPR 26`), then the words (`14 26`), then nothing. `+N` is the FIX and IMPR not shown
+    // (none: left out), `/N` every line of the document, `?` the sorts of a document nothing in is sorted yet; a `+` after the number where the document has more than was read.
     const kindStages=(k,hidden,doc)=>{
       const plus=doc.more===true?'+':'',total=Math.max(0,Math.min(Number.isInteger(doc.total)?doc.total:0,99999));
       const q=unsortedOnly(k),nf=q?'?':String(k.fix),ni=q?'?':String(k.improve);
@@ -815,8 +815,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const tail=[text('/'+total+plus,'dim')];
       const full=join([[word('fix'),gap,num(nf)],[word('improve'),gap,num(ni)],...(more.length?[more]:[])],sep);
       const bare=join([[word('fix'),gap,num(nf)],[word('improve'),gap,num(ni)],...(more.length?[more]:[])],gap);
-      const nums=join([[num(nf)],[num(ni)],...(more.length?[more]:[])],gap);
-      return [[...full,gap,...tail],full,bare,nums,...(more.length?[more]:[])];
+      const named=join([[word('fix'),gap,num(nf)],[word('improve'),gap,num(ni)]],gap);
+      const nums=join([[num(nf)],[num(ni)]],gap);
+      return [[...full,gap,...tail],full,bare,named,nums];
     };
     // 11-22: a BACKLOG that tells its sorts (`counts`) has its button's number the FIX and IMPR together (what is to be done), `?` where nothing in the document is sorted yet;
     // no row of a button is shown, so every one of them is hidden. Any other value is the items' own count.
