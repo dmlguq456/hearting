@@ -2076,21 +2076,29 @@ def _r2_disk_has_any_commit(root: Path, cycles: Sequence[Dict[str, Any]]) -> boo
     return any((Path(c["cycle_dir"]) / "manifest.json").exists() for c in cycles)
 
 
+def _is_campaign_folder(folder: Path) -> bool:
+    """A campaign folder holds its `campaign.json` or, once a caller removed that, the document it generated."""
+    return (folder / "campaign.json").is_file() or os.path.lexists(folder / "campaign.md")
+
+
 def _prune_empty_tree(path: Path) -> None:
-    """Bottom-up rmdir of every now-empty directory under (and including) `path`."""
+    """Bottom-up rmdir of every now-empty directory under (and including) `path`. A campaign folder's
+    generated `campaign.md` and `records/` pages are derived and never count as residue, but only the
+    `records/` right under a campaign folder, and only once nothing else is left in that folder."""
     if not path.is_dir():
         return
     for current, dirs, files in os.walk(path, topdown=False):
         cur = Path(current)
+        if cur.name == "records" and _is_campaign_folder(cur.parent):
+            continue   # its campaign folder's turn decides (below)
         if "campaign.md" in files:
             import campaign_document  # a campaign's derived document never counts as residue
             campaign_document.remove_generated(cur)
             files = [name for name in files if name != "campaign.md" or (cur / name).exists()]
-        if cur.name == "records" and files:   # a campaign's generated record pages are derived, as its document is
-            import campaign_document
-            for name in files:
-                campaign_document.remove_generated(cur, name=name, marker=campaign_document.RECORD_MARKER)
-            files = [name for name in files if (cur / name).exists()]
+        records = cur / "records"
+        if "records" in dirs and not files and os.listdir(cur) == ["records"] and records.is_dir() and not records.is_symlink():
+            import campaign_document   # a campaign's generated record pages are derived, as its document is
+            campaign_document.remove_generated_records(cur)
         if files:
             raise ResplitError("rollback-residue", str(cur))
         try:

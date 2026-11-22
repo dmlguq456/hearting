@@ -131,5 +131,47 @@ class RecordsFolderTest(F.ProducerTestBase):
             RS._prune_empty_tree(folder)
         self.assertEqual((folder / "records" / "pr-1.md").read_text(), "a person wrote this\n")
 
+    def test_a_records_folder_inside_a_cycle_folder_is_not_the_campaigns_and_is_not_removed(self):
+        import artifact_resplit as RS
+        cycle = self.root / "campaigns" / "made-by-the-run" / "2026-11-20_cycle"
+        (cycle / "artifacts" / "records").mkdir(parents=True)
+        (cycle / "artifacts" / "records" / "note.md").write_text(PAGE, encoding="utf-8")
+        with self.assertRaises(RS.ResplitError):
+            RS._prune_empty_tree(cycle)
+        self.assertEqual((cycle / "artifacts" / "records" / "note.md").read_text(), PAGE)
+
+    def test_the_records_pages_are_not_removed_before_a_blocker_beside_them_is_known(self):
+        import artifact_resplit as RS
+        for sibling in ("0-first-cycle", "z-last-cycle"):   # whichever the walk reaches first
+            folder = self.root / "campaigns" / f"made-by-the-run-{sibling}"
+            (folder / "records").mkdir(parents=True)
+            (folder / "campaign.md").write_text(f"{CD.MARKER}\n# t\n", encoding="utf-8")
+            (folder / "records" / "pr-1.md").write_text(PAGE, encoding="utf-8")
+            (folder / sibling).mkdir()
+            (folder / sibling / "kept.txt").write_text("a person's file\n", encoding="utf-8")
+            with self.assertRaises(RS.ResplitError):
+                RS._prune_empty_tree(folder)
+            self.assertEqual((folder / "records" / "pr-1.md").read_text(), PAGE)
+            self.assertEqual((folder / sibling / "kept.txt").read_text(), "a person's file\n")
+
+    def test_the_records_pages_stay_while_the_campaign_record_is_still_there(self):
+        import artifact_resplit as RS
+        folder = self.root / "campaigns" / "made-by-the-run"
+        (folder / "records").mkdir(parents=True)
+        (folder / "campaign.json").write_text("{}", encoding="utf-8")
+        (folder / "records" / "pr-1.md").write_text(PAGE, encoding="utf-8")
+        with self.assertRaises(RS.ResplitError):
+            RS._prune_empty_tree(folder)
+        self.assertEqual((folder / "records" / "pr-1.md").read_text(), PAGE)
+
+    def test_a_folder_that_is_no_campaign_folder_keeps_its_records_pages(self):
+        import artifact_resplit as RS
+        folder = self.root / "campaigns" / "only-records"   # no campaign.json and no campaign.md: not known as a campaign's
+        (folder / "records").mkdir(parents=True)
+        (folder / "records" / "pr-1.md").write_text(PAGE, encoding="utf-8")
+        with self.assertRaises(RS.ResplitError):
+            RS._prune_empty_tree(folder)
+        self.assertEqual((folder / "records" / "pr-1.md").read_text(), PAGE)
+
 if __name__ == "__main__":
     unittest.main()
