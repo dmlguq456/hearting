@@ -127,7 +127,11 @@ A manually invoked tidy writes its handoff card and queues memory work in one
 tool call (`utilities/session_tidy.py tidy`), followed by the command's short
 `say=` reply. `card`, `enqueue`, `--no-clear`, `--no-continue` and peer handoff
 keep their existing meaning. Manual memory-tidy results retain their undo and
-partial-coverage details.
+partial-coverage details. A tidy the session runs on any turn where no automatic
+request of this booking arrived (a person's turn, another session's message, a
+runtime notice or a completion wake) is a manually invoked tidy, whoever woke
+it: it schedules the compaction and takes the booking's place, and the unspent
+idle booking sends nothing afterwards.
 
 Automatic idle work needs no main-session Skill, tool or model turn. Its existing
 booking and memory queue bind the helper output to the unchanged session,
