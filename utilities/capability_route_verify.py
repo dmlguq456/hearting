@@ -666,10 +666,14 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             profile = node.get("model_profile")
             row = registry["model_profiles"].get(profile)
             # The `top` exception profile is unregistered on purpose, so only
-            # the two node classes allowed to hold it skip the registered check:
-            # the owner, and a depth-1 frame anchor leg.
+            # the three node classes allowed to hold it skip the registered check:
+            # the owner, a depth-1 frame anchor leg, and a depth-2 stage worker or review leg (`top_stage_node`) the
+            # person named in `explicit_profiles` on a strong-or-higher route.
             top_owner_node = profile == PROFILE.TOP_PROFILE and (
                 _owner_node(node, effective, form) or _frame_node(node)
+                or (PROFILE.top_stage_node(node)
+                    and (route.get("explicit_profiles") or {}).get(node.get("id")) == PROFILE.TOP_PROFILE
+                    and PROFILE.top_stage_intensity(effective))
             )
             if not top_owner_node and (
                 not isinstance(row, dict) or row.get("registered_topology") is not True

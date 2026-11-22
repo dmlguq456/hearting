@@ -10245,12 +10245,22 @@ class FrameBootstrapLayerTest(unittest.TestCase):
   self.assertEqual(explicit,{"__owner__":"top"})
   with self.assertRaises(ValueError) as refused:
    R._profile_input_maps(nodes,demands,{"execute":"top"})
-  self.assertEqual(str(refused.exception),"profile-explicit-top-owner-only:execute")
+  self.assertTrue(str(refused.exception).startswith("profile-explicit-top-owner-only:execute: "))
+  # at strong and above a named depth-2 stage node is accepted (2026-11-23); below it stays refused
+  _demands,explicit=R._profile_input_maps(nodes,demands,{"execute":"top"},"strong")
+  self.assertEqual(explicit,{"execute":"top"})
+  with self.assertRaises(ValueError) as refused:
+   R._profile_input_maps(nodes,demands,{"execute":"top"},"standard")
+  self.assertIn("this route is standard",str(refused.exception))
   # a node that only LOOKS like a frame leg does not get the exception either
   impostor=[dict(nodes[0],id="frame",worker_type="stage")]+nodes[1:]
   with self.assertRaises(ValueError) as refused:
    R._profile_input_maps(impostor,demands,{"frame":"top"})
-  self.assertEqual(str(refused.exception),"profile-explicit-top-owner-only:frame")
+  self.assertTrue(str(refused.exception).startswith("profile-explicit-top-owner-only:frame: "))
+  # ...and a depth-1 node that is neither owner nor frame is refused at every intensity
+  with self.assertRaises(ValueError) as refused:
+   R._profile_input_maps(impostor,demands,{"frame":"top"},"adversarial")
+  self.assertTrue(str(refused.exception).startswith("profile-explicit-top-owner-only:frame: "))
 
  # -- the frame tier ladder is stamped, never inherited from the recipe -----
  def test_the_recipe_placeholder_profile_never_reaches_a_compiled_frame_leg(self):
