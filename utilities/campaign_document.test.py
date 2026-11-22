@@ -2,6 +2,7 @@
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
+import hashlib
 import io
 import json
 import re
@@ -26,6 +27,20 @@ HOUR = 3600
 
 def stamp(epoch):
     return datetime.fromtimestamp(epoch, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def tree_digest(root):
+    """Every path under `root` with its bytes' digest (or what it is): equal before and after means nothing was written."""
+    out = {}
+    for path in sorted(Path(root).rglob("*")):
+        rel = str(path.relative_to(root))
+        if path.is_symlink():
+            out[rel] = "link:" + os.readlink(path)
+        elif path.is_file():
+            out[rel] = hashlib.sha256(path.read_bytes()).hexdigest() + f":{path.stat().st_mtime_ns}"
+        else:
+            out[rel] = "dir"
+    return out
 
 
 class PureTest(unittest.TestCase):
@@ -1468,6 +1483,43 @@ class RecordRoundTest(RecordFixture):
             self.catch_up(now=self.bump(2))
         self.assertEqual(spy.call_count, 0)   # the saved list is whole now: no record is listed again
 
+    def last_round(self, rid):
+        folder = self.runtime / "artifact-producer/v1/cycles"
+        return max(r["cycle_id"] for r in (json.loads(p.read_text()) for p in folder.glob("cyc_*.json"))
+                   if r.get("route_id") == rid)
+
+    def test_a_review_an_older_version_replaced_keeps_its_rounds_when_its_own_record_moves_next(self):
+        rid, _locators = self.review_with_rounds()
+        self.catch_up()
+        self.aged_cache()
+        third = self.last_round(rid)
+        moment = self.bump(1)
+        path = self.runtime / "artifact-producer/v1/cycles" / f"{third}.json"
+        os.utime(path, (moment - 5, moment - 5))   # the review itself moved right after the older version's pass
+        self.catch_up(now=moment, cycle_id=third)
+        for number in (1, 2, 3):
+            self.assertIn(f"[{number}라운드", self.review_line())
+        self.catch_up(now=self.bump(2))
+        for number in (1, 2, 3):
+            self.assertIn(f"[{number}라운드", self.review_line())
+
+    def test_a_drawing_from_an_older_version_s_list_writes_nothing_even_with_no_index(self):
+        _rid, _locators = self.review_with_rounds()
+        self.catch_up()
+        cache = json.loads(self.aged_cache().read_text())
+        index = self.runtime / "artifact-producer/v1/cycles" / ".cycle-routes-index.json"
+        if index.exists():
+            index.unlink()
+        moment = self.bump(1)
+        before = tree_digest(self.root)
+        pages = {}
+        cd.collect(self.root, self.folder, now=moment, cache=cache, persist=False, pages=pages)
+        self.assertEqual(tree_digest(self.root), before)
+        self.assertFalse(index.exists())
+        line = next(text for text in pages["pr-1700"].split("\n") if text.startswith("- 독립 검토"))
+        for number in (1, 2, 3):
+            self.assertIn(f"[{number}라운드", line)
+
     def test_a_review_with_one_cycle_is_read_once_and_then_marked_read(self):
         self.route("rv-1700-unit", closed=NOW - HOUR, capability="audit")
         self.catch_up()
@@ -1753,6 +1805,21 @@ class GitLinkTest(GitFixture):
         self.assertIsNone(cd.pr_from_merges("c1 H p1\tMerge pull request #12", "H"))
         stacked = "k1 H\tfix\nm1 k1 z1\tMerge pull request #61 from o/f2\nm2 base0 m1\tMerge pull request #60 from o/f1"
         self.assertEqual(cd.pr_from_merges(stacked, "H"), 60)
+        self.assertEqual(cd.pr_from_merges(stacked, "H", "m2"), 60)
+
+    def test_pr_from_merges_gives_a_head_on_the_base_branch_s_own_line_no_pr(self):
+        # pushed straight to main, then a longer branch took main in (#83) and came back (#84): none, not 83
+        back = "m83 i1 H\tMerge pull request #83 from o/main\nm84 H m83\tMerge pull request #84 from o/integration"
+        self.assertIsNone(cd.pr_from_merges(back, "H", "m84"))
+        # the head went into a longer branch by its own PR (#81), the branch reached main by #82: the head's own
+        longer = "m81 i1 H\tMerge pull request #81 from o/work\nm82 b0 m81\tMerge pull request #82 from o/integration"
+        self.assertEqual(cd.pr_from_merges(longer, "H", "m82"), 81)
+        # the head is itself a merge on main, and more came after it: none
+        after = "c1 H\tnext on main\nm90 c1 f1\tMerge pull request #90 from o/f"
+        self.assertIsNone(cd.pr_from_merges(after, "H", "m90"))
+        self.assertIsNone(cd.pr_from_merges("", "H", "H"))   # the base is the head itself
+        # a merge with three parents counts by its subject
+        self.assertEqual(cd.pr_from_merges("m87 b0 x1 H\tMerge pull request #87 from o/x", "H", "m87"), 87)
 
     def test_a_route_not_merged_yet_is_not_joined_and_is_not_asked_again_until_the_base_moves(self):
         head = self.branch_commit("feature", "impl")
@@ -1808,11 +1875,11 @@ class GitLinkTest(GitFixture):
             self.merge(f"f{index}", f"Merge pull request #{1780 + index} from o/f{index}")
         for index, head in enumerate(heads):
             self.closed_work(f"w{index}-x", head, closed=NOW - (index + 1) * HOUR)
-        with mock.patch.object(cd, "GIT_BUDGET", 5):   # the base lookup (3 `rev-parse` here) counts too: then 2 `git log`
+        with mock.patch.object(cd, "GIT_BUDGET", 2):   # two `git log`; the base lookup (3 `rev-parse` here) is not counted
             self.catch_up()
         joined = [line for line in self.lines() if "#178" in line]
         self.assertEqual(sorted(re.search(r"#(\d+)", line).group(1) for line in joined), ["1780", "1781"])   # the two newest closes
-        with mock.patch.object(cd, "GIT_BUDGET", 5):
+        with mock.patch.object(cd, "GIT_BUDGET", 2):
             self.catch_up(now=self.bump(1))
         self.assertEqual(len([line for line in self.lines() if "#178" in line]), 4)
 
@@ -1979,6 +2046,76 @@ class GitLinkTest(GitFixture):
         self.catch_up()
         self.assertIsNone(self.pr_of(rid))   # by date alone X would come after the merge and #50 would be taken
 
+    def test_a_commit_pushed_straight_to_main_has_no_pr_when_a_longer_branch_takes_main_in_and_comes_back(self):
+        self.git("checkout", "-q", "-b", "integration", self.start)
+        self.commit("integration-work")
+        self.git("checkout", "-q", "main")
+        self.commit("pushed-straight")
+        head = self.rev("HEAD")
+        self.git("checkout", "-q", "integration")
+        self.merge("main", "Merge pull request #83 from o/main")   # the longer branch takes main in
+        self.git("checkout", "-q", "main")
+        self.merge("integration", "Merge pull request #84 from o/integration")   # and comes back
+        rid, _c = self.closed_work("build-it", head)
+        self.catch_up()
+        self.assertIsNone(self.pr_of(rid))
+        self.assertEqual(self.lines(), ["- 11-20 build-it · 기록 1"])
+
+    def test_a_head_that_went_through_a_longer_branch_joins_its_own_pull_request(self):
+        self.git("checkout", "-q", "-b", "integration", self.start)
+        self.commit("integration-work")
+        self.git("checkout", "-q", "-b", "work", self.start)
+        self.commit("impl")
+        head = self.rev("HEAD")
+        self.git("checkout", "-q", "integration")
+        self.merge("work", "Merge pull request #81 from o/work")
+        self.git("checkout", "-q", "main")
+        self.merge("integration", "Merge pull request #82 from o/integration")
+        rid, _c = self.closed_work("build-it", head)
+        self.catch_up()
+        self.assertEqual(self.pr_of(rid), 81)
+
+    def test_a_head_that_is_itself_a_pull_request_merge_has_none_before_and_after_more_comes(self):
+        self.branch_commit("feature", "impl")
+        self.merge("feature", "Merge pull request #85 from o/feature")
+        head = self.rev("HEAD")
+        rid, _c = self.closed_work("build-it", head)
+        self.catch_up()
+        self.assertIsNone(self.pr_of(rid))
+        self.branch_commit("later", "later-work")
+        self.merge("later", "Merge pull request #86 from o/later")   # the base moves: asked again
+        self.catch_up(now=self.bump(1))
+        self.assertIsNone(self.pr_of(rid))
+        self.assertEqual(self.cache()["git"][rid]["base"], self.rev("main"))
+
+    def test_a_pull_request_merge_with_three_parents_counts_by_its_subject(self):
+        self.branch_commit("b1", "one")
+        head = self.branch_commit("b2", "two")
+        self.git("merge", "--no-ff", "-q", "-m", "Merge pull request #87 from o/b1", "b1", "b2")
+        self.assertEqual(len(self.git("log", "-1", "--format=%P").split()), 3)
+        rid, _c = self.closed_work("build-it", head)
+        self.catch_up()
+        self.assertEqual(self.pr_of(rid), 87)
+
+    def test_base_lookups_of_routes_not_merged_yet_never_starve_an_older_route(self):
+        """Fourteen working trees with only `main` (three `rev-parse` each): the thirteen newest are not
+        merged, the oldest is. The lookups are not counted, so the oldest is asked in the first pass."""
+        rids = []
+        for index in range(14):
+            tree = self.root.parent / f"tree-{index}"
+            self.git("worktree", "add", "-q", "-b", f"w{index}", str(tree), self.start)
+            self.commit(f"impl{index}", repo=tree)
+            head = self.git("rev-parse", "HEAD", repo=tree)
+            rids.append(self.closed_work(f"w{index}-x", head, repo=str(tree), closed=NOW - (14 - index) * HOUR)[0])
+        self.merge("w0", "Merge pull request #77 from o/w0")   # the oldest close
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up()
+        self.assertEqual(self.pr_of(rids[0]), 77)
+        self.assertEqual([self.pr_of(rid) for rid in rids[1:]], [None] * 13)
+        self.assertEqual(len(self.asked(calls, "log")), 14)
+        self.assertEqual(len(self.asked(calls, "rev-parse")), 42)
+
     def test_a_value_that_is_not_a_full_commit_hash_is_never_handed_to_git(self):
         out = self.root.parent / "written-by-git"
         bad = {"option": f"--output={out}", "name": "HEAD", "branch": "main", "short": "a" * 39, "upper": "A" * 40,
@@ -2059,15 +2196,19 @@ class GitLinkTest(GitFixture):
         self.catch_up(now=self.bump(1))
         self.assertEqual((self.pr_of(a), self.pr_of(b)), (1801, None))   # `b` was merged on `other`'s main, not the one asked first
 
-    def test_the_budget_counts_every_git_start_and_none_left_starts_nothing(self):
-        git = cd._GitPass(budget=2)
-        self.assertEqual(git.base(str(self.repo)), "")   # three refs to try, two starts allowed
-        self.assertEqual(git.calls, 2)
+    def test_the_budget_counts_only_git_log_and_none_left_starts_nothing(self):
+        head, main = self.branch_commit("feature", "impl"), self.rev("main")
+        git = cd._GitPass(budget=1)
+        self.assertEqual(git.base(str(self.repo)), main)   # three refs tried, none of them counted
+        self.assertEqual((git.calls, git.budget), (3, 1))
+        self.assertEqual(git.first_pr(str(self.repo), head, main), ("ok", None))
+        self.assertEqual((git.calls, git.budget), (4, 0))
         with mock.patch.object(cd.subprocess, "run", side_effect=AssertionError("git was started")):
+            self.assertEqual(git.first_pr(str(self.repo), head, main), ("timeout", None))
             off = cd._GitPass(budget=0)
             self.assertEqual(off.base(str(self.repo)), "")
             self.assertEqual(off.first_pr(str(self.repo), "a" * 40, "b" * 40), ("timeout", None))
-        self.assertEqual(off.calls, 0)
+        self.assertEqual((git.calls, off.calls), (4, 0))
 
     def test_a_pass_in_a_test_process_starts_no_git_and_one_called_directly_still_does(self):
         head = self.branch_commit("feature", "impl")

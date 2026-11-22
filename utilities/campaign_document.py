@@ -399,21 +399,38 @@ def supervisor_names(listing, pr):
     return sorted(name for name in (listing or ()) if name.startswith("RV-") and name.endswith(".md") and mark.search(name))
 
 
-def pr_from_merges(log_text, head):
+def pr_from_merges(log_text, head, base=None):
     """The number of the pull request merge that brought `head` in, from `<hash> <parents>\\t<subject>` lines of
-    `git log --ancestry-path --topo-order --reverse head..base` (parents first), else None. A line counts when
-    it is a `Merge pull request #N` with two or more parents whose first parent is not yet a descendant of
-    `head` (one that is was merged on top of a commit pushed straight to the base, or on top of an earlier
-    merge of a stacked pull request, so it did not bring `head` in). `Merge branch …` is another merge."""
-    seen = {head}
+    `git log --ancestry-path --topo-order --reverse head..base` (parents first), else None.
+
+    A head on the base branch's own line (from `base`, first parent after first parent, down to `head`) came
+    in through no pull request: a commit pushed straight to the base, or a head that is itself a merge on it.
+    It has none, even when a longer branch took the base in by a `Merge pull request` and came back. Any
+    other head is taken by the first `Merge pull request #N` with two or more parents whose first parent is
+    not yet a descendant of `head` (one that is was merged on top of a commit already holding `head`, so it
+    did not bring `head` in). Through a longer branch that is the head's own pull request into that branch,
+    not the later one that brought the branch to the base. `Merge branch …` is another merge."""
+    rows = []
     for line in str(log_text or "").split("\n"):
         meta, _, subject = line.partition("\t")
         sha, *parents = meta.split() or [""]
+        if sha:
+            rows.append((sha, parents, subject))
+    if base:
+        first = {sha: parents[0] for sha, parents, _subject in rows if parents}
+        current = base
+        for _step in range(len(first)):   # the listed commits are the head's descendants: the walk ends within them
+            if current not in first:
+                break
+            if first[current] == head:
+                return None
+            current = first[current]
+    seen = {head}
+    for sha, parents, subject in rows:
         found = _MERGED_PR.match(subject)
         if found and len(parents) > 1 and parents[0] not in seen:
             return int(found.group(1))
-        if sha:
-            seen.add(sha)
+        seen.add(sha)
     return None
 
 
@@ -838,21 +855,23 @@ class _Pages:
 class _GitPass:
     """One pass's git reads. Only `rev-parse` and `log` are ever run, each with a time limit and a clean
     environment, and nothing is fetched: what is not in the repository now is left for a later pass.
-    `budget` is how many git calls are left this pass (the newest closes first, the rest next time); 0 starts
-    nothing, and a call that timed out sets it to 0."""
+    `budget` is how many `git log` calls are left this pass (the newest closes first, the rest next time).
+    A base lookup (`rev-parse`, once per repository in a pass) does not use it, so the lookups of routes not
+    merged yet cannot starve an older route. 0 starts nothing, and a call that timed out sets it to 0."""
 
     def __init__(self, budget=None):
         self.budget, self.calls, self.bases = GIT_BUDGET if budget is None else budget, 0, {}
 
-    def _run(self, repo, *args):
+    def _run(self, repo, *args, counted=True):
         """`(exit code, stdout)`; the code is None when git did not answer (not installed, timed out, or the
-        pass has no budget left: nothing is started then). Every start is counted, and one that timed out
-        ends git for the rest of the pass."""
+        pass has no budget left: nothing is started then). A `counted` call uses one of the budget, and any
+        call that timed out ends git for the rest of the pass."""
         if self.budget <= 0:
             return None, ""
         env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
         env.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"})
-        self.budget -= 1
+        if counted:
+            self.budget -= 1
         self.calls += 1
         try:
             done = subprocess.run(["git", "--no-pager", "-C", str(repo), *args], capture_output=True, text=True,
@@ -871,7 +890,7 @@ class _GitPass:
         if repo not in self.bases:
             found = ""
             for ref in () if not _inside_repository(repo) else ("origin/HEAD", "origin/main", "main"):
-                code, out = self._run(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+                code, out = self._run(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", counted=False)
                 if code == 0 and out.strip():
                     found = out.strip().split()[0]
                     break
@@ -888,7 +907,7 @@ class _GitPass:
             return "timeout", None
         if code != 0:
             return "error", None
-        return "ok", pr_from_merges(out, head)
+        return "ok", pr_from_merges(out, head, base)
 
 
 def _inside_repository(path):
@@ -1004,6 +1023,11 @@ def collect(root, campaign_dir, *, now, cache=None, persist=False, listing=None,
     members, facts, cached_titles = cache["members"], cache["facts"], cache.setdefault("titles", {})
     cached_prs = cache.setdefault("prs", {})   # open route -> the PR its intent's first sentence names (0: none)
 
+    # A review an older version left without its rounds (it replaced the member, so `cycles` and `rk` are gone)
+    # is picked out before this pass's records replace that member: a new record of the same review must not
+    # make it look read.
+    recover = {rid for rid, m in members.items()
+               if _cache_member(m) and "rk" not in m and route_kind(m.get("cap"), m.get("slug")) == "review"}
     records = store.list_cycle_records(root) if fresh else (new_records or [])
     for rid, record in _choose(records).items():
         if record.get("campaign_id") == campaign_id:
@@ -1028,15 +1052,22 @@ def collect(root, campaign_dir, *, now, cache=None, persist=False, listing=None,
         if _cache_member(member):
             _add_cycle(member, _cycle_entry(record))
     members = cache["members"] = {rid: m for rid, m in members.items() if _cache_member(m)}
-    reviews = [rid for rid, m in members.items() if route_kind(m["cap"], m["slug"]) == "review" and "rk" not in m]
+    reviews = [rid for rid, m in members.items()
+               if route_kind(m["cap"], m["slug"]) == "review" and ("rk" not in m or rid in recover)]
     if reviews:   # a list an older version wrote (or replaced a member of): its reviews' cycles are read once, and `rk` marks them read
-        read = store.list_cycle_records(root, route_ids=reviews)
+        wanted = set(reviews)
+        # The indexed lookup saves the index it builds; a drawing (`persist=False`) reads every record instead
+        # and writes nothing.
+        read = (store.list_cycle_records(root, route_ids=reviews) if persist
+                else [r for r in store.list_cycle_records(root) if r.get("route_id") in wanted])
         for record in read:
             member = members.get(record.get("route_id")) if record.get("campaign_id") == campaign_id else None
             if _cache_member(member):
                 _add_cycle(member, _cycle_entry(record))
         for rid in reviews:
             member = members[rid]
+            if "rk" in member:   # this pass's own record of the review already ranked the cycle it stands on
+                continue
             mine = next((r for r in read if r.get("route_id") == rid and r.get("cycle_id") == member.get("cy")), None)
             member["rk"] = list(_rank(mine)) if mine else [False, ""]
 
