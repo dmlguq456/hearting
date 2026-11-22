@@ -1086,6 +1086,10 @@ def idle_context_for_enqueue(seat: "st.Seat", harness: str, sid: str) -> Optiona
     eligible = bool(req.get("status") == "reserved" and request.get("state") in ("arrived", "sent")
                     and arrival.get("sid") == sid
                     and st.read_prompt_seq(seat) == sequence(arrival.get("prompt_seq"), -1))
+    if not eligible and not (req.get("status") == "reserved" and request.get("source") == "memory-helper"):
+        # No automatic request of this booking arrived on this turn (none was sent, or its
+        # turn is another): a tidy the session runs now is a manually invoked one, whoever woke it.
+        return None
     return {"nonce": req["nonce"], "identity": identity,
             "origin": req.get("origin"), "arrival_seq": sequence(arrival.get("prompt_seq"), -1),
             "claim_id": request.get("token"), "eligible": eligible}
