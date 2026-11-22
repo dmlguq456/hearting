@@ -420,6 +420,8 @@ def question_free_text_supported(detail, question_id):
     if question is None:
         return False
     native_ref = detail.get("native_ref")
+    if (native_ref or {}).get("transport") == "hearting-message-answer":
+        return question.get("is_other") is not False   # a registered question takes words beside its choices (11-22)
     if _question_uses_workflow_transport(detail):
         choices = question.get("choices", question.get("options"))
         return (question.get("is_other") is True

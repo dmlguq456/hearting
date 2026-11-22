@@ -3232,7 +3232,11 @@ release path Fleet uses.
 Ordinary message questions are registered by `hearting run questions ask`; their
 private S4 source belongs to the exact harness and session, even when several
 sessions share one project or pane seat. Replacing a question affects only that
-session. Existing question IDs, seat addresses and answer bindings remain valid;
+session. A registered question takes words beside its choices (11-22): the person may pick a
+choice and add text, or send text alone, in the answer forms that already exist (`[value, text]`,
+text only), and the delivery to the asking session shows both; `questions answer --choice N` is
+unchanged. What is to be chosen is registered with `--choice`, not listed in the question's
+text. Existing question IDs, seat addresses and answer bindings remain valid;
 legacy seat-only sources are read only for their matching session. The exact
 consumed receipt remains distinct from native gate approval. A queued answer or
 ordinary peer notice closes neither kind of wait. Direct input closes a message

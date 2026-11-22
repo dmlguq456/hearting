@@ -73,6 +73,8 @@ for(const lang of ['en','ko'])for(const [kind,item] of Object.entries(kinds)){
   const isKey=s=>s.replace(/ · /g,' ').split(' ').filter(Boolean).every(w=>known.has(w));
   let first=out.length;while(first>0&&isKey(out[first-1]))first--;
   const foot=out.slice(first);
+  // 11-22: a question with choices keeps its choice rows before its key hints, which go first when rows run short.
+  if((kind==='choice'||kind==='decision')&&foot.length===0){const stand=kind==='choice'?['AAA','BBB']:['approve','reject','defer'];assert(stand.every(w=>out.some(r=>r.includes(w))),'the choices stand\n'+tag);shown++;continue;}
   assert(foot.length>=1,'a key line stands\n'+tag);
   assert(foot.every(r=>cells(r)<=inner),'within the popup\n'+tag);
   assert(foot.at(-1).split(' ').at(-1)===close,'the closing key stays last\n'+tag);

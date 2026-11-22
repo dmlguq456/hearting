@@ -2983,7 +2983,9 @@ for(const [cols,rows] of [[40,16],[80,12],[60,10]]){
  const all=c.detail({budget:v.popupRoom(rows)+1,columns:v.popupWidth(cols)-4});
  const r=v.popup({cols,rows,title:all[0],body:all.slice(1),sections:['QUESTIONS']});
  const text=r.rows.map(row=>row.map(p=>p.text).join('')).join('\n');
- assert(text.includes('Draft answer'),text);assert(text.includes('Esc/Ctrl+] back'),text);
+ assert(text.includes('Draft answer'),text);assert(text.includes('Here')&&text.includes('Another folder'),text);
+ // 11-22: short of rows the key hints give way before the choices and the answer row do.
+ if(cols>=80&&rows>=12)assert(text.includes('Esc/Ctrl+] back'),text);
  assert(r.rows.every(row=>row.reduce((n,p)=>n+[...p.text].length,0)<=cols),text);
 }
 '''

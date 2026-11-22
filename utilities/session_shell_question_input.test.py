@@ -142,8 +142,9 @@ const cases={
  tab:async create=>{const x=setup(create);x.b.update([{id:'synthetic',revision:'one',answerable:true,questions:['q','q2'].map(id=>({id,question:id,free_text:true,choices:['one','two']}))}],'',{});assert.deepEqual((await x.send('2note\t1other\r'))?.answers,{q:['two','note'],q2:['one','other']});},
 };
 (async()=>{for(const [name,test] of Object.entries(cases)){await test(current);let failed=false;try{await test(previous.exports);}catch{failed=true;}assert(failed,'baseline must fail '+name);console.log('NEW_CASE '+name+' current=PASS baseline=FAIL');}
- for(const columns of [96,56,17])for(const budget of [24,6,2]){const draw=create=>JSON.stringify(setup(create,{free_text:false}).rows(columns,budget),(k,v)=>k==='choiceIndex'?undefined:v).replace(' · t text','');assert.equal(draw(current),draw(previous.exports));}
- for(const columns of [96,56,17])for(const budget of [24,6,2])for(const keys of ['', '\r']){
+ // 11-22: a choice-only question's rows are as before where the popup is roomy; short of rows its choices now stay and the words page.
+ for(const columns of [96,56,17])for(const budget of [24]){const draw=create=>JSON.stringify(setup(create,{free_text:false}).rows(columns,budget),(k,v)=>k==='choiceIndex'?undefined:v).replace(' · t text','');assert.equal(draw(current),draw(previous.exports));}
+ for(const columns of [96,56,17])for(const budget of [24])for(const keys of ['', '\r']){
   const draw=create=>{const x=setup(create);x.b.leave();x.b.update([{id:'decision',revision:'one',answerable:true,answer_kind:'decision',questions:[{id:'q',question:'Decision'}]}],'',{});x.b.enter();x.b.input(Buffer.from(keys));return JSON.stringify(x.rows(columns,budget),(k,v)=>k==='choiceIndex'?undefined:v).replace(' · t text','');};assert.equal(draw(current),draw(previous.exports));
  }
  const x=setup(current);assert.deepEqual((await x.send('2\r')).answers.q,['v2']);
@@ -202,14 +203,16 @@ const cases={
     assert.deepEqual(x.answer,['draft']);
   },
   section_arrows(create){
+    // 11-22: in the question input ←→ never change sections: with no text they do nothing, with text they
+    // move the place in it (the old editor sent them to the sections when there was no text).
     const x=setup(create);
     x.keys('\x1b[D\x1bOC');
-    assert.deepEqual(x.sections,[-1,1]);
+    assert.deepEqual(x.sections,[]);
     x.b.write();
     x.keys('\x1b[D\x1b[C');
-    assert.deepEqual(x.sections,[-1,1]);
+    assert.deepEqual(x.sections,[]);
     x.keys('draft\x1b[A\x1bOD\x1b[C');
-    assert.deepEqual(x.sections,[-1,1]);
+    assert.deepEqual(x.sections,[]);
     x.keys('\r');
     assert.deepEqual(x.answer,['draft']);
   },

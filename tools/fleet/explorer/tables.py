@@ -2313,19 +2313,35 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
     native_only = False
     for spec in () if approval else specs:
         qid = spec["id"]
-        for text in _question_text(spec, envelope).splitlines() or [""]:
-            for wrapped in _wrap(text, width):
-                line(wrapped)
         values = answers.get(qid, ()) if hasattr(answers, "get") else ()
         values = tuple(values) if isinstance(values, (list, tuple)) else ()
         choices = _question_choices(spec)
         secret = bool(spec.get("is_secret") or spec.get("isSecret"))
+        words = [wrapped for text in _question_text(spec, envelope).splitlines() or [""]
+                 for wrapped in _wrap(text, width)]
+        # 11-22: the choices (and the answer row and the action line) are never pushed out by a long question:
+        # only the words give way, ending in `… +N more lines` (the shell's popup pages them instead). Short of
+        # rows the empty row goes first, then the thin line, then the words down to one row and that line.
+        keep = len(choices) + (1 if question_free_text_available(envelope, qid, values) else 0) + 1
+        gap = 2 if choices else 0
+        room = bottom - y - keep
+        while gap and room - gap < min(len(words), 2):
+            gap -= 1
+        shown = max(0, room - gap)
+        if len(words) > shown:
+            for wrapped in words[:max(0, shown - 1)]:
+                line(wrapped)
+            if shown:
+                line(f"… +{len(words) - max(0, shown - 1)} more lines", "dim")
+        else:
+            for wrapped in words:
+                line(wrapped)
         if choices:
             # 11-17: the question's words end, then one empty row and a thin line, then the choices (as the
             # shell's question popup does); short of rows the empty row goes first, never a choice's row.
-            if bottom - y >= len(choices) + 2:
+            if gap == 2 and bottom - y >= len(choices) + 2:
                 y += 1
-            if bottom - y >= len(choices) + 1:
+            if gap >= 1 and bottom - y >= len(choices) + 1:
                 line("─" * width, "line")
         for number, (value, label) in enumerate(choices, 1):
             if y >= bottom:

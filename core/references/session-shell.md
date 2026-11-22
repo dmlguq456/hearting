@@ -833,7 +833,7 @@ in place; while no popup stands focus, `empty` and the native input frontier sta
 as they were.
 Put each answer choice on
 its own line, wrapping within that choice; every choice row leads with a
-two-cell column for the mark. 11-17 (the person: "질문이랑 선지가 잘 구분되게" and "구분선 위에 여백도 하나 두고"): a question with choices ends its words, then one empty row, then a thin line in the popup frame's own color (dim where the frame is bright), then its choices, each number bold in the question's rose (the `◑` mark's color) with two cells before the words; a question answered in words has neither the line nor the empty row, and short of rows the empty row goes first and the line stays. The panel's choices row (`1 label · 2 label`) wears the same rose on its numbers, and Fleet's unfolded question the same empty row, line and numbers. In the question popup ↑↓ move the chosen
+two-cell column for the mark. 11-17 (the person: "질문이랑 선지가 잘 구분되게" and "구분선 위에 여백도 하나 두고"): a question with choices ends its words, then one empty row, then a thin line in the popup frame's own color (dim where the frame is bright), then its choices, each number bold in the question's rose (the `◑` mark's color) with two cells before the words; a question answered in words has neither the line nor the empty row. A question with choices always shows its choice rows, focused or not (11-22, the person: "선지가 선택이 안되고 그냥 글에 있는 경우도 있다는거야. 그게 거슬린다"): only the question's words page (`+N · more …`, PgUp/PgDn, the wheel read them), and the answer row stands beside the choices. Short of rows the popup gives up, in this order, the key hints, the empty row, the thin line, the words down to one row and the `more` line, and last the choices, which slide to keep the highlighted one in sight with `+N · more choices · ↑↓`; no question with choices shows no choice row. Fleet's unfolded question does the same (its words end in `… +N more lines` before a choice or the answer row is cut). A session that registers a question lists what is to be chosen with `--choice`, never as words in the question's text. The panel's choices row (`1 label · 2 label`) wears the same rose on its numbers, and Fleet's unfolded question the same empty row, line and numbers. In the question popup ↑↓ move the chosen
 choice: its first row carries `▸` in this session's harness color, bold, and
 every row of it (each row of a wrapped one) has its words bold in the bright
 body color, while every
@@ -841,7 +841,7 @@ other choice keeps the mark's column blank and reads dim grey (without color
 the mark and the weight alone tell them apart). Enter
 sends it. A question with choices starts on its recommended choice, else the first.
 That mark is a default until a number, an arrow choosing an option, or a click
-explicitly picks a choice. A free-text question's always-visible `› ` row takes
+explicitly picks a choice. A question a session registers with `questions ask` takes words beside its choices (11-22: its answer row stands, and what is sent is `[choice value, text]` or the text alone, the forms that already existed; a native form keeps its own `is_other`, an approval and `--choice N` are unchanged). A free-text question's always-visible `› ` row takes
 printable input immediately, including `r/w/f/p/t`; numbers select until writing
 starts. The first accepted character clears a default mark, including after a
 click on the answer row or down past the last choice. An explicitly chosen mark
@@ -867,9 +867,11 @@ the end of a row `→` goes to the first cell of the next), and a short budget t
 keeps the row holding the place, as it kept the last. The place is a screen value only:
 the sent answer (`[value, text]`), the saved draft and the questions API are as before, and
 returning to a question starts it at the text's end. No word jumps, no line-up/down in the
-wrapped text, no selection, no undo. In the shell `←` `→` still change sections when there is
-no text and keep `↑` `↓` Tab, numbers, Enter and Esc as they were; only with text do they move
-the place (before, dead keys). In Fleet `←` `→` (otherwise the view switch, with Tab and
+wrapped text, no selection, no undo. In the shell's question input `←` `→` move only the
+place in the text and do nothing with no text (11-22, the person: "구획을 안옮겨도 되는데.
+굳이"): they no longer change sections there, and its keys row no longer says `←→ section`;
+the other popups (STATUS, BACKLOG, ROUTE, MESSAGES, MEM, NOW) keep `←→` for the sections.
+`↑` `↓` Tab, numbers, Enter and Esc are as they were. In Fleet `←` `→` (otherwise the view switch, with Tab and
 Shift+Tab) move the place only while an answer is being typed (`editing`) and has text;
 `Home` `End` likewise, otherwise they scroll the pane; its key legend then names them.
 Tab and closing/reopening retain each question's mark, its default/explicit
@@ -1170,7 +1172,7 @@ The sender wraps a single value when its text itself parses as a JSON array.
 
 The question popup answers this session's own questions. Answer another session's wait in
 its own window or in Fleet. In free-text questions, `f`, `r`, `p` and `w` enter text.
-←→ switch sections when the answer row is inactive and its draft is empty; with text in the draft they move the place in it (see the question input rules above). While the popup
+In the question popup `←→` move the place in the typed text and do nothing otherwise (see the question input rules above); the other popups' `←→` switch sections, and a section's name pressed on the bottom line opens it. While the popup
 stands every key and press is its own (none reaches the native, a native that
 reads the mouse included; whatever follows an Esc, in the same read or within its
 25 ms, other than `[` or `O` (an arrow or function key) is dropped, neither closing

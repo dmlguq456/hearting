@@ -1450,6 +1450,10 @@
    "en": "more · focus and ↑↓ to read",
    "ko": "더 있음 · 포커스 후 ↑↓ 읽기"
   },
+  "fleet.session_block.more_choices": {
+   "en": "more choices · ↑↓",
+   "ko": "선택지 더 있음 · ↑↓"
+  },
   "fleet.session_block.more_choose": {
    "en": "more · PgUp/PgDn to read",
    "ko": "더 있음 · PgUp/PgDn 읽기"
@@ -1463,8 +1467,8 @@
    "ko": "더 있음 · 포커스 후 PgUp/PgDn 읽기"
   },
   "fleet.session_block.navigate": {
-   "en": "Tab next · ←→ section · Esc/Ctrl+] back",
-   "ko": "Tab 다음 · ←→ 구획 · Esc/Ctrl+] 돌아가기"
+   "en": "Tab next · Esc/Ctrl+] back",
+   "ko": "Tab 다음 · Esc/Ctrl+] 돌아가기"
   },
   "fleet.session_block.navigate_write": {
    "en": "Tab next · Esc/Ctrl+] back",

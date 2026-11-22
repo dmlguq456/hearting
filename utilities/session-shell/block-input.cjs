@@ -9,7 +9,7 @@ const SENT_KEEP_MS=10*60*1000;
 const ANSWER_FULL=Symbol('answer full');
 // Home and End as terminals send them: `ESC [ H/F`, SS3, and the `~` forms of tmux/screen and rxvt.
 const START=['\x1b[H','\x1bOH','\x1b[1~','\x1b[7~'],END=['\x1b[F','\x1bOF','\x1b[4~','\x1b[8~'];
-module.exports=function({changed,answer,action,section,cellWidth}) {
+module.exports=function({changed,answer,action,cellWidth}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false;
   let labels={},styles={},help='';
@@ -165,7 +165,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     let gap=split;
     const lines=()=>[...body,...gap,...marked,...(view?.source||[])];
     let content=lines();
-    const tail=[];
+    const tail=[];let keyLines=[];
     const picked=local.answers[id];
     if(status==='open'&&writable(row)){
       const draft=local.drafts[id]||'',safe=row.question.secret?'•'.repeat([...draft].length):draft;
@@ -198,8 +198,9 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
       const editing=active(row)&&writable(row);
       const navigate=text(editing?'navigate_write':'navigate','Tab next · Esc/Ctrl+] back');
       const writeHint=local.typing[id]?(choices(row).length?text('writing_choices','Enter send · ↑ choices'):text('send','Enter send')):text('choose_write','↑↓ choose · type to write · Enter send');
-      tail.push(...keys([...(active(row)?[writable(row)?writeHint:instruction]:[]),navigate],editing?1:Math.max(1,Math.max(2,budget)-2)));
-    }else if(status==='open')tail.push([span('Ctrl+] · '+text('open','answer needed'))]);
+      keyLines=keys([...(active(row)?[writable(row)?writeHint:instruction]:[]),navigate],editing?1:Math.max(1,Math.max(2,budget)-2));
+      tail.push(...keyLines);
+    }else if(status==='open'){keyLines=[[span('Ctrl+] · '+text('open','answer needed'))]];tail.push(...keyLines);}
     const limit=Math.max(2,budget),tailLimit=Math.min(tail.length,Math.max(1,limit-2));
     let footer=tail.slice(-tailLimit);
     const edit=tail.find(line=>line.some(part=>part.caret))||tail.findLast(line=>line.some(part=>part.answerRow));
@@ -211,6 +212,38 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     }
     const space=Math.max(0,limit-1-footer.length);
     if(edit&&!space)return [head,...footer].slice(0,limit);
+    // The reading hint names the keys that page the body.
+    const readingDown=focused&&local.typing[id]&&choices(row).length>0;
+    const readingWords=()=>choosing(row)?text('more_choose','more · PgUp/PgDn to read'):
+      readingDown?text('more_down','more · ↓ to read'):
+      !focused&&active(row)&&choices(row).length?text('more_page','more · focus and PgUp/PgDn to read'):
+      text('more','more · focus and ↑↓ to read');
+    // 11-22 (the person: "선지가 선택이 안되고 그냥 글에 있는 경우도 있다는거야. 그게 거슬린다"): a question with
+    // choices always shows its choice rows (and its answer row), focused or not. Only the question's words page
+    // (`+N · more …`, PgUp/PgDn, the wheel). Short of rows it gives up, in this order: the key hints, the empty
+    // row, then the thin line, then the words down to one row and the `more` line, and last the choices
+    // themselves, which then slide to keep the highlighted one in sight with a line saying there are more.
+    if(status==='open'&&choices(row).length>0){
+      const words=[...body,...(view?.source||[])],lessKeys=footer.filter(line=>!keyLines.includes(line));
+      if(edit&&!lessKeys.includes(edit))lessKeys.splice(0,lessKeys.length,edit);
+      const configs=[[gap,footer],[gap,lessKeys],[gap.slice(1),lessKeys],[[],lessKeys]];
+      const fit=configs.find(([g,f])=>limit-1-f.length-g.length-marked.length>=Math.min(words.length,2));
+      if(fit){
+        const [g,f]=fit,room=limit-1-f.length-g.length-marked.length;
+        if(words.length<=room){scroll=0;return [head,...words,...g,...marked,...f].slice(0,limit);}
+        const page=room-1;
+        scroll=Math.max(0,Math.min(scroll,words.length-page));
+        const more=[span(`+${words.length-page} · ${readingWords()} ${scroll+1}/${words.length}`)];
+        return [head,...words.slice(scroll,scroll+page),more,...g,...marked,...f].slice(0,limit);
+      }
+      const f=lessKeys,room=limit-1-f.length,hint=span(` +${words.length} ${choosing(row)?'PgUp/PgDn':readingDown?'↓':'↑↓'}`);
+      if(room<=0)return [head,...f].slice(0,limit);
+      // The words have no row left: the head says they are there to page; every choice still shows if it fits.
+      if(marked.length<=room)return [[...head,...(words.length?[hint]:[])],...marked,...f].slice(0,limit);
+      const size=room>=2?room-1:room,lit=Math.max(0,marked.findIndex(parts=>parts[0]?.text==='▸'));
+      const from=Math.max(0,Math.min(marked.length-size,lit-Math.floor(size/2)));
+      return [head,...marked.slice(from,from+size),...(room>=2?[[span(`+${marked.length-size} · ${text('more_choices','more choices · ↑↓')}`)]]:[]),...f].slice(0,limit);
+    }
     if(content.length>space&&gap.length>1){gap=gap.slice(1);content=lines();}
     if(content.length<=space){scroll=0;return [head,...content,...footer].slice(0,limit);}
     const page=Math.max(1,space-1);
@@ -224,11 +257,7 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
     // While ↑↓ choose, the body pages with PgUp/PgDn: the hint names the keys that read it.
     // A question with choices reads with PgUp/PgDn once focused (↑↓ choose): the hint names
     // those keys before focus too (11-14), as it does while choosing.
-    const readingDown=focused&&local.typing[id]&&choices(row).length>0;
-    const reading=choosing(row)?text('more_choose','more · PgUp/PgDn to read'):
-      readingDown?text('more_down','more · ↓ to read'):
-      !focused&&active(row)&&choices(row).length?text('more_page','more · focus and PgUp/PgDn to read'):
-      text('more','more · focus and ↑↓ to read');
+    const reading=readingWords();
     const more=[span(`+${Math.max(0,content.length-page)} · ${reading} ${scroll+1}/${content.length}`)];
     if(space<=1)head=[...head,span(` +${content.length-page} ${choosing(row)?'PgUp/PgDn':readingDown?'↓':'↑↓'}`)];
     return [head,...content.slice(scroll,scroll+page),...(space>1?[more]:[]),...footer].slice(0,limit);
@@ -405,9 +434,9 @@ module.exports=function({changed,answer,action,section,cellWidth}) {
             clearFullNotice(row);
             if(escape==='\x1b[Z')move(-1);
             else if(escape==='\x1b[C'||escape==='\x1b[D'||escape==='\x1bOC'||escape==='\x1bOD'){
-              const local=row&&state(row.item),id=row?.question.id;
-              if(!local?.typing[id]&&!local?.drafts[id])section?.(escape.endsWith('C')?1:-1);
-              else if(placing(row))place(row,escape.endsWith('C')?1:-1);
+              // 11-22 (the person: "구획을 안옮겨도 되는데. 굳이"): in the question input ←→ only move the place in
+              // the text; with no text they do nothing, and no longer change sections.
+              if(placing(row))place(row,escape.endsWith('C')?1:-1);
             }
             else if(START.includes(escape)||END.includes(escape)){if(placing(row))place(row,START.includes(escape)?'home':'end');}
             else if(escape==='\x1b[3~'){if(placing(row))removeAt(row);}

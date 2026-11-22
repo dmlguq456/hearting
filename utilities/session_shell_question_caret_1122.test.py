@@ -144,10 +144,10 @@ class QuestionCaretTest(unittest.TestCase):
 
     def test_keys_that_had_a_meaning_keep_it(self):
         self.node(r"""
-  // No text: ←→ still change sections (also with Home/End/Delete doing nothing).
-  let x=setup();x.keys(LEFT+RIGHT+'\x1bOD\x1bOC'+HOME+END+DEL+'\x01\x05');assert.deepEqual(x.sections,[-1,1,-1,1]);
+  // No text: ←→ do nothing (11-22: they no longer change sections), nor do Home/End/Delete.
+  let x=setup();x.keys(LEFT+RIGHT+'\x1bOD\x1bOC'+HOME+END+DEL+'\x01\x05');assert.deepEqual(x.sections,[]);assert.equal(place((x.b.write(),x)).row,'› ');
 
-  // Typing with no text yet: ←→ are still not sections (as before), and nothing is moved.
+  // Typing with no text yet: the same.
   x=setup();x.b.write();x.keys(LEFT+RIGHT);assert.deepEqual(x.sections,[]);
   // With text the arrows stay inside it; they are not sections.
   x=setup();x.keys('ab'+LEFT+RIGHT+LEFT);assert.deepEqual(x.sections,[]);assert.equal(place(x).front,'› a');
@@ -169,8 +169,8 @@ class QuestionCaretTest(unittest.TestCase):
     def test_a_choiceless_free_text_question_and_a_decision_are_untouched(self):
         self.node(r"""
   const x=setup({},[]);x.keys('ab'+LEFT+'X');assert.equal(place(x).row,'› aXb');assert.deepEqual((await x.send())?.answers.q,['aXb']);
-  // A choice-only question has no answer row; the arrows there change sections as before.
-  const y=setup({free_text:false});y.keys(LEFT+RIGHT);assert.deepEqual(y.sections,[-1,1]);
+  // A choice-only question has no answer row; the arrows there do nothing and change no section.
+  const y=setup({free_text:false});y.keys(LEFT+RIGHT);assert.deepEqual(y.sections,[]);
 """)
 
     def test_the_popup_puts_the_terminal_cursor_after_the_text_before_the_place(self):
