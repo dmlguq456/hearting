@@ -155,7 +155,9 @@ def _fallback_translator(message: str, /, **fields: Any) -> str:
         "entrance.backlog_note": ("Work handed off, and what you said then. "
                                   "The session that postpones work writes one line each."),
         "entrance.backlog_open": "Open backlog.md",
-        "entrance.backlog_count": "{count} items",
+        "entrance.backlog_count": "{count} total",
+        "entrance.backlog_kinds": "FIX {fix} · IMPR {improve} · NOTE {note} · TBD {tbd}",
+        "entrance.backlog_unavailable": "Counts unavailable",
         "entrance.backlog_updated": "updated {date}",
         "entrance.recent_routes": "Recent route reports",
         "entrance.spec_note": "How this repo works now. {count} topics; each change edits the same document.",
@@ -611,18 +613,37 @@ def _backlog_updated(line: str) -> str:
     return found.group(1)
 
 
+BACKLOG_KINDS = ("fix", "improve", "note")
+_BACKLOG_KIND = re.compile(r"^kind:(.*)$", re.IGNORECASE)
+
+
+def _backlog_kind_value(stripped: str) -> Optional[str]:
+    """The value of an indented `kind:` line (`stripped` is the line without its blanks): lower case, blanks cut; None for any other line.
+
+    The one rule for the sort of a job (core/ARTIFACT_META.md `backlog.md`; `tools/fleet/session_status.py` `parse_backlog` reads it the same way)."""
+    found = _BACKLOG_KIND.match(stripped)
+    return found.group(1).strip().lower() if found else None
+
+
+def _backlog_sort(values: set) -> str:
+    """`fix`, `improve` or `note` when the job's `kind:` lines gave exactly one value and it is one of those, else `tbd`."""
+    only = next(iter(values)) if len(values) == 1 else None
+    return only if only in BACKLOG_KINDS else "tbd"
+
+
 def _backlog(root: Path) -> Optional[Dict[str, Any]]:
-    """The root's `backlog.md` as `{"count", "updated"}`, or None when there is no such regular file.
+    """The root's `backlog.md` as `{"count", "updated", "kinds"}`, or None when there is no such regular file.
 
     Read by name from a no-follow fd, never written, never followed (a link is no file).  A file that
-    cannot be read or is over MAX_BACKLOG_BYTES keeps the line but has no count (`count` None).
-    A job is a top-level `- ` bullet under a `##` heading (core/ARTIFACT_META.md `backlog.md`)."""
+    cannot be read or is over MAX_BACKLOG_BYTES keeps the line but has no count (`count` and `kinds` None).
+    A job is a top-level `- ` bullet under a `##` heading (core/ARTIFACT_META.md `backlog.md`); `kinds` is the
+    count of each sort of job (`fix`, `improve`, `note`, `tbd`), read from the optional indented `kind:` lines."""
     try:
         if not stat.S_ISREG(os.lstat(str(Path(root) / BACKLOG_NAME)).st_mode):
             return None
     except OSError:
         return None
-    entry: Dict[str, Any] = {"count": None, "updated": ""}
+    entry: Dict[str, Any] = {"count": None, "updated": "", "kinds": None}
     try:
         root_fd = open_root(os.path.realpath(str(root)))
         try:
@@ -645,6 +666,15 @@ def _backlog(root: Path) -> Optional[Dict[str, Any]]:
     if len(raw) > MAX_BACKLOG_BYTES:
         return entry
     count, fence, updated, headed = 0, None, "", False
+    kinds = {"fix": 0, "improve": 0, "note": 0, "tbd": 0}
+    values: Optional[set] = None          # the `kind:` values of the job being read (None: no job is open)
+
+    def close() -> None:
+        nonlocal values
+        if values is not None:
+            kinds[_backlog_sort(values)] += 1
+        values = None
+
     for line in raw.decode("utf-8", "replace").splitlines():
         opened = _FENCE.match(line)
         if fence is not None:
@@ -654,14 +684,29 @@ def _backlog(root: Path) -> Optional[Dict[str, Any]]:
             continue
         if opened:
             fence = (opened.group(1)[0], len(opened.group(1)))
+            close()
             continue
         if _BACKLOG_HEADING.match(line):
             headed = True
-        elif not headed and not updated:
+            close()
+            continue
+        if not headed and not updated:
             updated = _backlog_updated(line)
-        elif headed and line.startswith("- "):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if line[:1] in (" ", "\t"):
+            if values is not None:
+                value = _backlog_kind_value(stripped)
+                if value is not None:
+                    values.add(value)
+            continue
+        close()
+        if headed and line.startswith("- "):
             count += 1
-    entry.update({"count": count, "updated": updated})
+            values = set()
+    close()
+    entry.update({"count": count, "updated": updated, "kinds": kinds})
     return entry
 
 
@@ -961,7 +1006,14 @@ def entrance_sections(snapshot: Dict[str, Any], t) -> List[Dict[str, Any]]:
     if backlog:
         meta = []
         if backlog["count"] is not None:
+            kinds = backlog.get("kinds") or {}
+            # a document with no sort written anywhere (an old one) has every sort unknown, not none: `?`
+            sorted_any = any(kinds.get(name) for name in BACKLOG_KINDS)
+            shown = {name: (_count(kinds.get(name, 0)) if sorted_any or not kinds.get("tbd") else "?") for name in BACKLOG_KINDS}
+            meta.append(t("entrance.backlog_kinds", tbd=_count(kinds.get("tbd", 0)), **shown))
             meta.append(t("entrance.backlog_count", count=_count(backlog["count"])))
+        else:
+            meta.append(t("entrance.backlog_unavailable"))
         if backlog["updated"]:
             meta.append(t("entrance.backlog_updated", date=backlog["updated"]))
         sections.append({"key": "backlog", "title": t("entrance.section_backlog"),

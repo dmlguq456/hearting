@@ -339,8 +339,12 @@
    "ko": "입구로 돌아가기"
   },
   "entrance.backlog_count": {
-   "en": "{count} items",
-   "ko": "일 {count}개"
+   "en": "{count} total",
+   "ko": "전체 {count}"
+  },
+  "entrance.backlog_kinds": {
+   "en": "FIX {fix} · IMPR {improve} · NOTE {note} · TBD {tbd}",
+   "ko": "FIX {fix} · IMPR {improve} · NOTE {note} · TBD {tbd}"
   },
   "entrance.backlog_note": {
    "en": "Work handed off, and what you said then. The session that postpones work writes one line each.",
@@ -349,6 +353,10 @@
   "entrance.backlog_open": {
    "en": "Open backlog.md",
    "ko": "backlog.md 열기"
+  },
+  "entrance.backlog_unavailable": {
+   "en": "Counts unavailable",
+   "ko": "수를 읽을 수 없음"
   },
   "entrance.backlog_updated": {
    "en": "updated {date}",

@@ -1742,20 +1742,20 @@ class BacklogTests(SectionFixture):
         positions = [page.index(mark) for mark in marks]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("The session that postpones work writes one line each.", readme)
-        self.assertIn("[Open backlog.md](<backlog.md>)\n   3 items · updated 2026-11-21 23:10", readme)
+        self.assertIn("[Open backlog.md](<backlog.md>)\n   FIX ? · IMPR ? · NOTE ? · TBD 3 · 3 total · updated 2026-11-21 23:10", readme)
         self.assertIn('<a href="backlog.md">Open backlog.md</a> '
-                      '<span class="meta">3 items · updated 2026-11-21 23:10</span>', page)
+                      '<span class="meta">FIX ? · IMPR ? · NOTE ? · TBD 3 · 3 total · updated 2026-11-21 23:10</span>', page)
         self.assertEqual(readme.count("(<backlog.md>)"), 1)
         self.assertEqual(page.count('href="backlog.md"'), 1)
 
     def test_only_a_top_level_bullet_outside_a_code_block_is_a_job(self):
         self._setup()
-        self.assertIn("3 items", self.entrance())
+        self.assertIn("3 total", self.entrance())
         self._setup("# B\n## C\n- one\n  - nested\n    - deeper\n\n````\n```\n- fenced\n````\n- two\n")
-        self.assertIn("2 items", self.entrance())
+        self.assertIn("2 total", self.entrance())
         self.assertNotIn("updated", self.entrance())  # no 갱신 line, no date
         self._setup("# B\n")
-        self.assertIn("0 items", self.entrance())
+        self.assertIn("0 total", self.entrance())
 
     def _count(self, text):
         (self.root / "backlog.md").write_text(text, encoding="utf-8")
@@ -1836,7 +1836,7 @@ class BacklogTests(SectionFixture):
         self.assertEqual(updated("# B\n   갱신 2026-11-21 23:10   \n## C\n"), "2026-11-21 23:10")  # surrounding spaces ignored
         (self.root / "backlog.md").write_text("# B\n갱신 2026-13-45 99:99\n## C\n- a\n", encoding="utf-8")
         self.refresh()
-        self.assertIn("1 items", self.entrance())
+        self.assertIn("1 total", self.entrance())
         self.assertNotIn("updated", self.entrance())
 
     def test_no_backlog_file_draws_no_section_and_changes_no_other_number(self):
@@ -1865,18 +1865,20 @@ class BacklogTests(SectionFixture):
         self.assertGreater((self.root / "backlog.md").stat().st_size, E.MAX_BACKLOG_BYTES)
         readme = self.entrance()
         self.assertIn("[Open backlog.md](<backlog.md>)", readme)
-        self.assertNotIn("items", readme)
+        self.assertNotIn("total", readme)
+        self.assertIn("Counts unavailable", readme)
         self.assertNotIn("updated", readme)
         self.assertEqual(self.entrance("index.html").count('href="backlog.md"'), 1)
         self._setup("# B\n## C\n- job\n" + "x" * (E.MAX_BACKLOG_BYTES - 15))  # exactly the limit still counts
         self.assertEqual((self.root / "backlog.md").stat().st_size, E.MAX_BACKLOG_BYTES)
-        self.assertIn("1 items", self.entrance())
+        self.assertIn("1 total", self.entrance())
         path = self.root / "backlog.md"
         path.chmod(0)
         self.addCleanup(path.chmod, 0o644)
         self.refresh()
         self.assertIn("[Open backlog.md](<backlog.md>)", self.entrance())
-        self.assertNotIn("items", self.entrance())
+        self.assertNotIn("total", self.entrance())
+        self.assertIn("Counts unavailable", self.entrance())
 
     def test_a_symbolic_link_backlog_is_never_followed(self):
         self.spec(5)
@@ -1907,10 +1909,26 @@ class BacklogTests(SectionFixture):
         self.assertEqual(targets[number:], ["recent-route-reports.md", "campaigns/INDEX.md"])
         out = self.reports()
         self.assertIn("Backlog\n   Work handed off, and what you said then.", out)
-        self.assertIn(f"{number}. Open backlog.md\n   backlog.md\n   3 items · updated 2026-11-21 23:10", out)
+        self.assertIn(f"{number}. Open backlog.md\n   backlog.md\n   FIX ? · IMPR ? · NOTE ? · TBD 3 · 3 total · updated 2026-11-21 23:10", out)
         self.assertEqual(self.open_line(number), str(self.root / "backlog.md"))
         self.assertEqual(self.open_line(number + 1), str(self.root / "recent-route-reports.html"))
         self.assertEqual(self.open_line(number + 2), str(self.root / "campaigns/INDEX.md"))
+
+    def test_the_line_tells_each_sort_the_total_and_the_date(self):
+        mixed = ("# B\n갱신 2026-11-21 23:10\n## C\n- a\n  kind: fix\n- b\n  kind: Improve\n- c\n  kind: note\n- d\n- e\n  kind: fix\n  kind: note\n## D\n- f\n  kind: FIX\n")
+        self._setup(mixed)
+        meta = "FIX 2 · IMPR 1 · NOTE 1 · TBD 2 · 6 total · updated 2026-11-21 23:10"
+        self.assertIn("[Open backlog.md](<backlog.md>)\n   " + meta, self.entrance())
+        self.assertIn('<span class="meta">' + meta + '</span>', self.entrance("index.html"))
+        self.assertEqual(E._backlog(self.root)["kinds"], {"fix": 2, "improve": 1, "note": 1, "tbd": 2})
+        # an old document (no `kind:` line anywhere): what is sorted is not told, as against none; nothing else of the line moves
+        self._setup("# B\n갱신 2026-11-21 23:10\n## C\n- a\n- b\n")
+        self.assertIn("\n   FIX ? · IMPR ? · NOTE ? · TBD 2 · 2 total · updated 2026-11-21 23:10", self.entrance())
+        # an empty one is zeros; only notes is zeros for the rest
+        self._setup("# B\n")
+        self.assertIn("\n   FIX 0 · IMPR 0 · NOTE 0 · TBD 0 · 0 total", self.entrance())
+        self._setup("# B\n## C\n- a\n  kind: note\n")
+        self.assertIn("\n   FIX 0 · IMPR 0 · NOTE 1 · TBD 0 · 1 total", self.entrance())
 
     def test_the_backlog_is_read_only_and_leaves_the_file_as_it_was(self):
         self._setup()
@@ -1927,13 +1945,14 @@ class BacklogTests(SectionFixture):
         readme = self.entrance()
         self.assertIn("## 백로그", readme)
         self.assertIn("맡긴 일과 그때 하신 말. 일을 미루는 세션이 한 줄씩 적습니다.", readme)
-        self.assertIn("[backlog.md 열기](<backlog.md>)\n   일 3개 · 갱신 2026-11-21 23:10", readme)
+        self.assertIn("[backlog.md 열기](<backlog.md>)\n   FIX ? · IMPR ? · NOTE ? · TBD 3 · 전체 3 · 갱신 2026-11-21 23:10", readme)
         self.assertIn("<h2>백로그</h2>", self.entrance("index.html"))
 
     def test_the_fallback_dictionary_carries_the_backlog_words(self):
         for key in ("entrance.section_backlog", "entrance.backlog_note", "entrance.backlog_open",
-                    "entrance.backlog_count", "entrance.backlog_updated"):
-            self.assertNotEqual(E._fallback_translator(key, count="1", date="d"), key)
+                    "entrance.backlog_count", "entrance.backlog_updated", "entrance.backlog_kinds",
+                    "entrance.backlog_unavailable"):
+            self.assertNotEqual(E._fallback_translator(key, count="1", date="d", fix="1", improve="1", note="1", tbd="1"), key)
 
 
 def _has_entrance_marker(path):

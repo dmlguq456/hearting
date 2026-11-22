@@ -801,9 +801,31 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // `+N` and, where the document has more than was read (a very long backlog), a `+` after it: `+2997+` (`+` alone where nothing is hidden by the rows).
     const countWords=(n,more)=>n>0?'+'+n+(more?'+':''):'+';
     const listTotalOf=doc=>Math.max(0,Math.min(Number.isInteger(doc.total)?doc.total:0,99999));
+    // 11-22 (the person: "알파벳 하나가 아니라 그래도 적절히 3~4자로 약어든 단어든 붙이는게 맞지"): a BACKLOG item's sort word and its colour (colours of the table the panel has).
+    const KIND_WORDS={fix:{word:'FIX',key:'lvl_y'},improve:{word:'IMPR',key:'lvl_g'},note:{word:'NOTE',key:'dim'},tbd:{word:'TBD',key:'dim'}};
+    // The BACKLOG head's text after the word, widest first (what is dropped as the width falls: the whole count, then the sorts' words, then the numbers):
+    // `FIX 14 · IMPR 26 · +37 /125`, … `14 26 +37`, `+37`. `+N` is the FIX and IMPR not shown (none: left out), `/N` every line of the document, `?` the sorts of a document
+    // nothing in is sorted yet; a `+` after the number where the document has more than was read.
+    const kindStages=(k,hidden,doc)=>{
+      const plus=doc.more===true?'+':'',total=Math.max(0,Math.min(Number.isInteger(doc.total)?doc.total:0,99999));
+      const q=unsortedOnly(k),nf=q?'?':String(k.fix),ni=q?'?':String(k.improve);
+      const more=hidden>0||plus?[text(countWords(hidden,doc.more===true),'loc_repo')]:[];
+      const sep=text(' · ','dim'),gap=text(' '),word=n=>text(KIND_WORDS[n].word,KIND_WORDS[n].key),num=v=>text(v,'loc_repo');
+      const join=(parts,s)=>parts.flatMap((p,i)=>i?[s,...p]:p);
+      const tail=[text('/'+total+plus,'dim')];
+      const full=join([[word('fix'),gap,num(nf)],[word('improve'),gap,num(ni)],...(more.length?[more]:[])],sep);
+      const bare=join([[word('fix'),gap,num(nf)],[word('improve'),gap,num(ni)],...(more.length?[more]:[])],gap);
+      const nums=join([[num(nf)],[num(ni)],...(more.length?[more]:[])],gap);
+      return [[...full,gap,...tail],full,bare,nums,...(more.length?[more]:[])];
+    };
+    // 11-22: a BACKLOG that tells its sorts (`counts`) has its button's number the FIX and IMPR together (what is to be done), `?` where nothing in the document is sorted yet;
+    // no row of a button is shown, so every one of them is hidden. Any other value is the items' own count.
+    const kindsOf=doc=>{const c=doc&&doc.counts;if(!c||typeof c!=='object')return null;const out={};
+      for(const name of ['fix','improve','note','tbd']){if(!Number.isInteger(c[name])||c[name]<0)return null;out[name]=Math.min(c[name],99999);}return out;};
+    const unsortedOnly=k=>k.tbd>0&&!(k.fix||k.improve||k.note);
     const listButton=(doc,stage)=>{const arrow=text('›','dim');if(stage>=2)return [arrow];
-      const n=listTotalOf(doc);
-      return [text(clean(doc.word).trim(),doc.has_doc===true?'loc_repo':'dim'),...(stage===0&&(n>0||doc.more===true)?[text(' '),text(countWords(n,doc.more===true),'loc_repo')]:[]),text(' '),arrow];};
+      const k=kindsOf(doc),n=k?k.fix+k.improve:listTotalOf(doc),q=!!k&&n===0&&unsortedOnly(k);
+      return [text(clean(doc.word).trim(),doc.has_doc===true?'loc_repo':'dim'),...(stage===0&&(n>0||q||doc.more===true)?[text(' '),text(q?'?':countWords(n,doc.more===true),'loc_repo')]:[]),text(' '),arrow];};
     // The REPO row where the two heads do not stand: `REPO hearting · wt 12 ──── STATUS +N ›  BACKLOG +N ›`, the bottom layout's first row's buttons (the same words, the same
     // order of giving way: the counts, then the words, then the name is cut). `offset` cells of the row stand left of `room`; a press on a button opens its popup, on the rest of the row the status popup.
     // 11-22: `fit` is what the value and the buttons must fit in (the cells the row had when its label column stood: what is kept or dropped as the width falls is unchanged), `room` the row's cells.
@@ -880,10 +902,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const items=(Array.isArray(doc.items)?doc.items:[]).filter(i=>i&&typeof i==='object'&&clean(i.text).trim()).slice(0,3),entry={name,doc,items,total:Math.max(items.length,listTotalOf(doc))};
         listRows.add(top.length);topActions.set(top.length,'popup:'+name);listHeads.set(top.length,entry);top.push([]);
         items.forEach((item,j)=>{
-          const at=top.length,mark=item.mark==='!'?text('! ','lvl_y'):text('· ','dim');
+          const at=top.length,sorted=name==='BACKLOG'&&kindsOf(doc);
+          // 11-22: a BACKLOG item stands behind its sort's word in four cells (`FIX `, `IMPR`, `NOTE`, `TBD `), the word and its colour (the colour table's own: yellow, green, dim) both tell it.
+          const kind=KIND_WORDS[item.kind]||KIND_WORDS.tbd,
+            mark=sorted?[text(kind.word.padEnd(4),kind.key),text(' ')]:[item.mark==='!'?text('! ','lvl_y'):text('· ','dim')];
           listRows.add(at);listItemAt.set(at,{entry,j});
           topActions.set(at,'popup:'+name+(typeof item.key==='string'&&item.key?':'+item.key:''));
-          top.push([pad(2),...cut([mark,text(clean(item.text).trim(),'loc_repo')],inner-2)]);
+          top.push([pad(2),...cut([...mark,text(clean(item.text).trim(),'loc_repo')],inner-2)]);
         });
         lists.push(entry);
       }
@@ -988,10 +1013,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // tag in dark gray upper case, the counts by state, a thin rule, and `›` where a press opens the
     // section's popup (Fleet's own table, whole). A press on the head or on any row of a section
     // opens it there; nothing opens in place. The rows are the table's own columns, picked.
-    const sectionHead=(count,name,after=[],rights=[[]],arrow=true,faint=false)=>{
+    const sectionHead=(count,name,after=[],rights=[[]],arrow=true,faint=false,alts=[])=>{
       const lead=[...count,...(count.length?[text(' ')]:[]),faint?text(name,'dim'):{...text(name,'dim'),role:'title'}];
       const close=arrow?[text(' '),text('›','dim')]:[];
-      for(const a of [after,[]])for(const r of rights){
+      for(const a of [after,...alts,[]])for(const r of rights){
         const head=[...lead,...(a.length?[text(' '),...a]:[])],tail=[...(r.length?[text(' '),...r]:[]),...close];
         const rest=inner-size(head)-size(tail);
         // 11-22: beside the native area a section's head has no rule: its name and count, then the `›` at the right end.
@@ -2174,8 +2199,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i))){
         const head=listHeads.get(i);
         // A list part's head: ` STATUS +2        ›` (one cell in; the count of the items not shown, as MESSAGES' head; the word dim, not titled, where its document is not there).
-        const hidden=head?head.total-Math.min(take[head.name+'_ITEMS'],head.items.length):0;
-        order.push({parts:head?[pad(IND),...narrow(()=>sectionHead([],head.name,hidden>0||head.doc.more===true?[text(countWords(hidden,head.doc.more===true),'loc_repo')]:[],[[]],true,head.doc.has_doc!==true))]:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});}});
+        const shownRows=head?head.items.slice(0,take[head.name+'_ITEMS']):[],k=head&&head.name==='BACKLOG'?kindsOf(head.doc):null;
+        const hidden=head?(k?k.fix+k.improve-shownRows.filter(it=>it&&(it.kind==='fix'||it.kind==='improve')).length:head.total-shownRows.length):0;
+        const stages=k?kindStages(k,hidden,head.doc):null;
+        order.push({parts:head?[pad(IND),...narrow(()=>sectionHead([],head.name,stages?stages[0]:hidden>0||head.doc.more===true?[text(countWords(hidden,head.doc.more===true),'loc_repo')]:[],[[]],true,head.doc.has_doc!==true,stages?stages.slice(1):[]))]:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});}});
     for(const item of order)add(item.parts,item.action,item.groups);
     const headRows=content.length;
     // Each section stands whole (its head and the rows it kept), one after another from the top; the
