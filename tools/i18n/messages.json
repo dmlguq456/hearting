@@ -1427,8 +1427,8 @@
    "ko": "전달 대기"
   },
   "fleet.session_block.editor_help": {
-   "en": "←→ section · p open/fold panel · w work · f Fleet · Esc/Ctrl+] back",
-   "ko": "←→ 구획 · p 패널 펼치기/접기 · w 열린 일 · f Fleet · Esc/Ctrl+] 돌아가기"
+   "en": "p open/fold panel · w work · f Fleet · Esc/Ctrl+] back",
+   "ko": "p 패널 펼치기/접기 · w 열린 일 · f Fleet · Esc/Ctrl+] 돌아가기"
   },
   "fleet.session_block.empty": {
    "en": "empty answer",

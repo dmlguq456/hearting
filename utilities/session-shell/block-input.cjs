@@ -206,9 +206,13 @@ module.exports=function({changed,answer,action,cellWidth}) {
     const edit=tail.find(line=>line.some(part=>part.caret))||tail.findLast(line=>line.some(part=>part.answerRow));
     // At small heights notices and key hints yield before the live input cell.
     if(edit&&!footer.includes(edit)){
-      const after=tailLimit>1?tail.slice(-(tailLimit-1)):[];
-      if(after.length===1&&local.notice===ANSWER_FULL)after[0]=notice;
-      footer=[edit,...after];
+      // The rows that stay are one unbroken stretch of the answer holding the place, then the end of the tail
+      // (notice, key hints) as far as it fits: the answer's rows are never shown with some left out between.
+      const last=tail.findLastIndex(line=>line.some(part=>part.answerRow)),ends=tail.slice(last+1);
+      let keep=tailLimit>1?ends.slice(-(tailLimit-1)):[];
+      if(keep.length===1&&local.notice===ANSWER_FULL)keep=[notice];
+      const size=tailLimit-keep.length,from=Math.max(0,Math.min(tail.indexOf(edit),last+1-size));
+      footer=[...tail.slice(from,from+size),...keep];
     }
     const space=Math.max(0,limit-1-footer.length);
     if(edit&&!space)return [head,...footer].slice(0,limit);
@@ -236,13 +240,25 @@ module.exports=function({changed,answer,action,cellWidth}) {
         const more=[span(`+${words.length-page} · ${readingWords()} ${scroll+1}/${words.length}`)];
         return [head,...words.slice(scroll,scroll+page),more,...g,...marked,...f].slice(0,limit);
       }
-      const f=lessKeys,room=limit-1-f.length,hint=span(` +${words.length} ${choosing(row)?'PgUp/PgDn':readingDown?'↓':'↑↓'}`);
+      // Not even a row of words, its `more` line and the choices fit: the words keep one row and the `more` line
+      // (PgUp/PgDn read them on), and the choices slide in what is left, the highlighted one in sight with a line
+      // saying there are more. Tighter still the words keep one row with the head saying they page, and last
+      // (one row left, or a limit of 2) the choices alone; with no row of words shown the head promises none.
+      const f=lessKeys,room=limit-1-f.length;
       if(room<=0)return [head,...f].slice(0,limit);
-      // The words have no row left: the head says they are there to page; every choice still shows if it fits.
-      if(marked.length<=room)return [[...head,...(words.length?[hint]:[])],...marked,...f].slice(0,limit);
-      const size=room>=2?room-1:room,lit=Math.max(0,marked.findIndex(parts=>parts[0]?.text==='▸'));
+      const wordRows=Math.min(words.length,room>=3?2:1),left=room-wordRows;
+      const showWords=wordRows>0&&left>=1,spare=showWords?left:room,page=wordRows===2&&words.length>2?1:wordRows;
+      let top=[];
+      if(showWords){
+        scroll=Math.max(0,Math.min(scroll,words.length-page));
+        top=words.slice(scroll,scroll+page);
+        if(wordRows===2&&page===1)top.push([span(`+${words.length-page} · ${readingWords()} ${scroll+1}/${words.length}`)]);
+        else if(words.length>page)head=[...head,span(` +${words.length-page} ${choosing(row)?'PgUp/PgDn':readingDown?'↓':'↑↓'}`)];
+      }else scroll=0;
+      if(marked.length<=spare)return [head,...top,...marked,...f].slice(0,limit);
+      const size=spare>=2?spare-1:spare,lit=Math.max(0,marked.findIndex(parts=>parts[0]?.text==='▸'));
       const from=Math.max(0,Math.min(marked.length-size,lit-Math.floor(size/2)));
-      return [head,...marked.slice(from,from+size),...(room>=2?[[span(`+${marked.length-size} · ${text('more_choices','more choices · ↑↓')}`)]]:[]),...f].slice(0,limit);
+      return [head,...top,...marked.slice(from,from+size),...(spare>=2?[[span(`+${marked.length-size} · ${text('more_choices','more choices · ↑↓')}`)]]:[]),...f].slice(0,limit);
     }
     if(content.length>space&&gap.length>1){gap=gap.slice(1);content=lines();}
     if(content.length<=space){scroll=0;return [head,...content,...footer].slice(0,limit);}

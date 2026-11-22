@@ -3,7 +3,8 @@ choices takes words beside them.
 
 A session registers a question with ``questions ask --choice …``; it used to read as a choice-only question (no answer
 row). A long question used to push the choices off the board: now only its words give way, ending in
-``… +N more lines``; short of rows the empty row goes first, then the thin line, then the words.
+``… +N more lines``; short of rows the empty row goes first, then the thin line, then the words. An item with several
+questions keeps every question's choices, answer row and the submit line first; the words of all of them give way.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -15,12 +16,15 @@ from tools.fleet.explorer.state import NavState, reduce
 from tools.fleet.explorer.view_model import ExplorerViewModel
 
 
-def board(lines=1, choices=4, transport="hearting-message-answer", **extra):
+def board(lines=1, choices=4, transport="hearting-message-answer", also=(), **extra):
     ref = {"id": "S4:synthetic", "harness": "codex", "session_id": "synthetic-session",
            "request_id": "synthetic-request", "question_id": "q"}
     question = {"id": "q", "question": "\n".join(f"question line {n + 1}" for n in range(lines)),
                 "choices": [{"value": f"v{n + 1}", "label": f"Choice {n + 1}"} for n in range(choices)], **extra}
-    envelope = {"kind": "question", "state": "open", "harness": "codex", "questions": [question],
+    later = [{"id": f"q{i + 2}", "question": "\n".join(f"second {i + 1} line {n + 1}" for n in range(rows)),
+              "choices": [{"value": f"v{n + 1}", "label": f"Choice {n + 1}"} for n in range(count)]}
+             for i, (rows, count) in enumerate(also)]
+    envelope = {"kind": "question", "state": "open", "harness": "codex", "questions": [question, *later],
                 "support": {"supported": True}, "native_ref": {"transport": transport}}
     row = {"id": ref["id"], "tag": ref["id"], "ref": ref, "kind": "question", "h": "codex",
            "session_tag": "a1", "source": "S4", "wait": "1m"}
@@ -72,6 +76,28 @@ class QuestionChoices(unittest.TestCase):
                             self.assertEqual(seen, list(range(1, choices + 1)), "\n".join(rows))
                             if lines > capacity - choices - 2:
                                 self.assertTrue(any("more lines" in line for line in rows), "\n".join(rows))
+
+    def test_several_questions_in_one_item_keep_every_choice_answer_row_and_the_submit_line(self):
+        for first in (1, 5, 17, 40):
+            for second in (1, 5, 17):
+                for count in ((4, 4), (2, 1)):
+                    for height in (22, 30, 40):
+                        with self.subTest(first=first, second=second, choices=count, height=height):
+                            state, vm, _ = board(lines=first, choices=count[0], also=((second, count[1]),))
+                            rows = rows_of(vm, state, height)
+                            text = "\n".join(rows)
+                            self.assertEqual(len(shown(rows)), sum(count), text)     # both questions' choices, whole
+                            self.assertEqual(sum(1 for line in rows if line.split("│")[-1].strip().startswith("> ")), 2, text)
+                            self.assertTrue(any(line.split("│")[-1].strip().startswith("submit") for line in rows), text)
+
+    def test_with_several_questions_the_words_of_all_give_way_and_a_roomy_board_shows_them_whole(self):
+        state, vm, _ = board(lines=40, choices=4, also=((40, 4),))
+        rows = rows_of(vm, state, 30)
+        self.assertTrue(any("more lines" in line for line in rows), "\n".join(rows))
+        state, vm, _ = board(lines=2, choices=2, also=((2, 2),))
+        rows = rows_of(vm, state, 40)
+        self.assertFalse(any("more lines" in line for line in rows))
+        self.assertTrue(any("question line 2" in line for line in rows) and any("second 1 line 2" in line for line in rows))
 
     def test_a_short_question_draws_as_before(self):
         state, vm, _ = board(lines=2, choices=3)

@@ -222,7 +222,10 @@ class QuestionSplitTest(unittest.TestCase):
         self.assertTrue(all(s["rule"] for s in shown if s["blank"]), shown)
         # 11-22: short of rows the question's words page (`+N · more …`); the choices never leave. What gives way
         # first is the key hints, then the empty row, then the line, then the words themselves (the head says they page).
-        self.assertTrue(all(s["numbers"] == 3 for s in shown), [s for s in shown if s["numbers"] != 3])
+        # The words keep a row and the `more` line before a choice is given up, so the choices stand whole down to 7 rows
+        # and slide (one at least) in what is left below that.
+        self.assertTrue(all(s["numbers"] == 3 for s in shown if s["budget"] >= 7), [s for s in shown if s["budget"] >= 7 and s["numbers"] != 3])
+        self.assertTrue(all(s["numbers"] >= 1 and s["more"] for s in shown if s["budget"] < 7), [s for s in shown if s["budget"] < 7])
         self.assertTrue(all(not (s["keys"] and not s["blank"]) for s in shown), shown)
         self.assertTrue(all(not (s["blank"] and not s["rule"]) for s in shown), shown)
         keyless = [s for s in shown if not s["keys"] and s["budget"] >= 7]
