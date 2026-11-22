@@ -996,7 +996,14 @@ an unsupported native request and any reason not named here; `answer in the
 parent` (`부모 창에서 답`) for a blocked worker's answer whose parent could not be
 confirmed; `sending` (`보내는 중`) while another answer is on its way; `closed`
 (`닫힘`) for a request already gone (an existing state word such as expired
-stays). The head carries the short form under 64 columns and the body row the
+stays). A question the panel already shows has gone from this session's waits
+only when a complete observation of the waits leaves it out (11-22): while that
+observation is missing, past its display time or incomplete (the producer's
+failure record included), the question stands as its own request says, an open
+registered question with its choices and its answer row, and an answer sent
+before the next observation is refused with one line saying why (`not sent ·
+reading the waits · Enter again soon`, `아직 안 보냄 · 대기 목록 읽는 중 · 잠시 뒤
+다시 Enter`), the typed answer kept. The head carries the short form under 64 columns and the body row the
 whole words. Every count of answer waits (Fleet's head and session rows, the
 `questions list` head, the status line, the panel's `◑ N` and the folded strip) counts every wait a person must answer, wherever
 it is answered: a question the panel answers, a Claude native request, a marker

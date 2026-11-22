@@ -857,11 +857,15 @@ def session_questions(harness, sid, *, view=None, retained=(), elsewhere=None):
     ``elsewhere`` (a list, when given) receives it, for the one guidance line. An answer the
     person sent and that still travels (``answer: sent``) is out of the session's wait index
     and in no count, yet comes here as its receipt: the panel's one dim line (rule 5).
+    A question already shown has left the session's waits only when a complete observation
+    leaves it out (11-22): with none (missing, past its display time, the producer's failure
+    record) it stands as its own request says.
     """
     import time
     import human_wait_state
     import questions
     view = view if isinstance(view, dict) else human_wait_state.cached_view(request=False) or {}
+    observed = view.get("complete") is True
     ids = set(view.get("by_session", {}).get((harness, sid), ()))
     answerable, receipts, current = [], [], set()
     for item in view.get("items", ()):
@@ -889,6 +893,12 @@ def session_questions(harness, sid, *, view=None, retained=(), elsewhere=None):
                 "owner": {"harness": harness, "session_id": sid}}
         described = questions.describe(item, now=time.time())
         if described.get("revision") == old.get("revision"):
+            if (described.get("answerable") is True and not observed
+                    and (described.get("request_state") or "open") == "open"):
+                # No observation says it left: it stands as its own request says (11-22).
+                result.insert(sum(1 for row in result if row.get("answerable") is True), described)
+                known.add(described["id"])
+                continue
             # No active input comes from a retained display reference; it has left this
             # session's waits, so an open one reads as closed (spec E9 rule 54 (e)).
             if described.get("answerable"):
@@ -1552,6 +1562,11 @@ def _block_answer(binding, request):
         return {"ok": False, "reason": "question-changed"}
     board = human_wait_state.cached_view(request=False)
     item, error = questions._find(board or {}, wanted)
+    if error and not (board or {}).get("complete"):
+        # The question stands while the waits are not observed (11-22); it is sent once they are.
+        registry_root()
+        from fleet.config import ui_text
+        return {"ok": False, "reason": ui_text("fleet.session_block.waits_unread")}
     if error or (item.get("owner") or {}).get("harness") != expected["harness"] or (
             item.get("owner") or {}).get("session_id") != expected["session_id"] or item.get("stale"):
         return {"ok": False, "reason": "question-changed"}
