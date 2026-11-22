@@ -6,7 +6,9 @@
 2. Only the REPO and SESSION heads, the boxes and the last row's rule are lines; the line between CTX and TITLE is gone. `rule motion`'s light runs over the SESSION head's rule alone.
 3. What a press opens is the row it was: the same actions on the same cells (a whole row for a head, an item, NOW, a box's top line), the REPO row's two buttons where the heads go.
 4. What stands and the order in which rows give way are what they were: the indent only takes a cell from what a row shows (cut by the old rule), the line between CTX and TITLE was one row, and short of rows
-   the SESSION head takes MODEL's value and row, so the head's name stands at every height.
+   the SESSION head takes MODEL's value and row, so the head's name stands at every height; where MODEL's value would not stand whole on that row the head does not take it (the MODEL row stands in its own width).
+5. A row `cut` or `tailed` ends in `…›` with `›` in the row's last cell and one `…` only, also where a two-cell character falls at the cut. Only the REPO and SESSION names carry weight (in mono and
+   `NO_COLOR` too, where weight is the only cue); every other name is the title role's color without it.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -40,8 +42,8 @@ const status=(n=3,total=5,has=true)=>part('STATUS',SI,n,total,has),backlog=(n=3,
 function model(o={}){
   const routes=Array.from({length:o.routes??0},(_,i)=>route(i+1));
   return {styles,colors:256,tag:'[e9]',repo_side:[t('hearting','loc_repo')],worktrees:[t('wt 12')],repo:[t('hearting','loc_repo')],git_side:[t('branch'),t(' ✓','lvl_g')],git:[t('branch')],
-    selected:[t('Opus 5.5','hb_claude'),t(' xhigh')],context_side:[t('━━━━','lvl_g'),t('────'),t(' 41%')],context:[t('ctx 41%','lvl_g')],quota:[t('5h ','dim'),t('23%','lvl_g')],
-    session_title:'시험용 세션',now:'시험용 NOW 한 줄',route_label:routes.length?'route '+routes.length:undefined,route_count:routes.length,route_total:routes.length,routes,
+    selected:o.selected??[t('Opus 5.5','hb_claude'),t(' xhigh')],context_side:[t('━━━━','lvl_g'),t('────'),t(' 41%')],context:[t('ctx 41%','lvl_g')],quota:[t('5h ','dim'),t('23%','lvl_g')],
+    session_title:'시험용 세션',now:o.now??'시험용 NOW 한 줄',route_label:routes.length?'route '+routes.length:undefined,route_count:routes.length,route_total:routes.length,routes,
     messages:MSGS.slice(-(o.messages??0)),memory_items:MEMS.slice(0,o.mem??0),
     ...(o.status!==undefined?{status_doc:o.status}:{}),...(o.backlog!==undefined?{backlog_doc:o.backlog}:{}),
     ...(o.peers===false?{}:{peers:{groups:[{steward:{tag:'e9',key:'hb_claude',me:true},members:[{tag:'d4',key:'hb_codex'}]}]}})};
@@ -165,6 +167,66 @@ for(const [motion,state] of [['border','working'],['scanners','working'],['off',
  const parts=v.rows[y].filter(p=>p.rule);assert(parts.length===1&&parts[0].text==='─'.repeat(32)&&parts[0].role==='messages'&&parts[0].dim===true,motion+state+JSON.stringify(parts));
  assert(!(v.motion&&v.motion.cells.some(c=>c.rule!==undefined)),motion+state);
 }
+""")
+
+    def test_the_arrow_of_a_cut_row_stands_in_the_last_cell_and_the_dots_are_one(self):
+        self.node(r"""
+// A two-cell character at the cut left the `›` one cell short of the end (`…›  │`): the cells left stand between `…` and `›`.
+const nowOf=(w,h,now,o={})=>inside(view.render({width:w,height:h,side:true,model:{...model({routes:0,...o}),now,status_doc:undefined,backlog_doc:undefined},state:'working',harness:'claude',frame:1000,since:990,
+  sent:()=>[],cellWidth:cells,configuration:{side_width:w,rule_motion:'off'}}));
+const NOWS=['abc 가나다라마바사아자차카타파하 가나다라마바사아자차카타파하 끝','가나다라마바사아자차카타파하가나다라마바사아자차카타파하가나다라마바사아자차카타파하','시험용 NOW가 아주 길게 이어져서 두 줄 이상을 차지하는 경우를 그려 본다 시험용 abc','a 가나 다라마바 사아자차카타파하 abcdefghijklmnop 가나다라마바사아자차카타파하 abc 가'];
+let seen=0;
+for(const w of [59,44,40,36,32])for(const now of NOWS)for(let h=8;h<=50;h++){
+ const a=nowOf(w,h,now),tag=w+'x'+h+' '+now+'\n'+a.join('\n');
+ for(const s of a){
+  assert(!s.includes('……'),'one `…` only\n'+tag);
+  if(/…\s?›$/.test(s)){seen++;assert.equal(cells(s),w-4,'`›` in the last cell\n'+tag);assert(s.endsWith(' ›')||s.endsWith('…›'),tag);}
+ }
+}
+assert(seen>=200,String(seen));
+// The reviewer's picture: a two-cell character at the cut.
+{const a=nowOf(44,32,NOWS[0]),i=a.findIndex(s=>/^ NOW /.test(s));
+ assert.equal(a[i+1],'        가나다라마바사아자차카타파하 … ›','\n'+a.join('\n'));}
+// The bottom layout's NOW row (its title beside it) is the same `tailed`: heights 6-22, four widths.
+for(const w of [120,100,80,60])for(const now of NOWS)for(let h=6;h<=22;h++){
+ const ls=lines(view.render({width:w,height:h,side:false,model:{...model({routes:0}),now,status_doc:undefined,backlog_doc:undefined},state:'working',harness:'claude',frame:1000,since:990,sent:()=>[],cellWidth:cells,configuration:{side_width:w,rule_motion:'off'}}));
+ for(const s of ls){assert(!s.includes('……'),w+'x'+h+'\n'+s);const m=/^│ (.*NOW .*…)\s?› │$/.exec(s);if(m)assert.equal(cells(s),w,w+'x'+h+'\n'+s);}
+}
+""")
+
+    def test_only_the_repo_and_session_names_are_bold(self):
+        self.node(r"""
+const boldOf=(v,word)=>v.rows.flatMap(r=>r.filter(p=>p.text===word)).map(p=>p.bold===true);
+for(const [name,cfg,extra] of [['terminal',{theme:'terminal'},{}],['light',{theme:'light'},{}],['mono',{theme:'mono'},{}],['no_color',{theme:'terminal'},{no_color:true}]])
+for(const h of [60,12]){
+ const v=view.render({width:44,height:h,side:true,model:{...model({routes:1,messages:1,mem:1,status:status(),backlog:backlog()}),...extra},state:'working',harness:'claude',frame:1000,since:990,sent:()=>[],cellWidth:cells,
+  configuration:{side_width:44,rule_motion:'off',position:'right',...cfg}}),tag=name+' '+h+'\n'+lines(v).join('\n');
+ assert.deepEqual(boldOf(v,'REPO'),[true],'REPO '+tag);
+ // The SESSION name stands alone (a head) or before MODEL's value (the merged head): the same part either way.
+ assert.deepEqual(boldOf(v,'SESSION'),[true],'SESSION '+tag);
+ for(const w of ['GIT','MESSAGES','MEM','STATUS','BACKLOG','NOW ','TITLE','MODEL','CTX'])assert(boldOf(v,w).every(b=>!b),w+' '+tag);
+}
+// Short of rows the head is merged with MODEL's value: the name is bold there too.
+{const v=drawW({height:14,question:true,mem:3,status:status(),backlog:backlog()});assert(lines(v).some(l=>/^│ SESSION Opus 5\.5 xhigh/.test(l)),lines(v).join('\n'));assert.deepEqual(boldOf(v,'SESSION'),[true]);}
+""")
+
+    def test_a_model_value_that_does_not_stand_whole_does_not_merge_into_the_head(self):
+        self.node(r"""
+const LONG=[t('GPT-5.5-codex-max','hb_claude'),t(' xhigh')];
+let merged=0,alone=0;
+for(const w of [44,36,32,30])for(const [sel,whole] of [[LONG,'GPT-5.5-codex-max xhigh'],[model().selected,'Opus 5.5 xhigh']])for(let h=8;h<=40;h++)for(const question of [false,true])for(const mem of [0,3]){
+ const v=drawW({width:w,height:h,question,mem,selected:sel,status:status(),backlog:backlog()}),ls=lines(v),a=inside(v),tag=w+'x'+h+'\n'+ls.join('\n');
+ assert.equal(ls.length,h,tag);assert(ls.every(l=>cells(l)===w),tag);
+ // A merged head holds the value whole; else the head row goes and the MODEL row stands (its value cut by its own width, as before the head was a group's).
+ const head=a.find(s=>/^SESSION [^─]/.test(s));
+ if(head){merged++;assert(head.includes(whole),'merged, whole\n'+tag);}
+ else if(a.some(s=>/^SESSION/.test(s)))alone++;
+ else assert(a.some(s=>/^ MODEL |^ GPT|^ Opus/.test(s)),'MODEL row stands\n'+tag);
+}
+assert(merged>0&&alone>0,merged+' '+alone);
+// The reviewer's picture: 32 wide, 14 high, a long model name: the MODEL row keeps the name whole.
+{const a=inside(drawW({width:32,height:14,question:true,mem:3,selected:LONG,status:status(),backlog:backlog()}));
+ assert(!a.some(s=>/^SESSION GPT/.test(s))&&a.some(s=>s.includes('GPT-5.5-codex-max xhigh')),a.join('\n'));}
 """)
 
     def test_the_session_head_stays_and_the_rows_give_way_in_the_order_they_did(self):

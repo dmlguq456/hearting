@@ -73,6 +73,8 @@ for(const lang of ['en','ko'])for(const [kind,item] of Object.entries(kinds)){
   const isKey=s=>s.replace(/ · /g,' ').split(' ').filter(Boolean).every(w=>known.has(w));
   let first=out.length;while(first>0&&isKey(out[first-1]))first--;
   const foot=out.slice(first);
+  // 11-22: a question with choices keeps its choice rows before its key hints, which go first when rows run short.
+  if((kind==='choice'||kind==='decision')&&foot.length===0){const stand=kind==='choice'?['AAA','BBB']:['approve','reject','defer'];assert(stand.every(w=>out.some(r=>r.includes(w))),'the choices stand\n'+tag);shown++;continue;}
   assert(foot.length>=1,'a key line stands\n'+tag);
   assert(foot.every(r=>cells(r)<=inner),'within the popup\n'+tag);
   assert(foot.at(-1).split(' ').at(-1)===close,'the closing key stays last\n'+tag);
@@ -228,6 +230,13 @@ for(const harness of ['claude','codex','opencode'])for(const [name,extra] of [['
  assert(v.motion&&v.motion.cells.length===28&&v.motion.cells.every(c=>c.row===rule&&c.col>=10&&c.col<=37),'the default light moves over the rule alone\n'+tag);
  assert(lines[rule+1].includes('MODEL'),tag);
  if(name!=='none')assert(lines.some(r=>r.includes('TITLE')||r.includes('NOW')),tag);
+ // No title and no NOW: no separate empty row stands under CTX, the next thing (the question's box) stands right under it.
+ if(name==='none'){
+  const q={count:1,label:'QUESTIONS',answerable:true,rows:[[p('◑ ',{foreground:217}),p('어느 쪽?',{foreground:253})]],one:[[p('◑ ',{foreground:217}),p('어느 쪽?',{foreground:253})]],line:[p('어느 쪽?',{foreground:253})],choices:0};
+  const asked=view.render({width:40,height:30,side:true,fill:true,model:{...base,wait:'◑답 대기 1',styles:{...styles,g_blocked:{foreground:217}}},state:'idle',sid:'s',harness,frame:0,brief:()=>q,sent:()=>[],configuration:{},background:''}).rows.map(str);
+  const ctx=asked.findIndex(r=>/^│  CTX /.test(r));
+  assert(ctx>0&&/^│ ╭/.test(asked[ctx+1]),'no separate empty row under CTX without a title\n'+asked.join('\n'));
+ }
 }
 // The bottom layout has none (the border alone is bright).
 const bottom=view.render({width:120,height:6,side:false,fill:false,model:{...base},state:'working',sid:'s',harness:'claude',frame:0,brief:()=>null,sent:()=>[],configuration:{},background:''});

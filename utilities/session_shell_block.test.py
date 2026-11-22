@@ -77,10 +77,12 @@ setImmediate(()=>{
         code=r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
 const block=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
-const many=Array.from({length:9},(_,i)=>'CHOICE_'+i);
-block.update([{id:'c',answerable:true,questions:[{id:'q',question:'Which?',choices:many}]}]);
+// 11-22: the choices stand; the question's words are what page.
+const words=Array.from({length:20},(_,i)=>[{text:'WORD_'+i}]);
+block.update([{id:'c',answerable:true,questions:[{id:'q',question:'Which?',choices:['CHOICE_0','CHOICE_1'],display:{body:words}}]}]);
 block.enter();
-let text=JSON.stringify(block.detail({budget:6,columns:30}));
+let text=JSON.stringify(block.detail({budget:8,columns:30}));
+assert(text.includes('CHOICE_0')&&text.includes('CHOICE_1'),text);
 assert(text.includes('more · PgUp/PgDn to read')&&!text.includes('focus and ↑↓'),text);
 // A question without choices still reads with ↑↓.
 block.update([{id:'t',answerable:true,questions:[{id:'q',question:'Q',choices:[]}]}]);
@@ -109,10 +111,11 @@ block.enter();
 text=JSON.stringify(block.detail({budget:8,columns:40}));
 assert(text.includes('ANSWER_ME')&&text.includes('▸'),text);
 block.leave();
-const many=Array.from({length:9},(_,i)=>'CHOICE_'+i);
-block.update([{id:'c',revision:'r2',answerable:true,questions:[{id:'q',question:'Which?',choices:many}]}]);
-text=JSON.stringify(block.detail({budget:6,columns:40}));
+const words=Array.from({length:20},(_,i)=>[{text:'WORD_'+i}]);
+block.update([{id:'c',revision:'r2',answerable:true,questions:[{id:'q',question:'Which?',choices:['CHOICE_0','CHOICE_1'],display:{body:words}}]}]);
+text=JSON.stringify(block.detail({budget:8,columns:40}));
 assert(text.includes('more · focus and PgUp/PgDn to read')&&!text.includes('focus and ↑↓'),text);
+assert(text.includes('CHOICE_0')&&text.includes('CHOICE_1'),'the choices show before focus too: '+text);
 console.log('PASS');"""
         result=subprocess.run(['node','-e',code,str(ROOT/'utilities/session-shell/block-input.cjs')],
                               text=True,capture_output=True,timeout=5)

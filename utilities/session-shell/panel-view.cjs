@@ -699,7 +699,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const title=clean(model.session_title||'').trim(),now=clean(model.now||'').trim();
     const nowKey=state==='working'||state==='submitting'||state==='blocked'?'loc_repo':'dim';
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
-    const top=[],spacers=new Set(),metaGaps=new Set(),rules=new Set(),optional=new Set(),gitRows=new Set(),jobRows=new Set(),topGroups=new Map();
+    const top=[],spacers=new Set(),metaGaps=new Set(),optional=new Set(),gitRows=new Set(),jobRows=new Set(),topGroups=new Map();
     // 11-21: the STATUS and BACKLOG parts under the REPO group: each a head row and its first items (all of them `listRows`). They are laid out last, after
     // everything else has its rows (the same layout a window without them has): they take the empty rows and, short of those, rows MESSAGES and MEM fold; they are the first to go.
     const lists=[],listRows=new Set(),listHeads=new Map(),listItemAt=new Map();
@@ -733,8 +733,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(!tail.length)return row;
       const mark=tail.filter(x=>clean(x.text).trim());
       if(size(row)+size(tail)<=limit)return [...row,pad(limit-size(row)-size(mark)),...mark];
-      const fit=clip(row,Math.max(0,limit-2));
-      return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'},tail.at(-1)];
+      // A row `cut` already ended in `…` loses that mark first (one `…` only), and the cells a wide character left
+      // empty at the cut stand between `…` and `›`, so the `›` is always the row's last cell.
+      const last=row.at(-1),ends=last&&clean(last.text).endsWith('…'),bare=ends?[...row.slice(0,-1),...(clean(last.text).length>1?[{...last,text:clean(last.text).slice(0,-1)}]:[])]:row;
+      const fit=clip(bare,Math.max(0,limit-2));
+      return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'},pad(limit-2-fit.used),tail.at(-1)];
     };
     const field=(label,parts,max=Infinity,tail=[])=>{
       const lead=[pad(IND),...(labelWidth?[text(label.padEnd(labelWidth),'dim')]:[])],rest=[pad(IND+labelWidth)],room=inner-IND-labelWidth;
@@ -846,7 +849,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     // A group's head row: its name (the title role, as a section's), a thin rule to the row's end.
     // 11-22: SESSION's rule is the one `rule motion` moves (`ruleParts`); its value (MODEL's, short of rows) stands after the name.
-    const groupHead=(name,value=[])=>{const lead=[{...text(name,'dim'),role:'title'},...(value.length?[text(' '),...value]:[])],rest=inner-size(lead);
+    const groupHead=(name,value=[])=>{const lead=[{...text(name,'dim'),role:'title',bold:true},...(value.length?[text(' '),...value]:[])],rest=inner-size(lead);
       return rest>=3?[...lead,text(' '),...ruleParts(rest-1)]:cut(lead,inner);};
     // Spec rule 46: the newest saved memory records (this repository's and the global ones, MEM_MAX at
     // most) stand in their own section under the messages, one row each (below). An older backend
@@ -872,7 +875,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         // as the other labels do not).
         const count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
         // 11-22: a group head is its bold name, one cell, its value, then the rule (no label column: the rows under it are the ones in a column).
-        const word=[{...text('REPO','dim'),role:'title'},text(' ')],room=inner-5,fit=inner-(labelWidth||5);
+        const word=[{...text('REPO','dim'),role:'title',bold:true},text(' ')],room=inner-5,fit=inner-(labelWidth||5);
         const withCount=count.length>0&&size(sideRepo)+size(count)<=fit;
         const value=withCount?[...sideRepo,...count]:cut(sideRepo,fit);
         const row=[...value,...fillEnd(room-size(value))];
@@ -919,12 +922,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
           return !first||rest===String(first.text)?parts:rest?[{...first,text:rest},...parts.slice(1)]:parts.slice(1);};
         const gauge=Array.isArray(model.context_side)?painted(model.context_side):word(painted(model.context));
         const value=mcp.length||cost.length?joined([gauge,mcp,cost]):gauge;
-        modelValueOf=room=>firstGives(selected,room);
+        modelValueOf=room=>size(selected)<=room?firstGives(selected,room):null;
         top.push(labelled('MODEL',firstGives(selected,inner-IND-labelWidth)));
         if(value.length){top.push(labelled('CTX',cut(value,inner-IND-labelWidth)));mark(top.length-1,'context');}
       }else{
         // Narrower than 30 cells inside, the rows as they were, without labels (one cell in, as the rows of the group above).
-        modelValueOf=room=>firstGives(selected,room);
+        modelValueOf=room=>size(selected)<=room?firstGives(selected,room):null;
         top.push(labelled('MODEL',firstGives(selected,inner-IND)));
         if(contextParts.length){top.push(labelled('CTX',cut(contextParts,inner-IND)));mark(top.length-1,'context');}
       }
@@ -948,7 +951,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         if(rows.length>kept.length){const last=kept.length-1,fit=clip(kept[last],inner-IND-1);kept[last]=[...fit.parts,text('…',key)];}
         top.push(...kept.map(r=>[pad(IND),...r]));
       }
-      // One empty row parts the head from the route box below it (a head with no content has its rule).
+      // One empty row parts the metadata from the content below it (a session with no content has none).
       if(content){spacers.add(top.length);top.push([]);}
     }else{
       // The bottom layout has few rows: the metadata row (or rows) first, then one
@@ -1919,8 +1922,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const questionRowsIn=()=>boxedQuestions()?within(questionRows):questionRows();
     const sectionRows=s=>s.name==='QUESTIONS'?questionRowsIn():s.rows(take[s.name]);
     const sectionSize=s=>!kept[s.name]?0:s.box?routeBox():(s.name==='QUESTIONS'&&boxedQuestions()?2:1)+sectionRows(s).length;
-    const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size-listRows.size;
-    let keepGit=true,keepSpacers=true,keepMetaGap=true,keepRules=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0,keepFootRule=true,keepQuestionBox=true;
+    const core=top.length-spacers.size-metaGaps.size-optional.size-gitRows.size-extra.size-listRows.size;
+    let keepGit=true,keepSpacers=true,keepMetaGap=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0,keepFootRule=true,keepQuestionBox=true;
     // 11-16 (the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을 USAGE로 해서 넣자"): the
     // panel's bottom is the USAGE section: its name row (the thin rule above the last row, now named), then
     // one row for each harness (Claude, Codex, OpenCode, Fleet's header order): the harness's name dim, then the
@@ -2082,7 +2085,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // head's rule, its color) parts the bottom sections (MESSAGES, MEM) from the last row (5h/7d, the gear and
     // the fold button); short of rows it goes before any content row.
     const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)
-      +(keepRules?rules.size:0)+(keepOptional?optional.size:0)+listNeed()+SECTIONS.reduce((n,s)=>n+sectionSize(s),0)+footRule()+1;
+      +(keepOptional?optional.size:0)+listNeed()+SECTIONS.reduce((n,s)=>n+sectionSize(s),0)+footRule()+1;
     const budget=rows;
     // Short of rows (spec rule 34 (b), 11-15): the empty rows, the rule above the last row (11-16) and a
     // value's further rows first (a route title's second row too); then MEM and the question step down
@@ -2102,11 +2105,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const give=(can,apply,undo,family=null)=>{while(need()>budget&&can()){apply();gave.push({undo,family});}};
     const lowest=['MEM','MESSAGES'];
     // RESOURCES gives way first (it is the newest and the least needed of the bottom's sections): the GPU rows, then the host rows.
-    const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
+    const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
       keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]);
     // The give-back's restore: the way back to a state `choices()` recorded.
-    const restore=json=>{const v=JSON.parse(json);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-      Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead]=v.slice(12,22);keepLine.splice(0,keepLine.length,...v[22]);keepRouteRule=v[23];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(24,30);};
+    const restore=json=>{const v=JSON.parse(json);[keepSpacers,keepMulti,keepMetaGap,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
+      Object.assign(take,v[9]);Object.assign(kept,v[10]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead]=v.slice(11,21);keepLine.splice(0,keepLine.length,...v[21]);keepRouteRule=v[22];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(23,29);};
     resGpus=resourceGpuTotal();
     give(()=>side&&resHosts>0&&resGpus>0,()=>{resGpus--;},()=>{resGpus++;});
     give(()=>side&&resHosts>0,()=>{resHosts--;},()=>{resHosts++;});
@@ -2127,7 +2130,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});
     give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});
     give(()=>keepMetaGap,()=>{keepMetaGap=false;},()=>{keepMetaGap=true;});
-    give(()=>keepRules&&rules.size>0,()=>{keepRules=false;},()=>{keepRules=true;});
     // (11-16: the QUESTIONS box's two border rows go after its content rows above, before the structural rows below.)
     give(()=>kept.QUESTIONS&&keepQuestionBox,()=>{keepQuestionBox=false;},()=>{keepQuestionBox=true;});
     // The box comes back with its context rows only while the workers stand.
@@ -2191,10 +2193,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     top.forEach((row,i)=>{
       if(!keepLists&&listRows.has(i))return;
       if(!keepLists&&i===repoAt&&repoButtons){order.push({parts:repoButtons.parts,groups:topGroups.get(i),action:repoButtons.actions});return;}
-      if(!keepMetaGap&&sessionAt>=0&&i===sessionAt+1&&modelValueOf){order.push({parts:groupHead('SESSION',modelValueOf(Math.max(1,inner-8))),groups:topGroups.get(i)});return;}
+      if(!keepMetaGap&&sessionAt>=0&&i===sessionAt+1&&modelValueOf){const value=modelValueOf(Math.max(1,inner-8));if(value){order.push({parts:groupHead('SESSION',value),groups:topGroups.get(i)});return;}}
       const at=listItemAt.get(i);
       if(at&&at.j>=take[at.entry.name+'_ITEMS'])return;
-      if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i))){
+      if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i))){
         const head=listHeads.get(i);
         // A list part's head: ` STATUS +2        ›` (one cell in; the count of the items not shown, as MESSAGES' head; the word dim, not titled, where its document is not there).
         const shownRows=head?head.items.slice(0,take[head.name+'_ITEMS']):[],k=head&&head.name==='BACKLOG'?kindsOf(head.doc):null;

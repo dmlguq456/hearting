@@ -672,6 +672,15 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
     legend = [("↑↓", "move"), ("←→", "focus"), ("PgUp/Dn·Home/End·wheel", "scroll"),
               ("⏎", "pane"), ("Tab", "view"), ("/", "filter"),
               ("u", "usage"), ("F", "feed"), ("q", "quit")]
+    overlay = state.question_overlay if isinstance(state.question_overlay, Mapping) else {}
+    if state.view == "QUESTIONS" and state.scope == "-" and overlay.get("editing"):
+        from .state import _question_text_draft
+        if _question_text_draft(overlay):
+            # 11-22: while an answer with text is typed these keys move inside it, so the legend says so
+            # (Tab still switches the view).
+            legend = [("←→·Home/End", "cursor") if key == "←→" else
+                      ("PgUp/Dn·wheel", label) if key.startswith("PgUp") else (key, label)
+                      for key, label in legend]
     for key, label in legend:
         if x > 1:
             x = grid.put(x, height - 2, " · ", "line", limit=width - 1)

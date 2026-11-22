@@ -139,6 +139,11 @@ const looks=(y,from,to)=>{const line=term.buffer.active.getLine(y),out=[];for(le
 const frames={},checks={};
 // (Private, as the shared cache's reader requires.)
 const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.renameSync(file+'.new',file);};
+// 11-22: the question popup's ←→ no longer change sections; a section is reached by a press on its name on the
+// popup's bottom line.
+const toSection=async(name,ms=500)=>{await flush();const s=await screen(),b=box(s);if(!b)throw Error('no popup to press in');
+  const text=[],where=[];cellsOf(b.bottom).forEach((ch,x)=>{for(const _ of ch){where.push(x);text.push(_);}});
+  const i=text.join('').indexOf(name);if(i<0)throw Error('no '+name+' on the bottom line: '+b.foot);await press(where[i],b.bottom,ms);};
 (async()=>{try{
   let s=await until(s=>has('READY_'+cfg.harness)(s)&&s.some(l=>/STATUS( \+\d+)? +›/.test(l))&&has('QUESTIONS')(s),'the panel with its status button');
   await sleep(600);s=await screen();frames.panel=s;
@@ -175,7 +180,7 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.r
   s=await go('\x1b[C','QUESTIONS','the question popup by →');frames.questions=s;
   checks.question_line=box(s).rows.map(l=>l.slice(box(s).left)).find(l=>l.includes('질문 본문'))||'';
   {const y=box(s).top+box(s).rows.findIndex(l=>l.includes('질문 본문'));checks.question_inverse=looks(y,0,cols).filter(c=>c.inverse).length;}
-  s=await go('\x1b[D','STATUS','back to the status popup');
+  await toSection('STATUS');s=await until(s=>!!box(s)&&box(s).title.includes('STATUS'),'back to the status popup');
   s=await go('\x1b[D','MESSAGES','the MESSAGES popup by ← (round)');frames.messages=s;
   checks.messages=box(s).rows.map(l=>l.slice(box(s).left));
   s=await go('\x1b[C','STATUS','the status popup by → (round)');

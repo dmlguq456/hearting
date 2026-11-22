@@ -106,11 +106,16 @@ const openNow=async()=>{const p=await at(NOWWORD);if(!p)throw Error('no NOW row\
 // Where the panel does not show its NOW row (a small window, the folded strip): Ctrl+] and ← reach it, as every popup is reached.
 const openAny=async()=>{if(await at(NOWWORD))return openNow();
   await key('\x1d',500);await until(s=>!!box(s),'a popup by Ctrl+]');
-  for(let i=0;i<5&&!(box(await screen())||{title:''}).title.includes('NOW');i++)await key('\x1b[D',600);
-  return until(titled('NOW'),'NOW by ←');};
+  await toSection('NOW',600);
+  return until(titled('NOW'),'NOW by a press on its name');};
 const close=async()=>{await key('\x1b',300);await until(s=>!box(s),'closed');};
 // Down until the row stood on has `word` (at most `max` presses).
 const downTo=async(word,max=14)=>{for(let i=0;i<max;i++){const t=await standing();if(t&&t.includes(word))return t;await key('\x1b[B',300);}return (await standing())||'';};
+// 11-22: the question popup's ←→ no longer change sections; a section is reached by a press on its name on the
+// popup's bottom line.
+const toSection=async(name,ms=500)=>{await flush();const s=await screen(),b=box(s);if(!b)throw Error('no popup to press in');
+  const text=[],where=[];cells(b.bottom).forEach((ch,x)=>{for(const _ of ch){where.push(x);text.push(_);}});
+  const i=text.join('').indexOf(name);if(i<0)throw Error('no '+name+' on the bottom line: '+b.foot);await press(where[i],b.bottom,ms);};
 (async()=>{try{
   await until(s=>has('READY_'+cfg.harness)(s)&&has(NOWWORD)(s),'the panel with its NOW');
   await key('draft9',300);
@@ -159,7 +164,7 @@ const downTo=async(word,max=14)=>{for(let i=0;i<max;i++){const t=await standing(
     await close();await sleep(500);out.closed=live();
     await openNow();await until(popupHas('지금'),'the list once more');await sleep(300);out.reopened=live();
     await key('\x1b[C',600);await until(titled('QUESTIONS'),'QUESTIONS');await sleep(400);out.next_section=live();
-    await key('\x1b[D',600);await until(titled('NOW'),'NOW again');await sleep(500);out.back=live();
+    await toSection('NOW',600);await until(titled('NOW'),'NOW again');await sleep(500);out.back=live();
     await key('\x1d',500);await sleep(500);out.ctrl=live();
     const end=await screen();out.draft=end.some(l=>l.startsWith('❯ draft9'));out.submitted=end.some(l=>l.includes('DONE_draft9'));out.native_mouse=raw.includes('NATIVE_ESC_');
     fs.writeFileSync(cfg.result,JSON.stringify({frames,checks:out}));return;
@@ -216,7 +221,7 @@ const downTo=async(word,max=14)=>{for(let i=0;i<max;i++){const t=await standing(
   await close();
   // 6. ←→ between the sections: NOW sits before QUESTIONS; Ctrl+] opens what it opened before (not NOW).
   await openNow();await key('\x1b[C',700);s=await until(titled('QUESTIONS'),'QUESTIONS by →');checks.next_foot=box(s).foot;
-  await key('\x1b[D',700);s=await until(titled('NOW'),'NOW by ←');
+  await toSection('NOW',700);s=await until(titled('NOW'),'NOW by a press on its name');
   await close();
   await key('\x1d',500);s=await until(s=>!!box(s),'a popup by Ctrl+]');checks.ctrl_title=box(s).title;await close();
   // 7. Keys and presses stayed the popup's.

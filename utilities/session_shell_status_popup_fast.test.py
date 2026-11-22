@@ -288,10 +288,10 @@ const flush=()=>new Promise(r=>term.write('',r));
 const cellsOf=y=>{const line=term.buffer.active.getLine(y),out=[];for(let x=0;x<cols;x++){const c=line?.getCell(x);out.push(!c?' ':c.getWidth()===0?'':c.getChars()||' ');}return out;};
 const screen=async()=>{await flush();return Array.from({length:rows},(_,y)=>cellsOf(y).join('').trimEnd());};
 const at=async needle=>{await flush();for(let y=0;y<rows;y++){const c=cellsOf(y),where=[];let text='';
-  c.forEach((ch,x)=>{for(const _ of ch)where.push(x);text+=ch;});const i=text.indexOf(needle);if(i>=0)return {x:where[i],y};}return null;};
+  c.forEach((ch,x)=>{for(const _ of ch)where.push(x);text+=ch;});const m=needle instanceof RegExp?needle.exec(text):null,i=needle instanceof RegExp?(m?m.index:-1):text.indexOf(needle);if(i>=0)return {x:where[i],y};}return null;};
 const until=async(test,what,ms=20000)=>{const began=Date.now();while(Date.now()-began<ms){const s=await screen();if(test(s))return {s,ms:Date.now()-began};await sleep(25);}
   throw Error('never '+what+'\n'+(await screen()).join('\n'));};
-const has=word=>s=>s.some(line=>line.includes(word));
+const has=word=>s=>s.some(line=>word instanceof RegExp?word.test(line):line.includes(word));
 // 11-21: the STATUS head stands under the REPO group (` STATUS +N        ›`), the panel's only drawing of the status.
 const hasButton=s=>s.some(line=>/STATUS( \+\d+)? +›/.test(line));
 const press=async(x,y,ms=100)=>{child.write(`\x1b[<0;${x+1};${y+1}M\x1b[<0;${x+1};${y+1}m`);await sleep(ms);};
@@ -441,7 +441,7 @@ const checks={};
   }
   if(cfg.scenario==='mem'){
     // 11-20: the MEM section's records are one row each; a press on a record opens the MEM popup (the MESSAGES popup's frame and keys) on it.
-    await until(has('MEM '),'the MEM section');
+    await until(has(/│ MEM +› │/),'the MEM section');
     const panel=await screen();
     checks.rows=panel.filter(l=>l.includes('MEMREC')).length;
     checks.row_cut=panel.some(l=>l.includes('MEMREC_ONE')&&l.includes('…'))&&!panel.some(l=>l.includes('MEMREC_ONE_END'));
@@ -453,7 +453,7 @@ const checks={};
     checks.first_row=body(r.s)[0];
     await close();
     // The head opens it too; ←→ walk the sections (MEM is the last).
-    const head=await at('MEM ');await press(head.x+2,head.y,0);
+    const head=await at(/MEM +› │/);await press(head.x+2,head.y,0);
     r=await until(popupHas('MEMREC_ONE_END'),'the MEM popup from its head');checks.head_first=body(r.s)[0];
     await key('\x1b[D',300);r=await until(s=>{const b=box(s);return !!b&&b.rows[0].includes('MESSAGES')||!!b&&!b.rows[0].includes('MEM');},'a section before MEM');
     await key('\x1b[C',300);r=await until(popupHas('MEMREC_ONE_END'),'MEM again by →');checks.walk=true;
