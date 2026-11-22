@@ -6732,6 +6732,9 @@ def _explorer_handle(ch, mouse_event=None, size=None, snapshot=None):
         key = _explorer_text_key(ch)
     else:
         key = _explorer_key_name(ch)
+        if key is None and _explorer_question_editing():
+            # 11-22: a typed answer has a place in it; these keys only mean something while it is typed.
+            key = {getattr(curses, "KEY_DC", -1): "delete", 1: "ctrl-a", 5: "ctrl-e"}.get(ch)
     if key:
         from .explorer.runtime import tag_cycle
         order = tag_cycle(getattr(_EXPLORER_MODEL, "ordering", None))

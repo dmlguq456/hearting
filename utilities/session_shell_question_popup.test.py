@@ -401,6 +401,22 @@ const assert=require('node:assert/strict'),path=require('node:path'),create=requ
 })().catch(e=>{console.error(e);process.exit(1);});
 """)
 
+    def test_no_guidance_the_question_popup_draws_names_the_arrows_as_sections(self):
+        # 11-22: in the question popup ←→ only move the place in the typed text, so none of its guidance
+        # (the keys rows `navigate`, `navigate_write`, the writing hints, and `editor_help`, which a popup with no
+        # question row to answer stands on) says `←→`, in either language.
+        from fleet.config import ui_text
+        keys = ("navigate", "navigate_write", "editor_help", "choose", "choose_write", "writing_choices", "send", "text",
+                "more", "more_choose", "more_down", "more_page", "more_choices")
+        for language in ("en", "ko"):
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": language}):
+                for key in keys:
+                    with self.subTest(language=language, key=key):
+                        word = ui_text("fleet.session_block." + key)
+                        self.assertTrue(word and word != "fleet.session_block." + key, word)
+                        self.assertNotIn("←→", word)
+                        self.assertNotIn("section" if language == "en" else "구획", word)
+
     def test_the_question_words_and_colors_are_one_set(self):
         # 11-15 design F 1-4, 12 (words) and 7-9 (colors): one word per meaning on the panel, the
         # popup, Fleet and the notices; `◑` Fleet's waiting red everywhere; `✓` Fleet's green on the

@@ -80,8 +80,18 @@ def _choice_value(choice):
     return str(choice)
 
 
+def _registered(envelope):
+    """A question a session registered with ``questions ask`` (its answer goes back as a message)."""
+    return isinstance(envelope, dict) and (
+        envelope.get("native_ref") or {}).get("transport") == "hearting-message-answer"
+
+
 def questions_of(envelope):
-    """``[{id, question, choices, recommended}]`` from one selected request envelope."""
+    """``[{id, question, choices, recommended}]`` from one selected request envelope.
+
+    A registered question (``questions ask``) takes words beside its choices, as ``[value, text]`` or text
+    alone (11-22): a native form keeps the schema's own ``is_other``."""
+    registered = _registered(envelope)
     detail = envelope.get("detail") if isinstance(envelope, dict) else None
     listed = detail.get("questions") if isinstance(detail, dict) else None
     if isinstance(listed, list) and listed:
@@ -95,7 +105,7 @@ def questions_of(envelope):
                         "choices": choices,
                         "recommended": recommended if type(recommended) is int
                         and 0 <= recommended < len(choices) else None,
-                        "free_text": bool(question.get("is_other", not choices)) and not (
+                        "free_text": bool(question.get("is_other", registered or not choices)) and not (
                             choices and (envelope.get("native_ref") or {}).get("transport") == "opencode-http-v2"
                             and question.get("field_type") != "multiselect"),
                         "secret": bool(question.get("is_secret"))})
@@ -109,7 +119,7 @@ def questions_of(envelope):
         choices = detail.get("choices")
     choices = choices if isinstance(choices, list) else []
     return [{"id": str(question_id), "question": str(text or ""), "choices": choices,
-             "recommended": None, "free_text": not choices}]
+             "recommended": None, "free_text": registered or not choices}]
 
 
 def _reference(item):
@@ -473,7 +483,8 @@ def main(argv=None):
     ask = sub.add_parser("ask", allow_abbrev=False, help="register a question in this session")
     ask.add_argument("text", nargs="?")
     ask.add_argument("--text-file")
-    ask.add_argument("--choice", action="append")
+    ask.add_argument("--choice", action="append",
+                     help="one choice the person can pick (repeat); list what is to be chosen here, not in the text")
     ask.add_argument("--recommend", type=int)
     ask.add_argument("--secret", action="store_true")
     ask.add_argument("--json", action="store_true")

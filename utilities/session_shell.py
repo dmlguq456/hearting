@@ -1297,7 +1297,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     labels = {key: ui_text("fleet.session_block." + key) for key in (
         *states, "choose", "choose_write", "writing_choices", "send", "navigate", "navigate_write",
         "text", "changed", "complete", "busy", "empty", "full", "more", "more_choose", "more_down",
-        "more_page", "sent", "questions")}
+        "more_page", "more_choices", "sent", "questions")}
     if editor < 64:
         for key in states:
             labels[key] = ui_text("fleet.session_block.compact_" + key)

@@ -1468,9 +1468,7 @@ function queueLayout(){
 }
 const block=require('./block-input.cjs')({changed:queueDisplay,cellWidth,
   answer:async fields=>{const result=await source('answer',fields);queueProjection();return result;},
-  action:key=>blockAction(key),
-  // The question editor forwards section arrows when it has no active answer draft.
-  section:delta=>setImmediate(()=>moveSection(delta))});
+  action:key=>blockAction(key)});
 let actionLines=[];
 function rebuildDisplay() {
   // The popup layer first: Fleet's screen or the plain relay closes it with the rest.
