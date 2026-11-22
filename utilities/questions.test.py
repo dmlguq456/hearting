@@ -46,6 +46,40 @@ class BuildResponseTest(unittest.TestCase):
         envelope["native_ref"]["transport"] = "hearting-message-answer"
         self.assertTrue(questions.questions_of(envelope)[0]["free_text"])
 
+    def test_a_registered_question_with_choices_takes_words_beside_them(self):
+        """11-22: a question a session registered (`questions ask --choice …`) is answered by a choice, text, or both."""
+        registered = {"kind": "question", "question_id": "message-response",
+                      "native_ref": {"transport": "hearting-message-answer"}}
+        # The one-question form (no `questions` list in its detail) and the list form without `is_other`.
+        form = dict(registered, detail="Which one?", choices=["one", "two", "three", "four"])
+        self.assertTrue(questions.questions_of(form)[0]["free_text"])
+        listed = dict(registered, detail={"questions": [{"id": "message-response", "question": "Which one?",
+                                                         "choices": ["one", "two", "three", "four"]}]})
+        self.assertTrue(questions.questions_of(listed)[0]["free_text"])
+        # What stays as it was: a native question with choices, an approval, a native form's own `is_other`.
+        native = {"kind": "question", "question_id": "q", "harness": "codex", "detail": "Which?",
+                  "choices": ["a", "b"], "native_ref": {"transport": "codex-app-server"}}
+        self.assertFalse(questions.questions_of(native)[0]["free_text"])
+        self.assertTrue(questions.questions_of(dict(native, choices=[]))[0]["free_text"])
+        flagged = dict(native, detail={"questions": [{"id": "q", "question": "Which?", "choices": ["a"],
+                                                      "is_other": False}]})
+        self.assertFalse(questions.questions_of(flagged)[0]["free_text"])
+        opencode = dict(registered, native_ref={"transport": "opencode-http-v2"},
+                        detail={"questions": [{"id": "q", "question": "Pick", "choices": ["one"],
+                                               "field_type": "string", "is_other": True}]})
+        self.assertFalse(questions.questions_of(opencode)[0]["free_text"])
+        # The answers keep their existing shapes: a choice and a note, text alone, a choice alone.
+        for kwargs, want in (({"answers": {"message-response": ["two", "but softer"]}}, ["two", "but softer"]),
+                             ({"text": "neither"}, ["neither"]),
+                             ({"choices": [2]}, ["two"])):
+            response, error = questions.build_response(form, **kwargs)
+            self.assertIsNone(error)
+            self.assertEqual(response, {"answers": {"message-response": want}})
+        # Delivered to the asking session, both the choice and the typed text are in the body.
+        body = state._message_body({"answers": {"message-response": ["two", "but softer"]}})
+        self.assertEqual(json.loads(body), ["two", "but softer"])
+        self.assertEqual(state._message_body({"answers": {"message-response": ["neither"]}}), "neither")
+
     def test_one_choice_per_question_maps_to_the_native_values(self):
         response, error = questions.build_response(self.INTERVIEW, choices=[1, 2])
         self.assertIsNone(error)
