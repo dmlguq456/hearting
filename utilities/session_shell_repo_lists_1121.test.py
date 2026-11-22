@@ -769,15 +769,15 @@ console.log(JSON.stringify(out));
             self.assertEqual(got["total"], count, name)
             if parsed["groups"]:
                 self.assertEqual(len([e for e in self.popup("list", own="")["list"] if e.get("key", "").startswith("i:")]), count, name)
-        # 64 KiB: exactly it the entrance counts (8191 here), one byte over it has no count at all (`count` None: the line only). The panel is not so bounded
-        # (it reads to 1 MiB and says `+` past that: an addition of the real backlog's size) and counts the same 8191.
+        # Around 64 KiB (the real backlog's size): the panel reads to 1 MiB and says `+` past that, so both sizes count the same 8191.
+        # The entrance reads to the same 1 MiB (its limit is tested with the sort rule, session_shell_backlog_kinds_1122.test.py).
         def sized(n):
             body, k = "## A\n", 0
             while len((body + "- %05d\n" % (k + 1)).encode()) <= n:
                 k += 1
                 body += "- %05d\n" % k
             return body + "x" * (n - len(body.encode()))
-        for size, entrance in ((65536, 8191), (65537, None)):
+        for size in (65536, 65537):
             text = sized(size)
             self.assertEqual(len(text.encode()), size)
             self.backlog(text)

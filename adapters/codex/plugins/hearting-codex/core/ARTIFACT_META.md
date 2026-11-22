@@ -301,7 +301,7 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   every campaign, that opens `all-campaigns.*`), **backlog** (one line that opens the
   root's `backlog.md`, see the next section; its meta is the count of each sort, the total and
   the file's `갱신` date (`FIX 2 · IMPR 1 · NOTE 1 · TBD 2 · 6 total`; a document with no sort written on any line says `FIX ? · IMPR ? · NOTE ?` and its `TBD`); there is no section when that regular file is absent or a link, and
-  `Counts unavailable` instead of the counts when it cannot be read or is over 64 KiB) and **records** (a link to the recent
+  `Counts unavailable` instead of the counts when it cannot be read or is over 1 MiB) and **records** (a link to the recent
   route reports page and a link to the ID index `campaigns/INDEX.md`), plus the root
   totals. The line counts are the constants `ENTRANCE_SPEC_LINES` and
   `ENTRANCE_CAMPAIGN_LINES` (not settings). Under the spec, campaigns and backlog titles one
@@ -397,7 +397,7 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
 - **Done.** The line is deleted. The file holds open work only.
 - **Readers.** The panel's BACKLOG and the entrance only read it; no code writes it. Both read
   the sort by this one rule and count each sort the same (`FIX`, `IMPR`, `NOTE`, `TBD`).
-  The entrance reads it by name, never through a link, at most 64 KiB.
+  The entrance reads it by name, never through a link, at most 1 MiB, the panel's own limit.
   No command, setting or step is added.
 
 ### Optional local artifact viewer

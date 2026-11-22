@@ -118,20 +118,27 @@ class KindRuleTest(unittest.TestCase):
                 full = session_status.parse_backlog(text.splitlines(), detail=True)
                 self.assertEqual(session_status.backlog_counts(full), counts, repr(text))
 
-    def test_a_64_kib_document_counts_its_sorts_at_the_limit_and_not_one_byte_over(self):
+    def test_both_readers_read_a_backlog_to_the_same_limit(self):
+        import artifact_entrance
+        from fleet import session_status
+        self.assertEqual(artifact_entrance.MAX_BACKLOG_BYTES, session_status.BACKLOG_READ_LIMIT)
+
+    def test_a_document_at_the_read_limit_counts_its_sorts_and_not_one_byte_over(self):
         import artifact_entrance
         from fleet import session_status
 
-        def sized(n):
-            body, k = "## A\n", 0
+        def sized(n):   # ASCII pieces, so characters are bytes; the length is kept, not re-encoded (1 MiB)
+            pieces, used, k = ["## A\n"], 5, 0
             while True:
                 piece = "- %05d\n  kind: %s\n" % (k + 1, ("fix", "improve", "note", "")[k % 4])
-                if len((body + piece).encode()) > n:
+                if used + len(piece) > n:
                     break
+                pieces.append(piece)
+                used += len(piece)
                 k += 1
-                body += piece
-            return body + "x" * (n - len(body.encode()))
-        for size, readable in ((65536, True), (65537, False)):
+            return "".join(pieces) + "x" * (n - used)
+        limit = artifact_entrance.MAX_BACKLOG_BYTES
+        for size, readable in ((limit, True), (limit + 1, False)):
             text = sized(size)
             self.assertEqual(len(text.encode()), size)
             with tempfile.TemporaryDirectory(prefix="bk") as folder:
@@ -144,7 +151,7 @@ class KindRuleTest(unittest.TestCase):
                 self.assertEqual(seen["count"], sum(counts.values()))
             else:
                 self.assertEqual((seen["count"], seen["kinds"]), (None, None))
-                self.assertGreater(sum(counts.values()), 500)           # the panel reads on (to 1 MiB): the document is counted there
+                self.assertGreater(sum(counts.values()), 500)           # the panel lists what it read and says there is more
 
     def test_the_rule_is_written_in_the_meta_contract(self):
         meta = (ROOT / "core" / "ARTIFACT_META.md").read_text(encoding="utf-8")

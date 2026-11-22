@@ -1861,7 +1861,7 @@ class BacklogTests(SectionFixture):
         self.assertEqual(self.entrance(), without)
 
     def test_an_unreadable_or_oversized_backlog_keeps_one_line_without_a_count(self):
-        self._setup("# B\n갱신 2026-11-21 23:10\n## C\n" + "- job\n" * 20000)
+        self._setup("# B\n갱신 2026-11-21 23:10\n## C\n" + "- job\n" * (E.MAX_BACKLOG_BYTES // 6 + 1))
         self.assertGreater((self.root / "backlog.md").stat().st_size, E.MAX_BACKLOG_BYTES)
         readme = self.entrance()
         self.assertIn("[Open backlog.md](<backlog.md>)", readme)
