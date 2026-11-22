@@ -15,7 +15,8 @@ PORTABLE_PROFILES = ("deep", "balanced-deep", "balanced", "light", "mini")
 # model -- the one CFG_MAIN_SESSION_ONLY_MODELS reserves for the session the
 # user talks to -- reached only through a route that sealed an explicit `top`
 # selection, with a full demand, for its dispatch-depth-1 owner (see
-# `TOP_WORKER_TYPES` and `require_top_route`). It is not portable in the
+# `TOP_WORKER_TYPES` and `require_top_route`), or, at intensity strong and above, for a
+# stage node or review leg the person named (`TOP_STAGE_WORKER_TYPES`). It is not portable in the
 # five-profile sense: no matrix cell resolves to it, no policy band names it,
 # no capacity cascade enters or leaves it. OpenCode's omitted top declaration
 # follows its installed balanced-deep collapse; other runtimes require an explicit top.
@@ -39,6 +40,17 @@ KNOWN_PROFILES = PORTABLE_PROFILES + EXCEPTION_PROFILES
 # anchor leg of the pair reaches `top` (`frame_profile_for_owner`), and
 # `replica_batch_contract.MAX_TOP_LEGS` caps a group at one `top` leg.
 TOP_WORKER_TYPES = frozenset({"owner", "frame"})
+# The third place `top` is allowed (2026-11-23 maintainer decision): a depth-2 stage node or
+# review/verification leg the person named with `--explicit-profiles`, on a route whose effective
+# intensity is `top_stage_intensity` (strong and above). Never a default, matrix cell, policy band,
+# automatic promotion, pair-rotation target or capacity cascade; the route seals it per node.
+TOP_STAGE_WORKER_TYPES = frozenset({"stage", "review"})
+TOP_STAGE_MIN_INTENSITY = "strong"
+_TOP_STAGE_INTENSITIES = ("strong", "thorough", "adversarial")
+
+
+def top_stage_intensity(intensity) -> bool:
+    return intensity in _TOP_STAGE_INTENSITIES
 RESOLVER_VERSION = "profile-demand/v1"
 DEMAND_SCHEMA_VERSION = 1
 DEMAND_JUDGMENTS = ("predetermined", "important", "difficult-uncertain")
@@ -427,11 +439,15 @@ def validate_registered_profile(
     if profile not in KNOWN_PROFILES:
         raise ModelProfileError(f"unknown model profile: {profile!r}")
     if profile == TOP_PROFILE and not (
-        registered_worker and dispatch_depth == 1 and worker_type in TOP_WORKER_TYPES
+        registered_worker and (
+            (dispatch_depth == 1 and worker_type in TOP_WORKER_TYPES)
+            # A depth-2 stage or review worker: `require_top_route` then checks the route sealed it
+            # for this node, by the person's name, at strong or higher.
+            or (dispatch_depth == 2 and worker_type in TOP_STAGE_WORKER_TYPES))
     ):
         raise ModelProfileError(
             "the top exception profile is limited to a registered dispatch-depth-1 "
-            "owner", "profile-top-depth-forbidden")
+            "owner, or a route-sealed stage or review worker at strong and above", "profile-top-depth-forbidden")
     if (
         profile == "mini"
         and registered_worker
@@ -443,7 +459,8 @@ def validate_registered_profile(
         )
 
 
-def require_top_route(route_file, *, profile: str, node: str | None = None) -> None:
+def require_top_route(route_file, *, profile: str, node: str | None = None,
+                      worker_type: str | None = None) -> None:
     """The exception profile is a route's decision: a wrapper resolving `top`
     must hold the route that sealed it. Refuses typed when there is no route or
     the route sealed something else (top review B1: without this,
@@ -477,6 +494,20 @@ def require_top_route(route_file, *, profile: str, node: str | None = None) -> N
     if not isinstance(route, dict):
         raise ModelProfileError(
             "the route did not seal the top exception profile for its owner", "profile-top-route-mismatch")
+    if worker_type in TOP_STAGE_WORKER_TYPES:
+        # A stage or review worker holds `top` only for the node the route sealed it on, which the
+        # person named in `explicit_profiles`, on a route of strong or higher intensity. A route
+        # that sealed `top` for its owner, a frame leg or another node authorizes none of this.
+        entry = next((n for n in route.get("nodes", [])
+                      if isinstance(n, dict) and n.get("id") == node), None) if node else None
+        if (entry is None or entry.get("model_profile") != TOP_PROFILE
+                or entry.get("dispatch_depth") != 2
+                or (route.get("explicit_profiles") or {}).get(node) != TOP_PROFILE
+                or not top_stage_intensity(route.get("effective_intensity"))):
+            raise ModelProfileError(
+                "the route did not seal the top exception profile for this stage or review node "
+                "(top needs a person-named node at strong or higher)", "profile-top-route-mismatch")
+        return
     if node is None:
         sealed = route.get("owner_model_profile")
     else:

@@ -65,6 +65,22 @@ def restricted_policy(*aliases: str) -> dict[str, str]:
     return {**shipped_policy(), "CFG_MAIN_SESSION_ONLY_MODELS": " ".join(aliases)}
 
 
+def stage_top_route(tmp: Path, name: str = "stage-top", **over) -> str:
+    """A strong route that sealed `top` on the stage node `inspect` and on the review leg
+    `review-alternative`, each named by the person in `explicit_profiles`; the owner stays `deep`."""
+    import json as _json
+    route = {"route_id": "rt-stage-top-fixture", "owner_model_profile": "deep", "effective_intensity": "strong",
+             "explicit_profiles": {"inspect": "top", "review-alternative": "top"},
+             "nodes": [{"id": "inspect", "dispatch_depth": 2, "model_profile": "top"},
+                       {"id": "report", "dispatch_depth": 2, "model_profile": "deep"},
+                       {"id": "review", "dispatch_depth": 2, "model_profile": "deep"},
+                       {"id": "review-alternative", "dispatch_depth": 2, "model_profile": "top"}]}
+    route.update(over)
+    path = tmp / f"{name}.json"
+    path.write_text(_json.dumps(route), encoding="utf-8")
+    return str(path)
+
+
 class ClaudeDispatchModelEligibilityTest(unittest.TestCase):
     def setUp(self):
         self.runtime_home = tempfile.TemporaryDirectory(prefix="hearting-claude-model-home-")
@@ -343,9 +359,14 @@ class TopExceptionProfileTest(ClaudeDispatchModelEligibilityTest):
                 WRAPPER.resolve_model_settings(selection(profile="top", route_file=self.route, model=model, effort=effort, capacity_retry=1))
             self.assertEqual(refused.exception.reason, "profile-top-override-forbidden")
 
-    def test_top_is_refused_below_dispatch_depth_one_and_for_review_workers(self):
-        for kwargs in (dict(dispatch_depth=2, worker_type="stage"), dict(dispatch_depth=2, worker_type="review"),
-                       dict(worker_type="support"), dict(worker_type="review")):
+    def test_top_is_refused_for_a_depth_one_review_or_support_worker_and_for_an_unnamed_stage(self):
+        # a depth-2 stage/review worker is admitted only by its own node's named seal (see the
+        # stage tests below); a route that sealed `top` for the owner alone does not admit it
+        for kwargs in (dict(dispatch_depth=2, worker_type="stage"), dict(dispatch_depth=2, worker_type="review")):
+            with self.subTest(**kwargs), self.assertRaises(WRAPPER.ModelSelectionError) as refused:
+                WRAPPER.resolve_model_settings(selection(profile="top", route_file=self.route, **kwargs))
+            self.assertEqual(refused.exception.reason, "profile-top-route-mismatch")
+        for kwargs in (dict(worker_type="support"), dict(worker_type="review")):
             with self.subTest(**kwargs), self.assertRaises(WRAPPER.ModelSelectionError) as refused:
                 WRAPPER.resolve_model_settings(selection(profile="top", route_file=self.route, **kwargs))
             self.assertEqual(refused.exception.reason, "invalid-dispatch-model-profile")
@@ -359,6 +380,58 @@ class TopExceptionProfileTest(ClaudeDispatchModelEligibilityTest):
             with self.assertRaises(WRAPPER.ModelSelectionError) as mapped:
                 WRAPPER.resolve_model_settings(selection(role="deep maker"))
         self.assertEqual(mapped.exception.reason, "headless-main-session-only-model")
+
+    def _stage_args(self, route, node, worker_type="stage", **over):
+        args = selection(profile="top", route_file=route, dispatch_depth=2, worker_type=worker_type,
+                         role="deep reviewer", **over)
+        args.route_node = node
+        return args
+
+    def test_a_person_named_top_stage_or_review_node_gets_the_top_budget(self):
+        # 2026-11-23: the stage worker's launch carries the top budget of this adapter's own config,
+        # exactly what the owner's top selection resolves to; nothing is called, nothing is installed.
+        policy = shipped_policy()
+        owner = WRAPPER.resolve_model_settings(selection(profile="top", route_file=top_route(self.tmp)))
+        for worker_type, node in (("stage", "inspect"), ("review", "review-alternative")):
+            with self.subTest(worker_type=worker_type, node=node):
+                result = WRAPPER.resolve_model_settings(
+                    self._stage_args(stage_top_route(self.tmp), node, worker_type))
+                self.assertEqual((result["model"], result["effort"], result["profile"], result["tier"]),
+                                 (owner["model"], owner["effort"], "top", owner["tier"]))
+                self.assertEqual(result["source"], owner["source"])
+                self.assertEqual(result["role"], "deep reviewer")
+                self.assertTrue(WRAPPER._main_session_only_model(result["model"]))
+
+    def test_an_unsealed_top_stage_selection_is_refused(self):
+        # a hand-given `--model-profile top`, a route that never named the node, another node, a lower
+        # intensity, an old route that sealed top for the owner only, and a stage launch with no node
+        base = dict(owner_model_profile="deep")
+        cases = {
+            "no route": (None, "inspect", "profile-top-route-required"),
+            "owner-only route": (top_route(self.tmp), "inspect", "profile-top-route-mismatch"),
+            "other node": (stage_top_route(self.tmp), "report", "profile-top-route-mismatch"),
+            "unknown node": (stage_top_route(self.tmp), "ghost", "profile-top-route-mismatch"),
+            "no node": (stage_top_route(self.tmp), None, "profile-top-route-mismatch"),
+            "standard route": (stage_top_route(self.tmp, "std", effective_intensity="standard"), "inspect",
+                               "profile-top-route-mismatch"),
+            "not named": (stage_top_route(self.tmp, "unnamed", explicit_profiles={}), "inspect",
+                          "profile-top-route-mismatch"),
+        }
+        for label, (route, node, reason) in cases.items():
+            with self.subTest(label), self.assertRaises(WRAPPER.ModelSelectionError) as refused:
+                WRAPPER.resolve_model_settings(self._stage_args(route, node))
+            self.assertEqual(refused.exception.reason, reason)
+
+    def test_a_named_top_stage_node_admits_no_model_override_and_an_unregistered_worker_is_refused(self):
+        with self.assertRaises(WRAPPER.ModelSelectionError) as override:
+            WRAPPER.resolve_model_settings(self._stage_args(
+                stage_top_route(self.tmp), "inspect", model="some-model", effort="low", capacity_retry=1))
+        self.assertEqual(override.exception.reason, "profile-top-override-forbidden")
+        with self.assertRaises(WRAPPER.ModelSelectionError) as unregistered:
+            WRAPPER.resolve_model_settings(self._stage_args(
+                stage_top_route(self.tmp), "inspect", registered_worker=0))
+        self.assertEqual(unregistered.exception.reason, "invalid-dispatch-model-profile")
+
 
 if __name__ == "__main__":
     unittest.main()

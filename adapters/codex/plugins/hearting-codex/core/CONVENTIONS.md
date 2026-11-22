@@ -200,7 +200,7 @@ a scalar quality ranking:
 | `balanced` | Predetermined work with an extended multi-step execution | light model with high execution budget | allowed |
 | `light` | Predetermined, short local execution | configured light budget | allowed |
 | `mini` | Lifecycle, classification, title, or explicitly micro-semantic help | configured micro budget | forbidden for substantive registered dispatch-depth-1/2 owner, stage, and review nodes |
-| `top` | Above deep: the harness's main-session-only model, only by a route-sealed explicit selection under important or difficult-uncertain judgment | configured top budget, opt-in; an older OpenCode user file may omit it and use the installed default collapse without rewriting that file | route-sealed dispatch-depth-1 owner only; not a stage node, leg, review worker, matrix cell, policy band, or capacity cascade |
+| `top` | Above deep: the harness's main-session-only model, only by a route-sealed explicit selection under important or difficult-uncertain judgment. An agent picks `top` only when the person said so | configured top budget, opt-in; an older OpenCode user file may omit it and use the installed default collapse without rewriting that file | (a) the route-sealed dispatch-depth-1 owner, and (b) at intensity `strong`, `thorough` or `adversarial`, a stage node or review/verification leg the person named with `--explicit-profiles` (key: the realized node id, `__owner__` for the owner). Not a default, matrix cell, policy band, automatic promotion, pair-rotation target or capacity-cascade step, and not set route-wide (`--profile` has no `top`) |
 
 Compile and compose use one pure resolver. `profile_demand`
 contains `schema_version: 1`, `judgment_requirement`, `execution_scope`, nonempty
@@ -212,7 +212,7 @@ never selects a deep profile. Important explicit deep records additional judgmen
 headroom. These are recommendations: an explicit known profile takes precedence
 without requiring a demand document or a justification for overriding the matrix.
 For a parallel group, `--explicit-profiles` wins for the named node/leg only;
-unnamed legs retain their declared profiles. An explicitly selected profile (`--profile`, `--explicit-profiles`, or a harness/profile-only pin) remains eligible for same-harness pair rotation; only a concrete model pin or capacity-retry-chosen model is preserved. Traversal skips profiles configured to the sibling's model and skips `top` and `mini`; profile order is a decision rule, not a quality ranking. Compose records omitted presets in
+unnamed legs retain their declared profiles; a leg's realized id (for example `impl-review-alternative`) is its key. A `top` value on a stage node or leg is accepted only at `strong` or higher and only when the person named that node; at a lower intensity compose refuses it and says the owner can take `top` at any intensity and a stage node from `strong`. An explicitly selected profile (`--profile`, `--explicit-profiles`, or a harness/profile-only pin) remains eligible for same-harness pair rotation; only a concrete model pin or capacity-retry-chosen model is preserved. Traversal skips profiles configured to the sibling's model and skips `top` and `mini`; profile order is a decision rule, not a quality ranking. Compose records omitted presets in
 `omitted_parallel_presets` and displays active-intensity omissions before launch,
 including `terminal-anchor`; this notice does not change the terminal/group contract.
 

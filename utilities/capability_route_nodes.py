@@ -18,6 +18,7 @@ from capability_route_base import (
     DEFAULTS, ROOT, TOPO,
 )
 from capability_route_dispatch import _expand_parallel_groups
+from replica_batch_contract import MAX_TOP_LEGS
 
 
 def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=None, owner_default=None):
@@ -339,7 +340,11 @@ def _seal_profile_demands(nodes, profile_demands=None, explicit_profiles=None, *
     return nodes
 
 
-def _profile_input_maps(nodes, demands, explicit):
+def _profile_input_maps(nodes, demands, explicit, intensity=None):
+    """Validate the demand and explicit-profile maps a route is composed (or verified) with.
+
+    `intensity` is the route's effective intensity: it decides whether a person-named stage node or
+    review leg may hold `top` (strong and above). A caller that has none refuses such a name."""
     valid = {n["id"] for n in nodes if not _no_model_node(n)} | {"__owner__"}
     normalized = {}
     for label, values in (("profile_demands", demands), ("explicit_profiles", explicit)):
@@ -348,16 +353,31 @@ def _profile_input_maps(nodes, demands, explicit):
     for key, value in (demands or {}).items():
         normalized[key] = PROFILE.normalize_profile_demand(value)
     frame_ids = {n["id"] for n in nodes if _frame_node(n)}
+    by_id = {n["id"]: n for n in nodes}
     for key, value in (explicit or {}).items():
         if value not in PROFILE.KNOWN_PROFILES:
             raise ValueError("profile-explicit-input-invalid:" + key)
         if value == PROFILE.TOP_PROFILE and key != "__owner__" and key not in frame_ids:
-            # The top exception profile is a dispatch-depth-1 decision: a
-            # depth-2 stage node or parallel leg never spends the main-session
-            # model. A depth-1 frame leg is the one added exception -- it is an
-            # anchor for the whole route's direction, launched by the depth-0
-            # session itself.
-            raise ValueError("profile-explicit-top-owner-only:" + key)
+            # The top exception profile is the owner's, and a depth-1 frame leg's (the anchor for the
+            # whole route's direction, launched by the depth-0 session itself). A depth-2 stage node or
+            # review/verification leg holds it only when the person named that node (this map is the
+            # person's) and the route's intensity is strong or higher: never a default, never a
+            # route-wide choice, never an automatic promotion.
+            node = by_id.get(key, {})
+            if node.get("dispatch_depth") != 2 or not PROFILE.top_stage_intensity(intensity):
+                raise ValueError(
+                    f"profile-explicit-top-owner-only:{key}: top is allowed for the owner at any intensity "
+                    f"and for a depth-2 stage node or review leg at {PROFILE.TOP_STAGE_MIN_INTENSITY} or "
+                    f"higher (this route is {intensity or 'unknown'})")
+    top_legs = {}
+    for key, value in (explicit or {}).items():
+        group = by_id.get(key, {}).get("parallel_group")
+        if value == PROFILE.TOP_PROFILE and group and key not in frame_ids:
+            top_legs.setdefault(group, []).append(key)
+    for group, keys in top_legs.items():
+        if len(keys) > MAX_TOP_LEGS:
+            raise ValueError(f"profile-explicit-top-group-width:{group}: at most {MAX_TOP_LEGS} leg of a "
+                             f"parallel group may be top, named {len(keys)} ({', '.join(sorted(keys))})")
     return normalized, dict(explicit or {})
 
 
@@ -371,7 +391,8 @@ def _verify_profile_contract(route):
         return
     if type(version) is not int or version != 1:
         raise ValueError("profile-selection-version-unsupported")
-    demands, explicit = _profile_input_maps(route.get("nodes", []), route.get("profile_demands"), route.get("explicit_profiles"))
+    demands, explicit = _profile_input_maps(route.get("nodes", []), route.get("profile_demands"),
+                                            route.get("explicit_profiles"), route.get("effective_intensity"))
     if route.get("owner_profile_demand") != demands.get("__owner__"):
         raise ValueError("owner-profile-demand-map-mismatch")
     owner_profile = route.get("owner_model_profile") or "light"

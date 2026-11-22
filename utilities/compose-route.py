@@ -441,7 +441,7 @@ def _parse_units(args) -> list:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile-demands", help="JSON file mapping realized nodes and __owner__ to SD-88 demands")
-    parser.add_argument("--explicit-profiles", help="JSON file mapping demanded node ids to explicit profiles")
+    parser.add_argument("--explicit-profiles", help="JSON file mapping node ids to explicit profiles; keys: __owner__ (the owner) or a node id (a parallel-group leg by its realized id, e.g. impl-review-alternative); a value of top is for the owner at any intensity, or for a node you name at strong or higher (never route-wide)")
     parser.add_argument("--capability", required=True)
     parser.add_argument("--capability-mode", required=True)
     parser.add_argument("--slug", required=True)

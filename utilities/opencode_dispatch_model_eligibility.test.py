@@ -48,6 +48,22 @@ def selection(**values):
     )
 
 
+def stage_top_route(tmp: Path, name: str = "stage-top", **over) -> str:
+    """A strong route that sealed `top` on the stage node `inspect` and on the review leg
+    `review-alternative`, each named by the person in `explicit_profiles`; the owner stays `deep`."""
+    import json as _json
+    route = {"route_id": "rt-stage-top-fixture", "owner_model_profile": "deep", "effective_intensity": "strong",
+             "explicit_profiles": {"inspect": "top", "review-alternative": "top"},
+             "nodes": [{"id": "inspect", "dispatch_depth": 2, "model_profile": "top"},
+                       {"id": "report", "dispatch_depth": 2, "model_profile": "deep"},
+                       {"id": "review", "dispatch_depth": 2, "model_profile": "deep"},
+                       {"id": "review-alternative", "dispatch_depth": 2, "model_profile": "top"}]}
+    route.update(over)
+    path = tmp / f"{name}.json"
+    path.write_text(_json.dumps(route), encoding="utf-8")
+    return str(path)
+
+
 class OpencodeDispatchModelEligibilityTest(unittest.TestCase):
     def setUp(self):
         # resolve against the shipped file, not whichever copy this machine
@@ -103,7 +119,12 @@ class OpencodeDispatchModelEligibilityTest(unittest.TestCase):
             WRAPPER.resolve_model_settings(selection(
                 profile="top", route_file=route, dispatch_depth=2,
                 worker_type="stage", role="_kernel/owner"))
-        self.assertEqual(depth.exception.reason, "invalid-dispatch-model-profile")
+        # a depth-2 stage is admitted only by its own node's named seal, not the owner's
+        self.assertEqual(depth.exception.reason, "profile-top-route-mismatch")
+        with self.assertRaises(WRAPPER.ModelSelectionError) as support:
+            WRAPPER.resolve_model_settings(selection(
+                profile="top", route_file=route, worker_type="support", role="_kernel/owner"))
+        self.assertEqual(support.exception.reason, "invalid-dispatch-model-profile")
 
     def test_a_frame_anchor_is_admitted_by_its_own_node_seal(self):
         # THE THREE-HARNESS PARITY POINT. The route seals `top` on the frame
@@ -226,6 +247,57 @@ class OpencodeDispatchModelEligibilityTest(unittest.TestCase):
         select.assert_not_called()
         self.assertEqual(result["model"], "opencode-go/muse-spark-1.3-contributor")
         self.assertEqual(result["source"], "explicit")
+
+    def _stage_args(self, route, node, worker_type="stage", **over):
+        args = selection(profile="top", route_file=route, dispatch_depth=2, worker_type=worker_type,
+                         role="deep reviewer", **over)
+        args.route_node = node
+        return args
+
+    def test_a_person_named_top_stage_or_review_node_gets_the_top_budget(self):
+        # 2026-11-23: the stage worker's launch carries the top budget of this adapter's own config,
+        # exactly what the owner's top selection resolves to; nothing is called, nothing is installed.
+        policy = parse_config(SHIPPED_CONF)
+        owner = WRAPPER.resolve_model_settings(selection(profile="top", route_file=self.top_route()))
+        for worker_type, node in (("stage", "inspect"), ("review", "review-alternative")):
+            with self.subTest(worker_type=worker_type, node=node):
+                result = WRAPPER.resolve_model_settings(
+                    self._stage_args(stage_top_route(self.tmp), node, worker_type))
+                self.assertEqual((result["model"], result["variant"], result["profile"], result["tier"]),
+                                 (owner["model"], owner["variant"], "top", owner["tier"]))
+                self.assertEqual(result["source"], owner["source"])
+                self.assertEqual(result["role"], "deep reviewer")
+                self.assertEqual((result["tier"], result["granularity"]), ("balanced-deep", "collapsed-top-to-balanced-deep"))
+
+    def test_an_unsealed_top_stage_selection_is_refused(self):
+        # a hand-given `--model-profile top`, a route that never named the node, another node, a lower
+        # intensity, an old route that sealed top for the owner only, and a stage launch with no node
+        base = dict(owner_model_profile="deep")
+        cases = {
+            "no route": (None, "inspect", "profile-top-route-required"),
+            "owner-only route": (self.top_route(), "inspect", "profile-top-route-mismatch"),
+            "other node": (stage_top_route(self.tmp), "report", "profile-top-route-mismatch"),
+            "unknown node": (stage_top_route(self.tmp), "ghost", "profile-top-route-mismatch"),
+            "no node": (stage_top_route(self.tmp), None, "profile-top-route-mismatch"),
+            "standard route": (stage_top_route(self.tmp, "std", effective_intensity="standard"), "inspect",
+                               "profile-top-route-mismatch"),
+            "not named": (stage_top_route(self.tmp, "unnamed", explicit_profiles={}), "inspect",
+                          "profile-top-route-mismatch"),
+        }
+        for label, (route, node, reason) in cases.items():
+            with self.subTest(label), self.assertRaises(WRAPPER.ModelSelectionError) as refused:
+                WRAPPER.resolve_model_settings(self._stage_args(route, node))
+            self.assertEqual(refused.exception.reason, reason)
+
+    def test_a_named_top_stage_node_admits_no_model_override_and_an_unregistered_worker_is_refused(self):
+        with self.assertRaises(WRAPPER.ModelSelectionError) as override:
+            WRAPPER.resolve_model_settings(self._stage_args(
+                stage_top_route(self.tmp), "inspect", model="some-model", variant="low", capacity_retry=1))
+        self.assertEqual(override.exception.reason, "profile-top-override-forbidden")
+        with self.assertRaises(WRAPPER.ModelSelectionError) as unregistered:
+            WRAPPER.resolve_model_settings(self._stage_args(
+                stage_top_route(self.tmp), "inspect", registered_worker=0))
+        self.assertEqual(unregistered.exception.reason, "invalid-dispatch-model-profile")
 
 
 if __name__ == "__main__":

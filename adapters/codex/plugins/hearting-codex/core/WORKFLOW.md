@@ -469,7 +469,9 @@ These advisory points add no prerequisite or required stage:
   judge whether that frame's scope covers the work.
 - Choose `--intensity` for the work's purpose and, when needed,
   `--explicit-profiles` for judgment or verification nodes. Check the selection
-  reasons and actual node/leg profiles in the compose output.
+  reasons and actual node/leg profiles in the compose output. `top` on a stage
+  node or review leg is for the person to name, at `strong` or higher only, and an
+  agent picks it only when the person asks.
 - Use `compose --explain` to check the displayed stage/worker/resource scale.
   At `strong` or higher, default to the eligible declared groups on retained
   anchors, with two-way as the baseline unless the registry widens it. Check
