@@ -17,7 +17,7 @@ what ended lately, what comes later) are kept for the popup's coming list and ar
 
 ``popup_doc(view, width)`` is the popup's document part: the document's rows (``popup_doc_rows``) and, for the
 campaign document Hearting generates (its first line is the marker and it was read whole), ``listing``: the
-list screen the popup opens on (11-21, design C: what waits for the person first), as entries the host lays out
+list screen the popup opens on (11-21, design C; 11-22: what is in progress first, no question among it), as entries the host lays out
 by its state (which row is chosen, which groups and items are open).  Any other document (a hand-written page,
 a cut one, none) has no listing and the popup draws exactly the rows it always drew.
 
@@ -471,12 +471,12 @@ def _doc_rows_of(view, width, lines, cut):
 # -- the list screen of the generated campaign document (11-21, design C) ----------------------------------------------
 #
 # The screen is the document's own words: the head (title, when it was updated, the one line),
-# what waits for the person (every bullet, each marked ``!``), what is in progress (three, then ``all N ›``), every other
+# what is in progress (three, then ``all N ›``), every other
 # heading as a folded line with its count, and ``full document ›``.  Which heading is which is ``_group_kind``'s reading (no
 # new rule); a heading it does not know is a folded group like the rest.  Nothing is invented: a group the document has
 # not is not drawn, a bullet is counted as written, a line that is no bullet is the group's note.
 
-CAMPAIGN_MARKER = "<!-- hearting:campaign-document v1 -->"       # utilities/campaign_document.MARKER (a test holds them equal)
+CAMPAIGN_MARKER = project_status.CAMPAIGN_MARKER       # utilities/campaign_document.MARKER (a test holds them equal)
 RUNNING_FIRST = 3      # in-progress items shown before ``all N ›``
 _UPDATED = re.compile(r"^(?:갱신|updated)\s*[:：]?\s*(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})", re.IGNORECASE)
 _ONE_LINE = re.compile(r"^\*\*(?:한 줄|one line)\*\*\s*[:：]\s*(.*)$", re.IGNORECASE)
@@ -493,10 +493,12 @@ def parse_listing(lines):
     """``{title, updated, summary, groups}`` of a generated campaign document's lines.
 
     ``updated`` is ``(year, month, day, hour, minute)`` or None, ``summary`` the one line's text or ''.  ``groups`` is
-    ``[{kind, name, items, notes}]`` in the document's order: ``kind`` is ``waiting`` or ``running`` (the first heading
-    of each, by ``_group_kind``) or ``other``; ``name`` the heading as written (markdown taken off); ``items`` the
+    ``[{kind, name, items, notes}]`` in the document's order: ``kind`` is ``running`` (the first heading of that kind, by
+    ``_group_kind``) or ``other``; ``name`` the heading as written (markdown taken off); ``items`` the
     top-level bullets' words; ``notes`` the group's other lines (a table row, a rule, a comment and what is indented
-    or in a fence are left to the full document)."""
+    or in a fence are left to the full document).  A heading that waits for the person (``기다리는 것`` ...) is no group
+    (11-22): what waits for an answer is a question and stands on the question screens only, so an older generated
+    document that still has the section is read without it (its full text is the document's, read whole)."""
     title, updated, summary, groups = "", None, "", []
     current, level, fence, seen = None, None, False, set()
     for raw in lines:
@@ -514,9 +516,12 @@ def parse_listing(lines):
                 current = None
             elif level is None or depth <= level:
                 kind = _group_kind(words)
-                kind = kind if kind in ("waiting", "running") and kind not in seen else "other"
-                seen.add(kind)
                 level = level or depth
+                if kind == "waiting":
+                    current = None
+                    continue
+                kind = kind if kind == "running" and kind not in seen else "other"
+                seen.add(kind)
                 current = {"kind": kind, "name": words, "items": [], "notes": []}
                 groups.append(current)
             continue
@@ -624,9 +629,9 @@ def listing_entries(parsed, width, old=False, now=None):
     if parsed["summary"]:
         out.append(_entry(_wrapped(parsed["summary"], width, 2, "soft")))
     out.append(_entry([[]]))
-    # What waits for the person first, then what is in progress, then every other heading in the document's order.
+    # What is in progress first, then every other heading in the document's order.
     ids = _group_ids(parsed["groups"])
-    order = sorted(zip(parsed["groups"], ids), key=lambda pair: {"waiting": 0, "running": 1}.get(pair[0]["kind"], 2))
+    order = sorted(zip(parsed["groups"], ids), key=lambda pair: 0 if pair[0]["kind"] == "running" else 1)
     for group, gid in order:
         name, kind, items = group["name"], group["kind"], group["items"]
         count = len(items)
@@ -641,7 +646,7 @@ def listing_entries(parsed, width, old=False, now=None):
             # (the words' own digest in the key: the choice follows the same words when the page is read again; the same words
             # twice in a group are told by their order)
             key = _item_key(gid, text, seen)
-            lead = [_SLOT] + ([("  ", None)] if folded else []) + ([("! ", "lvl_y")] if kind == "waiting" else [])
+            lead = [_SLOT] + ([("  ", None)] if folded else [])
             whole = lead + [(transcript.clean(text), "soft")]
             row = _cut_row(whole, width)
             cut = "".join(part for part, _ in row) != "".join(part for part, _ in whole)
@@ -670,7 +675,8 @@ def listing_entries(parsed, width, old=False, now=None):
 # ``+N`` on the head.  Both are read when the panel reads its status button (one read, in the same worker), and only when the
 # document changed (``sign``: its path, modification time and size, which the host sends back with its next ask).
 #
-# STATUS items are the list screen's own reading: ``parse_listing``'s ``waiting`` group, then its ``running`` group
+# STATUS items are the list screen's own reading: ``parse_listing``'s ``running`` group (what waits for an answer is a question and
+# stands on the question screens, never here)
 # (``listing_entries`` draws the same groups in the same order); there is no second reading of the page.  BACKLOG is
 # ``<artifact root>/backlog.md`` (written by another task; only read here): ``##`` headings are the groups (campaign folder names
 # or ``Unassigned``, as written), a top-level bullet is an item, and the indented lines under it are its detail.
@@ -1009,23 +1015,22 @@ def backlog_detail(root, own, key, width):
 
 
 def panel_items(parsed, first=PANEL_ITEMS):
-    """``(items, total)`` of the status list: what waits for the person, then what is in progress, the list screen's own order.
+    """``(items, total)`` of the status list: what is in progress, the list screen's own order.
 
-    ``parsed`` is ``parse_listing``'s answer.  Each item is ``{mark, text, key}``: ``mark`` is ``!`` for what waits (the screen's
-    own mark) and '' for the rest; ``key`` is the line's key on the list screen (a press on the item stands on it there).
-    ``total`` counts every item of the two groups; the recent and folded groups are not counted."""
+    ``parsed`` is ``parse_listing``'s answer.  Each item is ``{mark, text, key}``: ``mark`` is '' (the host draws the dim ``·``);
+    ``key`` is the line's key on the list screen (a press on the item stands on it there).
+    ``total`` counts every item of the ``running`` group; the recent and folded groups are not counted."""
     ids = _group_ids(parsed["groups"])
-    pairs = [(group, gid) for group, gid in zip(parsed["groups"], ids) if group["kind"] in ("waiting", "running")]
-    pairs.sort(key=lambda pair: 0 if pair[0]["kind"] == "waiting" else 1)
     items, total = [], 0
-    for group, gid in pairs:
+    for group, gid in zip(parsed["groups"], ids):
+        if group["kind"] != "running":
+            continue
         taken = {}
         for text in group["items"]:
             seen = taken[text] = taken.get(text, 0) + 1
             total += 1
             if len(items) < first:
-                items.append({"mark": "!" if group["kind"] == "waiting" else "", "text": transcript.clean(text)[:PANEL_TEXT],
-                              "key": _item_key(gid, text, seen)})
+                items.append({"mark": "", "text": transcript.clean(text)[:PANEL_TEXT], "key": _item_key(gid, text, seen)})
     return items, total
 
 

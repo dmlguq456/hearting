@@ -423,13 +423,11 @@ REPO row, which is the group's head (`REPO hearting · wt 12 ────`: the 
 no button while the two heads below stand, the two buttons where they do not; the same in every width), and under
 it GIT, PEERS, then (11-21, the person: "버튼을 REPO의 아래에 각각을 두고 +? 숫자 띄우고 백로그랑 현황을 나열하자" / "각각 3줄 정도씩 목록으로 만들고 추가분을 +? 형식으로")
 the **STATUS part** and the **BACKLOG part**: each a section head (` STATUS +2                  ›`, indented one cell like GIT, no rule, the word in the title role, `+N` in the MESSAGES head's
-color and place, `›` at the row's right end; a press opens that popup) and its first three items, one row each, indented two cells, cut with `…` within the cells left (`! ` in the status list's yellow before what waits for the person,
-`· ` dim before the rest; a press on an item opens the popup standing on that item; a BACKLOG item stands behind its sort's word instead, in four cells and one blank more: `FIX ` yellow, `IMPR` green, `NOTE` and `TBD ` dim, so the sort is told by the letters as well as the color). The STATUS items are the status list screen's own order, what waits for the person and
-then what is in progress (`session_status.panel_items`, from `parse_listing`, the one reading the list screen uses; the recent and the folded count nothing); the BACKLOG items
+color and place, `›` at the row's right end; a press opens that popup) and its first three items, one row each, indented two cells, cut with `…` within the cells left (`· ` dim before each; no item of the status list is a question, 11-22); a press on an item opens the popup standing on that item; a BACKLOG item stands behind its sort's word instead, in four cells and one blank more: `FIX ` yellow, `IMPR` green, `NOTE` and `TBD ` dim, so the sort is told by the letters as well as the color). The STATUS items are the status list screen's own: what is in progress (`session_status.panel_items`, from `parse_listing`, the one reading the list screen uses; the recent and the folded count nothing); the BACKLOG items
 are `<artifact root>/backlog.md`'s, by sort (`FIX`, `IMPR`, `TBD`, `NOTE`; an item with no valid `kind:` line is `TBD`, core/ARTIFACT_META.md `backlog.md`), and inside a sort this window's campaign group (the `##` heading that is, letter for letter, the name of the folder this window's status document is in) first,
 then the document's order. **The BACKLOG head (11-22) tells the sorts**: `BACKLOG FIX 14 · IMPR 26 · +37 /125` (the count of each of FIX and IMPR; `+N` the FIX and IMPR items not shown, left out for zero; `/N` every line of the document, a `+` after it where the file is longer than is read;
-`?` for FIX and IMPR where no item of the document is sorted yet, an old document: `FIX ? · IMPR ? /125`; a document with nothing in it `FIX 0 · IMPR 0 /0`). Short of cells it gives way in this order: `/N`, then the sorts' words (`14 26 +37`), then the numbers but `+N`, then all of it.
-For the STATUS head `+N` is the count of the items of the whole document not shown (nothing for zero; a `+` after it, `+2997+`, where the file is longer than is read: the first 1 MiB is read and what was read is counted; `+` alone where nothing is hidden by the rows and there is more); no item: the head alone; no document, or one that
+`?` for FIX and IMPR where no item of the document is sorted yet, an old document: `FIX ? · IMPR ? /125`; a document with nothing in it `FIX 0 · IMPR 0 /0`). Short of cells it gives way in this order: `/N`, then the ` · ` between the parts (`FIX 14 IMPR 26 +37`), then `+N` (`FIX 14 IMPR 26`), then the sorts' words (`14 26`), then all of it: the words outlast the numbers (the person asked for a word of three or four letters, not one), and a width one cell wider never tells less. The old document's `FIX ? · IMPR ?` and the zeros give way in the same order.
+For the STATUS head `+N` is the count of the in-progress items not shown (nothing for zero). The BACKLOG head of a backend that sends no sorts is the same (`BACKLOG +N`). The `+` after the number is the BACKLOG head's alone: `+2997+` (and `+37+` in the sorted head), where the file is longer than is read (the first 1 MiB is read and what was read is counted), and `+` alone where nothing is hidden by the rows and there is more. No item: the head alone; no document, or one that
 cannot be read: the word plain dim, no item, a press still opens the popup; no artifact root: neither part. **One rule (11-22, the person's STATUS and BACKLOG lists are the first to give way): the
 two parts never take a row from anything else.** The panel is laid out as it is without them (the same layout, the same `give` order, byte for byte what a window with no list value draws; the
 REPO row alone differs), and the parts take only what that layout leaves empty and, short of those, rows MESSAGES and MEM fold: the empty rows (the row between the head's block and the route
@@ -1009,14 +1007,16 @@ an unsupported native request and any reason not named here; `answer in the
 parent` (`부모 창에서 답`) for a blocked worker's answer whose parent could not be
 confirmed; `sending` (`보내는 중`) while another answer is on its way; `closed`
 (`닫힘`) for a request already gone (an existing state word such as expired
-stays). A question the panel already shows has gone from this session's waits
-only when a complete observation of the waits leaves it out (11-22): while that
-observation is missing, past its display time or incomplete (the producer's
-failure record included), the question stands as its own request says, an open
-registered question with its choices and its answer row, and an answer sent
-before the next observation is refused with one line saying why (`not sent ·
-reading the waits · Enter again soon`, `아직 안 보냄 · 대기 목록 읽는 중 · 잠시 뒤
-다시 Enter`), the typed answer kept. The head carries the short form under 64 columns and the body row the
+stays). A registered question (`questions ask`) the panel already shows has gone
+from this session's waits only when a complete observation of the waits leaves it
+out (11-22): while that observation is missing, past its display time or incomplete
+(the producer's failure record included) and does not list it at all, the question
+stands as its own request says, an open one with its choices and its answer row, and
+an answer sent before the next observation is refused with one line saying why and
+what is left (`not sent · reading the waits · Enter again or answer below`,
+`아직 안 보냄 · 대기 목록 읽는 중 · 다시 Enter 또는 아래 입력창에 답`), the typed
+answer kept. Another kind of wait (a native form, a human gate) leaves the panel
+until the next observation. The head carries the short form under 64 columns and the body row the
 whole words. Every count of answer waits (Fleet's head and session rows, the
 `questions list` head, the status line, the panel's `◑ N` and the folded strip) counts every wait a person must answer, wherever
 it is answered: a question the panel answers, a Claude native request, a marker
@@ -1078,21 +1078,20 @@ the folded strip opens that section's popup, and a new question or a failed
 route never opens one. The popups are seven
 kinds over one frame and one set of keys: STATUS (11-15, design 2, 11-21: the STATUS head under the REPO group; the table
 popup's frame, width and keys; its title `STATUS <campaign> · <age>`, `STATUS` alone without a document.
-11-21 (the person chose design C, "정할 것 먼저"): for the campaign document Hearting generates (its first line is the marker
+11-21 (the person chose design C, "정할 것 먼저"; 11-22 the person: a question stands on the question screens only, so the list has no `기다리는 것` group and no `!` line): for the campaign document Hearting generates (its first line is the marker
 `<!-- hearting:campaign-document v1 -->`, read whole) the popup opens on a **list screen**, of the document's own words and nothing
 else (`session_status.popup_doc`; the host lays it out, `status-list.cjs`): the head (title, `updated MM-DD HH:MM` — how long ago is the
 title band's, said once — and the one line folded to two rows; a document older than Fleet's own limit of three days adds `! … old document`
-to that line, a time that cannot be read says so), then `기다리는 것` (every bullet, each marked `!`, the group's other lines dim under them)
-and `하는 중` (the first three, then `all N ›` for the rest; `all N` opens every one), the two named by `parse_groups`' own word reading, then
+to that line, a time that cannot be read says so), then `하는 중` (the first three, then `all N ›` for the rest; `all N` opens every one), named by `parse_groups`' own word reading, then
 every other heading as one folded line `› <heading> <count>` in the document's order (a heading the screen does not know is one of them), and
-`full document ›`. Only the first heading of each of the two kinds comes first, as in `parse_groups`: a second `기다리는 것` is one of the folded
-groups. A group the document has not is not drawn; a waiting list of zero is its heading with `0` and the document's own note. Nothing is counted
+`full document ›`. Only the first `하는 중` heading comes first, as in `parse_groups`; a second is one of the folded
+groups. **A heading that waits for the person (`기다리는 것` and its near spellings, which an older generated document may still carry) is not drawn and not counted here: what waits for an answer is a registered question, and it stands on the question screens only (the panel's QUESTIONS, Fleet's question board); `full document ›` shows that older page as written.** A group the document has not is not drawn. Nothing is counted
 off: every bullet of a group is on the screen. A list that alone is more than an answer may weigh (`POPUP_ANSWER_BYTES`) is left out, and the popup
 then draws the page as it did before this. The keys that choose a line are short ids (a digest of the heading, of the words, an order number for
 the same words twice), never the words, so a heading of any length, or the same heading twice, is chosen and opened as the one it is.
 ↑↓ and Tab (Shift+Tab back) choose a line (`> ` and the chosen ground tell it), Enter or a press opens it: a folded heading opens in place
 (`▾`; again folds it), `all N ›` opens the whole running list, an item whose row was cut with `…` opens in that row's place as its whole words
-folded to the width (`> !` on the first row, the following rows in the words' own column; again makes it one row), an item that fits its row has
+folded to the width (`> ` on the first row, the following rows in the words' own column; again makes it one row), an item that fits its row has
 nothing to open and Enter changes nothing, and `full document ›` is the screen the popup had before this (Fleet's status lines, then the whole
 document: tables, fences and the lines outside any list are read there), Esc or Enter going back to the list on the line it left and a second Esc
 closing; its one row of keys is the popups' own, which say Esc once. ←→ are still the sections and `p` `f` `r` `w`,

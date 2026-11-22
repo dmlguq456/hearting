@@ -361,14 +361,12 @@ STATUS_PAGE = """<!-- hearting:campaign-document v1 -->
 - 하는 일 C
 - 하는 일 D
 
-## 기다리는 것
-- 정할 것 하나
-- 정할 것 둘
-
 ## 최근에 끝난 것
 - 끝난 일
 앞서 끝난 기록 3개는 접어 둠.
 """
+# An older generated page still has the section the generator wrote before 11-22 (a question stands on the question screens only).
+STATUS_PAGE_OLD = STATUS_PAGE.replace("## 최근에 끝난 것", "## 기다리는 것\n- 정할 것 하나\n- 정할 것 둘\n\n## 최근에 끝난 것")
 
 
 class BackendTest(unittest.TestCase):
@@ -425,25 +423,27 @@ class BackendTest(unittest.TestCase):
         self.assertEqual([i["text"] for i in items], ["일 하나", "일 둘", "다른 일"])
         self.assertTrue(all(i["mark"] == "" and i["key"].startswith("i:") for i in items))
 
-    def test_the_panels_status_items_are_the_list_screens_order_waiting_then_in_progress_with_its_marks_and_keys(self):
-        lines = STATUS_PAGE.splitlines()
-        parsed = self.status.parse_listing(lines)
-        items, total = self.status.panel_items(parsed)
-        self.assertEqual([(i["mark"], i["text"]) for i in items], [("!", "정할 것 하나"), ("!", "정할 것 둘"), ("", "하는 일 A")])
-        self.assertEqual(total, 6)                                                         # waiting 2 + in progress 4; the finished and the folded count nothing
-        # The keys are the list screen's own: a press on the item can stand on it there.
-        entries = self.status.listing_entries(parsed, 80)
-        have = {entry["key"] for entry in entries if entry.get("key")}
-        self.assertTrue({i["key"] for i in items} <= have)
-        # One reading: the same items as the list screen draws, in the order it draws them.
-        drawn = [text_of(entry["rows"][0]) for entry in entries if entry.get("key", "").startswith("i:")]
-        self.assertEqual([t.strip().lstrip("!").strip() for t in drawn[:3]], [i["text"] for i in items])
+    def test_the_panels_status_items_are_the_list_screens_order_what_runs_with_its_keys_and_no_question(self):
+        for page in (STATUS_PAGE, STATUS_PAGE_OLD):              # the older page, with its `기다리는 것`, gives the same items
+            lines = page.splitlines()
+            parsed = self.status.parse_listing(lines)
+            items, total = self.status.panel_items(parsed)
+            self.assertEqual([(i["mark"], i["text"]) for i in items], [("", "하는 일 A"), ("", "하는 일 B"), ("", "하는 일 C")])
+            self.assertEqual(total, 4)                                                     # in progress 4; the finished, the folded and a question count nothing
+            # The keys are the list screen's own: a press on the item can stand on it there.
+            entries = self.status.listing_entries(parsed, 80)
+            have = {entry["key"] for entry in entries if entry.get("key")}
+            self.assertTrue({i["key"] for i in items} <= have)
+            # One reading: the same items as the list screen draws, in the order it draws them.
+            drawn = [text_of(entry["rows"][0]) for entry in entries if entry.get("key", "").startswith("i:")]
+            self.assertEqual([t.strip() for t in drawn[:3]], [i["text"] for i in items])
+            self.assertFalse([t for t in drawn if "정할 것" in t or "!" in t])
 
     def test_the_lists_are_read_with_the_value_and_a_document_that_did_not_change_is_not_read_again(self):
         view = self.page()
         self.backlog()
         got = self.status.panel_lists(self.cwd, view, {}, now=time.time())
-        self.assertEqual(got["status"]["total"], 6)
+        self.assertEqual(got["status"]["total"], 4)
         self.assertEqual(len(got["status"]["items"]), 3)
         self.assertEqual((got["backlog"]["has_doc"], got["backlog"]["total"]), (True, 4))
         # Asked again with the signs it gave: nothing is read or parsed.
@@ -543,7 +543,7 @@ const settle=()=>new Promise(r=>setTimeout(r,10)),texts=()=>ctx.api.backlogDoc()
         sorted_backlog = BACKLOG.replace("- 다른 일\n", "- 다른 일\n  kind: fix\n")        # (11-22: the groups are the sorts) one FIX item stands open, the rest are the folded TBD group
         self.backlog(sorted_backlog)
         own = "2026-10-01_other-campaign"           # one item of its own: the panel fills up with the other group's
-        items, _total = self.status.panel_backlog_items(self.status.parse_backlog(BACKLOG.splitlines()), own, first=2)
+        items, _total = self.status.panel_backlog_items(self.status.parse_backlog(sorted_backlog.splitlines()), own, first=2)       # (the panel's keys are of the document the popup reads)
         pressed = items[1]["key"]                    # the first of the group that is a folded line in the popup
         with tempfile.TemporaryDirectory(prefix="rlj") as folder:
             path = Path(folder) / "answer.json"
@@ -854,7 +854,7 @@ console.log(JSON.stringify(out));
     def test_a_list_dropped_for_its_size_leaves_no_stale_style_index(self):
         # A generated page with no bullet at all and so much text that the list and the document both pass the answer's limit: the list is dropped, and
         # the closing `…` row points at a style the answer has (it did not, once the styles the list added were dropped but their names were kept).
-        body = STATUS_PAGE.split("## 하는 중")[0] + "## 기다리는 것\n" + "".join("note line %04d " % n + "z" * 60 + "\n" for n in range(780))
+        body = STATUS_PAGE.split("## 하는 중")[0] + "## 하는 중\n" + "".join("note line %04d " % n + "z" * 60 + "\n" for n in range(780))
         view = self.page("2026-11-04_big", body)
         view = {**view, "title": "STATUS fixture", "word": "STATUS", "slot": "", "watch": [], "age": "", "campaign": "fixture"}
         os.utime(view["path"], (1_800_000_000, 1_800_000_000))

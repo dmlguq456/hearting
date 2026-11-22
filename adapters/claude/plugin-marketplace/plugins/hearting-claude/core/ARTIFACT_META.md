@@ -205,14 +205,16 @@ line on the project's OVERVIEW rule and its parts at the top of the project page
 **The campaign document is made by code. A main session does not edit it by hand.** The
 entrance refresh worker (`utilities/campaign_document.py`, one turn after a begin, any
 close or a seal; the generator leaves a close that is not proven out of the document) writes `campaigns/<campaign>/campaign.md` for each campaign that
-moved: the sections `## 하는 중` → `## 기다리는 것` → `## 최근에 끝난 것` (→ `## 나중에 할 것`,
+moved: the sections `## 하는 중` → `## 최근에 끝난 것` (→ `## 나중에 할 것`,
 not yet written), one line per piece of work, routes of one PR joined. It creates the file or
 replaces one whose first line is its marker `<!-- hearting:campaign-document v1 -->`; a
 `campaign.md` without the marker, a link, a directory and a hand-written `현황.md` /
 `STATUS.md` are never written. Nothing waits on it: without a document, Fleet builds the line
-from the routes, questions and results it already shows. What `## 기다리는 것` lists is as of the
-document's last refresh: besides a worker turn, the question board's producer asks for one when
-the set of open questions changes (never from a question's own hook path).
+from the routes, questions and results it already shows. **The document says nothing about what
+waits for a person's answer: that is a registered question, and a question stands on the
+question screens only** (the panel's QUESTIONS, Fleet's question board). An older generated
+document that still has a `## 기다리는 것` section is read without it, and the document is
+written again as the work moves, without the section.
 
 - **Where.** `campaigns/<campaign-locator>/campaign.md`, directly in the campaign
   folder, made by the code above. Fleet prefers these campaign pages, reads up to three
@@ -247,12 +249,13 @@ the set of open questions changes (never from a question's own hook path).
   not move historical research/cycle documents or require a new page.
 - **Reading.** Readers take the one-line paragraph (else the first paragraph above the first
   section that is not the `갱신`/`Updated` stamp, else the title), count the top-level
-  bullets under the decisions heading (`## 기다리는 것`, `## 결정 필요`, `## Decisions needed`)
+  bullets under the decisions heading of a hand-written page (`## 결정 필요`, `## Decisions needed`;
+  a generated `campaign.md` has none, and a `## 기다리는 것` left in an older one is not counted)
   and take the first bullet under the next heading (`## 나중에 할 것`, `## 다음`, `## Next`).
   A section that records decisions already made (`## 사용자 결정 기록`, `## Decision log`) is
   not counted. The file's modification time is when the status last changed. Fleet shows the
   age in front of a document older than three days. The shell's status popup opens a generated
-  `campaign.md` on a list of its sections' own words (what waits for the person first, the
+  `campaign.md` on a list of its sections' own words (what is in progress first, the
   other headings folded, `full document ›` for the whole page) and any other page as it always
   drew it (`core/references/session-shell.md`); a section it does not know is a folded line,
   so a new heading never breaks it.
@@ -275,7 +278,7 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   campaign's one-line summary from `meta.json`, then one "All N campaigns" line, N being
   every campaign, that opens `all-campaigns.*`), **backlog** (one line that opens the
   root's `backlog.md`, see the next section; its meta is the count of each sort, the total and
-  the file's `갱신` date; there is no section when that regular file is absent or a link, and
+  the file's `갱신` date (`FIX 2 · IMPR 1 · NOTE 1 · TBD 2 · 6 total`; a document with no sort written on any line says `FIX ? · IMPR ? · NOTE ?` and its `TBD`); there is no section when that regular file is absent or a link, and
   `Counts unavailable` instead of the counts when it cannot be read or is over 64 KiB) and **records** (a link to the recent
   route reports page and a link to the ID index `campaigns/INDEX.md`), plus the root
   totals. The line counts are the constants `ENTRANCE_SPEC_LINES` and
@@ -345,8 +348,8 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   or two different values is unsorted (shown `TBD`): nothing is refused, warned or gated, and a
   document with no `kind:` line at all opens as before, every job unsorted. A `kind:` line counts
   only under a job (not under a heading or other text, not inside a code fence). What waits for
-  the person's answer is not put here: register it as a question and the status document's
-  `## 기다리는 것` stands for it.
+  the person's answer is not put here: register it as a question, which stands on the question
+  screens (the status document does not list it).
 - **Counting rule.** Lines are read by their shape, not by what Markdown makes of them (lines end
   as Python's `str.splitlines` ends them). A job is a line whose first two characters are `- `,
   below the first heading line and outside a code fence.

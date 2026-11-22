@@ -1,7 +1,7 @@
-"""11-21 (the person chose design C, "정할 것 먼저"): the status popup opens on a list, what waits for the person first.
+"""11-21 (design C), 11-22 (a question stands on the question screens only): the status popup opens on a list.
 
-For the generated campaign page (its first line is the marker) the popup's first screen is a list: the head, `기다리는 것` (every
-bullet, each marked `!`), `하는 중` (three, then `all N ›`), every other heading as a folded line with its count, and
+For the generated campaign page (its first line is the marker) the popup's first screen is a list: the head,
+`하는 중` (three, then `all N ›`), every other heading as a folded line with its count, and
 `full document ›`. The chosen line, the opened groups and items are the popup's own state; `full document ›` is the screen the popup
 always had (Fleet's lines and the whole document), Esc or Enter going back to the list. Any other document (a hand-written page, none, an
 unreadable or cut one) draws the rows it always drew.
@@ -38,17 +38,12 @@ PAGE = MARKER + """
 **한 줄**: LISTONE 한 줄 요약
 
 ## 하는 중
-- RUN_ONE 일 하나 · #11 · 기록 1
+- RUN_ONE 일 하나입니다. 권장은 가 안이고 이 글은 한 줄에 다 들어가지 않을 만큼 길게 이어지다가 RUN_ONE_END 에서 끝납니다 그리고 더 이어집니다 마지막 RUN_ONE_LAST
 - RUN_TWO 일 둘 · #12 · 기록 2
 - RUN_THREE 일 셋 · 기록 1
 - RUN_FOUR 일 넷 · 기록 1
 - RUN_FIVE 일 다섯 · 기록 1
 6시간 넘게 움직임 없는 열린 일 23개는 접어 둠.
-
-## 기다리는 것
-- 결정: Q_ONE 첫 질문입니다. 권장은 가 안이고 이 글은 한 줄에 다 들어가지 않을 만큼 길게 이어지다가 Q_ONE_END 에서 끝납니다 그리고 더 이어집니다 마지막 Q_ONE_LAST
-- Q_TWO 둘째 질문?
-질문판 기준 11:01
 
 ## 최근에 끝난 것
 - 11-21 DONE_ONE 끝난 일 · #1 · v4.70.2 · 기록 6
@@ -58,6 +53,13 @@ PAGE = MARKER + """
 ## 나중에 할 것
 - LATER_ONE 나중 일
 """
+# An older generated page: the section the generator wrote before 11-22 is still in it.
+PAGE_OLD = PAGE.replace("## 최근에 끝난 것", """## 기다리는 것
+- 결정: Q_ONE 첫 질문입니다.
+- Q_TWO 둘째 질문?
+질문판 기준 11:01
+
+## 최근에 끝난 것""")
 
 
 def load(name, file):
@@ -104,11 +106,11 @@ out.item_press=list.press(st,list.layout(entries,st),item.key);
 const opened=list.layout(entries,st,W);out.item_more=lines(opened).length-before;out.item_sel=opened.sel===item.key;
 const own=lines(opened).slice(opened.at,opened.at+opened.span);
 out.item_first=own[0];out.item_span=opened.span;
-out.item_rest_indent=own.slice(1).every(l=>l.startsWith('    ')&&!l.startsWith('     '));
+out.item_rest_indent=own.slice(1).every(l=>l.startsWith('  ')&&!l.startsWith('   '));
 out.item_fits=own.every(l=>W.measure(l)<=60);
-out.item_whole=own.map((l,i)=>i===0?l.replace(/^> ! /,''):l.trim()).join('').replace(/ /g,'')===entries.find(e=>e.key===item.key).text.replace(/ /g,'');
+out.item_whole=own.map((l,i)=>i===0?l.replace(/^> /,''):l.trim()).join('').replace(/ /g,'')===entries.find(e=>e.key===item.key).text.replace(/ /g,'');
 out.item_ends_cut=own[0].endsWith('…')||own[own.length-1].endsWith('…');
-out.item_text_once=lines(opened).filter(l=>l.includes('Q_ONE_END')).length;
+out.item_text_once=lines(opened).filter(l=>l.includes('RUN_ONE_END')).length;
 out.item_tinted=opened.rows.slice(opened.at,opened.at+opened.span).every(r=>r.some(p=>p.tint));
 out.item_hits=list.hits(opened).filter(h=>h.action[1]===item.key).map(h=>h.row);out.item_at=opened.at;
 out.item_neighbour_down=list.neighbour(opened,1)!==item.key;
@@ -221,7 +223,7 @@ class ListLogicTest(unittest.TestCase):
     def test_the_document_read_whole_is_what_it_was_whatever_the_list_weighs(self):
         """Review 1: the list and the document no longer share one answer's size, so the document's rows are the ones it always had."""
         for label, item in (('740', 'x' * 740), ('200', 'x' * 200)):
-            body = MARKER + '\n# T\n\n## 기다리는 것\n' + ''.join('- %03d %s\n' % (n, item) for n in range(60)) + '\n## END\nTAIL_SENTINEL\n'
+            body = MARKER + '\n# T\n\n## 하는 중\n' + ''.join('- %03d %s\n' % (n, item) for n in range(60)) + '\n## END\nTAIL_SENTINEL\n'
             whole = self.answer(body, part='doc')
             self.assertNotIn('list', whole, label)
             texts = [''.join(run[0] for run in row) for row in whole['rows']]
@@ -232,7 +234,7 @@ class ListLogicTest(unittest.TestCase):
             self.assertTrue(listed.get('list'), label)
             self.assertEqual(listed['rows'], [], label)
         # A page whose document answer was cut for its size was cut on the rows alone: the same page's list asks nothing of that.
-        big = MARKER + '\n# T\n\n## 기다리는 것\n- 하나\n\n## 나중에\n' + ''.join('- 글 %05d %s\n' % (n, 'y' * 70) for n in range(2000))
+        big = MARKER + '\n# T\n\n## 하는 중\n- 하나\n\n## 나중에\n' + ''.join('- 글 %05d %s\n' % (n, 'y' * 70) for n in range(2000))
         whole = self.answer(big, part='doc')
         self.assertLessEqual(len(json.dumps(whole, ensure_ascii=False).encode()), self.m.POPUP_ANSWER_BYTES)
         self.assertNotIn('list', whole)
@@ -240,21 +242,19 @@ class ListLogicTest(unittest.TestCase):
     def test_no_count_stops_the_list_and_a_list_that_does_not_fit_is_left_out_with_the_document_as_it_was(self):
         # Every item of every group, however many (61 and 300 are on the screen, with the keys to choose them).
         for count in (61, 300):
-            many = PAGE.replace('## 기다리는 것\n', '## 기다리는 것\n' + ''.join('- 질문 %04d?\n' % n for n in range(count)))
             running = count if count <= 61 else 61           # (the answer's own size is the limit: two lists of 300 are more than it may weigh)
-            many = many.replace('## 하는 중\n', '## 하는 중\n' + ''.join('- 하는 %04d\n' % n for n in range(running)))
+            many = PAGE.replace('## 하는 중\n', '## 하는 중\n' + ''.join('- 하는 %04d\n' % n for n in range(running)))
             answer = self.answer(many, width=96)
             self.assertTrue(answer.get('list'), count)
             self.assertLessEqual(len(json.dumps(answer, ensure_ascii=False).encode()), self.m.POPUP_ANSWER_BYTES)
             keys = [entry['key'] for entry in answer['list'] if entry.get('key')]
             self.assertEqual(len(keys), len(set(keys)), count)
             seen = ' '.join(''.join(run[0] for row in entry['rows'] for run in row) for entry in answer['list'])
-            self.assertIn('질문 %04d?' % (count - 1), seen)
             self.assertIn('하는 %04d' % (running - 1), seen)
-            self.assertEqual(sum(1 for key in keys if key.startswith('i:')), count + 2 + running + 5 + 2 + 1, count)
+            self.assertEqual(sum(1 for key in keys if key.startswith('i:')), running + 5 + 2 + 1, count)
         # A list that alone is more than an answer may weigh is left out: the popup then draws the document as it did.
         huge = PAGE.replace('- LATER_ONE 나중 일', ''.join('- 일 %04d ' % n + '가나다라마바사 ' * 8 + '\n' for n in range(900)))
-        for group in ('## 하는 중', '## 기다리는 것', '## 최근에 끝난 것'):
+        for group in ('## 하는 중', '## 최근에 끝난 것'):
             huge = huge.replace(group, group + '\n' + ''.join('- 또 %s %04d ' % (group[3:5], n) + '가나다라마바사 ' * 8 + '\n' for n in range(300)))
         big = self.answer(huge, width=96)
         self.assertTrue(big['ok'])
@@ -262,6 +262,17 @@ class ListLogicTest(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(big, ensure_ascii=False).encode()), self.m.POPUP_ANSWER_BYTES)
         plain = self.answer(huge, width=96, part='doc')
         self.assertEqual({k: v for k, v in big.items() if k != 'part'}, {k: v for k, v in plain.items() if k != 'part'})   # the answer the popup always had
+
+    def test_an_older_page_with_the_waiting_section_gives_the_same_list_and_the_document_read_whole_keeps_the_section(self):
+        new, old = self.answer(PAGE), self.answer(PAGE_OLD)
+        self.assertEqual({k: v for k, v in old.items() if k != 'part'}, {k: v for k, v in new.items() if k != 'part'})   # the list screen: not a row of it
+        seen = json.dumps(old['list'], ensure_ascii=False)
+        for word in ('기다리는', 'Q_ONE', 'Q_TWO', '질문판', '"! "'):
+            self.assertNotIn(word, seen, word)
+        whole = self.answer(PAGE_OLD, part='doc')
+        texts = [''.join(run[0] for run in row) for row in whole['rows']]
+        for word in ('기다리는 것', 'Q_ONE 첫 질문입니다.', 'Q_TWO 둘째 질문?', '질문판 기준 11:01'):
+            self.assertTrue(any(word in row for row in texts), word)                         # `full document ›` shows the page as it is
 
     def test_the_list_logic_on_the_real_answer(self):
         answer = self.answer(PAGE)
@@ -278,13 +289,12 @@ class ListLogicTest(unittest.TestCase):
         self.assertTrue(first[0].startswith('LISTTITLE'), first)
         self.assertEqual(first[1], 'updated 11-21 11:02')               # the age is the title band's, said once
         self.assertIn('LISTONE', first[2])
-        at = first.index('기다리는 것 2')
-        self.assertTrue(first[at + 1].startswith('> ! 결정: Q_ONE'), first[at:at + 3])
-        self.assertTrue(first[at + 1].endswith('…'))                     # cut to the width; the whole text is under it when opened
-        self.assertEqual(first[at + 2], '  ! Q_TWO 둘째 질문?')
-        self.assertEqual(first[at + 3], '    질문판 기준 11:01')
+        self.assertFalse([line for line in first if '기다리는' in line or line.lstrip().startswith('!')])     # no question here (11-22)
         run = first.index('하는 중 5')
-        self.assertEqual(first[run + 1:run + 4], ['  RUN_ONE 일 하나 · #11 · 기록 1', '  RUN_TWO 일 둘 · #12 · 기록 2', '  RUN_THREE 일 셋 · 기록 1'])
+        at = run
+        self.assertTrue(first[run + 1].startswith('> RUN_ONE 일 하나입니다'), first[run:run + 4])
+        self.assertTrue(first[run + 1].endswith('…'))                    # cut to the width; the whole text is under it when opened
+        self.assertEqual(first[run + 2:run + 4], ['  RUN_TWO 일 둘 · #12 · 기록 2', '  RUN_THREE 일 셋 · 기록 1'])
         self.assertEqual(first[run + 4], '  all 5 ›')
         self.assertFalse([line for line in first if 'RUN_FOUR' in line or 'DONE_ONE' in line or 'LATER_ONE' in line])
         self.assertEqual([line for line in first if line.lstrip().startswith('›')], ['  › 최근에 끝난 것 2', '  › 나중에 할 것 1'])
@@ -292,9 +302,9 @@ class ListLogicTest(unittest.TestCase):
         self.assertEqual(out['tinted'], [at + 1])
         self.assertEqual(out['first_sel'].split(':')[0], 'i')
         # Everything that can be chosen, in order, and the ends stay.
-        self.assertEqual(out['marks'], ['i', 'i', 'i', 'i', 'i', 'a', 'g', 'g', 'full'])
+        self.assertEqual(out['marks'], ['i', 'i', 'i', 'a', 'g', 'g', 'full'])
         self.assertEqual(out['walk'][-1], 'full')
-        self.assertEqual(len(out['walk']), 9)
+        self.assertEqual(len(out['walk']), 7)
         self.assertTrue(out['up_at_top'])
         # Enter: a heading opens (and folds), `all N ›` opens the whole running list, an item its whole text, `full document ›` the document.
         self.assertEqual(out['group_press'], 'fold')
@@ -304,13 +314,13 @@ class ListLogicTest(unittest.TestCase):
         self.assertEqual(out['group_closed'], 0)
         self.assertTrue(any('RUN_FIVE' in line for line in out['all_open']))
         self.assertIn('> all 5 ▾', out['all_open'])
-        # A cut item opens in place of its row: the whole words, folded in the width, the `> !` on the first row and the words' own column
+        # A cut item opens in place of its row: the whole words, folded in the width, the `> ` on the first row and the words' own column
         # on the rest, the row not shown a second time; opened again it is one row again. An item that was not cut has nothing to open.
         self.assertTrue(out['item_cut_has_text'])
         self.assertEqual(out['item_press'], 'item')
         self.assertGreaterEqual(out['item_more'], 2)
         self.assertEqual(out['item_span'], out['item_more'] + 1)
-        self.assertTrue(out['item_first'].startswith('> ! 결정: Q_ONE'), out['item_first'])
+        self.assertTrue(out['item_first'].startswith('> RUN_ONE 일 하나입니다'), out['item_first'])
         self.assertTrue(out['item_rest_indent'] and out['item_fits'] and out['item_whole'] and out['item_tinted'], out)
         self.assertFalse(out['item_ends_cut'], out)                      # nothing is cut any more
         self.assertEqual(out['item_text_once'], 1, out)                  # the same words are not on the screen twice
@@ -335,10 +345,10 @@ class ListLogicTest(unittest.TestCase):
             'dup': self.answer(PAGE + '\n## Other\n- A\n\n## Other\n- B\n'),
             'dup_solo': self.answer(PAGE + '\n## Other\n- B\n'),
             'long_heading': self.answer(PAGE + '\n## ' + 'h' * 1100 + '\n- HIDDEN_ITEM\n'),
-            'scripts': self.answer(PAGE.replace('- Q_TWO 둘째 질문?', '- ' + '😀가é' * 700 + '끝')),
+            'scripts': self.answer(PAGE.replace('- RUN_TWO 일 둘 · #12 · 기록 2', '- ' + '😀가é' * 700 + '끝')),
         }
         for size in (4000, 4001, 12000):
-            cases['long%d' % size] = self.answer(PAGE.replace('- Q_TWO 둘째 질문?', '- ' + '가' * (size - 1) + '끝'))
+            cases['long%d' % size] = self.answer(PAGE.replace('- RUN_TWO 일 둘 · #12 · 기록 2', '- ' + '가' * (size - 1) + '끝'))
         self.assertTrue(all(answer.get('list') for answer in cases.values()))
         path = self.root / 'front.json'
         path.write_text(json.dumps(cases, ensure_ascii=False))
@@ -727,17 +737,17 @@ const frame=s=>box(s)?box(s).rows:[];
   await key('\x1b[Z');checks.shift_tab=chosen(await screen());
   // Enter opens the whole text of the cut item in place of its row (folded, the first row marked, nothing twice); again makes it one row.
   const rowsBefore=rowsOf(r.s).length;
-  await key('\r');r=await until(shows('Q_ONE_LAST'),'the item opened');
-  checks.item_first=chosen(r.s)[0];checks.item_last_count=rowsOf(r.s).filter(l=>l.includes('Q_ONE_LAST')).length;
-  checks.item_head_count=rowsOf(r.s).filter(l=>l.includes('결정: Q_ONE')).length;checks.item_cut_left=rowsOf(r.s).some(l=>l.endsWith('…'));
+  await key('\r');r=await until(shows('RUN_ONE_LAST'),'the item opened');
+  checks.item_first=chosen(r.s)[0];checks.item_last_count=rowsOf(r.s).filter(l=>l.includes('RUN_ONE_LAST')).length;
+  checks.item_head_count=rowsOf(r.s).filter(l=>l.includes('RUN_ONE 일 하나입니다')).length;checks.item_cut_left=rowsOf(r.s).some(l=>l.endsWith('…'));
   checks.item_more=rowsOf(r.s).length-rowsBefore;
   checks.item_rest=rowsOf(r.s)[rowsOf(r.s).findIndex(l=>l.startsWith('> '))+1];
-  await key('\r');await until(s=>!shows('Q_ONE_LAST')(s),'the item closed');checks.item_closed_rows=rowsOf(await screen()).length-rowsBefore;
+  await key('\r');await until(s=>!shows('RUN_ONE_LAST')(s),'the item closed');checks.item_closed_rows=rowsOf(await screen()).length-rowsBefore;
   // Enter on an item that was not cut changes nothing.
   await key('\x1b[B');const shortSel=rowsOf(await screen());await key('\r',300);checks.short_same=JSON.stringify(rowsOf(await screen()))===JSON.stringify(shortSel);
   await key('\x1b[A');
   // Down to `all 5 ›`: Enter shows the whole running list.
-  for(let i=0;i<5;i++)await key('\x1b[B',120);
+  for(let i=0;i<3;i++)await key('\x1b[B',120);
   checks.at_all=chosen(await screen());
   await key('\r');r=await until(shows('RUN_FIVE'),'all of the running list');checks.all_open=chosen(r.s);
   await key('\r');await until(s=>!shows('RUN_FIVE')(s),'the running list folded again');
@@ -769,12 +779,12 @@ const frame=s=>box(s)?box(s).rows:[];
   await key('\x1b',400);await until(s=>!box(s),'Esc closed it');checks.esc_closed=true;
   // A document that changes under an open popup: the chosen line stays on its words; a group stays open by its name; a line gone falls to the top.
   await opened();await until(shows('full document ›'),'the list again');const vList=count('vm');
-  await key('\x1b[B',150);checks.before_edit=chosen(await screen());           // Q_TWO
-  await key('\x1b[B',150);await key('\x1b[B',150);await key('\x1b[B',150);await key('\x1b[B',150);await key('\x1b[B',150); // → the folded `최근에 끝난 것`
+  await key('\x1b[B',150);checks.before_edit=chosen(await screen());           // RUN_TWO
+  await key('\x1b[B',150);await key('\x1b[B',150);await key('\x1b[B',150); // → the folded `최근에 끝난 것`
   await key('\r',200);await until(shows('DONE_ONE'),'the group opened before the change');
   await key('\x1b[B',150);checks.on_done=chosen(await screen());
-  edit('- 결정: Q_ONE','- 결정: Q_ONE_EDITED');await sleep(2800);
-  r=await until(shows('Q_ONE_EDITED'),'the changed document in the list',15000);
+  edit('- RUN_ONE ','- RUN_ONE_EDITED ');await sleep(2800);
+  r=await until(shows('RUN_ONE_EDITED'),'the changed document in the list',15000);
   checks.after_edit=chosen(r.s);checks.group_still_open=shows('DONE_ONE')(r.s);
   edit('- 11-21 DONE_ONE','- 11-21 DONE_ONE_REWORDED');await sleep(2800);
   r=await until(shows('DONE_ONE_REWORDED'),'the reworded line',15000);
@@ -784,11 +794,11 @@ const frame=s=>box(s)?box(s).rows:[];
   for(let i=0;i<14;i++)await key('\x1b[B',60);
   await key('\r',300);r=await until(shows('갱신 2026-11-21 11:02'),'the document read whole, before the change');
   await until(shows('FLEET_STATUS_LINE'),'Fleet\'s line again',15000);const vFull=count('vm');
-  edit('- 결정: Q_ONE_EDITED','- 결정: Q_ONE_AGAIN');
-  r=await until(shows('Q_ONE_AGAIN'),'the changed document read whole',15000);
+  edit('- RUN_ONE_EDITED ','- RUN_ONE_AGAIN ');
+  r=await until(shows('RUN_ONE_AGAIN'),'the changed document read whole',15000);
   for(let i=0;i<60&&count('vm')===vFull;i++)await sleep(100);
   checks.refleet_on_full=count('vm')-vFull;checks.refleet_line=shows('FLEET_STATUS_LINE')((await screen()));checks.full_still=!shows('full document ›')(r.s);
-  await key('\x1b',400);r=await until(shows('full document ›'),'back at the list after the change');checks.after_change_list=shows('Q_ONE_AGAIN')(r.s);
+  await key('\x1b',400);r=await until(shows('full document ›'),'back at the list after the change');checks.after_change_list=shows('RUN_ONE_AGAIN')(r.s);
   await close();
   fs.writeFileSync(cfg.result,JSON.stringify({checks}));
 }catch(error){console.error(error.stack);process.exitCode=1;}
@@ -910,22 +920,23 @@ class PtyTest(unittest.TestCase):
         self.assertFalse(c['whole_doc_on_first'], c)
         rows = c['first_rows']
         self.assertTrue(rows[0].startswith('LISTTITLE'), rows)
-        self.assertTrue(any(row.startswith('기다리는 것 2') for row in rows), rows)
+        self.assertTrue(any(row.startswith('하는 중 5') for row in rows), rows)
+        self.assertFalse([row for row in rows if '기다리는' in row or row.lstrip().startswith('!')], rows)       # no question line (11-22)
         self.assertEqual(len(c['first_chosen']), 1, c)
-        self.assertTrue(c['first_chosen'][0].startswith('> ! 결정: Q_ONE'), c)
+        self.assertTrue(c['first_chosen'][0].startswith('> RUN_ONE 일 하나입니다'), c)
         self.assertIn('STATUS', c['title'])
         self.assertIn('Enter open', c['keys'])
         self.assertIn('←→ section', c['keys'])                          # the popups' own keys row
         # The choice moves with the arrows, Tab and Shift+Tab.
-        self.assertTrue(c['down'][0].startswith('> ! Q_TWO'), c)
-        self.assertTrue(c['tab'][0].startswith('> RUN_ONE'), c)
-        self.assertTrue(c['up'][0].startswith('> ! Q_TWO'), c)
-        self.assertTrue(c['shift_tab'][0].startswith('> ! 결정: Q_ONE'), c)
+        self.assertTrue(c['down'][0].startswith('> RUN_TWO'), c)
+        self.assertTrue(c['tab'][0].startswith('> RUN_THREE'), c)
+        self.assertTrue(c['up'][0].startswith('> RUN_TWO'), c)
+        self.assertTrue(c['shift_tab'][0].startswith('> RUN_ONE 일 하나입니다'), c)
         # An item opens its whole text under it, and closes.
-        self.assertTrue(c['item_first'].startswith('> ! 결정: Q_ONE'), c)                  # the row is the words, folded: marked on its first row
+        self.assertTrue(c['item_first'].startswith('> RUN_ONE 일 하나입니다'), c)                  # the row is the words, folded: marked on its first row
         self.assertEqual((c['item_last_count'], c['item_head_count'], c['item_cut_left']), (1, 1, False), c)   # nothing twice, nothing cut
         self.assertGreaterEqual(c['item_more'], 1, c)
-        self.assertTrue(c['item_rest'].startswith('    ') and not c['item_rest'].startswith('     '), c)  # the words' own column
+        self.assertTrue(c['item_rest'].startswith('  ') and not c['item_rest'].startswith('   '), c)  # the words' own column
         self.assertEqual(c['item_closed_rows'], 0, c)                                     # again: one row, as before
         self.assertTrue(c['short_same'], c)                                              # an item that was not cut has nothing to open
         # `all N ›`, a folded heading: Enter opens in place, again folds.
@@ -937,7 +948,7 @@ class PtyTest(unittest.TestCase):
         # ←→ are still the sections.
         self.assertNotIn('STATUS', c['right_title'].split('─')[1] if '─' in c['right_title'] else c['right_title'])
         self.assertTrue(c['right_not_list'], c)
-        self.assertTrue(c['left_chosen'] and c['left_chosen'][0].startswith('> ! 결정: Q_ONE'), c)        # a fresh list
+        self.assertTrue(c['left_chosen'] and c['left_chosen'][0].startswith('> RUN_ONE 일 하나입니다'), c)        # a fresh list
         self.assertTrue(c['press_open'], c)
         # `full document ›` is the screen the popup always had; Fleet is asked for only then; Esc and Enter go back, Esc again closes.
         self.assertIn('full document ›', c['at_full'][0])
@@ -952,11 +963,11 @@ class PtyTest(unittest.TestCase):
         self.assertIn('full document ›', c['esc_back_chosen'][0])                          # on the line it left
         self.assertTrue(c['enter_back'] and c['esc_closed'], c)
         # A document that changes under the popup.
-        self.assertTrue(c['before_edit'][0].startswith('> ! Q_TWO'), c)
+        self.assertTrue(c['before_edit'][0].startswith('> RUN_TWO'), c)
         self.assertIn('DONE_ONE', c['on_done'][0])
         self.assertIn('DONE_ONE', c['after_edit'][0], c)                                    # the same words keep the choice
         self.assertTrue(c['group_still_open'], c)                                           # the group stays open by its name
-        self.assertTrue(c['reworded'][0].startswith('> ! 결정: Q_ONE_EDITED'), c)             # a line gone: the top
+        self.assertTrue(c['reworded'][0].startswith('> RUN_ONE_EDITED'), c)             # a line gone: the top
         self.assertTrue(c['reworded_top'], c)
         self.assertEqual(c['vm_while_listing'], 0, c)
         self.assertEqual(c['refleet_on_full'], 1, c)                                      # the full document read again asks Fleet's lines again

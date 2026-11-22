@@ -96,6 +96,47 @@ class AnswerRowWithoutObservationTest(unittest.TestCase):
         self.assertIs(closed[0]["answerable"], False)
         self.assertEqual(closed[0]["reason"], "retained-display-no-longer-current")
 
+    def gap(self):
+        """The producer's own failure record: a fresh copy with no waits, not complete."""
+        self.assertTrue(waits.publish_cache({"items": [], "complete": False, "observed_at": time.time(),
+                                             "health": [{"source": "producer", "state": "unknown"}]}))
+
+    def test_a_question_that_ended_during_the_gap_does_not_stand_as_an_open_one(self):
+        shown = self.board()
+        retained = [{"id": row["id"], "revision": row["revision"]} for row in shown]
+        self.gap()
+        self.assert_answerable_with_choices(self.board(retained))
+        # Its session registers another one: the old request is gone, the new one is not listed yet.
+        self.f.ask(sid=SID, text="a second question", choices=["x", "y"])
+        self.assertFalse([row for row in self.board(retained) if row.get("answerable") is True])
+        # Or the session's own input answers it (a choice's number typed in the session) and closes it.
+        self.assertTrue(waits._refresh_cache())
+        again = self.board()
+        retained = [{"id": row["id"], "revision": row["revision"]} for row in again]
+        self.gap()
+        self.assert_answerable_with_choices_of(self.board(retained), again[0]["id"])
+        seat = self.f.seat("claude", SID)
+        import session_tidy
+        self.assertTrue(waits.close_signal(seat.key, sequence=session_tidy.read_prompt_seq(seat),
+                                           harness="claude", session_id=SID, answer="2"))
+        self.assertFalse([row for row in self.board(retained) if row.get("answerable") is True])
+
+    def assert_answerable_with_choices_of(self, rows, question_id):
+        self.assertEqual([row["id"] for row in rows], [question_id])
+        self.assertIs(rows[0]["answerable"], True, rows[0])
+
+    def test_an_incomplete_observation_that_lists_it_as_stale_does_not_make_it_answerable(self):
+        view = waits.cached_view(request=False)
+        shown = self.board()
+        retained = [{"id": row["id"], "revision": row["revision"]} for row in shown]
+        listed = [dict(item, stale=True) for item in view["items"] if item.get("id") == self.signal["id"]]
+        self.assertEqual(len(listed), 1)
+        self.assertTrue(waits.publish_cache({"items": listed, "complete": False, "observed_at": time.time(),
+                                             "health": [{"source": "producer", "state": "unknown"}]}))
+        rows = self.board(retained)
+        self.assertEqual([(row["id"], row["answerable"]) for row in rows], [(self.signal["id"], False)])
+        self.assertEqual(rows[0]["reason"], "retained-display-no-longer-current")
+
     def test_the_popup_keeps_the_choices_and_the_answer_row_across_the_gap(self):
         first = self.project()
         retained = [{"id": item["id"], "revision": item["revision"]} for item in first["questions"]]
@@ -115,7 +156,7 @@ class AnswerRowWithoutObservationTest(unittest.TestCase):
         self.assertTrue(waits.publish_cache({"items": [], "complete": False, "observed_at": time.time(),
                                              "health": [{"source": "producer", "state": "unknown"}]}))
         refused = shell._block_answer(binding, request)
-        self.assertEqual(refused, {"ok": False, "reason": "not sent · reading the waits · Enter again soon"})
+        self.assertEqual(refused, {"ok": False, "reason": "not sent · reading the waits · Enter again or answer below"})
         envelope = waits.read_selected_request({"id": self.signal["id"], "harness": "claude", "session_id": SID})
         self.assertEqual(envelope["state"], "open")
         self.assertTrue(waits._refresh_cache())
