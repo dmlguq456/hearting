@@ -2286,12 +2286,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--apply", action="store_true", help="write recovered_started_on into records (default: dry run)")
 
     p = sub.add_parser("cycle-display-titles-backfill",
-                       help="declare cycle display titles for Cairn from sealed cycles (default: dry run)")
+                       help="declare cycle display titles from sealed cycles (default: dry run)")
     p.add_argument("--artifact-root", required=True)
     p.add_argument("--apply", action="store_true", help="write the declaration (default: dry run)")
     p.add_argument("--report", help="write a markdown report to this path")
     p.add_argument("--out", help="write the candidate declaration bytes to this path (outside the artifact root)")
-    p.add_argument("--reader-dir", help="Cairn app_dir to gate --apply against (default: ~/.config/cairn-sync/config.json)")
     p.add_argument("--expect-post-digest", help="refuse --apply unless the computed post-digest matches")
     p.add_argument("--restore-journal", help="restore the declaration from a prior --apply's journal")
 
@@ -2487,7 +2486,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     root, apply=args.apply,
                     report_path=Path(args.report) if args.report else None,
                     out_path=Path(args.out) if args.out else None,
-                    reader_dir=Path(args.reader_dir) if args.reader_dir else None,
                     expect_post_digest=args.expect_post_digest,
                 )
             _print(result)
