@@ -16,8 +16,12 @@ aliases: {}
 
 # Unit: research/plan-review
 
-Act as the user's proxy: catch everything a careful user reading the plan would
-catch. Change lenses with task type rather than limiting the review to papers.
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
+Review stance: the shared stance text carried just above this body.
+
 Own paper grounding, domain expertise, and task-type lenses; the qa/plan-review
 unit owns construction quality (logic, completeness, test coverage, side
 effects) of the same plan. Quick work uses inline plan-check-lite instead of
@@ -26,36 +30,14 @@ this unit.
 Review nature: annotate, never alter plan substance. Memo comments and the
 review log are the only writes; the concrete write scope is node-owned.
 
-## Knowledge Sources
-
-Before reviewing, read and internalize all relevant sources below, in this
-order of authority. Understand the theoretical basis before reading the plan.
-
-1. **Design constraints:** `<artifact-root>/analysis_project/paper/00_overview_and_constraints.md`
-   — hard constraints and paper-to-code mapping produced by `/analyze-project --mode paper`.
-2. **Paper documentation:** relevant files under `<artifact-root>/analysis_project/paper/`
-   for the affected model variant.
-3. **Research surveys:** all files under `<artifact-root>/research/`. These complement
-   paper analysis and are not merely a fallback. If multiple versioned directories
-   exist, treat the highest version as authoritative unless the user says otherwise.
-4. **Code documentation:** relevant files under `<artifact-root>/analysis_project/code/`,
-   produced by `/analyze-project --mode code`.
-5. **Agent memory:** prior durable decisions and patterns when relevant.
+### Knowledge Sources
 
 Any directory may be absent; skip missing directories silently. If all of
 `analysis_project/paper/`, `research/`, and `analysis_project/code/` are absent,
 state in the report that the result relies only on agent memory and web
 sources, then continue without waiting for confirmation.
 
-## User Profile Defaults
-
-Preload per `_shared/profile-preload.md`:
-`02_paper_writing_style` (tone, argumentation, citation patterns),
-`04_analysis_methodology` (analysis and verification patterns),
-`05_domain_expertise` (domain background, terms, abbreviations), and
-`01_paper_figure_style` when the plan discusses figures.
-
-## Procedure
+### Procedure
 
 1. Read all Knowledge Sources first.
 2. **Read the plan in its authored language** thoroughly.
@@ -124,7 +106,7 @@ Preload per `_shared/profile-preload.md`:
    gate compares the array length against the realized auxiliary leg count, so a
    wrong length or a missing key is a gate failure, not a warning.
 
-## Branch: focus-axis (multi-axis parallel)
+### Branch: focus-axis (multi-axis parallel)
 
 Selected by `intensity=thorough|adversarial`, optionally scaled by
 `--qa thorough|adversarial`. If the invocation prompt contains
@@ -143,17 +125,52 @@ merges memos afterward. Available axes per task type:
 In focus-axis mode, prefix every memo with `[<axis_name>]` (e.g. `[STYLE]`,
 `[COVERAGE]`) so the orchestrator can deduplicate after merge.
 
-## Branch: default (all axes)
+### Branch: default (all axes)
 
 If `Focus axis` is absent from the prompt, cover *all* axes from the Step 3
 task-type table in a single pass. Use this for standard plan checks and any
 graph that did not explicitly open a multi-axis dispatch-depth-2 review.
 
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+Act as the user's proxy: catch everything a careful user reading the plan would
+catch. Change lenses with task type rather than limiting the review to papers.
+
+### Knowledge Sources
+
+Before reviewing, read and internalize all relevant sources below, in this
+order of authority. Understand the theoretical basis before reading the plan.
+
+1. **Design constraints:** `<artifact-root>/analysis_project/paper/00_overview_and_constraints.md`
+   — hard constraints and paper-to-code mapping produced by `/analyze-project --mode paper`.
+2. **Paper documentation:** relevant files under `<artifact-root>/analysis_project/paper/`
+   for the affected model variant.
+3. **Research surveys:** all files under `<artifact-root>/research/`. These complement
+   paper analysis and are not merely a fallback. If multiple versioned directories
+   exist, treat the highest version as authoritative unless the user says otherwise.
+4. **Code documentation:** relevant files under `<artifact-root>/analysis_project/code/`,
+   produced by `/analyze-project --mode code`.
+5. **Agent memory:** prior durable decisions and patterns when relevant.
+
+### User Profile Defaults
+
+Preload per `_shared/profile-preload.md`:
+`02_paper_writing_style` (tone, argumentation, citation patterns),
+`04_analysis_methodology` (analysis and verification patterns),
+`05_domain_expertise` (domain background, terms, abbreviations), and
+`01_paper_figure_style` when the plan discusses figures.
+
+### Branch: default (all axes)
+
 Multi-axis review exists so narrow parallel instances collectively cover what a
 careful user would catch without overloading one reviewer. It changes
 structure, not the expected content coverage.
 
-## Memory
+### Memory
 
 Per `_shared/memory-flow.md`. Retention targets: domain knowledge summaries
 with pointers to reference documents; decision precedents (what was chosen and
