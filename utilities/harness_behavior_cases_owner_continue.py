@@ -325,6 +325,10 @@ class OwnerContinueScenario(SoloReviewScenario):
         ev["rows_after_again"] = len(self.owner_rows())
         ev["kept"] = self.store_entries(run, route.get("route_id", "none"))
         rows = self.owner_rows()
+        # The last turn's own settlement (its envelope sealed after the route closed) finishes a moment later;
+        # the reading below is of a settled route, the earlier turn's reading is what this scenario checks.
+        wait_for(lambda: (UnitContinueScenario.terminal_inspect(self, run, rows[-1]["attempt_id"]) or {}).get("state")
+                 == "completed", 90, 3)
         ev["start_route"] = self.start_route_again(run, route) if route else {}
         ev["earlier_delivery"] = UnitContinueScenario.earlier_delivery(self, run, rows, 2)
         ev["inspect"] = [UnitContinueScenario.terminal_inspect(self, run, r["attempt_id"]) for r in rows[:2]]
