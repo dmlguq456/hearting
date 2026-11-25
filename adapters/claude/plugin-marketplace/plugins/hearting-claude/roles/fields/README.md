@@ -22,7 +22,7 @@ They are a short list of fundamentals per field, each with a one-line gloss and 
 
 They are not a method. They do not set the order of the work, the tools, how deep to go, or how large a piece of work must be before a document is written. Those differ from person to person, and each page has a "Not decided here" section that says so. A line that binds a way of doing something does not belong on these pages.
 
-For now the pages are reference text only; nothing reads them yet.
+A common unit that keys part of its reference by field (`### 참고 — <field>`) gets the `## Fundamentals` lines of its route's field carried with its worker text, without the glosses and sources; nothing else reads these pages.
 
 ## `other`
 

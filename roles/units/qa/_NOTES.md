@@ -134,3 +134,13 @@ collaboration boundaries; 참고: the Audit areas table, memory. `qa/ml-debug` �
 and the three assignments, the Procedure, Result diagnosis, Smoke check (with the attestation
 command), Report and collaboration boundaries; 참고: the Symptoms → Likely causes table,
 memory.
+
+## Field reference, first application (2026-11-25) — qa/code-review
+
+This unit runs under `code` (autopilot-code, autopilot-ship, analyze-project code) and `docs`
+(autopilot-apply verify, analyze-project doc/paper). No line removed or reworded. Five Review
+Criteria items that judge code (bug potential, performance, code quality, maintainability,
+framework pitfalls) moved under `### 참고 — code` with one lead line ("Review criteria for code:");
+scope and cost, project conventions and the effort-scaling note stay common. A `docs` review gets
+the common criteria and the docs fundamentals instead. 지킬 것, the stance pointer, Style and Memory
+are unchanged.
