@@ -70,6 +70,15 @@ class SupervisorExitedSettlementTest(unittest.TestCase):
                 "workflow_completion": "runtime-v1", "failure_class": "pass", "note": "completed-supervisor",
                 "parent_sid": "parent", **extra}
 
+    def test_an_armed_unit_capacity_notice_names_the_start_that_can_read_the_result(self):
+        self.jobs.touch()
+        receipt = {**self.receipt("att-unit"), "reason": supervision.UNIT_CAPACITY_PAUSE}
+        with mock.patch.object(supervision, "_resume_text",
+                               return_value="python3 capability-route.py start --route rt-unit"):
+            text = supervision.render_text(receipt, continued={"resume_at": "2099-01-01T00:00:00Z"})
+        self.assertIn("Its result comes back here.", text)
+        self.assertIn("You can also read the result with python3 capability-route.py start --route rt-unit.", text)
+
     def test_a_settlement_past_the_ceiling_is_the_attention_notice_in_any_harness(self):
         """RV-PR1559-1112: the watcher records a PASS owner's settlement-only exit only past
         SETTLING_NOTICE_SECONDS, so that one notice -- an undelivered completion, an incomplete

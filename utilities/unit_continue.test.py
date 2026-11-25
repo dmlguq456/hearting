@@ -278,6 +278,7 @@ class TurnPromptTest(unittest.TestCase):
         self.assertIn("please recheck", text)
         self.assertIn("Verdict: changes requested", text)
         self.assertNotIn("THE BRIEF", text)
+        self.assertIn("keep the earlier report as it is", text)
 
     def test_a_fresh_session_gets_the_brief_and_the_previous_result(self):
         with mock.patch.object(UC, "previous_result", return_value="Verdict: changes requested"):
@@ -285,6 +286,29 @@ class TurnPromptTest(unittest.TestCase):
         self.assertIn("THE BRIEF", text)
         self.assertIn("session-missing", text)
         self.assertIn("Verdict: changes requested", text)
+        self.assertIn("leave the earlier report as it is", text)
+
+    def test_capacity_retry_finishes_the_interrupted_turns_report(self):
+        for plan, context in (
+            (UC.SessionPlan("resumed", "", "s", "f", "r"), "artifact_output_dir: /same"),
+            (UC.SessionPlan("fresh", "harness-changed", "", ""), "THE BRIEF"),
+        ):
+            for turn in (1, 2):
+                with self.subTest(session=plan.kind, turn=turn):
+                    args = types.SimpleNamespace(**{**vars(self.args), "turn": turn, "automatic_retry_of": FIRST})
+                    prior = "Verdict: changes requested" if turn == 2 else ""
+                    with mock.patch.object(UC, "previous_result", return_value=prior) as previous:
+                        text = UC.turn_prompt(args, plan, "artifact_output_dir: /same", "THE BRIEF", "jobs")
+                    previous.assert_called_once_with("jobs", FIRST, after_capacity=True)
+                    self.assertIn(context, text)
+                    self.assertIn("Finish the interrupted turn's report under artifact_output_dir", text)
+                    self.assertIn("If that file already exists, continue from what is there", text)
+                    self.assertIn(self.args.continuation_text, text)
+                    self.assertNotIn("earlier report as it is", text)
+                    self.assertNotIn("This is turn 1", text)
+                    if prior:
+                        self.assertIn("Previous turn's result (turn 1)", text)
+                        self.assertIn(prior, text)
 
 
 class KeepWindowTest(unittest.TestCase):
