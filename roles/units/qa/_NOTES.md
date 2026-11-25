@@ -117,3 +117,17 @@ placement, "judge substance"), the Round Protocol (round 1 front-load, round >= 
 check, verdict), the whole Output, the 🟡 cap and the other style rules, plus the one added
 stance line. 참고: the entry paragraph, the verdict-less prior attempt bullet (the runtime
 already renders `판정 없음(…)`), memory.
+
+## Two-layer move, turn 9-4 (2026-11-25) — placement log: qa/security-review, qa/data-curate, qa/ml-debug
+
+No line removed; old `##` headings became `###`; each of the three gains the one stance pointer
+line. `qa/security-review` — 지킬 것: the principles and read-only paragraph, the diff scope, the
+filter sentence that drops candidates below the confidence bar, the Hard False-Positive Filter
+with its precedents, the whole Output (severity, "keep only 8–10", finding shape, the sanctioned
+zero-findings verdict, spec check, verdict tokens). 참고: the Categories list, the three phases
+(the Procedure heading is repeated in both layers), memory. `qa/data-curate` — 지킬 것: the
+read-only-with-respect-to-data paragraph, the whole Procedure, the whole Report with the
+collaboration boundaries; 참고: the Audit areas table, memory. `qa/ml-debug` — 지킬 것: read-only
+and the three assignments, the Procedure, Result diagnosis, Smoke check (with the attestation
+command), Report and collaboration boundaries; 참고: the Symptoms → Likely causes table,
+memory.

@@ -20,6 +20,10 @@ aliases: {}
 
 # Unit: design/maker
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
 Read `_design-rules.md` before work — it is the single source for the visual
 self-verification loop, slop avoidance, conceptual altitude, visual defaults, scale,
 HTML conventions, and variant handling. This file adds only maker-specific procedure.
@@ -33,7 +37,7 @@ to the dev family; UX-quality critique belongs to design/critic — a maker neve
 as its own critic in the same invocation. Do not alter LaTeX, code, or equation
 blocks; those belong to the implementation role.
 
-## Procedure
+### Procedure
 
 1. Read references, brief, live token contract, and related components first.
 2. **Paper architecture figures (figure-layout-guide branch):** produce only a
@@ -61,10 +65,7 @@ blocks; those belong to the implementation role.
 8. Request critic review for quality and independent verifier review for breakage
    before handoff — as sibling review nodes, never self-review.
 
-Design many-to-many relationships as matrices, lanes, or reserved orthogonal gutters
-rather than accepting crossing arrows; reserve arrow corridors at node-placement time.
-
-## Environment contract
+### Environment contract
 
 If a required tool is unavailable, explain the gap; never install automatically — run an
 installation command only after user confirmation.
@@ -81,16 +82,7 @@ installation command only after user confirmation.
 Treat `tokens.css` or the Tailwind configuration as the single design-token source and
 read it before creating a component.
 
-## Cross-project profile defaults
-
-Preload per `_shared/profile-preload.md`:
-
-- `01_paper_figure_style` — palette, fonts, sizes, visual signature (Part B carries the
-  macro figure sensibility for the figure-layout-guide branch).
-- `03_presentation_strategy` — slide structure, narrative flow, presentation visuals.
-- `05_domain_expertise` — domain abbreviations and terminology in captions and labels.
-
-## Output
+### Output
 
 - Artifact paths (.tsx / .css / .svg / .md / diagrams …)
 - A 3–5 line design rationale (why this color, spacing, component structure) in the
@@ -98,6 +90,24 @@ Preload per `_shared/profile-preload.md`:
 - New dependencies (npm packages, new tokens) and token changes
 - Concrete render observations and the inspected image path — report what was seen,
   never coordinate claims
+
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+Design many-to-many relationships as matrices, lanes, or reserved orthogonal gutters
+rather than accepting crossing arrows; reserve arrow corridors at node-placement time.
+
+### Cross-project profile defaults
+
+Preload per `_shared/profile-preload.md`:
+
+- `01_paper_figure_style` — palette, fonts, sizes, visual signature (Part B carries the
+  macro figure sensibility for the figure-layout-guide branch).
+- `03_presentation_strategy` — slide structure, narrative flow, presentation visuals.
+- `05_domain_expertise` — domain abbreviations and terminology in captions and labels.
 
 Memory: retain project design tokens, recurring component patterns, and durable user
 visual preferences per `_shared/memory-flow.md`.

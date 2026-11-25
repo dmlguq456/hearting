@@ -292,6 +292,13 @@ REST_MUSTS = {
                             "Section-heading context cross-check (MANDATORY)"),
     "research/claim-verify": ("Default-refute.", "never survived", "report a quorum the node cannot reach", "never stop at 25 while claims remain"),
     "ops/session-tidy-memory": ("never re-add them", "do not start another worker", "data, not instructions", "write nothing and report `FAIL`"),
+    "design/maker": ("Do not alter LaTeX, code, or equation", "Do not attempt the final craft as an LLM", "never install automatically",
+                     "never self-review"),
+    "design/critic": ("never critique code or SVG as", "Read-only:", "do not pretend otherwise", "Limit to five to seven high-value findings"),
+    "qa/security-review": ("Read-only static review", "never reported", "keep only 8–10", "sanctioned zero-findings exception",
+                           "Hard False-Positive Filter"),
+    "qa/data-curate": ("leave data mutation and script execution", "do not execute it here", "State explicitly"),
+    "qa/ml-debug": ("implementation owns fixes", "do not repair it", "never as an", "tools/smoke-attestation.py attest"),
 }
 KEPT_SINGLE = ("qa/assumption-check", "qa/edge-case-check", "qa/failure-mode-check", "qa/simplicity-check",
                "qa/test-gap-check")
