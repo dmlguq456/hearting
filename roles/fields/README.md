@@ -31,3 +31,5 @@ A common unit that keys part of its reference by field (`### 참고 — <field>`
 ## To change a page
 
 If a page is wrong or missing something, tell us in an issue or a pull request on the Hearting repository. Anyone who works in the field is welcome to. There is no form to fill in and no separate channel.
+
+Keep each fundamental on one line in the form `- head sentence — gloss [source]`. Only the head sentence is carried with the worker text; a line wrapped by indenting is joined to the item above it.

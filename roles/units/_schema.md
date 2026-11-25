@@ -87,13 +87,16 @@ the auxiliary checks keep the single-body form. A heading that splits across the
 repeated in both.
 
 **Field reference (common units, R31).** A unit that runs under more than one field may key part
-of its 참고 by field with a `### 참고 — <field>` section (field ids as in `roles/fields/`). The
+of its 참고 by field with a `### 참고 — <field>` section (field ids as in `roles/fields/`; a section
+that fits several fields names them, `### 참고 — code, lab`, and is written once). The
 runtime then carries the route's sealed field (an old route: its recipe's default field), and
 for that unit only: the field's `## Fundamentals` lines from `roles/fields/<field>.md` under
 `## 갈래의 기본 — <field>` just before `## 참고`, the common reference, and that field's sections.
-Other fields' sections are left out; an unknown field, `other` or a missing page carries the
-common reference only. 지킬 것 is never keyed by field. A unit with no such section renders as
-written.
+Other fields' sections are left out. A route whose field is unknown renders the body as written
+(every field's section, no fundamentals), as before this selection existed; `other` or a field
+with no section in the unit carries the common reference only; a missing page drops only the
+fundamentals, the field's own sections stay. 지킬 것 is never keyed by field. A unit with no
+such section renders as written.
 
 ## Floor guidance (from the investigation gradient)
 

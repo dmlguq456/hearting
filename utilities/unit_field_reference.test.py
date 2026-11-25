@@ -3,7 +3,8 @@
 
 The worker text of a unit whose `## 참고` keys sections by field (`### 참고 — <field>`) carries the
 field's fundamentals from `roles/fields/<field>.md`, the common reference and that field's sections
-only. An unknown field carries the common reference. Every other unit renders as written. The three
+only. An unknown field (None) renders the body as written, as before; `other` carries the common
+reference. Every other unit renders as written. The three
 harnesses share the one render, in a stage's bootstrap and in a unit route's first instruction.
 """
 import os, sys  # noqa: E401
@@ -84,13 +85,23 @@ class FieldReferenceSelectionTest(unittest.TestCase):
         code = W.unit_persona_body(ROOT, "plan/plan-author", "code")
         self.assertIn("This unit\nauthors the plan artifact inside the code-plan/code-refine stages", code)
 
-    def test_an_unknown_field_other_or_a_missing_page_carries_the_common_reference_only(self):
-        common = W.unit_persona_body(ROOT, "qa/code-review", None)
+    def test_an_unknown_field_renders_the_body_as_written(self):
+        for unit in FIELD_UNITS:
+            self.assertEqual(W.unit_persona_body(ROOT, unit, None), _raw(unit), unit)
+        text = W.unit_persona_body(ROOT, "qa/code-review", None)
+        self.assertNotIn("갈래의 기본", text)
+        self.assertEqual(text.count("### 참고 — code, lab"), 1)       # one section for both fields, as written
+        self.assertEqual(text.count("**Framework-specific pitfalls**"), 1)
+
+    def test_other_or_a_field_with_no_section_carries_the_common_reference_only(self):
+        common = W.unit_persona_body(ROOT, "qa/code-review", "other")
         self.assertNotIn("갈래의 기본", common)
         self.assertNotIn("### 참고 — ", common)
         self.assertIn("**Project convention adherence**", common)
-        for field in ("other", "nope", "Bad Value", 3):
+        for field in ("nope", "Bad Value", 3):
             self.assertEqual(W.unit_persona_body(ROOT, "qa/code-review", field), common, field)
+
+    def test_a_missing_page_drops_only_the_fundamentals(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "roles" / "units" / "qa").mkdir(parents=True)
@@ -102,7 +113,48 @@ class FieldReferenceSelectionTest(unittest.TestCase):
             (root / "roles" / "fields").mkdir()
             (root / "roles" / "fields" / "code.md").write_text("# code\n\n## Not decided here\n\n- x\n",
                                                                 encoding="utf-8")
-            self.assertNotIn("갈래의 기본", W.unit_persona_body(root, "qa/code-review", "code"))
+            no_fundamentals = W.unit_persona_body(root, "qa/code-review", "code")
+            self.assertNotIn("갈래의 기본", no_fundamentals)
+            self.assertIn("### 참고 — code", no_fundamentals)
+
+    def test_a_lab_review_keeps_the_five_code_criteria_once(self):
+        lab = W.unit_persona_body(ROOT, "qa/code-review", "lab")
+        self.assertIn("### 참고 — code, lab", lab)
+        for name in ("Bug potential", "Performance", "Code quality", "Maintainability", "Framework-specific pitfalls"):
+            self.assertEqual(lab.count(f"**{name}**"), 1, name)
+        self.assertEqual(W.unit_persona_body(ROOT, "qa/code-review", "code").count("**Framework-specific pitfalls**"), 1)
+
+    def test_a_dispatch_line_stays_common_for_plan_author(self):
+        for field in ("code", "lab", "docs", "other"):
+            text = W.unit_persona_body(ROOT, "plan/plan-author", field)
+            self.assertIn("It is dispatched, never user-invoked directly.", text, field)
+        self.assertNotIn("code-plan/code-refine stages", W.unit_persona_body(ROOT, "plan/plan-author", "lab"))
+
+    def test_a_wrapped_fundamental_is_joined_before_it_is_cut(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "roles" / "fields").mkdir(parents=True)
+            (root / "roles" / "fields" / "code.md").write_text(
+                "# code\n\n## Fundamentals\n\n- A change that makes things\n  better is approved. — gloss\n  more gloss [1–4]\n"
+                "- Second one [2]\n- Third — gloss [3]\n\n## Sources\n\n  1. not an item\n", encoding="utf-8")
+            self.assertEqual(W.field_fundamentals(root, "code"),
+                             ["A change that makes things better is approved.", "Second one", "Third"])
+
+    def test_a_section_may_name_several_fields_and_is_carried_once(self):
+        body = ("## 지킬 것\n\nmust\n\n## 참고\n\ncommon\n\n### 참고 — code, lab\n\nshared\n\n"
+                "### 참고 — docs\n\ndocs only\n\n### Style\n\ncommon again\n")
+        for field, shared, docs in (("code", True, False), ("lab", True, False), ("docs", False, True),
+                                    ("design", False, False)):
+            text = W.unit_field_reference(ROOT, body, field)
+            self.assertEqual(("shared" in text, "docs only" in text), (shared, docs), field)
+            self.assertIn("common again", text)
+        self.assertEqual(W.unit_field_reference(ROOT, body, None), body)
+
+    def test_a_tilde_fence_hides_a_section_heading(self):
+        body = "## 지킬 것\n\nmust\n\n## 참고\n\ncommon\n\n~~~\n### 참고 — code\nfenced\n~~~\n\n### 참고 — docs\n\ndocs only\n"
+        text = W.unit_field_reference(ROOT, body, "lab")
+        self.assertIn("fenced", text)
+        self.assertNotIn("docs only", text)
 
     def test_every_must_line_and_the_stance_stay_for_every_field(self):
         stance = W.unit_stance_text(ROOT, "qa/code-review")
@@ -209,11 +261,14 @@ class ThreeHarnessRenderTest(unittest.TestCase):
             self.assertEqual(len(set(texts.values())), 1, route)
             self.assertEqual(texts["claude"], W.render_worker_bootstrap(ROOT, "review", unit="qa/code-review",
                                                                         field=field))
+            if field is None:                      # an unknown field is the unit text as written
+                self.assertIn("### 참고 — code, lab", texts["claude"])
+                self.assertNotIn("갈래의 기본", texts["claude"])
         docs = self.stage_text("codex", self.stage_args(self.route({"field": "docs"})))
         self.assertIn("## 갈래의 기본 — docs", docs)
         self.assertNotIn("PyTorch", docs)
 
-    def test_an_unreadable_route_still_renders_the_common_text(self):
+    def test_an_unreadable_route_still_renders_the_unit_text_as_written(self):
         for path in (str(self.tmp / "missing.json"), self.route({"field": "docs"}).replace("route-", "gone-")):
             text = self.stage_text("opencode", self.stage_args(path))
             self.assertEqual(text, W.render_worker_bootstrap(ROOT, "review", unit="qa/code-review"))
@@ -258,7 +313,47 @@ class ThreeHarnessRenderTest(unittest.TestCase):
         self.assertNotIn("code-plan/code-refine stages", lab)
         old = self.unit_leg("opencode", {"capability": "unit"})       # an old unit route, sealed without a field
         self.assertNotIn("갈래의 기본", old)
-        self.assertNotIn("### 참고 — code", old)
+        self.assertIn("### 참고 — code", old)            # the body as written, as before the selection
+
+    def review_leg(self, harness, field):
+        adapter = self.adapters[harness]
+        args = argparse.Namespace(
+            capability="unit", capability_mode="default", worker_mode="qa/code-review", qa="quick", intensity="quick",
+            dispatch_depth=1, worker_type="review", attempt_id="att-field", assigned_contract="unit",
+            route_node="unit", route_file=self.route({"capability": "unit", "field": field}), route_id="rt-field",
+            owner_route_binding=None, unit="qa/code-review", worktree=str(self.tmp), artifact_root=str(self.tmp),
+            parent_attempt_id=None, continues_attempt_id=None, completion_gate=None)
+        with mock.patch.object(W, "resolve_node_scope", return_value={}), \
+                mock.patch.object(W, "_child_scope_environment", return_value={}), \
+                mock.patch.object(W, "node_scope_prompt", return_value="Node scope: fixed.\n"), \
+                mock.patch.object(W, "_bootstrap_memory_block", return_value="WS-ONE keep reviews short."), \
+                mock.patch.object(adapter.DISPATCH_MAIN, "dispatch_metadata_prompt",
+                                  return_value="Dispatch metadata:\n- unit: x\n"):
+            return adapter.DISPATCH_MAIN.unit_leg_prompt(adapter._ADAPTER, args, "Review the diff.\n")
+
+    def test_the_review_unit_a_unit_route_really_runs(self):
+        # qa/code-review (a review worker, read-only) is the unit that runs as a unit route: stance first, once.
+        stance = W.unit_stance_text(ROOT, "qa/code-review")
+        for field in ("code", None):
+            prompts = {harness: self.review_leg(harness, field) for harness in self.HARNESSES}
+            self.assertEqual(len(set(prompts.values())), 1, field)
+            prompt = prompts["claude"]
+            self.assertTrue(prompt.startswith(stance), field)               # the stance leads the text
+            self.assertEqual(prompt.count(stance), 1, field)                 # and is carried once
+            self.assertIn(_must_layer("qa/code-review"), prompt)
+            self.assertEqual(prompt.count("WS-ONE keep reviews short."), 1)
+            self.assertIn("exactly these three newline-delimited", prompt)
+            self.assertLess(len(prompt.encode("utf-8")), 15000)
+        code = self.review_leg("claude", "code")
+        self.assertIn("## 갈래의 기본 — code", code)
+        self.assertIn("Hold these in view; they set no order, tool or depth.", code)
+        for name in ("Bug potential", "Performance", "Code quality", "Maintainability", "Framework-specific pitfalls"):
+            self.assertEqual(code.count(f"**{name}**"), 1, name)
+        unknown = self.review_leg("claude", None)                           # unknown: the old text, as written
+        self.assertNotIn("갈래의 기본", unknown)
+        raw = W.unit_persona_body(ROOT, "qa/code-review", None)
+        self.assertIn(raw, unknown)
+        self.assertEqual(unknown.count("**Framework-specific pitfalls**"), 1)
 
 
 if __name__ == "__main__":

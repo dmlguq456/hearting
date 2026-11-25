@@ -330,15 +330,32 @@ def analyse_report(text: str, round_index: int, blocking: bool) -> dict:
 
 # -- rendering ------------------------------------------------------------------------------------
 
+_UNIT_FIELD_RE = re.compile(r"^field:[ \t]*([a-z][a-z0-9_-]*)[ \t]*(?:#.*)?$", re.MULTILINE)
+
+
+def unit_head_field(root: Path, unit: str) -> str | None:
+    """The `field:` of the unit's head, which the runtime reads for its route; None when the head has none."""
+    try:
+        text = (root / "roles" / "units" / f"{unit}.md").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    head = text.split("\n---", 2)[0] if text.startswith("---") else ""
+    found = _UNIT_FIELD_RE.search(head)
+    return found.group(1) if found else None
+
+
 def render_bytes(root: Path) -> dict:
-    """Rendered worker-text bytes per unit in its usual form; qa/test (it runs in both) also in the stage form."""
+    """Rendered worker-text bytes per unit in its usual form; qa/test (it runs in both) also in the stage form.
+
+    A unit whose head names a `field:` is rendered for that field, as its worker receives it."""
     sys.path.insert(0, str(ROOT / "utilities"))
     import worker_bootstrap as wb  # noqa: E402
     out = {}
     jobs = [(unit, unit, WORKER_TYPE[unit]) for unit in UNITS] + [("qa/test@stage", "qa/test", "stage")]
     for key, unit, worker_type in jobs:
         try:
-            out[key] = len(wb.render_worker_bootstrap(root, worker_type, unit=unit).encode("utf-8"))
+            text = wb.render_worker_bootstrap(root, worker_type, unit=unit, field=unit_head_field(root, unit))
+            out[key] = len(text.encode("utf-8"))
         except (OSError, ValueError):
             out[key] = None
     return out

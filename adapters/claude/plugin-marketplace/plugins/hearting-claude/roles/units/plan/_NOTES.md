@@ -69,8 +69,9 @@ section is an output or location rule.
 This unit runs under `code` (code-plan, code-refine) and `lab` (`autopilot-lab:eval-spec`). No word
 changed. The role paragraph was cut at a sentence boundary: "You analyze source code and produce
 detailed, accurate implementation plans." and "This unit authors the plan artifact inside the
-code-plan/code-refine stages; it is dispatched, never user-invoked directly." moved under
-`### 참고 — code`; the specialist sentence and the project instruction-file pointer stay common.
+code-plan/code-refine stages." moved under `### 참고 — code`; the specialist sentence, the project
+instruction-file pointer and "it is dispatched, never user-invoked directly." (fix 1, 2026-11-25:
+it is field-independent; only its first letter became a capital) stay common. A route whose field is unknown renders the body as written.
 A `lab` plan gets the lab fundamentals; its eval-spec line stays in 지킬 것. The profile preloads,
 plan steps 1–3 and Memory were not split (a memory read or write would change, which this step
 does not do).

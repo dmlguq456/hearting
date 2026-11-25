@@ -180,26 +180,36 @@ def unit_persona_body(root: Path, unit: str | None, field: str | None = None) ->
     return unit_field_reference(root, _FRONTMATTER_RE.sub("", text, count=1).strip(), field)
 
 
-_FIELD_SECTION_RE = re.compile(r"^### 참고 — ([a-z][a-z0-9_-]{0,31})[ \t]*$")
+_FIELD_NAME = r"[a-z][a-z0-9_-]{0,31}"
+# One section may name several fields (``### 참고 — code, lab``): it is carried for each, written once.
+_FIELD_SECTION_RE = re.compile(rf"^### 참고 — ({_FIELD_NAME}(?:, {_FIELD_NAME})*)[ \t]*$")
 _REFERENCE_LAYER = "## 참고"
 
 
 def field_fundamentals(root: Path, field: str | None) -> list[str]:
     """The lines of ``roles/fields/<field>.md``'s ``## Fundamentals`` list, each without its gloss
-    and source numbers; ``[]`` for no field, ``other``, a missing page or any read failure."""
+    and source numbers; ``[]`` for no field, ``other``, a missing page or any read failure.
+
+    An item is ``- head sentence — gloss [source]``; an indented line after it continues it, so
+    a wrapped item is joined before it is cut."""
     if not isinstance(field, str) or not _FIELD_LABEL_RE.match(field):
         return []
     try:
         text = (Path(root) / "roles" / "fields" / f"{field}.md").read_text(encoding="utf-8")
     except (OSError, ValueError):
         return []
-    lines, inside = [], False
+    items, inside = [], False
     for line in text.splitlines():
         if line.startswith("## "):
             inside = line.startswith("## Fundamentals")
         elif inside and line.startswith("- "):
-            head = line[2:].split(" — ", 1)[0]
-            lines.append(re.sub(r"\s*\[[^\]]*\]\s*$", "", head).strip())
+            items.append(line[2:].strip())
+        elif inside and items and line[:1] in (" ", "\t") and line.strip():
+            items[-1] += " " + line.strip()
+    lines = []
+    for item in items:
+        head = item.split(" — ", 1)[0]
+        lines.append(re.sub(r"\s*\[[^\]]*\]\s*$", "", head).strip())
     return [line for line in lines if line]
 
 
@@ -208,27 +218,30 @@ def unit_field_reference(root: Path, body: str, field: str | None) -> str:
 
     Only a body whose ``## 참고`` holds ``### 참고 — <field>`` sections changes: sections of
     other fields are left out, and the field's fundamentals (``roles/fields/<field>.md``) are
-    carried just before ``## 참고``. An unknown field, ``other`` or a missing page carries the
-    common reference only; ``## 지킬 것`` and everything outside those sections stay as written."""
-    fence, layer_at, keep, kept, found = False, None, True, [], False
+    carried just before ``## 참고``. A route whose field is unknown (None) gets the body as
+    written, every field's section and no fundamentals, as before this selection existed.
+    ``other`` or a field with no section here carries the common reference only. A missing page
+    drops only the fundamentals; the field's own sections stay. ``## 지킬 것`` and everything
+    outside those sections stay as written."""
+    fence, layer_at, keep, kept, found = None, None, True, [], False
     for line in body.split("\n"):
-        if line.startswith("```"):
-            fence = not fence
+        if line.startswith(("```", "~~~")):
+            fence = None if fence == line[:3] else (fence or line[:3])
         heading = not fence and line.startswith(("## ", "### "))
         if heading and line.rstrip() == _REFERENCE_LAYER and layer_at is None:
             layer_at = len(kept)
         if heading and layer_at is not None:
             match = _FIELD_SECTION_RE.match(line)
             found = found or bool(match)
-            keep = match is None or match.group(1) == field
+            keep = match is None or field in match.group(1).split(", ")
         if keep:
             kept.append(line)
-    if not found:
+    if not found or field is None:
         return body
     fundamentals = field_fundamentals(root, field)
     if fundamentals:
         block = [f"## 갈래의 기본 — {field}", "",
-                 f"From `roles/fields/{field}.md`, which gives the reasons and sources. Keep these; "
+                 f"From `roles/fields/{field}.md`, which gives the reasons and sources. Hold these in view; "
                  "they set no order, tool or depth.", ""]
         block += [f"- {line}" for line in fundamentals] + [""]
         kept[layer_at:layer_at] = block
@@ -240,7 +253,7 @@ def unit_route_field(args) -> str | None:
 
     A route sealed before fields existed reads its recipe's default field through
     ``capability_topology.route_field``. An unreadable route or any failure is None, so the
-    unit text carries its common reference only and the launch goes on."""
+    unit text is carried as written and the launch goes on."""
     try:
         route_file = getattr(args, "route_file", None) or getattr(
             getattr(args, "owner_route_binding", None), "route_file", None)

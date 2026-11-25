@@ -162,7 +162,7 @@ Effort scaling: low/medium effort yields a small set of high-confidence findings
 high through max broadens coverage across correctness, reuse, simplification, and
 efficiency and may include more uncertainty.
 
-### 참고 — code
+### 참고 — code, lab
 
 Review criteria for code:
 
