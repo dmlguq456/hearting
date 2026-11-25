@@ -2355,12 +2355,12 @@ def _exited_owner_response(route, result, jobs, aid, **extra):
 PIN_HANDOFF_SUMMARY = "owner-pin-handoff"
 
 
-def _pin_handoff_close_command(path, jobs):
-    # close already owns cancellation and resource preservation on every harness.
-    # It reads the registry from the environment rather than a --jobs option.
+def _close_command(path, jobs, *summary) -> str:
+    """The parent's `close` for this route: it stops the route as it ended (an unproven closure).
+    close already owns cancellation and resource preservation on every harness. It reads the registry
+    from the environment rather than a --jobs option."""
     return shlex.join(["env", f"AGENT_DISPATCH_JOBS={Path(jobs).resolve()}", sys.executable,
-                       entrypoint(ROOT, "utilities/capability-route.py"), "close", "--route", str(path),
-                       "--summary", PIN_HANDOFF_SUMMARY])
+                       entrypoint(ROOT, "utilities/capability-route.py"), "close", "--route", str(path), *summary])
 
 
 def _owner_pin_handoff(route, path, jobs, result, rows=None):
@@ -2383,7 +2383,7 @@ def _owner_pin_handoff(route, path, jobs, result, rows=None):
             "owner_attempt_id": aid, "owner_started": metadata.get("launch_started") == "1",
             "harness": metadata["harness"], "requested_harness": pinned,
             "required_action": "close-owner-for-handoff",
-            "recovery_command": _pin_handoff_close_command(path, jobs),
+            "recovery_command": _close_command(path, jobs, "--summary", PIN_HANDOFF_SUMMARY),
             "next_step": "Run recovery_command to settle this owner through the existing close. "
                 "Resource runs are preserved. The close receipt then gives the start command "
                 "for the unfinished stages on the current pin."}
@@ -2401,7 +2401,7 @@ def pin_handoff_continuation(route, path, jobs, outcome):
     if outcome.get("terminal_gate_proven") is True:
         return outcome  # normal completion won the close race; no unfinished handoff
     if outcome.get("state") != "cancelled":
-        return {**outcome, "recovery_command": _pin_handoff_close_command(path, jobs)}
+        return {**outcome, "recovery_command": _close_command(path, jobs, "--summary", PIN_HANDOFF_SUMMARY)}
     metadata = (_rows(jobs).get(outcome.get("owner_attempt_id")) or (None, {}))[1]
     owned = _owns(metadata, _current_parent_session_id(), jobs)
     if owned is None:  # an unreadable seat lineage: wait, as the preparation failure below does
@@ -2475,14 +2475,38 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 "required_action":"resume-inline-finish", "finish_state":pending.get("state")}
     unit = unit_leg(route)
     node = unit["id"] if unit is not None else UC.OWNER if follow_up_owner_route(route) else None
+    turn = set_aside = None
     if node is not None:
         rows = _rows(jobs)
-        if UC.ready_to_continue(jobs, route, path, node, rows) is not None:
+        turn = UC.ready_to_continue(jobs, route, path, node, rows)
+        if turn is not None:
             # A kept request for the route's next turn and nothing in its way: reopen the route (the closure
             # record is set aside, not deleted) and start the turn below.
             turns = UC.chain(rows, route["route_id"], node)
             require_route_parent(turns[-1][2], jobs, turns[-1][0])
-            UC.reopen(path)
+            set_aside = UC.reopen(path)
+
+    def keep_closure():
+        # The next turn was not admitted (a refused claim, an access or shape refusal): the closure goes back, so
+        # the route stays closed on its earlier result and the kept request waits for the next start.
+        if set_aside is not None and turn.attempt_id not in _rows(jobs):
+            UC.restore_closure(path, set_aside)
+    try:
+        receipt = _advance_open(route, path, jobs, result, request, resume, wait=wait, interview=interview,
+                                answers=answers, decision=decision, run=run, sleep=sleep, clock=clock)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            keep_closure()
+        raise
+    if receipt.get("state") != "waiting-capacity":   # a usage-limit wait keeps the start it will resume
+        keep_closure()
+    return receipt
+
+
+def _advance_open(route, path, jobs, result, request, resume, *, wait, interview, answers, decision, run, sleep,
+                  clock):
+    """`_advance` past a reopening: settle a closed route, or prepare and start what the route runs next."""
+    from dispatch_notice_state import closed_outcome
     closed = closed_outcome(path, route)
     if closed and closed.get("autoclose"):
         # The runtime closed this route after it sat unused (route_autoclose.py).
@@ -2895,7 +2919,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
             return {**{key: value for key, value in result.items() if key != "correction_command"},
                     "state": "needs-attention", "reason": "workflow-executor-exited",
                     "missing_terminal_gates": missing, "required_action": "report-unfinished-work",
-                    "close_command": _close_command(path),
+                    "close_command": _close_command(path, jobs),
                     "next_step": "The owner exited before the declared stages completed"
                         + (", and this is already a continuation of an earlier owner. "
                            if dispatch_replacement.created_as(jobs, metadata) else ". ")
@@ -2947,7 +2971,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 "result": _outcome(jobs, aid),
                 **({"owner_report": report} if report else {}),
                 **({"owner_log_file": str(metadata["log_file"])} if not report and metadata.get("log_file") else {}),
-                "close_command": _close_command(path),
+                "close_command": _close_command(path, jobs),
                 "next_step": f"{opening} {report_context} Get the person's answer (or fix what it names), then run correction_command with "
                     "--message-file <answer file>: that continues this route at once in a replacement owner that "
                     "receives the answer (in the same session when it can be woken). Do not recompose the route. "
@@ -3150,6 +3174,9 @@ def correct_unit_route(route, path, jobs, text, request_id=None, **start_kwargs)
         kept = UC.submit(jobs, route["route_id"], text, request_id,
                          source_session=route_authority.correction_source_session(), unit=unit_label)
     except DispatchContractError as exc:
+        if getattr(exc, "retry_when", None):   # an unreadable seat lineage: the same command, once it reads again
+            return 69, {"state": "not-admitted", "reason": exc.reason, "retry_when": exc.retry_when,
+                        "next_step": exc.retry_when}
         return 69, {"state": "not-admitted", "reason": exc.reason,
                     "retry_when": "The route's launching session (or the worker that started it) asks.",
                     "next_step": "Only the session that started this unit route can ask for another turn."}
@@ -3180,12 +3207,6 @@ def correct_unit_route(route, path, jobs, text, request_id=None, **start_kwargs)
                                 "has ended and the route has closed: run resume_command then (the end notice "
                                 "carries it). ") + str(receipt.get("next_step") or "")
     return 0, receipt
-
-
-def _close_command(path) -> str:
-    """The parent's `close` for this route: it stops the route as it ended (an unproven closure)."""
-    return shlex.join([sys.executable, entrypoint(ROOT, "utilities/capability-route.py"), "close",
-                       "--route", str(path)])
 
 
 def follow_up_owner_route(route) -> bool:
@@ -3240,6 +3261,9 @@ def correct_owner_route(route, path, jobs, text, request_id=None, **start_kwargs
         kept = UC.submit(jobs, route["route_id"], text, request_id,
                          source_session=route_authority.correction_source_session())
     except DispatchContractError as exc:
+        if getattr(exc, "retry_when", None):   # an unreadable seat lineage: the same command, once it reads again
+            return 69, {"state": "not-admitted", "reason": exc.reason, "retry_when": exc.retry_when,
+                        "next_step": exc.retry_when}
         return 69, {"state": "not-admitted", "reason": exc.reason,
                     "retry_when": "The session that opened this work asks.",
                     "next_step": "Only the session that opened this route can give it a later request."}

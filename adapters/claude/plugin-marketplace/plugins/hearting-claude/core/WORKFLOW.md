@@ -1539,8 +1539,8 @@ Only a real user decision reaches a person: the continuation names it and ends
 waiting for an approved fix. An owner that ended `PASS` with declared stages undone is
 continued the same way once: its PASS stays as recorded, and the replacement receives the
 undone stages as observations. No gate, close, or recompose is needed. A replacement on the same
-harness wakes the earlier owner's session when it still exists and starts fresh otherwise
-(`session: resumed | fresh:<reason>`, OPERATIONS §5.10c). The answer receipt names both actions a
+harness wakes the earlier owner's session when it still exists and the runtime did not end it
+without a result, and starts fresh otherwise (`session: resumed | fresh:<reason>`, OPERATIONS §5.10c). The answer receipt names both actions a
 parent can take: `correction_command` with the answer, or `close_command` to stop the route.
 
 A continuation route projects this contract onto its suffix. It drops a gate

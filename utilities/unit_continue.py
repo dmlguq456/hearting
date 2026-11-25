@@ -11,6 +11,7 @@ turn's prompt. It owns no process, no poller and no new state beyond the text st
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -263,10 +264,22 @@ def ready_to_continue(jobs, route, path, node, rows) -> Optional[Turn]:
     return turn if superseded_count(path) >= last_turn(turns) else None
 
 
-def reopen(path) -> None:
-    """Set the closure record aside so the route can start its next turn (never deletes it)."""
+def reopen(path) -> Optional[Path]:
+    """Set the closure record aside so the route can start its next turn (never deletes it); the set-aside path."""
     from capability_route_close import retire_stale_closure
-    retire_stale_closure(Path(path))
+    return retire_stale_closure(Path(path))
+
+
+def restore_closure(path, set_aside) -> bool:
+    """Put a closure `reopen` set aside back when the next turn did not start; never over a newer closure."""
+    from capability_route_close import outcome_path
+    try:
+        os.link(set_aside, outcome_path(Path(path)))
+    except OSError:
+        return False        # the route was closed again meanwhile, or the set-aside record is gone: leave both
+    with contextlib.suppress(OSError):
+        os.unlink(set_aside)
+    return True
 
 
 # -- the session ------------------------------------------------------------------------------------
@@ -332,8 +345,19 @@ def opencode_session_exists(session_id) -> bool:
     return done.returncode == 0
 
 
+def ended_without_result(meta) -> bool:
+    """Whether the runtime, not the model, ended this attempt with no result: its supervisor failed, its process
+    was killed or went silent (`route_authority`'s `runtime` and `silent` ends). A usage limit is not one."""
+    from dispatch_replacement import DEATH_NOTES
+    from dispatch_supervisor_terminal import runtime_ended_without_result
+    return runtime_ended_without_result(meta) or meta.get("note") in DEATH_NOTES
+
+
 def session_plan(jobs, prev_attempt_id, harness, *, exists=None) -> SessionPlan:
-    """Whether the turn after `prev_attempt_id` wakes its session on `harness`, or starts a fresh one."""
+    """Whether the turn after `prev_attempt_id` wakes its session on `harness`, or starts a fresh one.
+
+    A session the runtime ended without a result (killed mid-tool, a supervisor error, a resume that failed)
+    is not woken: the next attempt starts fresh, so one broken session is never retried in the same lineage."""
     exists = exists or opencode_session_exists
     from dispatch_completion_join import exact_attempt_row
     try:
@@ -342,6 +366,8 @@ def session_plan(jobs, prev_attempt_id, harness, *, exists=None) -> SessionPlan:
         return SessionPlan("fresh", "session-missing", "", "")
     if meta.get("harness") != harness:
         return SessionPlan("fresh", "harness-changed", "", "")
+    if ended_without_result(meta):
+        return SessionPlan("fresh", "resume-refused", "", "")
     session_id = session_id_of(meta)
     if harness == "opencode":
         from opencode_runtime import is_v2
@@ -399,12 +425,18 @@ def transplant(plan, new_home) -> None:
     if destination.is_file() and os.path.samefile(source, destination):
         return      # the new attempt runs in the same home (a networked Codex owner's home is its worktree's): nothing moves
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
-    sibling = source.with_suffix("")
-    if sibling.is_dir():
-        shutil.copytree(sibling, destination.with_suffix(""), symlinks=True, dirs_exist_ok=True)
-    if not destination.is_file() or destination.stat().st_size != source.stat().st_size:
-        raise ContinueError("session-transplant-incomplete")
+    try:
+        shutil.copy2(source, destination)
+        sibling = source.with_suffix("")
+        if sibling.is_dir():
+            shutil.copytree(sibling, destination.with_suffix(""), symlinks=True, dirs_exist_ok=True)
+        if not destination.is_file() or destination.stat().st_size != source.stat().st_size:
+            raise ContinueError("session-transplant-incomplete")
+    except (OSError, ContinueError):
+        # A partial copy would hold the session id a fresh start of this launch then uses.
+        with contextlib.suppress(OSError):
+            destination.unlink()
+        raise
 
 
 # -- the turn's prompt ------------------------------------------------------------------------------
@@ -471,7 +503,8 @@ def owner_turn_prompt(args, plan, metadata_block, prompt, recovery, jobs) -> str
     """What an owner that takes over from an earlier owner of the same route is told (`owner_predecessor`).
 
     A woken session already holds the assignment, the kernel and the route steps: it gets this attempt's
-    dispatch facts and only what is new, the recovery context of a replacement (an answer, the runtime's
+    dispatch facts (with this launch's commit policy and the node's declared scope, `launch_policy_prompt`)
+    and only what is new, the recovery context of a replacement (an answer, the runtime's
     observation, a usage limit) or the request of a later turn. A fresh session gets the whole prompt as
     before, the same new text and why it starts fresh."""
     reason = plan.reason if plan is not None and plan.kind != "resumed" else "session-missing"

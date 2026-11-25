@@ -2229,6 +2229,21 @@ def _child_scope_environment(args, route, environ, source_worktree=None):
     return child
 
 
+def declared_scope_prompt(args, environ) -> str:
+    """This node's declared scope (`node_scope_prompt`), resolved as `assignment_prompt` resolves it; '' without
+    a route file."""
+    route_file = getattr(args, "route_file", None)
+    if not route_file:
+        return ""
+    route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+    source_worktree = _linked_slice_source_worktree(args, route)
+    scope = resolve_node_scope(
+        route, getattr(args, "route_node", None), _child_scope_environment(args, route, environ, source_worktree),
+        parent_attempt_id=getattr(args, "parent_attempt_id", None), route_file=route_file,
+        source_worktree=source_worktree, source_worktree_verified=source_worktree is not None)
+    return node_scope_prompt(scope)
+
+
 def assignment_prompt(args, task: str, environ) -> str:
     """Project the route's input/output boundary, rather than ask a caller to copy it.
 
