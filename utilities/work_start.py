@@ -709,10 +709,12 @@ def _slot(route, node, rows, jobs=None, path=None):
                     route["route_id"], route["route_hash"]):
                 matches = [owner]
                 adopted[owner] = binding
-    if matches and path is not None and jobs is not None and node != "owner" and unit_leg(route, node):
+    if matches and path is not None and jobs is not None and (
+            (node != "owner" and unit_leg(route, node)) or (node == "owner" and follow_up_owner_route(route))):
         # A unit route's next turn is a new attempt of this node once the last one ended and the route is closed
-        # (or reopened for it): the slot is then that turn's id, which has no row yet.
-        turn = UC.ready_to_continue(jobs, route, path, node, rows)
+        # (or reopened for it): the slot is then that turn's id, which has no row yet. A one-shot owner route
+        # takes a later request the same way once its owner closed it PASS.
+        turn = UC.ready_to_continue(jobs, route, path, UC.OWNER if node == "owner" else node, rows)
         if turn is not None:
             return turn.attempt_id
     aid = matches[-1] if matches else attempt_id(route, node)
@@ -850,7 +852,9 @@ def _start(route, path, jobs, node, harness, run, on_registered=None):
 
 def _start_bound(route, path, jobs, node, harness, run, on_registered, repository):
     # A unit route's next turn is a new attempt of the same node; its text and its predecessor ride along.
-    turn = UC.next_turn(jobs, route, node, _rows(jobs)) if unit_leg(route, node) else None
+    turn = (UC.next_turn(jobs, route, node, _rows(jobs)) if unit_leg(route, node) else
+            UC.next_turn(jobs, route, UC.OWNER, _rows(jobs)) if node == "owner" and follow_up_owner_route(route)
+            else None)
     aid = turn.attempt_id if turn else attempt_id(route, node)
     command = [sys.executable, str(ROOT / "utilities/dispatch-owner.py"), "--start",
                "--route-evidence", str(path), "--jobs", str(jobs),
@@ -2470,12 +2474,13 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
         return {**result, "state":"needs-attention", "reason":"finish-pending",
                 "required_action":"resume-inline-finish", "finish_state":pending.get("state")}
     unit = unit_leg(route)
-    if unit is not None:
+    node = unit["id"] if unit is not None else UC.OWNER if follow_up_owner_route(route) else None
+    if node is not None:
         rows = _rows(jobs)
-        if UC.ready_to_continue(jobs, route, path, unit["id"], rows) is not None:
-            # A kept request for a unit route's next turn and nothing in its way: reopen the route (the closure
+        if UC.ready_to_continue(jobs, route, path, node, rows) is not None:
+            # A kept request for the route's next turn and nothing in its way: reopen the route (the closure
             # record is set aside, not deleted) and start the turn below.
-            turns = UC.chain(rows, route["route_id"], unit["id"])
+            turns = UC.chain(rows, route["route_id"], node)
             require_route_parent(turns[-1][2], jobs, turns[-1][0])
             UC.reopen(path)
     closed = closed_outcome(path, route)
@@ -2795,7 +2800,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
     if RP.is_framed_route(route):
         return _framed_settle(route, path, jobs, result, wait=wait, run=run, sleep=sleep, clock=clock)
     rows = _rows(jobs)
-    aid = _slot(route, "owner", rows, jobs)
+    aid = _slot(route, "owner", rows, jobs, path)
     refusal = None
     owner_start = route_authority.decide_continuation(route, action="owner-start",
         facts={"registered": aid in rows})
@@ -2849,7 +2854,9 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 "next_step": f"The owner did not start ({reason}); nothing ran and nothing failed. "
                     "Run resume_command again later (for a busy admission lock, after about a minute); "
                     "it starts the owner again."}
-    result.update(owner_attempt_id=aid, owner_started=metadata.get("launch_started") == "1")
+    result.update(owner_attempt_id=aid, owner_started=metadata.get("launch_started") == "1",
+                  # A later turn's number and session, or the session of an owner that took over from another.
+                  **(_turn_fields(metadata, jobs) or ({"session": metadata["session"]} if metadata.get("session") else {})))
     result["correction_command"] = correction_command(aid, jobs, agent_home=ROOT)
     handoff = _owner_pin_handoff(route, path, jobs, result, rows)
     if handoff is not None:
@@ -2884,13 +2891,17 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                             "retry_when": replacement.get("retry_when", ""),
                             "next_step": replacement.get("retry_when") or replacement.get(
                                 "next_step", "Retry resume_command after the exact launch settles.")}
-            return {**result, "state": "needs-attention", "reason": "workflow-executor-exited",
+            # The owner input path takes no text for a PASS row, so no correction is offered here.
+            return {**{key: value for key, value in result.items() if key != "correction_command"},
+                    "state": "needs-attention", "reason": "workflow-executor-exited",
                     "missing_terminal_gates": missing, "required_action": "report-unfinished-work",
+                    "close_command": _close_command(path),
                     "next_step": "The owner exited before the declared stages completed"
                         + (", and this is already a continuation of an earlier owner. "
                            if dispatch_replacement.created_as(jobs, metadata) else ". ")
                         + "Preserve its report and committed result, and report these missing stages. Waiting "
-                        "or repeating finalization cannot execute them."}
+                        "or repeating finalization cannot execute them. To end the route as it is, run "
+                        "close_command (its closure records the stages as unproven)."}
     joined = _timed_join(
         result, clock, jobs=jobs, expected_attempts={aid},
         timeout=_wait_budget(result) if wait else 0, recover=True, observe_only=not wait)
@@ -2936,9 +2947,11 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 "result": _outcome(jobs, aid),
                 **({"owner_report": report} if report else {}),
                 **({"owner_log_file": str(metadata["log_file"])} if not report and metadata.get("log_file") else {}),
+                "close_command": _close_command(path),
                 "next_step": f"{opening} {report_context} Get the person's answer (or fix what it names), then run correction_command with "
                     "--message-file <answer file>: that continues this route at once in a replacement owner that "
-                    "receives the answer. Do not close or recompose the route."}
+                    "receives the answer (in the same session when it can be woken). Do not recompose the route. "
+                    "If the person stops the work instead, run close_command."}
     if replacement.get("state") == "needs-attention":
         result["replacement_attention"] = [replacement]
         if replacement["reason"] == "replacement-capacity-wait":
@@ -3166,6 +3179,90 @@ def correct_unit_route(route, path, jobs, text, request_id=None, **start_kwargs)
         receipt["next_step"] = ("The text is kept for this route's next turn. It starts when the running turn "
                                 "has ended and the route has closed: run resume_command then (the end notice "
                                 "carries it). ") + str(receipt.get("next_step") or "")
+    return 0, receipt
+
+
+def _close_command(path) -> str:
+    """The parent's `close` for this route: it stops the route as it ended (an unproven closure)."""
+    return shlex.join([sys.executable, entrypoint(ROOT, "utilities/capability-route.py"), "close",
+                       "--route", str(path)])
+
+
+def follow_up_owner_route(route) -> bool:
+    """A route one owner makes alone with nothing else declared (`solo` at quick): once its owner closed it PASS,
+    a later request from the session that opened it continues it as the route's next owner turn.
+
+    A route with review, frame or resource nodes keeps its own path: its completion markers are the route's,
+    so a later turn would read the earlier review as its own. A leg of an approved plan or a route grouped
+    under a parent cycle has its cycle fixed by that grouping."""
+    from route_form import one_shot_owner
+    nodes = [node for node in route.get("nodes") or [] if isinstance(node, dict)]
+    return bool(route.get("capability") != "unit" and route.get("route_plan") is None
+                and "parent_cycle_id" not in route and len(nodes) == 1 and one_shot_owner(route))
+
+
+def correct_owner_route(route, path, jobs, text, request_id=None, **start_kwargs):
+    """`correct` with a message on a closed route whose one-shot owner ended PASS: keep `text` for the route's
+    next owner turn and start it, through the store, chain and reopening a unit route's next turn uses.
+
+    Returns `(exit_code, receipt)`, or None when the route is not closed that way (its owner is still running,
+    settling or waiting for an answer): the owner input path then answers as before."""
+    if text is None:
+        return None
+    from dispatch_notice_state import closed_outcome
+    closed = closed_outcome(Path(path), route)
+    if closed:
+        _restore_archived_route(jobs, route["route_id"])
+    rows = _rows(jobs)
+    turns = UC.chain(rows, route["route_id"], UC.OWNER)
+    if not turns:
+        return None
+    reopened = not closed and UC.ready_to_continue(jobs, route, path, UC.OWNER, rows) is not None
+    if not closed and not reopened:
+        return None
+    last_id, last_status, last_meta = turns[-1]
+    import route_parent_close
+    stopped = (last_status in {"cancelled", "killed"} or last_meta.get("parent_close_requested") == "1"
+               or route_parent_close.row_requested(last_meta, jobs))
+    passed = last_status == "done" and verdict_pass(last_meta)
+    if closed and (stopped or not passed or closed.get("autoclose")):
+        return 69, {"state": "not-admitted", "reason": "owner-continue-not-passed", "route_id": route["route_id"],
+                    "next_step": "This route ended without a PASS (or was stopped or closed unused), so it takes no "
+                                 "later request and nothing was kept. Report its result; new work is a new route."}
+    if not follow_up_owner_route(route):
+        return 69, {"state": "not-admitted", "reason": "owner-continue-route-shape", "route_id": route["route_id"],
+                    "next_step": "Only a one-shot route its owner makes alone (no review, frame or resource node, "
+                                 "not a leg of an approved plan) takes a later request on its closed route. Earlier "
+                                 "review records stay as they are; compose the new request as a new route with the "
+                                 "review it needs."}
+    try:
+        require_route_parent(last_meta, jobs, last_id)
+        kept = UC.submit(jobs, route["route_id"], text, request_id,
+                         source_session=route_authority.correction_source_session())
+    except DispatchContractError as exc:
+        return 69, {"state": "not-admitted", "reason": exc.reason,
+                    "retry_when": "The session that opened this work asks.",
+                    "next_step": "Only the session that opened this route can give it a later request."}
+    except UC.ContinueError as exc:
+        return 69, {"state": "not-admitted", "reason": str(exc)}
+    entry = kept["entry"]
+    new_id = UC.attempt_id_for(route["route_id"], UC.OWNER, entry["id"])
+    if kept["duplicate"] and new_id in rows:
+        return 0, {"state": "already-asked", "route_id": route["route_id"], "request_id": entry["id"],
+                   "duplicate": True, "retained": False, "owner_attempt_id": new_id,
+                   **_turn_fields(rows[new_id][1], jobs),
+                   "next_step": "This text already ran as that turn and nothing new started; its result is "
+                                "delivered by that turn's end notice. To ask for more, send a different text or "
+                                "pass a new --request-id."}
+    receipt = start_work(route, path, jobs, **start_kwargs)
+    rows = _rows(jobs)
+    receipt.update(request_id=entry["id"], duplicate=kept["duplicate"], retained=new_id not in rows,
+                   continues_attempt_id=last_id)
+    if new_id in rows:
+        receipt.update(owner_attempt_id=new_id, **_turn_fields(rows[new_id][1], jobs))
+    else:
+        receipt["next_step"] = ("The text is kept for this route's next owner turn; run resume_command to start "
+                                "it once the reason below is cleared. ") + str(receipt.get("next_step") or "")
     return 0, receipt
 
 

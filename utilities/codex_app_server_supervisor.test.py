@@ -119,7 +119,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                                       'error':{'code':-32000,'message':'fixture resume failure'}})
                                 continue
                         else:
-                            record('thread-start')
+                            record('thread-start', ephemeral=value['params'].get('ephemeral'))
                         send({'jsonrpc':'2.0','id':value['id'],'result':{'thread':{'id':'thread-1'}}})
                     elif method == 'turn/start':
                         turns += 1
@@ -442,6 +442,26 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             env=env,
             timeout=10,
         )
+
+    def test_an_owner_keeps_its_thread_and_a_later_owner_wakes_it_with_its_own_grants(self):
+        # The owner that takes over from an earlier owner of its route (an answer, an observation, a
+        # usage limit, a later request) wakes that thread; every owner keeps its thread for the next one.
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
+        env = {**os.environ, "FAKE_TRACE": str(self.trace)}
+        kept = subprocess.run([*self.command(), "--keep-session"], input="initial assignment", text=True,
+                              capture_output=True, env=env, timeout=10)
+        self.assertEqual(kept.returncode, 0, kept.stderr + kept.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        self.assertEqual([row.get("ephemeral") for row in trace if row["event"] == "thread-start"], [False])
+        self.trace.write_text("", encoding="utf-8")
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
+        self.state.unlink(missing_ok=True)
+        woken = subprocess.run([*self.command(), "--keep-session", "--resume-thread", "thread-1"],
+                               input="the earlier owner's context", text=True, capture_output=True, env=env, timeout=10)
+        self.assertEqual(woken.returncode, 0, woken.stderr + woken.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        self.assertEqual([row["event"] for row in trace if row["event"].startswith("thread-")], ["thread-resume"])
+        self.assertEqual(next(row["thread"] for row in trace if row["event"] == "thread-resume"), "thread-1")
 
     def test_context_window_is_captured_by_supervised_server_across_resume(self):
         self.jobs.write_text(owner_row(self.lease), encoding="utf-8")

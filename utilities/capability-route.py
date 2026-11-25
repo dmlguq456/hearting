@@ -2368,6 +2368,22 @@ def main():
             from start_receipt import print_next_line
             print_next_line(result)
             return code
+        if isinstance(frame_raw,dict) and a.message_file and not ROUTE_PLAN.is_framed_route(frame_raw):
+            # A closed one-shot route its owner finished PASS takes the text as its next owner turn
+            # (work_start.correct_owner_route); any other state keeps the owner input path below.
+            from work_start import correct_owner_route
+            try:
+                verified=verify_route(frame_raw)
+            except (ValueError, KeyError, TypeError, OSError):
+                verified=None   # an unverifiable record keeps the owner input path, which reports it
+            taken=(correct_owner_route(verified,frame_path,jobs,a.message_file.read_text(),a.request_id)
+                   if verified is not None else None)
+            if taken is not None:
+                code,result=taken
+                print(json.dumps(result,ensure_ascii=False))
+                from start_receipt import print_next_line
+                print_next_line(result)
+                return code
         if ROUTE_PLAN.is_framed_route(frame_raw):
             from work_start import _framed_cycle
             _first = {}

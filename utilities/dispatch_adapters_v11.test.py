@@ -117,7 +117,8 @@ class AdapterV11Test(unittest.TestCase):
     for harness in ADAPTERS:
      wrapper=self.load_wrapper(harness)
      wrapper_source=Path(wrapper.__file__).read_text()
-     self.assertIn("prompt_text += recovery_instructions(args)",wrapper_source)
+     # Every wrapper appends the recovery context; only an owner taking over from another is told it alone.
+     self.assertIn("owner_continuation_prompt(_ADAPTER, args, prompt_text, recovery_instructions(args))",wrapper_source)
      for path_kind in ("hop","replacement"):
       args=SimpleNamespace(automatic_retry_of="att-progress",worker_type="stage",
                            jobs_path=jobs,attempt_id="att-next" if path_kind=="replacement" else "att-hop")

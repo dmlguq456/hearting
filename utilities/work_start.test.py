@@ -884,6 +884,9 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual((result["state"], result["reason"], result["required_action"]),
                          ("needs-attention", "workflow-executor-exited", "report-unfinished-work"), result)
         self.assertIn("already a continuation", result["next_step"])
+        # A PASS row takes no owner input, so this receipt offers no correction; it names the close.
+        self.assertNotIn("correction_command", result)
+        self.assertIn(" close --route ", result["close_command"])
 
     def test_completed_deferred_owner_still_reports_workflow_gaps(self):
         """C15 (S3a): `verdict_pass` recognizes a marker-bound deferred owner
@@ -1369,8 +1372,10 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual((result['state'],result['reason'],result['required_action']),
                          ('needs-attention','owner-blocked','answer-blocked-owner'),result)
         self.assertIn('--attempt-id '+owner,result['correction_command'])
-        for token in ('correction_command','--message-file','replacement owner','Do not close or recompose'):
+        for token in ('correction_command','--message-file','replacement owner','Do not recompose','close_command'):
             self.assertIn(token,result['next_step'])
+        # Both actions the receipt names can be run: the answer, and the parent's close of this route.
+        self.assertIn(' close --route ',result['close_command'])
         self.assertEqual(len(self.calls),3)   # nothing new launched while it waits
 
     def test_blocked_owner_with_unreadable_report_and_log_waits_instead_of_asking_a_person(self):

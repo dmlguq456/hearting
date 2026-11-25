@@ -869,7 +869,12 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
                 "--parent-attempt-id", args.attempt_id or "unassigned",
                 "--state-file", str(completion_state_path(args)),
                 "--lease-file", str(completion_lease_path(args)),
+                # An owner keeps its thread, so an owner taking over from it can wake it.
+                "--keep-session",
             ]
+            plan = getattr(args, "session_plan", None)
+            if plan is not None and plan.kind == "resumed":
+                command += ["--resume-thread", plan.session_id]
         else:
             command += ["--one-turn"]
             if is_unit_leg_launch(args):
@@ -2128,8 +2133,11 @@ def main(argv: list[str]) -> int:
             completion_lease_path(args)
     except DispatchContractError as e:
         return fail(e.reason, 69, detail=e.detail, child_spawned="0")
+    import unit_continue
+    # An owner taking over from an earlier owner of its route wakes that thread when the App Server supervises it.
+    unit_continue.owner_plan_for_args(
+        args, jobs, "codex", keeps_session=args.resolved_completion_delivery == "app-server-supervised")
     if is_unit_leg_launch(args):
-        import unit_continue
         plan = unit_continue.plan_for_args(args, jobs, "codex")
         if (plan is not None and plan.kind == "resumed"
                 and getattr(args, "resolved_stage_telemetry_transport", "raw-exec") != "app-server-one-turn"):
@@ -2146,7 +2154,7 @@ def main(argv: list[str]) -> int:
     from review_input import prompt_block as review_input_prompt
     prompt_text += review_input_prompt(args)
     from dispatch_replacement import recovery_instructions
-    prompt_text += recovery_instructions(args)
+    prompt_text = DISPATCH_MAIN.owner_continuation_prompt(_ADAPTER, args, prompt_text, recovery_instructions(args))
     assignment_sha256 = "sha256:" + hashlib.sha256(
         task_input[0].encode("utf-8")
     ).hexdigest()
@@ -2287,8 +2295,7 @@ def main(argv: list[str]) -> int:
             args.agent_home, 'codex', args.worker_type, args.attempt_id,
             env=dispatch_env, destination=args.nested_codex_home, profile=args.profile)
         dispatch_env.update(args.worker_runtime_env)
-        if is_unit_leg_launch(args):
-            import unit_continue
+        if is_unit_leg_launch(args) or unit_continue.owner_predecessor(args):
             unit_continue.transplant(getattr(args, "session_plan", None), dispatch_env["CODEX_HOME"])
         command = shell_command(args, prompt_path, log_path)
         launch_spec = DISPATCH_MAIN.LaunchSpec(

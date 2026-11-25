@@ -187,6 +187,27 @@ def dispatch_metadata_prompt(h, args, *, guard_session_id: bool = True) -> str:
     )
 
 
+def owner_continuation_prompt(h, args, prompt: str, recovery: str) -> str:
+    """The owner prompt and its recovery context (`dispatch_replacement.recovery_instructions`). An owner that
+    takes over from an earlier owner of its route is told `unit_continue.owner_turn_prompt` instead: a woken
+    session gets only this attempt's facts and what is new."""
+    import unit_continue
+    plan = getattr(args, "session_plan", None)
+    if not unit_continue.owner_predecessor(args) or plan is None:
+        return prompt + recovery
+    return unit_continue.owner_turn_prompt(args, plan, dispatch_metadata_prompt(h, args), prompt, recovery,
+                                           args.jobs_path)
+
+
+def owner_session_arguments(args) -> list:
+    """The supervisor flag that wakes the earlier owner's session (Claude and OpenCode supervisors)."""
+    import unit_continue
+    plan = getattr(args, "session_plan", None)
+    if unit_continue.owner_predecessor(args) and plan is not None and plan.kind == "resumed":
+        return ["--resume-session", plan.session_id]
+    return []
+
+
 def assignment_prompt_tail(h, args, task: str, *, heartbeat: str, commit_clause: str) -> str:
     """Progress, commit policy, sub-session, released intent, unit and assignment sections."""
     return (

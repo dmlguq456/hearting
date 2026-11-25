@@ -965,6 +965,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             # Refresh permissions on the existing same-session resume path.
             "--turn-transport", "resume-process",
             "--add-dir", str(args.artifact_root),
+            *DISPATCH_MAIN.owner_session_arguments(args),
         ]
         if getattr(args, "runtime_dir", ""):
             command += ["--add-dir", str(args.runtime_dir)]
@@ -1270,6 +1271,10 @@ def main(argv: list[str]) -> int:
             completion_lease_path(args)
     except DispatchContractError as e:
         return fail(e.reason, 69, detail=e.detail, child_spawned="0")
+    import unit_continue
+    # An owner taking over from an earlier owner of its route wakes that session when its supervisor can.
+    unit_continue.owner_plan_for_args(
+        args, jobs, "claude", keeps_session=args.resolved_completion_delivery == "session-resume-supervised")
     try:
         default_roots = adapter_default_roots(args)
         args.execution_access_grant = route_authority.bind_launch_access(
@@ -1297,7 +1302,7 @@ def main(argv: list[str]) -> int:
     from review_input import prompt_block as review_input_prompt
     prompt_text += review_input_prompt(args)
     from dispatch_replacement import recovery_instructions
-    prompt_text += recovery_instructions(args)
+    prompt_text = DISPATCH_MAIN.owner_continuation_prompt(_ADAPTER, args, prompt_text, recovery_instructions(args))
     assignment_sha256 = "sha256:" + hashlib.sha256(
         task_input[0].encode("utf-8")
     ).hexdigest()
@@ -1354,8 +1359,7 @@ def main(argv: list[str]) -> int:
         args.worker_runtime_env = prepare_worker_home(args.agent_home, 'claude', args.worker_type,
                                                        args.attempt_id, env=env, profile=args.profile)
         env.update(args.worker_runtime_env)
-        if getattr(args, "unit_session_id", ""):
-            import unit_continue
+        if getattr(args, "unit_session_id", "") or unit_continue.owner_predecessor(args):
             unit_continue.transplant(getattr(args, "session_plan", None), env["CLAUDE_CONFIG_DIR"])
         # Apply after the masked worker home and all inherited environment
         # updates so every direct/supervised/resumed native child sees this
