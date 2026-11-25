@@ -3075,6 +3075,17 @@ def _turn_fields(meta, jobs) -> dict:
     return fields
 
 
+def _unit_memory_labels(path, leg):
+    """The labels a taken unit correction can carry for the main session's work-style record: the route's
+    sealed field and the unit the text goes to (a value only; nothing is written). A label that cannot
+    be read is no label."""
+    try:
+        import memory_work_labels
+        return memory_work_labels.correction_labels(path, memory_work_labels.unit_label(leg.get("unit")))
+    except Exception:
+        return []
+
+
 def correct_unit_route(route, path, jobs, text, request_id=None, **start_kwargs):
     """`correct --route <unit route>`: keep `text` for the route's next turn and start it when nothing is in the way.
 
@@ -3117,7 +3128,10 @@ def correct_unit_route(route, path, jobs, text, request_id=None, **start_kwargs)
                         "next_step": "The unit worker's last turn ended without a verdict, so this route cannot "
                                      "take another turn and nothing was kept. To run the same unit again, run "
                                      "parent_next_command (a new route; this one stays as it ended)."}
-        kept = UC.submit(jobs, route["route_id"], text, request_id)
+        labels = _unit_memory_labels(path, leg)
+        unit_label = next((label for label in labels if label.startswith("unit:")), None)
+        kept = UC.submit(jobs, route["route_id"], text, request_id,
+                         source_session=route_authority.correction_source_session(), unit=unit_label)
     except DispatchContractError as exc:
         return 69, {"state": "not-admitted", "reason": exc.reason,
                     "retry_when": "The route's launching session (or the worker that started it) asks.",
@@ -3131,7 +3145,7 @@ def correct_unit_route(route, path, jobs, text, request_id=None, **start_kwargs)
         # Starting nothing, say so instead of letting the closed route read back the old result as if it were new.
         return 0, {"state": "already-asked", "route_id": route["route_id"], "request_id": entry["id"],
                    "duplicate": True, "retained": False, "unit_attempt_id": new_id,
-                   **_turn_fields(rows[new_id][1], jobs),
+                   **_turn_fields(rows[new_id][1], jobs), **({"memory_labels": labels} if labels else {}),
                    "next_step": "This text already ran as that turn; its result is (or will be) delivered by "
                                 "that turn's end notice, and nothing new started. To ask for another turn, "
                                 "send a different text or pass a new --request-id."}
@@ -3140,6 +3154,8 @@ def correct_unit_route(route, path, jobs, text, request_id=None, **start_kwargs)
     started = new_id in rows
     receipt.update(request_id=entry["id"], duplicate=kept["duplicate"], retained=not started,
                    continues_attempt_id=turns[-1][0])
+    if labels:
+        receipt["memory_labels"] = labels
     if started:
         receipt.update(unit_attempt_id=new_id, **_turn_fields(rows[new_id][1], jobs))
     else:
