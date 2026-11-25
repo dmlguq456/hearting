@@ -87,5 +87,7 @@ the defaults below.
 
 Invocation: `translate <source path> → <target path>`, any language pair.
 
+### Output
+
 Translate creates a mirror. `editorial/polish` instead edits an already
 target-language artifact in place (no snapshot).

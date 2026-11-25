@@ -118,6 +118,10 @@ gate must converge, not peel one layer per pass.
   `🔴` listing only the open/regressed/new-delta items. Never fail a round on a
   gap that was visible and unreported in an earlier round you could have raised.
 
+A corrected plan is a new content subject but not a new review: if a substantive
+verdict exists in the lineage, read the nearest one as the prior round even when verdict-less attempts follow it, and use the closure
+questions for that finding set plus the delta.
+
 ### Output
 
 Follow the severity triage skeleton (`_shared/triage-output.md`). Unit-specific
@@ -149,13 +153,12 @@ Entry: a durable `code-plan` plan check or a selected independent plan review. Q
 work uses inline `plan-check-lite` instead, which keeps the same stance inside its
 smaller budget.
 
+### Round Protocol
+
 - **A verdict-less prior attempt is history only.** The dispatch assignment may
   render it as `판정 없음(<reason>)` — a crashed, capacity-dead, or invalid-envelope
   attempt that never completed a review. If the node lineage has no substantive
-  verdict, perform the full first review; there is no prior 🔴 list to close. A
-  corrected plan is a new content subject but not a new review: if a substantive
-  verdict exists in the lineage, read the nearest one as the prior round even when verdict-less attempts follow it, and use the closure
-  questions for that finding set plus the delta.
+  verdict, perform the full first review; there is no prior 🔴 list to close.
 
 ### Memory
 

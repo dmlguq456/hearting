@@ -181,5 +181,7 @@ Always carried with the worker text. These are defaults you may override: a bett
 is fine. Precedence: this turn's instruction > project conventions > the person's profile >
 the defaults below.
 
+### Memory
+
 Memory: retain recurring hard failures and habitually omitted states per
 `_shared/memory-flow.md`.

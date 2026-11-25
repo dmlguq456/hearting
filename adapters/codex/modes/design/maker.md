@@ -132,6 +132,8 @@ Always carried with the worker text. These are defaults you may override: a bett
 is fine. Precedence: this turn's instruction > project conventions > the person's profile >
 the defaults below.
 
+### Procedure
+
 Design many-to-many relationships as matrices, lanes, or reserved orthogonal gutters
 rather than accepting crossing arrows; reserve arrow corridors at node-placement time.
 
@@ -143,6 +145,8 @@ Preload per `_shared/profile-preload.md`:
   macro figure sensibility for the figure-layout-guide branch).
 - `03_presentation_strategy` — slide structure, narrative flow, presentation visuals.
 - `05_domain_expertise` — domain abbreviations and terminology in captions and labels.
+
+### Memory
 
 Memory: retain project design tokens, recurring component patterns, and durable user
 visual preferences per `_shared/memory-flow.md`.

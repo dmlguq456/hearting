@@ -67,6 +67,11 @@ line of the invocation prompt:
 - "Research survey mode: Compile analysis summary" → **compile**
 - "Research survey mode: Report generation" → **report**
 
+### Context Sources
+
+If all are absent, state that the result relies only on agent memory
+and web sources, then continue.
+
 ### Language Rule
 
 Write prose in the selected target language for the selected audience
@@ -79,6 +84,29 @@ methodology terms (`attention`, `transformer`, `contrastive learning`,
 machine-readable values in `search_results.json` unchanged.
 
 ### Branch: search (paper search)
+
+**Multi-query search:** search every configured source for each query variant.
+A paper discovered by several queries naturally receives a higher
+`discovery_count` — a strong centrality signal. Do NOT deduplicate away
+repeat discoveries; cross-source frequency is the importance signal.
+
+**Sources** (in order for EACH query; if any source takes >3 minutes, skip it):
+
+1. **HF paper_search:** use pre-fetched results if provided in the prompt;
+   otherwise skip (MCP tools are not available to this worker).
+2. **OpenAlex:** `https://api.openalex.org/works?search={query}&per_page={max}`
+   — title, authors, year, cited_by_count, oa_url, id.
+3. **arXiv API:** `http://export.arxiv.org/api/query?search_query={query}&max_results={max}`
+   — title, authors, arXiv ID, summary.
+4. **Google Scholar direct:** `curl -s -L` with a browser User-Agent against
+   `https://scholar.google.com/scholar?q={query}`; parse HTML for titles,
+   years, citation counts, links. Rate limit: 3 s between requests, 50/day
+   max. On CAPTCHA or empty response, skip.
+5. **Web search:** `"Google Scholar {query}"`, `"{query} site:arxiv.org"` —
+   supplementary.
+6. **Semantic Scholar** (only if `S2_API_KEY` is set):
+   `curl -s -H "x-api-key: $S2_API_KEY" "https://api.semanticscholar.org/graph/v1/paper/search?query={query}&limit={max}&fields=title,authors,year,citationCount,externalIds"`
+   with a mandatory `sleep 1` after each call.
 
 **Output:** write `search_results.json` (schema provided by the orchestrator)
 plus `search_results.md` (human-readable ranked table) to the output
@@ -94,6 +122,15 @@ return 0 results, reformulate the query once (broaden keywords); if still 0,
 write empty results and return an error verdict.
 
 ### Branch: analysis (paper analysis)
+
+**Paywall fast-detect (BEFORE attempting access):** a paper with neither
+`arxiv_id` nor `oa_url` is likely paywalled — if
+`browser_extracts/{filename}.txt` exists, read it; otherwise jump straight to
+the abstract-only fallback. Never WebFetch a likely paywall site (timeout /
+hang risk).
+
+**Per-paper timeout:** spend no more than 60 seconds obtaining any one paper
+by any method, then fall through to the next rung.
 
 **Per-paper card** (`{output_dir}/cards/{year}_{first_author}_{arxiv_id_or_hash}.md`):
 
@@ -112,6 +149,9 @@ write empty results and return an error verdict.
   support when only an abstract was read.
 
 ### Branch: chaining (reference chaining)
+
+6. Write `chaining_results.md`: new papers, frequency table, Mermaid citation
+   graph, recommended additions (top papers by reference_frequency).
 
 The orchestrator controls loopback (medium: max 1, deep: max 2); this unit
 handles only its single invocation scope.
@@ -200,8 +240,7 @@ authority; skip missing directories silently:
 (design constraints), (2) `<artifact-root>/analysis_project/paper/` (paper
 docs), (3) `<artifact-root>/research/` (prior surveys — highest version
 authoritative), (4) `<artifact-root>/analysis_project/code/`, (5) agent
-memory. If all are absent, state that the result relies only on agent memory
-and web sources, then continue.
+memory.
 
 Preload user-profile defaults per `_shared/profile-preload.md`:
 `02_paper_writing_style`, `04_analysis_methodology`, `05_domain_expertise`,
@@ -217,29 +256,6 @@ while continuing.
 
 The orchestrator provides multiple expanded queries (original + 3–5 variants),
 the output directory, and optional pre-fetched HF results.
-
-**Multi-query search:** search every configured source for each query variant.
-A paper discovered by several queries naturally receives a higher
-`discovery_count` — a strong centrality signal. Do NOT deduplicate away
-repeat discoveries; cross-source frequency is the importance signal.
-
-**Sources** (in order for EACH query; if any source takes >3 minutes, skip it):
-
-1. **HF paper_search:** use pre-fetched results if provided in the prompt;
-   otherwise skip (MCP tools are not available to this worker).
-2. **OpenAlex:** `https://api.openalex.org/works?search={query}&per_page={max}`
-   — title, authors, year, cited_by_count, oa_url, id.
-3. **arXiv API:** `http://export.arxiv.org/api/query?search_query={query}&max_results={max}`
-   — title, authors, arXiv ID, summary.
-4. **Google Scholar direct:** `curl -s -L` with a browser User-Agent against
-   `https://scholar.google.com/scholar?q={query}`; parse HTML for titles,
-   years, citation counts, links. Rate limit: 3 s between requests, 50/day
-   max. On CAPTCHA or empty response, skip.
-5. **Web search:** `"Google Scholar {query}"`, `"{query} site:arxiv.org"` —
-   supplementary.
-6. **Semantic Scholar** (only if `S2_API_KEY` is set):
-   `curl -s -H "x-api-key: $S2_API_KEY" "https://api.semanticscholar.org/graph/v1/paper/search?query={query}&limit={max}&fields=title,authors,year,citationCount,externalIds"`
-   with a mandatory `sleep 1` after each call.
 
 **Input type detection:** arXiv ID (NNNN.NNNNN) → fetch metadata first; PDF
 path → read and extract keywords; refs folder → extract keywords per PDF.
@@ -273,15 +289,6 @@ research/claim-verify.
 `referenced_works`, concepts, `cited_by_count`, and venue information.
 
 ### Branch: analysis (paper analysis)
-
-**Paywall fast-detect (BEFORE attempting access):** a paper with neither
-`arxiv_id` nor `oa_url` is likely paywalled — if
-`browser_extracts/{filename}.txt` exists, read it; otherwise jump straight to
-the abstract-only fallback. Never WebFetch a likely paywall site (timeout /
-hang risk).
-
-**Per-paper timeout:** spend no more than 60 seconds obtaining any one paper
-by any method, then fall through to the next rung.
 
 **Access ladder** (try in order, fall through on failure or timeout):
 
@@ -319,8 +326,6 @@ Via OpenAlex `referenced_works`:
 4. Identify foundational papers: `reference_frequency >= 2` AND not in the
    original search.
 5. Depth: medium = 1-hop; deep = 2-hop + lineage trace.
-6. Write `chaining_results.md`: new papers, frequency table, Mermaid citation
-   graph, recommended additions (top papers by reference_frequency).
 
 ### Branch: code-search (code & model search)
 

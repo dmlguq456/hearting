@@ -82,20 +82,29 @@ silently.
 No line was removed; old `##` headings became `###`. `research/plan-review` — 지킬 것: the
 ownership split with `qa/plan-review`, "annotate, never alter plan substance", the whole
 Procedure (including the conditional auxiliary-arbiter step whose array length is gate-checked)
-and both branches (focus-axis limit, all-axes default), plus the added stance line. 참고: the
-proxy-role opening lines, Knowledge Sources, User Profile Defaults, the closing explanation of
-multi-axis review, memory.
+and both branches (focus-axis limit, all-axes default), the Knowledge Sources absence rule
+(skip a missing directory; when all three are absent, say so in the report), plus the added
+stance line. 참고: the proxy-role opening lines, the Knowledge Sources list, User Profile
+Defaults, the closing explanation of multi-axis review, memory. The `Knowledge Sources` and
+`Branch: default (all axes)` headings are repeated in both layers.
 
-`research/research-survey` — 지킬 것: branch detection from the prompt's first line, Language
-Rule, the files each branch writes (search output, MERGE mode, error handling and the `error`
-verdict, the per-paper card, the loopback and file-isolation limits, the compile contents, the
-whole report branch: file inventory, single source of truth, no fabricated citations, QA
-cooperation), Return and the conditional auxiliary-arbiter rule. 참고: Context Sources and
-profile preload, the search procedure (sources, merge and rank, venue tiers, enrichment), the
-analysis procedure (paywall fast-detect, access ladder, reading depth and grades), the
-chaining and code-search procedures, memory. Branch headings that split across the layers are
-repeated in both. The per-branch reference loading in the design ("참고 — <갈래>") needs a
-runtime that is not there yet, so the branch headings keep their old titles.
+`research/research-survey` — 지킬 것: branch detection from the prompt's first line, the
+Context Sources report duty (when every source is absent, say so), Language Rule, the search
+tool contract (multi-query search that never deduplicates away repeat discoveries, the Sources
+list with its endpoints, the 3-minute skip, the Scholar 3 s / 50 per day limit, the mandatory
+`sleep 1` after each Semantic Scholar call), the analysis limits (paywall fast-detect with
+"never WebFetch a likely paywall site", the 60-second per-paper timeout), the files each branch
+writes (search output, MERGE mode, error handling and the `error` verdict, the per-paper card,
+`chaining_results.md`, the loopback and file-isolation limits, the compile contents, the whole
+report branch: file inventory, single source of truth, no fabricated citations, QA
+cooperation), Return and the conditional auxiliary-arbiter rule. 참고: the Context Sources
+reading order and profile preload, the search inputs, input type detection, merge and rank,
+venue tiers, enrichment, the access ladder, reading depth and grades, chaining steps 1–5, the
+code-search procedure, memory. Branch headings that split across the layers are repeated in
+both. The report-duty sentence was cut from its Context Sources line at the sentence
+boundary; no word changed (fix round 1, 2026-11-25). The per-branch reference loading in the
+design ("참고 — <갈래>") needs a runtime that is not there yet, so the branch headings keep
+their old titles.
 
 ## Two-layer move, turn 9-3 (2026-11-25) — placement log: research/fact-check, research/claim-verify
 

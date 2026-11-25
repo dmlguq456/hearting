@@ -30,6 +30,13 @@ this unit.
 Review nature: annotate, never alter plan substance. Memo comments and the
 review log are the only writes; the concrete write scope is node-owned.
 
+### Knowledge Sources
+
+Any directory may be absent; skip missing directories silently. If all of
+`analysis_project/paper/`, `research/`, and `analysis_project/code/` are absent,
+state in the report that the result relies only on agent memory and web
+sources, then continue without waiting for confirmation.
+
 ### Procedure
 
 1. Read all Knowledge Sources first.
@@ -149,11 +156,6 @@ order of authority. Understand the theoretical basis before reading the plan.
    produced by `/analyze-project --mode code`.
 5. **Agent memory:** prior durable decisions and patterns when relevant.
 
-Any directory may be absent; skip missing directories silently. If all of
-`analysis_project/paper/`, `research/`, and `analysis_project/code/` are absent,
-state in the report that the result relies only on agent memory and web
-sources, then continue without waiting for confirmation.
-
 ### User Profile Defaults
 
 Preload per `_shared/profile-preload.md`:
@@ -161,6 +163,8 @@ Preload per `_shared/profile-preload.md`:
 `04_analysis_methodology` (analysis and verification patterns),
 `05_domain_expertise` (domain background, terms, abbreviations), and
 `01_paper_figure_style` when the plan discusses figures.
+
+### Branch: default (all axes)
 
 Multi-axis review exists so narrow parallel instances collectively cover what a
 careful user would catch without overloading one reviewer. It changes

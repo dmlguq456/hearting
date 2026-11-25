@@ -22,6 +22,8 @@ aliases: {}
 
 Always carried with the worker text. Every line in this section is a must.
 
+### Focus
+
 Backend logic and schemas belong to `dev/backend`. Visual direction and design
 tokens belong to the design family.
 

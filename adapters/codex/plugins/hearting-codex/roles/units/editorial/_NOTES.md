@@ -80,7 +80,7 @@ only (`_voice.md` is not carried by the runtime, so the path is a pointer, not a
 No line removed, old `##` headings became `###`. These three units are short and every
 section is a gate, a scope rule or an output rule, so the 참고 is thin: `polish` and `review`
 keep only the `Invocation:` line there, `translate` also keeps the closing note on how it
-differs from `polish`. Everything else, including the "read `_voice.md` before acting"
-pointer and the invocation gate, is 지킬 것. `editorial/review` gains the one stance pointer
+differs from `polish` (the `Output` heading is repeated in both layers). Everything else,
+including the "read `_voice.md` before acting" pointer and the invocation gate, is 지킬 것. `editorial/review` gains the one stance pointer
 line. `_voice.md` is still not carried by the runtime; no line of it was copied into a unit
 (that would add worker text), the pointers stay as they were.

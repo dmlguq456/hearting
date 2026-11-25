@@ -107,8 +107,9 @@ judged, recorded for completeness.
 No line removed; old `##` headings became `###`; one added stance pointer line. Everything
 that decides the verdict is 지킬 것: input and procedure, Layer 1 (zero tolerance), Layer 2 (derived
 pass rate), main-context protection, the output schema, the rendering-unavailable rule.
-참고: only the closing memory line. `_design-rules.md` is still not carried by the runtime;
-the "read it first" pointer stays in 지킬 것 and no line of it was copied in.
+참고: only the closing memory line, under its own `Memory` heading. `_design-rules.md` is still
+not carried by the runtime; the "read it first" pointer stays in 지킬 것 and no line of it was
+copied in.
 
 ## Two-layer move, turn 9-4 (2026-11-25) — placement log: design/maker, design/critic
 
@@ -117,7 +118,8 @@ No line removed; old `##` headings became `###`. `design/maker` — 지킬 것: 
 production integration to dev, critique to the critic; no edits to LaTeX, code or equations),
 the whole Procedure (the figure-layout-guide limit, context before work, scaffolds, the render
 loop, sibling reviews), the Environment contract (never install automatically), Output.
-참고: the matrices-and-lanes layout line, the cross-project profile defaults, memory.
+참고: the matrices-and-lanes layout line (the `Procedure` heading is repeated in both layers),
+the cross-project profile defaults, memory (under its own `Memory` heading).
 `design/critic` (plus the added stance pointer line) — 지킬 것: read-only and scope, the
 verifier-first split, the Rendered-result branch (render through the harness, never critique
 code as text), the Plan-review branch (pre-render gate, review log path), the Output cap of five

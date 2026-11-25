@@ -114,9 +114,12 @@ Same form as the pilot: `## 지킬 것` / `## 참고`, old `##` headings became 
 removed**. 지킬 것: the role and scope paragraph with the read-only line, the whole Procedure
 (the check list carries the 🔴 triggers: concrete test commands, reuse, long runs, runtime
 placement, "judge substance"), the Round Protocol (round 1 front-load, round >= 2 closure
-check, verdict), the whole Output, the 🟡 cap and the other style rules, plus the one added
-stance line. 참고: the entry paragraph, the verdict-less prior attempt bullet (the runtime
-already renders `판정 없음(…)`), memory.
+check, verdict, and the sentence that reads a corrected plan against the nearest substantive
+verdict), the whole Output, the 🟡 cap and the other style rules, plus the one added stance
+line. 참고: the entry paragraph, the first part of the verdict-less prior attempt bullet (the
+runtime already renders `판정 없음(…)`; the `Round Protocol` heading is repeated in both layers),
+memory. The corrected-plan sentence left that bullet at its sentence boundary; one word moved
+to the next line and no word changed (fix round 1, 2026-11-25).
 
 ## Two-layer move, turn 9-4 (2026-11-25) — placement log: qa/security-review, qa/data-curate, qa/ml-debug
 

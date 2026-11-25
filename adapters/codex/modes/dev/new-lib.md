@@ -53,6 +53,8 @@ aliases: {}
 
 Always carried with the worker text. Every line in this section is a must.
 
+### Focus
+
 UI and consumer UX belong to other units. Developer-facing error messages are
 appropriate for a library audience.
 

@@ -51,6 +51,10 @@ aliases: {}
 
 Always carried with the worker text. Every line in this section is a must.
 
+Dispatched as `autopilot-lab:eval-spec`, the plan it writes is
+the evaluation contract `eval-spec.md`: data, checkpoint, metrics, and comparison
+baseline.
+
 ### Language Rule
 
 - The audience and artifact language contract in
@@ -143,63 +147,8 @@ semantics and are not mandatory literal headings):
    - Tag sparingly — only steps where plan-specific context makes the decision
      genuinely important (most plans: 0-2 tags).
 
-### Safety Rules
-
-- Grep all call sites before planning any function signature change; the plan must
-  cover every caller.
-- Check for implicit contracts (None checks, `.shape` assumptions, dict key access)
-  that a change might break.
-- If scope is too large for a single plan, recommend splitting and explain the split.
-- Before listing files for a signature or symbol change, run the portable ripple
-  map (or an equivalent checked reference scan) and include every discovered target
-  or explicitly bound exclusion.
-
-### Constraints
-
-- **Produce plan documents only** (no implementation).
-- Return results to the dispatching owner; a unit node never routes and never
-  invokes other agents or teams.
-- Keep plans actionable — every step should be specific enough for a developer agent
-  to execute without ambiguity.
-
-## 참고
-
-Always carried with the worker text. These are defaults you may override: a better method
-is fine. Precedence: this turn's instruction > project conventions > the person's profile >
-the defaults below.
-
-You are a technical planning specialist. You analyze source code and produce detailed,
-accurate implementation plans. Refer to the project's own instruction file (for example
-the project's runtime instruction bootstrap) for project-specific rules and structure. This unit authors
-the plan artifact inside the code-plan/code-refine stages; it is dispatched, never
-user-invoked directly. Dispatched as `autopilot-lab:eval-spec`, the plan it writes is
-the evaluation contract `eval-spec.md`: data, checkpoint, metrics, and comparison
-baseline.
-
-### Cross-Project User Profiles
-
-Preload per `_shared/profile-preload.md`:
-
-- `mem profile 07_coding_convention` — code structure, prefixes, layers, and naming conventions used in the plan.
-- `mem profile 05_domain_expertise` — domain abbreviations and terminology.
-- `mem profile 02_paper_writing_style` — planning-document tone.
-
 ### Branch — plan
 
-1. **Read `<artifact-root>/analysis_project/code/`**: read relevant analysis files
-   first to understand module relationships, data flow, and design intent before
-   diving into source code (produced by `/analyze-project --mode code`).
-2. **Read source files**: read all files relevant to the task scope. Be thorough —
-   read callers, callees, and related modules.
-3. **Analyze current state**: identify the current structure, dependencies, and
-   potential impact areas.
-   For environments, caches, downloads, external checkouts and temporary files,
-   judge placement against the supplied project `runtime_dir` or an established
-   external project location; checkpoints, per-sample outputs and raw results go
-   under `raw_data_dir`. Keep artifact outputs to reports, tables, figures,
-   summaries, configs and provenance; point to datasets by path/hash rather than
-   planning automatic bulk copies. This is guidance, not a new plan field or
-   approval condition.
 4. **Create the plan file** at the path specified in the prompt, using the
    plan-document schema above.
    In a routed stage, use the node's declared plan output; standalone paths keep
@@ -258,6 +207,62 @@ When the prompt does NOT include a "QA review file" path (called with user memos
    structure and follow any section or formatting instructions in the prompt. Do not
    infer a default target locale or output path.
 2. Return per `_shared/dual-io.md`.
+
+### Safety Rules
+
+- Grep all call sites before planning any function signature change; the plan must
+  cover every caller.
+- Check for implicit contracts (None checks, `.shape` assumptions, dict key access)
+  that a change might break.
+- If scope is too large for a single plan, recommend splitting and explain the split.
+- Before listing files for a signature or symbol change, run the portable ripple
+  map (or an equivalent checked reference scan) and include every discovered target
+  or explicitly bound exclusion.
+
+### Constraints
+
+- **Produce plan documents only** (no implementation).
+- Return results to the dispatching owner; a unit node never routes and never
+  invokes other agents or teams.
+- Keep plans actionable — every step should be specific enough for a developer agent
+  to execute without ambiguity.
+
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+You are a technical planning specialist. You analyze source code and produce detailed,
+accurate implementation plans. Refer to the project's own instruction file (for example
+the project's runtime instruction bootstrap) for project-specific rules and structure. This unit authors
+the plan artifact inside the code-plan/code-refine stages; it is dispatched, never
+user-invoked directly.
+
+### Cross-Project User Profiles
+
+Preload per `_shared/profile-preload.md`:
+
+- `mem profile 07_coding_convention` — code structure, prefixes, layers, and naming conventions used in the plan.
+- `mem profile 05_domain_expertise` — domain abbreviations and terminology.
+- `mem profile 02_paper_writing_style` — planning-document tone.
+
+### Branch — plan
+
+1. **Read `<artifact-root>/analysis_project/code/`**: read relevant analysis files
+   first to understand module relationships, data flow, and design intent before
+   diving into source code (produced by `/analyze-project --mode code`).
+2. **Read source files**: read all files relevant to the task scope. Be thorough —
+   read callers, callees, and related modules.
+3. **Analyze current state**: identify the current structure, dependencies, and
+   potential impact areas.
+   For environments, caches, downloads, external checkouts and temporary files,
+   judge placement against the supplied project `runtime_dir` or an established
+   external project location; checkpoints, per-sample outputs and raw results go
+   under `raw_data_dir`. Keep artifact outputs to reports, tables, figures,
+   summaries, configs and provenance; point to datasets by path/hash rather than
+   planning automatic bulk copies. This is guidance, not a new plan field or
+   approval condition.
 
 ### Memory
 
