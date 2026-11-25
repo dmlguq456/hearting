@@ -743,7 +743,7 @@ def _isolated(root, *, followed=True, slow_claude=False, list_version="0.170.0")
         (root / folder).mkdir(parents=True)
     text = (AGENT_HOME / "adapters/codex/config/models.conf").read_text()
     if followed:
-        day = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        day = (datetime.date.fromisoformat(TODAY) - datetime.timedelta(days=1)).isoformat()
         text = text.replace("CFG_TIER_DEEP_MODEL=gpt-6.1-sol",
                             f"CFG_TIER_DEEP_MODEL=gpt-6.2-sol # auto-follow {day}: gpt-6.1-sol -> gpt-6.2-sol")
     (home / "agent-config" / "models.conf").write_text(text)
