@@ -1,4 +1,7 @@
-"""The shared panel's content order is independent of the native harness."""
+"""The shared panel's content order is independent of the native harness.
+
+11-25 (four groups): beside the native area a box's count stands after its name (`QUESTIONS 1`, `ROUTE 1`).
+"""
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
@@ -229,9 +232,9 @@ for(const [width,height,side] of [[37,21,true],[80,14,false]])for(const state of
  const text=rows[0].join('\n');assert(!text.includes(id),state+' default exposes full ID');
  // Spec 2026-11-11: an unreported effort is left out, never painted as `?`.
  assert(text.includes('fixture')&&!text.includes('fixture · ?'),state+' model row');
- if(question){assert(text.includes('│ ╭─ 1 QUESTIONS ─')&&text.includes('│ │ ◑ Choose the destination')&&text.includes('│ │   1 Current project'),state+' question summary under its label');}
- // Spec E9 rule 45: beside the native area the count leads its upper-case word.
- if(state!=='start')assert(text.includes(side?'1 ROUTE':'route 1')&&text.includes('Current task'),state+' route row missing');
+ if(question){assert(text.includes(side?'│ ╭─ QUESTIONS 1 ─':'│ ╭─ 1 QUESTIONS ─')&&text.includes('│ │ ◑ Choose the destination')&&text.includes('│ │   1 Current project'),state+' question summary under its label');}
+ // Spec E9 rule 45 (11-25, four groups: the count stands after the name): beside the native area the upper-case word leads its count.
+ if(state!=='start')assert(text.includes(side?'ROUTE 1':'route 1')&&text.includes('Current task'),state+' route row missing');
  else assert(!/route/i.test(text),state+' a known-empty route list draws no box');
 }
 '''

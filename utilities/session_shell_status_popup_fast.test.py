@@ -18,6 +18,9 @@ collection before it drew one row; the host cut such a read at 12 s. Now:
 Part A runs the backend on a synthetic artifact root of 400 campaign folders; part B runs the real host in a
 private PTY on the same kind of root (the button's read and Fleet's collection are given a synthetic delay, as
 a slow disk and a long collection are). Nothing here reaches a real account, session, artifact root or terminal.
+
+11-25 (four groups): the STATUS, BACKLOG and MEM parts stand in the `[REPO]` group, their list heads bold (`BACKLOG +3/6 · FIX 4 · IMPR 0`: the count
+of items off the screen out of the total comes first, then the sorts); the part's rows are otherwise the ones above.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -417,9 +420,9 @@ const checks={};
   if(cfg.scenario==='backlog'){
     // 11-21: the BACKLOG part under the REPO group (its head and its first three items, `+N` for the rest); a press on an item opens the BACKLOG popup
     // standing on it; the group of this window's campaign is open on top and the others are folded; an item with detail opens under its row.
-    await until(s=>s.some(l=>/BACKLOG FIX \d+ · IMPR \d+ · \+\d+ +\/\d+ +›/.test(l)),'the BACKLOG head');
+    await until(s=>s.some(l=>/BACKLOG \+\d+\/\d+ · FIX \d+ · IMPR \d+ +›/.test(l)),'the BACKLOG head');
     const panel=await screen();
-    checks.head=panel.find(l=>/BACKLOG FIX/.test(l));checks.items=panel.filter(l=>/BL_ITEM/.test(l)).length;
+    checks.head=panel.find(l=>/BACKLOG \+\d+\/\d+ · FIX/.test(l));checks.items=panel.filter(l=>/BL_ITEM/.test(l)).length;
     checks.status_head=panel.some(l=>/STATUS( \+\d+)? +›/.test(l));
     const spot=await at('BL_ITEM_TWO');await press(spot.x,spot.y,0);
     let r=await until(popupHas('BL_ITEM_ONE'),'the BACKLOG popup');
@@ -441,7 +444,7 @@ const checks={};
   }
   if(cfg.scenario==='mem'){
     // 11-20: the MEM section's records are one row each; a press on a record opens the MEM popup (the MESSAGES popup's frame and keys) on it.
-    await until(has(/│ MEM +› │/),'the MEM section');
+    await until(has(/│ +MEM +› │/),'the MEM section');   // 11-25 (four groups): a list head is bold, in the REPO group, its records two cells in
     const panel=await screen();
     checks.rows=panel.filter(l=>l.includes('MEMREC')).length;
     checks.row_cut=panel.some(l=>l.includes('MEMREC_ONE')&&l.includes('…'))&&!panel.some(l=>l.includes('MEMREC_ONE_END'));
@@ -610,7 +613,7 @@ class PtyTest(unittest.TestCase):
     def test_the_backlog_part_lists_three_items_and_its_popup_opens_on_the_one_pressed(self):
         checks = self.run_case('backlog')
         self.assertEqual(checks['items'], 3, checks)                                     # the first three; the others are `+N`
-        self.assertRegex(checks['head'], r'BACKLOG FIX 4 · IMPR 0 · \+1 +/6 +›', checks)  # six items in the document, four of them FIX, three shown
+        self.assertRegex(checks['head'], r'BACKLOG \+3/6 · FIX 4 · IMPR 0 +›', checks)  # six items in the document, four of them FIX, three shown: `+3/6` stands off the screen
         self.assertTrue(checks['status_head'], checks)
         self.assertIn('BACKLOG', checks['title'], checks)
         self.assertIn('╰─ STATUS · BACKLOG · ', checks['band'], checks)

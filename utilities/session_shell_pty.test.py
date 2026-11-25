@@ -1,4 +1,8 @@
-"""Real PTY/control loop with synthetic native UI and private dependency assets."""
+"""Real PTY/control loop with synthetic native UI and private dependency assets.
+
+11-25 (four groups): a group head is a frame row (`├╴[SESSION] ───┤`); the motion checks read its `├`/`┤` as frame cells and
+allow the host the `╴` tick right of the left frame (the left frame's phase; not one of the orbit's cells).
+"""
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
@@ -482,13 +486,14 @@ function existing(file){return new Promise((resolve,reject)=>{
    // A frame cell's look: an arc shade (`0` the head .. `3`), `b` the neutral frame (the terminal's dim),
    // `p<N>` another color, `t` the head's words.
    const RAMP=[216,173,137,102];    // (11-18: this window is Claude's, and a running session's arc is its harness's ramp: `FACES.dark.ramp.claude.orbit`)
-   const look=c=>{const ch=c.getChars();if(!ch||!'┌┐└┘─│'.includes(ch))return 't';
+   const look=c=>{const ch=c.getChars();if(!ch||!'┌┐└┘─│├┤'.includes(ch))return 't';      // (11-25: a group head's `├` and `┤` are frame cells)
      if(c.isFgPalette()){const i=RAMP.indexOf(c.getFgColor());return i>=0?String(i):'p'+c.getFgColor();}return c.isFgDefault()&&c.isDim()?'b':'x';};
    const word=()=>{const m=(lineAt(box()?.top??0)?.translateToString()||'').match(/┌ ([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●◑]) /);return m?m[1]==='●'?'idle':m[1]==='◑'?'waiting':'running':'';};
    const read=()=>{const b=box();if(!b)return null;const at=(y,x)=>lineAt(b.top+y).getCell(b.left+x),cells=[];
      for(let x=0;x<b.W;x++)cells.push(at(0,x));for(let y=1;y<b.H-1;y++)cells.push(at(y,b.W-1));
      for(let x=b.W-1;x>=0;x--)cells.push(at(b.H-1,x));for(let y=b.H-2;y>0;y--)cells.push(at(y,0));
      return {at:Date.now(),looks:cells.map(look),top:b.top,left:b.left,W:b.W,H:b.H,word:word(),
+       ticks:Array.from({length:b.H},(_,y)=>y).filter(y=>lineAt(b.top+y).getCell(b.left+1).getChars()==='╴'),      // (11-25: the `╴` right of the left frame at each group head row)
        native:Array.from({length:bottom?b.top:sideTerm.rows},(_,y)=>(lineAt(y)?.translateToString()||'').slice(0,bottom?undefined:b.left-2)),
        inside:Array.from({length:b.H-2},(_,y)=>(lineAt(b.top+1+y)?.translateToString()||'').slice(b.left+1,b.left+b.W-1)),
        cursor:[sideTerm.buffer.active.cursorX,sideTerm.buffer.active.cursorY],
@@ -534,8 +539,8 @@ function existing(file){return new Promise((resolve,reject)=>{
    const flush=()=>new Promise(resolve=>sideTerm.write('',resolve));
    // The rule's row (`at`: that row however it stands) and the frame's right column, as colors.
    const rule=(at=-1)=>{for(let y=0;y<sideTerm.rows;y++){const row=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y),line=row?.translateToString()||'';
-     const m=line.slice(140).match(/^│ SESSION (─{28}) │$/);   // (11-22: the light runs over the SESSION head's rule alone)
-     const colors=m&&Array.from({length:28},(_,i)=>{const c=row.getCell(150+i);return c.isFgDefault()?'d':c.getFgColor()+(c.isDim()?'d':'');}).join(',');
+     const m=line.slice(140).match(/^├╴\[SESSION\] (─{27})┤$/);   // (11-22: the light runs over the SESSION head's rule alone; 11-25: the head is a frame row, `├╴[SESSION] ───┤`)
+     const colors=m&&Array.from({length:27},(_,i)=>{const c=row.getCell(152+i);return c.isFgDefault()?'d':c.getFgColor()+(c.isDim()?'d':'');}).join(',');
      if(m&&(at<0?colors.split(',').some(c=>!c.endsWith('d')):y===at))return {y,native:line.slice(0,138),colors};}return null;};
    const frame=()=>Array.from({length:sideTerm.rows},(_,y)=>{const c=sideTerm.buffer.active.getLine(y)?.getCell(179);return c?(c.isFgDefault()?'d':c.getFgColor())+(c.isDim()?'d':''):'';}).join(',');
    let first=null;const began=Date.now();
@@ -853,8 +858,11 @@ class SessionShellPTYTest(unittest.TestCase):
     @staticmethod
     def frame_cells(reading):
         top,left,W,H=reading['top']+1,reading['left']+1,reading['W'],reading['H']
+        # 11-25 (four groups): a group head row is `├╴[NAME] ───┤`: its `╴` right of the left frame is repainted with
+        # the left frame's phase (a frame cell the host writes, though not one of the orbit's 2*W+2*(H-2) cells).
         return ({(top,left+x) for x in range(W)}|{(top+H-1,left+x) for x in range(W)}
-                |{(top+y,left) for y in range(H)}|{(top+y,left+W-1) for y in range(H)})
+                |{(top+y,left) for y in range(H)}|{(top+y,left+W-1) for y in range(H)}
+                |{(top+y,left+1) for y in reading.get('ticks',[])})
 
     @staticmethod
     def turned(a,b):

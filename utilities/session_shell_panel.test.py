@@ -1,4 +1,10 @@
-"""The approved work panel preserves facts, editor receipts and private settings."""
+"""The approved work panel preserves facts, editor receipts and private settings.
+
+11-25 (four groups): beside the native area the panel is four groups, `[REPO]` (GIT, STATUS, BACKLOG, MEM), `[SESSION]` (MODEL, CTX, TITLE, PEERS, NOW, the
+QUESTIONS and ROUTE boxes, MESSAGES), `[RESOURCES]` and `[USAGE]`, each headed by a frame row `├╴[NAME] value ───┤` and parted by one empty row (the first
+rows given up); list heads are bold at body brightness, a group name bold and brightest, value names dim; the count follows a box's name (`ROUTE 3`,
+`QUESTIONS 1`); list heads stand two cells in, their items three (a message's body four); labels stand from a panel 30 wide. The bottom layout is unchanged.
+"""
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
@@ -125,7 +131,7 @@ for(const width of [37,40,80]){
    one:[[{text:'◑ '},{text:'Where should this result go?'}]],line:[{text:'Where should this result go?'}],choices:1})});
  const text=v.rows.map(r=>r.map(s=>s.text).join(''));
  assert(text.some(s=>s.includes('Native selected high')));assert(text.some(s=>s.includes('Exact route')));
- assert(text.some(s=>s.includes('Where should')));assert(text.some(s=>s.includes('1 QUESTIONS')));
+ assert(text.some(s=>s.includes('Where should')));assert(text.some(s=>s.includes(width<80?'QUESTIONS 1':'1 QUESTIONS')));
  // Nothing opens in place any more (11-15), and no row shows `→`.
  assert(!text.some(s=>s.includes('→')));
  assert(text[0].startsWith('┌'));assert(text.at(-1).endsWith('┘'));
@@ -186,12 +192,13 @@ for(const [harness,states] of Object.entries(models))for(const width of [35,40,8
   // An open question comes first: its rows stay and the line waits.
   if(asking){assert.equal(text,none,id+' '+s);continue;}
   const first=rows.findIndex(l=>l.includes('⚠ [정리]'));
-  // The notice ends at the next group: a blank row, a section rule, a box's top line (the QUESTIONS box, 11-16) or the answer wait.
-  const end=rows.findIndex((l,i)=>i>first&&(/^│ +│$/.test(l)||l.includes('── ')||/^│ ╭─/.test(l)||/◑(답| to answer)/.test(l)));
+  // The notice ends at the next group: a blank row, a section rule, a box's top line (the QUESTIONS box, 11-16), the QUESTIONS head
+  // (11-25: `QUESTIONS ?` stands where the answer wait stood) or the answer wait.
+  const end=rows.findIndex((l,i)=>i>first&&(/^│ +│$/.test(l)||l.includes('── ')||/^│ ╭─/.test(l)||/^│ QUESTIONS/.test(l)||/◑(답| to answer)/.test(l)));
   assert(first>=0&&end>first&&text.includes('이어서해'),id+' '+s+'\n'+text);
   const lines=rows.slice(first,end);
   // Bottom: one row; side: at most three. A cut line says so with an ellipsis.
-  assert(lines.length===(width===80?1:3)&&lines.at(-1).includes('…'),id+' '+s+' '+lines.length);
+  assert(lines.length===(width===80?1:3)&&lines.at(-1).includes('…'),id+' '+s+' '+lines.length+'\n'+text);
   assert.equal(rows.length,width===80?none.split('\n').length+1:rows.length,id);
  }
 }
@@ -216,7 +223,7 @@ const paint=(width,height,side,q)=>view.render({width,height,side,model,sid:'exa
  brief:()=>q}).rows.map(r=>r.map(s=>s.text).join(''));
 for(const [width,height,side] of [[40,30,true],[80,20,false]]){
  const idle=paint(width,height,side,null);
- for(const want of ['project','(topic 🚧 3)','fixture high',side?'CTX    ━━━━':'context ','42%','running: pytest','1 QUESTIONS','SESSION_TITLE',side?'6 ROUTE':'route 6','ROUTE_0',side?'MESSAGES':'messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
+ for(const want of ['project','(topic 🚧 3)','fixture high',side?'CTX    ━━━━':'context ','42%','running: pytest',side?'QUESTIONS 1':'1 QUESTIONS','SESSION_TITLE',side?'ROUTE 6':'route 6','ROUTE_0',side?'MESSAGES':'messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
   assert(idle.some(s=>s.includes(want)),width+' missing '+want+'\n'+idle.join('\n'));
  // Spec rule 23: every route has a row or is counted in the box's lower border; no `more` row.
  const listed=idle.filter(s=>/ROUTE_\d/.test(s)).length,below=Number((idle.join('\n').match(/ ↓(\d+) ─╯/)||[0,0])[1]);
@@ -226,7 +233,9 @@ for(const [width,height,side] of [[40,30,true],[80,20,false]]){
 for(const [width,side,low] of [[40,true,14],[80,false,10]])for(let height=low;height<=24;height+=2){
  const rows=paint(width,height,side,question),text=rows.join('\n');
  assert(rows.length<=height,width+'x'+height);
- for(const want of ['1 QUESTIONS','◑ Q head'])assert(text.includes(want),'question row lost at '+width+'x'+height+'\n'+text);
+ // 11-25: the side's box and head read `QUESTIONS 1`; the bottom keeps `1 QUESTIONS` (head and box).
+ assert(side?text.includes('QUESTIONS 1'):/│ 1 QUESTIONS|╭─ 1 QUESTIONS /.test(text),'question head lost at '+width+'x'+height+'\n'+text);
+ for(const want of ['◑ Q head'])assert(text.includes(want),'question row lost at '+width+'x'+height+'\n'+text);
  for(const want of ['project','fixture high','42%','SESSION_TITLE'])assert(text.includes(want),width+'x'+height+' lost '+want+'\n'+text);
  // Spec rules 23, 31 (v4.36.4's order, the route box again): the messages fold to one row (the newest
  // stays) before the route box scrolls; 11-20: the messages section goes before the route box does.
@@ -252,7 +261,7 @@ const paint=(model,width,height,extra={})=>{const r=view.render({width,height,si
 // Spec rule 23: twelve current routes all have rows; the head counts all twelve
 // and nothing folds into `+N more` or opens Fleet.
 const twelve={...base,routes:Array.from({length:12},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:12,route_total:12};
-let r=paint(twelve,40,40);assert(r.plain.some(s=>s.includes('12 ROUTE')),r.plain.join('\n'));
+let r=paint(twelve,40,40);assert(r.plain.some(s=>s.includes('ROUTE 12')),r.plain.join('\n'));
 assert(r.plain.some(s=>s.includes('ROUTE_11'))&&!r.plain.join('').includes('more'),r.plain.join('\n'));
 // Fewer rows: the rows shown plus the border counts (`↑N` above, `↓N` below) are always the whole count.
 const six={...base,routes:Array.from({length:6},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:6,route_total:6};
@@ -397,6 +406,9 @@ assert.equal(r.find(p=>p.text==='kimi-k3').foreground,110);assert.notEqual(r.fin
 
     def test_place_tells_the_boxes_apart_and_the_border_carries_the_state(self):
         # Spec rules 14-17 and 19 (2026-11-11 night final layout, draft C6).
+        # 11-25 (four groups): the groups stand `├╴[REPO] …┤`, one empty row, `├╴[SESSION] …┤` (MODEL, CTX, TITLE, NOW straight under it, no spacer before the
+        # route box); the count follows a box's name (`QUESTIONS 1`, `ROUTE 3`); a list head is bold at the body's brightness, not dim; MESSAGES stands two cells
+        # in, a message three and its body four.
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);
 const p=t=>({text:t}),cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
@@ -462,7 +474,7 @@ const failed=paint({state:'idle',model:{routes:[route(0),{...route(1),state:'dea
 const box=failed.rows.flat().filter(x=>/^[╭╮╰╯]$/.test(x.text));
 assert(box.length===4&&box.every(x=>x.foreground===217&&x.bold===false),JSON.stringify(box));
 assert(failed.rows[0][0].foreground==null&&failed.rows[0][0].dim===true);
-// Repo row, then Git on its own row; the route box high; MESSAGES (no box) keeps to the bottom, right
+// Repo head, then Git on its own row; the route box high; MESSAGES (no box) keeps to the bottom, right
 // above the quota row, the rows left over standing between the box and it (11-15).
 // (35 rows: every structural row of spec rule 35 stands with three routes in their full form, each now four rows: who, CTX row, NOW and title.)
 let rows=text(paint({state:'idle',height:35}));
@@ -472,31 +484,32 @@ assert(rows[1].includes('project')&&!rows[1].includes('[e9]')&&!rows[1].includes
 // its labels; an empty row parts the head from the route box. (11-20: the SESSION group's head `SESSION ────` stands where the empty row between the
 // two groups stood.)
 // (11-22: the line between CTX and TITLE is gone, and GIT, MODEL, CTX, TITLE, NOW stand one cell in.)
-assert(/^│ SESSION ─+ │$/.test(rows[3])&&rows[4].includes('fixture high')&&rows[5].startsWith('│  CTX    42%')&&!rows.some(s=>/^│ ─+ │$/.test(s)&&rows.indexOf(s)<rows.length-3),rows.join('\n'));
-assert(rows[6].startsWith('│  TITLE  SESSION_TITLE')&&rows[7].startsWith('│  NOW    NOW_LINE')&&/^│ +│$/.test(rows[8])&&rows[9].includes('╭─ 3 ROUTE'),rows.join('\n'));
-const r=rows.findIndex(s=>s.includes('╭─ 3 ROUTE ')),m=rows.findIndex(s=>s.startsWith('│ MESSAGES')),rb=rows.findIndex(s=>s.startsWith('│ ╰'));
+// (11-25: the empty row stands before the SESSION group's frame head; none stands between NOW and the route box.)
+assert(/^│ +│$/.test(rows[3])&&/^├╴\[SESSION\] ─+┤$/.test(rows[4])&&rows[5].includes('fixture high')&&rows[6].startsWith('│  CTX    42%')&&!rows.some(s=>/^│ ─+ │$/.test(s)&&rows.indexOf(s)<rows.length-3),rows.join('\n'));
+assert(rows[7].startsWith('│  TITLE  SESSION_TITLE')&&rows[8].startsWith('│  NOW    NOW_LINE')&&rows[9].includes('╭─ ROUTE 3'),rows.join('\n'));
+const r=rows.findIndex(s=>s.includes('╭─ ROUTE 3 ')),m=rows.findIndex(s=>s.startsWith('│  MESSAGES')),rb=rows.findIndex(s=>s.startsWith('│ ╰'));
 assert(r>0&&m>rb&&rb>r&&rows.slice(r,rb).filter(s=>s.includes('ROUTE_')).length===3,rows.join('\n'));
 // Spec rules 24, 38 (11-18, route row 5; the CTX row under the who row, then the NOW row): beside the native area a route
 // reads its title (with the route's mark; this fixture names no kind), then who two cells in (the glyph with its harness: no
 // context, no time), then its CTX row (`CTX 72%`, this fixture has no gauge) four cells in, then its NOW four cells in.
 const t0=rows.findIndex(s=>s.includes('ROUTE_0'));
 assert(/^│ │ \S ROUTE_0 +│ │$/.test(rows[t0])&&/^│ │   \S codex +│ │$/.test(rows[t0+1])&&/^│ │ {5}CTX 72% +│ │$/.test(rows[t0+2])&&/^│ │ {5}DOING_0 +│ │$/.test(rows[t0+3]),rows.join('\n'));
-// Each message takes two rows (a head `← [e7]`, the text two cells in), the head `MESSAGES` carries no count of rows shown.
-assert(rows.at(-2).includes('7d 60%')&&/^│ MESSAGES +› │$/.test(rows[m]),rows.join('\n'));
-assert(rows[m+1].startsWith('│  ← [e7]')&&rows[m+2].startsWith('│   MESSAGE_1')&&rows[m+3].startsWith('│  ← [e7]')&&rows[m+4].startsWith('│   MESSAGE_2')&&rows[m+5].startsWith('│  ← [e7]')&&rows[m+6].startsWith('│   MESSAGE_3'),rows.join('\n'));
+// Each message takes two rows (a head `← [e7]` three cells in, the text four), the head `MESSAGES` carries no count of rows shown.
+assert(rows.at(-2).includes('7d 60%')&&/^│  MESSAGES +› │$/.test(rows[m]),rows.join('\n'));
+assert(rows[m+1].startsWith('│   ← [e7]')&&rows[m+2].startsWith('│    MESSAGE_1')&&rows[m+3].startsWith('│   ← [e7]')&&rows[m+4].startsWith('│    MESSAGE_2')&&rows[m+5].startsWith('│   ← [e7]')&&rows[m+6].startsWith('│    MESSAGE_3'),rows.join('\n'));
 assert(m+7===rows.length-3&&/^│ ─+ │$/.test(rows[m+7])&&rows.slice(rb+1,m).every(s=>/^│ +│$/.test(s)),'MESSAGES keeps to the bottom, the spare rows stand above it\n'+rows.join('\n'));
 for(const s of rows)assert.equal(cells(s),40,s);
 // The questions section sits first, above the route box (11-15; 11-16 a thin rounded box like the route's): its top
 // line carries the count in the question's rose and the name tag dim, `›` at its end, then the question's summary
 // in the rows inside; messages are dim, the route box plain. (No question answerable here: the box's line is dim.)
 const asked=paint({state:'working',q:question,model:{answerable:true},height:39});rows=text(asked);
-const qTop=rows.findIndex(s=>/^│ ╭─ 1 QUESTIONS ─+ ›─╮ │$/.test(s)),ra=rows.findIndex(s=>s.includes('╭─ 3 ROUTE ')),mq=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
+const qTop=rows.findIndex(s=>/^│ ╭─ QUESTIONS 1 ─+ ›─╮ │$/.test(s)),ra=rows.findIndex(s=>s.includes('╭─ ROUTE 3 ')),mq=rows.findIndex(s=>s.startsWith('│  MESSAGES'));
 assert(qTop>0&&rows[qTop+1].startsWith('│ │ ◑ Q_HEAD')&&rows[qTop+2].startsWith('│ │   1 A · 2 B')&&/^│ ╰─+╯ │$/.test(rows[qTop+3])&&ra===qTop+4&&mq>ra&&rows.at(-2).includes('7d 60%')
  &&rows.some(s=>/^│ │ \S ROUTE_0 {24}│ │$/.test(s)),rows.join('\n'));
 const border=(i,ch)=>asked.rows[i].find(x=>x.text.startsWith(ch));
-assert.equal(asked.rows[qTop].find(x=>x.text==='1').foreground,174);assert.equal(asked.rows[qTop].find(x=>x.text==='QUESTIONS').dim,true);
+assert.equal(asked.rows[qTop].find(x=>x.text==='1').foreground,174);assert.equal(asked.rows[qTop].find(x=>x.text==='QUESTIONS').bold,true);assert.notEqual(asked.rows[qTop].find(x=>x.text==='QUESTIONS').dim,true);   // (11-25: the box's name is a list name: bold)
 assert.equal(asked.rows[qTop+1].find(x=>x.text==='◑').foreground,174);
-assert.equal(asked.rows[mq].find(x=>x.text.includes('MESSAGES')).dim,true);assert.notEqual(border(ra,'╭').dim,true);
+assert.equal(asked.rows[mq].find(x=>x.text.includes('MESSAGES')).bold,true);assert.notEqual(asked.rows[mq].find(x=>x.text.includes('MESSAGES')).dim,true);assert.notEqual(border(ra,'╭').dim,true);
 
 // A press on any of its rows opens the question popup.
 assert.deepEqual(asked.hits.filter(h=>h.action==='question').map(h=>h.row),[qTop,qTop+1,qTop+2,qTop+3]);
@@ -511,11 +524,11 @@ for(const q of [null,question])for(let h=12;h<=30;h++){
  // Fewer messages show from the oldest (their head counts the rest, spec rule 58), before the
  // route box scrolls; the newest message goes only with the section.
  const hidden=['MESSAGE_1','MESSAGE_2'].filter(m=>!all.includes(m)).length;
- if(all.includes('MESSAGE_3')&&hidden)assert(new RegExp('│ MESSAGES \\+'+hidden+' ').test(all),h+'\n'+all);
+ if(all.includes('MESSAGE_3')&&hidden)assert(new RegExp('│  MESSAGES \\+'+hidden+' ').test(all),h+'\n'+all);
  if(all.includes('MESSAGE_1')&&all.includes('ROUTE_0'))assert(rows.filter(s=>s.includes('ROUTE_')).length===3&&!/[↑↓]\d/.test(all),h+'\n'+all);
  if(/[↑↓]\d/.test(all))assert(!two&&!all.includes('MESSAGE_2')&&!all.includes('MESSAGE_1'),h+'\n'+all);
  // (The route box that went leaves rows over, which a section that fits there takes back: the newest message only, never an older one.)
- if(!all.includes('╭─ 3 ROUTE'))assert(!all.includes('MESSAGE_1')&&!all.includes('MESSAGE_2'),h+' the messages go before the route box\n'+all);
+ if(!all.includes('╭─ ROUTE 3'))assert(!all.includes('MESSAGE_1')&&!all.includes('MESSAGE_2'),h+' the messages go before the route box\n'+all);
 }
 // Every box is closed, whatever the height; an empty route list or message list draws no box (nor head).
 for(let h=10;h<=30;h++)for(const q of [null,question]){const rows=text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model,state:'idle',brief:()=>q}));
@@ -726,7 +739,7 @@ const one={id:'w',title:'속도 3단계',kind:'working',state:'working',elapsed:
  workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',target:'utilities/panel.py',now:'editing utilities/panel.py'})]};
 const two={...one,id:'t',title:'검토 두 갈래',role:'owner',doer_worker:false,owner_paint:undefined,paint:{glyph:P('⠋'),...doer('claude','Opus 5.5','xhigh','61%','━━━━','collecting reviews')},
  workers_live:[worker('codex','gpt-5.5','high','34%','━━',{tool:'Bash',now:'running the codex review'}),worker('opencode','glm-5.2','max','71%','━━━━━',{kind:'idle',elapsed:'8m',now:'waiting for the owner'})]};
-const box=rows=>{const a=rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s));return rows.slice(a,a+rows.slice(a).findIndex(s=>s.startsWith('│ ╰'))+1).filter(s=>!/^│ │ ─ (direct|dispatch|request) ─+ │ │$/.test(s));};// (11-17: without the zone rules `─ dispatch ───`)
+const box=rows=>{const a=rows.findIndex(s=>/╭─ ROUTE \d+/.test(s));return rows.slice(a,a+rows.slice(a).findIndex(s=>s.startsWith('│ ╰'))+1).filter(s=>!/^│ │ ─ (direct|dispatch|request) ─+ │ │$/.test(s));};// (11-17: without the zone rules `─ dispatch ───`)
 const col=(row,word)=>[...row.slice(0,row.indexOf(word))].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 // No worker: the kind / title / owner (who only) / its CTX row / its NOW; no stage box, no `↳`, no time on the owner.
 let b=box(draw([solo],40,60)),at=b.findIndex(s=>s.includes('⠋ owner claude Opus 5.5 xhigh'));
@@ -1481,14 +1494,14 @@ const q={count:1,label:'QUESTIONS',rows:[[p('◑ '),p('Q_HEAD')],[p('  '),p('1 Y
 // (11-15: the waiting question's `◑` blinks on the breath's beat: its cell is the only moving one.)
 for(const [width,height,side] of [[40,8,true],[80,6,false]]){
  const r=view.render({width,height,side,state:'idle',model:{routes:[route],route_count:1},brief:()=>q});
- assert(!rows(r).join('\n').includes(side?'1 ROUTE':'route 1'),rows(r).join('\n'));
+ assert(!rows(r).join('\n').includes(side?'ROUTE 1':'route 1'),rows(r).join('\n'));
  assert.deepEqual(r.spins,[]);assert.deepEqual(r.motion.cells.map(c=>c.ch),['◑'],width+'x'+height);
  const off=view.render({width,height,side,state:'idle',model:{routes:[route],route_count:1},brief:()=>q,configuration:{rule_motion:'off'}});
  assert.equal(off.animated,false,width+'x'+height);
 }
 // The same route with room to show it: its mark spins and the beat runs.
 const shown=view.render({width:40,height:30,side:true,state:'idle',model:{routes:[route],route_count:1},brief:()=>q});
-assert(rows(shown).join('\n').includes('1 ROUTE'));assert.equal(shown.animated,true);assert(shown.spins.length>0);
+assert(rows(shown).join('\n').includes('ROUTE 1'));assert.equal(shown.animated,true);assert(shown.spins.length>0);
 """
         self.node(script, "panel-view.cjs")
 
@@ -1545,6 +1558,7 @@ assert(oneRow>0,'the probe reaches the one-row form');
         # 80x14, its focused editor, and OpenCode's 35-column sidebar keep the
         # session title and running jobs on screen. Spec rule 15 (2026-11-11 night):
         # the branch has its own row below the repo row and is the first to go.
+        # 11-25 (four groups): the side's box and head read `QUESTIONS 1`; the bottom keeps `1 QUESTIONS` (head and box); the repo row is the frame head `├╴[REPO] project/ …┤`.
         sys.path.insert(0, str(ROOT / "tools"))
         from fleet.session_panel import presentation
         values = {"harness": "claude", "tag": "[cb]", "state": "idle", "title": "REVIEW1463_TITLE",
@@ -1564,13 +1578,15 @@ const assert=require('node:assert/strict'),view=require(process.argv[1]),models=
 const question={count:1,label:'QUESTIONS',rows:[[{text:'◑ '},{text:'REVIEW1463: 결과를 어디에 둘까요?'}],[{text:'  '},{text:'1 현재 프로젝트 (추천) · 2 다른 폴더'}]],
  one:[[{text:'◑ '},{text:'REVIEW1463: 결과를 어디에 둘까요?'}]],line:[{text:'REVIEW1463: 결과를 어디에 둘까요?'}],choices:2};
 const routes=[{id:'r',title:'REVIEW1463_ROUTE',state:'blocked',kind:'blocked',paint:{glyph:{text:'◑'}}}];
+const qhead=(s,side)=>side?s.includes('QUESTIONS 1'):/│ 1 QUESTIONS|╭─ 1 QUESTIONS /.test(s);
 const paint=(width,height,side,focused,model)=>view.render({width,height,side,fill:false,focused,sid:'s',configuration:{},
  model:{...model,answerable:true,routes,route_count:1},brief:()=>question})
  .rows.map(r=>r.map(p=>p.text).join(''));
 for(const [width,height,side,focused] of [[80,14,false,false],[80,14,false,true],[35,21,true,false],[35,26,true,false],[80,10,false,false]]){
  const rows=paint(width,height,side,focused,models.short);
- for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB','1 QUESTIONS','◑ REVIEW1463'])
+ for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB','◑ REVIEW1463'])
   assert(rows.some(s=>s.includes(want)),`${width}x${height} focused=${focused} lost ${want}\n`+rows.join('\n'));
+ assert(rows.some(s=>qhead(s,side)),`${width}x${height} focused=${focused} lost the QUESTIONS head\n`+rows.join('\n'));
  const branch=rows.findIndex(s=>s.includes('(values-'));
  if(width===35&&height===26)assert(branch>=0,'a roomy side panel keeps the Git row\n'+rows.join('\n'));
  // The Git row sits right below the repo row and never shares it.
@@ -1580,7 +1596,7 @@ for(const [width,height,side,focused] of [[80,14,false,false],[80,14,false,true]
 }
 // A long title is shortened with an ellipsis; the answer wait (the QUESTIONS head's count) keeps its place.
 const rows=paint(80,14,false,false,models.long);
-assert(rows.some(s=>s.includes('REVIEW1463_TITLE_AAA')&&s.includes('…')),rows.join('\n'));assert(rows.some(s=>s.includes('1 QUESTIONS')),rows.join('\n'));
+assert(rows.some(s=>s.includes('REVIEW1463_TITLE_AAA')&&s.includes('…')),rows.join('\n'));assert(rows.some(s=>qhead(s,false)),rows.join('\n'));
 assert(/^└─.*─┘$/.test(rows.at(-1))&&[...rows.at(-1)].length===80,rows.at(-1));
 '''
         result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"), json.dumps(models)],
@@ -1840,8 +1856,9 @@ for(const width of [28,32,36]){
 // The same function breaks TITLE and NOW at word boundaries, as before (11-17: the NOW's last row ends in `›`, the mark of a row a press opens; 11-22: at the row's right end,
 // and the rows stand one cell in, so a row takes one cell less).
 const title=rows.findIndex(s=>s.includes('TITLE'));
-assert.deepEqual(rows.slice(title,title+6).map(s=>s.slice(2,-1).trimEnd()),[' TITLE  하팅 v4-open 감독 — 셸','        상태·표시 고치기와 Fleet',
- '        세션 줄 다듬기',' NOW    검토 결과 3건을 기다리는','        중이며 CI 결과를 확인하고','        있음                       ›'],all);
+// 11-25 (four groups): the NOW is at most two rows, the second ending in `…` where the text goes on (the popup has the whole of it).
+assert.deepEqual(rows.slice(title,title+5).map(s=>s.slice(2,-1).trimEnd()),[' TITLE  하팅 v4-open 감독 — 셸','        상태·표시 고치기와 Fleet',
+ '        세션 줄 다듬기',' NOW    검토 결과 3건을 기다리는','        중이며 CI 결과를 확인하고… ›'],all);
 // With room the whole values stand on one row each.
 const wide=draw([oneShot,staged,failed],140,76,{side:false}).join('\n');
 for(const want of ['PG-50 휠 입력','2/3: execute ✕','54m','3/7: execute','claude Opus 5.5 xhigh'])assert(wide.includes(want),want+'\n'+wide);
@@ -1855,6 +1872,8 @@ assert(!wide.includes('>_'),'no command column\n'+wide);   // 11-18
         # folds from its two rows (head, body) to one (11-20: before the rule under the metadata goes); then the route box's NOW rows go (11-17: the owner rows take the one-row form), its stage
         # rows go, its owner rows go (11-17: the title row stands alone), and only then it scrolls in place. The rule under the metadata
         # stays while TITLE or NOW takes more than one row; the messages fold all together.
+        # 11-25 (four groups): the empty rows between the groups go first of all; the `[SESSION]` frame head is the old rule's place: short of rows it
+        # takes MODEL's value (`├╴[SESSION] claude-… ───┤`) and MODEL's row goes; the list heads and messages stand two and three cells in.
         script = self.FIXTURE + r"""
 // (11-17: the first two routes of each three have a NOW, the third none, so its row is drawn only where a session has one.)
 const noted=[oneShot,staged,waiting].map(r=>r===waiting?r:{...r,paint:{...r.paint,now:'now step'}});
@@ -1863,29 +1882,29 @@ const nine=[...Array(9)].map((_,i)=>{const r=noted[i%3];return {...r,id:'n'+i,ti
 // rows go before the one-row form, whose title row it shares.)
 const place=rows=>rows.filter(s=>/^│ │ {5}(staged )?\d+\/\d+: /.test(s)).length,names=rows=>rows.filter(s=>/^│ │   [⠋●✕] /.test(s)).length,titles=rows=>rows.filter(s=>/^│ │ [⠋●✕] (셸|세션|새 판)/.test(s)).length;
 const ctx=rows=>rows.filter(s=>/^│ │ {5}now step/.test(s)).length,shown=rows=>rows.filter(s=>/^│ │ [⠋●✕] /.test(s)).length;
-const section=rows=>{const m=rows.findIndex(s=>s.startsWith('│ MESSAGES'));return m<0?[]:rows.slice(m+1).filter(s=>/^│  [←→] /.test(s));};
+const section=rows=>{const m=rows.findIndex(s=>s.startsWith('│  MESSAGES'));return m<0?[]:rows.slice(m+1).filter(s=>/^│   [←→] /.test(s));};
 // 40×60: every route in its whole form (title, who with its context, NOW, stage; the one-shot route has no stage row, the third no NOW) and the three messages (11-20; five before), two rows each.
 const c60=draw(nine,40,60);
-assert(place(c60)===6&&titles(c60)===9&&names(c60)===9&&ctx(c60)===6&&section(c60).length===3&&c60.filter(s=>/^│   \S/.test(s)).length===3,c60.join('\n'));   // 11-20: three messages at most
+assert(place(c60)===6&&titles(c60)===9&&names(c60)===9&&ctx(c60)===6&&section(c60).length===3&&c60.filter(s=>/^│    \S/.test(s)).length===3,c60.join('\n'));   // 11-20: three messages at most
 // The first height (from 72 down) each step is taken.
 const first={};
 for(let h=72;h>=16;h--){
  const rows=draw(nine,40,h),all=rows.join('\n'),title=rows.findIndex(s=>s.startsWith('│  TITLE'));
- const f={msg:section(rows).length>0&&!rows.some(s=>/^│   \S/.test(s)),rule:!rows.some(s=>/^│ SESSION ─+ │$/.test(s)),ctx:ctx(rows)<6,place:place(rows)<6,names:names(rows)<9,scroll:shown(rows)<9};
+ const f={msg:section(rows).length>0&&!rows.some(s=>/^│    \S/.test(s)),rule:!rows.some(s=>/^│  MODEL/.test(s)),ctx:ctx(rows)<6,place:place(rows)<6,names:names(rows)<9,scroll:shown(rows)<9};
  for(const [k,v] of Object.entries(f))if(v&&first[k]===undefined)first[k]=h;
  // The messages fold all together: a body row stands under every head or under none.
  {const bodies=rows.filter(s=>/^│   \S/.test(s)).length;assert(!bodies||bodies===section(rows).length,h+'\n'+all);}
- // (11-22: the rule under the metadata is gone; the SESSION head's own row, which then takes MODEL's value and row, goes only once TITLE and NOW are one row each.)
- if(title>0&&/^│ {9}\S/.test(rows[title+1]))assert(rows.some(s=>/^│ SESSION ─+ │$/.test(s)),h+'\n'+all);
+ // (11-22: the rule under the metadata is gone; the SESSION head, which then takes MODEL's value and row, goes only once TITLE and NOW are one row each.)
+ if(title>0&&/^│ {9}\S/.test(rows[title+1]))assert(rows.some(s=>/^├╴\[SESSION\] ─+┤$/.test(s)),h+'\n'+all);
  // Each route in the box takes the same form; the box never shows more than its rows.
- assert(rows.length<=h&&rows.filter(s=>s.includes('╭─ 9 ROUTE')).length===1,h+'\n'+all);
+ assert(rows.length<=h&&rows.filter(s=>s.includes('╭─ ROUTE 9')).length===1,h+'\n'+all);
 }
 // (11-20: the messages fold first, with MEM's rows, before the rule under the metadata goes.)
 assert(first.msg>=first.rule&&first.rule>=first.ctx&&first.ctx>first.place&&first.place>first.names&&first.names>first.scroll,JSON.stringify(first));
 // Empty rows go before the rule does: with room to spare the rule stands. (11-16: the QUESTIONS box takes two rows
 // where its head row took one, so the height this stood at, 60, is 61 now; 62 leaves the same one spare row.)
 const tall=draw(nine,40,62);
-assert(tall.some(s=>/^│ SESSION ─+ │$/.test(s)),tall.join('\n'));
+assert(tall.some(s=>/^├╴\[SESSION\] ─+┤$/.test(s)),tall.join('\n'));
 """
         self.node(script, "panel-view.cjs")
 
@@ -1896,6 +1915,8 @@ assert(tall.some(s=>/^│ SESSION ─+ │$/.test(s)),tall.join('\n'));
         # stay empty under the last one above MESSAGES; (d) both are structural rows: they go
         # after the values on several rows and the sections' rows, the metadata one before the
         # rule, and all of them before the route box folds.
+        # 11-25 (four groups): one empty row parts each group head from the group above (here `[SESSION]` from REPO) and they are the first rows given up;
+        # no empty row parts NOW from the first section any more (the spacer is gone) and the `[SESSION]` frame head stands where the rule did.
         script = self.FIXTURE + r'''
 const blank=s=>/^│ +│$/.test(s);
 // (a) An idle steward panel: between the two beats one cell changes, `⚑`, on every face.
@@ -1911,14 +1932,13 @@ for(const [config,background,extra,number] of [[{theme:'terminal'},'dark',{},[21
  for(const v of [lit,dark]){const tag=v.rows[0].find(x=>x.text==='e9');
   assert(tag&&!tag.beat&&(tag.foreground??null)===number[0]&&!!tag.bold===number[1]&&!tag.dim,JSON.stringify(config)+' '+JSON.stringify(tag));}
 }
-// (b) The metadata's two groups: with Git, and without it (the row parts the repository from the model). 11-20: that row is the SESSION group's head.
+// (b) The two groups: with Git, and without it (the empty row parts the repository from the SESSION group, whose frame head follows it).
 const r50=draw([oneShot,staged],40,50);
-assert(r50[1].includes('hearting/')&&r50[2].includes('(fix/fleet')&&/^│ SESSION ─+ │$/.test(r50[3])&&r50[4].includes('claude-fable-5-2 high')&&r50[5].startsWith('│  CTX    ━━━━'),r50.join('\n'));
+assert(r50[1].includes('hearting/')&&r50[2].includes('(fix/fleet')&&blank(r50[3])&&/^├╴\[SESSION\] ─+┤$/.test(r50[4])&&r50[5].includes('claude-fable-5-2 high')&&r50[6].startsWith('│  CTX    ━━━━'),r50.join('\n'));
 const noGit=view.render({width:40,height:50,side:true,fill:true,model:{...head,git:[],routes:[oneShot],route_count:1},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
-assert(noGit[1].includes('hearting/')&&/^│ SESSION ─+ │$/.test(noGit[2])&&noGit[3].includes('claude-fable-5-2 high'),noGit.join('\n'));
-// (c) Six routes and eight messages at 40×58: the question's head, then the route box (every route
-// in its whole form), the one parting row above the first section, and the rows the sections leave
-// stay empty under the box, above MESSAGES (`MESSAGES +5`, three messages of two rows each, at the panel's bottom).
+assert(noGit[1].includes('hearting/')&&blank(noGit[2])&&/^├╴\[SESSION\] ─+┤$/.test(noGit[3])&&noGit[4].includes('claude-fable-5-2 high'),noGit.join('\n'));
+// (c) Six routes and eight messages at 40×58: the question's head straight under NOW (11-25: no parting row), then the route box (every route
+// in its whole form), and the rows the sections leave stay empty under the box, above MESSAGES (`MESSAGES +5`, three messages of two rows each, at the panel's bottom).
 const more=[...messages,message('←','[52]','08:10','두 번째 검토 — 줄이는 순서를 확인해 주세요, 본문이 길어서 둘째 줄까지 넘어감',6),
  message('→','[73]','08:20','PR 출판 요청 두 번째',7,'전달됨'),message('←','[e7]','08:30','설치 끝',8)];
 const noted=[oneShot,staged,waiting].map(r=>r===waiting?r:{...r,paint:{...r.paint,now:'now step'}});   // (the third has no NOW, so no NOW row)
@@ -1926,27 +1946,27 @@ const six=[...Array(6)].map((_,i)=>{const r=noted[i%3];return {...r,id:'s'+i,tit
 const QUESTION={count:1,label:'QUESTIONS',rows:[[P('◑ '),P('Q_HEAD')],[P('  '),P('1 A · 2 B')]],one:[[P('◑ '),P('Q_HEAD')]],line:[P('Q_HEAD')],choices:2};
 const paint=(routes,height,o={})=>view.render({width:40,height,side:true,fill:true,model:{...head,messages:o.messages||more,routes,route_count:routes.length,answerable:!!o.q,...(o.model||{})},
  state:'idle',configuration:{},brief:()=>o.q||null}).rows.map(r=>r.map(p=>p.text).join(''));
-const rule=rows=>rows.findIndex(s=>s.startsWith('│ MESSAGES'));
+const rule=rows=>rows.findIndex(s=>s.startsWith('│  MESSAGES'));
 // (11-16: the QUESTIONS section is a thin box too, its name in the top line; `bottom` is the last box's, the route box's.)
-const first=rows=>rows.findIndex(s=>/^│ (\d+ )?QUESTIONS |^│ ╭─/.test(s)),bottom=rows=>rows.findLastIndex(s=>s.startsWith('│ ╰'));
+const first=rows=>rows.findIndex(s=>/^│ QUESTIONS |^│ ╭─/.test(s)),bottom=rows=>rows.findLastIndex(s=>s.startsWith('│ ╰'));
 const full=paint(six,58),m=rule(full),q0=first(full),rb=bottom(full);
-assert(q0>0&&blank(full[q0-1])&&/^│ 1 QUESTIONS +› │$/.test(full[q0])&&full[q0+1].startsWith('│ ╭─ 6 ROUTE ─')&&rb>q0+24&&m>rb&&/^│ MESSAGES \+5 +› │$/.test(full[m]),full.join('\n'));   // 11-20: three at most, five of the eight left out
+assert(q0>0&&!blank(full[q0-1])&&/^│ QUESTIONS 1 +› │$/.test(full[q0])&&full[q0+1].startsWith('│ ╭─ ROUTE 6 ─')&&rb>q0+24&&m>rb&&/^│  MESSAGES \+5 +› │$/.test(full[m]),full.join('\n'));   // 11-20: three at most, five of the eight left out
 // MESSAGES keeps to the panel's bottom (spec rule 14): its rows end above the thin rule and the 5h/7d row, the spare rows
 // stand between the route box and it.
-assert([1,3,5].every(k=>/^│  [←→] \[/.test(full[m+k])&&/^│   \S/.test(full[m+k+1]))&&m+7===full.length-3&&/^│ ─+ │$/.test(full.at(-3))&&full.slice(rb+1,m).every(blank)&&full.at(-2).includes('7d 66%'),full.join('\n'));
+assert([1,3,5].every(k=>/^│   [←→] \[/.test(full[m+k])&&/^│    \S/.test(full[m+k+1]))&&m+7===full.length-3&&/^│ ─+ │$/.test(full.at(-3))&&full.slice(rb+1,m).every(blank)&&full.at(-2).includes('7d 66%'),full.join('\n'));
 // With a question the summary stands in the QUESTIONS box, between its top line and the route box (11-15: right above it).
-const asked=paint([oneShot,staged],44,{q:QUESTION,messages}),q=asked.findIndex(s=>s.includes('1 QUESTIONS '));
-assert(q>2&&blank(asked[q-1])&&asked[q+1].startsWith('│ │ ◑ Q_HEAD')&&asked[q+2].startsWith('│ │   1 A · 2 B')&&/^│ ╰─+╯ │$/.test(asked[q+3])&&asked[q+4].startsWith('│ ╭─ 2 ROUTE ─')&&rule(asked)>bottom(asked),asked.join('\n'));
-// No routes: no box stands (a section with no row to show inside is its head row), and the parting row still stands above the first section.
+const asked=paint([oneShot,staged],44,{q:QUESTION,messages}),q=asked.findIndex(s=>s.includes('QUESTIONS 1 '));
+assert(q>2&&!blank(asked[q-1])&&asked[q+1].startsWith('│ │ ◑ Q_HEAD')&&asked[q+2].startsWith('│ │   1 A · 2 B')&&/^│ ╰─+╯ │$/.test(asked[q+3])&&asked[q+4].startsWith('│ ╭─ ROUTE 2 ─')&&rule(asked)>bottom(asked),asked.join('\n'));
+// No routes: no box stands (a section with no row to show inside is its head row), and no parting row stands above the first section (11-25).
 const none=paint([],30,{model:{routes_known:true}});
-assert(none.filter(s=>s.includes('╭')).length===0&&/1 QUESTIONS/.test(none[first(none)])&&!none.join('').includes('ROUTE')&&blank(none[first(none)-1])&&first(none)>0&&rule(none)>first(none),none.join('\n'));
+assert(none.filter(s=>s.includes('╭')).length===0&&/QUESTIONS 1/.test(none[first(none)])&&!none.join('').includes('ROUTE')&&!blank(none[first(none)-1])&&first(none)>0&&rule(none)>first(none),none.join('\n'));
 // (d) Short of rows: the parting row goes first, then the thin rule above the last row, then values on
 // several rows, then the metadata row and the rule under it, then every message folds to one row; only then
 // does the route box fold (its NOW rows, then its stage rows) and scroll.
-const flags=h=>{const rows=paint(six,h),at=first(rows),git=rows.findIndex(s=>s.includes('(fix/')),title=rows.findIndex(s=>s.startsWith('│  TITLE'));
- return {spacer:at>0&&blank(rows[at-1]),meta:git>0&&/^│ SESSION ─+ │$/.test(rows[git+1]),multi:title>0&&/^│ {9}\S/.test(rows[title+1]),
+const flags=h=>{const rows=paint(six,h),at=rows.findIndex(s=>/^├╴\[SESSION\]/.test(s)),title=rows.findIndex(s=>s.startsWith('│  TITLE'));   // (11-25: the empty row stands before the SESSION head)
+ return {spacer:at>0&&blank(rows[at-1]),meta:at>0&&/^├╴\[SESSION\] ─+┤$/.test(rows[at]),multi:title>0&&/^│ {9}\S/.test(rows[title+1]),
   ctx:rows.filter(s=>/^│ │ {5}now step/.test(s)).length,place:rows.filter(s=>/^│ │ {5}(staged )?\d+\/\d+: /.test(s)).length,shown:rows.filter(s=>/^│ │ [⠋●✕] /.test(s)).length,
-  foot:/^│ ─+ │$/.test(rows.at(-3)),msgfold:rows.some(s=>/^│  [←→] \[/.test(s))&&!rows.some(s=>/^│   \S/.test(s))};};
+  foot:/^│ ─+ │$/.test(rows.at(-3)),msgfold:rows.some(s=>/^│   [←→] \[/.test(s))&&!rows.some(s=>/^│    \S/.test(s))};};
 const gone={};
 for(let h=72;h>=14;h--){
  const f=flags(h),all=paint(six,h).join('\n');
@@ -1964,6 +1984,8 @@ assert(gone.spacer>=gone.foot&&gone.foot>=gone.multi&&gone.multi>=gone.msgfold&&
         # Spec E9 rules 37, 41: beside the native area `REPO hearting · wt 12` and `GIT` without the
         # count. (MEM moved under the messages, spec rule 46; an older backend's row goes there.)
         # The bottom layout keeps its rows as they were.
+        # 11-25 (four groups): REPO is the frame head `├╴[REPO] hearting · wt 12 ───┤` (its name `tier:'group'`, bold); GIT is a value name (`tier:'value'`, dim);
+        # MEM stands under GIT as the last part of the REPO group (the older backend's row too), the labels stand from a panel 30 wide.
         script = self.FIXTURE + r'''
 const D=t=>({text:t,dim:true}),MEM=[D('3m '),D('decision '),P('셸 패널 route 줄 순서는 누가 / context·시간 / 무엇 / 종류로 정함, 지어낸 기억')];
 const side={...head,repo_side:[P('hearting')],worktrees:[D('wt 12')],git_side:[D('fix/fleet-opencode-… ✓')],memory:MEM};
@@ -1971,27 +1993,27 @@ const paint=(routes,width,height,o={})=>view.render({width,height,side:o.side!==
  state:'working',configuration:{},questions:()=>[]});
 const text=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
 const v50=paint([oneShot,staged],40,50),r50=text(v50);
-assert(r50[1].startsWith('│ REPO hearting · wt 12 ')&&r50[2].startsWith('│  GIT    fix/fleet-opencode-… ✓ ')&&!r50.slice(1,3).join('').includes('🚧'),r50.join('\n'));
+assert(r50[1].startsWith('├╴[REPO] hearting · wt 12 ')&&r50[1].endsWith('┤')&&r50[2].startsWith('│  GIT    fix/fleet-opencode-… ✓ ')&&!r50.slice(1,3).join('').includes('🚧'),r50.join('\n'));
 // The labels are TITLE's and NOW's: dim, seven cells; the name keeps its color, the rest is dim.
 const labels=[v50.rows[2].find(p=>/^GIT +$/.test(p.text))];   // (11-22: REPO is a group head, its bold name one cell before its value)
-assert(labels.every(p=>p&&p.dim===true&&p.text.length===7),JSON.stringify(labels));
-assert(v50.rows[1].find(p=>p.text==='REPO').role==='title');
+assert(labels.every(p=>p&&p.dim===true&&p.tier==='value'&&p.text.length===7),JSON.stringify(labels));
+const group=v50.rows[1].find(p=>p.text==='[REPO]');assert(group.role==='title'&&group.tier==='group'&&group.bold===true&&group.dim!==true,JSON.stringify(group));
 assert(v50.rows[1].find(p=>p.text==='hearting').dim!==true&&v50.rows[1].filter(p=>p.text===' · '||p.text==='wt 12').every(p=>p.dim===true),JSON.stringify(v50.rows[1]));
 // Short of cells the branch gives way; the status and a warning stay whole (spec rule 30 (d)).
 const tight=text(paint([oneShot],40,50,{model:{git_side:[D('fix/fleet-opencode-…'),D(' ↓3'),D(' ⚠️rebase')]}}));
 assert(/^│  GIT    fix\/fleet-.*… ↓3 ⚠️rebase +│$/.test(tight[2]),tight.join('\n'));
-// Narrower than 30 cells inside, the labels go first (as TITLE's and NOW's).
-const narrow=text(paint([oneShot],32,50));
-assert(narrow[1].startsWith('│ REPO hearting · wt 12')&&narrow[2].startsWith('│  fix/fleet-opencode-… ✓')&&!narrow.join('').includes('REPO  '),narrow.join('\n'));   // (11-20: the REPO row is the group's head: its word stands first, as `REPO `)
+// Narrower than a panel 30 wide (11-25: was 32), the labels go first (as TITLE's and NOW's).
+const narrow=text(paint([oneShot],29,50));
+assert(narrow[1].startsWith('├╴[REPO] hearting · wt 12')&&narrow[2].startsWith('│  fix/fleet-opencode-…')&&!narrow[2].includes('GIT'),narrow.join('\n'));   // (the group head keeps its name)
 assert(v50.groups.includes('head')&&v50.groups.includes('git'),v50.groups);
 // Only the count was left in the parentheses: the repository row carries the Git group.
 const bare=paint([oneShot],40,50,{model:{git_side:[]}});
 assert(text(bare)[1].includes('wt 12')&&!text(bare).join('').includes('GIT')&&bare.groups.includes('git'),text(bare).join('\n'));
 // Spec E9 rule 46 (e): an older backend's one MEM row (painted pieces only) stands in the MEM
-// section under the messages (11-20: one row, its age `3m`, its type left out, then the headline, `…` where it goes on); the head has no MEM row.
-const title=r50.findIndex(s=>s.startsWith('│  TITLE')),mem=r50.findIndex(s=>/^│ MEM +› │$/.test(s)),msg=r50.findIndex(s=>s.startsWith('│ MESSAGES'));
-assert(title>0&&!r50.slice(0,msg).some(s=>s.includes('MEM'))&&mem>msg&&/^│  · 3m 셸 패널 route 줄 순서는 누가/.test(r50[mem+1])&&!r50.slice(mem).join('').includes('decision')
- &&mem+1===r50.length-4&&/^│ ─+ │$/.test(r50.at(-3)),r50.join('\n'));
+// section (11-25: the last part of the REPO group, under GIT; one row, its age `3m`, its type left out, then the headline, `…` where it goes on); the head has no MEM row.
+const title=r50.findIndex(s=>s.startsWith('│  TITLE')),mem=r50.findIndex(s=>/^│  MEM +› │$/.test(s)),msg=r50.findIndex(s=>s.startsWith('│  MESSAGES'));
+assert(title>0&&mem>2&&mem<title&&msg>title&&/^│   · 3m 셸 패널 route 줄 순서는 누가/.test(r50[mem+1])&&!r50.slice(mem).join('').includes('decision')
+ &&/^│ +│$/.test(r50[mem+2])&&/^├╴\[SESSION\]/.test(r50[mem+3])&&/^│ ─+ │$/.test(r50.at(-3)),r50.join('\n'));
 // No row, no MEM.
 assert(!text(paint([oneShot],40,50,{model:{memory:[]}})).join('').includes('MEM'));
 // The bottom layout: its rows as before (the count stays in the Git parentheses, no MEM).
@@ -2006,6 +2028,8 @@ assert(bottom.some(s=>s.includes('hearting/ │'))&&bottom.some(s=>s.includes('(
         # rows as REPO's and GIT's; `CTX` stands for the word `context`; short of cells the model
         # name gives way so the effort stays whole; narrower than 30 cells inside all four labels
         # go and the rows are as they were. The bottom layout keeps its rows.
+        # 11-25 (four groups): the labels stand from a panel 30 wide (inner 26, was 30); MODEL and CTX are the SESSION group's first rows, under its frame head
+        # `├╴[SESSION] ───┤` (no empty row of their own), GIT closes the REPO group's metadata with the empty row before `[SESSION]`.
         script = self.FIXTURE + r'''
 const D=t=>({text:t,dim:true}),gauge=[P('━━━━'),D('──────'),D(' '),P('41%')];
 const side={...head,repo_side:[P('hearting')],worktrees:[D('wt 12')],git_side:[D('fix/fleet-opencode-… ✓')],
@@ -2014,33 +2038,33 @@ const paint=(width,o={})=>view.render({width,height:50,side:o.side!==false,fill:
  native:o.native||{},state:'working',configuration:{},questions:()=>[]});
 const text=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
 // (a) 38 cells: four labels in one column, dim and seven cells; no word `context` beside them.
-const v38=paint(38),r38=text(v38),meta=r38.slice(1,6);
-assert(meta[0].startsWith('│ REPO hearting · wt 12')&&meta[1].startsWith('│  GIT    fix/fleet-opencode-… ✓')&&/^│ SESSION ─+ │$/.test(meta[2])   // (11-20: the SESSION group's head stands where the empty row stood)
- &&meta[3].startsWith('│  MODEL  claude-fable-5-2 high ')&&meta[4].startsWith('│  CTX    ━━━━────── 41% '),r38.join('\n'));
+const v38=paint(38),r38=text(v38),meta=r38.slice(1,7);
+assert(meta[0].startsWith('├╴[REPO] hearting · wt 12')&&meta[1].startsWith('│  GIT    fix/fleet-opencode-… ✓')&&/^│ +│$/.test(meta[2])&&/^├╴\[SESSION\] ─+┤$/.test(meta[3])   // (11-25: the empty row, then the SESSION group's frame head)
+ &&meta[4].startsWith('│  MODEL  claude-fable-5-2 high ')&&meta[5].startsWith('│  CTX    ━━━━────── 41% '),r38.join('\n'));
 // (11-22: GIT, MODEL, CTX stand one cell in; REPO is the group's head, its bold name and one cell.)
-const labels=[2,4,5].map(i=>v38.rows[i].find(p=>/^(GIT|MODEL|CTX) +$/.test(p.text)));
-assert(labels.every(p=>p&&p.dim===true&&p.text.length===7),JSON.stringify(labels));
+const labels=[2,5,6].map(i=>v38.rows[i].find(p=>/^(GIT|MODEL|CTX) +$/.test(p.text)));
+assert(labels.every(p=>p&&p.dim===true&&p.tier==='value'&&p.text.length===7),JSON.stringify(labels));
 assert(!r38.slice(0,8).join('\n').includes('context'),r38.join('\n'));
 assert(v38.groups.includes('context'),v38.groups);
 // (b) A long model: the name gives way with `…`, the effort stays whole (as GIT's branch).
 for(const o of [{model:{selected:[P('opencode-go/deepseek-v4.1-flash'),D(' '),P('max')]}},{native:{model:'opencode-go/deepseek-v4.1-flash',effort:'max'}}]){
- const row=text(paint(38,o))[4];
+ const row=text(paint(38,o))[5];
  assert(/^│  MODEL  opencode-go\/deepseek-\S*… max │$/.test(row)&&cells(row)===38,row);
 }
-// (c) 30 cells inside keep the labels; 29 cells inside, all four go and `context` comes back.
-assert(text(paint(34))[5].startsWith('│  CTX    ━━━━'),text(paint(34)).join('\n'));
-const r33=text(paint(33));
-assert(r33[1].startsWith('│ REPO hearting · wt 12')&&r33[2].startsWith('│  fix/fleet-opencode-… ✓')&&r33[4].startsWith('│  claude-fable-5-2 high')
- &&r33[5].startsWith('│  context ━━━━────── 41%')&&!/GIT |MODEL|CTX/.test(r33.slice(0,8).join('')),r33.join('\n'));   // (the route box's own `CTX` rows are below the head; 11-20: the REPO row keeps its word, the group's head)
+// (c) A panel 30 wide (26 inside, 11-25; was 30 inside) keeps the labels; one cell less, all four go and `context` comes back.
+assert(text(paint(30))[6].startsWith('│  CTX    ━━━━')&&text(paint(30))[5].startsWith('│  MODEL  claude-fable'),text(paint(30)).join('\n'));
+const r29=text(paint(29));
+assert(r29[1].startsWith('├╴[REPO] hearting · wt 12')&&r29[2].startsWith('│  fix/fleet-opencode-… ✓')&&r29[5].startsWith('│  claude-fable-5-2 high')
+ &&r29[6].startsWith('│  context ━━━━────── 41%')&&!/GIT |MODEL|CTX/.test(r29.slice(0,8).join('')),r29.join('\n'));   // (the route box's own `CTX` rows are below the head; the group's head keeps its name)
 // (d) A model not known yet.
-assert(text(paint(38,{model:{selected:[]}}))[4].startsWith('│  MODEL  Checking '),text(paint(38,{model:{selected:[]}})).join('\n'));
+assert(text(paint(38,{model:{selected:[]}}))[5].startsWith('│  MODEL  Checking '),text(paint(38,{model:{selected:[]}})).join('\n'));
 // (e) OpenCode's MCP count stays on the CTX row; the MODEL row carries none.
 const mcp=text(paint(38,{model:{mcp:[D('MCP '),P('3/4')]}}));
-assert(mcp[5].startsWith('│  CTX    ━━━━────── 41% │ MCP 3/4 ')&&!mcp[4].includes('MCP'),mcp.join('\n'));
+assert(mcp[6].startsWith('│  CTX    ━━━━────── 41% │ MCP 3/4 ')&&!mcp[5].includes('MCP'),mcp.join('\n'));
 // (f) An older backend without `context_side`: the word goes, never `CTX    context`.
 for(const context of [[D('context '),...gauge],[P('context ━━━━────── 41%')]]){
  const old=text(paint(38,{model:{context,context_side:undefined}}));
- assert(old[5].startsWith('│  CTX    ━━━━────── 41% ')&&!old.join('').includes('context'),old.join('\n'));
+ assert(old[6].startsWith('│  CTX    ━━━━────── 41% ')&&!old.join('').includes('context'),old.join('\n'));
 }
 // (g) The bottom layout keeps its rows, whatever the side fragments say.
 const bottom=o=>text(paint(140,{side:false,...o}));
@@ -2104,19 +2128,20 @@ for(const [i,row] of plain.entries())for(const p of row)if(p.text.trim()&&p.text
         # the running pulse kept) in the route box's top line, `MESSAGES` with its thin rule to `›`, the
         # producer's own label too; role words and kind rows stay as they are; the bottom layout keeps
         # `route N`. (11-15: the route box again; no read pages any more.)
+        # 11-25 (four groups): beside the native area the count stands AFTER the box's name (`ROUTE 2`, `ROUTE 3 ⠏2`) and the list head stands two cells in.
         script = self.FIXTURE + r"""
 const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
 const owned={...oneShot,role:'owner',kind_word:'code'};
 const at=(o={})=>view.render({width:o.width||40,height:60,side:o.side!==false,fill:o.side!==false,model:{...head,routes:[owned,staged],route_count:2,...(o.model||{})},
  state:'working',configuration:{},questions:()=>[],...(o.extra||{})});
 const v=at(),rows=plain(v),all=rows.join('\n');
-assert(rows.some(s=>s.startsWith('│ ╭─ 2 ROUTE ─'))&&rows.some(s=>/^│ MESSAGES( \+\d+)? +› │$/.test(s))&&!/\broute \d|messages/.test(all),all);   // 11-20: three at most, `+N` counts the rest
-const count=v.rows.flat().find(p=>p.text==='2 ROUTE');assert(count&&count.beat===true,JSON.stringify(count));
+assert(rows.some(s=>s.startsWith('│ ╭─ ROUTE 2 ─'))&&rows.some(s=>/^│  MESSAGES( \+\d+)? +› │$/.test(s))&&!/\broute \d|messages/.test(all),all);   // 11-20: three at most, `+N` counts the rest
+const count=v.rows.flat().find(p=>p.text==='ROUTE 2');assert(count&&count.beat===true,JSON.stringify(count));
 // (11-17, route row 5: the kind stands alone in the route's first line, `● code`; the owner's line under its title.)
 assert(all.includes('⠋ owner')&&rows.some(s=>/^│ │ \S code +\d+m │ │$/.test(s))&&!all.includes('code · one-shot'),all);
 // The producer's label alone (no rows yet): its count first too.
 const label=plain(at({model:{routes:[],route_count:0,route_label:'route 3 ⠏2'}}));
-assert(label.some(s=>s.includes('╭─ 3 ROUTE ⠏2 ─')),label.join('\n'));
+assert(label.some(s=>s.includes('╭─ ROUTE 3 ⠏2 ─')),label.join('\n'));
 // The bottom layout: `route N`, `messages`.
 const bottom=plain(at({width:120,side:false})).join('\n');
 assert(bottom.includes('╭─ route 2 ')&&/│ messages( \+\d+)? ─+ › │/.test(bottom)&&!/ROUTE|MESSAGES/.test(bottom),bottom);
@@ -2130,32 +2155,34 @@ assert(plain(at({width:120,side:false,model:{routes:[],route_count:0,route_label
         # rows stand between the sections above (QUESTIONS, the route box, LAB, SESSIONS: their places and
         # order as before, from the top) and MESSAGES. Without MESSAGES, MEM; with neither, the spare rows are below.
         # The bottom layout keeps its label alone.
+        # 11-25 (four groups): MEM no longer stands at the bottom: it ends the REPO group (head and records two and three cells in); MESSAGES alone keeps to the bottom,
+        # its head two cells in, a message three and its body four; the empty row before it is the spare rows' place, and no spacer stands under NOW.
         script = self.FIXTURE + r"""
 const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
 const blank=s=>/^│ +│$/.test(s);
 const tall=(height,o={})=>plain(view.render({width:o.width||40,height,side:o.side!==false,fill:o.side!==false,model:{...head,routes:[oneShot,staged],route_count:2,...(o.model||{})},
  state:'idle',configuration:{},questions:()=>[]}));
 for(const height of [50,70,90]){
- const rows=tall(height),r=rows.findIndex(s=>s.startsWith('│ ╭─ 2 ROUTE ')),rb=rows.findIndex((s,i)=>i>r&&s.startsWith('│ ╰')),m=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
+ const rows=tall(height),r=rows.findIndex(s=>s.startsWith('│ ╭─ ROUTE 2 ')),rb=rows.findIndex((s,i)=>i>r&&s.startsWith('│ ╰')),m=rows.findIndex(s=>s.startsWith('│  MESSAGES'));
  // (11-16: with no row to show inside it, the section stays its head row: an empty box is no box.)
- assert(r>0&&/^│ 1 QUESTIONS /.test(rows[r-1])&&blank(rows[r-2]),height+'\n'+rows.join('\n'));
+ assert(r>0&&/^│ QUESTIONS 1 /.test(rows[r-1])&&!blank(rows[r-2]),height+'\n'+rows.join('\n'));
  // MESSAGES keeps its rows (three at most since 11-20, two each) above the thin rule and the 5h/7d row; the blank rows stand above its head.
  // (11-18: the route box is its top line, the `dispatch` rule, the first route's title, who and CTX row, the second's title, who, CTX row and stage line, then its bottom: `r+9`; no NOW, no row.)
- const last=rows.findLastIndex(s=>/^│  [←→] /.test(s));
- assert(last===rows.length-5&&/^│   \S/.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&/⚙   ▾ │$/.test(rows.at(-2))&&rb===r+9&&m>rb&&m+8===rows.length-2,height+'\n'+rows.join('\n'));
+ const last=rows.findLastIndex(s=>/^│   [←→] /.test(s));
+ assert(last===rows.length-5&&/^│    \S/.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&/⚙   ▾ │$/.test(rows.at(-2))&&rb===r+9&&m>rb&&m+8===rows.length-2,height+'\n'+rows.join('\n'));
  assert(blank(rows[m-1])&&rows.slice(rb+1,m).every(blank)&&rows.slice(r+1,rb).every(s=>/^│ │ /.test(s)),height+'\n'+rows.join('\n'));
  // The press targets went with their rows.
  const v=view.render({width:40,height,side:true,fill:true,model:{...head,routes:[oneShot,staged],route_count:2},state:'idle',configuration:{},questions:()=>[]});
  for(let k=0;k<=6;k++)assert(v.hits.some(h=>h.row===m+k&&h.action==='popup:MESSAGES'),k+JSON.stringify(v.hits));
 }
-// MEM under MESSAGES: its last row above the thin rule and 5h/7d, the blank rows above MESSAGES.
+// MEM under REPO (11-25): its records straight under its head, then the empty row and the `[SESSION]` head, the MESSAGES head below the blank rows.
 {const rows=tall(50,{model:{memory_items:[{tier:'durable',kind:'decision',age:'3m',text:'MEM_ONE'},{tier:'durable',kind:'fact',age:'1h',text:'MEM_TWO'}]}}),
- m=rows.findIndex(s=>s.startsWith('│ MESSAGES')),e=rows.findIndex(s=>/^│ MEM +› │$/.test(s)),s=rows.findIndex(s=>s.includes('ROUTE_')||/^│ 2 ROUTE /.test(s));
- assert(m>0&&e>m&&/MEM_ONE/.test(rows[e+1])&&/MEM_TWO/.test(rows[e+2])&&e+3===rows.length-3&&/^│ ─+ │$/.test(rows.at(-3))&&blank(rows[m-1]),rows.join('\n'));}
-// No MESSAGES: MEM keeps to the bottom. Neither: the sections stand from the top, the blank rows are below.
-{const mem=tall(50,{model:{messages:[],memory_items:[{tier:'durable',kind:'decision',age:'3m',text:'MEM_ONE'}]}}),e=mem.findIndex(s=>/^│ MEM +› │$/.test(s));
- assert(e>0&&e+2===mem.length-3&&/MEM_ONE/.test(mem[e+1])&&/^│ ─+ │$/.test(mem.at(-3))&&blank(mem[e-1]),mem.join('\n'));
- const none=tall(50,{model:{messages:[]}}),r=none.findIndex(s=>s.startsWith('│ ╭─ 2 ROUTE ')),rb=none.findIndex((s,i)=>i>r&&s.startsWith('│ ╰'));
+ m=rows.findIndex(s=>s.startsWith('│  MESSAGES')),e=rows.findIndex(s=>/^│  MEM +› │$/.test(s));
+ assert(e>0&&m>e&&/MEM_ONE/.test(rows[e+1])&&/MEM_TWO/.test(rows[e+2])&&blank(rows[e+3])&&/^├╴\[SESSION\]/.test(rows[e+4])&&/^│ ─+ │$/.test(rows.at(-3))&&blank(rows[m-1]),rows.join('\n'));}
+// No MESSAGES: MEM still ends the REPO group. Neither: the sections stand from the top, the blank rows are below.
+{const mem=tall(50,{model:{messages:[],memory_items:[{tier:'durable',kind:'decision',age:'3m',text:'MEM_ONE'}]}}),e=mem.findIndex(s=>/^│  MEM +› │$/.test(s));
+ assert(e>0&&/MEM_ONE/.test(mem[e+1])&&blank(mem[e+2])&&/^├╴\[SESSION\]/.test(mem[e+3])&&!mem.some(s=>/MESSAGES/.test(s)),mem.join('\n'));
+ const none=tall(50,{model:{messages:[]}}),r=none.findIndex(s=>s.startsWith('│ ╭─ ROUTE 2 ')),rb=none.findIndex((s,i)=>i>r&&s.startsWith('│ ╰'));
  assert(r>0&&rb>r&&none.slice(rb+1,-2).every(blank)&&!none.some(s=>/MEM|MESSAGES/.test(s)),none.join('\n'));}
 // No overlap and no overflow at any height 5-60 and width 12-60, beside the native area and below it: the rows
 // stay within the height, each as wide as the panel, and a press target stands on a row of its own section.
@@ -2166,9 +2193,9 @@ for(const side of [true,false])for(let height=5;height<=60;height+=side?1:5)for(
  const rows=plain(v),label=[side,height,width].join(' ')+'\n'+rows.join('\n');
  assert(rows.length<=height&&rows.every(s=>wide(s)===width),label);
  assert(v.hits.every(h=>h.row>=0&&h.row<rows.length),label);
- const at=rows.findIndex(s=>s.startsWith('│ MESSAGES')||s.startsWith('│ messages')),m=rows.findIndex(s=>/^│ MEM /.test(s));
- if(side&&at>=0&&m>at)assert(rows.slice(at,m).filter(blank).length===0,label);
- for(const h of v.hits.filter(h=>h.action==='popup:MESSAGES'))assert(h.row>=at&&(m<0||h.row<m),label);
+ const at=rows.findIndex(s=>s.startsWith('│  MESSAGES')||s.startsWith('│ messages')),m=rows.findIndex(s=>/^│ {1,2}MEM /.test(s));
+ if(side&&at>=0&&m>=0)assert(m<at,label);   // 11-25: MEM stands in the REPO group, above MESSAGES
+ for(const h of v.hits.filter(h=>h.action==='popup:MESSAGES'))assert(h.row>=at,label);
 }
 const bottom=tall(14,{side:false,width:120});
 assert(bottom.some(s=>/^│ messages( \+\d+)? ─+ › │$/.test(s))&&!bottom.some(s=>/MESSAGES/.test(s)),bottom.join('\n'));
@@ -2179,24 +2206,25 @@ assert(bottom.some(s=>/^│ messages( \+\d+)? ─+ › │$/.test(s))&&!bottom.s
         # 11-14 night ("메시지 뜨는 최대 개수를 좀 줄이자. 세로폭이 아무리 길어도 말이야"): beside the native area
         # no more than five messages show whatever the height (11-16: two rows each again); the head counts
         # the rest (`MESSAGES +N`). Spare rows never lengthen a body. 11-20 (the person: "MESSAGE도 최대 3개 정도로 다시 줄이고"): three.
+        # 11-25 (four groups): the list head and its messages stand two cells in (a message three, its body four).
         script = self.FIXTURE + r"""
 const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
 const more=[...messages,message('←','[52]','08:10','두 번째 검토',6),message('→','[73]','08:20','PR 출판 요청 두 번째',7,'전달됨'),message('←','[e7]','08:30','설치 끝',8)];
 const at=(list,height)=>plain(view.render({width:40,height,side:true,fill:true,model:{...head,messages:list,routes:[oneShot],route_count:1},state:'idle',configuration:{},questions:()=>[]}));
-const heads=rows=>rows.filter(s=>/^│  [←→] \[/.test(s));
+const heads=rows=>rows.filter(s=>/^│   [←→] \[/.test(s));
 for(const list of [messages,more])for(const height of [60,90,140]){
- const rows=at(list,height),label=rows.find(s=>s.startsWith('│ MESSAGES'));
+ const rows=at(list,height),label=rows.find(s=>s.startsWith('│  MESSAGES'));
  assert.equal(heads(rows).length,3,height+'\n'+rows.join('\n'));
- assert(new RegExp('^│ MESSAGES'+(list.length>3?' \\+'+(list.length-3):'')+' +› │$').test(label),label);
+ assert(new RegExp('^│  MESSAGES'+(list.length>3?' \\+'+(list.length-3):'')+' +› │$').test(label),label);
  // The newest three, oldest first.
- assert.deepEqual(heads(rows).map(s=>s.slice(5,9)),list.slice(-3).map(m=>m.who),rows.join('\n'));
+ assert.deepEqual(heads(rows).map(s=>s.slice(6,10)),list.slice(-3).map(m=>m.who),rows.join('\n'));
 }
 // Three or fewer: all of them, and no count.
-for(const n of [1,2,3]){const rows=at(messages.slice(0,n),90);assert.equal(heads(rows).length,n);assert(rows.some(s=>/^│ MESSAGES +› │$/.test(s)),rows.join('\n'));}
+for(const n of [1,2,3]){const rows=at(messages.slice(0,n),90);assert.equal(heads(rows).length,n);assert(rows.some(s=>/^│  MESSAGES +› │$/.test(s)),rows.join('\n'));}
 // Spare rows never lengthen a body: a long body is one row (under its head) ending in `…`.
 const long=[...messages.slice(0,2),message('←','[52]','08:10','두 번째 검토 — 줄이는 순서를 확인해 주세요, 본문이 길어서 둘째 줄까지 넘어가고 셋째 줄까지 이어지는 긴 본문입니다',6)];
-const rows=at(long,90),i=rows.findIndex(s=>s.startsWith('│  ← [52]'));
-assert(i>0&&rows[i+1].startsWith('│   두 번째')&&rows[i+1].includes('…')&&!/^│   \S/.test(rows[i+2]),rows.join('\n'));
+const rows=at(long,90),i=rows.findIndex(s=>s.startsWith('│   ← [52]'));
+assert(i>0&&rows[i+1].startsWith('│    두 번째')&&rows[i+1].includes('…')&&!/^│ {3,4}[^ │]/.test(rows[i+2]),rows.join('\n'));
 """
         self.node(script, "panel-view.cjs")
 
@@ -2206,6 +2234,8 @@ assert(i>0&&rows[i+1].startsWith('│   두 번째')&&rows[i+1].includes('…')&
         # (and the guide line), the route box every route whole, MESSAGES three rows, MEM two; short of rows
         # (20) each other section keeps one and the box scrolls in place. The heads in order and the press
         # actions of every head and row; a route's rows open the route popup with it unfolded.
+        # 11-25 (four groups): MEM is the last part of the REPO group, so the heads stand MEM, QUESTIONS, ROUTE, MESSAGES (the
+        # count after a box's name, `QUESTIONS 3`, `ROUTE 4`); the list heads and the items stand two cells in (a message's body four).
         script = r"""
 const assert=require('node:assert/strict'),pv=require(process.argv[1]);
 const p=(text,extra={})=>({text,...extra});
@@ -2231,12 +2261,12 @@ const brief=()=>({count:2,label:'QUESTIONS',rows:[[p('◑ 패널을 접었을 �
  one:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로')]],line:[p('패널을 접었을 때')],choices:4});
 const paint=height=>pv.render({width:44,height,side:true,model,native:{},state:'working',sid:'s',harness:'claude',frame:0,brief,sent:()=>[]});
 // (11-16: with room QUESTIONS is a thin rounded box, its name in the top line; short of rows the box's two lines go and the section reads as a head row and its rows.)
-const HEADS=[['QUESTIONS',/^│ ╭─ 3 QUESTIONS ─+ ›─╮ │$|^│ 3 QUESTIONS +› │$/],['ROUTE',/^│ ╭─ 4 ROUTE ─+(?: [↑↓]\d+)? ›─╮ │$|^│ ╭─ 4 ROUTE ─+ ›─╮ │$/],
- ['MESSAGES',/^│ MESSAGES(?: \+\d+)? +› │$/],['MEM',/^│ MEM +› │$/]];
-// The rows under each head, up to the next head (MEM: its `◆` rows; a box: up to its bottom line).
+const HEADS=[['MEM',/^│  MEM +› │$/],['QUESTIONS',/^│ ╭─ QUESTIONS 3 ─+ ›─╮ │$|^│ QUESTIONS 3 +› │$/],['ROUTE',/^│ ╭─ ROUTE 4 ─+(?: [↑↓]\d+)? ›─╮ │$|^│ ╭─ ROUTE 4 ─+ ›─╮ │$/],
+ ['MESSAGES',/^│  MESSAGES(?: \+\d+)? +› │$/]];
+// The rows under each head, up to the next head (MEM and the last, MESSAGES: their item rows; a box: up to its bottom line).
 const sections=rows=>{const at=HEADS.map(([name,re])=>[name,rows.findIndex(s=>re.test(s))]);
  assert(at.every(([,i])=>i>0),rows.join('\n'));assert(at.every(([,i],k)=>!k||i>at[k-1][1]),'order of the heads\n'+rows.join('\n'));
- const out={};at.forEach(([name,i],k)=>{const end=name==='ROUTE'||/^│ ╭/.test(rows[i])?rows.findIndex((s,j)=>j>i&&s.startsWith('│ ╰'))+1:k+1<at.length?at[k+1][1]:rows.findIndex((s,j)=>j>i&&!/^│  [◆◇·] |^│   \S/.test(s));
+ const out={};at.forEach(([name,i],k)=>{const end=name==='ROUTE'||/^│ ╭/.test(rows[i])?rows.findIndex((s,j)=>j>i&&s.startsWith('│ ╰'))+1:name!=='MEM'&&k+1<at.length?at[k+1][1]:rows.findIndex((s,j)=>j>i&&!/^│ {3,4}[^ │]/.test(s));
   const body=rows.slice(i+1,end);while(body.length&&/^│ +│$/.test(body.at(-1)))body.pop();out[name]={head:i,rows:body,from:i+1};});return out;};
 for(const [height,rowsOf] of [[46,{QUESTIONS:2,MESSAGES:6,MEM:2}],[20,{QUESTIONS:1,MESSAGES:1,MEM:1}]]){
  const v=paint(height),rows=v.rows.map(r=>r.map(x=>x.text).join('')),sec=sections(rows),label=height+'\n'+rows.join('\n');
@@ -2272,17 +2302,19 @@ for(const [height,rowsOf] of [[46,{QUESTIONS:2,MESSAGES:6,MEM:2}],[20,{QUESTIONS
  assert.deepEqual(act(sec.MEM.head),['popup:MEM']);sec.MEM.rows.forEach((_,k)=>assert.deepEqual(act(sec.MEM.from+k),['popup:MEM:'+k]));
  if(height===46){
   // (11-20: the newest three of the four.)
-  assert.deepEqual([0,2,4].map(k=>sec.MESSAGES.rows[k].slice(3,9)),['→ [73]','← [12]','← [52]'],label);
-  assert.deepEqual([1,3,5].map(k=>sec.MESSAGES.rows[k].slice(2,6)),['  설치','  답 ','  정리'],label);}
- // MESSAGES and MEM keep to the bottom: MEM's last row, a thin rule (the second thing to go when short of rows), then the 5h/7d row.
- if(height===46)assert(/^│  ◆ /.test(rows.at(-5))&&/^│  ◆ /.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&rows.at(-2).includes('7d 64%'),label);
- else assert(/^│  ◆ /.test(rows.at(-3))&&rows.at(-2).includes('7d 64%'),label);   // 11-20: short of rows the record is its one row (mark, age, headline)
+  assert.deepEqual([0,2,4].map(k=>sec.MESSAGES.rows[k].slice(4,10)),['→ [73]','← [12]','← [52]'],label);
+  assert.deepEqual([1,3,5].map(k=>sec.MESSAGES.rows[k].slice(3,7)),['  설치','  답 ','  정리'],label);}
+ // MESSAGES keeps to the bottom: its last message, a thin rule (the second thing to go when short of rows), then the 5h/7d row.
+ // (11-25: MEM no longer stands there: it ends the REPO group, under its head.)
+ if(height===46)assert(/^│   ← \[52\]/.test(rows.at(-5))&&/^│    정리 끝/.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&rows.at(-2).includes('7d 64%'),label);
+ else assert(/^│   ← \[52\] 정리 끝/.test(rows.at(-3))&&rows.at(-2).includes('7d 64%'),label);   // 11-20: short of rows the message is its one row
+ assert(/^│   ◆ /.test(rows[sec.MEM.head+1])&&(rows[sec.MEM.head+1+sec.MEM.rows.length]||'').match(/^│ +│$|^├╴\[SESSION\]/),'MEM ends the REPO group\n'+label);
 }
-// Taller than the sections need: the blank rows stand between the route box and the MESSAGES head, not under MEM.
+// Taller than the sections need: the blank rows stand between the route box and the MESSAGES head (MEM stands in the REPO group, 11-25).
 {const v=paint(52),rows=v.rows.map(r=>r.map(x=>x.text).join('')),sec=sections(rows),blank=s=>/^│ +│$/.test(s),label=rows.join('\n');
  const end=sec.ROUTE.from+sec.ROUTE.rows.length;
  assert(sec.MESSAGES.head-end>=1&&rows.slice(end,sec.MESSAGES.head).every(blank),label);
- assert(/^│  ◆ /.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&rows.at(-2).includes('7d 64%')&&sec.MEM.rows.length===2,label);
+ assert(/^│    정리 끝/.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&rows.at(-2).includes('7d 64%')&&sec.MEM.rows.length===2&&sec.MEM.head<sec.QUESTIONS.head,label);
  // The press targets of the moved rows moved with them.
  const act=i=>v.hits.filter(h=>h.row===i).map(h=>h.action).filter(a=>a!=='fold'&&a!=='settings');
  assert.deepEqual(act(sec.MESSAGES.head),['popup:MESSAGES']);assert.deepEqual(act(sec.MESSAGES.from),['popup:MESSAGES']);
@@ -2295,6 +2327,7 @@ for(const [height,rowsOf] of [[46,{QUESTIONS:2,MESSAGES:6,MEM:2}],[20,{QUESTIONS
         # went. QUESTIONS keeps its head and first row to the last (spec rule 34 (b)); the structural rows
         # above it (TITLE, NOW, ...) give their rows up first. Every height 5-60 at every width 12-60 keeps
         # its rows within the height, each as wide as the panel, and 5-9 rows (from width 20) show the question.
+        # 11-25 (four groups): the head reads `QUESTIONS 3` and REPO stands as the frame head `├╴[REPO] …┤`.
         script = r"""
 const assert=require('node:assert/strict'),pv=require(process.argv[1]);
 const p=(text,extra={})=>({text,...extra});
@@ -2310,7 +2343,7 @@ for(let h=5;h<=60;h++)for(let w=12;w<=60;w++){
  const v=paint(h,w),rows=v.rows.map(r=>r.map(x=>x.text).join('')),label=h+'x'+w+'\n'+rows.join('\n');
  assert(rows.length<=h&&rows.every(r=>cells(r)===w),label);
  if(w>=20&&h<=9){
-  const head=rows.findIndex(r=>/^│ 3 QUESTIONS/.test(r));
+  const head=rows.findIndex(r=>/^│ QUESTIONS 3/.test(r));
   assert(head>=0&&/^│ ◑ /.test(rows[head+1]),label);
   // The press on the head or its row still opens the question popup.
   assert(v.hits.some(x=>x.row===head&&x.action==='question')&&v.hits.some(x=>x.row===head+1&&x.action==='question'),label+JSON.stringify(v.hits));
@@ -2318,9 +2351,9 @@ for(let h=5;h<=60;h++)for(let w=12;w<=60;w++){
 }
 // 5 rows: the head and first row between the borders and the fold row; 6 rows: REPO stands above them.
 let rows=paint(5,44).rows.map(r=>r.map(x=>x.text).join(''));
-assert(/^│ 3 QUESTIONS/.test(rows[1])&&/^│ ◑ /.test(rows[2])&&rows[3].endsWith('⚙   ▾ │'),rows.join('\n'));
+assert(/^│ QUESTIONS 3/.test(rows[1])&&/^│ ◑ /.test(rows[2])&&rows[3].endsWith('⚙   ▾ │'),rows.join('\n'));
 rows=paint(6,44).rows.map(r=>r.map(x=>x.text).join(''));
-assert(/^│ REPO /.test(rows[1])&&/^│ 3 QUESTIONS/.test(rows[2]),rows.join('\n'));
+assert(/^├╴\[REPO\] /.test(rows[1])&&/^│ QUESTIONS 3/.test(rows[2]),rows.join('\n'));
 """
         self.node(script, "panel-view.cjs")
 
@@ -2338,6 +2371,7 @@ assert(/^│ REPO /.test(rows[1])&&/^│ 3 QUESTIONS/.test(rows[2]),rows.join('\
         # rose (`accent-line`) and blinks where a question is answerable here, the letters inside stand still; a
         # question answered elsewhere leaves the line dim. Short of rows the box's two lines go and the letters
         # blink again as before.
+        # 11-25 (four groups): the count follows the box's name (`╭─ QUESTIONS 1 ─…`, the head `QUESTIONS 1`).
         script = r"""
 const assert=require('node:assert/strict'),pv=require(process.argv[1]);
 const p=(text,extra={})=>({text,...extra});
@@ -2362,7 +2396,7 @@ const inside=r=>r.slice(3,-3);// (a row's content between the box's two walls)
 const grounds=v=>v.rows.map(r=>r.some(x=>x.background!==undefined));
 const red=x=>x.foreground===174&&x.dim!==true;
 // (a) 256 colors: the head, the sent line, then three rows; no ground anywhere, the words red.
-{const v=paint({q:choice(),sent,width:48}),rows=v.rows.map(str),head=rows.findIndex(r=>/^│ ╭─ 1 QUESTIONS ─+ ›─╮ │$/.test(r));
+{const v=paint({q:choice(),sent,width:48}),rows=v.rows.map(str),head=rows.findIndex(r=>/^│ ╭─ QUESTIONS 1 ─+ ›─╮ │$/.test(r));
  assert(head>0,rows.join('\n'));assert(/^│ │ ✓ 답 보냄 · 2 표준 출력 +│ │$/.test(rows[head+1])&&/^│ ╰─+╯ │$/.test(rows[head+5]),rows.join('\n'));
  assert(!grounds(v).some(Boolean),rows.join('\n'));
  const at=[head+2,head+3,head+4];
@@ -2394,7 +2428,7 @@ for(const q of [there,null]){const v=paint({q,sent}),rows=v.rows.map(str);
  assert(!grounds(v).some(Boolean)&&!rows.join('').includes('↵'),JSON.stringify(q));
  for(const r of v.rows.filter(r=>/다른 세션의 질문|그 창에서 답/.test(str(r))))assert(!inside(r).filter(x=>x.text!=='◑').some(red),str(r));
  // The box's line is dim (nothing here to answer), and does not blink.
- const top=v.rows.find(r=>/^│ ╭─ 1 QUESTIONS/.test(str(r))),line=top.filter(x=>/^[╭─╮ ]+$/.test(x.text)&&x.text.trim());
+ const top=v.rows.find(r=>/^│ ╭─ QUESTIONS 1/.test(str(r))),line=top.filter(x=>/^[╭─╮ ]+$/.test(x.text)&&x.text.trim());
  assert(line.length&&line.every(x=>x.dim===true&&x.role==='messages'&&x.blink!==true),JSON.stringify(q)+JSON.stringify(line));
  assert(!v.rows.flat().some(x=>x.role==='accent-line'),JSON.stringify(q));}
 // (c) Eight colors: the words in the terminal's red; mono and NO_COLOR: by weight; no bar, no ground.
@@ -2410,7 +2444,7 @@ for(const [cfg,m,look] of [[{theme:'mono'},{},x=>x.bold!==true&&x.foreground==nu
  assert(inside(r).every(x=>x.background===235)&&inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===253),JSON.stringify(r));}
 // (e0) Short of rows (20): the plain section, no box lines; its red letters blink again as before.
 {const v=paint({q:choice(),height:20,sent}),rows=v.rows.map(str),at=rows.findIndex(r=>r.includes('◑ 로그를'));
- assert(rows.some(r=>/^│ 1 QUESTIONS +› │$/.test(r))&&!rows.some(r=>/╭─ 1 QUESTIONS/.test(r))&&at>0,rows.join('\n'));
+ assert(rows.some(r=>/^│ QUESTIONS 1 +› │$/.test(r))&&!rows.some(r=>/╭─ QUESTIONS 1/.test(r))&&at>0,rows.join('\n'));
  assert(v.rows[at].filter(x=>/로그/.test(x.text)).every(x=>red(x)&&x.blink===true),JSON.stringify(v.rows[at]));}
 // (e) Short of rows: the action row goes first, then the choices; the first row stays to the last.
 // Every height 5-60 at every width 12-60 keeps its rows within the panel, each as wide.
@@ -2460,29 +2494,30 @@ for(const [m,cfg] of [[{colors:8},{}],[{colors:256,no_color:true},{}],[{colors:2
         # kind dim (`◆ 10m decision`), then the headline in the body color; its scope is read in the MEM popup (`memoryBody`). This repository's
         # records and the global ones stand together (the backend's order, newest first). Short of cells the kind goes first; the mark and the age
         # stay. Mono and NO_COLOR keep the two marks apart by shape. MESSAGES and MEM keep to the bottom.
+        # 11-25 (four groups): MEM is the last part of the REPO group (before the empty row and `[SESSION]`), its head and items stand two cells in.
         script = self.FIXTURE + r"""
 const items=[{tier:'durable',scope:'project',kind:'decision',age:'10m',text:'패널 접힘은 아래 두 줄'},
  {tier:'working',scope:'global',kind:'lesson',age:'2h',text:'스피너 끊김을 고친 법'}];
 const drawMem=(o={})=>view.render({width:o.width||44,height:o.height||40,side:true,fill:true,model:{...head,routes:[],route_count:0,memory_items:o.items||items,...(o.model||{})},
  state:'idle',configuration:o.cfg||{},questions:()=>[]});
 const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
-const memRows=v=>{const rows=plain(v),i=rows.findIndex(s=>/^│ MEM +(› )?│$/.test(s));return rows.slice(i+1).filter(s=>/^│  [◆◇·] /.test(s));};
+const memRows=v=>{const rows=plain(v),i=rows.findIndex(s=>/^│  MEM +(› )?│$/.test(s));return rows.slice(i+1).filter(s=>/^│   [◆◇·] /.test(s));};
 let [a,b]=memRows(drawMem({width:52}));
-assert(/^│  ◆ 10m decision 패널 접힘은 아래 두 줄 +│$/.test(a),a);
-assert(/^│  ◇ 2h lesson 스피너 끊김을 고친 법 +│$/.test(b),b);
+assert(/^│   ◆ 10m decision 패널 접힘은 아래 두 줄 +│$/.test(a),a);
+assert(/^│   ◇ 2h lesson 스피너 끊김을 고친 법 +│$/.test(b),b);
 // Its words: the lead dim (the mark, the age, the kind), the headline in the body color.
-{const v=drawMem({width:52}),rows=plain(v),y=rows.findIndex(s=>s.startsWith('│  ◆ 10m'));
+{const v=drawMem({width:52}),rows=plain(v),y=rows.findIndex(s=>s.startsWith('│   ◆ 10m'));
  const lead=v.rows[y].filter(p=>/[◆a-z0-9]/.test(p.text)&&!/패널/.test(p.text));assert(lead.length&&lead.every(p=>p.dim===true),JSON.stringify(v.rows[y]));
  assert(v.rows[y].find(p=>p.text.includes('패널')).dim!==true);}
 // Short of cells: the kind goes first; the mark and the age stay.
-for(let w=60;w>=14;w--){const rows=memRows(drawMem({width:w})),x=rows[0],y=rows.find(r=>r.startsWith('│  ◇'));
- for(const [r,mark,age] of [[x,'◆','10m'],[y,'◇','2h']]){assert(r.startsWith('│  '+mark+' '+age+' ')&&cells(r)===w,w+' '+r);}}
+for(let w=60;w>=14;w--){const rows=memRows(drawMem({width:w})),x=rows[0],y=rows.find(r=>r.startsWith('│   ◇'));
+ for(const [r,mark,age] of [[x,'◆','10m'],[y,'◇','2h']]){assert(r.startsWith('│   '+mark+' '+age+' ')&&cells(r)===w,w+' '+r);}}
 // A record naming no tier says only what it names.
-[a]=memRows(drawMem({items:[{kind:'fact',age:'5m',text:'only a kind'}]}));assert(/^│  · 5m fact only a kind +│$/.test(a),a);
+[a]=memRows(drawMem({items:[{kind:'fact',age:'5m',text:'only a kind'}]}));assert(/^│   · 5m fact only a kind +│$/.test(a),a);
 // Mono and NO_COLOR: the two marks stay apart by shape.
-for(const o of [{cfg:{theme:'mono'}},{model:{no_color:true}}]){const rows=memRows(drawMem(o));assert(rows[0].startsWith('│  ◆ ')&&rows[1].startsWith('│  ◇ '),JSON.stringify(o));}
-// MEM keeps to the panel's bottom, above the thin rule and the last row.
-{const rows=plain(drawMem());assert(/^│  ◇ 2h lesson /.test(rows.at(-4))&&/^│ ─+ │$/.test(rows.at(-3))&&rows.at(-2).includes('7d'),rows.join('\n'));}
+for(const o of [{cfg:{theme:'mono'}},{model:{no_color:true}}]){const rows=memRows(drawMem(o));assert(rows[0].startsWith('│   ◆ ')&&rows[1].startsWith('│   ◇ '),JSON.stringify(o));}
+// MEM ends the REPO group: its last record, the empty row, then the `[SESSION]` head (the panel's bottom keeps the thin rule and the last row).
+{const rows=plain(drawMem()),at=rows.findIndex(s=>/^├╴\[SESSION\]/.test(s));assert(at>2&&/^│   ◇ 2h lesson /.test(rows[at-2])&&/^│ +│$/.test(rows[at-1])&&/^│ ─+ │$/.test(rows.at(-3))&&rows.at(-2).includes('7d'),rows.join('\n'));}
 """
         self.node(script, "panel-view.cjs")
 
@@ -2493,6 +2528,8 @@ for(const o of [{cfg:{theme:'mono'}},{model:{no_color:true}}]){const rows=memRow
         # the kind goes, the age stays) and its headline two cells in on up to two rows, the second ending
         # in `…`; short of rows the headlines take one row, MEM steps down to one record and then goes
         # before any of the messages does.
+        # 11-25 (four groups): MEM no longer stands under the messages: it is the last part of the REPO group (the list heads in bold at the body's
+        # brightness, `tier:'list'`, two cells in, the records three); it still goes whole before any message row or the MESSAGES head does.
         script = self.FIXTURE + r"""
 const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
 const cellsOfRows=s=>[...s].reduce((n,c)=>n+(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1f300}-\u{1faff}]/u.test(c)?2:1),0);
@@ -2501,40 +2538,40 @@ const items=[{tier:'durable',kind:'decision',age:'3m',text:'panel labels in dark
 const routes=[oneShot,staged,{...oneShot,id:'c'}];
 const at=(o={})=>view.render({width:o.width||40,height:o.height||70,side:true,fill:true,model:{...head,routes,route_count:routes.length,memory_items:items,...(o.model||{})},
  state:'idle',configuration:{},questions:()=>[]});
-const section=(rows,word)=>{const i=rows.findIndex(s=>new RegExp('^│ '+word+'( \\+\\d+)? +(› )?│$').test(s));if(i<0)return null;let end=i+1;
- while(end<rows.length&&/^│  [◆◇·] |^│  [←→] |^│   \S/.test(rows[end]))end++;return rows.slice(i+1,end);};
+const section=(rows,word)=>{const i=rows.findIndex(s=>new RegExp('^│  '+word+'( \\+\\d+)? +(› )?│$').test(s));if(i<0)return null;let end=i+1;
+ while(end<rows.length&&/^│   [◆◇·] |^│   [←→] |^│    \S/.test(rows[end]))end++;return rows.slice(i+1,end);};
 let v=at(),rows=plain(v);
-const msg=rows.findIndex(s=>s.startsWith('│ MESSAGES')),mem=rows.findIndex(s=>/^│ MEM +› │$/.test(s));
-assert(msg>0&&mem>msg&&!rows.slice(0,msg).some(s=>s.includes('MEM')),rows.join('\n'));
+const msg=rows.findIndex(s=>s.startsWith('│  MESSAGES')),mem=rows.findIndex(s=>/^│  MEM +› │$/.test(s));
+assert(mem>0&&msg>mem&&mem<rows.findIndex(s=>/^├╴\[SESSION\]/.test(s))&&!rows.slice(msg).some(s=>s.includes('MEM')),rows.join('\n'));
 // Two records, one row each (11-20): the mark, the age and the kind dim, then the headline (`…` where it goes on).
-assert(/^│  ◆ 3m decision panel labels in dark… +│$/.test(rows[mem+1])&&/^│  ◆ 2h lesson one fix per review fin… +│$/.test(rows[mem+2])&&!/^│  [◆◇·] |^│   \S/.test(rows[mem+3]),rows.join('\n'));
+assert(/^│   ◆ 3m decision panel labels in dar… +│$/.test(rows[mem+1])&&/^│   ◆ 2h lesson one fix per review fi… +│$/.test(rows[mem+2])&&!/^│   [◆◇·] |^│    \S/.test(rows[mem+3]),rows.join('\n'));
 // The lead dim; short of cells the kind goes (the headline keeps 14 cells at least), the mark and the age stay.
 assert(v.rows[mem+2].filter(p=>/lesson|2h|◆/.test(p.text)&&!/review/.test(p.text)).every(p=>p.dim===true),JSON.stringify(v.rows[mem+2]));
-for(const [w,re] of [[40,/^│  ◆ 3m decision /],[34,/^│  ◆ 3m decision /],[30,/^│  ◆ 3m panel labels/],[20,/^│  ◆ 3m /],[16,/^│  ◆ 3m /]]){
- const r=plain(at({width:w})),m=r.findIndex(s=>/^│ MEM +› │$/.test(s));
+for(const [w,re] of [[40,/^│   ◆ 3m decision /],[34,/^│   ◆ 3m decision /],[30,/^│   ◆ 3m panel labels/],[20,/^│   ◆ 3m /],[16,/^│   ◆ 3m /]]){
+ const r=plain(at({width:w})),m=r.findIndex(s=>/^│  MEM +› │$/.test(s));
  assert(re.test(r[m+1])&&r.every(s=>cellsOfRows(s)===w),w+'\n'+r.join('\n'));
 }
-// The headline in the body color; the title as the messages' (dim, its word the title role).
+// The headline in the body color; the head as the messages' (a list head: bold at the body's brightness, not dim; its word the title role).
 {const words=v.rows[mem+2].filter(p=>/review/.test(p.text));assert(words.length&&words.every(p=>p.dim!==true),JSON.stringify(v.rows[mem+2]));}
 const title=v.rows[mem].find(p=>p.text==='MEM'),mtitle=v.rows[msg].find(p=>p.text==='MESSAGES');
-assert(title.role==='title'&&title.dim===true&&mtitle.role==='title'&&mtitle.dim===true);
+assert(title.role==='title'&&title.tier==='list'&&title.bold===true&&title.dim!==true&&mtitle.role==='title'&&mtitle.tier==='list'&&mtitle.bold===true&&mtitle.dim!==true);
 // 11-20: MEM opens its popup: the head and each record press it (a record by its number).
 assert.deepEqual(v.hits.filter(h=>h.row>=mem&&h.row<=mem+2).map(h=>h.action),['popup:MEM','popup:MEM:0','popup:MEM:1'],JSON.stringify(v.hits));
 // One record, none.
 rows=plain(at({model:{memory_items:items.slice(1)}}));
-const one=section(rows,'MEM');assert(one&&one.length===1&&one[0].startsWith('│  ◆ 2h lesson one fix per review fin'),rows.join('\n'));
+const one=section(rows,'MEM');assert(one&&one.length===1&&one[0].startsWith('│   ◆ 2h lesson one fix per review fi'),rows.join('\n'));
 assert(!plain(at({model:{memory_items:[]}})).join('').includes('MEM'));
 // An age missing: the row keeps what is known; a record without a kind reads the same.
-{const r=plain(at({model:{memory_items:[{tier:'durable',kind:'',age:'5m',text:'only an age'}]}})),i=r.findIndex(s=>/^│  ◆ 5m only an age +│$/.test(s));assert(i>0,r.join('\n'));}
+{const r=plain(at({model:{memory_items:[{tier:'durable',kind:'',age:'5m',text:'only an age'}]}})),i=r.findIndex(s=>/^│   ◆ 5m only an age +│$/.test(s));assert(i>0,r.join('\n'));}
 // No messages: MEM alone under its head.
-rows=plain(at({model:{messages:[]}}));assert(!rows.join('').includes('MESSAGES')&&section(rows,'MEM').filter(s=>/^│  ◆ /.test(s)).length===2,rows.join('\n'));
+rows=plain(at({model:{messages:[]}}));assert(!rows.join('').includes('MESSAGES')&&section(rows,'MEM').filter(s=>/^│   ◆ /.test(s)).length===2,rows.join('\n'));
 // Narrower than 30 cells inside: the same section.
-rows=plain(at({width:32}));assert(section(rows,'MEM')?.[0].startsWith('│  ◆ 3m panel'),rows.join('\n'));
+rows=plain(at({width:32}));assert(section(rows,'MEM')?.[0].startsWith('│   ◆ 3m panel'),rows.join('\n'));
 // Short of rows (11-15: every section down to two rows and then one, the lowest first, MEM's headlines
 // first taking one row (11-16); then MEM goes whole, its records and then its head, before any message row
 // or the MESSAGES head goes).
-const memRows=rows=>rows.filter(s=>/^│  ◆ /.test(s)).length,memHead=rows=>rows.some(s=>/^│ MEM +› │$/.test(s));
-const msgRows=rows=>rows.filter(s=>/^│  [←→] \[/.test(s)).length,msgHead=rows=>rows.some(s=>s.startsWith('│ MESSAGES'));
+const memRows=rows=>rows.filter(s=>/^│   ◆ /.test(s)).length,memHead=rows=>rows.some(s=>/^│  MEM +› │$/.test(s));
+const msgRows=rows=>rows.filter(s=>/^│   [←→] \[/.test(s)).length,msgHead=rows=>rows.some(s=>s.startsWith('│  MESSAGES'));
 let oneRecord=0,noRecord=0,noHead=0,noMsgRow=0,noMsgHead=0;
 for(let h=70;h>=8;h--){
  rows=plain(at({height:h}));
@@ -2543,7 +2580,7 @@ for(let h=70;h>=8;h--){
  if(!msgRows(rows)&&!noMsgRow)noMsgRow=h;if(!msgHead(rows)&&!noMsgHead)noMsgHead=h;
  // Spec rule 58: the messages not shown are counted right after their head (`MESSAGES +N`), with or without MEM.
  const shown=msgRows(rows),hidden=msgHead(rows)?head.messages.length-shown:0;
- if(hidden)assert(new RegExp('^│ MESSAGES \\+'+hidden+' +› │$').test(rows.find(s=>s.startsWith('│ MESSAGES'))),h+'\n'+rows.join('\n'));
+ if(hidden)assert(new RegExp('^│  MESSAGES \\+'+hidden+' +› │$').test(rows.find(s=>s.startsWith('│  MESSAGES'))),h+'\n'+rows.join('\n'));
 }
 // (A later step that frees more rows than it needed gives them back to the earlier ones, so a state may come back one height lower.)
 assert(oneRecord>noRecord&&noRecord>=noHead&&noHead>noMsgRow&&noMsgRow>noMsgHead&&noMsgHead>0,JSON.stringify({oneRecord,noRecord,noHead,noMsgRow,noMsgHead}));
@@ -2551,9 +2588,9 @@ assert(oneRecord>noRecord&&noRecord>=noHead&&noHead>noMsgRow&&noMsgRow>noMsgHead
 // the title role) and a thin rule in the same color runs on from each to the row's end (to `›` for
 // MESSAGES); nothing stands before a head.
 let lined=at();rows=plain(lined);
-assert(rows.some(s=>/^│ MESSAGES( \+\d+)? +› │$/.test(s))&&rows.some(s=>/^│ MEM +› │$/.test(s))&&!rows.some(s=>/── (MESSAGES|MEM)/.test(s)),rows.join('\n'));
+assert(rows.some(s=>/^│  MESSAGES( \+\d+)? +› │$/.test(s))&&rows.some(s=>/^│  MEM +› │$/.test(s))&&!rows.some(s=>/── (MESSAGES|MEM)/.test(s)),rows.join('\n'));
 // (11-22: beside the native area a section's head has no rule: its name, then `›` at the right end.)
-const hasRule=word=>lined.rows[rows.findIndex(s=>s.startsWith('│ '+word))].some(p=>/─/.test(p.text));
+const hasRule=word=>lined.rows[rows.findIndex(s=>s.startsWith('│  '+word))].some(p=>/─/.test(p.text));
 assert(!hasRule('MESSAGES')&&!hasRule('MEM'),rows.join('\n'));
 const cellsOf=s=>[...s].reduce((n,c)=>n+(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1f300}-\u{1faff}]/u.test(c)?2:1),0);
 for(const w of [32,40,48]){const r=plain(at({width:w}));assert(r.every(s=>cellsOf(s)===w),w+'\n'+r.join('\n'));}
@@ -2580,6 +2617,7 @@ const labStart=rows=>rows.findIndex(s=>/^│ (\d+ )?LAB( |$)/.test(s));
         # section ("세션 현황" meant this session's own progress, not the other sessions) left the panel: an
         # older backend's `lab` or `sessions` draws nothing, changes no frame, glyph or row and opens nothing.
         # The sections stand QUESTIONS, the route box, MESSAGES, MEM.
+        # 11-25 (four groups): MEM stands first now (it ends the REPO group): MEM, QUESTIONS, the route box, MESSAGES.
         script = self.FIXTURE + self.LAB + r"""
 const sessions={count:3,counts:[[T('◑1')],[T('●2')]],rows:[1,2,3].map(i=>({glyph:[T('●')],tag:[T('['),T('7'+i),T(']')],title:[T('다른 세션 '+i)],age:[T(i+'m')]}))};
 const q={count:1,label:'QUESTIONS',rows:[[P('◑ '),P('조건을 계속 비교할까요?')],[P('  '),P('1 계속 · 2 멈춤')]],one:[[P('◑ '),P('조건을 계속 비교할까요?')]],line:[P('조건을 계속 비교할까요?')],choices:2};
@@ -2592,7 +2630,7 @@ for(const state of ['idle','working','blocked'])for(const folded of [false,true]
  const rows=plain(both);
  assert(!/\bLAB\b|SESSIONS|다른 세션|잡음 섞기/.test(rows.join('\n')),rows.join('\n'));
  assert(!both.hits.some(h=>/LAB|SESSIONS/.test(h.action)));
- if(!folded){const order=['1 QUESTIONS','╭─ 1 ROUTE','MESSAGES','MEM'].map(w=>rows.findIndex(r=>r.includes(w)));
+ if(!folded){const order=['MEM','╭─ QUESTIONS 1','╭─ ROUTE 1','MESSAGES'].map(w=>rows.findIndex(r=>r.includes(w)));
   assert(order.every((y,k)=>y>0&&(!k||y>order[k-1])),order+'\n'+rows.join('\n'));}
 }
 """
@@ -2604,6 +2642,8 @@ for(const state of ['idle','working','blocked'])for(const folded of [false,true]
         # and then one (three messages at most). Only then does the route box fold its rows and scroll in place; then MEM goes, then
         # MESSAGES' row and head, and last of these the route box (11-20: the person put it before MESSAGES and MEM).
         # The question keeps its head and first row, the fold and settings row stay.
+        # 11-25 (four groups): MEM stands in the REPO group now (its head two cells in, its records three) but gives way in the same order; a message's body
+        # stands four cells in; the count follows a box's name (`ROUTE 3`, `QUESTIONS 1`).
         script = self.FIXTURE + r"""
 const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
 const items=[{tier:'durable',kind:'decision',age:'3m',text:'평가 조건을 같게 유지'},{tier:'durable',kind:'lesson',age:'2h',text:'one fix per review finding'}];
@@ -2612,9 +2652,8 @@ const noted=[oneShot,staged].map(r=>({...r,paint:{...r.paint,now:'now step'}}));
 const sections=(height,o={})=>plain(view.render({width:40,height,side:true,fill:true,model:{...head,routes:[noted[0],noted[1],noted[0]],route_count:3,memory_items:items,...(o.model||{})},
  state:'idle',configuration:{},brief:()=>o.q||null}));
 const n=(rows,re)=>rows.filter(s=>re.test(s)).length;
-const above=rows=>{const i=rows.findIndex(s=>/^│ MEM ─/.test(s));return i<0?rows:rows.slice(0,i);};
-const state=rows=>({body:n(above(rows),/^│   \S/),msg:rows.some(s=>/^│ MESSAGES/.test(s))?n(rows,/^│  [←→] \[/):-1,mem:rows.some(s=>/^│ MEM +›/.test(s))?n(rows,/^│  ◆/):-1,
- box:rows.some(s=>s.startsWith('│ ╭─ 3 ROUTE'))?n(rows,/^│ │ [⠋●✕] /):-1,whole:n(rows,/^│ │ {5}now step/)});
+const state=rows=>({body:n(rows,/^│    \S/),msg:rows.some(s=>/^│  MESSAGES/.test(s))?n(rows,/^│   [←→] \[/):-1,mem:rows.some(s=>/^│  MEM +›/.test(s))?n(rows,/^│   ◆/):-1,
+ box:rows.some(s=>s.startsWith('│ ╭─ ROUTE 3'))?n(rows,/^│ │ [⠋●✕] /):-1,whole:n(rows,/^│ │ {5}now step/)});
 // The first height (from 90 down) each step is taken.
 const first={};const seen=[];
 for(let h=90;h>=8;h--){
@@ -2632,7 +2671,7 @@ assert(first.fold>first.scroll&&first.msg1>first.scroll,label);
 // MEM and then MESSAGES go whole before the route box does (11-20); the question keeps its rows to the end.
 assert(first.scroll>first.mem0&&first.mem0>first['mem-1']&&first['mem-1']>first.msg0&&first.msg0>first['msg-1']&&first['msg-1']>first.boxGone,label);
 // With a question: its head and first row stay at every height (its second row goes early, with MEM's rows, before the messages fold).
-const asked=rows=>rows.filter(s=>/1 QUESTIONS|조건을 계속|1 계속 · 2 멈춤/.test(s));
+const asked=rows=>rows.filter(s=>/QUESTIONS 1|조건을 계속|1 계속 · 2 멈춤/.test(s));
 for(let h=40;h>=10;h--){const rows=sections(h,{q});
  assert(asked(rows).length>=2,h+'\n'+rows.join('\n'));
  assert(rows.at(-2).endsWith('⚙   ▾ │'),h);}
@@ -2653,6 +2692,8 @@ for(let h=40;h>=10;h--){const rows=sections(h,{q});
         # the still frame in the state's color. The head rule is the plain thin rule in every
         # state. Between frames only the frame's line cells (and the spinner glyph) change; the
         # host gets those cells, their paint at any frame and the next frame they change at.
+        # 11-25 (four groups): a group head's frame cells `├` `╴` `┤` take the frame's own colour and motion phase: `├` and `┤` stand where the side `│` cells
+        # stood (already counted) and `╴` is one cell more for every head, so the host's cells are the frame's line cells plus one per group head.
         script = self.FIXTURE + r"""
 const styles={dim:{dim:true},g_spin:{foreground:230},g_blocked:{foreground:217},g_work_off:{foreground:150,dim:true},
  tag_steward:{foreground:219,bold:true},tag_steward_dim:{foreground:219,dim:true}};
@@ -2720,8 +2761,8 @@ for(const since of [0,7,59,1000]){const v=run({state:'working',frame:since,since
  const words=text(v.rows[0]).indexOf(' ─')+1;assert.equal(headOf(l),words,since+' '+text(v.rows[0]));
  assert.deepEqual(looks(run({state:'working',frame:since+13,since})),looks(run({state:'working',frame:13})),'the same arc, '+since+' frames on');}
 // (d) The host's cells: the frame's line cells (never the head's words), their paint at any frame as painted, the next change.
-const v3=run({state:'working',frame:3});
-assert(v3.animated&&!v3.blinks&&v3.motion&&v3.motion.cells.length===156-text(v3.rows[0]).indexOf(' ─'));
+const v3=run({state:'working',frame:3}),heads=v=>v.rows.filter(r=>r[0].text==='├').length;
+assert(heads(v3)===2&&v3.animated&&!v3.blinks&&v3.motion&&v3.motion.cells.length===156-text(v3.rows[0]).indexOf(' ─')+heads(v3));
 {const g=grid(v3);for(const c of v3.motion.cells)assert.equal(g[c.row][c.col].ch,c.ch,JSON.stringify(c));
  assert(!v3.motion.cells.some(c=>c.row===0&&c.col>0&&c.col<text(v3.rows[0]).indexOf(' ─')+1));
  for(const f of [3,17,30,59]){const g=grid(run({state:'working',frame:f}));
@@ -2732,14 +2773,14 @@ for(const f of [0,3,59,60,1000])assert.equal(v3.motion.next(f),f+1);
  let t=0,wakes=0;while(t<60){const n=s.motion.next(t);assert(n>t);for(let k=t+1;k<n;k++)assert.deepEqual(s.motion.at(k),s.motion.at(t),String(k));t=n;wakes++;}
  assert.equal(wakes,P);}
 // (e) Between two frames only the frame's line cells and the spinner glyph change; the head rule never moves.
-// (11-22: the rule that stands still here and moves under `rule` is the SESSION head's: `SESSION ───…`, 28 cells of rule at 40 wide.)
+// (11-22: the rule that stands still here and moves under `rule` is the SESSION head's: `├╴[SESSION] ───…┤`, 26 cells of rule (and a last one of its own) at 40 wide, 11-25.)
 const ruleRow=v=>v.rows.findIndex((r,i)=>i>0&&r.some(p=>p.rule));
 for(const state of ['working','submitting','blocked']){
  const a=run({state,frame:5}),b=run({state,frame:state==='blocked'?17:6}),ga=grid(a),gb=grid(b),mc=new Set(a.motion.cells.map(c=>c.row+','+c.col));
  ga.forEach((r,y)=>r.forEach((c,x)=>{if(!c)return;if(mc.has(y+','+x)||c.p.spin)return;assert.deepEqual(c,gb[y][x],state+' '+y+','+x);}));
  const i=ruleRow(a);assert(i>0,state);
  for(const v of [a,b]){const parts=v.rows[i].filter(p=>p.rule);
-  assert(parts.length===1&&parts[0].text==='─'.repeat(28)&&parts[0].role==='messages'&&parts[0].dim===true&&!parts[0].motion&&!parts[0].tone,state+' '+JSON.stringify(parts));}
+  assert(parts.length===1&&parts[0].text==='─'.repeat(26)&&parts[0].role==='messages'&&parts[0].dim===true&&!parts[0].motion&&!parts[0].tone,state+' '+JSON.stringify(parts));}
 }
 // (f) Waiting: the whole frame breathes, one red at a time on every line cell; three shades in
 // 256 colors, six in 24-bit; it starts at its brightest (the frame's waiting red) and the host
@@ -2790,15 +2831,15 @@ for(const [o,face] of [[{background:'dark'},'dark'],[{cfg:{theme:'light'}},'ligh
 // the same content and breath; the same arc, each starting right after its own head's words.
 const startOf=v=>text(v.rows[0]).indexOf(' ─')+1;
 for(const [state,f] of [['working',5],['blocked',10]]){const all=['claude','codex','opencode'].map(harness=>run({harness,state,frame:f})),hs=['claude','codex','opencode'];
- // (11-18: the same content and tones' steps; a working session's tone colors are its own harness's, so only those are set aside.)
- const alike=v=>v.rows.slice(1,-1).map(r=>r.slice(1,-1).map(p=>p.role==='orbit'&&state==='working'?{...p,foreground:null}:p));
+ // (11-18: the same content and tones' steps; a working session's tone colors are its own harness's, so only those are set aside; 11-25: so is the arc level of a group head's `╴`, which follows where each head's words end.)
+ const alike=v=>v.rows.slice(1,-1).map(r=>r.slice(1,-1).map(p=>p.role==='orbit'&&state==='working'?{...p,foreground:null,level:null}:p));
  for(const [i,v] of all.slice(1).entries()){
   assert.deepEqual(alike(v),alike(all[0]),state);
   if(state==='blocked'){assert.deepEqual(v.rows.slice(1),all[0].rows.slice(1),state);continue;}
   const d=startOf(v)-startOf(all[0]),a=looks(v,hs[i+1]),b=looks(all[0],hs[0]),P=a.length;assert(d!==0);
   a.forEach((x,i)=>{const y=b[((i-d)%P+P)%P];if(x!=='text'&&y!=='text')assert.equal(x,y,state+' '+i);});}}
 // (j) Short of rows (the rule goes, spec rule 34 (c)) the frame keeps moving; the bottom layout moves alike.
-for(let h=30;h>=8;h-=4){const v=run({state:'working',frame:7,height:h});assert(v.motion&&v.motion.cells.length===2*40+2*(h-2)-text(v.rows[0]).indexOf(' ─'),String(h));}
+for(let h=30;h>=8;h-=4){const v=run({state:'working',frame:7,height:h});assert(v.motion&&v.motion.cells.length===2*40+2*(h-2)-text(v.rows[0]).indexOf(' ─')+v.rows.filter(r=>r[0].text==='├').length,String(h));}
 {const b=run({side:false,width:100,height:14,state:'working',frame:7});assert(b.motion&&b.motion.cells.some(c=>c.row===b.rows.length-1)&&b.motion.cells.some(c=>c.col===99));}
 """
         self.node(script, "panel-view.cjs")
@@ -2816,6 +2857,8 @@ for(let h=30;h>=8;h-=4){const v=run({state:'working',frame:7,height:h});assert(v
         # nothing moves. Waiting, the whole frame breathes red under every value but `off`, the rule
         # stays plain; idle, the still frame. The `on` saved before 11-15 reads as `rule`. The values
         # to tune stand at the top of panel-view.cjs.
+        # 11-25 (four groups): the light runs over the `[SESSION]` head's rule (26 cells at 40 wide, from column 12: `├╴[SESSION] `), and a group head's
+        # frame cells `├` `╴` `┤` move with the frame, so the host's cells of a moving frame count three more per head than the line cells `ring` reads.
         script = self.FIXTURE + r"""
 const fs=require('node:fs');
 const styles={dim:{dim:true},g_spin:{foreground:230},g_blocked:{foreground:217},g_work_off:{foreground:150,dim:true},g_dead:{foreground:210}};
@@ -2841,10 +2884,10 @@ assert.deepEqual(['rule','border','scanners','off'].map(v=>view.change({...view.
 const grid=v=>v.rows.map(r=>{const out=[];for(const p of r)for(const ch of p.text){out.push({ch,p});if(cells(ch)>1)out.push(null);}return out;});
 const around=v=>{const g=grid(v),W=g[0].length,H=g.length,out=[];for(let x=0;x<W;x++)out.push(g[0][x]);for(let y=1;y<H-1;y++)out.push(g[y][W-1]);
  for(let x=W-1;x>=0;x--)out.push(g[H-1][x]);for(let y=H-2;y>0;y--)out.push(g[y][0]);return out.map(c=>c&&'┌┐└┘─│'.includes(c.ch)?c:null);};
-const ring=v=>around(v).filter(Boolean);
+const ring=v=>around(v).filter(Boolean),heads=v=>v.rows.filter(r=>r[0].text==='├').length;   // (11-25: a group head's `├` `╴` `┤` move with the frame too: three cells a head, none of them in `ring`)
 const ruleAt=v=>v.rows.findIndex((r,i)=>i>0&&r.some(p=>p.rule));
-// (11-22: the light runs over the SESSION head's rule alone, `RULE`'s 28 cells at 40 wide, not over its name or value.)
-const RULE=28,ruleCells=v=>v.rows[ruleAt(v)].filter(p=>p.rule).flatMap(p=>[...p.text].map(ch=>({ch,p})));
+// (11-22: the light runs over the SESSION head's rule alone, `RULE`'s cells (26 at 40 wide, 11-25), not over its name or value.)
+const RULE=26,ruleCells=v=>v.rows[ruleAt(v)].filter(p=>p.rule).flatMap(p=>[...p.text].map(ch=>({ch,p})));
 const plainRule=v=>{const parts=v.rows[ruleAt(v)].filter(p=>p.rule);return parts.length===1&&parts[0].text==='─'.repeat(RULE)&&parts[0].role==='messages'&&parts[0].dim===true&&!parts[0].tone;};
 // (a) `rule`, the default: the frame lit and still, the light over the rule.
 const ramp=view.FACES.dark.scan,CYCLE=26+10-1;
@@ -2866,9 +2909,9 @@ for(const f of [0,5,13,20,26,30])assert.deepEqual(shades(f),shades(f+CYCLE),'one
 // The light comes in on the paint that shows the turn (one frame on).
 for(const since of [0,7,1000])assert.deepEqual(ruleCells(run({state:'working',frame:since,since})).map(c=>c.p.tone==='scan'?c.p.foreground:0),
  ruleCells(run({state:'working',frame:1})).map(c=>c.p.tone==='scan'?c.p.foreground:0),String(since));
-// The host's cells: the rule's 28 cells only, painted as at that frame; through the rest no wake.
+// The host's cells: the rule's cells only, painted as at that frame; through the rest no wake.
 {const v=run({state:'working',frame:3}),y=ruleAt(v);
- assert(v.animated&&v.motion&&v.motion.cells.length===RULE&&v.motion.cells.every((c,i)=>c.row===y&&c.col===10+i&&c.ch==='─'));
+ assert(v.animated&&v.motion&&v.motion.cells.length===RULE&&v.motion.cells.every((c,i)=>c.row===y&&c.col===12+i&&c.ch==='─'));
  for(const f of [3,17,30,40]){const at=v.motion.at(f),painted=ruleCells(run({state:'working',frame:f}));at.forEach((p,i)=>assert.equal(p.foreground??null,painted[i].p.foreground??null,f+' '+i));}
  assert.equal(v.motion.next(3),4);assert.equal(v.motion.next(25),26);
  for(let f=26;f<=CYCLE;f++)assert.equal(v.motion.next(f),CYCLE+1,String(f));}
@@ -2901,17 +2944,18 @@ for(const [o,P,n] of [[{},156,3],[{width:60},196,3],[{side:false,width:100,heigh
    seq.push(at);}
   // One period: frame 56 is frame 0; each place rises and falls once (one crest run in 56 frames).
   {const looks=f=>ring(run({...o,state:'working',frame:f,motion:'scanners',model:{colors}})).map(c=>c.p.foreground);assert.deepEqual(looks(56),looks(0));assert.deepEqual(looks(56+17),looks(17));}
-  const L=seq[0].length;for(const i of [L-1,L-10,Math.floor(L/2)]){const s=seq.map(q=>q[i]),top=Math.max(...s);assert.equal(s.filter((x,k)=>x===top&&s[(k+55)%56]!==top).length,1,JSON.stringify([o,colors,i,s]));}
+  // (11-25: the ring's last cell, row 1's left, is now the REPO head's `├`, not a line cell: the one before it stands in.)
+  const L=seq[0].length;for(const i of [L-2,L-10,Math.floor(L/2)]){const s=seq.map(q=>q[i]),top=Math.max(...s);assert.equal(s.filter((x,k)=>x===top&&s[(k+55)%56]!==top).length,1,JSON.stringify([o,colors,i,s]));}
  }
 }
-{const v=run({state:'working',frame:4,motion:'scanners'});assert(v.motion&&v.motion.cells.length===ring(v).length&&v.motion.next(4)===5);assert(plainRule(v));
+{const v=run({state:'working',frame:4,motion:'scanners'});assert(v.motion&&v.motion.cells.length===ring(v).length+3*heads(v)&&v.motion.next(4)===5);assert(plainRule(v));
  const t=view.render({width:40,height:40,side:true,model:{...head,styles,colors:1<<24},state:'working',frame:4,configuration:{rule_motion:'scanners'},questions:()=>[]});
  // The darkest point in 24-bit color is above the still frame's gray (#808080 on the dark face).
  const lows=ring(t).map(c=>c.p.foreground).filter(x=>/^#/.test(x)).map(x=>parseInt(x.slice(1,3),16));assert(Math.min(...lows)>0x80,JSON.stringify(lows.slice(0,5)));}
 // (c) Waiting: the breath over the whole frame under every value but `off`, the rule plain; idle: still.
 for(const motion of ['rule','border','scanners']){
  const w=run({state:'blocked',frame:0,since:0,motion});
- assert(ring(w).every(c=>c.p.role==='orbit'&&c.p.tone==='breath'),motion);assert(plainRule(w),motion);assert(w.motion&&w.motion.cells.length===ring(w).length);
+ assert(ring(w).every(c=>c.p.role==='orbit'&&c.p.tone==='breath'),motion);assert(plainRule(w),motion);assert(w.motion&&w.motion.cells.length===ring(w).length+3*heads(w));
  assert(ring(run({state:'blocked',frame:24,since:0,motion})).every(c=>c.p.foreground!==ring(w)[0].p.foreground),motion+' breathes');
  for(const state of ['idle','unknown',undefined]){const v=run({state,frame:7,motion});
   assert(ring(v).every(c=>c.p.role==='frame'&&c.p.dim===true),motion+' '+state);assert(plainRule(v));assert.equal(v.motion,null);
@@ -2932,7 +2976,7 @@ for(const motion of ['rule','border','scanners','off'])for(const [cfg,model] of 
 // (f) Claude, Codex and OpenCode draw the same frame and rule on the same frame.
 for(const motion of ['rule','scanners'])for(const [state,f] of [['working',5],['blocked',10]]){const all=['claude','codex','opencode'].map(harness=>run({harness,state,frame:f,motion}));
  // (11-18: the moving tones' colors are the working session's own harness's; their steps and positions are the same.)
- const alike=v=>v.rows.slice(1,-1).map(r=>r.slice(1,-1).map(p=>p.role==='orbit'&&state==='working'?{...p,foreground:null}:p));
+ const alike=v=>v.rows.slice(1,-1).map(r=>r.slice(1,-1).map(p=>p.role==='orbit'&&state==='working'?{...p,foreground:null,level:null}:p));
  for(const v of all.slice(1))assert.deepEqual(alike(v),alike(all[0]),motion+' '+state);}
 // (g) A light face: the lit frame and the light take the face's ramps.
 {const v=run({state:'working',frame:8,cfg:{theme:'light'}});assert(ring(v).every(c=>c.p.foreground===view.FACES.light.orbit[1]));
@@ -3083,7 +3127,9 @@ for(const background of ['','dark','light'])for(const theme of ['terminal','ligh
  const at=ch=>parts.find(p=>p.text.startsWith(ch));
  // Spec rule 31: a message's text is body text; its head's own values are secondary.
  assert.equal(at('┌').foreground,f.frame,label);assert.equal(r.rows.flat().find(p=>p.text==='note').foreground,f.body,label);
- assert(parts.some(p=>p.text.includes('MESSAGES')&&p.foreground===f.title),label);
+ // 11-25 (four groups): a list name (MESSAGES) is bold at the body's brightness, a group name (`[SESSION]`) bold and the brightest, on a shade too.
+ assert(parts.some(p=>p.text.includes('MESSAGES')&&p.tier==='list'&&p.bold===true&&p.foreground===f.body),label);
+ assert(parts.some(p=>p.text==='[SESSION]'&&p.tier==='group'&&p.bold===true&&p.foreground===(theme==='mono'?f.body:f.bright)),label);   // (mono: weight alone parts the tiers)
  if(theme!=='mono'){
   // The question's `◑` and its count (11-15: the section's label row) are rose; its words are body text.
   assert(parts.some(p=>p.text==='◑'&&p.foreground===f.accent)&&parts.some(p=>p.text==='1'&&p.role==='accent'&&p.foreground===f.accent),label);
@@ -3148,22 +3194,23 @@ const render=(width,height,extra={},model=base)=>view.render({width,height,side:
     def test_the_title_counts_routes_then_requests_and_no_hourglass_stands_anywhere(self):
         # Restored 11-15 from v4.36.4, 11-17: `N ROUTE` in the route box's top line (the requests no tab of it), the request
         # rows in the box after the routes, under the `request` rule; MESSAGES keeps the messages alone and draws no request.
+        # 11-25 (four groups): beside the native area the count follows the name, `ROUTE 1`, and the list head stands two cells in.
         self.node(r"""
 for(const [width,height] of [[32,30],[37,30],[38,30],[80,24]]){
  const lines=text(render(width,height));
  // (11-17, route zones: the title counts the routes alone, the requests are the box's `request` zone.)
- assert(lines.some(s=>width<80?/^│ ╭─ 1 ROUTE ─+ ›─╮ │$/.test(s):/^│ ╭─ route 1 ─+ ›─╮ │$/.test(s)),lines.join('\n'));
+ assert(lines.some(s=>width<80?/^│ ╭─ ROUTE 1 ─+ ›─╮ │$/.test(s):/^│ ╭─ route 1 ─+ ›─╮ │$/.test(s)),lines.join('\n'));
  assert(!lines.some(s=>/REQUEST|request \d/.test(s)),lines.join('\n'));
  for(const mark of ['◂','→','✓'])assert(lines.filter(s=>s.includes(mark)).length===1,mark+width+'\n'+lines.join('\n'));
  assert(!lines.join('').includes('⏳')&&!lines.join('').includes('⌛'));
  assert(lines.some(s=>s.includes('MSG_KEPT')),'messages stay at '+width);
  // Requests stand once, in the box: MESSAGES counts and shows the messages alone.
- const m=lines.findIndex(s=>/^│ (MESSAGES +|messages ─+ )› │$/.test(s)),box=lines.findIndex(s=>s.includes('╰'));
+ const m=lines.findIndex(s=>/^│ ( MESSAGES +|messages ─+ )› │$/.test(s)),box=lines.findIndex(s=>s.includes('╰'));
  assert(m>box&&box>0&&lines.slice(m+1).every(s=>!/[◂✓]|→ \[52\]/.test(s)),lines.join('\n'));
  assert(lines.length<=height);
 }
 const none=text(render(37,30,{},{...base,requests:[]}));
-assert(none.some(s=>s.includes('1 ROUTE'))&&!none.join('').includes('REQUEST'));
+assert(none.some(s=>s.includes('ROUTE 1'))&&!none.join('').includes('REQUEST'));
 // Spec rules 57, 58 (11-17: the tag is gone, the title is the route count in its state color): the box's
 // `request` zone is named by a dim rule of its own.
 const rows0=v=>text(v).filter(s=>/^│ │ ─ request ─+ │ │$/.test(s));
@@ -3173,7 +3220,7 @@ for(const width of [32,38]){
  assert(!parts.some(p=>/REQUEST/.test(p.text)),'no request tab in the title');
  const rule=parts.find(p=>p.text==='request'&&p.role==='zone');
  assert(rows0(v).length===1&&rule,JSON.stringify(parts.filter(p=>/request/.test(p.text))));
- const count=parts.find(p=>/^\d+ ROUTE$/.test(p.text));
+ const count=parts.find(p=>/^ROUTE \d+$/.test(p.text));
  assert(count&&count.fg===186,JSON.stringify(count));
  // A press on a request's row opens the MESSAGES popup (as the request rows of MESSAGES did).
  const rows=text(v),at=rows.findIndex(s=>s.includes('◂'));
@@ -3224,7 +3271,7 @@ const lone=text(render(32,24,{},{...base,routes:[],route_count:0,requests:[
  q('rq-dddddd','→','[52]','https://example.com/'+'a'.repeat(80),'전달됨','request-out')]}));
 // (11-17, route zones: a request alone reads `ROUTE` in the title; the one `request` rule stands, no `dispatch` one: no route stands above.)
 assert(lone.some(s=>/^│ ╭─ ROUTE ─+ ›─╮ │$/.test(s))&&!lone.some(s=>/REQUEST/.test(s)),lone.join('\n'));
-assert(lone.filter(s=>/^│ │ ─ request ─+ │ │$/.test(s)).length===1&&!lone.some(s=>/─ (dispatch|direct) ─/.test(s))&&!lone.some(s=>s.includes('├')),lone.join('\n'));
+assert(lone.filter(s=>/^│ │ ─ request ─+ │ │$/.test(s)).length===1&&!lone.some(s=>/─ (dispatch|direct) ─/.test(s))&&!lone.some(s=>s.slice(2).includes('├')),lone.join('\n'));   // (11-25: a group head's own `├╴` stands at a row's start)
 const at=lone.findIndex(s=>s.includes('→ [52]'));
 assert(at>0&&lone[at+1].includes('…')&&lone[at+2].includes('전달됨'),lone.join('\n'));
 assert(lone.every(s=>[...s].length<=32));

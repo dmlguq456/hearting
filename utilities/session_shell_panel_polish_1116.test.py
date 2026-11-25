@@ -11,10 +11,13 @@
 5. A tidy result that ended well reads as a dim line without `⚠` (its inner words out of the panel's line, the
    notice itself unchanged); what leaves the person something to do keeps the caution look; the release lines
    are quiet too.
-6. Beside the native area a thin rule parts MEM (the bottom sections) from the last row; it goes before content.
+6. Beside the native area a thin rule parts MEM (the bottom sections) from the last row; it goes before content (11-25: MEM stands under REPO, so the rule parts MESSAGES).
 7. The fold button is `▾` at the last row's right end, the gear left of it, their presses moved with them.
 
 (3's beat in a real PTY: session_shell_wait_blink_pty.test.py.)
+
+11-25 (four groups): MESSAGES is the last section of the SESSION group (`  MESSAGES +4  ›`, its head one cell in, a message's head two, its body three; the empty rows between the groups go first
+short of rows); MEM stands under REPO.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -65,9 +68,9 @@ const draw=(o={})=>view.render({width:o.width??50,height:o.height??46,side:o.sid
   frame:o.frame??1000,since:o.since??990,brief:o.question===false?undefined:brief,sent:()=>[],cellWidth:cells,
   configuration:{side_width:50,rule_motion:o.motion||'rule',theme:o.theme||'terminal',position:o.position||'right'},folded:!!o.folded});
 const lines=v=>v.rows.map(str);
-// The rows between the MESSAGES head and the MEM head (inside the frame).
-function section(v){const ls=lines(v).map(l=>l.slice(2,-2)),a=ls.findIndex(l=>l.startsWith('MESSAGES')),b=ls.findIndex(l=>l.startsWith('MEM'));
-  return a<0?null:{head:ls[a],rows:ls.slice(a+1,b<0?ls.length-2:b),at:a};}
+// The rows under the MESSAGES head (inside the frame) down to the thin rule over the last row (11-25: MESSAGES is the last section; MEM stands under REPO).
+function section(v){const ls=lines(v).map(l=>l.slice(2,-2)),a=ls.findIndex(l=>l.startsWith(' MESSAGES')),e=ls.findIndex((l,i)=>i>a&&i<ls.length-1&&(/^─+$/.test(l)||/^\[/.test(l))),b=e<0?ls.length-2:e;
+  return a<0?null:{head:ls[a],rows:ls.slice(a+1,b),at:a};}
 """
 
 
@@ -94,13 +97,13 @@ class PanelPolish1116Test(unittest.TestCase):
         out = self.node(r"""
 const v=draw(),m=section(v);
 assert(m,lines(v).join('\n'));
-assert.match(m.head,/^MESSAGES \+4 +›$/,m.head);
+assert.match(m.head,/^ MESSAGES \+4 +›$/,m.head);
 // Three messages (11-20: three at most, the person: "MESSAGE도 최대 3개 정도로 다시 줄이고"), each its head and its first line two cells in, the newest last.
 assert.equal(m.rows.length,6,m.rows.join('\n'));
 const heads=m.rows.filter((_,i)=>i%2===0),bodies=m.rows.filter((_,i)=>i%2===1);
 assert.deepEqual(heads.map(h=>h.trim()),['← [12] opencode · 09:52 · report','← [e7] codex · 10:03 · reply','→ [12] opencode · 10:05 · not delivered'],heads.join('\n'));
-assert(bodies.every(b=>/^  \S/.test(b)),bodies.join('\n'));
-assert.match(bodies[0].trimEnd(),/^  시험 통과, CI 기다리는 중$/,bodies[0]);
+assert(bodies.every(b=>/^   \S/.test(b)),bodies.join('\n'));   // 11-25: a message's body row stands four cells in from the frame (three inside it)
+assert.match(bodies[0].trimEnd(),/^   시험 통과, CI 기다리는 중$/,bodies[0]);
 // The looks: the arrow in its direction's color, the number in the body color, the rest of the head dim,
 // a sent one's state in its own color; the body in the body color. A press on any row opens the popup.
 const row=v.rows.find(r=>str(r).includes('← [12] opencode'));
@@ -123,7 +126,7 @@ const seen=[];
 for(let h=46;h>=18;h--){
   const v=draw({height:h}),m=section(v),ls=lines(v),rule=/^│ ─+ │$/.test(ls[ls.length-3]);
   if(!m){seen.push({h,count:0,form:'',rule});continue;}
-  const two=m.rows.length>=2&&/^  \S/.test(m.rows[1]),count=two?m.rows.length/2:m.rows.length;
+  const two=m.rows.length>=2&&/^   \S/.test(m.rows[1]),count=two?m.rows.length/2:m.rows.length;
   seen.push({h,count,form:two?'two':'one',rule,newest:m.rows.at(two?-2:-1)});
 }
 let sawOne=false,sawFewer=false,ruleGone=false;
@@ -145,7 +148,7 @@ console.log(JSON.stringify(seen.map(s=>[s.h,s.count,s.form,s.rule?1:0])));
     def test_three_messages_and_none_hidden_read_whole(self):
         self.node(r"""
 const v=draw({messages:3}),m=section(v);
-assert.match(m.head,/^MESSAGES +›$/,m.head);
+assert.match(m.head,/^ MESSAGES +›$/,m.head);
 assert.equal(m.rows.length,6,m.rows.join('\n'));
 """)
 
@@ -344,14 +347,18 @@ assert(lines(fl)[0].includes('⚠ [정리] 압축 실패'),lines(fl)[0]);
     # 6 ---------------------------------------------------------------------------------------------------------
     def test_a_thin_rule_parts_the_bottom_sections_from_the_last_row(self):
         self.node(r"""
-for(const o of [{},{messages:0},{mem:false}]){
+// 11-25 (four groups): MEM stands under REPO, so MESSAGES is the bottom section the rule parts from the last row.
+for(const o of [{},{mem:false}]){
   const v=draw(o),ls=lines(v),n=ls.length;
   assert.match(ls[n-2],/5h 23% │ 7d 61%/,ls.join('\n'));
   assert.match(ls[n-3],/^│ ─{46} │$/,ls.join('\n'));
   // The section heads' rule: its look (dim, the messages role).
   const rule=v.rows[n-3].find(p=>/^─+$/.test(p.text));assert(rule&&rule.dim===true,JSON.stringify(v.rows[n-3]));
-  assert.match(ls[n-4],o.mem===false?/[^─]/:/^│  ◇ 2h lesson 점멸은 1초 박자로/,ls[n-4]);   // 11-20: a record is one row
+  assert.match(ls[n-4],/^│    고맙습니다 +│$/,ls[n-4]);   // the newest message's body row, right over the rule
+  assert(ls.some(l=>/^│  MEM +› │$/.test(l))===(o.mem!==false),ls.join('\n'));
 }
+// Without MESSAGES (MEM is up under REPO) the last row is still the metadata line.
+{const ls=lines(draw({messages:0}));assert.match(ls.at(-2),/5h 23% │ 7d 61%/,ls.join('\n'));}
 // Without MESSAGES and MEM nothing stands to part; under the native area there is no MEM and no rule.
 const none=lines(draw({messages:0,mem:false}));assert(!/^│ ─{46} │$/.test(none.at(-3)),none.join('\n'));
 const bottom=lines(draw({side:false,width:120,height:14}));assert(!bottom.some(l=>/^│ ─{116} │$/.test(l)),bottom.join('\n'));

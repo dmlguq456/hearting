@@ -146,7 +146,7 @@ class MarkKeepsTheRestTest(unittest.TestCase):
         cls.dir = Path(tempfile.mkdtemp(prefix="now-mark-"))
         source = (SHELL / "panel-view.cjs").read_text(encoding="utf-8")
         mark = "[text(' '),text('›','dim')]"
-        for here in ("Infinity," + mark, "now?" + mark + ":[]"):     # the NOW field's mark and the bottom row's
+        for here in ("field('NOW',line(now,nowKey),2," + mark, "now?" + mark + ":[]"):     # the NOW field's mark and the bottom row's
             assert source.count(here) == 1, here
             source = source.replace(here, here.replace(mark, "[]"))
         (cls.dir / "base.cjs").write_text(source, encoding="utf-8")

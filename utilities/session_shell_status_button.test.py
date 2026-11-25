@@ -11,6 +11,9 @@
 3. The folded strip keeps `N ROUTE` whole from 30 cells with the wait beside it.
 4. The popup's bottom line names STATUS by its word; a press opens it by its key. A request body's tables
    come drawn (Fleet's rows) in the MESSAGES popup.
+
+11-25 (four groups): the REPO head is a frame row (`├╴[REPO] hearting · wt 12 ─────┤`: the left frame, a little stroke, the bracketed name, its value,
+the rule through to the right frame `┤`), not a `│ REPO … │` row; the rest of the rules above are unchanged.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -60,15 +63,15 @@ for(const name of names)for(const wt of [true,false])for(let w=24;w<=60;w++){
  assert(!row.includes('STATUS')&&!row.includes('›'),tag);
  assert(v.hits.filter(h=>h.row===1).length===0,tag);
  const inner=w-4,label=inner>=30;
- assert(row.startsWith('│ REPO '),tag);   // 11-22: the same in every width (the group head's name, one cell, its value)
- // The rule runs to the end of the row (a thin rule where three cells or more are free).
- assert(/(─+|[^─]) │$/.test(row),tag);
+ assert(row.startsWith('├╴[REPO] '),tag);   // 11-22: the same in every width (the group head's name, one cell, its value); 11-25: a frame row
+ // The rule runs through to the right frame (a thin rule where three cells or more are free).
+ assert(/─┤$/.test(row),tag);
  // The name is whole, or cut with `…`.
  assert(row.includes(name)||row.includes('…'),tag);
 }
 const at40=name=>str(render({width:40,model:{repo_side:[p(name)],status_doc:doc,backlog_doc:backlog}}).rows[1]);
-assert.equal(at40('hearting'),'│ REPO hearting · wt 12 ────────────── │');
-assert.equal(at40('speech-separation-bench'),'│ REPO speech-separation-bench ─────── │');   // (the count goes before the name is cut)
+assert.equal(at40('hearting'),'├╴[REPO] hearting · wt 12 ─────────────┤');
+assert.equal(at40('speech-separation-bench'),'├╴[REPO] speech-separation-bench ──────┤');   // (the count goes before the name is cut)
 """)
 
     def test_no_document_dims_the_head_and_no_root_shows_none(self):
@@ -82,7 +85,7 @@ assert.equal(at40('speech-separation-bench'),'│ REPO speech-separation-bench �
 // No artifact root (no value): nothing under the REPO row, no press, no word anywhere.
 for(const status_doc of [undefined,null,{word:'',has_doc:true}]){
  const v=render({width:54,height:30,model:{repo_side:[p('hearting')],status_doc}});
- assert.match(str(v.rows[1]),/^│ REPO hearting · wt 12 ─+ │$/,JSON.stringify(status_doc));
+ assert.match(str(v.rows[1]),/^├╴\[REPO\] hearting · wt 12 ─+┤$/,JSON.stringify(status_doc));
  assert(!v.hits.some(h=>/STATUS|BACKLOG/.test(h.action)));
  assert(!v.rows.flat().some(x=>x.text==='STATUS'));}
 """)
@@ -91,7 +94,7 @@ for(const status_doc of [undefined,null,{word:'',has_doc:true}]){
         self.node(r"""
 // Narrower than 30 cells inside (the 32-cell side panel): the first row, unlabelled; no button.
 {const v=render({width:32,model:{repo_side:[p('hearting')],status_doc:{word:'STATUS',has_doc:true},backlog_doc:{word:'BACKLOG',has_doc:true}}});
- assert.equal(str(v.rows[1]),'│ REPO hearting · wt 12 ────── │');assert(!v.hits.some(h=>h.row===1));}
+ assert.equal(str(v.rows[1]),'├╴[REPO] hearting · wt 12 ─────┤');assert(!v.hits.some(h=>h.row===1));}
 // The bottom layout: the right end of the first row (`repo │ model │ context`) holds two buttons; the counts go first, then the words (`›` stays), then the row is cut.
 const two=(w,s,b)=>render({width:w,side:false,height:8,model:{repo:[p('hearting')],context:[p('ctx 46%')],status_doc:{word:'STATUS',has_doc:true,total:s},backlog_doc:{word:'BACKLOG',has_doc:true,total:b}}});
 for(const [w,want] of [[120,/│ hearting │ Opus 5\.5 │ ctx 46% +STATUS \+2 ›  BACKLOG \+11 › │$/],[60,/│ hearting │ Opus 5\.5 │ ctx 46% STATUS \+2 ›  BACKLOG \+11 › │$/],[56,/│ hearting │ Opus 5\.5 │ ctx 46% +STATUS ›  BACKLOG › │$/],[52,/│ hearting │ Opus 5\.5 │ ctx 46% +›  › │$/],[34,/│ hearting │ Opus 5\.5 │ ct… ›  › │$/]]){

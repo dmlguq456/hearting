@@ -13,6 +13,8 @@ box); its top and bottom lines and the request rows stay v4.36.4's. Everything h
 rows are not drawn any more. The comparison therefore takes the session rows out of both sides (the golden's old ones, the
 drawn ones) except the head of each who row (mark and role word, with their colors and press cells), and compares the rest
 of the box cell for cell; the session rows' own grammar is `session_shell_route_row_5_1117.test.py`'s.
+11-25 (four groups): the box's title reads `ROUTE 2` (the count after the name; the golden's reads `2 ROUTE`, so the comparison reads the drawn title the golden's
+way), the box is found by that title, and beside the native area the MESSAGES head and items stand as the SESSION group's last list (the items two cells in).
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -38,7 +40,7 @@ const pv=require(path.join(process.argv[1],'panel-view.cjs')),golden=JSON.parse(
 const txt=r=>r.map(p=>p.text).join('');
 // The route box: its top line `│ ╭─ N ROUTE` (`route N` under the native area) to its bottom line `│ ╰`.
 // (11-16: the QUESTIONS section is a thin box too, above it: the route box is the one whose top line names the route.)
-const boxOf=v=>{const rows=v.rows.map(txt),a=rows.findIndex(s=>/^│ ╭─ (?:\d+ ROUTE|route)/.test(s));if(a<0)return null;const b=rows.findIndex((s,i)=>i>a&&/^│ ╰/.test(s));return {a,b};};
+const boxOf=v=>{const rows=v.rows.map(txt),a=rows.findIndex(s=>/^│ ╭─ (?:ROUTE \d+|route)/.test(s));if(a<0)return null;const b=rows.findIndex((s,i)=>i>a&&/^│ ╰/.test(s));return {a,b};};
 const P=t=>({text:t}),D=t=>({text:t,dim:true});
 const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 """
@@ -55,7 +57,8 @@ const runs=row=>{const all=[];for(const p of row)for(const c of [...p.text])all.
 const strip=m=>{const {lab,sessions,memory_items,messages,wait,answerable,...rest}=m;return {...rest,messages:[]};};
 // 11-22: the box's top line ends in `›` at its right end (`╭─ 2 ROUTE ───── ›─╮`, after a hidden count where there is one); the golden's has none. The comparison is made
 // with that mark taken out: its cells go back to the line (with a hidden count: the cell the mark took from the line).
-const unarrow=row=>{const cs=[];for(const [t,s] of row)for(const c of t)cs.push([c,s]);
+// 11-25 (four groups): the count stands after the name (`╭─ ROUTE 2 ──`); the golden's reads `2 ROUTE`, so the name part is read the golden's way too.
+const unarrow=row=>{const cs=[];for(const [t,s] of row)for(const c of t.replace(/^ROUTE (\d+)$/,'$1 ROUTE'))cs.push([c,s]);
  const at=cs.findIndex(([c])=>c==='›');if(at<0)return row;
  const line=cs.find(([c])=>c==='─')[1];
  if(cs[at-2]&&cs[at-2][0]==='─'){cs[at-1]=['─',line];cs[at]=['─',line];}
@@ -213,7 +216,7 @@ for(const [side,width,height] of [[true,40,60],[true,32,46],[false,120,20]]){
  const v=pv.render({width,height,side,fill:side,model:scene,state:'working',configuration:{}});
  const rows=v.rows.map(txt),b=boxOf(v),label=side+' '+width+'\n'+rows.join('\n');
  // (11-17: the title counts the routes alone, the requests are the box's `request` zone, named by its rule.)
- assert(rows[b.a].includes(side?'╭─ 2 ROUTE':'╭─ route 2')&&!/REQUEST|request \d/.test(rows[b.a]),label);
+ assert(rows[b.a].includes(side?'╭─ ROUTE 2':'╭─ route 2')&&!/REQUEST|request \d/.test(rows[b.a]),label);
  // (Short of rows the rules go first: the 32-cell panel here draws none, the others the one `request` rule.)
  const rules=rows.slice(b.a+1,b.b).filter(s=>/^│ │ ─ request ─+ │ │$/.test(s)).length;
  assert(rules<=1&&(width!==40&&width!==120||rules===1),label);
@@ -221,10 +224,10 @@ for(const [side,width,height] of [[true,40,60],[true,32,46],[false,120,20]]){
  const requestRow=s=>/^│ │ (◂ \[e7\]|→ \[52\])/.test(s);
  const inBox=rows.slice(b.a+1,b.b).filter(requestRow),outside=[...rows.slice(0,b.a),...rows.slice(b.b+1)].filter(requestRow);
  assert(inBox.length===2&&outside.length===0,label);
- const m=rows.findIndex(s=>/^│ (MESSAGES|messages)/.test(s));
+ const m=rows.findIndex(s=>/^│ {1,2}(MESSAGES|messages)/.test(s));
  // MESSAGES: the three messages, two rows each (head, body), no `+N` for the requests.
- assert(m>b.b&&/^│ (MESSAGES +|messages ─+ )› │$/.test(rows[m]),label);
- const ind=/^│ MESSAGES/.test(rows[m])?1:0;   // 11-22: beside the native area an item stands one cell in
+ assert(m>b.b&&/^│ (?: MESSAGES +|messages ─+ )› │$/.test(rows[m]),label);
+ const ind=/^│  MESSAGES/.test(rows[m])?2:0;   // 11-25: beside the native area the head stands one cell in and an item two (3 cells after the `│`)
  assert.deepEqual([1,3,5].map(i=>rows[m+i].slice(2+ind,8+ind)),['← [e7]','→ [52]','← [e1]'],label);
 }
 const body=pv.messagesBody({model:scene,columns:72}).map(txt);
@@ -250,7 +253,7 @@ for(const side of [true,false])for(let height=8;height<=60;height+=side?1:4)for(
  assert(/⚙   ▾ │$/.test(rows.at(-2)),label);
  if(height>=10&&w>=28){assert(rows.some(r=>/QUESTIONS/.test(r)),'the question head stays\n'+label);assert(rows.some(r=>r.includes('route 상자를')),'its first row stays\n'+label);}
  // (11-16: the QUESTIONS section is a thin box too: at most one box of its own, and the route box one of its own.)
- const tops=rows.filter(r=>/^│ ╭/.test(r)).length,bottoms=rows.filter(r=>/^│ ╰/.test(r)).length,routeTops=rows.filter(r=>/^│ ╭─ (?:\d+ ROUTE|route)/.test(r)).length;
+ const tops=rows.filter(r=>/^│ ╭/.test(r)).length,bottoms=rows.filter(r=>/^│ ╰/.test(r)).length,routeTops=rows.filter(r=>/^│ ╭─ (?:ROUTE \d+|route)/.test(r)).length;
  assert(tops===bottoms&&routeTops<=1&&tops-routeTops<=1,label);
  const b=boxOf(v);
  if(b){boxes++;

@@ -9,6 +9,9 @@ stands again after a resize, opens from the one-row folded strip's routes, and s
 window, where the wheel reads it on. Keys and presses stay the popup's: the native's draft is
 untouched. Frames are text read back from a private headless terminal; nothing here reaches a real
 account, session or terminal (Fleet's collection is a fixture).
+11-25 (four groups): the side panel's boxes read `ROUTE 2` / `QUESTIONS 1` (the count follows the name); the
+folded strip (the bottom layout) and the popup's own title keep `2 ROUTE`. A group head row opens
+with the frame's `├` (not `│`), so the draft read cuts at either.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -168,7 +171,7 @@ const grounded=async()=>{await flush();let n=0;for(let y=0;y<rows;y++){const lin
 // (Private, as the shared cache's reader requires.)
 const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{mode:0o600});fs.renameSync(file+'.new',file);};
 (async()=>{try{
-  await until(s=>has('READY_'+cfg.harness)(s)&&has('2 ROUTE')(s)&&has('QUESTIONS')(s),'the panel with its sections');
+  await until(s=>has('READY_'+cfg.harness)(s)&&has('ROUTE 2')(s)&&has('QUESTIONS')(s),'the panel with its sections');
   await key('draft9',300);
   frames.closed=await screen();
   // 11-15 (the route box again): a press on a route's own row in the panel's route box opens the routes
@@ -178,7 +181,7 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
    const t=await until(s=>unfolded(s).includes('질문 팝업'),'the pressed route unfolded');frames.route_row=t;
    checks.ground=await ground();await key('\x1b',300);await until(s=>!box(s),'closed after the route row');checks.ground_left=await grounded();}
   // A press on the ROUTE section's head: Fleet's routes table, the most pressing route unfolded.
-  let p=await at('2 ROUTE');await press(p.x+2,p.y);
+  let p=await at('ROUTE 2');await press(p.x+2,p.y);
   let s=await until(popupHas('PROGRESS'),'the routes popup');
   s=await until(s=>unfolded(s).includes('휠 입력'),'the failed route unfolded');frames.route=s;veil.route=await outside();
   checks.route_title=box(s).title;checks.route_foot=box(s).foot;
@@ -230,7 +233,7 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   // (it shows every control byte it gets); after that second a lone Esc and a letter reach it.
   await resize(160,40);
   // The native's input row, its own cells only (the panel beside it starts at its frame `│`).
-  const draft=async()=>{const t=(await screen()).find(l=>l.startsWith('❯ '));return t?t.slice(2).split('│')[0].trimEnd():null;};
+  const draft=async()=>{const t=(await screen()).find(l=>l.startsWith('❯ '));return t?t.slice(2).split(/[│├]/)[0].trimEnd():null;};
   const kinds=['QUESTIONS','ROUTE'];
   const open=async kind=>{await key('\x1d',400);await until(s=>!!box(s),'a popup by Ctrl+]');
     if(kind==='ROUTE')await toSection('ROUTE',400);
@@ -299,10 +302,10 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
     const live=new Set([child.pid]);for(let again=true;again;){again=false;for(const [id,k] of kids)if(!live.has(id)&&live.has(k.ppid)){live.add(id);again=true;}}
     return [...live].filter(id=>kids.get(id)&&kids.get(id).cmd.includes(cfg.backend)).length;};
   const idle=reads();checks.children={idle};
-  {const head=await at('2 ROUTE');for(let i=0;i<100;i++){await press(head.x+2,head.y,60);child.write('\x1b');await sleep(60);}}
+  {const head=await at('ROUTE 2');for(let i=0;i<100;i++){await press(head.x+2,head.y,60);child.write('\x1b');await sleep(60);}}
   await sleep(2500);checks.children.after_100=reads();
   if(cfg.harness==='claude'){
-    fs.writeFileSync(cfg.vm+'.hang','');{const head=await at('2 ROUTE');await press(head.x+2,head.y,500);}
+    fs.writeFileSync(cfg.vm+'.hang','');{const head=await at('ROUTE 2');await press(head.x+2,head.y,500);}
     checks.children.hanging=reads();await sleep(13500);checks.children.ended=reads();
     s=await screen();checks.children.stood=!!box(s);
     fs.unlinkSync(cfg.vm+'.hang');await key('\x1b',300);
@@ -447,7 +450,7 @@ class SessionShellTablePopupTest(unittest.TestCase):
         text = lambda name: '\n'.join(frames[name])  # noqa: E731
         # The panel: each section its head and rows (11-15, design E).
         panel = text('closed')
-        for head in ('1 QUESTIONS', '╭─ 2 ROUTE '):
+        for head in ('QUESTIONS 1', '╭─ ROUTE 2 '):
             self.assertIn(head, panel)
         # (11-15: no LAB and no SESSIONS section, whatever the backend sends.)
         self.assertNotRegex(panel, r'\bLAB\b|SESSIONS|분리 모델')

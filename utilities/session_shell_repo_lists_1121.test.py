@@ -10,6 +10,9 @@ the panel's STATUS part and BACKLOG part under the REPO group, and the BACKLOG p
 4. The two parts' items come with the status value (one read, the document read again only where it changed: `have`), and the panel's drawing reads no file.
 5. The BACKLOG popup is the status popup's list screen (`status-list.cjs`) over `<artifact root>/backlog.md`; its groups are the document's `##` headings as written.
 6. (From the review of #1793) a list dropped for its size leaves no stale style index; the document's rows are made only where the list is dropped.
+
+11-25 (four groups): the REPO group is its frame-row head (`├╴[REPO] hearting · wt 12 ───┤`), GIT, STATUS, BACKLOG and MEM (MEM moved up from under MESSAGES; PEERS moved down under TITLE in
+the SESSION group); an empty row and the `[SESSION]` head follow. A list head is bold at body brightness (`tier:'list'`); the REPO head's low-height buttons read `[REPO] hearting  STATUS +5 ›  BACKLOG +14 ›─┤`.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -75,9 +78,8 @@ class PanelListsTest(unittest.TestCase):
         self.node(r"""
 const v=draw({status:status(),backlog:backlog(),routes:1,messages:3,mem:2,height:40}),ls=lines(v);
 const want=[
-'│ REPO hearting · wt 12 ───────────────────────────────── │',
+'├╴[REPO] hearting · wt 12 ────────────────────────────────┤',
 '│  GIT    branch ✓                                        │',
-'│  PEERS  [e9] ⚑  ─ [d4]                                  │',
 '│  STATUS +2                                            › │',
 '│   ! 시험용 정할 것 하나                                 │',
 '│   · 시험용 하는 일 하나 · #101                          │',
@@ -86,12 +88,16 @@ const want=[
 '│   · 시험용 나중 일 하나                                 │',
 '│   · 시험용 나중 일 둘                                   │',
 '│   · 시험용 나중 일 셋                                   │',
-'│ SESSION ─────────────────────────────────────────────── │'];
-assert.deepEqual(ls.slice(1,13),want,ls.join('\n'));
+'│  MEM                                                  › │',
+'│   ◆ 1m decision 시험용 기억 1 제목                      │',
+'│   ◆ 2m decision 시험용 기억 2 제목                      │',
+'│                                                         │',
+'├╴[SESSION] ──────────────────────────────────────────────┤'];
+assert.deepEqual(ls.slice(1,16),want,ls.join('\n'));   // 11-25: the REPO group is GIT, STATUS, BACKLOG, MEM; PEERS stands under TITLE in the SESSION group
 assert(ls.every(l=>cells(l)===59));
 // `+N` is the head's own text in the MESSAGES head's colour (`loc_repo`); the mark of what waits is the status list's own yellow.
-const row=v.rows[4],plus=row.find(p=>p.text==='+2');assert(plus&&plus.foreground===253,JSON.stringify(row));
-{const w=v.rows[5].find(p=>p.text==='! '),d=v.rows[6].find(p=>p.text==='· ');assert(w&&w.foreground===186&&d&&d.dim===true,JSON.stringify([v.rows[5],v.rows[6]]));}
+const row=v.rows[3],plus=row.find(p=>p.text==='+2');assert(plus&&plus.foreground===253,JSON.stringify(row));
+{const w=v.rows[4].find(p=>p.text==='! '),d=v.rows[5].find(p=>p.text==='· ');assert(w&&w.foreground===186&&d&&d.dim===true,JSON.stringify([v.rows[4],v.rows[5]]));}
 // No `+N` where every item shows (the total is the three), and none for a total that was not told.
 {const a=inside(draw({status:status(3,3),backlog:backlog(2,2),height:40}));
  assert(a.some(l=>/^ STATUS +›$/.test(l))&&a.some(l=>/^ BACKLOG +›$/.test(l)),a.join('\n'));}
@@ -99,11 +105,11 @@ const row=v.rows[4],plus=row.find(p=>p.text==='+2');assert(plus&&plus.foreground
  assert(a.some(l=>/^ STATUS +›$/.test(l))&&a.some(l=>/^ BACKLOG +›$/.test(l))&&a.filter(l=>/^  [!·] /.test(l)).length===3,a.join('\n'));}
 // No item: the head alone (no empty row). A total of nothing and a total with no items shown (the host holds the count only) say `+N`.
 {const a=inside(draw({status:status(0,0),backlog:backlog(0,0),height:40}));
- const at=a.findIndex(l=>/^ STATUS/.test(l));assert(/^ BACKLOG/.test(a[at+1])&&/^SESSION/.test(a[at+2]),a.join('\n'));}
+ const at=a.findIndex(l=>/^ STATUS/.test(l));assert(/^ BACKLOG/.test(a[at+1])&&/^$/.test(a[at+2])&&/^\[SESSION\]/.test(a[at+3]),a.join('\n'));}   // (11-25: an empty row, then the SESSION head)
 {const a=inside(draw({status:status(0,7),backlog:backlog(0,9),height:40}));assert(a.some(l=>/^ STATUS \+7 +›$/.test(l))&&a.some(l=>/^ BACKLOG \+9 +›$/.test(l)),a.join('\n'));}
-// The REPO row has no button now, and the heads stand between PEERS and SESSION.
-{const a=inside(draw({status:status(),backlog:backlog(),height:40}));assert(!a[1].includes('›')&&/^REPO hearting · wt 12 ─+$/.test(a[1]),a[1]);
- const at=n=>a.findIndex(l=>l.trimStart().startsWith(n));assert(at('PEERS')<at('STATUS')&&at('STATUS')<at('BACKLOG')&&at('BACKLOG')<at('SESSION'));}
+// The REPO head has no button, and the heads stand between GIT and the SESSION head (PEERS is under TITLE, in the SESSION group).
+{const a=inside(draw({status:status(),backlog:backlog(),height:40}));assert(!a[1].includes('›')&&/^\[REPO\] hearting · wt 12 ─+$/.test(a[1]),a[1]);
+ const at=n=>a.findIndex(l=>l.trimStart().startsWith(n));assert(at('GIT')<at('STATUS')&&at('STATUS')<at('BACKLOG')&&at('BACKLOG')<at('[SESSION]')&&at('[SESSION]')<at('PEERS'));}
 """)
 
     def test_a_missing_document_is_a_dim_word_and_no_root_has_no_part(self):
@@ -116,8 +122,8 @@ const row=v.rows[4],plus=row.find(p=>p.text==='+2');assert(plus&&plus.foreground
   assert(w.dim===true&&w.role===undefined&&arrow.dim===true,JSON.stringify(v.rows[at]));
   assert(v.hits.some(h=>h.row===at&&h.action===action));}
  assert(!a.some(l=>/^ *[!·] /.test(l)));}
-// With a document the word has the title role (as the other sections' heads).
-{const v=draw({status:status(),backlog:backlog(),height:40});const at=inside(v).findIndex(l=>l.trimStart().startsWith('STATUS'));assert.equal(v.rows[at].find(p=>p.text==='STATUS').role,'title');}
+// With a document the word has the title role (as the other sections' heads), and (11-25) is a list head: bold at body brightness.
+{const v=draw({status:status(),backlog:backlog(),height:40});const at=inside(v).findIndex(l=>l.trimStart().startsWith('STATUS')),w=v.rows[at].find(p=>p.text==='STATUS');assert.equal(w.role,'title');assert(w.tier==='list'&&w.bold===true&&w.dim!==true,JSON.stringify(w));}
 // Only one of the two parts has a value: only that one stands. No value at all (no artifact root): nothing, no press.
 {const a=inside(draw({status:status(),height:40}));assert(a.some(l=>l.trimStart().startsWith('STATUS'))&&!a.some(l=>l.trimStart().startsWith('BACKLOG')));}
 for(const status_doc of [undefined,null,{word:'',has_doc:true}]){const v=draw({status:status_doc,backlog:status_doc,height:40}),a=inside(v);
@@ -253,7 +259,7 @@ assert.deepEqual([seen[0].b,seen[0].s,seen[0].heads],[3,3,2]);
     def test_the_repo_row_ends_in_the_two_buttons_where_the_heads_go_and_gives_way_as_the_bottom_row_does(self):
         self.node(self.SORT + r"""
 const press=(v,a)=>v.hits.find(h=>h.row===1&&h.action===a);
-for(const [w,want] of [[59,/^REPO hearting · wt 12 +STATUS \+5 ›  BACKLOG \+14 ›$/],[44,/^REPO hearting +STATUS ›  BACKLOG ›$/],[40,/^REPO hearting +STATUS ›  BACKLOG ›$/],[30,/^REPO hearting · wt 12 ›  ›$/]]){
+for(const [w,want] of [[59,/^\[REPO\] hearting · wt 12 +STATUS \+5 ›  BACKLOG \+14 ›$/],[44,/^\[REPO\] hearting +STATUS ›  BACKLOG ›$/],[40,/^\[REPO\] hearting · wt 12 +›  ›$/],[30,/^\[REPO\] hearting +›  ›$/]]){
   const v=drawN({width:w,height:14,question:true,routes:3,messages:7,mem:5,peers:true,status:status(),backlog:backlog()}),p=sort(v);
   assert(!p.rows.some(r=>r.k==='list'),w+'\n'+p.lines.join('\n'));
   assert.match(p.rows[0].t.trimEnd(),want,w+' '+p.rows[0].t);

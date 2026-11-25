@@ -3,6 +3,7 @@
 The panel no longer answers in place: its QUESTIONS section is a label row and a two-row summary,
 and the question reads whole in a popup over the window (one frame for every popup). These run
 the real backend presentation, the real editor and the real panel paint with synthetic values.
+11-25 (four groups): beside the native area the box and head read with the count after the name (`╭─ QUESTIONS 3 ─`, `ROUTE 4`).
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -154,15 +155,17 @@ for(const [width,side] of [[52,true],[40,true],[90,false]]){
  // Both inputs a host ever gave: the editor's rows (before 11-15) and the summary (now).
  const r=v.render({width,height:20,side,model,state:'idle',harness:'claude',configuration:{},questions:o=>b.detail(o),brief:()=>b.summary(),sent:()=>b.sent()});
  const rows=r.rows.map(row=>row.map(p=>p.text).join('')),all=rows.join('\n');
- for(const want of [side?'4 ROUTE':'route 4','ROUTE_0','MESSAGE_3',side?'╭─ 3 QUESTIONS ─':'3 QUESTIONS','◑ 패널을'])assert(all.includes(want),width+' lost '+want+'\n'+all);
+ for(const want of [side?'ROUTE 4':'route 4','ROUTE_0','MESSAGE_3','◑ 패널을'])assert(all.includes(want),width+' lost '+want+'\n'+all);
+ assert(side?all.includes('╭─ QUESTIONS 3 ─'):/QUESTIONS 3|3 QUESTIONS/.test(all),width+' lost the question section\n'+all);
  assert(!/\bLAB\b/.test(all),all);
  assert(!/╭─ › ◑|╭─ ◑/.test(all),'no question box in the panel\n'+all);
  assert(rows.filter(s=>/패널을|아래 두 줄|넓힌|지금 그대로|21칸/.test(s)).length<=2,all);
+ // (11-25: beside the native area the count stands after the name, `ROUTE 4`, `╭─ QUESTIONS 3 ─`; the bottom layout's route box reads as before, its question box too or with the count after the name.)
  // (11-16: beside the native area the section is a thin box, its name in the top line, the summary inside; the bottom layout
  // keeps the head row and its rows. A press on the head and on every row of either opens the popup.)
  // (11-17: the route box's zone rule no longer goes first, so a 20-row bottom layout may keep the section's thin box, as the side layout
  // does, and give the messages their one-row form instead; either form: the head row and its rows, or the box.)
- const q=rows.findIndex(s=>s.includes(side?'╭─ 3 QUESTIONS ─':'3 QUESTIONS')),boxed=side||rows[q].includes('╭'),last=boxed?rows.findIndex((s,i)=>i>q&&s.startsWith('│ ╰')):rows.findIndex(s=>s.includes('◑ 패널을'));
+ const q=rows.findIndex(s=>side?s.includes('╭─ QUESTIONS 3 ─'):/QUESTIONS 3|3 QUESTIONS/.test(s)),boxed=side||rows[q].includes('╭'),last=boxed?rows.findIndex((s,i)=>i>q&&s.startsWith('│ ╰')):rows.findIndex(s=>s.includes('◑ 패널을'));
  assert(q>0&&last>q,all);
  for(let i=q;i<=last;i++)assert(r.hits.filter(h=>h.action==='question').some(h=>h.row===i),i+JSON.stringify(r.hits));
 }

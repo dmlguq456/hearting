@@ -175,7 +175,7 @@ const lookAt=async word=>{const p=await at(word);return p?looks()[p.y][p.x]:null
 const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=cells(y);for(let x=Math.max(0,cols-40);x<cols;x++)if('─│┌┐└┘'.includes(c[x]))out.push(all[y][x].fg);}return JSON.stringify(out);};
 (async()=>{try{
   if(cfg.scenario==='veil'||cfg.scenario==='plain'){
-    await until(s=>has('READY_'+cfg.harness)(s)&&has('2 QUESTIONS')(s),'the panel with its questions');
+    await until(s=>has('READY_'+cfg.harness)(s)&&has('QUESTIONS 2')(s),'the panel with its questions');
     await key('paint\r',300);await key('busy\r',600);
     let s=await until(has('RED_TEXT'),'the colored row');
     checks.red_before=await lookAt('RED_TEXT');checks.blue_before=await lookAt('BLUE_BG');
@@ -204,7 +204,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
     for(const [c,r,name] of [[120,30,'side'],[90,24,'strip'],[160,40,'open']]){await resize(c,r);s=await until(s=>!!box(s),'the popup at '+name);
       sizes[name]=(await bright()).length;frames['veil_'+name]=s;}
     await key('\x1b',300);await resize(80,24);await until(has('◑답 대기'),'the strip at 80');
-    await key('\x1d',250);await key('p',600);s=await until(s=>s.some(l=>/QUESTIONS [─›]/.test(l)),'the panel under the native');
+    await key('\x1d',250);await key('p',600);s=await until(s=>s.some(l=>/QUESTIONS (?:\d+ )?[─›]/.test(l)),'the panel under the native');
     await key('\x1d',300);s=await until(s=>!!box(s),'the popup over the panel under the native');sizes.bottom=(await bright()).length;frames.veil_bottom=s;
     await resize(160,40);s=await until(s=>!!box(s),'the popup beside again');sizes.beside=(await bright()).length;
     checks.sizes=sizes;await key('\x1b',300);await until(s=>!box(s),'closed after the sizes');
@@ -220,7 +220,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   if(cfg.scenario==='ground'){
     // 11-17: the popup's ground as the terminal shows it, in 24-bit color (the cell's RGB) or in a palette step: the popup's
     // own cells, the cell each side of it, and the chosen choice's rows; nothing of them outside the popup.
-    await until(s=>has('READY_'+cfg.harness)(s)&&has('2 QUESTIONS')(s),'the panel with its questions');
+    await until(s=>has('READY_'+cfg.harness)(s)&&has('QUESTIONS 2')(s),'the panel with its questions');
     await key('\x1d',500);await until(s=>!!box(s),'the popup');await flush();
     const s=await screen(),b=box(s),c=cells(b.top),left=c.indexOf('╭'),right=c.indexOf('╮'),rowsOut=[];
     const bg=(line,x)=>{const cell=line?.getCell(x);return !cell?null:cell.isBgRGB()?'#'+cell.getBgColor().toString(16).padStart(6,'0'):cell.isBgPalette()?cell.getBgColor():-1;};
@@ -243,7 +243,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
     await key('\x1b',0);frames.closed=await until(s=>has('REPO')(s)&&!box(s),'the popup closed');
     fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));return;
   }
-  await until(s=>has('READY_'+cfg.harness)(s)&&has('2 QUESTIONS')(s),'the panel with its questions');
+  await until(s=>has('READY_'+cfg.harness)(s)&&has('QUESTIONS 2')(s),'the panel with its questions');
   frames.closed=await screen();
   // Native output while the popup stands: the twelve lines arrive under it.
   await key('later\r',100);await key('\x1d',100);
@@ -257,7 +257,7 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   s=await until(s=>!box(s),'the popup closing on Esc');
   frames.output_closed=s;checks.later_after_close=s.filter(l=>/LATER_\d\d/.test(l)).length;
   // A press on the panel's QUESTIONS rows opens it; keys stay in it; Tab moves to 2/2.
-  const label=await at('2 QUESTIONS ');  // (11-16: the box's top line carries the name)
+  const label=await at('QUESTIONS 2 ');  // (11-16: the box's top line carries the name; 11-25: the count after it)
   await press(label.x+2,label.y);
   s=await until(s=>!!box(s),'the popup by a press on QUESTIONS');
   frames.pressed=s;
@@ -456,7 +456,7 @@ class SessionShellPopupTest(unittest.TestCase):
         # Closed: the panel's questions section is a thin box (11-16) with its name in the top line and the summary
         # inside, no editor box.
         panel = '\n'.join(frames['closed'])
-        self.assertIn('╭─ 2 QUESTIONS ─', panel)
+        self.assertIn('╭─ QUESTIONS 2 ─', panel)
         self.assertIn('│ │ ◑ 패널을 접었을 때의 모양을 어', panel)
         self.assertNotIn('……', panel)
         # 11-15 ("그냥 질문은 글자 자체를 붉은 색으로"): the question to answer here reads in red letters: its

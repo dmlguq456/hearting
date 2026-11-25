@@ -7,6 +7,7 @@ tool call (open
 and just finished) and in the worker's own words, and the marker must be absent from all
 public places: the job JSON, Fleet's activity rows and a one-step route's folded row, the
 shell feed row, and the shell panel painted at 40 and 80 columns and folded at 52.
+11-25 (four groups): the side panel's ROUTE box head reads `ROUTE 1` (the count follows the name).
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -194,14 +195,15 @@ class DoerActivityPublicBoundaryTest(unittest.TestCase):
         painted = self._painted
         # 11-15 (popup design E): the panel's ROUTE section is one row per route (its doer's tool reads
         # in the routes popup, Fleet's own band, the `fleet` surface below): the row was really drawn.
-        # (Beside the native area the count leads, `1 ROUTE`; under it, at 80 columns, `route 1`.)
-        for width, head in (("40", "1 ROUTE"), ("80", "route 1")):
+        # (Beside the native area the count follows the name, `ROUTE 1` (11-25, four groups); under it, at 80
+        # columns, `route 1`.)
+        for width, head in (("40", "ROUTE 1"), ("80", "route 1")):
             self.assertIn(head, painted["claude:edit_body"][width])
             self.assertIn("Synthetic task", painted["claude:pipe_tail"][width])
         # The folded places were really drawn too.
         _public, fleet, _feed, _route = self._surfaces(jobs["claude:edit_body"])
         self.assertIn("● Edit src/app.py", fleet)
-        self.assertIn("1 ROUTE", painted["claude:pipe_tail"]["52-folded"])
+        self.assertIn("ROUTE 1", painted["claude:pipe_tail"]["52-folded"])
 
     def test_short_lowercase_marker_reaches_no_public_surface(self):
         lower_b64 = base64.b64encode(LOWER_MARK.encode()).decode()

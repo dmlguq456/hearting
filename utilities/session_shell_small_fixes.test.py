@@ -8,6 +8,7 @@
 4. `veilRow` also turns colon-form SGR gray.
 5. The question summary's `answerable` is `active(row)`, the one formula.
 6. The head rule stands without a session title (the default `rule motion` must not wait on one). 11-22: the rule is the SESSION head's (the line between CTX and TITLE is gone), and the light runs over it alone.
+   11-25 (four groups): that head is the `[SESSION]` frame row (`├╴[SESSION] ───┤`), the light runs over its rule up to the cell before the right frame.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -224,10 +225,10 @@ const paint=(harness,extra,o={})=>view.render({width:o.width||40,height:o.height
  frame:0,brief:()=>null,sent:()=>[],configuration:{},background:''});
 for(const harness of ['claude','codex','opencode'])for(const [name,extra] of [['title',{session_title:'제목'}],['none',{}],['now',{now:'그리는 중'}]]){
  const v=paint(harness,extra),lines=v.rows.map(str),tag=harness+' '+name+'\n'+lines.join('\n');
- const rule=lines.findIndex(r=>/^│ SESSION ─{28} │$/.test(r));
+ const rule=lines.findIndex(r=>/^├╴\[SESSION\] ─{27}┤$/.test(r));   // 11-25: a frame row; the last rule cell (the padding's) is the frame's own, outside the light
  assert(rule>0,'the head rule stands\n'+tag);
  assert(!lines.some(r=>/^│ ─{36} │$/.test(r)),'no rule between the metadata and the title\n'+tag);
- assert(v.motion&&v.motion.cells.length===28&&v.motion.cells.every(c=>c.row===rule&&c.col>=10&&c.col<=37),'the default light moves over the rule alone\n'+tag);
+ assert(v.motion&&v.motion.cells.length===26&&v.motion.cells.every(c=>c.row===rule&&c.col>=12&&c.col<=37),'the default light moves over the rule alone\n'+tag);
  assert(lines[rule+1].includes('MODEL'),tag);
  if(name!=='none')assert(lines.some(r=>r.includes('TITLE')||r.includes('NOW')),tag);
  // No title and no NOW: no separate empty row stands under CTX, the next thing (the question's box) stands right under it.

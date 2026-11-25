@@ -5,7 +5,7 @@
 2. A request reads like a route's doer: its mark, the other session's Fleet number, then that session's harness, model
    and effort in the colors a route's doer takes; unknown values leave out (`[6c] claude`); the age, then the effort,
    then the model give way first.
-3. The box's title counts the routes alone (`2 ROUTE`, 11-17: the requests are a zone, no tab of the title; never a count
+3. The box's title counts the routes alone (`ROUTE 2` since 11-25, `2 ROUTE` before; 11-17: the requests are a zone, no tab of the title; never a count
    without its name); one word list line for the panel, the Fleet session page and the Fleet links.
 4. A request this session received stays after it is answered, as long as a sent one does (15 minutes), closed and dim.
 5. A message whose other end is this session itself (the tidy notice) is no message: MESSAGES, its popup, the folded
@@ -50,7 +50,7 @@ const base=(o={})=>({styles,colors:o.colors??256,no_color:o.no_color===true,tag:
 const draw=(o={})=>view.render({width:o.width??40,height:o.height??50,side:o.side??true,model:base(o),state:'working',frame:1000,since:990,cellWidth:cells,
   configuration:{side_width:o.width??40,theme:o.theme||'terminal'},background:''});
 const lines=v=>v.rows.map(str);
-const boxOf=v=>{const rows=lines(v),a=rows.findIndex(s=>/^│ ╭─ (?:\d+ (ROUTE|PEER REQUEST|REQUEST)|ROUTE|route|peer request|request)/.test(s));if(a<0)return null;
+const boxOf=v=>{const rows=lines(v),a=rows.findIndex(s=>/^│ ╭─ (?:(ROUTE|PEER REQUEST|REQUEST) \d+|ROUTE|route|peer request|request)/.test(s));if(a<0)return null;
   const b=rows.findIndex((s,i)=>i>a&&/^│ ╰/.test(s));return {a,b,rows};};
 // 11-17 (route zones): a zone's named rule inside the box (`│ │ ─ dispatch ──── │ │`); `zone` is its name or any.
 const zoneRule=(s,zone='(?:direct|dispatch|request)')=>new RegExp('^│ │ ─ '+zone+' ─+ │ │$').test(s);
@@ -185,11 +185,11 @@ assert(order.includes('age')&&order.includes('effort')&&order.includes('model'),
 // 11-17: the title is the route count alone at every width (the requests are the box's `request` zone, not a tab).
 for(const width of [30,34,38,40,50,60]){
  const rows=lines(draw({width})),b=boxOf(draw({width})),top=rows[b.a];
- // Never a count without its name.
+ // Never a count without its name (11-25: the count stands after the name).
  const words=top.replace(/[╭╮─│]/g,' ').trim().split(/\s+/);
- assert(!/^\d+$/.test(words.at(-1)),'a count without its name: '+top);
+ assert(/^\d+$/.test(words[1])&&words[0]==='ROUTE','a count without its name: '+top);
  assert(words.includes('ROUTE'),top);
- assert(/^│ ╭─ 2 ROUTE ─+ ›─╮ │$/.test(top)&&!/REQUEST/.test(top),top);
+ assert(/^│ ╭─ ROUTE 2 ─+ ›─╮ │$/.test(top)&&!/REQUEST/.test(top),top);
 }
 // Below the native area the lower case form `route 2` stands alone too.
 const below=lines(draw({width:120,height:20,side:false}));
@@ -197,7 +197,7 @@ assert(below.some(s=>/route 2/.test(s)&&!/request/.test(s)),below.join('\n'));
 // A request alone reads `ROUTE`, never a bare count.
 assert(lines(draw({routes:[]})).some(s=>/^│ ╭─ ROUTE ─+ ›─╮ │$/.test(s)),lines(draw({routes:[]})).join('\n'));
 const tight=lines(draw({width:24,height:50})).find(s=>/^│ ╭─/.test(s));
-assert(!/│ \d+ ─|│ \d+╮|│ \d+ *$/.test(tight.replace(/ │$/,'')),tight);
+assert(!/│ ╭─ \d+|│ \d+ ─|│ \d+╮|│ \d+ *$/.test(tight.replace(/ │$/,'')),tight);
 """)
 
     def test_every_width_and_height_keeps_the_box_closed_with_its_presses_on_the_drawn_rows(self):

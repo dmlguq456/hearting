@@ -240,12 +240,10 @@ editing controls in all three harnesses, including startup and restoration.
 The panel follows the 2026-11-11 unified layout (the C3 draft the person
 chose), placed by the C6 rule: what is always there sits at the top, what
 comes and goes below it; the sections stand from the top one after another, and
-MESSAGES and MEM keep to the panel's bottom, above the `5h`/`7d` row (beside the native area one thin
-rule, a section head's rule in its color, parts them from that row: 11-16, the person: "MEM과 가장
-하단을 구분하는 줄이 필요"; short of rows it goes before any content row), so the
-rows left over stand between the sections above them and MESSAGES (the person's own
-word, 2026-11-11, restored 2026-11-15; without MESSAGES MEM keeps to the bottom, with
-neither the rows left over are below the last section). The top border carries Fleet's row head for this
+MESSAGES keeps to the bottom of the session's group, above `[RESOURCES]` and `[USAGE]` (beside the native area, where there is no USAGE, one thin
+rule parts it from the last row: 11-16, the person: "MEM과 가장 하단을 구분하는 줄이 필요"; short of rows it goes before any content row), so the
+rows left over stand between the sections above it and MESSAGES (the person's own word, 2026-11-11, restored 2026-11-15; without MESSAGES the rows left over are below the last section). Under the native area MEM
+keeps to the bottom after MESSAGES as before; beside it MEM ends the REPO group (11-25). The top border carries Fleet's row head for this
 session on the left: the state glyph (a spinner while it works or an answer is
 being typed in for the person, `●` idle, `◑` waiting on a dialog or question),
 the session number (`[e9]`), the harness name in its Fleet hue and, for a
@@ -354,7 +352,7 @@ second and changes only the blinking row), and an idle panel with nothing to
 blink paints nothing between native frames.
 Then the metadata, one block. Beside the native area the repository and Git rows
 start with dim labels in the label column of `TITLE` and `NOW` (`GIT`; REPO is a group head, below;
-narrower than 30 cells inside the labels go first): `REPO hearting · wt 12`,
+narrower than 26 cells inside the labels go first, 11-25; 30 before): `[REPO] hearting · wt 12`,
 the repository name in its color with no trailing `/` and the worktree count
 dim (none for zero or an unknown count), (11-21: the row has no status button where the STATUS and BACKLOG parts stand under the REPO group, below; short of rows, where their heads go, it ends in the two buttons, 11-22; and the bottom layout's first row ends in two buttons),
 and `GIT    main ✓`, all dim with no
@@ -362,8 +360,8 @@ parentheses: the branch and dirty mark cut at 20 cells (32 with 60 cells
 inside), then `✓` when ahead and behind are both known to be 0, else `↑N`/`↓N`
 (nothing when unknown: no upstream to compare with), then the existing merge
 warnings and `💀merged`; no Git row when nothing is left; no folder or branch
-glyph. Directly under `GIT` stands `PEERS` (11-17, the person's PEERS sketch; the label column of
-`REPO`/`GIT`): `PEERS  [c7] ⚑  ─ [d4] [3b]`, the supervising session, its flag, two cells, a dash, then the sessions it
+glyph. Under `TITLE` (11-25; under `GIT` from 11-17) stands `PEERS` (11-17, the person's PEERS sketch; the label column of
+`GIT`): `PEERS  [c7] ⚑  ─ [d4] [3b]`, the supervising session, its flag, two cells, a dash, then the sessions it
 supervises, in that order from every window; a supervised window shows only its own group
 (`[c7] ⚑  ─ [d4]`), a window that is both shows two groups joined by ` · `. Each number wears its session's
 harness color: this window's own the lit color, bold; every other session's the same hue one step back and plain (11-18, "this window's
@@ -418,65 +416,88 @@ head from the sections. The bottom
 layout keeps the metadata row (or rows) first and one content row
 (`title │ NOW …`, each keeping at least half of what is left).
 
-Two groups (11-20, the person: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" / "REPO ---- SESSION ----"), beside the native area. REPO is the repository's: the
-REPO row, which is the group's head (`REPO hearting · wt 12 ────`: the word bold, in the title role's color, its value after one cell, the rule dim in a section head's color running to the row's end,
-no button while the two heads below stand, the two buttons where they do not; the same in every width), and under
-it GIT, PEERS, then (11-21, the person: "버튼을 REPO의 아래에 각각을 두고 +? 숫자 띄우고 백로그랑 현황을 나열하자" / "각각 3줄 정도씩 목록으로 만들고 추가분을 +? 형식으로")
-the **STATUS part** and the **BACKLOG part**: each a section head (` STATUS +2                  ›`, indented one cell like GIT, no rule, the word in the title role, `+N` in the MESSAGES head's
-color and place, `›` at the row's right end; a press opens that popup) and its first three items, one row each, indented two cells, cut with `…` within the cells left (`· ` dim before each; no item of the status list is a question, 11-22); a press on an item opens the popup standing on that item; a BACKLOG item stands behind its sort's word instead, in four cells and one blank more: `FIX ` yellow, `IMPR` green, `NOTE` and `TBD ` dim, so the sort is told by the letters as well as the color). The STATUS items are the status list screen's own: what is in progress (`session_status.panel_items`, from `parse_listing`, the one reading the list screen uses; the recent and the folded count nothing); the BACKLOG items
-are `<artifact root>/backlog.md`'s, by sort (`FIX`, `IMPR`, `TBD`, `NOTE`; an item with no valid `kind:` line is `TBD`, core/ARTIFACT_META.md `backlog.md`), and inside a sort this window's campaign group (the `##` heading that is, letter for letter, the name of the folder this window's status document is in) first,
-then the document's order. **The BACKLOG head (11-22) tells the sorts**: `BACKLOG FIX 14 · IMPR 26 · +37 /125` (the count of each of FIX and IMPR; `+N` the FIX and IMPR items not shown, left out for zero; `/N` every line of the document, a `+` after it where the file is longer than is read;
-`?` for FIX and IMPR where no item of the document is sorted yet, an old document: `FIX ? · IMPR ? /125`; a document with nothing in it `FIX 0 · IMPR 0 /0`). Short of cells it gives way in this order: `/N`, then the ` · ` between the parts (`FIX 14 IMPR 26 +37`), then `+N` (`FIX 14 IMPR 26`), then the sorts' words (`14 26`), then all of it: the words outlast the numbers (the person asked for a word of three or four letters, not one), and a width one cell wider never tells less. The old document's `FIX ? · IMPR ?` and the zeros give way in the same order.
-For the STATUS head `+N` is the count of the in-progress items not shown (nothing for zero). The BACKLOG head of a backend that sends no sorts is the same (`BACKLOG +N`). The `+` after the number is the BACKLOG head's alone: `+2997+` (and `+37+` in the sorted head), where the file is longer than is read (the first 1 MiB is read and what was read is counted), and `+` alone where nothing is hidden by the rows and there is more. No item: the head alone; no document, or one that
-cannot be read: the word plain dim, no item, a press still opens the popup; no artifact root: neither part. **One rule (11-22, the person's STATUS and BACKLOG lists are the first to give way): the
-two parts never take a row from anything else.** The panel is laid out as it is without them (the same layout, the same `give` order, byte for byte what a window with no list value draws; the
-REPO row alone differs), and the parts take only what that layout leaves empty and, short of those, rows MESSAGES and MEM fold: the empty rows (the row between the head's block and the route
-box, the rows left over), then the BACKLOG items (3, 2, 1, none: `+N` grows by as many; they stand on empty rows), then MESSAGES and MEM folding as they fold short of rows (the messages
-in their one-row form, MEM to two records, MESSAGES to two messages, then one each: both keep their head and one row, and stand where the panel without the parts has them), then the STATUS
-items (they may stand on what was folded), then the two heads together. **At no height is a BACKLOG item left short while an empty row is left after the parts gave way:** a fold that frees several
-rows at once leaves empty ones, and the BACKLOG items stand on those again (up to three, as many as the empty rows; the STATUS items stand before them, never a BACKLOG item with a STATUS
-item short). So as the height falls the BACKLOG items may be more again at a height; the layout without the parts is not monotonic in the height either. Nothing else gives way for the parts: NOW, QUESTIONS and the route box (their rows and their shape, folded or
-open), Git, PEERS, the SESSION head, MODEL, CTX, TITLE, RESOURCES, the notices and the last row have the rows and the form they have without the parts, and none
-has more. Where the two heads do not stand the REPO row ends in the two buttons, `STATUS +N ›  BACKLOG +N ›` (BACKLOG's `N` is its FIX and IMPR together, `?` for an old document with none sorted, nothing for zero; the bottom layout's first row's pieces, the same order of giving way: the counts
-go the way the bottom row's go, but the repository's own `· wt N` goes first: `· wt N`, then the name is cut (to eight cells), then the buttons' counts, then their words; at the `›  ›` stage
-`· wt N` stands again where it fits; a press on a button opens that popup, on the rest of the row the status popup), and everything
-but that row is what the panel without the parts draws, byte for byte (MESSAGES and MEM unfolded as without them); where the heads stand the row has no button. (The layout is made once, then the
-parts are fitted in that order; there is no second budget and nothing is drawn twice.) The bottom layout has no list and no more rows:
-its first row ends in `STATUS +N ›  BACKLOG +N ›` (`N` the whole count, for BACKLOG its FIX and IMPR together, nothing for zero; short of cells the counts go, then the words, then the row is cut; the rest of the row opens the
-status popup). The two parts' items come with the status button's value, in the same read and the same worker, only where a document changed (the host sends the documents' path,
-modification time, size, inode and change time back as `have` and, for the backlog, the folder its order was made for (this window's campaign group stands first, so another folder is another
-order); an unchanged one is neither read nor parsed again); the panel's drawing reads no file. SESSION is this session's: its head `SESSION ────` stands where the empty row between the two groups of
-metadata stood, then MODEL, CTX, TITLE, NOW (indented one cell like GIT), QUESTIONS, the route box, MESSAGES, MEM. Short of rows the head row does not go: it takes MODEL's value and
-MODEL's row (`SESSION Opus 5.5 xhigh ────`, the value after one cell, the rule after it where three cells are left), so the group keeps its name at every height and the
-row count is what it was when the head went; where MODEL's value does not stand whole on that row, the head does not take it: the head row goes and the MODEL row stands in its own width, as before the head was a group's. **The line forms (11-22, the person chose the one-cell indent over the two-cell draft):**
+Four groups (11-25, the person, choosing the fourth design round's "나" draft: "저장소 먼저로 네 묶음 주고로 해줘"; before it two, 11-20: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" /
+"REPO ---- SESSION ----"), beside the native area, in this order: **`[REPO]`** (the repository's: GIT, STATUS, BACKLOG, MEM), **`[SESSION]`** (this session's: MODEL, CTX, TITLE, PEERS, NOW, QUESTIONS,
+the route box, MESSAGES), **`[RESOURCES]`** (the machines'), **`[USAGE]`** (the accounts'); a window with no RESOURCES has `[USAGE]` as its third head. The top border's session tag is untouched ("테두리에
+세션 이름표가 있는건 건들지 말자. 좋으니까.", 11-23), and the repository's name is not put on it.
+
+*A group head (11-23, the person: "일단 REPO SESSION은 눈금을 넣고, 앞뒤로 []를 넣어서 좀 더 강조를 하자"; 11-25: the same for all four)* is a row of the frame itself: `├╴[REPO] hearting · wt 12 ──────┤`: the left
+frame cell is `├`, the cell beside it `╴` (the tick, in the cell a body row leaves blank), then the name in brackets, the brightest tone (`FACES.*.bright`) and bold, its value after one cell where it has one
+(REPO's name and worktree count; SESSION's MODEL where rows run short, below), then the thin rule to the right frame cell `┤` (the right padding cell is a rule cell too). The two frame cells and the tick are the
+frame's own: its state color, and under `rule motion` `border`/`scanners` its moving phase (the tick has the left frame cell's phase, so the orbit's length and speed do not change), under `rule` the lit
+frame. The light `rule motion` `rule` passes runs over the `[SESSION]` head's rule alone, as it did over the old SESSION head's.
+
+*One empty row stands before each head after the first* (before `[SESSION]`, `[RESOURCES]`, `[USAGE]`; "REPO와 SESSION 구분줄 사이에 여백이 한칸은 있어야 될것 같다", 11-23). **Short of rows these empty rows are
+the first thing given up**, before any other row (before RESOURCES' GPU rows), and the last given back. The old empty row between the metadata and the title is gone (the heads part the groups).
+
+**REPO** is the repository's: its head `[REPO] hearting · wt 12 ──────` (no button while the two list heads below stand, the two buttons where they do not; the same in every width), then GIT, then
+(11-21, the person: "버튼을 REPO의 아래에 각각을 두고 +? 숫자 띄우고 백로그랑 현황을 나열하자" / "각각 3줄 정도씩 목록으로 만들고 추가분을 +? 형식으로") the **STATUS part** and the **BACKLOG part**: each a list head
+(` STATUS +2                  ›`, indented one cell like GIT, no rule, the name bold at the body's brightness, `›` at the row's right end; a press opens that popup) and its first three items, one row
+each, indented two cells, cut with `…` within the cells left, each behind a dim `·` ("그리고 백로그 목록에 점으로 불릿 만들어주고", 11-23; no item of the status list is a question, 11-22); a press on an item opens
+the popup standing on that item; a BACKLOG item has its sort's word after the dot, in four cells and one blank more (`· FIX  title`): `FIX ` yellow, `IMPR` green, `NOTE` and `TBD ` dim, so the sort is told by
+the letters as well as the color). The STATUS items are the status list screen's own: what is in progress (`session_status.panel_items`, from `parse_listing`, the one reading the list screen uses; the recent and
+the folded count nothing); the BACKLOG items are `<artifact root>/backlog.md`'s, by sort (`FIX`, `IMPR`, `TBD`, `NOTE`; an item with no valid `kind:` line is `TBD`, core/ARTIFACT_META.md `backlog.md`), and inside a
+sort this window's campaign group (the `##` heading that is, letter for letter, the name of the folder this window's status document is in) first, then the document's order. Then, last of the group, **MEM** (11-25:
+it was the bottom's; "MEM은 REPO로"): its head and its records, below.
+**The number on a list head (11-25) is one thing: the items not on the screen.** STATUS `+2` (five in progress, three shown; nothing for zero). **The BACKLOG head (11-22, 11-25) tells it with the sorts**:
+`BACKLOG +136/139 · FIX 54 · IMPR 36` (`+N` the items not shown, `/N` every line of the document, a `+` after it where the file is longer than is read; then the count of each of FIX and IMPR, the sorts' words as the
+product has them; `?` for FIX and IMPR where no item of the document is sorted yet, an old document: `+6/9 · FIX ? · IMPR ?`; nothing off the screen: the sorts alone, `FIX 0 · IMPR 0`, no bare `/N`). Short of cells it
+gives way in this order: the sorts' counts first (the ` · ` between the parts: `+136/139 FIX 54 IMPR 36`, then `+136/139`), then all of it. The BACKLOG head of a backend that sends no sorts is `BACKLOG +N`. The `+`
+after the number is the BACKLOG head's alone: `+2997+` where the file is longer than is read (the first 1 MiB is read and what was read is counted), and `+` alone where nothing is hidden by the rows and there is
+more. No item: the head alone; no document, or one that cannot be read: the word plain dim, no item, a press still opens the popup; no artifact root: neither part.
+**One rule (11-22, the person's STATUS and BACKLOG lists are the first to give way): the two parts never take a row from anything else.** The panel is laid out as it is without them (the same layout, the same
+`give` order), and the parts take only what that layout leaves empty and, short of those, rows MESSAGES and MEM fold: the empty rows between the groups (11-25, first), then the BACKLOG items (3, 2, 1, none: `+N` grows by
+as many; they stand on empty rows), then MESSAGES and MEM folding as they fold short of rows (the messages in their one-row form, MEM to two records, MESSAGES to two messages, then one each: both keep their
+head and one row), then the STATUS items (they may stand on what was folded), then the two heads together. **At no height is a BACKLOG item left short while an empty row is left after the parts gave way:** a fold that
+frees several rows at once leaves empty ones, and the BACKLOG items stand on those again (up to three, as many as the empty rows; the STATUS items stand before them, never a BACKLOG item with a STATUS item short).
+So as the height falls the BACKLOG items may be more again at a height. Nothing else gives way for the parts: NOW, QUESTIONS and the route box, GIT, PEERS, the SESSION head, MODEL, CTX, TITLE, RESOURCES, the
+notices and the last row have the rows and the form they have without the parts. (Where RESOURCES is tall, as at 52 rows with five hosts, it is the BACKLOG items and the empty rows that stand back, not a GPU row:
+the parts are laid out last.) Where the two heads do not stand the `[REPO]` head row ends in the two buttons, `STATUS +N ›  BACKLOG +N ›` (11-25: each button's `N` is that document's whole count, `?` for a BACKLOG
+with none sorted, nothing for zero; the bottom layout's first row's pieces, the same order of giving way: the counts go the way the bottom row's go, but the repository's own `· wt N` goes first: `· wt N`, then the
+name is cut (to eight cells), then the buttons' counts, then their words; at the `›  ›` stage `· wt N` stands again where it fits; a press on a button opens that popup, on the rest of the row the status popup), and
+everything but that row is what the panel without the parts draws; where the heads stand the row has no button. (The layout is made once, then the parts are fitted in that order; there is no second budget and
+nothing is drawn twice.) The bottom layout has no list and no more rows: its first row ends in `STATUS +N ›  BACKLOG +N ›` (`N` the whole count, for BACKLOG its FIX and IMPR together, nothing for zero; short
+of cells the counts go, then the words, then the row is cut; the rest of the row opens the status popup). The two parts' items come with the status button's value, in the same read and the same worker, only where a
+document changed (the host sends the documents' path, modification time, size, inode and change time back as `have` and, for the backlog, the folder its order was made for (this window's campaign group stands first,
+so another folder is another order); an unchanged one is neither read nor parsed again); the panel's drawing reads no file.
+
+**SESSION** is this session's, in this order: MODEL, CTX, TITLE, **PEERS** (11-23, the person: "그리고 PEERS도 세션의 아래로 가는게 맞지 않나?"; it stood under GIT before), NOW (two rows at most, `…` where it goes on; the NOW
+popup has the whole), QUESTIONS, the route box, MESSAGES. Short of rows the head row does not go: it takes MODEL's value and MODEL's row (`[SESSION] Opus 5.5 xhigh ────`, the value after one cell, the rule
+after it where three cells are left), so the group keeps its name at every height and the row count is what it was when the head went; where MODEL's value does not stand whole on that row, the head does
+not take it: the head row goes and the MODEL row stands in its own width. PEERS, with GIT, is among the first rows to go (the `keepGit` step). The jobs, the warning and a tidy notice stay in SESSION, this
+repository's open-work row (`◌ 2 open …`) ends REPO. The boxes: the count stands after the name (11-25: `╭─ QUESTIONS 1 ─── ›─╮`, `╭─ ROUTE 1 ─── ›─╮`, the name of the question box bold), and a head of QUESTIONS with no box reads `QUESTIONS 1`.
+MESSAGES and MEM (and a message's body) stand two cells in under their heads, a message's second row four.
+
+**RESOURCES** and **USAGE** are the machines' and the accounts' (below), each with its own head of the same form; short of rows the empty row before each goes first.
+
+**The line forms (11-25; the weights and the indent come from 11-22, the person chose the one-cell indent over the two-cell draft; "불릿은 다 별로네", 11-23: no bullet character before a title):**
 
 | Layer | Form | Where |
 |---|---|---|
-| Group head | bold name + value + rule, no indent (the weight is these two names' alone; the other section names keep the title role's color without it, in mono and `NO_COLOR` too) | REPO, SESSION |
-| Dependent row | one cell in | GIT, PEERS, STATUS, BACKLOG (under REPO); MODEL, CTX, TITLE, NOW (under SESSION) |
-| Dependent's item | one cell more (two in all) | the STATUS and BACKLOG items |
-| Activity | rounded box, `›` at the right end of its top line (`╭─ 3 QUESTIONS ───── ›─╮`) | QUESTIONS, ROUTE |
-| Lower section | the name alone (no rule) and `›` at the right end; an item one cell in, its second row two | MESSAGES, MEM (RESOURCES and USAGE: the name alone, no `›`, their rows as they were) |
+| Group head | frame row `├╴[NAME] value ──┤`; the name the brightest tone and bold | REPO, SESSION, RESOURCES, USAGE |
+| Value line | one cell in; the name dim (`FACES.*.secondary`), then the value in the same column (a label column of 7 cells; from 26 cells inside) | GIT, MODEL, CTX, TITLE, PEERS, NOW |
+| List head | one cell in; the name bold at the body's brightness (`FACES.*.body`), `›` at the right end | STATUS, BACKLOG, MESSAGES, MEM |
+| List item | one cell more (two in all); a STATUS and a BACKLOG item behind a dim `·` (BACKLOG's then its sort's word); a message or a record two cells in (a message's second row four) | the items of the four lists |
+| Activity | rounded box, `›` at the right end of its top line (`╭─ QUESTIONS 3 ───── ›─╮`, the count after the name) | QUESTIONS, ROUTE |
 | Opens on a press | the one `›` at the right end of the row | STATUS, BACKLOG, NOW, QUESTIONS, ROUTE, MESSAGES, MEM |
 
-Only the rule of the REPO and SESSION heads is a line; the light of `rule motion` runs over the SESSION head's rule alone (`border`, `scanners` and `off` are as they were). What is shown, the order of the
-sections, what a press opens and the order in which rows give way are not changed by the indent: a value cut with `…` is cut by the rule it was cut by, in the cells the indent leaves. RESOURCES and USAGE keep their own heads, place and shape
-at the panel's bottom (they read under SESSION; they belong to neither group). The bottom layout has no group heads: its first row carries the repository and the session together (and the two buttons),
-then GIT, PEERS, then the title and NOW row and the route box. The REPO row is the group's head in every width; there is no head row of its own over it.
+The three tones are the colour table's own (no colour is added): the group name `bright`, a list name and the body `body`, a value's name `secondary` (dim); in mono and with `NO_COLOR` the weight tells them apart (bold: group
+names and list names; dim: value names; plain: the body), as it does where the face is unknown. What is shown, what a press opens and the order in which rows give way are not changed by the indent: a value cut with
+`…` is cut by the rule it was cut by, in the cells the indent leaves. The bottom layout has no group heads: its first row carries the repository and the session together (and the two buttons), then GIT, PEERS, then
+the title and NOW row and the route box; it is unchanged. The `[REPO]` head is the group's head in every width; there is no head row of its own over it.
 
 Under the head the panel is a few rows per section (11-15, popup design E), each
 a press away from its popup, where the section's own table reads whole: in order
-QUESTIONS, the route box, MESSAGES and MEM (beside the native area all of
-them; under it QUESTIONS, the route box and MESSAGES). The panel draws no LAB and no SESSIONS
+QUESTIONS, the route box, MESSAGES and MEM (beside the native area MEM stands in REPO, 11-25, before the SESSION group's; under the native area QUESTIONS, the route box and MESSAGES, then MEM). The panel draws no LAB and no SESSIONS
 section (11-15, the person: the experiment board and the machine's sessions read in Fleet's own
 LAB and session tables, which stay; the panel no longer reads the board or the session table, nor
 watches their files). Every other section's head has one form:
-its count where it has one, its name tag in dark gray upper case, its counts by
+its count where it has one, its name tag in upper case (11-25: beside the native area bold at the body's brightness), its counts by
 state, and `›` at the right end (11-22: beside the native area no rule between them, `MESSAGES +3                ›`, `MEM                ›`
-(11-20: MEM has a popup since), the items one cell in and a message's second row two; under the native area
+(11-20: MEM has a popup since), the items two cells in and a message's second row four (11-25); under the native area
 `messages` keeps its word, its rule and its items as they were). The routes stand in the one thin rounded box, as
 v4.36.4 drew it (restored 11-15: the person had asked for the routes to open a
-popup, not for the box to go), its title in its top line, with the `›` at the right end of that line as QUESTIONS' (11-22, `╭─ 2 ROUTE ───── ›─╮`;
+popup, not for the box to go), its title in its top line, with the `›` at the right end of that line as QUESTIONS' (11-22, `╭─ ROUTE 2 ───── ›─╮` since 11-25, the count after the name;
 under the native area `route 2`; 11-17: the title counts the routes alone, `ROUTE` where only requests
 stand, and the `PEER REQUEST` word is gone from it, the requests being a zone of the box, below). Nothing opens in place: a press on a
 head or on any row of its section opens its popup (11-19, the person: "라우트를 눌렀을때 fleet에서 처럼 스테이지별 단계가
@@ -654,7 +675,7 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   메시지 처럼 팝업이 가능하게"): one row a record, as a message's one-row form (spec rule 46 (b) drew two rows from 11-16): its mark (`◆` durable,
   `◇` working, `·` for a record naming no tier), its age and its kind dim, then the stored headline (else the start of its snippet) in the body
   color, `…` where it goes on (`◆ 10m decision headline`; short of cells the kind goes first, where the headline would be left under 14 cells; the
-  mark and the age stay). The head is `MEM                ›` (no rule since 11-22): a press on it, or on a record (`popup:MEM:<n>`), opens the MEM popup. Short of rows MEM shows two
+  mark and the age stay). The head is `MEM                ›` (no rule since 11-22; 11-25: the last part of the REPO group, the heads and records two cells in beside the native area): a press on it, or on a record (`popup:MEM:<n>`), opens the MEM popup. Short of rows MEM shows two
   records, then one, after the messages took the one-row form; no section without a journal row.
   The MEM popup is the MESSAGES popup's frame, keys and press rules (the table popup: `←→` section, PgUp/PgDn, Esc), its rows drawn from the records the
   panel already holds (`memory_items`, `panelView.memoryBody`; no reading, no new kind of popup): each record its dim head (`◆ project · decision · 10m`:
@@ -664,8 +685,8 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   other project's text. The popup's name stands on the bottom line after MESSAGES.
 
 - USAGE (spec rule 59, 11-16, the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을
-  USAGE로 해서 넣자"): the section at the panel's bottom, its name row `USAGE` (as MESSAGES' and MEM's, no rule since 11-22, no `›`: it
-  opens nothing; the thin rule that parted MEM from the last row became it), then one row per harness in Fleet's header
+  USAGE로 해서 넣자"): the section at the panel's bottom, its head `USAGE` (11-25, beside the native area: the group head `├╴[USAGE] ───┤`, after one empty row; it opens
+  nothing; the thin rule that parted MEM from the last row became it, 11-16), then one row per harness in Fleet's header
   order (Claude, Codex, OpenCode): the harness's name in its Fleet hue one step down (11-16, "하네스 이름도 어둡게 원래 테마 컬러를": claude 130, codex 104, opencode
   110 on a dark or unknown face, 166, 68, 31 on a light one, `FACES.*.harnessName`; none in mono, eight colors or `NO_COLOR`), then the windows that harness reports as the last row showed
   them (`5h 12%(↻ 2h) │ 7d 66%`, Fleet's level colors; a window not reported is left out; a harness with none reported reads a
@@ -676,23 +697,20 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   else it keeps the row above and the buttons stand alone. Every harness window shows the same three rows. A row
   gives way short of cells in the last row's order (the reset times, 5h, the model windows from the last, 7d), each value
   whole. Under the native area it stands as beside it, as rows are left. The folded strip is unchanged.
-- RESOURCES (11-18, the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): beside the
-  native area, the section right above USAGE, its name row `RESOURCES` (no rule since 11-22, no `›`: it opens nothing), then for each host (this
-  machine first, then the configured hosts, eight at most) one row, its name and `CPU 34%  MEM 61%`, and under it every GPU of the host in its number's order side by side (`  GPU0 92% 21/24G [3b]  GPU1 0% 0/24G  GPU3 58%
-  14/24G [c7]`: no gauge of the use since 11-18 ("게이지는 없애자 ... 가로로 나열"); the use is its number, in Fleet's level color (green, yellow from 50, red
-  from 80); the memory; and the Fleet numbers of the sessions that hold it, empty where the producer does not know them; a GPU nothing runs on
-  is the same group with the sample's own values and no session number, the whole of it `dim`, the use too and not in a level's color, since 11-19:
-  "빈 GPU도 일관성있게 표시해줘. 그냥 0% 0/48GB 이런식으로 해놔. 컬러만 좀 어둡게 하면 되잖아. 0%에"; the host row has no count of them any more), two cells in and two cells
-  apart, one grid for the whole section since 11-19 ("그리고 GPU 표시를 행과 열 간격을 맞춰."): every group of every host the same width (the label left-aligned to the longest label, the use and the memory right-aligned to the widest, the session numbers left-aligned after them and blank where a GPU has none, the last group of a row not padded behind), the same number of groups on every row, one form for all groups (memory, then use go together), and the host rows aligned the same way (the name column as wide as the longest name, each stat's value right-aligned; MEM then CPU are given up for the section before a name is cut), onto the next row where they do not fit and never splitting one GPU's group; a host that could not be reached keeps its name alone, a host with no
-  GPU is its one row. A memory gauge stands right before the memory number since 11-19 (the person, on v4.59.6's panel: "가로로 길어지면 RESOURCE에
-  게이지도 넣어주면 좋고"; `GPU0  93% ━━━━━━━━─ 21/24G [3b]`) and only where it costs no row: the rows come first, the gauge is what the width leaves. It is
-  Fleet's VRAM gauge (the memory ratio's fill by `render_gpu._gauge_segs`, the level color by `_resource_level_key`; a GPU nothing runs on has all
-  of it `dim`, an unknown memory is Fleet's empty track), drawn by the producing side at each width 4 to 10 (`gauge4` … `gauge10`, as a route's
-  context gauge is) and picked, never refilled, by the panel; the same width for every group of the section, the widest 4 to 10 the room allows.
-  It stands only where the rows are as many as without it and it has 4 cells at least; the groups to a row may be fewer than they would be (a
-  width for three where every host has two GPUs gives each row two and the rest to the gauge; the count that gives the widest gauge with as
-  many rows wins). Not in the forms without the memory, not on the host rows; where it cannot stand the section is as it was without it. Short of cells a GPU's group gives up its memory, then its use, and keeps the session number (every group takes the
-  form that lets the widest stand alone); a host row gives up `MEM`, then `CPU`; if that is still short the name is cut with `…` (to 12 cells at least). The values are Fleet's own
+- RESOURCES (11-18, the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"; 11-25: the third group): beside the
+  native area, the group right above USAGE, its head `├╴[RESOURCES] ───┤` (after one empty row; it opens nothing), then for each host (this
+  machine first, then the configured hosts, eight at most) **its name alone** (11-23, the person: "RESOURCES는 CPU, MEM이 그렇게 중요해? GPU가 더 중요한데."; no CPU, no MEM) and, under it, **one row with
+  two of its GPUs side by side** (11-23: "GPU는 지금 상태에서 게이지를 절반정도로 짧게해서 한줄에 2개가 들어가게만 해주라"), in columns:
+  `│  0  92%━━━━─41/48G[c6]  1  48%━━───15/48G[d2]  │`: the GPU's number alone (no word `GPU`), its use (the number, in Fleet's level color: green, yellow from 50, red from 80), a short
+  memory gauge (5 cells at 50 wide), the memory, and the Fleet numbers of the sessions that hold it (each in its harness's color, this window's own bold, as PEERS draws them; a GPU used by a
+  process whose holder the producer does not know reads `other`, dim). A GPU nothing runs on is the same group with the sample's own values and no holder, the whole of it `dim`, the use too and not in a
+  level's color (11-19: "빈 GPU도 일관성있게 표시해줘. 그냥 0% 0/48GB 이런식으로 해놔. 컬러만 좀 어둡게 하면 되잖아. 0%에": `0%` and `0/24G`). A host with no GPU reads `name  No GPU`. **One grid for the
+  whole section (11-19, "그리고 GPU 표시를 행과 열 간격을 맞춰."): every host's row has the same columns (each as wide as the widest value of any GPU: the number, the use and the memory right-aligned, the gauge and the
+  holders left-aligned) and every gauge the same length; the number of GPUs on a row is two.** The form is the first of these that puts two GPUs in a row of the inner width: the 5-cell gauge with a cell between
+  the columns and two between the GPUs (wide panels, 59), the 5-cell gauge without those cells (50), the 4-cell gauge, no gauge (44), and then one GPU to a row (30, with the gauge back where it fits). A
+  GPU held by several sessions makes its cell wider than the column: where that host's pair overflows the row, **that host alone** stands one GPU to a row, in the same columns; the others keep the grid. The
+  gauge is Fleet's VRAM gauge (the memory ratio's fill by `render_gpu._gauge_segs`, the level color by `_resource_level_key`; a GPU nothing runs on has all of it `dim`, an unknown memory is Fleet's empty
+  track), drawn by the producing side at each width 4 to 10 (`gauge4` … `gauge10`) and picked, never refilled, by the panel. A host stands with all its rows or not at all. The values are Fleet's own
   compute-host sample (`compute_hosts.collect`, the sample its RESOURCES view draws): a probe costs the servers an SSH read each, so the
   resident producer takes it only while a side panel that draws the section is open (the host's projection request carries `side`;
   `panel_projection` then touches `.resources-wanted`, at most every 20 seconds, and the producer reads no host once it is 90 seconds old),
@@ -702,8 +720,9 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   eight hosts, sixteen GPUs each); the panel reads that cache only, never a host, so what it shows is at most about two minutes old (the
   sample's period, the pass that follows it, the probe's own time) and is not drawn once it is older than two and a half minutes. A window with
   no producer, no configured host and no local sample has no section. The existing `MEM` section is the saved memory records, not
-  the machine's memory, so nothing is merged with it. Short of rows it gives way before any other part of the panel (its GPU rows,
-  then its host rows, the name row with the last of them), so the sections above and USAGE stand as they do without it.
+  the machine's memory, so nothing is merged with it. Short of rows it gives way, after the empty rows between the groups, before any other part of the panel (its GPU rows from the last host, a host with
+  its rows whole, the last host's name row with them), so the sections above and USAGE stand as they do without it. At 50 wide and 52 high with five hosts it takes 11 rows (its head, five names, five GPU rows) where the
+  one-row-a-host form of the draft would take six, and the three empty rows and two BACKLOG items stand back for them.
 - The window's last line (spec rule 60, 11-16, the person: "맨 아래줄이 비면이 아니고 항상 비우라고 그냥" / "디렉토리 경로가 뜨던데,
   그걸 모든 셸에서 통일해도 좋겠네. 대신 hearting version은 우측으로 붙이고"): in every harness the row at the bottom of the
   native screen where the harness drew its own line (Claude's statusline rows, Codex's footer row with its thread id and
@@ -723,7 +742,7 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
 
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run short they give way in this order:
-RESOURCES (11-18: its GPU rows, then its host rows and name; the idle count goes with its host row); empty rows and a value's further rows
+the empty rows between the groups (11-25, the person: they go first); RESOURCES (11-18: its GPU rows, then its host rows and name); a value's further rows
 (title, NOW, a route's title); then (11-20, the person: "MESSAGE, MEM은 좀 더 세로길이 따라서 과감하게 표시 줄을 줄여버려 1~2줄 수준으로" and "NOW·QUESTIONS·ROUTE가
 MESSAGES·MEM보다 먼저 자리를 받게") MESSAGES and MEM go down before any other section gives a row, in this order: MEM's
 every message takes the one-row form (`← [e7] text`); MEM shows two records;
@@ -737,14 +756,14 @@ edge), each NOW's first row goes, the workers take one row each, the workers go 
 `· worker N`), the kind rows go, every route takes one row; then the box shows fewer
 routes and scrolls in place (the wheel over it), down to one, its border counting
 what it hides (`↑2`, `↓3`; it takes the rows of its tallest window, so the wheel moves
-nothing else); then Git; then MEM gives its row, then its head, then (11-16) the USAGE section's rows of the
+nothing else); then Git and PEERS; then MEM gives its row, then its head, then (11-16) the USAGE section's rows of the
 harnesses that are not this window's (the last first) and its name row, then MESSAGES gives its row and its
 head; then the route box (11-20: after MESSAGES and MEM; v4.36.4 had it before the
 running jobs and them before MESSAGES); the running jobs; the question's head and first row stay to the last (its box's two border lines go after its content
 rows, before the structural rows below them); this window's own usage row last of all. Rows a later step frees beyond its need go back to the steps
 before it, the most important first. A section is placed whole or not at all; the
-rows left over stand above MESSAGES and MEM (which keep to the bottom, with their
-press targets), or under the last section when there are none. A row that gave way and goes back goes back to the next step in this order (MESSAGES, MEM, a list item, a NOW's further row): the line that no longer stands between CTX and TITLE is not one of the steps, so the row it freed goes to whichever of those comes next.
+rows left over stand above MESSAGES (which keeps to the bottom of its group, with its
+press targets; under the native area MESSAGES and MEM), or under the last section when there are none. A row that gave way and goes back goes back to the next step in this order (MESSAGES, MEM, a list item, a NOW's further row): the line that no longer stands between CTX and TITLE is not one of the steps, so the row it freed goes to whichever of those comes next.
 Groups are divided by `│`, stages joined by `›`. Fixed words are English
 (`context`, `route`, `messages`, stage names, `5h`/`7d`, the section names
 `QUESTIONS`, `ROUTE`, `MESSAGES`, `MEM` with their counts

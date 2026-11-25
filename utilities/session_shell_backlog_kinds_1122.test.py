@@ -6,7 +6,10 @@ the sort of a backlog line (`FIX`, `IMPR`, `NOTE`, `TBD`) in the document's prom
 2. `session_status.parse_backlog` and `artifact_entrance._backlog` read it by one rule: on the same documents (a table of cases, and many random ones) they give the same count of each sort.
 3. The panel's BACKLOG head tells the sorts and its rows stand behind a four-cell word; every row of every picture has the panel's width.
 4. The popup is by sort (FIX first and open, the others folded lines with their counts), this window's campaign first inside a sort; an item's key names the same item wherever it stands.
-5. (The entrance's backlog line, `FIX n · IMPR n · NOTE n · TBD n · N total · updated …`, is tested with the entrance's own suite, `utilities/artifact_entrance.test.py`.)
+5. 11-25 (four groups): the BACKLOG head reads `BACKLOG +136/139 · FIX 54 · IMPR 36` (`+N` the items NOT on screen out of the total, the sorts after it; narrow `+136/139 FIX 54 IMPR 36`, then
+   `+136/139` alone, then the word alone); a row stands behind a dim `· ` (`  · FIX  title`); the REPO head's buttons at low heights read `BACKLOG +139 ›` (the total; the bottom layout's
+   button is still FIX and IMPR together).
+6. (The entrance's backlog line, `FIX n · IMPR n · NOTE n · TBD n · N total · updated …`, is tested with the entrance's own suite, `utilities/artifact_entrance.test.py`.)
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -188,56 +191,57 @@ class PanelPictureTest(unittest.TestCase):
 const docs=JSON.parse(process.argv[2]);
 const host=d=>({...d,items:d.items.map(i=>({mark:'',text:i.text,key:i.key,kind:i.kind}))});
 const at=(o)=>{const v=draw({...o,status:status(),routes:1,messages:2,mem:1});return {v,ls:lines(v),a:inside(v)};};
-const head=a=>a.find(l=>/^ BACKLOG/.test(l)),rows=a=>a.filter(l=>/^  (FIX |IMPR|NOTE|TBD ) /.test(l));
+const head=a=>a.find(l=>/^ BACKLOG/.test(l)),rows=a=>a.filter(l=>/^  · (FIX |IMPR|NOTE|TBD ) /.test(l));
 // every row of every picture has the panel's width (cells counted, Hangul two)
 let pictures=0;
 for(const name of Object.keys(docs))for(const width of [59,44,30])for(const height of [40,24,14]){
   const {ls}=at({width,height,backlog:host(docs[name])});pictures++;
   assert(ls.every(l=>cells(l)===width),name+' '+width+'x'+height+'\n'+ls.map(l=>cells(l)+' '+l).join('\n'));}
 assert.equal(pictures,54);
-// the mixed document at 59 and 44 wide, tall: the head tells the sorts, the three rows stand behind four cells (FIX, FIX, IMPR: the order is the sorts')
+// the mixed document at 59 and 44 wide, tall: the head tells the items not shown of the total, then the sorts; the three rows stand behind a dim `· ` and four cells (FIX, FIX, FIX: the order is the sorts')
 {const {a,ls}=at({width:44,height:40,backlog:host(docs.mixed)});
- assert(/^ BACKLOG FIX 3 · IMPR 2 · \+2 \/9 +›$/.test(head(a)),ls.join('\n'));
+ assert(/^ BACKLOG \+6\/9 · FIX 3 · IMPR 2 +›$/.test(head(a)),ls.join('\n'));
  const r=rows(a);assert.equal(r.length,3,a.join('\n'));
- assert.deepEqual(r.map(l=>l.slice(2,6)),['FIX ','FIX ','FIX '],r.join('\n'));}
+ assert.deepEqual(r.map(l=>l.slice(4,8)),['FIX ','FIX ','FIX '],r.join('\n'));}
 {const {a}=at({width:59,height:40,backlog:{...host(docs.mixed),items:host(docs.mixed).items.slice(0,3)}});
- assert(/^ BACKLOG FIX 3 · IMPR 2 · \+2 \/9 +›$/.test(head(a)),a.join('\n'));
- assert(rows(a).every(l=>/^  (FIX |IMPR) 시험용/.test(l)),a.join('\n'));}
+ assert(/^ BACKLOG \+6\/9 · FIX 3 · IMPR 2 +›$/.test(head(a)),a.join('\n'));
+ assert(rows(a).every(l=>/^  · (FIX |IMPR) 시험용/.test(l)),a.join('\n'));}
 // FIX and IMPR are told by the word and the colour (the table's own: yellow, green; NOTE and TBD dim)
 {const {v}=at({width:59,height:40,backlog:host({...docs.mixed,items:[{kind:'fix',text:'KIND_A',key:'i:fix:a'},{kind:'improve',text:'KIND_B',key:'i:imp:b'},{kind:'note',text:'KIND_C',key:'i:note:c'}]})});
  const row=txt=>v.rows.find(r=>r.map(p=>p.text).join('').includes(txt));
  const word=(txt,w)=>row(txt).find(p=>p.text===w);
  assert.equal(word('KIND_A','FIX ').foreground,186);assert.equal(word('KIND_B','IMPR').foreground,150);assert.equal(word('KIND_C','NOTE').dim,true);}
-// no more width than 30: the ` · ` and the `/N` have given way, the words stay (and `+N`); one stage narrower the `+N` goes before the words do
-{const {a}=at({width:30,height:40,backlog:host(docs.mixed)});assert(/^ BACKLOG FIX 3 IMPR 2 \+2 +›$/.test(head(a)),head(a));}
-{const {a}=at({width:28,height:40,backlog:host(docs.mixed)});assert(/^ BACKLOG FIX 3 IMPR 2 +›$/.test(head(a)),head(a));}
-{const {a}=at({width:20,height:40,backlog:host(docs.mixed)});assert(/^ BACKLOG 3 2 +›$/.test(head(a)),head(a));}
-// one cell wider never tells less: the stages (nothing, the numbers, the words, `+N`, the ` · `, `/N`) only ever come in that order as the width grows, and `+N` never stands alone
+// narrower (11-25): the ` · ` has given way, the words stay with `+N/total`; narrower the sorts' words and numbers go and `+N/total` stands alone, then the word alone
+{const {a}=at({width:32,height:40,backlog:host(docs.mixed)});assert(/^ BACKLOG \+6\/9 FIX 3 IMPR 2 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:30,height:40,backlog:host(docs.mixed)});assert(/^ BACKLOG \+6\/9 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:20,height:40,backlog:host(docs.mixed)});assert(/^ BACKLOG \+6\/9 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:18,height:40,backlog:host(docs.mixed)});assert(/^ BACKLOG +›$/.test(head(a)),head(a));}
+// one cell wider never tells less: the stages (nothing, `+N/total` alone, the sorts' words with it, the ` · `) only ever come in that order as the width grows, and the sorts never stand without the count where something is off the screen
 {const rank=h=>{const t=h.replace(/^ BACKLOG/,'').replace(/ *›$/,'').trim();
-   if(!t)return 0;if(!/[A-Z]/.test(t))return 1;if(t.includes('/'))return 5;if(t.includes('·'))return 4;if(/\+\d+\+?$/.test(t))return 3;return 2;};
+   if(!t)return 0;if(!/[A-Z]/.test(t))return 1;if(t.includes('·'))return 3;return 2;};
  let tried=0;
  for(const name of Object.keys(docs)){let last=-1,seen=new Set();
   for(let width=14;width<=80;width++){const {a}=at({width,height:40,backlog:host(docs[name])});const h=head(a);tried++;
-   assert(!/^ BACKLOG \+\d+\+? +›$/.test(h),name+' '+width+': '+h);
+   assert(!/[A-Z]{3}/.test(h.replace(/^ BACKLOG/,''))||/\/\d/.test(h)||['notes','tbd_notes','empty'].includes(name),name+' '+width+': '+h);   // (a document with nothing off the screen has no count to stand with)
    const r=rank(h);assert(r>=last,name+' '+width+': '+h+' tells less than '+last);last=r;seen.add(r);}
-  if(name==='big'||name==='mixed')for(const r of [1,2,3,4,5])assert(seen.has(r),name+' never stands at stage '+r);}
+  if(name==='big'||name==='mixed')for(const r of [1,2,3])assert(seen.has(r),name+' never stands at stage '+r);}
  assert.equal(tried,6*67);}
 // an old document (no sort written): FIX and IMPR are `?`, every row is TBD
 {const {a}=at({width:44,height:40,backlog:host(docs.legacy)});
- assert(/^ BACKLOG FIX \? · IMPR \? \/9 +›$/.test(head(a)),a.join('\n'));assert(rows(a).every(l=>l.startsWith('  TBD  ')),a.join('\n'));assert.equal(rows(a).length,3);}
-// only notes: the zeros are told; no `+N`
-{const {a}=at({width:44,height:40,backlog:host(docs.notes)});assert(/^ BACKLOG FIX 0 · IMPR 0 \/2 +›$/.test(head(a)),a.join('\n'));assert.equal(rows(a).length,2);assert(rows(a).every(l=>l.startsWith('  NOTE ')));}
+ assert(/^ BACKLOG \+6\/9 · FIX \? · IMPR \? +›$/.test(head(a)),a.join('\n'));assert(rows(a).every(l=>l.startsWith('  · TBD  ')),a.join('\n'));assert.equal(rows(a).length,3);}
+// only notes: the zeros are told; no `+N` and no bare `/2` (every item is on screen: the sorts alone)
+{const {a}=at({width:44,height:40,backlog:host(docs.notes)});assert(/^ BACKLOG FIX 0 · IMPR 0 +›$/.test(head(a)),a.join('\n'));assert.equal(rows(a).length,2);assert(rows(a).every(l=>l.startsWith('  · NOTE ')));}
 // notes and unsorted but no FIX or IMPR: zeros
-{const {a}=at({width:44,height:40,backlog:host(docs.tbd_notes)});assert(/^ BACKLOG FIX 0 · IMPR 0 \/2 +›$/.test(head(a)),a.join('\n'));assert.deepEqual(rows(a).map(l=>l.slice(2,6)),['TBD ','NOTE']);}
+{const {a}=at({width:44,height:40,backlog:host(docs.tbd_notes)});assert(/^ BACKLOG FIX 0 · IMPR 0 +›$/.test(head(a)),a.join('\n'));assert.deepEqual(rows(a).map(l=>l.slice(4,8)),['TBD ','NOTE']);}
 // an empty document and no document
-{const {a}=at({width:44,height:40,backlog:host(docs.empty)});assert(/^ BACKLOG FIX 0 · IMPR 0 \/0 +›$/.test(head(a)),a.join('\n'));assert.equal(rows(a).length,0);}
+{const {a}=at({width:44,height:40,backlog:host(docs.empty)});assert(/^ BACKLOG FIX 0 · IMPR 0 +›$/.test(head(a)),a.join('\n'));assert.equal(rows(a).length,0);}
 {const {a,v}=at({width:44,height:40,backlog:{word:'BACKLOG',has_doc:false,items:[],total:0}});assert(/^ BACKLOG +›$/.test(head(a)),a.join('\n'));
- const at2=a.findIndex(l=>/^ BACKLOG/.test(l));assert(v.rows[at2+1].map(p=>p.text).join('').includes('SESSION'));}
+ const at2=a.findIndex(l=>/^ BACKLOG/.test(l));assert(!/^  · /.test(a[at2+1])&&/^ MEM/.test(a[at2+1]),a.join('\n'));}   // (no item under it: MEM's head follows)
 // three-digit counts (and more) stand whole where there is room and give way where there is not
-{const {a}=at({width:59,height:40,backlog:host(docs.big)});assert(/^ BACKLOG FIX 866 · IMPR 433 · \+1296 \/1299 +›$/.test(head(a))||/^ BACKLOG FIX 866 · IMPR 433 · \+1296 +›$/.test(head(a)),head(a));}
-{const {a}=at({width:30,height:40,backlog:host(docs.big)});assert(/^ BACKLOG 866 433 +›$/.test(head(a)),head(a));}
-{const {a}=at({width:36,height:40,backlog:host(docs.big)});assert(/^ BACKLOG FIX 866 IMPR 433 +›$/.test(head(a)),head(a));}
-{const {a}=at({width:37,height:40,backlog:host(docs.big)});assert(/^ BACKLOG FIX 866 IMPR 433 \+1296 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:59,height:40,backlog:host(docs.big)});assert(/^ BACKLOG \+1296\/1299 · FIX 866 · IMPR 433 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:44,height:40,backlog:host(docs.big)});assert(/^ BACKLOG \+1296\/1299 FIX 866 IMPR 433 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:40,height:40,backlog:host(docs.big)});assert(/^ BACKLOG \+1296\/1299 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:30,height:40,backlog:host(docs.big)});assert(/^ BACKLOG \+1296\/1299 +›$/.test(head(a)),head(a));}
 // a backend that sends no counts is drawn as it was
 {const {a}=at({width:44,height:40,backlog:backlog()});assert(a.some(l=>/^ BACKLOG \+11 +›$/.test(l)),a.join('\n'));assert(a.some(l=>/^  · 시험용 나중 일 하나/.test(l)));}
 """, self.docs())
@@ -247,13 +251,15 @@ assert.equal(pictures,54);
 const docs=JSON.parse(process.argv[2]);
 const host=d=>({...d,items:d.items.map(i=>({mark:'',text:i.text,key:i.key,kind:i.kind}))});
 const at=(o)=>{const v=draw({...o,status:status(),routes:1,messages:2,mem:1});return {v,ls:lines(v),a:inside(v)};};
-// bottom layout: the first row ends in the two buttons, BACKLOG's number the FIX and IMPR together
+// bottom layout (unchanged): the first row ends in the two buttons, BACKLOG's number the FIX and IMPR together
 {const v=draw({side:false,width:120,height:14,status:status(),backlog:host(docs.mixed),routes:1}),a=lines(v);
  assert(/STATUS \+\d+ ›  BACKLOG \+5 ›│$/.test(a[1])||/BACKLOG \+5 ›/.test(a[1]),a[1]);assert(a.every(l=>cells(l)===120));}
 {const v=draw({side:false,width:120,height:14,status:status(),backlog:host(docs.legacy),routes:1}),a=lines(v);assert(/BACKLOG \? ›/.test(a[1]),a[1]);}
 {const v=draw({side:false,width:120,height:14,status:status(),backlog:host(docs.notes),routes:1}),a=lines(v);assert(/BACKLOG ›/.test(a[1]),a[1]);}
-// beside the native area, short of rows: the REPO row ends in the buttons and no list stands
-{const {a}=at({width:44,height:14,backlog:host(docs.mixed)});assert(a.some(l=>/BACKLOG( \+5)? ›/.test(l))&&!a.some(l=>/^  (FIX|IMPR)/.test(l)),a.join('\n'));}
+// beside the native area, short of rows (11-25): the REPO head ends in the buttons, BACKLOG's number the total (`+9`, not FIX and IMPR together; the counts give way first where the head is narrow), and no list stands
+{const {a}=at({width:44,height:14,backlog:host(docs.mixed)});assert(a.some(l=>/BACKLOG( \+9)? ›/.test(l))&&!a.some(l=>/^  · (FIX|IMPR)/.test(l)),a.join('\n'));}
+{const {a}=at({width:59,height:14,backlog:host(docs.mixed)});assert(a.some(l=>/^\[REPO\] .*STATUS \+5 ›  BACKLOG \+9 ›$/.test(l)),a.join('\n'));}
+{const {a}=at({width:59,height:14,backlog:host(docs.big)});assert(a.some(l=>/^\[REPO\] .*STATUS \+5 ›  BACKLOG \+1299 ›$/.test(l)),a.join('\n'));}
 """, self.docs())
 
 

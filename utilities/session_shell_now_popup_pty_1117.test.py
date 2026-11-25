@@ -99,7 +99,7 @@ const standing=async()=>{await flush();const s=await screen(),b=box(s);if(!b)ret
     for(let x=0;x<cols;x++){const c=line?.getCell(x);if(c&&c.getChars().trim()&&(c.isBgPalette()&&c.getBgColor()===cfg.chosen||cfg.reversed&&c.isInverse())){hit=true;break;}}
     if(hit)return s[y].replace(/^.*?│ /,'').replace(/ │.*$/,'').trim();}
   return '';};
-const draft=async()=>{const t=(await screen()).find(l=>l.startsWith('❯ '));return t?t.slice(2).split('│')[0].trimEnd():null;};
+const draft=async()=>{const t=(await screen()).find(l=>l.startsWith('❯ '));return t?t.slice(2).split(/[│├]/)[0].trimEnd():null;};
 const NOWWORD=cfg.now;
 const openNow=async()=>{const p=await at(NOWWORD);if(!p)throw Error('no NOW row\n'+(await screen()).join('\n'));await press(p.x+1,p.y,300);
   return until(titled('NOW'),'the NOW popup');};

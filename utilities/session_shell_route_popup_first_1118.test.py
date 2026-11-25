@@ -15,6 +15,8 @@ popup stands at once from what the host already holds, and its own reading repla
    own values draw (`panelView.routePageFirst`), then Fleet's page; Enter goes to the table and back; a press on the
    section's head opens the table. A route with no stage line keeps the panel's box as its first screen.
 
+11-25 (four groups): the side panel's route box reads `ROUTE 3` (the count after the name), so the test finds the section's head by that.
+
 The collection is given a synthetic delay (as a long `collect_all` is); the host runs in a private PTY. Nothing here
 reaches a real account, session, artifact root or terminal.
 """
@@ -162,7 +164,7 @@ const control=(name,value='')=>fs.writeFileSync(cfg.control+'/'+name,String(valu
 const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.renameSync(file+'.new',file);};
 const plain=s=>box(s)?box(s).rows.map(l=>l.trimEnd()):[];
 const frames={},checks={};
-const head=()=>at(cfg.routes+' ROUTE');
+const head=()=>at('ROUTE '+cfg.routes);   // 11-25: the box's title stands `ROUTE N` (the count after the name)
 const opened=async()=>{const p=await head();await press(p.x+2,p.y,0);};
 const close=async()=>{await key('\x1b',300);await until(s=>!box(s),'closed');};
 // What the popup first shows: the panel's box (`PANEL_R…` titles) or Fleet's table (`FLEET_R…`).
@@ -177,7 +179,7 @@ const measure=async(label,press_=opened)=>{
   const full=await until(filled,'the filled table ('+label+')');m.full_ms=Date.now()-t0;m.full_title=title(full.s);frames[label+'_full']=plain(full.s);
   return m;};
 (async()=>{try{
-  await until(s=>has('READY_'+cfg.harness)(s)&&has(cfg.routes+' ROUTE')(s)&&has('PANEL_R1')(s),'the panel with its routes');await sleep(700);
+  await until(s=>has('READY_'+cfg.harness)(s)&&has('ROUTE '+cfg.routes)(s)&&has('PANEL_R1')(s),'the panel with its routes');await sleep(700);
   const sc=cfg.scenario;
   if(sc==='one'||sc==='many'){
     // First opening, the collection slow: the panel's own box stands under a second, Fleet's table after the delay.
@@ -272,7 +274,7 @@ const measure=async(label,press_=opened)=>{
       c.arrow={table_keys:popupHas('↑↓ route')(arrow.s),page_keys:popupHas('Enter 표로 돌아가기')(arrow.s),paged:paged(arrow.s)};
       // (f) The section's head: the table (the panel's box or Fleet's), never the page.
       await close();control('vm-delay',cfg.delay);
-      // (an unfolded panel's box is titled `route N`; the folded strip and the side panel say `N ROUTE`: both are the section's head)
+      // (an unfolded panel's box is titled `route N`; the folded strip says `N ROUTE` and the side panel `ROUTE N`: each is the section's head)
       {const p=(await head())||(await at('route '+cfg.routes));await press(p.x+2,p.y,0);}
       const top=await until(either,'a table from the head at '+w);
       c.head={kind:kind(top.s),paged:paged(top.s),keys:popupHas('Enter 표로 돌아가기')(top.s)};

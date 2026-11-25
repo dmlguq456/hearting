@@ -766,8 +766,8 @@ class SessionShellSuccessionTest(unittest.TestCase):
         # 11-15 (popup design E): a press on the ROUTE section opens the routes popup over the window.
         point = None
         for y, line in enumerate(window.screen()['lines']):
-            if '1 ROUTE ' in line and '─' in line:
-                point = (line.index('1 ROUTE')+2, y+1)
+            if 'ROUTE 1 ' in line and '─' in line:   # 11-25 (four groups): the box's count stands after its name
+                point = (line.index('ROUTE 1')+2, y+1)
         self.assertIsNotNone(point, window.screen()['lines'])
         window.type('\x1b[<0;%d;%dM\x1b[<0;%d;%dm' % (point[0], point[1], point[0], point[1])); window.until('╰─ ')
         # The popup read the synthetic view model: nothing here collects this machine's sessions.

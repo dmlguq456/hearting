@@ -9,6 +9,8 @@ has a PEERS line.
     color (this window's own bold), the flag the steward pink, the dash and the `·` dim; `+N` short of cells; no line where
     the window has no relation.
   * The data: the same steward relations Fleet reads (same repository, registered), handed to the panel by the cache.
+  * 11-25 (four groups): the box's title reads `ROUTE 2` (the count after the name); the `PEERS` line stands in the SESSION group, under TITLE and before NOW,
+    and the labels stand from a panel 30 cells wide (the narrowest without them is 28).
 Everything is synthetic.
 """
 import os, sys  # noqa: E401
@@ -45,7 +47,7 @@ const text=r=>r.map(p=>p.text).join('');
 const plain=v=>v.rows.map(text);
 const draw=(routes,reqs,width,height,o)=>plain(render(routes,reqs,width,height,o));
 // The box's rows, the frame and the box's own sides taken off.
-const box=rows=>{const a=rows.findIndex(s=>/╭─ (\d+ )?ROUTE|╭─ route \d+/.test(s)),z=rows.findIndex((s,i)=>i>a&&/^│ ╰/.test(s));
+const box=rows=>{const a=rows.findIndex(s=>/╭─ ROUTE( \d+)?|╭─ route \d+/.test(s)),z=rows.findIndex((s,i)=>i>a&&/^│ ╰/.test(s));
   return a<0?[]:rows.slice(a+1,z).map(s=>s.replace(/^│ │ ?/,'').replace(/ ?│ │$/,'').replace(/\s+$/,''));};
 const rules=rows=>rows.filter(s=>/^─ (direct|dispatch|request) ─+$/.test(s));
 const zr=(n,w=36)=>'─ '+n+' '+'─'.repeat(w-3-n.length);
@@ -106,7 +108,7 @@ assert.deepEqual(none.slice(none.indexOf(zr('dispatch'))+1,none.indexOf(zr('requ
 ],none.join('\n'));
 // The title counts the routes alone: the requests are a zone, not a tab.
 const top=draw([direct,dispatch],requests,44,60).find(s=>/ROUTE/.test(s));
-assert(/╭─ 2 ROUTE ─+ ›─╮/.test(top)&&!/REQUEST/.test(top),top);
+assert(/╭─ ROUTE 2 ─+ ›─╮/.test(top)&&!/REQUEST/.test(top),top);
 // The same box beside the requests' order: they are listed after the routes whatever the order they came in.
 const mixed=box(draw([dispatch,direct,bare],requests,44,80));
 assert.deepEqual(rules(mixed).map(s=>s.split(' ')[1]),['direct','dispatch','request']);
@@ -240,11 +242,11 @@ const line=(peers,w=60)=>rowsOf(peers,w).map(s=>s.replace(/^│ /,'').replace(/ 
 assert.equal(line(supervising),'PEERS  [c7] ⚑  ─ [d4] [3b]');
 assert.equal(line(supervised),'PEERS  [c7] ⚑  ─ [d4]');
 assert.equal(line(both),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ [a1] [a2]');
-// The row stands right under GIT, with the labels' column; none for a window with no relation (and no empty row).
-const all=rowsOf(supervising).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trim());
+// 11-25 (four groups): the row stands in the SESSION group, right under TITLE and before NOW, with the labels' column; none for a window with no relation (and no empty row).
+const all=draw([],[],60,30,{peers:supervising,model:{session_title:'a title',now:'doing a thing'}}).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trim());
 const at=all.findIndex(s=>/^PEERS/.test(s));
-assert(/^GIT /.test(all[at-1])&&/^REPO /.test(all[at-2]),all.join('\n'));
-assert.equal(all[at].indexOf('[c7]'),all[at-1].indexOf('main'));
+assert(/^TITLE /.test(all[at-1])&&/^NOW /.test(all[at+1])&&/^MODEL /.test(all[at-2]),all.join('\n'));
+assert.equal(all[at].indexOf('[c7]'),all[at-1].indexOf('a title'));
 const none=rowsOf(undefined);
 assert(!none.some(s=>/PEERS/.test(s)));
 assert.equal(none.length,rowsOf({me:'x',groups:[]}).length);
@@ -324,8 +326,8 @@ for(const p of [peers,two,one])for(let w=34;w<=90;w++){
  assert(!/\] \+\d+ · /.test(l),w+' a count before another group: '+l);
  if(/ \+\d+$/.test(l))assert(/─( \[[0-9a-f]{2}\])* \+\d+$/.test(l)&&!/\] · \[[0-9a-f]{2}\] \+\d+$/.test(l),w+' '+l);
 }
-// Narrower than the labelled layout the row has no label, as REPO and GIT have none.
-const bareRow=draw([],[],30,30,{peers}).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trim()).find(s=>/^\[c7\] ⚑/.test(s));
+// Narrower than the labelled layout (11-25: from 30 cells, inner 26) the row has no label, as GIT and the others have none.
+const bareRow=draw([],[],28,30,{peers}).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trim()).find(s=>/^\[c7\] ⚑/.test(s));
 assert(bareRow&&!/PEERS/.test(bareRow),bareRow);
 """)
 

@@ -14,6 +14,7 @@ the right end of its first line.
 The kind word is the one bold word, the intensity stands in dim brackets (nothing else goes in them), and exactly one thing
 blinks per route: the stage name when a stage line stands, else the first line's dot. Failed, finished and narrow forms keep
 the same grammar. The bottom layout and the three harnesses draw the same words.
+11-25 (four groups): the route box's title reads `ROUTE 1` (the count after the name); the route rows themselves are unchanged.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -57,14 +58,14 @@ const text=r=>r.map(p=>p.text).join('');
 const plain=v=>v.rows.map(text);
 const draw=(routes,width,height,o)=>plain(render(routes,width,height,o));
 // The box's rows, the frame and the box's own sides taken off (and the zone rules `─ dispatch ───`: this test reads the routes).
-const box=rows=>{const a=rows.findIndex(s=>/╭─ \d+ ROUTE/.test(s)),z=rows.findIndex((s,i)=>i>a&&s.startsWith('│ ╰'));
+const box=rows=>{const a=rows.findIndex(s=>/╭─ ROUTE \d+/.test(s)),z=rows.findIndex((s,i)=>i>a&&s.startsWith('│ ╰'));
   return rows.slice(a+1,z).map(s=>s.replace(/^│ │ ?/,'').replace(/ ?│ │$/,'').replace(/\s+$/,'')).filter(s=>!/^─ (direct|dispatch|request) ─+$/.test(s));};
 const only=(route,width=44,o={})=>box(draw([route],width,60,o));
 // (11-18: `worker_box: none` draws the workers hung under the owner by `↳` with the stage line as a row of its own, the form these scenes were written in.)
 const NB={configuration:{worker_box:'none'}};
 const rowParts=(v,re)=>v.rows.find(r=>re.test(text(r)));
-// (The box's title `1 ROUTE` pulses while a route runs; it is not a route's line.)
-const beats=(route,o={})=>render([route],44,60,o).rows.flat().filter(p=>p.beat===true&&!/ROUTE$/.test(p.text));
+// (The box's title `ROUTE 1` (11-25: the count after the name) pulses while a route runs; it is not a route's line.)
+const beats=(route,o={})=>render([route],44,60,o).rows.flat().filter(p=>p.beat===true&&!/^ROUTE \d+$/.test(p.text));
 '''
 
 
@@ -219,7 +220,7 @@ const frame=beats(R.frame);assert.equal(frame.length,1);assert.equal(frame[0].te
 // A stage line that goes (short of rows) hands the blink to the dot: the one thing that blinks is always on a row that stands.
 let handed=false;
 for(let h=40;h>=10;h--){
- const v=render([R.staged],44,h),own=v.rows.flat().filter(p=>p.beat===true&&!/ROUTE$/.test(p.text)),shown=plain(v);
+ const v=render([R.staged],44,h),own=v.rows.flat().filter(p=>p.beat===true&&!/^ROUTE \d+$/.test(p.text)),shown=plain(v);
  if(!shown.some(s=>/● frame|● code|⠋ .*frame/.test(s)))break;
  assert(own.length<=1,h+' '+JSON.stringify(own));
  if(shown.some(s=>/3\/6: execute/.test(s)))assert(own.length===1&&own[0].text==='execute',h);
@@ -300,7 +301,7 @@ want('resource+verification','● research(standard) · resource+verification 2/
 want('unknown','● research(standard) · 2/3: analyze',{},64);
 // One blinking thing, the stage's name where it stands (on the first line, or on the stage row under the owner); the first line's dot stands still.
 for(const shape of ['map-reduce','transactional-owner','resource+verification']){
- const own=render([mk(shape)],84,60).rows.flat().filter(p=>p.beat===true&&!/ROUTE$/.test(p.text));assert.equal(own.length,1,shape);assert.equal(own[0].text,'analyze',shape);
+ const own=render([mk(shape)],84,60).rows.flat().filter(p=>p.beat===true&&!/^ROUTE \d+$/.test(p.text));assert.equal(own.length,1,shape);assert.equal(own[0].text,'analyze',shape);
  assert.deepEqual(beats(mk(shape)).map(p=>p.text),['analyze'],shape+' (the stage row)');
 }
 // Short of cells the stage's name goes first, then the stage text whole (the first line's chain and kind stay); every row keeps its width, and

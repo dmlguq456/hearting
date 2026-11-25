@@ -9,6 +9,11 @@
    the SESSION head takes MODEL's value and row, so the head's name stands at every height; where MODEL's value would not stand whole on that row the head does not take it (the MODEL row stands in its own width).
 5. A row `cut` or `tailed` ends in `…›` with `›` in the row's last cell and one `…` only, also where a two-cell character falls at the cut. Only the REPO and SESSION names carry weight (in mono and
    `NO_COLOR` too, where weight is the only cue); every other name is the title role's color without it.
+
+11-25 (four groups, "저장소 먼저로 네 묶음 주고로 해줘"): the group heads are frame rows (`├╴[REPO] … ┤`, `├╴[SESSION] … ┤`), the light runs over the cells between them (30 at width 44; the cell before `┤` is
+a plain `─`); MEM stands under BACKLOG (last of the REPO group), PEERS under TITLE; the list heads (STATUS, BACKLOG, MEM, MESSAGES) stand one cell in and are bold with the group names (the value names GIT, MODEL, CTX,
+TITLE, PEERS, NOW are not); the items of MESSAGES and MEM two cells in, a message's body three; the boxes' count after the name (`QUESTIONS 1`); the label column from inner width 26; the empty rows between the
+groups are the first thing given up.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -73,9 +78,8 @@ class PanelTidyTest(unittest.TestCase):
         self.node(r"""
 const v=drawW({question:true,routes:1,messages:1,mem:1,status:status(),backlog:backlog(),height:52}),ls=lines(v);
 const SHOWN=[
-'│ REPO hearting · wt 12 ────────────────── │',
+'├╴[REPO] hearting · wt 12 ─────────────────┤',
 '│  GIT    branch ✓                         │',
-'│  PEERS  [e9] ⚑  ─ [d4]                   │',
 '│  STATUS +2                             › │',
 '│   ! 시험용 정할 것 하나                  │',
 '│   · 시험용 하는 일 하나 · #101           │',
@@ -84,23 +88,26 @@ const SHOWN=[
 '│   · 시험용 나중 일 하나                  │',
 '│   · 시험용 나중 일 둘                    │',
 '│   · 시험용 나중 일 셋                    │',
-'│ SESSION ──────────────────────────────── │',
+'│  MEM                                   › │',
+'│   ◆ 1m decision 시험용 기억 1 제목       │',
+'│                                          │',
+'├╴[SESSION] ───────────────────────────────┤',
 '│  MODEL  Opus 5.5 xhigh                   │',
 '│  CTX    ━━━━──── 41%                     │',
 '│  TITLE  시험용 세션                      │',
+'│  PEERS  [e9] ⚑  ─ [d4]                   │',
 '│  NOW    시험용 NOW 한 줄               › │',
-'│                                          │',
-'│ ╭─ 1 QUESTIONS ───────────────────── ›─╮ │'];
-assert.deepEqual(ls.slice(1,19).map(l=>l.replace(/ +│$/,' │')),SHOWN.map(l=>l.replace(/ +│$/,' │')),ls.join('\n'));
+'│ ╭─ QUESTIONS 1 ───────────────────── ›─╮ │'];
+assert.deepEqual(ls.slice(1,21).map(l=>l.replace(/ +│$/,' │')),SHOWN.map(l=>l.replace(/ +│$/,' │')),ls.join('\n'));
 assert(ls.every(l=>cells(l)===44),ls.join('\n'));
-// The lower sections: the name and `›` at the right end, no rule; an item one cell in, a message's second row two; the box's `›` at the end of its top line.
+// The lower sections: the name and `›` at the right end, no rule; an item two cells in (MEM, now the last of the REPO group), a message's body row four; the box's `›` at the end of its top line.
 const at=re=>ls.findIndex(l=>re.test(l));
-const m=at(/^│ MESSAGES +› │$/),e=at(/^│ MEM +› │$/),r=at(/^│ ╭─ 1 ROUTE ─+ ›─╮ │$/);
-assert(m>0&&e>m&&r>0&&r<m,ls.join('\n'));
-assert(/^│  ← \[77\] claude · 09:07 · report +│$/.test(ls[m+1])&&/^│   시험용 메시지 7 +│$/.test(ls[m+2])&&/^│  ◆ 1m decision 시험용 기억 1 제목 +│$/.test(ls[e+1]),ls.slice(m).join('\n'));
-// The lines in the whole picture: the REPO and SESSION heads, the two boxes' lines, the rule over the last row. No other.
+const m=at(/^│  MESSAGES +› │$/),e=at(/^│  MEM +› │$/),r=at(/^│ ╭─ ROUTE 1 ─+ ›─╮ │$/),se=at(/^├╴\[SESSION\]/);
+assert(m>0&&e>0&&e<se&&r>0&&r<m,ls.join('\n'));
+assert(/^│   ← \[77\] claude · 09:07 · report +│$/.test(ls[m+1])&&/^│    시험용 메시지 7 +│$/.test(ls[m+2])&&/^│   ◆ 1m decision 시험용 기억 1 제목 +│$/.test(ls[e+1]),ls.slice(m).join('\n'));
+// The lines in the whole picture: the REPO and SESSION heads (frame rows), the two boxes' lines, the rule over the last row. No other.
 const lined=ls.map((l,i)=>[i,l]).filter(([,l])=>/─{5}/.test(l)).map(([i,l])=>i);
-assert(lined.every(i=>/^│ (REPO|SESSION) |^│ [╭│╰]|^┌|^└|^│ ─+ │$/.test(ls[i])),lined.map(i=>ls[i]).join('\n'));
+assert(lined.every(i=>/^├╴\[(REPO|SESSION)\] |^│ [╭│╰]|^┌|^└|^│ ─+ │$/.test(ls[i])),lined.map(i=>ls[i]).join('\n'));
 assert(!ls.some(l=>/^│ ─+ │$/.test(l)&&ls.indexOf(l)<ls.length-3),'no line between CTX and TITLE\n'+ls.join('\n'));
 """)
 
@@ -109,13 +116,14 @@ assert(!ls.some(l=>/^│ ─+ │$/.test(l)&&ls.indexOf(l)<ls.length-3),'no line
 for(const width of [59,44,40,36,34,30,26]){
  const v=drawW({width,height:60,question:true,routes:1,messages:3,mem:2,status:status(),backlog:backlog()}),ins=lines(v).map(l=>l.slice(2,-2));
  const lead=re=>{const l=ins.find(s=>re.test(s));assert(l,width+' '+re+'\n'+ins.join('\n'));return l.length-l.trimStart().length;};
- const label=width-4>=30;
+ const label=width-4>=26;
  for(const re of label?[/^ *GIT /,/^ *PEERS /,/^ *MODEL /,/^ *CTX /,/^ *TITLE /,/^ *NOW /]:[/^ *branch/,/^ *\[e9\]/,/^ *Opus 5\.5/,/^ *ctx 41%/,/^ *시험용 세션/])assert.equal(lead(re),1,width+' '+re);
  assert.equal(lead(/^ *STATUS/),1,String(width));assert.equal(lead(/^ *BACKLOG/),1,String(width));
  assert.equal(lead(/^ *! 시험용/),2,String(width));
- // The group heads and the lower sections' heads: no indent; the items of MESSAGES and MEM one cell in.
- for(const re of [/^REPO /,/^SESSION /,/^MESSAGES/,/^MEM /])assert(ins.some(s=>re.test(s)),width+' '+re);
- assert(ins.some(s=>/^ [←→] \[/.test(s))&&ins.some(s=>/^ ◆ /.test(s)),width+'\n'+ins.join('\n'));
+ // The group heads are frame rows (`├╴[REPO] …┤`: the inside starts at the bracket); MESSAGES and MEM stand one cell in like STATUS, their items two.
+ for(const re of [/^\[REPO\] /,/^\[SESSION\] /])assert(ins.some(s=>re.test(s)),width+' '+re);
+ for(const re of [/^ MESSAGES/,/^ MEM /])assert.equal(lead(re),1,width+' '+re);
+ assert(ins.some(s=>/^  [←→] \[/.test(s))&&ins.some(s=>/^  ◆ /.test(s)),width+'\n'+ins.join('\n'));
  assert(lines(v).every(l=>cells(l)===width));
 }
 // A long text is cut with `…` by the rule it had, in the cells the indent leaves: a STATUS item at 44 (36 inside, 34 for it) ends in `…` and fills its row.
@@ -127,11 +135,11 @@ for(const width of [59,44,40,36,34,30,26]){
         self.node(r"""
 const v=drawW({question:true,routes:1,messages:1,mem:1,status:status(),backlog:backlog(),height:52}),ls=lines(v),inn=ls.map(l=>l.slice(2,-2));
 const endsIn=re=>{const l=inn.find(s=>re.test(s));assert(l,re+'\n'+ls.join('\n'));return l;};
-for(const re of [/^ STATUS/,/^ BACKLOG/,/^ NOW /,/^MESSAGES/,/^MEM /])assert(/ ›$/.test(endsIn(re))||/^ NOW .*›$/.test(endsIn(re)),re+' '+endsIn(re));
-for(const re of [/^ STATUS/,/^ BACKLOG/,/^ NOW /,/^MESSAGES/,/^MEM /])assert.equal([...endsIn(re)].filter(c=>c==='›').length,1,re);
-assert(/ ›─╮$/.test(endsIn(/^╭─ 1 QUESTIONS/))&&/ ›─╮$/.test(endsIn(/^╭─ 1 ROUTE/)));
+for(const re of [/^ STATUS/,/^ BACKLOG/,/^ NOW /,/^ MESSAGES/,/^ MEM /])assert(/ ›$/.test(endsIn(re))||/^ NOW .*›$/.test(endsIn(re)),re+' '+endsIn(re));
+for(const re of [/^ STATUS/,/^ BACKLOG/,/^ NOW /,/^ MESSAGES/,/^ MEM /])assert.equal([...endsIn(re)].filter(c=>c==='›').length,1,re);
+assert(/ ›─╮$/.test(endsIn(/^╭─ QUESTIONS 1/))&&/ ›─╮$/.test(endsIn(/^╭─ ROUTE 1/)));
 // The mark stands in the last cell of the row where a press lands (the one a person finds it in), and nowhere else on the rows around it.
-for(const re of [/^ STATUS/,/^ BACKLOG/,/^ NOW /,/^MESSAGES/,/^MEM /])assert.equal(cells(endsIn(re)),40,String(re));
+for(const re of [/^ STATUS/,/^ BACKLOG/,/^ NOW /,/^ MESSAGES/,/^ MEM /])assert.equal(cells(endsIn(re)),40,String(re));
 // A NOW on several rows ends its last row alone with `›`; where the last row is full the mark takes the row's last cell as `…›`.
 {const m=model({routes:0}),w=view.render({width:36,height:52,side:true,model:{...m,now:'가가가가 가가가가 가가가가 가가가가 가가가가 가가가가',status_doc:undefined,backlog_doc:undefined},state:'working',harness:'claude',frame:1000,since:990,sent:()=>[],cellWidth:cells,configuration:{side_width:36,rule_motion:'off'}}),a=lines(w).map(l=>l.slice(2,-2).trimEnd());
  const i=a.findIndex(s=>/^ NOW /.test(s));let k=i;while(k+1<a.length&&/^        \S/.test(a[k+1]))k++;
@@ -144,27 +152,27 @@ for(const re of [/^ STATUS/,/^ BACKLOG/,/^ NOW /,/^MESSAGES/,/^MEM /])assert.equ
 
     def test_the_rule_the_light_moves_over_is_the_session_heads_alone(self):
         self.node(r"""
-// Tall: `SESSION ────…` (28 cells of rule at 44-4-8 ... here 32), the light on those cells only, never on the name; no other row carries it.
+// Tall: `├╴[SESSION] ────…┤` (the rule runs from cell 12 to the last cell before `┤`, which is one plain `─` past the light's 30), the light on those 30 cells only, never on the frame cells or the name; no other row carries it.
 {const v=drawW({question:true,routes:1,height:52,motion:'rule',state:'working',status:status(),backlog:backlog()}),ls=lines(v);
- const y=ls.findIndex(l=>/^│ SESSION ─+ │$/.test(l));assert(y>0,ls.join('\n'));
- const run=ls[y].slice(10).match(/─+/)[0].length;assert.equal(run,32,ls[y]);
+ const y=ls.findIndex(l=>/^├╴\[SESSION\] ─+┤$/.test(l));assert(y>0,ls.join('\n'));
+ const run=ls[y].slice(12).match(/─+/)[0].length;assert.equal(run,31,ls[y]);
  const cs=v.motion.cells.filter(c=>c.rule!==undefined);
- assert.equal(cs.length,32);assert(cs.every((c,i)=>c.row===y&&c.col===10+i&&c.ch==='─'&&c.rule===i),JSON.stringify(cs.slice(0,3)));
- assert(!v.motion.cells.some(c=>c.rule===undefined&&c.row===y&&c.col<10),'the name is not moved');
+ assert.equal(cs.length,30);assert(cs.every((c,i)=>c.row===y&&c.col===12+i&&c.ch==='─'&&c.rule===i),JSON.stringify(cs.slice(0,3)));
+ assert(!v.motion.cells.some(c=>c.rule===undefined&&c.row===y),'the name and the frame cells (`├╴` and `┤`) are not moved');
  // The light goes round and comes back: some frame lights cells, some frame (the rest) lights none; the next change is asked for from the rule's own length.
  const lit=f=>v.motion.at(989+f).filter(p=>p.tone==='scan').length;   // (`since` is 990 and a rule's own tick is one on: the host's frame 989+f is the rule's tick f)
  assert(lit(3)>0&&lit(13)===0&&lit(26)===0&&v.motion.next(992)===993);
  for(const f of [0,5,13,20]){const a=v.motion.at(989+f);assert.equal(a.length,v.motion.cells.length);}
  assert(!ls.some((l,i)=>i!==y&&v.rows[i].some(p=>p.rule)),'one row carries the rule');}
-// Short of rows the head takes MODEL's value and its row: the rule is the rest of that row, and the light runs over it (not over `SESSION Opus 5.5 xhigh`).
+// Short of rows the head takes MODEL's value and its row: the rule is the rest of that row, and the light runs over it (not over `[SESSION] Opus 5.5 xhigh`).
 {const v=drawW({question:true,routes:1,messages:1,mem:1,height:24,motion:'rule',state:'working',status:status(),backlog:backlog()}),ls=lines(v);
- const y=ls.findIndex(l=>/^│ SESSION Opus 5\.5 xhigh ─+ │$/.test(l));assert(y>0,ls.join('\n'));
+ const y=ls.findIndex(l=>/^├╴\[SESSION\] Opus 5\.5 xhigh ─+┤$/.test(l));assert(y>0,ls.join('\n'));
  const first=ls[y].indexOf('─',10),cs=v.motion.cells.filter(c=>c.rule!==undefined);
- assert(cs.length>=3&&cs.every(c=>c.row===y&&c.col>=first&&c.ch==='─')&&cs.length===[...ls[y].slice(first)].filter(c=>c==='─').length,JSON.stringify(cs.slice(0,2)));}
+ assert(cs.length>=3&&cs.every(c=>c.row===y&&c.col>=first&&c.ch==='─')&&cs.length===[...ls[y].slice(first)].filter(c=>c==='─').length-1,JSON.stringify(cs.slice(0,2)));}
 // Still: the plain rule in every other mode (border, scanners, off and a waiting frame keep a rule that does not move).
 for(const [motion,state] of [['border','working'],['scanners','working'],['off','working'],['rule','idle'],['rule','blocked']]){
- const v=drawW({height:52,motion,state}),ls=lines(v),y=ls.findIndex(l=>/^│ SESSION ─+ │$/.test(l));assert(y>0,motion+state);
- const parts=v.rows[y].filter(p=>p.rule);assert(parts.length===1&&parts[0].text==='─'.repeat(32)&&parts[0].role==='messages'&&parts[0].dim===true,motion+state+JSON.stringify(parts));
+ const v=drawW({height:52,motion,state}),ls=lines(v),y=ls.findIndex(l=>/^├╴\[SESSION\] ─+┤$/.test(l));assert(y>0,motion+state);
+ const parts=v.rows[y].filter(p=>p.rule);assert(parts.length===1&&parts[0].text==='─'.repeat(30)&&parts[0].role==='messages'&&parts[0].dim===true,motion+state+JSON.stringify(parts));
  assert(!(v.motion&&v.motion.cells.some(c=>c.rule!==undefined)),motion+state);
 }
 """)
@@ -196,18 +204,23 @@ for(const w of [120,100,80,60])for(const now of NOWS)for(let h=6;h<=22;h++){
 
     def test_only_the_repo_and_session_names_are_bold(self):
         self.node(r"""
-const boldOf=(v,word)=>v.rows.flatMap(r=>r.filter(p=>p.text===word)).map(p=>p.bold===true);
+// 11-25 (four groups): the group names (`[REPO]`, `[SESSION]`) and the list heads (STATUS, BACKLOG, MEM, MESSAGES) are bold; the value names (GIT, MODEL, CTX, TITLE, PEERS, NOW) are not.
+const boldOf=(v,word)=>v.rows.flatMap(r=>r.filter(p=>p.text.trim()===word)).map(p=>p.bold===true);
 for(const [name,cfg,extra] of [['terminal',{theme:'terminal'},{}],['light',{theme:'light'},{}],['mono',{theme:'mono'},{}],['no_color',{theme:'terminal'},{no_color:true}]])
 for(const h of [60,12]){
  const v=view.render({width:44,height:h,side:true,model:{...model({routes:1,messages:1,mem:1,status:status(),backlog:backlog()}),...extra},state:'working',harness:'claude',frame:1000,since:990,sent:()=>[],cellWidth:cells,
   configuration:{side_width:44,rule_motion:'off',position:'right',...cfg}}),tag=name+' '+h+'\n'+lines(v).join('\n');
- assert.deepEqual(boldOf(v,'REPO'),[true],'REPO '+tag);
+ assert.deepEqual(boldOf(v,'[REPO]'),[true],'REPO '+tag);
  // The SESSION name stands alone (a head) or before MODEL's value (the merged head): the same part either way.
- assert.deepEqual(boldOf(v,'SESSION'),[true],'SESSION '+tag);
- for(const w of ['GIT','MESSAGES','MEM','STATUS','BACKLOG','NOW ','TITLE','MODEL','CTX'])assert(boldOf(v,w).every(b=>!b),w+' '+tag);
+ assert.deepEqual(boldOf(v,'[SESSION]'),[true],'SESSION '+tag);
+ // The list heads: bold (at body brightness) where they stand as heads; at low height STATUS and BACKLOG are the REPO head's buttons, not heads.
+ for(const w of h>=40?['STATUS','BACKLOG','MEM','MESSAGES']:['MESSAGES'])assert.deepEqual(boldOf(v,w),[true],w+' '+tag);
+ const tiers=v.rows.flatMap(r=>r.filter(p=>['[REPO]','[SESSION]','STATUS','MESSAGES'].includes(p.text.trim())&&p.tier)).map(p=>[p.text.trim(),p.tier]);
+ assert(tiers.every(([w,t])=>t===(w[0]==='['?'group':'list')),JSON.stringify(tiers));
+ for(const w of ['GIT','NOW','TITLE','MODEL','CTX','PEERS'])assert(boldOf(v,w).every(b=>!b),w+' '+tag);
 }
 // Short of rows the head is merged with MODEL's value: the name is bold there too.
-{const v=drawW({height:14,question:true,mem:3,status:status(),backlog:backlog()});assert(lines(v).some(l=>/^│ SESSION Opus 5\.5 xhigh/.test(l)),lines(v).join('\n'));assert.deepEqual(boldOf(v,'SESSION'),[true]);}
+{const v=drawW({height:14,question:true,mem:3,status:status(),backlog:backlog()});assert(lines(v).some(l=>/^├╴\[SESSION\] Opus 5\.5 xhigh/.test(l)),lines(v).join('\n'));assert.deepEqual(boldOf(v,'[SESSION]'),[true]);}
 """)
 
     def test_a_model_value_that_does_not_stand_whole_does_not_merge_into_the_head(self):
@@ -218,15 +231,18 @@ for(const w of [44,36,32,30])for(const [sel,whole] of [[LONG,'GPT-5.5-codex-max 
  const v=drawW({width:w,height:h,question,mem,selected:sel,status:status(),backlog:backlog()}),ls=lines(v),a=inside(v),tag=w+'x'+h+'\n'+ls.join('\n');
  assert.equal(ls.length,h,tag);assert(ls.every(l=>cells(l)===w),tag);
  // A merged head holds the value whole; else the head row goes and the MODEL row stands (its value cut by its own width, as before the head was a group's).
- const head=a.find(s=>/^SESSION [^─]/.test(s));
+ const head=a.find(s=>/^\[SESSION\] [^─]/.test(s));
  if(head){merged++;assert(head.includes(whole),'merged, whole\n'+tag);}
- else if(a.some(s=>/^SESSION/.test(s)))alone++;
+ else if(a.some(s=>/^\[SESSION\]/.test(s)))alone++;
  else assert(a.some(s=>/^ MODEL |^ GPT|^ Opus/.test(s)),'MODEL row stands\n'+tag);
 }
 assert(merged>0&&alone>0,merged+' '+alone);
-// The reviewer's picture: 32 wide, 14 high, a long model name: the MODEL row keeps the name whole.
+// The reviewer's picture: 28 wide (no label column: it stands from inner width 26 now), 14 high, a long model name: the MODEL row keeps the name whole.
+{const a=inside(drawW({width:28,height:14,question:true,mem:3,selected:LONG,status:status(),backlog:backlog()}));
+ assert(!a.some(s=>/^\[SESSION\] GPT/.test(s))&&a.some(s=>s.includes('GPT-5.5-codex-max xhigh')),a.join('\n'));}
+// Where the label column stands (32 wide) the MODEL row cuts the value by its own width and the head does not take it.
 {const a=inside(drawW({width:32,height:14,question:true,mem:3,selected:LONG,status:status(),backlog:backlog()}));
- assert(!a.some(s=>/^SESSION GPT/.test(s))&&a.some(s=>s.includes('GPT-5.5-codex-max xhigh')),a.join('\n'));}
+ assert(!a.some(s=>/^\[SESSION\] GPT/.test(s))&&a.some(s=>/^ MODEL  GPT-5\.5-codex… xhigh$/.test(s)),a.join('\n'));}
 """)
 
     def test_the_session_head_stays_and_the_rows_give_way_in_the_order_they_did(self):
@@ -237,13 +253,13 @@ for(let h=70;h>=12;h--){
  const v=drawW({...o,height:h}),ls=lines(v),a=ls.map(l=>l.slice(2,-2).trimEnd());
  assert.equal(ls.length,h,h+'\n'+ls.join('\n'));
  // The group's name is on screen at every height (alone with its rule, or with MODEL's value on MODEL's row), and no row is the line between CTX and TITLE.
- assert(a.some(s=>/^SESSION( |$)/.test(s)),h+'\n'+ls.join('\n'));
- const alone=a.some(s=>/^SESSION ─+$/.test(s)),merged=a.some(s=>/^SESSION Opus 5\.5 xhigh/.test(s));
+ assert(a.some(s=>/^\[SESSION\]( |$)/.test(s)),h+'\n'+ls.join('\n'));
+ const alone=a.some(s=>/^\[SESSION\] ─+$/.test(s)),merged=a.some(s=>/^\[SESSION\] Opus 5\.5 xhigh/.test(s));
  assert(alone!==merged,h+'\n'+ls.join('\n'));
  if(merged)assert(!a.some(s=>/^ MODEL /.test(s)),'the head takes MODEL\'s row\n'+ls.join('\n'));
  assert(!a.slice(1,-3).some(s=>/^─+$/.test(s)),h+'\n'+ls.join('\n'));
  seen.push({h,alone,bItems:a.filter(s=>/^  · 시험용 나중/.test(s)).length,sItems:a.filter(s=>/^  [!·] 시험용 (정할|하는)/.test(s)).length,heads:a.filter(s=>/^ (STATUS|BACKLOG)\b/.test(s)).length,
-  gap:a.filter(s=>!s.trim()).length,msg:a.filter(s=>/^ [←→] \[/.test(s)).length,body:a.filter(s=>/^  \S/.test(s)&&!/^  [!·] /.test(s)).length,git:a.some(s=>/^ GIT /.test(s)),title:a.some(s=>/^ TITLE /.test(s))});
+  gap:a.filter(s=>!s.trim()).length,msg:a.filter(s=>/^  [←→] \[/.test(s)).length,body:a.filter(s=>/^   \S/.test(s)&&!/^   [!·] /.test(s)).length,git:a.some(s=>/^ GIT /.test(s)),title:a.some(s=>/^ TITLE /.test(s))});
 }
 const first=f=>{const x=seen.find(f);return x?x.h:0;};
 const order=[first(r=>r.bItems<3),first(r=>r.sItems<3),first(r=>!r.heads),first(r=>!r.alone),first(r=>!r.git)];
@@ -251,6 +267,8 @@ const order=[first(r=>r.bItems<3),first(r=>r.sItems<3),first(r=>!r.heads),first(
 assert(seen.every(r=>r.title),'TITLE stands at every height');
 assert(order.every((x,i)=>x>0&&(!i||x<=order[i-1])),JSON.stringify(order));
 assert(order[0]>order[1]&&order[1]>order[2],JSON.stringify(order));
+// 11-25: the empty rows between the groups are the first thing given up, before BACKLOG loses an item.
+assert(first(r=>r.gap===0)>order[0],JSON.stringify([first(r=>r.gap===0),order]));
 // The merged head costs no row more than the head that went: the head row is MODEL's row.
 const tall=lines(drawW({...o,height:60})).length,short=lines(drawW({...o,height:30})).length;assert.equal(tall,60);assert.equal(short,30);
 """)
@@ -263,14 +281,14 @@ const act=i=>v.hits.filter(h=>h.row===i).map(h=>[h.left,h.right,h.action]);
 // A whole row for a head, an item, NOW (every row of it), a box's top line, MESSAGES and MEM heads and each of their rows; none on the group heads, GIT, PEERS, MODEL, CTX or TITLE.
 const sh=rowOf(/^ STATUS/),bh=rowOf(/^ BACKLOG/);
 assert.deepEqual(act(sh),[[2,41,'popup:STATUS']]);assert.deepEqual(act(sh+1),[[2,41,'popup:STATUS:i:a1']]);assert.deepEqual(act(bh+3),[[2,41,'popup:BACKLOG:i:b3']]);
-for(const re of [/^REPO /,/^ GIT /,/^ PEERS /,/^SESSION /,/^ MODEL /,/^ CTX /,/^ TITLE /])assert.deepEqual(act(rowOf(re)),[],String(re));
+for(const re of [/^\[REPO\] /,/^ GIT /,/^ PEERS /,/^\[SESSION\] /,/^ MODEL /,/^ CTX /,/^ TITLE /])assert.deepEqual(act(rowOf(re)),[],String(re));
 assert.deepEqual(act(rowOf(/^ NOW /)),[[2,41,'popup:NOW']]);
-assert.deepEqual(act(rowOf(/^╭─ 1 QUESTIONS/)),[[2,41,'question']]);assert.deepEqual(act(rowOf(/^╭─ 1 ROUTE/)),[[2,41,'popup:ROUTE']]);
-const mh=rowOf(/^MESSAGES/),eh=rowOf(/^MEM /);
+assert.deepEqual(act(rowOf(/^╭─ QUESTIONS 1/)),[[2,41,'question']]);assert.deepEqual(act(rowOf(/^╭─ ROUTE 1/)),[[2,41,'popup:ROUTE']]);
+const mh=rowOf(/^ MESSAGES/),eh=rowOf(/^ MEM /);
 assert.deepEqual(act(mh),[[2,41,'popup:MESSAGES']]);assert.deepEqual(act(mh+1),[[2,41,'popup:MESSAGES']]);assert.deepEqual(act(eh),[[2,41,'popup:MEM']]);assert.deepEqual(act(eh+1),[[2,41,'popup:MEM:0']]);assert.deepEqual(act(eh+2),[[2,41,'popup:MEM:1']]);
 // The REPO row where the heads go: the two buttons on the same cells as before (the row's own value is cut by the width it always was).
 {const w=drawW({question:true,routes:3,messages:7,mem:5,height:14,status:status(3,5),backlog:backlog(3,14)}),l=lines(w);
- assert(/^│ REPO hearting +STATUS ›  BACKLOG › │$/.test(l[1])||/^│ REPO hearting · wt 12 +STATUS \+5 ›  BACKLOG \+14 › │$/.test(l[1]),l[1]);
+ assert(/^├╴\[REPO\] hearting +STATUS ›  BACKLOG ›─┤$/.test(l[1])||/^├╴\[REPO\] hearting · wt 12 +STATUS \+5 ›  BACKLOG \+14 ›─┤$/.test(l[1]),l[1]);
  const p=w.hits.filter(h=>h.row===1);assert.deepEqual(p.map(h=>h.action),['popup:STATUS','popup:BACKLOG']);assert.equal(p[0].left,2);assert.equal(p[1].right,44-3);assert.equal(p[0].right+1,p[1].left);}
 """)
 
@@ -281,8 +299,8 @@ for(const width of [59,44,30])for(const height of [52,40,24,14,10,8])for(const q
  const v=drawW({width,height,question,routes,messages,mem,usage,status:status(),backlog:backlog()}),ls=lines(v);
  assert.equal(ls.length,height,[width,height]+'\n'+ls.join('\n'));assert(ls.every(l=>cells(l)===width),[width,height,question,routes]+'\n'+ls.join('\n'));
  // The names stand where a person looks: REPO at the first row; the group heads, section heads and the boxes' arrows at their ends.
- assert(/^│ REPO /.test(ls[1]),ls[1]);
- for(const l of ls.slice(1,-1)){const s=l.slice(2,-2).trimEnd();if(/^(MESSAGES|MEM)( |$)/.test(s))assert(/ ›$/.test(s),s);}
+ assert(/^├╴\[REPO\] /.test(ls[1]),ls[1]);
+ for(const l of ls.slice(1,-1)){const s=l.slice(2,-2).trimEnd();if(/^ (MESSAGES|MEM)( |$)/.test(s))assert(/ ›$/.test(s),s);}
  n++;
 }
 assert(n>=800,String(n));
