@@ -1392,7 +1392,7 @@ def retain_registered_notice(jobs, record):
     receipt = record.get("receipt") or {}
     if (receipt.get("kind") != supervision.KIND
             or receipt.get("reason") not in {
-                supervision.ANSWER_AWAITING_PARENT, "no-progress", "attempt-stalled",
+                supervision.ANSWER_AWAITING_PARENT, "no-progress", "attempt-stalled", supervision.UNIT_CAPACITY_PAUSE,
             }):
         return False
     row = current_attempt_row(jobs, receipt.get("owner_attempt_id", ""))

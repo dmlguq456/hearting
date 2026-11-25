@@ -29,13 +29,14 @@ from dispatch_receipt_identity import receipt_digest
 from dispatch_registry_cache import registry_view
 from foreground_activity import BLOCKING_COMMAND_MAX_SECONDS
 import dispatch_pending_delivery as pending_delivery
+from unit_continue import CAPACITY_PAUSE as UNIT_CAPACITY_PAUSE
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 KIND = "supervision"
-REASONS = frozenset({"owner-input-undelivered", "no-progress", "attempt-stalled", "process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed", "terminal-evidence-conflict", "workflow-completion-pending", "closure-blocked", "watch-deadline", "receiver-unavailable", "answer-awaiting-parent", "parent-session-ended"})
+REASONS = frozenset({"owner-input-undelivered", "no-progress", "attempt-stalled", "process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed", "terminal-evidence-conflict", "workflow-completion-pending", "closure-blocked", "watch-deadline", "receiver-unavailable", "answer-awaiting-parent", "parent-session-ended", UNIT_CAPACITY_PAUSE})
 # Notices that only say "still waiting / cannot classify": confirmed execution is not a reason to ask anyone.
 CONFIRMED_WAIT_REASONS = frozenset({"join-deadline", "process-unverifiable"})
 # Another session answered a BLOCKED owner; only the route's parent launches the continuation.
@@ -1403,6 +1404,9 @@ def _pending(rows: dict, attempts: list[str], jobs: Path, reason=None, *, notice
             if status and status.get("state") in {"stalled", "unknown"}:
                 return True
         return False
+    if reason == UNIT_CAPACITY_PAUSE:
+        from dispatch_replacement import unit_capacity_pause
+        return any(unit_capacity_pause(jobs, aid) for aid in attempts)
     if reason == "no-progress":
         from dispatch_replacement import parent_resume_obligation
         for aid in attempts:
@@ -1540,6 +1544,7 @@ def materialize(jobs: Path, attempts: set[str], *, reason: str) -> list[dict]:
         if reason == "attempt-stalled":
             for monitored_attempt in receipt["monitored_attempt_ids"]:
                 _attach_stall_delivery(jobs, monitored_attempt, record)
+        if reason in {"attempt-stalled", UNIT_CAPACITY_PAUSE}:
             try:
                 from peer_obligations import retain_registered_notice
                 retain_registered_notice(jobs, record)
@@ -1990,7 +1995,7 @@ def continue_for_parent(record: dict, *, session_id: str, recipient_kind: str,
     their existing answer-resume behavior."""
     receipt = record.get("receipt") if isinstance(record, dict) else None
     if (not session_id or not isinstance(receipt, dict) or receipt.get("kind") != KIND
-            or receipt.get("reason") not in {ANSWER_AWAITING_PARENT, "no-progress"}):
+            or receipt.get("reason") not in {ANSWER_AWAITING_PARENT, "no-progress", UNIT_CAPACITY_PAUSE}):
         return None
     try:
         from dispatch_replacement import _route, source_reservation
@@ -2004,7 +2009,7 @@ def continue_for_parent(record: dict, *, session_id: str, recipient_kind: str,
         if arm is None:
             from capacity_auto_resume import arm
         result = {"reason": receipt["reason"], "route_id": route.get("route_id")}
-        if receipt["reason"] == "no-progress" or source_reservation(jobs, owner):
+        if receipt["reason"] in {"no-progress", UNIT_CAPACITY_PAUSE} or source_reservation(jobs, owner):
             result["source_attempt_id"] = owner
         return arm(result, route_file, jobs, environ=env)
     except Exception:  # noqa: BLE001 -- the notice still carries the start command
@@ -2191,6 +2196,13 @@ def render_text(receipt: dict, *, continued: dict | None = None, notice_context=
                 "the answer is kept. Only this route's parent session launches its continuation, so "
                 "continue the work with the route's start command: the new owner receives the answer "
                 "first. Do not ask for the answer again." + (" " + command if command else ""))
+    if receipt["reason"] == UNIT_CAPACITY_PAUSE:
+        if continued:
+            return (f"The unit worker stopped at a usage limit. The same route will try to continue "
+                    f"at {continued['resume_at']} or when the usage gate clears. Its result comes back here.")
+        command = _resume_text(receipt)
+        return ("The unit worker stopped at a usage limit. The existing route can continue when capacity returns."
+                + (" " + command if command else ""))
     if receipt["reason"] == "no-progress":
         if continued:
             return ("The route parent has an armed start for the remaining replacement work. Its runtime "

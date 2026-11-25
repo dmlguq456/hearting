@@ -177,10 +177,16 @@ class CapacityResumeTest(unittest.TestCase):
         aid, prior = value("--attempt-id"), value("--automatic-retry-of")
         source = self.rows()[prior][1]
         task = Path(value("--prompt-file")).read_text()
+        unit = source.get("capability") == "unit"
+        candidate_harness = getattr(self, "target_harness", None) or source["harness"]
+        raw_argv = list(argv)
+        if unit:
+            index = raw_argv.index("--route-evidence")
+            del raw_argv[index:index + 2]  # the selector consumes this before invoking the adapter
         args = SimpleNamespace(attempt_id=aid, jobs_path=self.jobs, worktree=value("--worktree"),
-                               route_id="rt-cap", route_node="owner", replacement_input_argv=list(argv),
+                               route_id="rt-cap", route_node=source["route_node"], replacement_input_argv=raw_argv,
                                **{"model_profile": source["model_profile"], **(self.candidate_args or {})})
-        if source.get("harness") == "opencode" and not hasattr(args, "opencode_config_content"):
+        if candidate_harness == "opencode" and not hasattr(args, "opencode_config_content"):
             args.opencode_config_content = json.dumps({
                 "permissions": [{"action": "read", "resource": "*", "effect": "allow"}],
                 "agents": {},
@@ -190,7 +196,9 @@ class CapacityResumeTest(unittest.TestCase):
             "replacement_attempt_id", "replacement_claim_digest", "replacement_original_attempt_id",
             "replacement_ordinal", "automatic_retry_of", "log_file", "cleanup_receipt_digest"}}
         meta.update(attempt_id=aid, automatic_retry_of=prior, launch_claimed="1", log_file=str(self.root / (aid + ".log")))
-        meta.update(D.parse_registry_metadata(R.seal_launch_input(args, source["harness"], task)))
+        if unit:
+            meta.update(harness=candidate_harness, continues_attempt_id=prior, turn=value("--turn"))
+        meta.update(D.parse_registry_metadata(R.seal_launch_input(args, candidate_harness, task)))
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         row = (stamp + "\topen\t12\tparent\ttask\t" + ",".join(k + "=" + v for k, v in meta.items()))
         with R._locked(self.jobs) as lines:
@@ -620,6 +628,109 @@ class CapacityResumeTest(unittest.TestCase):
         result = self.start()
         self.assertEqual(result["reason"], "replacement-owner-child-unsettled", result)
         self.assertEqual((self.calls, self.claims(), self.cleaned), ([], [], []))
+
+    def seed_unit(self, harness="claude", **extra):
+        self.jobs.write_text("")
+        self.route.update(capability="unit", effective_intensity="quick", nodes=[
+            {"id": "unit", "worker_type": "review", "dispatch_depth": 1, "launch_authority": "depth-0",
+             "model_profile": "deep", "role": "reviewer", "unit": "qa/code-review"}])
+        self.path.write_text(json.dumps(self.route))
+        aid = self.seed_owner(f"att-unit-{harness}", note="dead-capacity", failure_class="capacity", harness=harness,
+                              route_node="unit", worker_type="review", capability="unit",
+                              workflow_completion="runtime-v1", **extra)["attempt_id"]
+        (R._directory(self.jobs) / "inputs" / f"{aid}.json").unlink()
+        argv = ["--start", "--attempt-id", aid, "--slug", "task", "--route-node", "unit"]
+        args = SimpleNamespace(attempt_id=aid, jobs_path=self.jobs, worktree=str(self.root),
+                               route_id="rt-cap", route_node="unit", model_profile="deep",
+                               replacement_input_argv=argv)
+        if harness == "opencode":
+            args.opencode_config_content = json.dumps({"permissions": [
+                {"action": "read", "resource": "*", "effect": "allow"}], "agents": {}})
+        digest = D.parse_registry_metadata(R.seal_launch_input(args, harness, "the raw task"))
+        self.set_status(aid, "done", **digest)
+        self.statuses[aid] = dict(verdict="FAIL", completion_proven=False, marker=None, marker_digest=None)
+        return aid
+
+    def test_pinned_unit_waits_and_the_same_node_launches_once_after_reset(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness), mock.patch("dispatch_capacity_evidence.harness_hold") as hold:
+                self.calls.clear()
+                original = self.seed_unit(harness, model="fixture-model")
+                self.route["selection_pins"] = {"worker": {"harness": harness}}
+                hold.return_value = {"label": "fixture-reset", "until_epoch": 4070908800}
+                receipt = self.start()
+                self.assertEqual((receipt["state"], receipt["reason"], receipt["harness"]),
+                                 ("waiting-capacity", "unit-capacity-wait", harness), receipt)
+                self.assertEqual(self.calls, [])
+                hold.return_value = None
+                receipt = self.start()
+                self.assertEqual(receipt["state"], "running", receipt)
+                successor = self.replacement_id(original)
+                self.assertEqual(receipt["unit_attempt_id"], successor)
+                self.assertEqual(self.rows()[successor][1]["continues_attempt_id"], original)
+                self.assertEqual((self.start()["unit_attempt_id"], len(self.calls)), (successor, 1))
+                self.set_status(successor, "done", failure_class="pass")
+                with mock.patch.object(W, "_unit_summary", return_value={"summary": "review result"}), \
+                        mock.patch.object(W, "_outcome", return_value={"classification": "success"}):
+                    self.ready = True
+                    result = self.start()
+                    self.ready = False
+                self.assertEqual((result["state"], result["summary"]), ("completed", "review result"))
+
+    def test_unpinned_unit_uses_the_normal_selector_without_carrying_a_foreign_session(self):
+        import unit_continue
+        original = self.seed_unit("claude")
+        self.target_harness = "codex"
+        self.assertEqual(self.start()["state"], "running")
+        successor = self.replacement_id(original)
+        self.assertEqual(self.rows()[successor][1]["harness"], "codex")
+        self.assertNotIn("--adapter", self.calls[0])
+        plan = unit_continue.session_plan(self.jobs, original, "codex")
+        self.assertEqual(plan.row_value, "fresh:harness-changed")
+        self.assertFalse(plan.session_id)
+        missing = unit_continue.session_plan(self.jobs, original, "claude")
+        self.assertEqual(missing.row_value, "fresh:session-missing")
+
+    def test_only_a_launched_recording_unit_capacity_end_can_continue(self):
+        import unit_ephemeral
+        original = self.seed_unit("claude")
+        capacity = self.rows()[original][1]
+        scratch = self.root / "ephemeral" / "123456789abc" / ".agent_reports"
+        scratch.mkdir(parents=True)
+        (scratch / unit_ephemeral.MARKER).touch()
+        fields = ["", "done"]
+        for label, changes in (
+                ("not started", {"launch_started": "0"}),
+                ("ordinary runtime failure", {"note": "dead-exit-1", "failure_class": "runtime"}),
+                ("user stop", {"note": "dead-capacity", "parent_close_requested": "1"}),
+                ("missing result", {"note": "dead-missing-result", "failure_class": "protocol"}),
+                ("record-free", {"artifact_root": str(scratch)}),
+                ("completed review", {"note": "completed-marker", "failure_class": "pass"})):
+            with self.subTest(label=label):
+                self.assertIsNone(R.death_kind(fields, {**capacity, **changes}, jobs=self.jobs))
+        self.assertEqual(R.death_kind(fields, capacity, jobs=self.jobs), "capacity")
+
+    def test_nested_unit_wait_returns_only_to_live_caller(self):
+        aid = self.seed_unit(caller_attempt_id="att-caller")
+        self.seed_owner("att-caller", note="", failure_class="")
+        self.set_status("att-caller", "running")
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": "att-caller", "AGENT_DISPATCH_CHILD": "1"}), \
+                mock.patch.object(D, "_parent_liveness_evidence", return_value=(False, "exited", None)):
+            result = self.start()
+            self.assertEqual(result["reason"], "replacement-parent-not-live", result)
+        self.assertEqual((self.calls, self.claims()), ([], []))
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": "att-caller", "AGENT_DISPATCH_CHILD": "1"}), \
+                mock.patch.object(D, "_parent_liveness_evidence", return_value=(True, "live", None)):
+            result = self.start()
+            self.assertEqual(result["state"], "running", result)
+            successor = self.replacement_id(aid)
+            self.assertEqual(self.rows()[successor][1]["caller_attempt_id"], "att-caller")
+            self.set_status(successor, "done", failure_class="pass")
+            self.ready = True
+            with mock.patch.object(W, "_unit_summary", return_value={"summary": "nested result"}), \
+                    mock.patch.object(W, "_outcome", return_value={"classification": "success"}):
+                self.assertEqual(self.start(wait=True)["summary"], "nested result")
+        self.assertEqual(len(self.calls), 1)
 
     # -- 6: only an explicit start launches a capacity replacement -------------------
     def _state_files(self):

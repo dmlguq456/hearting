@@ -719,11 +719,9 @@ def _slot(route, node, rows, jobs=None, path=None):
         if not matches:
             raise DispatchContractError("work-attempt-identity-conflict", aid)
         status, meta = rows[aid]
-        if (node == "owner" and jobs is not None and _never_started(status, meta)
-                and meta.get("replacement_original_attempt_id")):
-            # A registered replacement that never crossed launch_started is
-            # still its predecessor's continuation. Follow the existing exact
-            # claim; do not let the reservation become the semantic owner.
+        if ((node == "owner" or unit_leg(route, node)) and jobs is not None
+                and _never_started(status, meta) and meta.get("replacement_original_attempt_id")):
+            # A reservation that never crossed launch_started is still its predecessor's continuation.
             from dispatch_replacement import effective_attempts
             effective, _lineage = effective_attempts(jobs, {meta["replacement_original_attempt_id"]})
             if len(effective) != 1:
@@ -1155,9 +1153,9 @@ def _capacity_wait(result, aid, node, refusal, resume, clock):
     return waiting
 
 
-def _capacity_pause(result, attention, resume):
-    """A usage-limit stop is a pause, not a failure: nothing was started, one `start` resumes it."""
-    waiting = {**result, "state": "waiting-capacity", "reason": "owner-capacity-wait",
+def _capacity_pause(result, attention, resume, *, unit=False):
+    """The same route waits for its harness capacity before it can continue."""
+    waiting = {**result, "state": "waiting-capacity", "reason": UC.CAPACITY_PAUSE if unit else "owner-capacity-wait",
                "required_action": "resume-after-capacity", "harness": attention.get("harness", ""),
                "source_attempt_id": attention.get("source_attempt_id", ""),
                "next_step": "The harness is at a usage limit; nothing failed and nothing was started. "
@@ -1175,6 +1173,10 @@ def _capacity_pause(result, attention, resume):
             "looks again at the end of the wait, from the session that owns the route; completed stages are kept.")
     waiting.pop("parent_next", None)
     waiting.pop("parent_next_command", None)
+    if unit:
+        waiting.update(parent_next="bounded-wait", parent_next_command=resume + " --wait",
+                       next_step="The unit worker stopped at a usage limit. The same route can continue "
+                           "when capacity returns. Use parent_next_command to follow that route.")
     return waiting
 
 
@@ -2974,7 +2976,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 "bounded-wait means run parent_next_command once."}
 
 
-def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock):
+def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock, resumed=False):
     """Start the one leg of a unit route, or report where it is; repeating this launches nothing twice.
 
     There is no owner and no gate: the depth-0 session launches the worker with the brief, the shared
@@ -2998,15 +3000,47 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock):
     attempts = {aid}
     result.update(unit_attempt_id=aid, owner_started=False, **_wait_fields(attempts, rows, resume),
                   **_turn_fields(rows[aid][1], jobs))
+    from dispatch_replacement import advance, death_kind, _capacity_wait as replacement_capacity_wait
+    capacity = death_kind(["", rows[aid][0]], rows[aid][1], jobs=jobs) == "capacity"
     joined = _timed_join(result, clock, jobs=jobs, expected_attempts=attempts,
-                         timeout=_wait_budget(result) if wait else 0, recover=True, observe_only=not wait)
+                         timeout=_wait_budget(result) if wait and not capacity else 0,
+                         recover=True, observe_only=not wait or capacity)
     result["observation"] = joined
-    if joined["state"] == "ready":
+    status, source = _rows(jobs).get(aid, rows[aid])
+    capacity = capacity or death_kind(["", status], source, jobs=jobs) == "capacity"
+    if joined["state"] == "ready" or capacity:
         outcome = _outcome(jobs, aid)
+        if outcome.get("cancellation_requested") or outcome.get("stopped"):
+            return {**result, "state": outcome.get("state", "cancelled"), "result": outcome,
+                    "parent_next": "inspect-receipt", "parent_next_command": ""}
         if outcome["classification"] == "success":
             return {**result, "state": "completed", "result": outcome, **_unit_summary(jobs, aid, sleep=sleep),
                     **_turn_fields(_rows(jobs).get(aid, ("", {}))[1], jobs)}
-        # The one leg ended without a pass: the same work goes out again as a new unit route.
+        if capacity:
+            step = (replacement_capacity_wait(jobs, aid, source)
+                    if resumed else advance(jobs, aid, run=run, resume_capacity=True))
+            if step.get("reason") == "replacement-capacity-wait" and wait and not resumed:
+                from capacity_auto_resume import _epoch
+                retry = _epoch(step.get("retry_at")) or clock() + CAPACITY_PROBE_SECONDS
+                delay = min(_wait_budget(result), max(0, retry - clock()))
+                if delay > 0:
+                    sleep(delay)
+                    result["capacity_waited_seconds"] = result.get("capacity_waited_seconds", 0) + delay
+                if delay > 0 and _wait_budget(result) > 0:
+                    step = advance(jobs, aid, run=run, resume_capacity=True)
+            if step.get("state") in {"running", "reused"}:
+                # Follow the admitted row with the remaining wait window, even if its result came back immediately.
+                return _advance_unit(route, path, jobs, result, leg, wait=wait, run=run, sleep=sleep,
+                                     clock=clock, resumed=True)
+            if step.get("reason") == "replacement-capacity-wait":
+                return _capacity_pause({**result, "result": outcome}, step, resume, unit=True)
+            if step.get("state") == "needs-attention":
+                return {**result, "state": "needs-attention", "reason": step["reason"],
+                        "result": outcome, "replacement_attention": [step],
+                        "parent_next": "inspect-receipt", "parent_next_command": "",
+                        "next_step": step.get("retry_when") or step.get("next_step")
+                            or "Inspect the unit recovery receipt before continuing this route."}
+        # Ordinary failed or missing results keep the existing inspection and compose path.
         command = _compose_again(route)
         return {**result, "state": "needs-attention", "reason": "unit-outcome-needs-inspection",
                 "result": outcome, "required_action": "compose-again", "parent_next": "compose",
@@ -3453,7 +3487,10 @@ def _arm_capacity_resume(result, path, jobs):
             f"{armed['resume_at']} at the latest, and then leaves this session one notice of the "
             if waits_to_cap else
             f"runs resume_command once at {armed['resume_at']} and then leaves this session one notice of the ")
+    next_step = (f"The unit worker stopped at a usage limit. The runtime {when}result. "
+                 "resume_command stays valid to try earlier." if result.get("reason") == UC.CAPACITY_PAUSE else
+                 f"The runtime {when}result; tell the user the work is paused until then. "
+                 "Nothing failed. resume_command stays valid if the user wants to resume earlier.")
     return {**result, "auto_resume": armed, "required_action": "wait-for-auto-resume",
             "parent_next": "end-turn", "parent_next_reason": "capacity-auto-resume",
-            "next_step": f"The runtime {when}result; tell the user the work is paused until then. "
-                "Nothing failed. resume_command stays valid if the user wants to resume earlier."}
+            "parent_next_command": "", "next_step": next_step}

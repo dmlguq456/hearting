@@ -177,6 +177,45 @@ class UnitFailedLegTest(UnitLegBase):
         self.assertNotIn("start --route", result["parent_next_command"])
 
 
+class UnitCapacityStartTest(UnitLegBase):
+    def test_governor_refusal_before_registration_keeps_the_original_slot(self):
+        route, path = self.unit_route()
+        jobs = Path(self.root) / "jobs.log"
+        jobs.touch()
+
+        def refuse(command, **kwargs):
+            self.assertIn(W.attempt_id(route, "unit"), command)
+            return subprocess.CompletedProcess(command, 75,
+                "check=failed\nreason=model-worker-governor-denied\nretryable=1\nrefusal=rolling-start-budget\n"
+                "worker_class=dispatch\nretry_after_seconds=30\nchild_spawned=0\n", "")
+
+        with mock.patch.object(W, "prepare_task_request", return_value=None):
+            receipt = W.start_work(route, path, jobs, run=refuse)
+        self.assertEqual((receipt["state"], receipt["reason"]), ("waiting-capacity", "launch-capacity-wait"))
+        self.assertFalse(receipt["spawned"])
+        self.assertEqual(jobs.read_text(), "")
+
+    def test_registered_capacity_pause_is_not_a_compose_again(self):
+        route, path = self.unit_route()
+        jobs = Path(self.root) / "jobs.log"
+        aid = W.attempt_id(route, "unit")
+        jobs.write_text(self.leg_row(route, path, status="done", launch_started="1",
+                                    artifact_root=route["artifact_root"], failure_class="capacity",
+                                    note="dead-capacity"))
+        hold = {"state": "needs-attention", "reason": "replacement-capacity-wait",
+                "harness": "claude", "source_attempt_id": aid, "retry_at": "2099-01-01T00:00:00Z"}
+        with mock.patch.object(W, "default_parent_session_id", return_value="parent"), \
+                mock.patch.object(W, "join_selected_attempts", return_value={"state": "ready", "children": []}), \
+                mock.patch.object(W, "_outcome", return_value={"classification": "failure"}), \
+                mock.patch("dispatch_replacement.advance", return_value=hold) as advance, \
+                mock.patch("capacity_auto_resume.arm", return_value=None):
+            receipt = W.start_work(route, path, jobs)
+        self.assertEqual((receipt["state"], receipt["reason"]), ("waiting-capacity", "unit-capacity-wait"))
+        self.assertEqual(receipt["source_attempt_id"], aid)
+        self.assertEqual(receipt["retry_at"], hold["retry_at"])
+        advance.assert_called_once()
+
+
 class UnitTupleTest(UnitLegBase):
     def test_the_binding_takes_its_axes_from_the_recipe_and_the_unit_head(self):
         route, path = self.unit_route()

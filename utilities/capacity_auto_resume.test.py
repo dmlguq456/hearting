@@ -45,6 +45,26 @@ class ArmTest(unittest.TestCase):
         record = json.loads(Path(armed["record"]).read_text())
         self.assertEqual((record["state"], record["route_file"]), ("armed", str(self.route.resolve())))
 
+    def test_unit_carrier_arms_only_for_the_parent_and_only_once(self):
+        source = "att-unit"
+        offer = {"reason": C.UNIT_CAPACITY_PAUSE, "route_id": PAUSE["route_id"], "source_attempt_id": source}
+        pending = {"route_id": offer["route_id"], "route_file": str(self.route),
+                   "route_hash": "sha256:sealed", "source_attempt_id": source, "source": {"parent_sid": "parent"}}
+        with mock.patch("dispatch_replacement.unit_capacity_pause", return_value=pending), \
+                mock.patch("session_identity.identity", return_value=SimpleNamespace(known=True, session_id="parent")), \
+                mock.patch("route_authority.owns", return_value=False) as owns:
+            self.assertIsNone(self.arm(offer))
+            owns.return_value = True
+            armed = self.arm(offer)
+            self.assertEqual(self.arm(offer)["state"], "already-armed")
+        self.assertEqual(len(self.spawned), 1)
+        path = Path(armed["record"])
+        self.assertEqual(json.loads(path.read_text())["unit_route_hash"], pending["route_hash"])
+        with mock.patch("dispatch_replacement.unit_capacity_pause", return_value=None):
+            C.run(path, now=lambda: RETRY_EPOCH, call=mock.Mock(side_effect=AssertionError("unit already settled")),
+                  follow=lambda _: None)
+        self.assertEqual(json.loads(path.read_text())["notice"], "skipped-unit-no-longer-pending")
+
     def test_the_record_names_the_paused_harness_attempt_and_usage_state(self):
         armed = self.arm({**PAUSE, "harness": "claude", "source_attempt_id": "att-dead",
                           "usage_state": "allocation-usage-gate"})
