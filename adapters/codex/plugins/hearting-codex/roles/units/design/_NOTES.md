@@ -101,3 +101,11 @@ infinite regress). Rule preserved in the unit; date/rationale only here.
 EN `_design_rules.md:22` "three to five useful iterations" vs KO "최대 3-5 회전"
 (hard cap). Unit bodies follow the LAW fragment (EN, "up to"); no semantic conflict
 judged, recorded for completeness.
+
+## Two-layer move, turn 9-3 (2026-11-25) — placement log: design/verifier
+
+No line removed; old `##` headings became `###`; one added stance pointer line. Everything
+that decides the verdict is 지킬 것: input and procedure, Layer 1 (zero tolerance), Layer 2 (derived
+pass rate), main-context protection, the output schema, the rendering-unavailable rule.
+참고: only the closing memory line. `_design-rules.md` is still not carried by the runtime;
+the "read it first" pointer stays in 지킬 것 and no line of it was copied in.

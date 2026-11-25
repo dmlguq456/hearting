@@ -96,3 +96,12 @@ analysis procedure (paywall fast-detect, access ladder, reading depth and grades
 chaining and code-search procedures, memory. Branch headings that split across the layers are
 repeated in both. The per-branch reference loading in the design ("참고 — <갈래>") needs a
 runtime that is not there yet, so the branch headings keep their old titles.
+
+## Two-layer move, turn 9-3 (2026-11-25) — placement log: research/fact-check, research/claim-verify
+
+No line removed; old `##` headings became `###`. `research/fact-check` — 지킬 것: the scope
+paragraph, the classification rule, the four verification rules, the output table and return;
+참고: memory only. `research/claim-verify` (plus the added stance pointer line) — 지킬 것:
+principles (default-refute, the votes the node launched, source quality × claim strength), the
+input and cost gate with resume, the per-claim vote and its aggregation, the output table and
+verdict mapping; 참고: the "Division vs fact-check" comparison and memory.
