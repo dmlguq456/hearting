@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
 MEM = ROOT / "tools" / "memory" / "mem.py"
@@ -93,6 +94,30 @@ class WorkLabelsTest(unittest.TestCase):
             item["unit"] = unit
         known = json.loads(path.read_text())["requests"] if path.exists() else []
         path.write_text(json.dumps({"schema_version": 1, "attempt_id": attempt, "requests": known + [item]}))
+
+    def unit_correct(self, route_id, unit="qa/code-review", text="look again", session=SESSION,
+                     last="pass", parent_ok=True, request_id=None):
+        """The real ``correct --route <unit route>`` code path (a fake registry and start, a real text store).
+
+        Returns ``(code, receipt)``; what it keeps is what a later ``mem add`` reads."""
+        import work_start
+        from dispatch_contract import DispatchContractError
+        node, first = "unit", "att-" + "1" * 32
+        route = {"route_id": route_id, "route_hash": "h", "capability": "unit", "artifact_root": str(self.root),
+                 "cwd": str(self.root / "project"),
+                 "nodes": [{"id": node, "dispatch_depth": 1}]}
+        meta = {"attempt_id": first, "route_id": route_id, "route_node": node, "harness": self.harness,
+                "worker_type": "review", "capability": "unit", "workflow_completion": "runtime-v1",
+                "failure_class": last}
+        rows = {first: ("done", meta)}
+        refuse = None if parent_ok else DispatchContractError("work-parent-recovery-required", "x")
+        with mock.patch.dict(os.environ, self.env(**{session_env()[self.harness][0]: session}), clear=True), \
+                mock.patch.object(work_start, "unit_leg", return_value={"id": node, "unit": unit}), \
+                mock.patch.object(work_start, "_rows", side_effect=lambda jobs: rows), \
+                mock.patch.object(work_start, "require_route_parent", side_effect=refuse), \
+                mock.patch.object(work_start, "start_work", return_value={"state": "running", "next_step": "n"}):
+            return work_start.correct_unit_route(
+                route, str(self.root / "routes" / f"{route_id}.json"), self.jobs, text, request_id)
 
     def direct_turn(self, ago, root="/tmp/proj-a", route_held=False):
         """A direct-work turn that ended ``ago`` seconds back, written the way the real recorder
@@ -327,6 +352,76 @@ class WorkLabelsTest(unittest.TestCase):
         self.assertEqual(self.add(tier="working")[1], [])
         self.assertEqual(self.add("--topic", "field:docs")[1], ["field:docs"])
         self.assertEqual(self.add("--topic", "other-topic")[1], ["field:code", "other-topic"])
+
+    def test_a_unit_route_correction_the_runtime_took_adds_its_unit(self):
+        rid = self.route("code", capability="unit")
+        code, receipt = self.unit_correct(rid)
+        self.assertEqual((code, receipt["memory_labels"]), (0, ["field:code", "unit:qa/code-review"]))
+        self.assertEqual(self.add()[1], ["field:code", "unit:qa/code-review"])
+        self.assertTrue(self.found("unit:qa/code-review"))
+        self.assertTrue(self.found("field:code"))
+        self.assertFalse(self.found("unit:qa/test"))
+
+    def test_a_unit_correction_that_was_refused_or_never_kept_adds_no_unit(self):
+        rid = self.route("code", capability="unit")
+        code, receipt = self.unit_correct(rid, parent_ok=False)
+        self.assertEqual((code, receipt["state"], "memory_labels" in receipt), (69, "not-admitted", False))
+        code, receipt = self.unit_correct(rid, last="blocked")  # the last turn ended with no verdict
+        self.assertEqual((code, receipt["state"], "memory_labels" in receipt), (69, "not-admitted", False))
+        code, receipt = self.unit_correct(rid, text="  ")  # nothing to keep
+        self.assertEqual((code, "memory_labels" in receipt), (69, False))
+        self.assertEqual(self.add()[1], ["field:code"])
+
+    def test_a_unit_correction_another_session_sent_does_not_label_this_one(self):
+        rid = self.route("code", capability="unit")
+        self.unit_correct(rid, session="sess-other")
+        self.assertEqual(self.add()[1], ["field:code"])
+        self.unit_correct(rid, text="a different ask")  # this session's own, newer
+        self.assertEqual(self.add()[1], ["field:code", "unit:qa/code-review"])
+
+    def test_the_newest_unit_correction_of_this_session_wins_and_a_repeat_changes_nothing(self):
+        rid = self.route("code", capability="unit")
+        self.unit_correct(rid, text="first ask")
+        time.sleep(0.2)
+        self.unit_correct(rid, unit="qa/test", text="second ask")
+        self.assertEqual(self.add()[1], ["field:code", "unit:qa/test"])
+        self.unit_correct(rid, unit="qa/ml-debug", text="first ask")  # the same text again: kept once, unchanged
+        self.assertEqual(self.add()[1], ["field:code", "unit:qa/test"])
+
+    def test_a_unit_correction_on_one_of_several_routes_or_after_direct_work_names_nothing(self):
+        rid = self.route("code", capability="unit")
+        self.unit_correct(rid)
+        other = self.route("docs", capability="unit")
+        self.assertEqual(self.add()[1], [])  # several routes
+        self.unit_correct(other, unit="editorial/write")
+        self.assertEqual(self.add()[1], [])
+        self.direct_turn(1)  # direct work after both
+        self.assertEqual(self.add()[1], [])
+
+    def test_a_unit_correction_followed_by_direct_work_names_nothing(self):
+        rid = self.route("code", capability="unit", ts=time.time() - 600)
+        self.unit_correct(rid)
+        self.assertEqual(self.add()[1], ["field:code", "unit:qa/code-review"])
+        self.direct_turn(1)
+        self.assertEqual(self.add()[1], [])
+
+    def test_a_unit_label_never_replaces_what_the_record_was_given_or_had(self):
+        rid = self.route("code", capability="unit")
+        self.unit_correct(rid)
+        self.assertEqual(self.add("--topic", "unit:editorial/write")[1], ["field:code", "unit:editorial/write"])
+        self.assertEqual(self.add("--topic", "field:docs")[1], ["field:docs", "unit:qa/code-review"])
+        self.assertEqual(self.add("--topic", "other-topic")[1], ["field:code", "other-topic", "unit:qa/code-review"])
+        text = f"{BODY} Unit written again."
+        first, topics = self.add("--topic", "unit:editorial/write", body=text, AGENT_DISPATCH_DEPTH="1")
+        again, topics = self.add(body=text)
+        self.assertEqual((again, topics), (first, ["field:code", "unit:editorial/write"]))
+        self.assertEqual(self.add(rtype="lesson")[1], [])
+        self.assertEqual(self.add(tier="working")[1], [])
+
+    def test_a_worker_session_gets_no_unit_label_from_a_unit_correction(self):
+        rid = self.route("code", capability="unit")
+        self.unit_correct(rid)
+        self.assertEqual(self.add(AGENT_DISPATCH_DEPTH="2")[1], [])
 
     def test_a_worker_session_gets_nothing(self):
         self.route("code")

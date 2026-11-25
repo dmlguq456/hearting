@@ -7,8 +7,10 @@ the labels that fit, or with none:
 
 - the field comes from the route sealed for the session's one current route
   (``field`` in the route file, one of the eight English names);
-- the unit comes from the newest correction this session sent to a stage of that
-  route (the owner-input request keeps the stage's unit, ``dispatch_owner_input``).
+- the unit comes from the newest correction this session sent on that route: to a stage
+  of an owner's route (the owner-input request keeps the stage's unit,
+  ``dispatch_owner_input``) or to a unit route's worker (the kept text keeps it,
+  ``unit_continue``). A refused or never-kept correction left nothing to read.
 
 "Current route" is read from the session's own route-chain ledger
 (``tools/fleet/route_chain``), the record every compose and start already
@@ -157,6 +159,13 @@ def _correction_unit(route_id, session, environ):
                 at = events[0].get("time") if isinstance(events[0], dict) else 0
                 if isinstance(at, (int, float)) and at >= newest[0]:
                     newest = (at, item.get("unit"))
+    # A unit route has no owner: its correction is the text kept for its next turn, with the sender and unit.
+    import unit_continue
+    for item in unit_continue.entries(jobs, route_id):
+        if isinstance(item, dict) and item.get("source_session") == session:
+            at = item.get("at")
+            if isinstance(at, (int, float)) and not isinstance(at, bool) and at >= newest[0]:
+                newest = (at, item.get("unit"))
     stored = newest[1]  # kept as the label itself
     return unit_label(stored[5:]) if isinstance(stored, str) and stored.startswith("unit:") else None
 

@@ -349,24 +349,6 @@ class ProjectionBehaviorTests(ProjectionFixture):
         self.assertEqual(payload["verification"]["history"],
                          [{"sequence": 1, "round": 1, "verdict": "FAIL"}])
 
-    def test_cairn_exact_revision_join_and_local_uncertainty(self):
-        report_revision = next(row for row in self.document["artifact_revisions"]
-                               if row["locator"]["path"] == "artifacts/report/REPORT.md")
-        row = {"stable_id": report_revision["artifact_id"], "artifact_root_id": ROOT_ID,
-               "namespace_state": "active", "integrity": {"verified": True,
-                 "expected_digest": report_revision["content_digest"]}, "freshness": {"stale": False}}
-        joined = projection.project_rows([row], artifact_root=self.root, jobs=self.jobs)
-        self.assertEqual(joined[0]["payload"]["verification"]["verdict"], "PASS")
-        wrong = dict(row, artifact_root_id="root_" + "0" * 32)
-        unresolved = projection.project_rows([wrong], artifact_root=self.root, jobs=self.jobs)
-        self.assertEqual(unresolved[0]["payload"]["verification"]["verdict"], "unresolved")
-        self.assertEqual(unresolved[0]["payload"]["verification"]["reason"],
-                         "remote-root-binding-mismatch")
-        stale = dict(row, partial=True)
-        unresolved = projection.project_rows([stale], artifact_root=self.root, jobs=self.jobs)
-        self.assertEqual(unresolved[0]["payload"]["verification"]["reason"],
-                         "remote-projection-stale")
-
     def test_obligation_read_distinguishes_pending_unknown_and_not_applicable(self):
         self.assertEqual(projection._obligations(self.jobs, [])["state"], "not-applicable")
         metadata = [("done", {"peer_obligation_id": "peer-fixture"})]

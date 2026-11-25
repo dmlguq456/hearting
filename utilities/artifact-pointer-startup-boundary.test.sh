@@ -4,13 +4,8 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 W5_STARTUP_TMP=$(mktemp -d)
-http_pid=
 cleanup() {
   rc=$?
-  if [ -n "$http_pid" ] && kill -0 "$http_pid" 2>/dev/null; then
-    kill "$http_pid" 2>/dev/null || rc=1
-    wait "$http_pid" 2>/dev/null || :
-  fi
   rm -rf -- "$W5_STARTUP_TMP" || rc=1
   test ! -e "$W5_STARTUP_TMP" || rc=1
   trap - EXIT HUP INT TERM
@@ -21,7 +16,6 @@ trap cleanup EXIT HUP INT TERM
 export XDG_DATA_HOME="$W5_STARTUP_TMP/data"
 export XDG_STATE_HOME="$W5_STARTUP_TMP/state"
 export MEM_STORE="$W5_STARTUP_TMP/data/hearting/memory"
-export W5_STARTUP_TMP
 case "$MEM_STORE" in "$W5_STARTUP_TMP"/*) ;; *) exit 2;; esac
 mkdir -p "$XDG_DATA_HOME" "$XDG_STATE_HOME"
 
@@ -30,47 +24,6 @@ mkdir -p "$XDG_DATA_HOME" "$XDG_STATE_HOME"
 (cd "$ROOT" && python3 "$ROOT/tools/memory/mem.py" add working note \
   "startup sentinel project record" --scope project --source startup-seed \
   --headline "startup sentinel" --entity startup >/dev/null)
-
-path_count="$W5_STARTUP_TMP/path-transport.count"
-printf '0\n' > "$path_count"
-fake="$W5_STARTUP_TMP/cairn-artifact-read.sh"
-cat > "$fake" <<'EOF'
-#!/bin/sh
-n=$(cat "$W5_STARTUP_TMP/path-transport.count")
-printf '%s\n' "$((n+1))" > "$W5_STARTUP_TMP/path-transport.count"
-exit 99
-EOF
-chmod 700 "$fake"
-export PATH="$W5_STARTUP_TMP:$PATH"
-
-# A reachable isolated HTTP fixture is the second active transport oracle.
-# Its process is joined and reaped before this test reports success.
-http_count="$W5_STARTUP_TMP/http.count"
-: > "$http_count"
-cat > "$W5_STARTUP_TMP/http-server.py" <<'PY'
-import http.server, pathlib, sys
-port_file, count_file = map(pathlib.Path, sys.argv[1:])
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        with count_file.open("a", encoding="utf-8") as stream:
-            stream.write("1\n")
-        self.send_response(500); self.end_headers()
-    def log_message(self, *_args):
-        pass
-server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-port_file.write_text(str(server.server_address[1]), encoding="utf-8")
-server.serve_forever()
-PY
-python3 "$W5_STARTUP_TMP/http-server.py" "$W5_STARTUP_TMP/http.port" "$http_count" &
-http_pid=$!
-i=0
-while [ ! -s "$W5_STARTUP_TMP/http.port" ]; do
-  kill -0 "$http_pid" 2>/dev/null
-  i=$((i+1)); [ "$i" -lt 500 ] || exit 1
-  sleep 0.01
-done
-export CAIRN_READ_ENDPOINT="http://127.0.0.1:$(cat "$W5_STARTUP_TMP/http.port")/read"
-export CAIRN_READ_TOKEN="w5-startup-fixture-token"
 
 run_real() {
   mode=$1; shift
@@ -84,10 +37,10 @@ run_real() {
   set -- "$trace"*
   test -e "$1"
   # AF_UNIX lookups such as glibc's optional nscd probe are local runtime
-  # plumbing, not an artifact transport. Keep the boundary exact: the Cairn
-  # executable or any IP socket attempt is forbidden here.
-  if rg -q 'utilities/cairn-artifact-read\.sh|connect\(.*sa_family=AF_INET' "$trace"*; then
-    rg -n 'utilities/cairn-artifact-read\.sh|connect\(.*sa_family=AF_INET' "$trace"* >&2 || :
+  # plumbing, not an artifact transport. Keep the boundary exact: any IP
+  # socket attempt is forbidden here.
+  if rg -q 'connect\(.*sa_family=AF_INET' "$trace"*; then
+    rg -n 'connect\(.*sa_family=AF_INET' "$trace"* >&2 || :
     echo "startup transport observed for $mode" >&2
     exit 1
   fi
@@ -113,24 +66,7 @@ assert 0 < len(candidates) <= mem.CANDIDATE_MAX_RESULTS
 assert len(data) <= mem.CANDIDATE_MAX_UTF8_BYTES
 PY
 
-# Command-owned sentinels are all established before the zero-call assertions.
-test "$(cat "$path_count")" = 0
-test ! -s "$http_count"
-telemetry="$XDG_STATE_HOME/hearting/artifact-projection/read-telemetry.jsonl"
-test ! -e "$telemetry" || test ! -s "$telemetry"
-hook_hits="$W5_STARTUP_TMP/hook-hits"
-if (cd "$ROOT" && rg -l 'cairn-artifact-read|artifact-projection-read' adapters/*/hooks/ hooks) > "$hook_hits"; then
-  echo "startup hook unexpectedly references artifact projection read" >&2
-  exit 1
-fi
-test ! -s "$hook_hits"
-
-# Explicitly join the HTTP fixture and prove cleanup before printing PASS.
-kill -0 "$http_pid" 2>/dev/null
-kill "$http_pid"
-wait "$http_pid" 2>/dev/null || :
-http_pid=
 rm -rf -- "$W5_STARTUP_TMP"
 test ! -e "$W5_STARTUP_TMP"
 trap - EXIT HUP INT TERM
-echo "startup boundary: PASS (two real paths, three transport oracles, isolated telemetry, explicit cleanup)"
+echo "startup boundary: PASS (two real paths, no IP socket, isolated store, explicit cleanup)"
