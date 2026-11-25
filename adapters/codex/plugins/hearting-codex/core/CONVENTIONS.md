@@ -778,9 +778,8 @@ capability-route compose`, but their name and description are not in the model's
 per-request Skill list. Codex sets `policy.allow_implicit_invocation: false` in
 `agents/openai.yaml`, Claude sets `disable-model-invocation: true`, and OpenCode,
 which has no such switch, drops them from its Skill projection and keeps the
-native command. Model-support Skills (`session-tidy`,
-`artifact-projection-read`) stay model-visible helpers, not primary entry
-candidates. `DESIGN_PRINCIPLES §10`
+native command. The model-support Skill (`session-tidy`) stays a model-visible
+helper, not a primary entry candidate. `DESIGN_PRINCIPLES §10`
 owns the qualitative design tenets.
 
 The conformance gate enumerates the portable capability domain and checks every
