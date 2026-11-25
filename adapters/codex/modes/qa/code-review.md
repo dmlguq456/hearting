@@ -182,22 +182,27 @@ review for a fresh independent judgment; do not infer the old subject from
 
 ### Review Criteria
 
-- **Bug potential**: runtime errors, logic errors, type mismatches
-- **Performance**: unnecessary computation, memory waste, inefficient data loading
-- **Code quality**: duplication, unclear names, overly long functions, magic numbers
 - **Scope and cost**: compare actual changed files/lines with the plan estimate;
   check whether an existing implementation of the same function was extended
   where practical, whether a new module or code path duplicates one that exists,
   and how actual size compares with the plan estimate. Compare long checks with
   the attempt budget.
-- **Maintainability**: hardcoded paths, config/code separation, missing error handling
-- **Framework-specific pitfalls** (e.g. PyTorch: missing `.detach()`, memory leaks,
-  device mismatches, in-place operations)
 - **Project convention adherence** per project instructions
 
 Effort scaling: low/medium effort yields a small set of high-confidence findings;
 high through max broadens coverage across correctness, reuse, simplification, and
 efficiency and may include more uncertainty.
+
+### 참고 — code, lab
+
+Review criteria for code:
+
+- **Bug potential**: runtime errors, logic errors, type mismatches
+- **Performance**: unnecessary computation, memory waste, inefficient data loading
+- **Code quality**: duplication, unclear names, overly long functions, magic numbers
+- **Maintainability**: hardcoded paths, config/code separation, missing error handling
+- **Framework-specific pitfalls** (e.g. PyTorch: missing `.detach()`, memory leaks,
+  device mismatches, in-place operations)
 
 ### Style
 

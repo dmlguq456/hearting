@@ -22,7 +22,7 @@ They are a short list of fundamentals per field, each with a one-line gloss and 
 
 They are not a method. They do not set the order of the work, the tools, how deep to go, or how large a piece of work must be before a document is written. Those differ from person to person, and each page has a "Not decided here" section that says so. A line that binds a way of doing something does not belong on these pages.
 
-For now the pages are reference text only; nothing reads them yet.
+A common unit that keys part of its reference by field (`### 참고 — <field>`) gets the `## Fundamentals` lines of its route's field carried with its worker text, without the glosses and sources; nothing else reads these pages.
 
 ## `other`
 
@@ -31,3 +31,5 @@ For now the pages are reference text only; nothing reads them yet.
 ## To change a page
 
 If a page is wrong or missing something, tell us in an issue or a pull request on the Hearting repository. Anyone who works in the field is welcome to. There is no form to fill in and no separate channel.
+
+Keep each fundamental on one line in the form `- head sentence — gloss [source]`. Only the head sentence is carried with the worker text; a line wrapped by indenting is joined to the item above it.
