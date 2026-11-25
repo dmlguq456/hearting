@@ -2197,10 +2197,11 @@ def render_text(receipt: dict, *, continued: dict | None = None, notice_context=
                 "continue the work with the route's start command: the new owner receives the answer "
                 "first. Do not ask for the answer again." + (" " + command if command else ""))
     if receipt["reason"] == UNIT_CAPACITY_PAUSE:
+        command = _resume_text(receipt)
         if continued:
             return (f"The unit worker stopped at a usage limit. The same route will try to continue "
-                    f"at {continued['resume_at']} or when the usage gate clears. Its result comes back here.")
-        command = _resume_text(receipt)
+                    f"at {continued['resume_at']} or when the usage gate clears. Its result comes back here. "
+                    f"You can also read the result with {command or 'start --route <route-id>'}.")
         return ("The unit worker stopped at a usage limit. The existing route can continue when capacity returns."
                 + (" " + command if command else ""))
     if receipt["reason"] == "no-progress":

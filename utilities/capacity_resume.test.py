@@ -10,6 +10,7 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 from datetime import datetime, timezone
+from itertools import product
 import json
 import os
 from pathlib import Path
@@ -50,6 +51,7 @@ class CapacityResumeTest(unittest.TestCase):
         self.ready = False
         self.statuses = {}
         self.launch_home = None
+        self.reuse_snapshot = R._reuse_snapshot
         for patcher in (
                 mock.patch.object(W, "default_parent_session_id", return_value="parent"),
                 # These fixtures drive start synchronously; a pause must not leave a detached timer.
@@ -130,13 +132,13 @@ class CapacityResumeTest(unittest.TestCase):
                 "session_id": "s", "result": "You've hit your session limit · " + result}) + "\n")
         meta = {"attempt_schema_version": "2", "dispatch_depth": "1", "transport": "headless",
                 "execution_surface": "registered-headless", "registered_worker": "1",
-                "fallback_hop": "same-harness-headless", "attempt_id": aid, "route_id": "rt-cap",
-                "route_hash": "sha256:cap", "route_node": "owner", "worker_type": "owner",
+                "fallback_hop": "same-harness-headless", "attempt_id": aid, "route_id": self.route["route_id"],
+                "route_hash": self.route["route_hash"], "route_node": "owner", "worker_type": "owner",
                 "parent_sid": "parent", "harness": harness, "model_profile": "deep", "note": note, "failure_class": failure_class,
                 "launch_outcome": "never-launched", "log_file": str(log), "artifact_root": str(self.root / "artifacts"),
                 "launch_started": "1", "parent_completion_delivery": "codex-managed-gateway", **extra}
         args = SimpleNamespace(attempt_id=aid, jobs_path=self.jobs, worktree=str(self.root),
-                               route_id="rt-cap", route_node="owner", model_profile="deep",
+                               route_id=meta["route_id"], route_node=meta["route_node"], model_profile="deep",
                                replacement_input_argv=["--start", "--attempt-id", aid, "--prompt-text", "the raw task"])
         if harness == "opencode":
             args.opencode_config_content = json.dumps({
@@ -184,7 +186,7 @@ class CapacityResumeTest(unittest.TestCase):
             index = raw_argv.index("--route-evidence")
             del raw_argv[index:index + 2]  # the selector consumes this before invoking the adapter
         args = SimpleNamespace(attempt_id=aid, jobs_path=self.jobs, worktree=value("--worktree"),
-                               route_id="rt-cap", route_node=source["route_node"], replacement_input_argv=raw_argv,
+                               route_id=source["route_id"], route_node=source["route_node"], replacement_input_argv=raw_argv,
                                **{"model_profile": source["model_profile"], **(self.candidate_args or {})})
         if candidate_harness == "opencode" and not hasattr(args, "opencode_config_content"):
             args.opencode_config_content = json.dumps({
@@ -209,8 +211,8 @@ class CapacityResumeTest(unittest.TestCase):
 
     candidate_args = None
 
-    def start(self, **kw):
-        return W.start_work(self.route, self.path, self.jobs, run=self.launcher, **kw)
+    def start(self, *, run=None, **kw):
+        return W.start_work(self.route, self.path, self.jobs, run=run or self.launcher, **kw)
 
     def claims(self):
         return sorted((R._directory(self.jobs) / "claims").glob("*.json")) if (R._directory(self.jobs) / "claims").exists() else []
@@ -631,9 +633,10 @@ class CapacityResumeTest(unittest.TestCase):
 
     def seed_unit(self, harness="claude", **extra):
         self.jobs.write_text("")
-        self.route.update(capability="unit", effective_intensity="quick", nodes=[
-            {"id": "unit", "worker_type": "review", "dispatch_depth": 1, "launch_authority": "depth-0",
-             "model_profile": "deep", "role": "reviewer", "unit": "qa/code-review"}])
+        if self.route["capability"] != "unit":
+            self.route.update(capability="unit", effective_intensity="quick", nodes=[
+                {"id": "unit", "worker_type": "review", "dispatch_depth": 1, "launch_authority": "depth-0",
+                 "model_profile": "deep", "role": "reviewer", "unit": "qa/code-review"}])
         self.path.write_text(json.dumps(self.route))
         aid = self.seed_owner(f"att-unit-{harness}", note="dead-capacity", failure_class="capacity", harness=harness,
                               route_node="unit", worker_type="review", capability="unit",
@@ -641,7 +644,7 @@ class CapacityResumeTest(unittest.TestCase):
         (R._directory(self.jobs) / "inputs" / f"{aid}.json").unlink()
         argv = ["--start", "--attempt-id", aid, "--slug", "task", "--route-node", "unit"]
         args = SimpleNamespace(attempt_id=aid, jobs_path=self.jobs, worktree=str(self.root),
-                               route_id="rt-cap", route_node="unit", model_profile="deep",
+                               route_id=self.route["route_id"], route_node="unit", model_profile="deep",
                                replacement_input_argv=argv)
         if harness == "opencode":
             args.opencode_config_content = json.dumps({"permissions": [
@@ -676,6 +679,125 @@ class CapacityResumeTest(unittest.TestCase):
                     result = self.start()
                     self.ready = False
                 self.assertEqual((result["state"], result["summary"]), ("completed", "review result"))
+
+    def test_capacity_timer_respects_the_approved_plan_scope_for_unit_and_owner(self):
+        import artifact_producer as producer
+        import capacity_auto_resume as timer
+        import route_plan as plans
+
+        module = W._route_module()
+        headless = {"candidates": [
+            {"harness": harness, "transport": "headless", "surface": "registered-headless", "status": "supported",
+             "probe_source": "fixture", "probe_time": "2026-11-25T00:00:00Z"} for harness in ("claude", "codex")
+        ]}
+        brief = self.root / "approved-task.md"
+        brief.write_text("the raw task")
+        unit_leg = {"capability": "unit", "shape": "solo", "unit": "qa/code-review"}
+        owner_leg = {"capability": "autopilot-code", "shape": "solo", "intensity": "quick"}
+        next_leg = {"capability": "autopilot-draft", "mode": "doc", "shape": "direct"}
+        for kind, scope in product(("unit", "owner"), ("complete", "report")):
+            with self.subTest(kind=kind, scope=scope):
+                first_leg = unit_leg if kind == "unit" else owner_leg
+                self.ready = False
+                self.calls.clear()
+                root = self.root / f"{kind}-{scope}"
+                root.mkdir()
+                producer.activate(root, repository_id="repo_" + "a" * 32,
+                                  artifact_root_id="root_" + "b" * 32, w7={"campaign_id": "camp_" + "c" * 32})
+                self.jobs = root / "jobs.log"
+                self.jobs.touch()
+                context = {"cwd": str(self.root), "artifact_root": str(root), "slug": "approved",
+                           "prompt_file": str(brief), "owner": "claude"}
+                decision = plans.build_decision(
+                    frame_route={"route_id": "rt-1234567890abcdef", "route_hash": "sha256:frame", "cycle_id": "frame-cycle"},
+                    selected="approved", reason="", briefs=[], intent={},
+                    proposal={"legs": [first_leg, next_leg]},
+                    approvals={"execution_scope": scope}, first_leg_compose={"context": context})
+                decision_file = root / "decision.json"
+                record = plans.build_record(decision)
+                decision_file.write_bytes(plans.render(record))
+                binding = plans.read_route_plan(f"{decision_file}#0", root)
+                arguments = plans.leg_arguments(first_leg)
+                if kind == "unit":
+                    # The fixture starts with the approved binding already on the unit route.
+                    arguments.update(capability=None, unit=first_leg["unit"])
+                else:
+                    arguments["route_plan"] = binding
+                self.route = module.compose_route(
+                    **arguments, cwd=str(self.root), artifact_root=str(root),
+                    slug="approved-leg0", unassigned=True, spec_read="fixture", profile="deep",
+                    registered_headless_evidence=headless, jobs=self.jobs,
+                    work_request={"text": "the raw task", "owner_harness": "claude"})
+                if kind == "unit":
+                    self.route["route_plan"] = plans.sealed_form(binding)
+                    self.route = module._bind_entry_execution_scope(self.route, scope)
+                self.path = Path(module.canonical_route_path(str(root), self.route["route_id"]))
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.path.write_text(json.dumps(self.route))
+                with mock.patch.object(producer, "_observe_after_begin"):
+                    producer.begin(root, route_file=self.path, capability=self.route["capability"],
+                                   intensity="quick", jobs=self.jobs, require_cycle=True)
+                cycle = producer.route_cycle_for(root, self.route)
+                node = self.route["nodes"][0]
+                scope_fields = {"artifact_root": str(root), "route_file": str(self.path), "unit": node["unit"],
+                                "write_scope": node["write_scope"][0], "artifact_cycle_id": cycle["cycle_id"]}
+                if kind == "unit":
+                    original = self.seed_unit(**scope_fields)
+                else:
+                    original = self.seed_owner("att-plan-owner", note="dead-capacity", failure_class="capacity",
+                                               result=FREE, route_node=node["id"], **scope_fields)["attempt_id"]
+                timer_path = root / "timer.json"
+                timer_path.write_text(json.dumps({
+                    "state": "armed", "cause": "capacity", "retry_at": "2020-01-01T00:00:00Z",
+                    "route_id": self.route["route_id"], "route_file": str(self.path),
+                    "jobs": str(self.jobs), "source_attempt_id": original,
+                    **({"unit_route_hash": self.route["route_hash"]} if kind == "unit" else {}),
+                }))
+                receipts = []
+
+                def launch(command, **kwargs):
+                    result = self.launcher(command, **kwargs)
+                    successor = self.replacement_id(original)
+                    self.set_status(successor, "done", failure_class="pass", verdict="PASS")
+                    self.ready = True
+                    return result
+
+                def start(argv, **kwargs):
+                    self.assertEqual(argv[2:], ["start", "--route", str(self.path), "--jobs", str(self.jobs)])
+                    receipt = self.start(run=launch)
+                    receipts.append(receipt)
+                    return subprocess.CompletedProcess(argv, 0, json.dumps(receipt) + "\n", "")
+
+                with mock.patch.object(R, "_route", return_value=(self.path, self.route)), \
+                        mock.patch.object(R, "_reuse_snapshot", side_effect=self.reuse_snapshot), \
+                        mock.patch.object(plans, "completed_cycle", side_effect=lambda route: cycle if self.ready else None), \
+                        mock.patch("dispatch_capacity_evidence.harness_hold", return_value=None), \
+                        mock.patch("dispatch_terminal_commit.owner_workflow_gaps", return_value={}), \
+                        mock.patch.object(timer, "_notify"), mock.patch.object(W, "_unit_summary", return_value={}):
+                    self.assertEqual(timer.run(timer_path, call=start), 0)
+                receipt, = receipts
+                command, = self.calls
+                self.assertEqual(command[command.index("--route-evidence") + 1], str(self.path))
+                successor = self.rows()[self.replacement_id(original)][1]
+                if kind == "unit":
+                    self.assertEqual((successor["continues_attempt_id"], successor["turn"]), (original, "1"))
+                self.assertEqual({key: successor[key] for key in scope_fields}, scope_fields)
+                self.assertEqual((successor["route_hash"], successor["route_node"]),
+                                 (self.route["route_hash"], node["id"]))
+                claim, = self.claims()
+                self.assertEqual(json.loads(claim.read_text())["reuse"]["cycle_id"], cycle["cycle_id"])
+                self.assertEqual(self.route["entry_execution_scope"], scope)
+                if scope == "complete":
+                    self.assertIn("plan_advanced", receipt, receipt)
+                    self.assertEqual((receipt["state"], receipt["plan_advanced"]["leg"]), ("inline", 1), receipt)
+                    next_route = json.loads(Path(receipt["route_file"]).read_text())
+                    self.assertEqual(next_route["route_plan"], {**self.route["route_plan"], "index": 1})
+                    self.assertEqual((next_route["parent_cycle_id"], next_route["entry_execution_scope"]),
+                                     (cycle["cycle_id"], scope))
+                else:
+                    self.assertEqual((receipt["state"], receipt["next_leg"]["index"]), ("completed", 1), receipt)
+                    self.assertNotIn("plan_advanced", receipt)
+                    self.assertEqual(plans.plan_cursor(root, decision["frame_route"]["route_id"], record["digest"]), [])
 
     def test_unpinned_unit_uses_the_normal_selector_without_carrying_a_foreign_session(self):
         import unit_continue

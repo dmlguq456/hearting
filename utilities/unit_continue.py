@@ -372,16 +372,24 @@ def previous_result(jobs, prev_attempt_id, *, after_capacity=False) -> str:
 
 def turn_prompt(args, plan, metadata_block, brief, jobs) -> str:
     """What the continued turn is told. A woken session already holds the brief and the kernel's rules:
-    it gets this turn's dispatch facts (the new cycle's output folder) and the text. A fresh session gets
-    the original brief and the previous result with the text."""
+    it gets this turn's dispatch facts and text. A capacity retry finishes the existing report.
+    A fresh session gets the original brief and the previous result with the text."""
     number = int(getattr(args, "turn", 0) or 2)
     text = getattr(args, "continuation_text", "") or ""
     after_capacity = bool(getattr(args, "automatic_retry_of", None))
     previous = previous_result(jobs, args.continues_attempt_id, after_capacity=after_capacity)
     carried = f"Previous turn's result (turn {number - 1}):\n{previous}\n\n" if previous else ""
     if after_capacity:
-        text = ("The worker stopped at a usage limit. Finish the interrupted turn within the same scope. "
-                "Keep earlier findings and pick up where possible.\n\n" + text)
+        opening = "The worker stopped at a usage limit. Resume the interrupted turn"
+        report = ("Finish the interrupted turn's report under artifact_output_dir. "
+                  "If that file already exists, continue from what is there. Keep earlier findings.")
+        request = f"{carried}Request for the interrupted turn:\n{text.rstrip()}\n"
+        if plan is not None and plan.kind == "resumed":
+            return (f"{opening} in this session within the same scope. {report} End as before.\n\n"
+                    f"{metadata_block}\n{request}")
+        reason = plan.reason if plan else "session-missing"
+        return (f"{brief.rstrip()}\n\n{opening} in a fresh session ({reason}) within the same scope. "
+                f"{report}\n\n{request}")
     if plan is not None and plan.kind == "resumed":
         return (f"This is turn {number} of the same assignment, in the same session. The dispatch facts below "
                 f"are this turn's: write this turn's report under its artifact_output_dir, and keep the "

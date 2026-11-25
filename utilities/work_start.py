@@ -2606,7 +2606,8 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 "artifact_env": prepare_route_artifact_env(path, start=True, jobs=jobs, require_cycle=False)}
     leg = unit_leg(route)
     if leg is not None:
-        return _advance_unit(route, path, jobs, result, leg, wait=wait, run=run, sleep=sleep, clock=clock)
+        result = _advance_unit(route, path, jobs, result, leg, wait=wait, run=run, sleep=sleep, clock=clock)
+        return _with_next_leg(route, result)
     rows = _rows(jobs)
     existing_owner = _slot(route, "owner", rows, jobs)
     frames = ([] if existing_owner in rows and not (interview or answers) else
@@ -3012,8 +3013,10 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock, re
     if joined["state"] == "ready" or capacity:
         outcome = _outcome(jobs, aid)
         if outcome.get("cancellation_requested") or outcome.get("stopped"):
-            return {**result, "state": outcome.get("state", "cancelled"), "result": outcome,
-                    "parent_next": "inspect-receipt", "parent_next_command": ""}
+            return {**result, "state": outcome.get("state", "cancelled"),
+                    "result": {**outcome, "required_action": "", "recovery_command": ""},
+                    "resume_command": "", "parent_next": "inspect-receipt", "parent_next_command": "",
+                    "next_step": "Inspect the unit cancellation receipt."}
         if outcome["classification"] == "success":
             return {**result, "state": "completed", "result": outcome, **_unit_summary(jobs, aid, sleep=sleep),
                     **_turn_fields(_rows(jobs).get(aid, ("", {}))[1], jobs)}
