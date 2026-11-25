@@ -595,7 +595,7 @@ class UnitCapacityContinueScenario(UnitContinueScenario):
             return "fail"
         successor = rows[-1]
         new_report = next((path for path in self.reports(run) if path not in before), None)
-        delivered = wait_for(lambda: new_report and any(str(new_report) in r["last_text"]
+        delivered = wait_for(lambda: new_report and any(str(new_report) in r["text"]
                              for r in unit.resting_session_requests(run)), 65, 1)
         ev["returned_report"] = bool(delivered)
         ev["reports_after"] = len(self.reports(run))
