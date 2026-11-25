@@ -916,6 +916,7 @@ def _commit_attempt_row(
         if exclusive_live_metadata:
             matching_terminal_attempts = set()
             replacement_attempts = set()
+            interrupted_unit_turns = set()
             for entry in rows:
                 if entry is None:
                     continue
@@ -939,6 +940,14 @@ def _commit_attempt_row(
                         replacement_attempts.add(metadata["attempt_id"])
                     else:
                         matching_terminal_attempts.add(metadata["attempt_id"])
+                    if (row_metadata.get("capability") == "unit" and metadata.get("capability") == "unit"
+                            and metadata.get("launch_started") == "1"
+                            and (source := metadata.get("replacement_original_attempt_id"))
+                            and metadata.get("continues_attempt_id") == source):
+                        interrupted_unit_turns.add(source)
+            # A replacement finishes the same logical unit turn. It does not spend
+            # an extra turn when the caller later asks its next ordinary question.
+            matching_terminal_attempts -= interrupted_unit_turns
             if (
                 not automatic_replacement
                 and terminal_attempt_limit is not None

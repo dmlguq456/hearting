@@ -17,8 +17,8 @@ shared:
 
 - a valid envelope's own failure note closes the row (FAIL, BLOCKED, a
   completed blocking review);
-- an actual process failure overrides the envelope (SD-72: final text is a
-  semantic observation, not an exit receipt);
+- a process failure overrides a verdict envelope (SD-72). A recorded unit's
+  exact native quota error explains its nonzero exit.
 - a PASS writes no close here: the join, reap watch or supervisor settles it;
 - when the typed close does not land after a process failure, the wrapper's
   legacy close runs.
@@ -30,6 +30,18 @@ from typing import Callable
 
 from codex_dispatch_terminal import ARTIFACT_HINT_KEYS, REVIEW_BLOCKING_NOTE, inspect_terminal_attempt
 from dispatch_contract import close_attempt_row
+
+
+def capacity_evidence(terminal: dict, log_path) -> dict[str, str]:
+    evidence = {"failure_class": "capacity"}
+    if log_path:
+        evidence["capacity_log"] = str(log_path)
+    if terminal.get("quota_reset_epoch") is not None:
+        evidence["reset"] = str(terminal["quota_reset_epoch"])
+    for key in ("quota_window", "quota_model_scope"):
+        if terminal.get(key) is not None:
+            evidence[key] = str(terminal[key])
+    return evidence
 
 
 def terminal_evidence(terminal: dict, terminal_note: str, log_path, outcome=None) -> dict[str, str]:
@@ -47,12 +59,14 @@ def terminal_evidence(terminal: dict, terminal_note: str, log_path, outcome=None
     }
     if outcome is not None:
         evidence["process_exit"] = str(outcome.exit_code)
-        if outcome.failure:
+        if outcome.failure and terminal_note != "dead-capacity":
             evidence.update(
                 detected_by="foreground-process-exit",
                 failure_class="runtime",
                 reconcile_reason=outcome.failure,
             )
+    if terminal_note == "dead-capacity":
+        evidence.update(capacity_evidence(terminal, log_path))
     for key in ARTIFACT_HINT_KEYS:
         if terminal.get(key):
             evidence[key] = str(terminal[key])
@@ -91,6 +105,14 @@ def settle_foreground_exit(jobs, attempt_id: str | None, log_path, outcome, *, w
     note = terminal.get("failure_note", "") if valid else ""
     if outcome.failure:
         note = f"dead-{outcome.failure}"
+        # A native usage-limit envelope explains an ordinary nonzero exit.
+        # Signal, timeout and cancellation exits keep their own disposition.
+        from route_authority import native_capacity_terminal
+        from unit_continue import recorded_leg
+        meta = artifact_binding or {}
+        if (outcome.failure == f"exit-{outcome.exit_code}" and recorded_leg(meta)
+                and native_capacity_terminal(terminal, meta)):
+            note = "dead-capacity"
     closed = False
     if note and attempt_id:
         closed = bool(close_attempt_row(jobs, attempt_id, note,

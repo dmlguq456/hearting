@@ -119,6 +119,25 @@ def chain(rows, route_id, node) -> list:
     return sorted(turns, key=lambda item: turn_of(item[2]))      # stable: registry order within a turn
 
 
+def recorded_leg(meta) -> bool:
+    """The recording, read-only unit route can keep its session and continue."""
+    from unit_ephemeral import is_scratch_root
+    return bool(meta.get("capability") == "unit" and meta.get("workflow_completion") == "runtime-v1"
+                and meta.get("dispatch_depth") == "1" and meta.get("route_node") == "unit"
+                and meta.get("artifact_root") and not is_scratch_root(meta["artifact_root"]))
+
+
+def capacity_turn_options(source, argv) -> dict:
+    """A replacement finishes the same logical turn, carrying its original request text."""
+    text = "Continue the unfinished work after the usage limit. Preserve any earlier completed findings."
+    for index, token in enumerate(argv[:-1]):
+        if token == "--continuation-text":
+            text = argv[index + 1]       # The interrupted turn's own request, even across another capacity stop.
+            break
+    return {"--continues-attempt-id": source["attempt_id"], "--turn": str(turn_of(source)),
+            "--continuation-text": text}
+
+
 def continued_by_later_turn(jobs, meta) -> bool:
     """Whether a later turn of this unit route has taken over from this attempt (a row names it as `continues_attempt_id`).
 
@@ -213,7 +232,7 @@ def ready_to_continue(jobs, route, path, node, rows) -> Optional[Turn]:
         if owner_completion_state(jobs, last_status, last_meta).state not in {"complete", "not-applicable"}:
             return None
         return turn
-    return turn if superseded_count(path) >= len(turns) else None
+    return turn if superseded_count(path) >= turn_of(last_meta) else None
 
 
 def reopen(path) -> None:
@@ -328,25 +347,49 @@ def transplant(plan, new_home) -> None:
 
 # -- the turn's prompt ------------------------------------------------------------------------------
 
-def previous_result(jobs, prev_attempt_id) -> str:
-    """The previous turn's sealed summary (verdict line, findings, report path), '' when there is none."""
+def previous_result(jobs, prev_attempt_id, *, after_capacity=False) -> str:
+    """The previous turn's sealed summary, crossing an interrupted turn if necessary."""
     from dispatch_completion_join import exact_attempt_row
     try:
         import work_intent
         meta = exact_attempt_row(Path(jobs), prev_attempt_id).metadata
-        return work_intent.sealed_summary(meta, prev_attempt_id)
-    except Exception:  # noqa: BLE001
-        return ""
+        scope = ("route_id", "route_hash", "route_node")
+        seen = set()
+        while meta["attempt_id"] not in seen:
+            aid = meta["attempt_id"]
+            seen.add(aid)
+            summary = work_intent.sealed_summary(meta, aid)
+            if summary or not after_capacity or not meta.get("continues_attempt_id"):
+                return summary
+            prior = exact_attempt_row(Path(jobs), meta["continues_attempt_id"]).metadata
+            if any(meta.get(key) != prior.get(key) for key in scope):
+                break
+            meta = prior
+    except Exception:  # noqa: BLE001 -- no prior summary is a valid handoff
+        pass
+    return ""
 
 
 def turn_prompt(args, plan, metadata_block, brief, jobs) -> str:
     """What the continued turn is told. A woken session already holds the brief and the kernel's rules:
-    it gets this turn's dispatch facts (the new cycle's output folder) and the text. A fresh session gets
-    the original brief and the previous result with the text."""
+    it gets this turn's dispatch facts and text. A capacity retry finishes the existing report.
+    A fresh session gets the original brief and the previous result with the text."""
     number = int(getattr(args, "turn", 0) or 2)
     text = getattr(args, "continuation_text", "") or ""
-    previous = previous_result(jobs, args.continues_attempt_id)
+    after_capacity = bool(getattr(args, "automatic_retry_of", None))
+    previous = previous_result(jobs, args.continues_attempt_id, after_capacity=after_capacity)
     carried = f"Previous turn's result (turn {number - 1}):\n{previous}\n\n" if previous else ""
+    if after_capacity:
+        opening = "The worker stopped at a usage limit. Resume the interrupted turn"
+        report = ("Finish the interrupted turn's report under artifact_output_dir. "
+                  "If that file already exists, continue from what is there. Keep earlier findings.")
+        request = f"{carried}Request for the interrupted turn:\n{text.rstrip()}\n"
+        if plan is not None and plan.kind == "resumed":
+            return (f"{opening} in this session within the same scope. {report} End as before.\n\n"
+                    f"{metadata_block}\n{request}")
+        reason = plan.reason if plan else "session-missing"
+        return (f"{brief.rstrip()}\n\n{opening} in a fresh session ({reason}) within the same scope. "
+                f"{report}\n\n{request}")
     if plan is not None and plan.kind == "resumed":
         return (f"This is turn {number} of the same assignment, in the same session. The dispatch facts below "
                 f"are this turn's: write this turn's report under its artifact_output_dir, and keep the "

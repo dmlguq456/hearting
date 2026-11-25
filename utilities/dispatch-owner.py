@@ -73,7 +73,7 @@ _REQUIRED = {
 # against that same derivation, both through resolve_qa (the single qa/intensity
 # SoT).
 _CAPTURED = _REQUIRED | {"--unit", "--review-output", "--model-role", "--qa",
-                         "--attempt-id", "--continues-attempt-id"}
+                         "--attempt-id", "--continues-attempt-id", "--automatic-retry-of"}
 # SD-OPEN-40: the depth-1 tuples this selector may launch. `review` exists so an
 # independent reviewer can be a *registered review worker* instead of an owner
 # wearing a reviewer's prompt. Before it, every ad-hoc independent review landed
@@ -1247,9 +1247,9 @@ def main(argv):
                             child_env.update(prepare_route_artifact_env(
                                 Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs),
                                 sibling_looked=bool(first) and first.get("_status") in {"open", "running"},
-                                # A unit route's next turn begins its own cycle (the earlier one stays sealed).
+                                # A new request begins its own cycle. A capacity retry finishes the open turn.
                                 fresh_cycle=(values.get("--attempt-id") if values.get("--continues-attempt-id")
-                                             else None)))
+                                             and not values.get("--automatic-retry-of") else None)))
                     except ProducerError as exc:
                         raise OwnerError(f"{exc.code}:{exc.detail}") from exc
                 # Deliberately NOT export_owner_route_env() here. The adapters

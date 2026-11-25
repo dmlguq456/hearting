@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -74,6 +75,9 @@ class UnitContinueScenario(unit.UnitRouteBlockingScenario):
     moved_head = False   # the work tree's head moves on between turn 1 and turn 2 (the sealed head stays an ancestor)
 
     # -- the fixture model ------------------------------------------------------------------------
+    def write_report_from_fixture(self, run, target, body):
+        return False
+
     def script(self, run):
         self.worker_end = threading.Event()
         self.ran = set()
@@ -99,7 +103,8 @@ class UnitContinueScenario(unit.UnitRouteBlockingScenario):
                 if turn == self.blocked_turn:       # this turn ends without a verdict and without a report
                     return Reply("artifact: -\nverdict: BLOCKED\nblocker: HB-CONT-BLOCKED the fixture is not reachable")
                 if record["last_kind"] != "tool" and not wrote:
-                    return Reply(shell=f"mkdir -p \"$(dirname '{target}')\" && printf %s {shlex.quote(body)} > '{target}'")
+                    if not self.write_report_from_fixture(run, Path(target), body):
+                        return Reply(shell=f"mkdir -p \"$(dirname '{target}')\" && printf %s {shlex.quote(body)} > '{target}'")
                 if turn > 1:
                     return Reply(f"artifact: {target}\nverdict: PASS\nblocker: none")
                 return self.final_reply(target)
@@ -453,5 +458,205 @@ class UnitContinueRetainedScenario(UnitContinueScenario):
             self.worker_end.set()
 
 
+
+CAPACITY_CHECK = "SCENARIO-CAPACITY check the same unit route with start"
+CAPACITY_REPLY = "The worker stopped at a usage limit"
+
+
+class UnitCapacityContinueScenario(UnitContinueScenario):
+    name = "unit-capacity-continue"
+    summary = ("A recording unit hits a loopback 429. The existing capacity wait continues that turn "
+               "once with the original permissions, preserving any earlier review.")
+    QUIET = 3
+    WAIT = 185
+
+    def extra_argv(self, harness):
+        # The private test pane owns its server directly. Its socket path is
+        # already near the Unix-domain length limit inside the fixture HOME.
+        return ["--no-daemon"] if harness == "codex" else []
+
+    def prepare(self, run):
+        super().prepare(run)
+        if run.harness == "codex":
+            # The fixture provider does not use an OpenAI account. Answer the
+            # offline login probe locally and leave all model calls to Codex.
+            bin_dir = run.home.root / "fixture-bin"
+            bin_dir.mkdir()
+            command = bin_dir / "codex"
+            command.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = login ] && [ "$2" = status ]; then\n'
+                "  echo 'Logged in using the loopback fixture'\n  exit 0\nfi\n"
+                f'exec {shlex.quote(run.binary)} "$@"\n', encoding="utf-8")
+            command.chmod(0o700)
+            run.home.env["PATH"] = f"{bin_dir}{os.pathsep}{run.home.env['PATH']}"
+
+    def write_report_from_fixture(self, run, target, body):
+        if run.harness != "codex":
+            return False
+        # This host's nested Codex sandbox cannot start its tool socket in
+        # the temporary HOME. Emit the synthetic artifact in the fixture,
+        # while the real worker still negotiates its ordinary permission scope.
+        if not target.resolve().is_relative_to(Path(run.home.env["AGENT_ARTIFACT_ROOT"])):
+            raise ValueError("fixture report escaped its artifact root")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+        return True
+
+    def script(self, run):
+        normal = super().script(run)
+        self.release_limit = threading.Event()
+        self.reset = None
+        self.checks = 0
+
+        def answer(record, earlier):
+            text, last = record["text"], record["last_text"]
+            interrupted_request = unit.WORK if run.harness == "codex" else T2_TEXT
+            if ("Dispatch metadata:" in text and interrupted_request in text
+                    and "- capability: unit" in text and CAPACITY_REPLY not in text):
+                if self.reset is None:
+                    self.reset = int(time.time()) + 42
+                    if run.harness == "codex":
+                        # The native error renders only hours and minutes.
+                        self.reset = ((self.reset + 59) // 60) * 60
+                reset = datetime.fromtimestamp(self.reset, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                kind = "rate_limit_error" if record["protocol"] == "anthropic" else "usage_limit_reached"
+                error = {"type": kind, "code": kind, "message": f"Usage limit reached. It resets {reset} (UTC).",
+                         "resets_at": self.reset}
+                return Reply(gate=self.release_limit, http_error=(429, {"type": "error", "error": error}))
+            if CAPACITY_CHECK in last and record["last_kind"] == "user":
+                self.checks += 1
+                route = next(path.stem for path in self.route_files(run) if "." not in path.stem)
+                return Reply(shell=shlex.join([sys.executable, str(_base().SOURCE / "utilities/capability-route.py"),
+                                               "start", "--route", route]))
+            return normal(record, earlier)
+        return answer
+
+    def wait_receipt(self, run, after):
+        from harness_behavior_cases_e import last_json_object
+        for request in unit.resting_session_requests(run)[after:]:
+            if request["last_kind"] != "tool":
+                continue
+            value = last_json_object(request["last_text"])
+            if value.get("route_id") and value.get("state"):
+                return value
+        return None
+
+    def continue_route(self, run, ev):
+        before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in self.reports(run)}
+        run.prompt(CONT)
+        return self.observe_capacity_resume(run, ev, before)
+
+    def observe_capacity_resume(self, run, ev, before):
+        interrupted_turn = len(before) + 1
+        if not wait_for(lambda: self.reset, 85, 0.5):
+            run.note("the interrupted turn did not reach the loopback model")
+            return "fail"
+        wait_for(lambda: len(self.unit_rows()) >= interrupted_turn, 20, 0.5)
+        self.release_limit.set()
+        terminal = wait_for(lambda: len(self.unit_rows()) >= interrupted_turn
+                            and self.unit_rows()[interrupted_turn - 1]["status"] in TERMINAL_STATES, 215, 0.5)
+        rows = self.unit_rows()
+        if len(rows) < interrupted_turn:
+            return "fail"
+        source = rows[interrupted_turn - 1]
+        ev["interrupted"] = {key: source.get(key) for key in (
+            "attempt_id", "status", "launch_started", "note", "failure_class", "reconcile_reason", "reset")}
+        ev["fixture_429s"] = sum(r["reply"].get("http_status") == 429 for r in run.main_requests())
+        if not terminal or source.get("failure_class") != "capacity":
+            run.note("the loopback 429 did not settle as a capacity end")
+            log = Path(source["log_file"])
+            if log.is_file():
+                ev["native_error"] = log.read_text(encoding="utf-8", errors="replace")[-1400:]
+            return "fail"
+        ev["fixture_reset"] = datetime.fromtimestamp(self.reset, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for index in range(2):
+            prior = len(unit.resting_session_requests(run))
+            run.wait_idle(1, 15)
+            run.prompt(f"{CAPACITY_CHECK} ({index + 1})")
+            receipt = wait_for(lambda: self.wait_receipt(run, prior), 22, 0.5) or {}
+            ev.setdefault("before_reset", []).append({
+                key: receipt.get(key) for key in ("state", "reason", "required_action", "retry_at", "auto_resume")})
+        if not any(check["state"] == "waiting-capacity" for check in ev["before_reset"]):
+            run.note(f"the existing route did not return a capacity wait: {ev['before_reset']}")
+            return "fail"
+        ev["rows_before_reset"] = len(self.unit_rows())
+        expected_rows = interrupted_turn + 1
+        done = wait_for(lambda: len(self.unit_rows()) == expected_rows
+                        and self.unit_rows()[-1]["status"] in TERMINAL_STATES, self.WAIT, 1)
+        rows = self.unit_rows()
+        ev["capacity_rows"] = [self.row_view(r) | {key: r.get(key) for key in (
+            "failure_class", "note", "route_id", "route_hash", "write_scope", "artifact_cycle_id")}
+            for r in rows]
+        ev["previous_report_kept"] = all(path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == digest
+                                         for path, digest in before.items())
+        if not done or len(rows) != expected_rows:
+            run.note(f"capacity retry did not finish once, unit rows={len(rows)}")
+            return "fail"
+        successor = rows[-1]
+        new_report = next((path for path in self.reports(run) if path not in before), None)
+        delivered = wait_for(lambda: new_report and any(str(new_report) in r["text"]
+                             for r in unit.resting_session_requests(run)), 65, 1)
+        ev["returned_report"] = bool(delivered)
+        ev["reports_after"] = len(self.reports(run))
+        ev["delivery"] = {key: successor.get(key) for key in (
+            "parent_completion_delivery", "parent_completion_reason", "launch_lifecycle", "delivery_intent")}
+        if not delivered:
+            ev["parent_notice_tails"] = [r["last_text"][-800:] for r in unit.resting_session_requests(run)[-5:]]
+        context = (T1_MARK, T2_TEXT) if before else (unit.WORK,)
+        ev["retained_context"] = any(CAPACITY_REPLY in r["text"] and all(marker in r["text"] for marker in context)
+                                      for r in run.main_requests())
+        return "pass" if (ev["rows_before_reset"] == interrupted_turn and ev["previous_report_kept"] and delivered
+                          and ev["reports_after"] == interrupted_turn
+                          and ev["retained_context"] and successor.get("session") == "resumed"
+                          and successor.get("turn") == str(interrupted_turn)
+                          and successor.get("continues_attempt_id") == source["attempt_id"]
+                          and successor.get("failure_class") == "pass"
+                          and all(successor.get(key) == source.get(key) for key in (
+                              "route_id", "route_hash", "route_node", "write_scope", "permission_mode",
+                              "runtime_sandbox"))) else "fail"
+
+    def drive(self, run):
+        try:
+            run.prompt(unit.START)
+            started = wait_for(lambda: self.unit_rows(), 60, 0.5)
+            self.worker_end.set()
+            if not started:
+                for request in unit.resting_session_requests(run):
+                    if request["last_kind"] == "tool":
+                        run.note(request["last_text"][-650:])
+                run.note("the initial unit did not register")
+                run.note(run.tui.screen().strip()[-2500:])
+                if run.harness == "codex":
+                    probe = subprocess.run([sys.executable,
+                                            str(_base().SOURCE / "utilities/dispatch-readiness.py"),
+                                            "--owner-harness", "codex", "--child-harness", "codex",
+                                            "--jobs", str(self.jobs), "--worktree", str(run.home.workspace),
+                                            "--output", str(run.home.root / "readiness.json")],
+                                           env=run.home.env, cwd=run.home.workspace,
+                                           text=True, capture_output=True, timeout=30)
+                    run.note((probe.stdout + probe.stderr)[-1200:])
+                return "fail"
+            if run.harness == "codex":
+                return self.observe_capacity_resume(run, run.evidence, {})
+            closed = wait_for(lambda: any(p.stem.endswith(".outcome") for p in self.route_files(run)), 45, 0.5)
+            run.evidence["first_review_completed"] = bool(closed)
+            if not closed or self.unit_rows()[0].get("failure_class") != "pass":
+                first = self.unit_rows()[0]
+                ev = run.evidence
+                ev["row"] = {key: first.get(key) for key in (
+                    "status", "note", "failure_class", "reconcile_reason", "launch_started", "runtime_sandbox")}
+                path = Path(first["log_file"])
+                if path.is_file():
+                    ev["native_error"] = path.read_text(encoding="utf-8", errors="replace")[-1800:]
+                return "fail"
+            run.wait_idle(2, 20)
+            return self.continue_route(run, run.evidence)
+        finally:
+            self.worker_end.set()
+            self.release_limit.set()
+
+
 SCENARIOS = [UnitContinueScenario, UnitContinueChainScenario, UnitContinueBlockedScenario,
-             UnitContinueMovedScenario, UnitContinueMissingScenario, UnitContinueRetainedScenario]
+             UnitContinueMovedScenario, UnitContinueMissingScenario, UnitContinueRetainedScenario,
+             UnitCapacityContinueScenario]

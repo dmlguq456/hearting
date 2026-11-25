@@ -36,6 +36,7 @@ F = _load("framed_route_for_unit_launch", "framed_route.test.py")
 T, R, L = F.T, F.R, F.L
 import dispatch_contract as DC  # noqa: E402
 import dispatch_completion_join as JOIN  # noqa: E402
+import dispatch_replacement as REPLACEMENT  # noqa: E402
 import dispatch_terminal_commit as DTC  # noqa: E402
 import codex_dispatch_terminal as TERMINAL  # noqa: E402
 import owner_route_binding as BINDING  # noqa: E402
@@ -148,6 +149,36 @@ class UnitStartTest(UnitLegBase):
         self.assertEqual(self.commands, [])
 
 
+    def test_cancelled_unit_receipts_offer_inspection_and_no_restart(self):
+        import route_parent_close
+        from start_receipt import next_line
+
+        cancelled = JOIN.CurrentDeliveryState(
+            None, "", "", "", "done", "CANCELLED", True, 0, False,
+            cancelled=True, cancellation_requested=True)
+        stopped = JOIN.CurrentDeliveryState(None, "", "", "", "done", "", True, 0, False)
+        for end, state, row_metadata in (
+            ("parent cancellation", cancelled, {"note": "cancelled-by-parent"}),
+            ("Fleet stop", stopped, {"note": route_parent_close.STOP_NOTE, **route_parent_close.STOP_EVIDENCE}),
+        ):
+            with self.subTest(end=end):
+                self.jobs.write_text(self.leg_row(self.route, self.path, status="done",
+                                                  launch_started="1", **row_metadata))
+                with mock.patch.object(W, "join_selected_attempts", return_value={"state": "ready"}), \
+                        mock.patch.object(W, "current_delivery_state", return_value=state):
+                    receipt = W.start_work(self.route, self.path, self.jobs, run=self.run_launch)
+                self.assertEqual(receipt["state"], "cancelled", receipt)
+                self.assertEqual(receipt["result"].get("cancellation_requested", False), state.cancellation_requested)
+                self.assertEqual(receipt["result"].get("stopped", False), not state.cancellation_requested)
+                self.assertEqual(receipt["result"]["required_action"], "")
+                self.assertEqual(receipt["result"]["recovery_command"], "")
+                self.assertEqual(receipt["resume_command"], "")
+                self.assertEqual((receipt["parent_next"], receipt["parent_next_command"]), ("inspect-receipt", ""))
+                self.assertIn("Inspect the unit cancellation receipt.", next_line(receipt))
+                self.assertNotIn("start --route", next_line(receipt))
+                self.assertEqual(self.commands, [])
+
+
 class UnitAgainTest(UnitLegBase):
     def test_the_compose_again_command_of_an_autoclosed_unit_route_names_its_unit(self):
         route, _ = self.unit_route()
@@ -175,6 +206,67 @@ class UnitFailedLegTest(UnitLegBase):
         self.assertEqual((result["state"], result["required_action"]), ("needs-attention", "compose-again"))
         self.assertIn("--unit qa/code-review", result["parent_next_command"])
         self.assertNotIn("start --route", result["parent_next_command"])
+
+
+    def test_silent_unit_exit_has_no_automatic_replacement_and_can_compose_again(self):
+        route, path = self.unit_route()
+        jobs = Path(self.root) / "jobs.log"
+        original = self.leg_row(route, path, status="done", note="dead-worker-silent-exit",
+                                launch_started="1", failure_class="protocol", artifact_root=route["artifact_root"])
+        jobs.write_text(original)
+        aid = W.attempt_id(route, "unit")
+
+        def unexpected_launch(*args, **kwargs):
+            self.fail("a resultless unit must not start an automatic replacement")
+
+        self.assertIsNone(REPLACEMENT.accept_terminal_delivery_duty(jobs, aid))
+        self.assertEqual(REPLACEMENT.advance_batch(jobs, {aid}, run=unexpected_launch), ({aid}, [], []))
+        with mock.patch.object(W, "default_parent_session_id", return_value="parent"), \
+                mock.patch.object(W, "join_selected_attempts", return_value={"state": "ready"}):
+            receipt = W.start_work(route, path, jobs, run=unexpected_launch)
+        self.assertEqual((receipt["state"], receipt["required_action"]), ("needs-attention", "compose-again"))
+        self.assertIn("--unit qa/code-review", receipt["parent_next_command"])
+        self.assertEqual(jobs.read_text(), original)
+        self.assertIsNone(REPLACEMENT.source_reservation(jobs, aid))
+
+
+class UnitCapacityStartTest(UnitLegBase):
+    def test_governor_refusal_before_registration_keeps_the_original_slot(self):
+        route, path = self.unit_route()
+        jobs = Path(self.root) / "jobs.log"
+        jobs.touch()
+
+        def refuse(command, **kwargs):
+            self.assertIn(W.attempt_id(route, "unit"), command)
+            return subprocess.CompletedProcess(command, 75,
+                "check=failed\nreason=model-worker-governor-denied\nretryable=1\nrefusal=rolling-start-budget\n"
+                "worker_class=dispatch\nretry_after_seconds=30\nchild_spawned=0\n", "")
+
+        with mock.patch.object(W, "prepare_task_request", return_value=None):
+            receipt = W.start_work(route, path, jobs, run=refuse)
+        self.assertEqual((receipt["state"], receipt["reason"]), ("waiting-capacity", "launch-capacity-wait"))
+        self.assertFalse(receipt["spawned"])
+        self.assertEqual(jobs.read_text(), "")
+
+    def test_registered_capacity_pause_is_not_a_compose_again(self):
+        route, path = self.unit_route()
+        jobs = Path(self.root) / "jobs.log"
+        aid = W.attempt_id(route, "unit")
+        jobs.write_text(self.leg_row(route, path, status="done", launch_started="1",
+                                    artifact_root=route["artifact_root"], failure_class="capacity",
+                                    note="dead-capacity"))
+        hold = {"state": "needs-attention", "reason": "replacement-capacity-wait",
+                "harness": "claude", "source_attempt_id": aid, "retry_at": "2099-01-01T00:00:00Z"}
+        with mock.patch.object(W, "default_parent_session_id", return_value="parent"), \
+                mock.patch.object(W, "join_selected_attempts", return_value={"state": "ready", "children": []}), \
+                mock.patch.object(W, "_outcome", return_value={"classification": "failure"}), \
+                mock.patch("dispatch_replacement.advance", return_value=hold) as advance, \
+                mock.patch("capacity_auto_resume.arm", return_value=None):
+            receipt = W.start_work(route, path, jobs)
+        self.assertEqual((receipt["state"], receipt["reason"]), ("waiting-capacity", "unit-capacity-wait"))
+        self.assertEqual(receipt["source_attempt_id"], aid)
+        self.assertEqual(receipt["retry_at"], hold["retry_at"])
+        advance.assert_called_once()
 
 
 class UnitTupleTest(UnitLegBase):
