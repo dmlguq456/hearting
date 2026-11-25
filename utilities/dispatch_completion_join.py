@@ -505,19 +505,7 @@ def materialize_after_terminal_close(jobs: Path, attempt_id: str) -> Path | None
             sys.stderr.write(
                 f"replacement-duty-not-accepted attempt_id={attempt_id} reason={exc}\n"
             )
-        path = materialize_pending_delivery(jobs, row.raw.split("\t"))
-        meta = row.metadata
-        if (path and meta.get("capability") == "unit" and meta.get("replacement_original_attempt_id")
-                and meta.get("continues_attempt_id") == meta["replacement_original_attempt_id"]):
-            # A timer can launch the unit outside the parent's tool call. Retain
-            # its normal completion even when that call never armed a native hook.
-            try:
-                from peer_obligations import retain_registered_completion
-                retain_registered_completion(jobs, attempt_id, meta["parent_sid"],
-                                             meta.get("parent_completion_delivery", ""))
-            except (OSError, ValueError, RuntimeError):
-                log_delivery_refusal(jobs, attempt_id, "unit-completion-retention-pending")
-        return path
+        return materialize_pending_delivery(jobs, row.raw.split("\t"))
     except (JoinContractError, pending_delivery.PendingDeliveryError, OSError, ImportError) as exc:
         sys.stderr.write(
             f"delivery-persistence-refused attempt_id={attempt_id} reason={exc}\n"

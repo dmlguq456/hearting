@@ -311,6 +311,24 @@ def _route_finished(record: dict) -> bool:
                 and not route_plan.is_framed_route(route))
 
 
+def _retain_unit_completion(record: dict, receipt: dict) -> bool:
+    """A timer's start has no Bash hook in the parent. Arm the existing completion carrier."""
+    try:
+        from dispatch_completion_join import exact_attempt_row
+        from peer_obligations import retain_registered_completion
+        jobs = Path(record["jobs"])
+        aid = receipt["unit_attempt_id"]
+        meta = exact_attempt_row(jobs, aid).metadata
+        if (meta.get("route_hash") != record["unit_route_hash"]
+                or meta.get("replacement_original_attempt_id") != record["source_attempt_id"]
+                or meta.get("caller_attempt_id")):
+            return False
+        return bool(retain_registered_completion(jobs, aid, meta["parent_sid"],
+                                                 meta.get("parent_completion_delivery", "")))
+    except (OSError, ValueError, KeyError, RuntimeError):
+        return False
+
+
 def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cleared=_cleared,
         follow=follow_installed_release) -> int:
     record = json.loads(path.read_text(encoding="utf-8"))
@@ -372,14 +390,21 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
     # shared-spec publication and reports what is left. Only a plain
     # `completed` of a route that finished as proven work while this wait
     # slept has nothing to tell its session.
+    unit_advanced = bool(record.get("unit_route_hash") and receipt.get("unit_attempt_id")
+                         and receipt.get("continues_attempt_id") == record["source_attempt_id"]
+                         and receipt.get("state") in {"running", "completed"})
+    retained = unit_advanced and _retain_unit_completion(record, receipt)
     quiet = (done.returncode == 0 and receipt.get("state") == "completed"
-             and not receipt.get("next_leg") and _route_finished(record))
+             and not receipt.get("next_leg") and _route_finished(record)
+             and (not unit_advanced or retained))
     record.update(state="resumed", resumed_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                   exit_code=done.returncode, result_state=receipt.get("state"),
                   owner_attempt_id=receipt.get("owner_attempt_id"), **({"early": True} if early else {}),
                   **({"notice": "skipped-route-completed"} if quiet else {}))
     if receipt.get("unit_attempt_id"):
         record["unit_attempt_id"] = receipt["unit_attempt_id"]
+    if unit_advanced:
+        record["unit_completion_retained"] = retained
     _write(path, record)
     if not quiet:
         _notify(record, receipt, capped=capped and not early)
@@ -421,6 +446,10 @@ def _notify(record: dict, receipt: dict, capped: bool = False) -> None:
                 + (f"; paused again until {receipt.get('retry_at', 'an unknown time')}" if again else "")
                 + (f"; start exited {record.get('exit_code')}, run it again: "
                    f"{resume_command(record['route_file'], record['jobs'], agent_home=ROOT)}" if failed else ""))
+        if state == "completed" and receipt.get("unit_attempt_id") and receipt.get("summary"):
+            summary = receipt["summary"]
+            report = next((line for line in summary.splitlines() if line.startswith("Artifact: ")), "")
+            text = f"{text}. {report} {summary}"
         action = "report-pause" if again else "run-resume-command" if failed else "report-to-user"
         notify(caller.harness, caller.session_id, key=f"capacity-resume:{record['route_id']}:{record['retry_at']}",
                subject="capacity resume", text=text, route_id=record["route_id"], jobs=record["jobs"],

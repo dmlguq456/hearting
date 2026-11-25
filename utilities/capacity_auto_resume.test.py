@@ -337,6 +337,28 @@ class RunTest(unittest.TestCase):
             C.run(self.path, sleep=self.sleep, now=lambda: self.clock[0], call=lambda argv, **kw: done)
         notify.assert_called_once()
 
+    def test_unit_resume_retains_the_exact_successors_completion(self):
+        record = {**json.loads(self.path.read_text()), "unit_route_hash": "sha256:unit",
+                  "source_attempt_id": "att-limited"}
+        self.path.write_text(json.dumps(record))
+        receipt = {"state": "completed", "unit_attempt_id": "att-resumed",
+                   "continues_attempt_id": "att-limited", "summary": "the sealed review"}
+        done = SimpleNamespace(returncode=0, stdout=json.dumps(receipt) + "\n")
+        pending = {"route_file": record["route_file"], "route_hash": record["unit_route_hash"]}
+        row = SimpleNamespace(metadata={"route_hash": record["unit_route_hash"],
+                                        "replacement_original_attempt_id": "att-limited",
+                                        "parent_sid": "unit-parent",
+                                        "parent_completion_delivery": "claude-parent-runtime"})
+        with mock.patch("dispatch_replacement.unit_capacity_pause", return_value=pending), \
+                mock.patch("dispatch_completion_join.exact_attempt_row", return_value=row), \
+                mock.patch("peer_obligations.retain_registered_completion", return_value=True) as retain, \
+                mock.patch.object(C, "_route_finished", return_value=True), \
+                mock.patch.object(C, "_notify") as notify:
+            C.run(self.path, now=lambda: RETRY_EPOCH + C.SLACK_SECONDS, call=lambda *args, **kw: done)
+        retain.assert_called_once_with(Path(record["jobs"]), "att-resumed", "unit-parent", "claude-parent-runtime")
+        notify.assert_not_called()
+        self.assertTrue(json.loads(self.path.read_text())["unit_completion_retained"])
+
     def test_the_resume_runs_the_installed_release_not_the_arming_one(self):
         done = SimpleNamespace(returncode=0, stdout="{}\n")
         calls = []
