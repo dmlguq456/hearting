@@ -25,6 +25,7 @@ from dispatch_contract import (
     DispatchContractError, completion_marker_gate, owner_frame_launch_gate,
     parse_registry_metadata, verdict_pass,
 )
+from capacity_auto_resume import UNIT_CAPACITY_PAUSE
 from dispatch_attempt_policy import deferred_completion, terminal_conflict_pending
 from dispatch_completion_join import (
     join_selected_attempts, current_delivery_state, delivery_classification,
@@ -1155,7 +1156,7 @@ def _capacity_wait(result, aid, node, refusal, resume, clock):
 
 def _capacity_pause(result, attention, resume, *, unit=False):
     """The same route waits for its harness capacity before it can continue."""
-    waiting = {**result, "state": "waiting-capacity", "reason": UC.CAPACITY_PAUSE if unit else "owner-capacity-wait",
+    waiting = {**result, "state": "waiting-capacity", "reason": UNIT_CAPACITY_PAUSE if unit else "owner-capacity-wait",
                "required_action": "resume-after-capacity", "harness": attention.get("harness", ""),
                "source_attempt_id": attention.get("source_attempt_id", ""),
                "next_step": "The harness is at a usage limit; nothing failed and nothing was started. "
@@ -3504,7 +3505,7 @@ def _arm_capacity_resume(result, path, jobs):
             if waits_to_cap else
             f"runs resume_command once at {armed['resume_at']} and then leaves this session one notice of the ")
     next_step = (f"The unit worker stopped at a usage limit. The runtime {when}result. "
-                 "resume_command stays valid to try earlier." if result.get("reason") == UC.CAPACITY_PAUSE else
+                 "resume_command stays valid to try earlier." if result.get("reason") == UNIT_CAPACITY_PAUSE else
                  f"The runtime {when}result; tell the user the work is paused until then. "
                  "Nothing failed. resume_command stays valid if the user wants to resume earlier.")
     return {**result, "auto_resume": armed, "required_action": "wait-for-auto-resume",

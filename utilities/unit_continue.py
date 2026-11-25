@@ -29,7 +29,6 @@ STORE = "unit-continue"
 TEXT_BYTES = 65536                                   # the same limit an owner's answer has
 REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")     # the same id shape an owner's answer has
 REASONS = ("session-missing", "harness-changed", "store-unsupported", "resume-refused")
-CAPACITY_PAUSE = "unit-capacity-wait"
 
 
 class ContinueError(ValueError):

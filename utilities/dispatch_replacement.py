@@ -1538,9 +1538,8 @@ def accept_terminal_delivery_duty(jobs, aid):
         # The existing parent notice carries this pause after the drain proof. It lets
         # every session carrier schedule the ordinary start under the parent's identity.
         if unit_capacity_pause(jobs, aid):
-            from dispatch_supervision import materialize
-            from unit_continue import CAPACITY_PAUSE
-            materialize(jobs, {aid}, reason=CAPACITY_PAUSE)
+            from dispatch_supervision import UNIT_CAPACITY_PAUSE, materialize
+            materialize(jobs, {aid}, reason=UNIT_CAPACITY_PAUSE)
         return None
     if not row[1].get('delivery_intent') or not _parent_carrier_replaces(row[1]):
         # Nothing bound to this parent would launch the reservation, and it would

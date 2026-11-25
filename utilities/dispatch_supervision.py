@@ -29,7 +29,7 @@ from dispatch_receipt_identity import receipt_digest
 from dispatch_registry_cache import registry_view
 from foreground_activity import BLOCKING_COMMAND_MAX_SECONDS
 import dispatch_pending_delivery as pending_delivery
-from unit_continue import CAPACITY_PAUSE as UNIT_CAPACITY_PAUSE
+from capacity_auto_resume import UNIT_CAPACITY_PAUSE
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:

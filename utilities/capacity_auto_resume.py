@@ -66,8 +66,6 @@ except ImportError:  # a partial tree without it (e.g. a fixture release): no re
     def end_with_test(child):
         return child
 
-from unit_continue import CAPACITY_PAUSE as UNIT_CAPACITY_PAUSE
-
 ROOT = Path(__file__).resolve().parents[1]
 MAX_SLEEP_SECONDS = 7 * 24 * 3600
 MAX_CHAIN = 3
@@ -81,6 +79,7 @@ MAX_FLOOR_DOUBLINGS = (MAX_SLEEP_SECONDS // LATER_SECONDS).bit_length()
 RECHECK_SECONDS = 600
 LATER_REASONS = ("owner-launch-not-admitted", "owner-launch-not-started")
 LAUNCH_CAPACITY_REASON = "launch-capacity-wait"
+UNIT_CAPACITY_PAUSE = "unit-capacity-wait"
 ANSWER_REASON = "answer-awaiting-parent"
 NO_PROGRESS_REASON = "no-progress"
 CHAIN_ENV = "AGENT_CAPACITY_RESUME_CHAIN"
