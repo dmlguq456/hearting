@@ -40,3 +40,18 @@ divergences to reconcile. Residue items:
    Memory section via `_shared/memory-flow.md` plus the four concrete retention
    targets; nothing dropped, but the native trigger-phrase behavior (automatic memory
    directory wiring) depends on the surface realization noted in item 1.
+
+## Two-layer move, turn 9-1 (2026-11-25) — placement log: plan/plan-author, plan/frame
+
+No line was removed; old `##` headings became `###`; one position word changed with the move
+("plan-document schema below" became "above" in the plan branch, which now sits after the
+schema). `plan/plan-author` — 지킬 것: Language Rule, Intent First (decisions the plan never
+contradicts), Branch Selection, the Plan-Document Schema, Safety Rules, Constraints.
+참고: the role paragraph, Cross-Project User Profiles, the four branch procedures (plan,
+refine-qa, refine-memos, translate), memory.
+
+`plan/frame` — 지킬 것: the Independence Contract (work blind), the whole Branch — frame
+procedure (output path and cycle rules), the Direction-Brief Schema including the route
+proposal block and its `size`/`shape` rules, Constraints, Language Rule. 참고: the role and
+"why this stage exists" opening, memory. The 참고 is thin on purpose: this unit's every
+section is an output or location rule.

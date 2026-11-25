@@ -21,6 +21,10 @@ bootstrap:
 
 # Unit: research/research-survey
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
 Own paper search, analysis, cards, and report generation for the research
 pipeline (the autopilot-research stages). Determine the branch from the first
 line of the invocation prompt:
@@ -32,7 +36,132 @@ line of the invocation prompt:
 - "Research survey mode: Compile analysis summary" → **compile**
 - "Research survey mode: Report generation" → **report**
 
-## Context Sources
+### Language Rule
+
+Write prose in the selected target language for the selected audience
+(default: the user's current communication language, unless a publication,
+external-audience, or artifact contract specifies another). Preserve paper
+titles, author names, venues, URLs, code identifiers, model names, dataset
+names, and metric names in their established source form. Preserve established
+methodology terms (`attention`, `transformer`, `contrastive learning`,
+`metric learning`, …) when translation would reduce precision. Keep canonical
+machine-readable values in `search_results.json` unchanged.
+
+### Branch: search (paper search)
+
+**Output:** write `search_results.json` (schema provided by the orchestrator)
+plus `search_results.md` (human-readable ranked table) to the output
+directory.
+
+**MERGE mode** (additional rounds): when the prompt says "MERGE mode", read
+the existing `search_results.json` first; on fuzzy title duplicates increment
+`discovery_count` and extend the `sources` array; append new papers; update
+`total_papers`; regenerate `search_results.md`.
+
+**Error handling:** if a source fails, skip and continue. If ALL sources
+return 0 results, reformulate the query once (broaden keywords); if still 0,
+write empty results and return an error verdict.
+
+### Branch: analysis (paper analysis)
+
+**Per-paper card** (`{output_dir}/cards/{year}_{first_author}_{arxiv_id_or_hash}.md`):
+
+- **Venue:** formal venue + Tier 1–4; for arXiv preprints, mark
+  "arXiv preprint" and check formal publication status.
+- **Source quality:** `primary` (peer-reviewed venue/journal) / `preprint`
+  (unpublished arXiv) / `secondary` (survey/blog synthesis) / `unreliable`
+  (unverified). This feeds claim-verify's source-quality × claim-strength
+  weighting (strong claims need primary). Separate axis from venue tier —
+  tier = reputation, quality = verification strength.
+- Reading recommendation grade; methodology (2–3 lines); performance metrics;
+  experiment environment (GPU, training time, framework); datasets; baselines;
+  limitations / open problems; key figures (arXiv HTML image URLs); code /
+  checkpoints; connections (← builds on, → improved by).
+- Record central claims with quotations where available. Never imply full-text
+  support when only an abstract was read.
+
+### Branch: chaining (reference chaining)
+
+The orchestrator controls loopback (medium: max 1, deep: max 2); this unit
+handles only its single invocation scope.
+
+### Branch: code-search (code & model search)
+
+**File isolation:** write per-paper files to
+`{output_dir}/code_resources/{paper_filename}.md` plus an aggregate
+`code_search.md`.
+
+### Branch: compile (analysis summary)
+
+Compile `{output_dir}/analysis_summary.md` from `cards/`,
+`chaining_results.md`, and `code_search.md`. Contents: **phase status flags**
+(`chaining_available`, `code_search_available` — true/false + reason), total
+papers analyzed (full-read vs abstract-only counts), global caps applied,
+citation graph (if chaining ran), code/model availability summary, key
+findings (top-5 most-cited, top-5 most-connected).
+
+### Branch: report (report generation)
+
+The orchestrator provides `mode`, `analysis_dir`, `topic`, `output_dir`, and
+the full mode-specific report structure (chapter outlines, table schemas,
+diagrams) in its prompt — treat that prompt as canonical for chapter contents;
+this unit fixes only the file inventory:
+
+| Mode | Output files | Count |
+|---|---|---|
+| `academic` (default) | `00_briefing` / `01_landscape` / `02_core_papers` / `03_baselines` / `04_technical_deep_dive` / `05_datasets` / `06_implementation` / `07_resources` / `08_reading_guide` | **9** |
+| `technology` | `00_briefing` / `01_landscape` / `02_standards` / `03_vendor_comparison` / `04_technical_deep_dive` / `05_deployment` / `06_implementation` / `07_resources` | **7** |
+| `market` | `00_briefing` / `01_market_overview` / `02_key_players` / `03_trends` / `04_opportunities` | **5** |
+
+If a "Mode: {mode}" line is absent, default to `academic` (9 files).
+
+**Single source of truth:** read `analysis_summary.md` FIRST; its phase flags
+override file existence. Do not read stale files from previous runs.
+
+**Graceful degradation:** `chaining_available == false` → label the
+relationship diagram "reference chaining incomplete" and rely on the cards'
+Connections field; `code_search_available == false` → add a "code search
+incomplete" notice and use card code metadata. Use cards and chapters to
+expose incomplete enrichment rather than hiding it.
+
+**Quality:** no fabricated citations, URLs, or metrics (Language Rule above
+governs language and identifier preservation).
+
+**QA cooperation:** if re-invoked with "Fix these 🔴 issues: ...", fix only
+the listed issues.
+
+### Return
+
+Per `_shared/dual-io.md`. Return concise completion verdicts with paper counts
+and artifact paths (e.g. "✅ search complete (N papers)", "✅ analysis
+complete"); `error` when a branch could produce no results.
+
+**When this node is a declared auxiliary arbiter** — the prompt names it as the
+arbiter of an upstream `parallel_group` with `leg_class: auxiliary` legs (the
+`compile`/`report` branches downstream of a fanned-out `retrieval`) — the
+artifact's frontmatter carries `auxiliary_findings_considered` with exactly one
+entry per realized auxiliary leg, each saying whether that leg's finding was
+adopted or rejected and why:
+
+```yaml
+---
+auxiliary_findings_considered:
+  - "assumption-check: authority scope narrowed to peer-reviewed venues — adopted"
+---
+```
+
+This is conditional, not unconditional: the same unit runs in positions where it
+arbitrates nothing, and there the key is absent. The completion gate compares the
+array length against the realized auxiliary leg count, so a wrong length or a
+missing key is a gate failure, not a warning.
+
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+### Context Sources
 
 Before starting, read the relevant local knowledge base in this order of
 authority; skip missing directories silently:
@@ -53,18 +182,7 @@ to the request, follow existing repository patterns, align ambiguous research
 details with the source paper's method, and record the uncertainty in a memo
 while continuing.
 
-## Language Rule
-
-Write prose in the selected target language for the selected audience
-(default: the user's current communication language, unless a publication,
-external-audience, or artifact contract specifies another). Preserve paper
-titles, author names, venues, URLs, code identifiers, model names, dataset
-names, and metric names in their established source form. Preserve established
-methodology terms (`attention`, `transformer`, `contrastive learning`,
-`metric learning`, …) when translation would reduce precision. Keep canonical
-machine-readable values in `search_results.json` unchanged.
-
-## Branch: search (paper search)
+### Branch: search (paper search)
 
 The orchestrator provides multiple expanded queries (original + 3–5 variants),
 the output directory, and optional pre-fetched HF results.
@@ -123,20 +241,7 @@ research/claim-verify.
 **OpenAlex enrichment** (batch): for papers with arXiv IDs, fill
 `referenced_works`, concepts, `cited_by_count`, and venue information.
 
-**Output:** write `search_results.json` (schema provided by the orchestrator)
-plus `search_results.md` (human-readable ranked table) to the output
-directory.
-
-**MERGE mode** (additional rounds): when the prompt says "MERGE mode", read
-the existing `search_results.json` first; on fuzzy title duplicates increment
-`discovery_count` and extend the `sources` array; append new papers; update
-`total_papers`; regenerate `search_results.md`.
-
-**Error handling:** if a source fails, skip and continue. If ALL sources
-return 0 results, reformulate the query once (broaden keywords); if still 0,
-write empty results and return an error verdict.
-
-## Branch: analysis (paper analysis)
+### Branch: analysis (paper analysis)
 
 **Paywall fast-detect (BEFORE attempting access):** a paper with neither
 `arxiv_id` nor `oa_url` is likely paywalled — if
@@ -172,23 +277,7 @@ reading depth): citations > 100 → 🔴 must-read; 11–100 → 🟡 skim; ≤ 
 every Tier 1 paper is at least 🟡 skim regardless of citation count (recent
 Tier 1 papers matter despite low counts).
 
-**Per-paper card** (`{output_dir}/cards/{year}_{first_author}_{arxiv_id_or_hash}.md`):
-
-- **Venue:** formal venue + Tier 1–4; for arXiv preprints, mark
-  "arXiv preprint" and check formal publication status.
-- **Source quality:** `primary` (peer-reviewed venue/journal) / `preprint`
-  (unpublished arXiv) / `secondary` (survey/blog synthesis) / `unreliable`
-  (unverified). This feeds claim-verify's source-quality × claim-strength
-  weighting (strong claims need primary). Separate axis from venue tier —
-  tier = reputation, quality = verification strength.
-- Reading recommendation grade; methodology (2–3 lines); performance metrics;
-  experiment environment (GPU, training time, framework); datasets; baselines;
-  limitations / open problems; key figures (arXiv HTML image URLs); code /
-  checkpoints; connections (← builds on, → improved by).
-- Record central claims with quotations where available. Never imply full-text
-  support when only an abstract was read.
-
-## Branch: chaining (reference chaining)
+### Branch: chaining (reference chaining)
 
 Via OpenAlex `referenced_works`:
 
@@ -202,10 +291,7 @@ Via OpenAlex `referenced_works`:
 6. Write `chaining_results.md`: new papers, frequency table, Mermaid citation
    graph, recommended additions (top papers by reference_frequency).
 
-The orchestrator controls loopback (medium: max 1, deep: max 2); this unit
-handles only its single invocation scope.
-
-## Branch: code-search (code & model search)
+### Branch: code-search (code & model search)
 
 Runs only AFTER the analysis phase completes (skipped for shallow depth).
 For each paper in `cards/`:
@@ -217,75 +303,7 @@ For each paper in `cards/`:
    to this worker; if they become available, prefer them.)
 3. Verify: checkpoints, training code, license, last commit, stars/forks.
 
-**File isolation:** write per-paper files to
-`{output_dir}/code_resources/{paper_filename}.md` plus an aggregate
-`code_search.md`.
-
-## Branch: compile (analysis summary)
-
-Compile `{output_dir}/analysis_summary.md` from `cards/`,
-`chaining_results.md`, and `code_search.md`. Contents: **phase status flags**
-(`chaining_available`, `code_search_available` — true/false + reason), total
-papers analyzed (full-read vs abstract-only counts), global caps applied,
-citation graph (if chaining ran), code/model availability summary, key
-findings (top-5 most-cited, top-5 most-connected).
-
-## Branch: report (report generation)
-
-The orchestrator provides `mode`, `analysis_dir`, `topic`, `output_dir`, and
-the full mode-specific report structure (chapter outlines, table schemas,
-diagrams) in its prompt — treat that prompt as canonical for chapter contents;
-this unit fixes only the file inventory:
-
-| Mode | Output files | Count |
-|---|---|---|
-| `academic` (default) | `00_briefing` / `01_landscape` / `02_core_papers` / `03_baselines` / `04_technical_deep_dive` / `05_datasets` / `06_implementation` / `07_resources` / `08_reading_guide` | **9** |
-| `technology` | `00_briefing` / `01_landscape` / `02_standards` / `03_vendor_comparison` / `04_technical_deep_dive` / `05_deployment` / `06_implementation` / `07_resources` | **7** |
-| `market` | `00_briefing` / `01_market_overview` / `02_key_players` / `03_trends` / `04_opportunities` | **5** |
-
-If a "Mode: {mode}" line is absent, default to `academic` (9 files).
-
-**Single source of truth:** read `analysis_summary.md` FIRST; its phase flags
-override file existence. Do not read stale files from previous runs.
-
-**Graceful degradation:** `chaining_available == false` → label the
-relationship diagram "reference chaining incomplete" and rely on the cards'
-Connections field; `code_search_available == false` → add a "code search
-incomplete" notice and use card code metadata. Use cards and chapters to
-expose incomplete enrichment rather than hiding it.
-
-**Quality:** no fabricated citations, URLs, or metrics (Language Rule above
-governs language and identifier preservation).
-
-**QA cooperation:** if re-invoked with "Fix these 🔴 issues: ...", fix only
-the listed issues.
-
-## Return
-
-Per `_shared/dual-io.md`. Return concise completion verdicts with paper counts
-and artifact paths (e.g. "✅ search complete (N papers)", "✅ analysis
-complete"); `error` when a branch could produce no results.
-
-**When this node is a declared auxiliary arbiter** — the prompt names it as the
-arbiter of an upstream `parallel_group` with `leg_class: auxiliary` legs (the
-`compile`/`report` branches downstream of a fanned-out `retrieval`) — the
-artifact's frontmatter carries `auxiliary_findings_considered` with exactly one
-entry per realized auxiliary leg, each saying whether that leg's finding was
-adopted or rejected and why:
-
-```yaml
----
-auxiliary_findings_considered:
-  - "assumption-check: authority scope narrowed to peer-reviewed venues — adopted"
----
-```
-
-This is conditional, not unconditional: the same unit runs in positions where it
-arbitrates nothing, and there the key is absent. The completion gate compares the
-array length against the realized auxiliary leg count, so a wrong length or a
-missing key is a gate failure, not a warning.
-
-## Memory
+### Memory
 
 Per `_shared/memory-flow.md`. Retention targets: key papers, core methods, and
 important repositories per domain; useful domain source lists and query

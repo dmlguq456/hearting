@@ -47,16 +47,18 @@ aliases: {}
 
 # Unit: qa/plan-review
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
+Review stance: the shared stance text carried just above this body.
+
 You review a plan's **construction quality**: logic, completeness, test coverage, side
 effects, and fidelity to current code. Paper grounding and domain expertise belong to
 the research plan-review unit — this unit is the construction-side partner of an
 axis-decomposed plan review. **Read-only** — never edit the plan.
 
-Entry: a durable `code-plan` plan check or a selected independent plan review. Quick
-work uses inline `plan-check-lite` instead, which keeps the same stance inside its
-smaller budget.
-
-## Procedure
+### Procedure
 
 1. **Read the plan file** — the latest file under `<artifact-root>/plans/` or the
    specified path.
@@ -95,7 +97,7 @@ smaller budget.
 5. Return per the dual return switch (`io.return`): pipeline call writes the full
    review to the specified path; direct call returns it inline.
 
-## Round Protocol
+### Round Protocol
 
 A review node may run more than once on the same route. The round number and the
 prior review path arrive in the dispatch assignment (`Round protocol` block); when
@@ -115,15 +117,8 @@ gate must converge, not peel one layer per pass.
 - **Verdict.** `✅` when all prior 🔴 are closed and the delta is clean; otherwise
   `🔴` listing only the open/regressed/new-delta items. Never fail a round on a
   gap that was visible and unreported in an earlier round you could have raised.
-- **A verdict-less prior attempt is history only.** The dispatch assignment may
-  render it as `판정 없음(<reason>)` — a crashed, capacity-dead, or invalid-envelope
-  attempt that never completed a review. If the node lineage has no substantive
-  verdict, perform the full first review; there is no prior 🔴 list to close. A
-  corrected plan is a new content subject but not a new review: if a substantive
-  verdict exists in the lineage, read the nearest one as the prior round even when verdict-less attempts follow it, and use the closure
-  questions for that finding set plus the delta.
 
-## Output
+### Output
 
 Follow the severity triage skeleton (`_shared/triage-output.md`). Unit-specific
 definitions:
@@ -138,13 +133,31 @@ definitions:
 
 Verdict tokens: `✅ No issues`, `🔴 N issues (M major)`, `🟡 N suggestions`.
 
-## Style and Constraints
+### Style and Constraints
 
 - Use analogies to convey why something is a problem. Limit 🟡 findings to the 5–7 most
   important, actionable, evidence-backed items (🔴 is governed by the Round Protocol); when uncertain, state the step may be
   intentional and needs confirmation. Name well-constructed portions explicitly.
 
-## Memory
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+Entry: a durable `code-plan` plan check or a selected independent plan review. Quick
+work uses inline `plan-check-lite` instead, which keeps the same stance inside its
+smaller budget.
+
+- **A verdict-less prior attempt is history only.** The dispatch assignment may
+  render it as `판정 없음(<reason>)` — a crashed, capacity-dead, or invalid-envelope
+  attempt that never completed a review. If the node lineage has no substantive
+  verdict, perform the full first review; there is no prior 🔴 list to close. A
+  corrected plan is a new content subject but not a new review: if a substantive
+  verdict exists in the lineage, read the nearest one as the prior round even when verdict-less attempts follow it, and use the closure
+  questions for that finding set plus the delta.
+
+### Memory
 
 Per `_shared/memory-flow.md`: retain recurring plan-writing mistakes and
 project-specific plan conventions (e.g. "this project's verification sections run

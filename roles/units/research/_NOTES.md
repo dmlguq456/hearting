@@ -76,3 +76,23 @@ silently.
     and review logs — annotation targets/log paths are node-granted
     write_scope, artifact substance is never altered. Flagging for validator
     semantics review (workstream B).
+
+## Two-layer move, turn 9-1 (2026-11-25) — placement log: research/plan-review, research/research-survey
+
+No line was removed; old `##` headings became `###`. `research/plan-review` — 지킬 것: the
+ownership split with `qa/plan-review`, "annotate, never alter plan substance", the whole
+Procedure (including the conditional auxiliary-arbiter step whose array length is gate-checked)
+and both branches (focus-axis limit, all-axes default), plus the added stance line. 참고: the
+proxy-role opening lines, Knowledge Sources, User Profile Defaults, the closing explanation of
+multi-axis review, memory.
+
+`research/research-survey` — 지킬 것: branch detection from the prompt's first line, Language
+Rule, the files each branch writes (search output, MERGE mode, error handling and the `error`
+verdict, the per-paper card, the loopback and file-isolation limits, the compile contents, the
+whole report branch: file inventory, single source of truth, no fabricated citations, QA
+cooperation), Return and the conditional auxiliary-arbiter rule. 참고: Context Sources and
+profile preload, the search procedure (sources, merge and rank, venue tiers, enrichment), the
+analysis procedure (paywall fast-detect, access ladder, reading depth and grades), the
+chaining and code-search procedures, memory. Branch headings that split across the layers are
+repeated in both. The per-branch reference loading in the design ("참고 — <갈래>") needs a
+runtime that is not there yet, so the branch headings keep their old titles.

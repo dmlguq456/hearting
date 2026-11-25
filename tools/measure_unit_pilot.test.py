@@ -250,8 +250,81 @@ class TwoLayerRenderTest(unittest.TestCase):
                 self.assertIn("artifact: <canonical path | ->\nverdict: PASS | FAIL | BLOCKED\nblocker: none | <one line>", text)
 
     def test_a_unit_that_is_not_in_the_pilot_keeps_its_single_body(self):
-        text = self.wb.render_worker_bootstrap(ROOT, "stage", unit="dev/frontend")
+        text = self.wb.render_worker_bootstrap(ROOT, "review", unit="qa/edge-case-check")
         self.assertNotIn("\n## 지킬 것\n", text)
+
+
+# Units moved to the two-layer form after the pilot (turns 9-1 .. 9-4). The five auxiliary checks keep the
+# single body (general/explore was written in the two-layer form from the start). Each anchor sits on one line of the unit and must stay in the musts.
+REST_MUSTS = {
+    "qa/plan-review": ("never edit the plan", "Every round returns one closed finding set", "Round ≥ 2 — closure check",
+                       "Never fail a round on a", "Verdict tokens:", "Limit 🟡 findings to the 5–7"),
+    "research/plan-review": ("annotate, never alter plan substance", "limit review to that single axis only",
+                             "auxiliary_findings_considered", "wrong length or a missing key is a gate failure"),
+    "plan/plan-author": ("Produce plan documents only", "never contradicts one", "Grep all call sites before planning",
+                         "never routes and never"),
+    "plan/frame": ("Work blind", "Produce the direction brief only", "exactly one fenced `yaml` block",
+                   "not begin another cycle"),
+    "research/research-survey": ("Keep canonical", "Never imply full-text", "no fabricated citations",
+                                 "auxiliary_findings_considered"),
+}
+KEPT_SINGLE = ("qa/assumption-check", "qa/edge-case-check", "qa/failure-mode-check", "qa/simplicity-check",
+               "qa/test-gap-check")
+STANCE_LINE = "Review stance: the shared stance text carried just above this body."
+
+
+class TwoLayerRestRenderTest(unittest.TestCase):
+    """The units moved after the pilot carry both layers once, musts first, the musts intact, the closing form untouched."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import worker_bootstrap
+        cls.wb = worker_bootstrap
+
+    def front(self, unit):
+        text = (ROOT / "roles" / "units" / f"{unit}.md").read_text(encoding="utf-8")
+        head = text.split("\n---\n", 1)[0]
+        return dict(line.split(":", 1) for line in head.splitlines()[1:] if ":" in line and not line.startswith(" "))
+
+    def render(self, unit):
+        return self.wb.render_worker_bootstrap(ROOT, self.front(unit)["worker_type"].split("#")[0].strip(), unit=unit)
+
+    def test_both_headings_once_and_the_musts_come_first(self):
+        for unit in REST_MUSTS:
+            with self.subTest(unit=unit):
+                text = self.render(unit)
+                self.assertEqual((text.count("\n## 지킬 것\n"), text.count("\n## 참고\n")), (1, 1))
+                self.assertLess(text.index("\n## 지킬 것\n"), text.index("\n## 참고\n"))
+
+    def test_the_exposed_lines_sit_in_the_musts_section(self):
+        for unit, anchors in REST_MUSTS.items():
+            with self.subTest(unit=unit):
+                text = self.render(unit)
+                musts = text[text.index("\n## 지킬 것\n"):text.index("\n## 참고\n")]
+                for anchor in anchors:
+                    self.assertIn(anchor, musts, anchor)
+
+    def test_stance_units_carry_the_stance_text_once_and_the_pointer_line_in_the_musts(self):
+        for unit in REST_MUSTS:
+            with self.subTest(unit=unit):
+                text = self.render(unit)
+                musts = text[text.index("\n## 지킬 것\n"):text.index("\n## 참고\n")]
+                has_stance = self.front(unit)["stance"].split("#")[0].strip() != "none"
+                self.assertEqual(text.count("Refute first"), 1 if has_stance else 0)
+                self.assertEqual(musts.count(STANCE_LINE), 1 if has_stance else 0)
+
+    def test_the_closing_form_is_untouched(self):
+        for unit in REST_MUSTS:
+            with self.subTest(unit=unit):
+                self.assertIn("artifact: <canonical path | ->\nverdict: PASS | FAIL | BLOCKED\nblocker: none | <one line>", self.render(unit))
+
+    def test_the_kept_units_keep_their_single_body(self):
+        for unit in KEPT_SINGLE:
+            with self.subTest(unit=unit):
+                text = self.render(unit)
+                self.assertNotIn("\n## 지킬 것\n", text)
+                self.assertNotIn("\n## 참고\n", text)
 
 
 class RenderAndCliTest(Fixture):
