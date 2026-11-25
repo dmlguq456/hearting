@@ -38,7 +38,7 @@ Intensity controls procedure and default rigor; the recorded request, released d
 
 Stage gates check whether output can feed the next stage. Independent QA runs only where selected, using a separate execution with a different declared persona or perspective. Same-harness review is independent (allocation order in §2.1). Further legs retain declared profile and perspective diversity. Final verification remains capability-specific. Never add an omitted plan-check or report an unexecuted check as passed.
 
-Dispatch depth is portable route topology, not process ancestry, runtime-native
+Dispatch depth is a node's place inside one route, not process ancestry, runtime-native
 agent nesting, or proof of registry membership. Dispatch depth 0 covers all
 interactive sessions, including peers and steward sessions; dispatch depth 1 owns
 the capability pipeline; dispatch depth 2
@@ -47,9 +47,11 @@ at dispatch depth 0. Quick is semantically one registered-headless one-shot
 conductor at dispatch depth 1 and opens no child node. A `solo` route at `standard` or higher (where the kind declares a one-shot review) keeps that one owner, which makes the work itself; its children are the route's declared verification nodes at dispatch depth 2 (one review at `standard`; the kind's review legs from `strong`, the same declared group a `staged` route realizes). The owner starts them with the command its task gives (one command starts the whole group) and cannot close any of them itself. Its transport/schema
 compatibility identity remains `worker_type=owner`, `unit=_kernel/owner`,
 `owner_model_profile`, and `one-shot-owner`; those names do not make it a
-standard+ capability owner. Standard+ fallback attempts retain their node's
-dispatch depth even when the execution surface changes from registered headless
-to a runtime-native subagent or inline. Dispatch depth 3 or greater is forbidden.
+standard+ capability owner. Standard+ fallback attempts retain their node's dispatch depth when the
+execution surface changes from registered headless to inline, or to a runtime-native subagent where the
+route sealed a candidate for that hop (compose's readiness check records none). No route has a node at dispatch
+depth 3 or greater; a unit route a worker opens is a route of its own: its leg is dispatch depth 1, hangs below
+the caller in Fleet, counts under the worker governor's caps and widens nothing of the caller's scope (`OPERATIONS §5.10c`).
 Resource runners and Claude agent-team teammate sessions are separate lifecycle
 surfaces and carry no dispatch depth.
 

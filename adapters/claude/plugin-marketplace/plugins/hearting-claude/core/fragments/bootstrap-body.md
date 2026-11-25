@@ -56,7 +56,9 @@ person or a frame already chose, using `--shape staged --capability
 <kind> --graph <stage,…>` for person-named stages (§0.2.1). Refusals name missing inputs.
 Before unapproved material work, present the §0.4 intent card (진행 / 수정 /
 중단). Peer requests need only compose's `[경로]` line and scope, except for
-destructive or external-facing work. Dispatch depth 3 is forbidden.
+destructive or external-facing work. To hand another agent a read-only job, open a unit route:
+`--unit qa/code-review` keeps its report, `--unit general/explore --ephemeral` returns
+a lookup and keeps no record (§0.2.1).
 
 ## Following the runtime
 

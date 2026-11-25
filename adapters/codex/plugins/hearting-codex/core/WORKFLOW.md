@@ -339,8 +339,8 @@ and `adversarial`; the owner starts the route's declared review nodes with the c
 its task gives, and cannot close any of them itself), or omit `--shape` and let the frame choose, or use
 `staged` when the size of the work calls for stages (`staged` is chosen for size, not to
 obtain a review where the kind declares a one-shot review; where it declares none, work that
-needs an independent review opens `staged`). A light check of a direct change may use the harness's own native
-subagent (decision 2026-11-03).
+needs an independent review opens `staged`). The session checks a direct change itself; a second look it
+wants from another worker is a unit route (below).
 
 | Main decision | Command | Result |
 |---|---|---|
@@ -350,11 +350,13 @@ subagent (decision 2026-11-03).
 | New work whose direction is clear | `compose --start --shape solo\|staged --capability <kind> --prompt-file <task>` | opened directly; a sign may add the one advice line below |
 | Other new work (more than one reading is plausible) | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
 
-A single read-only unit can also be opened as a route of its own, with no owner:
-`compose --start --unit <family/name> --prompt-file <brief>` (for example
-`qa/code-review`, or `general/explore` for a lookup or an investigation; `stages --capability unit` lists the units). Its one worker starts
-with the brief, and its end closes the route and returns the sealed summary to the
-session that opened it (`core/OPERATIONS.md` §5.10c). A unit route has no intensity
+Handing one read-only job to another worker opens that unit as a route of its own, with no owner
+(decision 2026-11-17: every call to another agent is a route, and one that needs no record keeps none).
+A judgment, such as a review, keeps its report: `compose --start --unit qa/code-review --prompt-file <brief>`.
+Gathering material, such as a lookup or many files to read, keeps none: `compose --start --unit general/explore
+--ephemeral --prompt-file <brief>` writes nothing to the artifact folder or campaign records and brings the answer
+back in the notice (`stages --capability unit` lists the units). Its one worker starts with the brief, and its end closes
+the route and returns the sealed summary to the session that opened it; a worker opens one the same way (`core/OPERATIONS.md` §5.10c). A unit route has no intensity
 (one unit does one job and nothing checks it; `core/CONVENTIONS.md` §1). This adds a
 way to start; it does not change the choices above. `--prompt-file -` reads the brief
 once from standard input (a heredoc), so no file has to be written first; it means the
