@@ -61,6 +61,16 @@ class TextStoreTest(unittest.TestCase):
             with self.assertRaises(UC.ContinueError, msg=reason):
                 UC.submit(self.jobs, "rt-abc", text, request_id)
 
+    def test_the_sender_and_unit_are_noted_on_a_new_entry_and_a_duplicate_keeps_its_first(self):
+        first = UC.submit(self.jobs, "rt-abc", "ask", source_session="sess-1", unit="unit:qa/test")["entry"]
+        self.assertEqual((first["source_session"], first["unit"]), ("sess-1", "unit:qa/test"))
+        again = UC.submit(self.jobs, "rt-abc", "ask", source_session="sess-2", unit="unit:qa/other")
+        self.assertTrue(again["duplicate"])
+        self.assertEqual((again["entry"]["source_session"], again["entry"]["unit"]), ("sess-1", "unit:qa/test"))
+        bare = UC.submit(self.jobs, "rt-abc", "plain")["entry"]
+        self.assertNotIn("source_session", bare)
+        self.assertNotIn("unit", bare)
+
     def test_routes_keep_separate_texts(self):
         UC.submit(self.jobs, "rt-abc", "a")
         self.assertEqual(UC.entries(self.jobs, "rt-other"), [])
@@ -420,6 +430,34 @@ class CorrectUnitRouteTest(unittest.TestCase):
         self.assertEqual((code, receipt["state"]), (69, "not-admitted"))
         start.assert_not_called()
         self.assertEqual(UC.entries(self.jobs, "rt-abc"), [])
+
+    def test_a_taken_correction_carries_the_field_and_unit_labels_and_notes_them_in_the_store(self):
+        Path(self.dir.name, "rt.json").write_text(json.dumps({"field": "research"}))
+        with mock.patch.object(self.W, "unit_leg", return_value={"id": NODE, "unit": "qa/code-review"}), \
+                mock.patch.object(self.W.route_authority, "correction_source_session", return_value="sess-1"):
+            (code, receipt), _ = self.call("ask")
+        self.assertEqual((code, receipt["memory_labels"]), (0, ["field:research", "unit:qa/code-review"]))
+        entry = UC.entries(self.jobs, "rt-abc")[0]
+        self.assertEqual((entry["source_session"], entry["unit"]), ("sess-1", "unit:qa/code-review"))
+
+    def test_a_refused_correction_carries_no_labels_and_keeps_nothing(self):
+        from dispatch_contract import DispatchContractError
+        Path(self.dir.name, "rt.json").write_text(json.dumps({"field": "research"}))
+        with mock.patch.object(self.W, "unit_leg", return_value={"id": NODE, "unit": "qa/code-review"}):
+            (code, receipt), _ = self.call("ask", side_effect=DispatchContractError("work-parent-recovery-required", "x"))
+            self.assertEqual((code, "memory_labels" in receipt), (69, False))
+            (code, receipt), _ = self.call("  ")
+            self.assertEqual((code, "memory_labels" in receipt), (69, False))
+        self.assertEqual(UC.entries(self.jobs, "rt-abc"), [])
+
+    def test_an_unreadable_unit_or_field_gives_only_what_can_be_read(self):
+        for leg, written, expected in (({"id": NODE}, {"field": "docs"}, ["field:docs"]),
+                                       ({"id": NODE, "unit": "_kernel/owner"}, {"field": "docs"}, ["field:docs"]),
+                                       ({"id": NODE, "unit": "qa/test"}, {"field": "dev"}, ["unit:qa/test"]),
+                                       ({"id": NODE}, {}, [])):
+            with self.subTest(leg=leg, route=written):
+                Path(self.dir.name, "rt.json").write_text(json.dumps(written))
+                self.assertEqual(self.W._unit_memory_labels(self.dir.name + "/rt.json", leg), expected)
 
     def test_a_leg_of_an_approved_plan_is_refused(self):
         self.route["route_plan"] = {"decision": "d", "index": 0, "digest": "x"}
