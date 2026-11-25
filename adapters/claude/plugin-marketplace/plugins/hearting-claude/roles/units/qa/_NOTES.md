@@ -107,3 +107,30 @@ level 1-5 list and the Level 5b observation bullets, memory.
 Placement rule that was applied: a line that the 11-17 form review marked as exposed when
 moved below (`RV-UNIT-FORM-1117.md` §1, "아래가 뚫리는 자리") is in 지킬 것; tone, examples,
 level lists and criteria lists are in 참고.
+
+## Two-layer move, turn 9-1 (2026-11-25) — placement log: qa/plan-review
+
+Same form as the pilot: `## 지킬 것` / `## 참고`, old `##` headings became `###`, **no line
+removed**. 지킬 것: the role and scope paragraph with the read-only line, the whole Procedure
+(the check list carries the 🔴 triggers: concrete test commands, reuse, long runs, runtime
+placement, "judge substance"), the Round Protocol (round 1 front-load, round >= 2 closure
+check, verdict, and the sentence that reads a corrected plan against the nearest substantive
+verdict), the whole Output, the 🟡 cap and the other style rules, plus the one added stance
+line. 참고: the entry paragraph, the first part of the verdict-less prior attempt bullet (the
+runtime already renders `판정 없음(…)`; the `Round Protocol` heading is repeated in both layers),
+memory. The corrected-plan sentence left that bullet at its sentence boundary; one word moved
+to the next line and no word changed (fix round 1, 2026-11-25).
+
+## Two-layer move, turn 9-4 (2026-11-25) — placement log: qa/security-review, qa/data-curate, qa/ml-debug
+
+No line removed; old `##` headings became `###`; each of the three gains the one stance pointer
+line. `qa/security-review` — 지킬 것: the principles and read-only paragraph, the diff scope, the
+filter sentence that drops candidates below the confidence bar, the Hard False-Positive Filter
+with its precedents, the whole Output (severity, "keep only 8–10", finding shape, the sanctioned
+zero-findings verdict, spec check, verdict tokens). 참고: the Categories list, the three phases
+(the Procedure heading is repeated in both layers), memory. `qa/data-curate` — 지킬 것: the
+read-only-with-respect-to-data paragraph, the whole Procedure, the whole Report with the
+collaboration boundaries; 참고: the Audit areas table, memory. `qa/ml-debug` — 지킬 것: read-only
+and the three assignments, the Procedure, Result diagnosis, Smoke check (with the attestation
+command), Report and collaboration boundaries; 참고: the Symptoms → Likely causes table,
+memory.

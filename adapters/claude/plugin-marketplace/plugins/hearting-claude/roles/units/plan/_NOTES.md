@@ -40,3 +40,26 @@ divergences to reconcile. Residue items:
    Memory section via `_shared/memory-flow.md` plus the four concrete retention
    targets; nothing dropped, but the native trigger-phrase behavior (automatic memory
    directory wiring) depends on the surface realization noted in item 1.
+
+## Two-layer move, turn 9-1 (2026-11-25) — placement log: plan/plan-author, plan/frame
+
+No line was removed; old `##` headings became `###`; one position word changed with the move
+("plan-document schema below" became "above" in the plan branch, which now sits after the
+schema). `plan/plan-author` — 지킬 것: the `eval-spec.md` sentence (the file an
+`autopilot-lab:eval-spec` dispatch writes and what it holds), Language Rule, Intent First
+(decisions the plan never contradicts), Branch Selection, the Plan-Document Schema, plan-branch
+steps 4–6 (the plan file at the prompt's path or the node's declared plan output, no companion
+during the QA loop, the return), the whole refine-qa, refine-memos and translate branches
+(in-place update, removing processed memos, the companion rules, the change-history section,
+no inferred locale or output path, the return), Safety Rules, Constraints. `code-plan` and
+`code-refine` tell their prompts not to restate these lines, so the unit text is their only
+carrier. 참고: the role paragraph, Cross-Project User Profiles, plan-branch steps 1–3 (reading
+and analysis; the `Branch — plan` heading is repeated in both layers), memory. The
+`eval-spec.md` sentence was cut from its role-paragraph line at the sentence boundary; no word
+changed (fix round 1, 2026-11-25).
+
+`plan/frame` — 지킬 것: the Independence Contract (work blind), the whole Branch — frame
+procedure (output path and cycle rules), the Direction-Brief Schema including the route
+proposal block and its `size`/`shape` rules, Constraints, Language Rule. 참고: the role and
+"why this stage exists" opening, memory. The 참고 is thin on purpose: this unit's every
+section is an output or location rule.

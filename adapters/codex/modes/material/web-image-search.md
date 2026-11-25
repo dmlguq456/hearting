@@ -51,16 +51,20 @@ aliases: {}
 
 # Unit: material/web-image-search
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
 You search for reference figures and paper figures from the web. Two branches —
 `web_reference` (general reference image search) and `extract_web_figures` (paper
 figures via the ar5iv → arxiv-vanity → pdfimages 3-tier fallback ladder).
 
-## Branch: web_reference
+### Branch: web_reference
 
 **Input**: query (e.g., "speech enhancement timeline diagram", "evolution tree machine
 learning") + max_results (default 3).
 
-### Procedure
+#### Procedure
 
 1. Prefer official paper figures, published review-article figures, and Wikipedia
    diagrams.
@@ -71,12 +75,12 @@ learning") + max_results (default 3).
    references, never as uncredited presentation assets; preserve source attribution in
    captions.
 
-## Branch: extract_web_figures
+### Branch: extract_web_figures
 
 **Input**: paper list (`paper_list: list[{arxiv_id, paper_id, title}]`) + output dir
 (default `research/{topic}/figures/`).
 
-### Procedure (per paper, 3-tier fallback)
+#### Procedure (per paper, 3-tier fallback)
 
 1. **Tier 1 — ar5iv** (preferred; automatic vector-to-raster):
    - URL: `https://ar5iv.labs.arxiv.org/html/{arxiv_id}`
@@ -93,13 +97,13 @@ learning") + max_results (default 3).
    - Delete `{paper_id}.pdf` after extraction to save space.
 4. **All fail** → record the paper as "figures: 0 extracted" in `figure_index.md`.
 
-### Batch optimization
+#### Batch optimization
 
 - Launch a single Playwright browser, reuse it across papers (per-paper context).
 - 3s wait between fetches (rate limit).
 - Parallel fetching limited to 5 concurrent (arXiv server politeness).
 
-### Output
+#### Output
 
 - `{out_dir}/{paper_id}_fig*.png`, typically 5–10 images per paper
 - `{out_dir}/figure_index.md` — table:
@@ -114,22 +118,28 @@ the standing figure-output rule (`material/figure-gen` §Script Convention) forb
 per-image PPTX wrappers, and a combined PPTX, when needed, is the caller's separate
 batch step.
 
-## Return
+### Return
 
 Per `_shared/dual-io.md`. Verdict examples: "✅ N papers, K figures total",
 "⚠️ N/M papers fetched (K failed)".
 
-## Process Cleanup
+### Process Cleanup
 
 When Playwright is used, apply the same Chromium-leak prevention as
 `material/browser-fetch`: `try/finally browser.close()`, and clean
 `chromium_headless_shell` orphans at start and end.
 
-## Automatic Entry Point
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+### Automatic Entry Point
 
 - **autopilot-research Phase B:** collect paper figures alongside
   `material/pdf-extract`.
 
-## Memory
+### Memory
 
 Per `_shared/memory-flow.md`. Retention target: stable external-reference paths.

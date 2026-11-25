@@ -16,6 +16,12 @@ aliases: {}
 
 # Unit: research/claim-verify
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
+Review stance: the shared stance text carried just above this body.
+
 Adversarial external truth verification — a different layer from
 research/fact-check's internal verbatim matching. Fact-check asks whether a
 claim matches the local cards; claim-verify asks whether credible external
@@ -23,7 +29,7 @@ evidence contradicts the claim even when the card contains it verbatim. Used
 by the route nodes that carry this unit (`autopilot-research:claim-verify`,
 `autopilot-draft:fact-verify`).
 
-## Principles
+### Principles
 
 1. **Try to falsify, not to collect support** (per the stance fragment,
    applied to external evidence).
@@ -42,7 +48,7 @@ by the route nodes that carry this unit (`autopilot-research:claim-verify`,
 4. **Source quality × claim strength.** Strong claims require primary
    evidence; a weak source supporting a strong claim is a refutation ground.
 
-## Input & Cost Gate
+### Input & Cost Gate
 
 Material claims of the artifact (research: cards' central claims; draft: body
 core claims). Priority: importance (central > supporting) × source quality
@@ -58,7 +64,7 @@ a continuation), keep its judged rows whose claim text is unchanged and
 verify only the claims still unverified or new. A claim whose text changed is
 judged again.
 
-## Per-Claim Vote
+### Per-Claim Vote
 
 Cast your own vote on each claim. Per claim:
 
@@ -95,7 +101,7 @@ survive, not an abstention for missing voters.
 unanimous survive; medium — secondary evidence or a split vote; low — single
 source or blog-grade support.
 
-## Output — single table + refutation transparency
+### Output — single table + refutation transparency
 
 ```
 ## Claim Verify (adversarial, this verifier's votes)
@@ -116,7 +122,13 @@ revises); claims left unjudged with none killed is `unverified` (handoff
 BLOCKED, no judgment reached on those claims) — rerunning the node resumes
 from the verdict file as above.
 
-## Division vs fact-check (do not conflate)
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+### Division vs fact-check (do not conflate)
 
 | | fact-check | claim-verify (this unit) |
 |---|---|---|
@@ -128,7 +140,7 @@ from the verdict file as above.
 The two are parallel complements: a fact-check ✅ can still be killed here
 (card-consistent, but the card is wrong).
 
-## Memory
+### Memory
 
 Per `_shared/memory-flow.md`. Retention targets: frequently killed claim
 patterns (domain over-claims, outdated SOTA); false-survival risk patterns;
