@@ -140,7 +140,9 @@ def bind_worker_contract(h, args, *, profile_type) -> str:
         route_node=args.route_node,
         profile_type=profile_type,
     )
-    bootstrap = h.render_worker_bootstrap(h.ROOT, args.worker_type, unit=(args.unit or None))
+    import worker_bootstrap as wb
+    bootstrap = h.render_worker_bootstrap(h.ROOT, args.worker_type, unit=(args.unit or None),
+                                          field=wb.unit_route_field(args))
     args.assigned_contract = h.assigned_contract(
         capability=args.capability,
         worker_type=args.worker_type,
@@ -222,7 +224,7 @@ def unit_leg_prompt(h, args, task: str, *, commit_clause: str = "") -> str | Non
             # The woken session holds the brief and the kernel's rules already: only this turn's facts and text.
             return unit_continue.turn_prompt(args, plan, dispatch_metadata_prompt(h, args), task, args.jobs_path)
         task = unit_continue.turn_prompt(args, plan, "", task, args.jobs_path)
-    persona = wb.unit_persona_body(h.ROOT, args.unit) or ""
+    persona = wb.unit_persona_body(h.ROOT, args.unit, wb.unit_route_field(args)) or ""
     stance = wb.unit_stance_text(h.ROOT, args.unit)
     unit_text = "\n\n".join(part for part in (stance if stance and stance not in persona else "", persona) if part)
     # The kernel's closing contract, without the paragraph that only a supervised owner reads.
