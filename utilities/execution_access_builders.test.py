@@ -192,6 +192,11 @@ class ExecutionAccessBuilderTest(unittest.TestCase):
                            else " --model-context-window 800000")
             self.assertEqual(current.count(window_flag), 1)
             current = current.replace(window_flag, "", 1)
+            if delivery == "app-server-supervised":
+                # Session persistence changed independently of access grants: a supervised owner keeps its
+                # thread so a later owner of its route can wake it. Remove exactly that one flag.
+                self.assertEqual(current.count(" --keep-session"), 1)
+                current = current.replace(" --keep-session", "", 1)
             self.assertEqual(base, current)
         for delivery in ("one-shot", "session-resume-supervised"):
             with mock.patch.dict(os.environ, self.env, clear=True):

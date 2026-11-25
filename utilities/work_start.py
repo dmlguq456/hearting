@@ -3225,10 +3225,10 @@ def correct_owner_route(route, path, jobs, text, request_id=None, **start_kwargs
     stopped = (last_status in {"cancelled", "killed"} or last_meta.get("parent_close_requested") == "1"
                or route_parent_close.row_requested(last_meta, jobs))
     passed = last_status == "done" and verdict_pass(last_meta)
-    if closed and (stopped or not passed or closed.get("autoclose")):
-        return 69, {"state": "not-admitted", "reason": "owner-continue-not-passed", "route_id": route["route_id"],
-                    "next_step": "This route ended without a PASS (or was stopped or closed unused), so it takes no "
-                                 "later request and nothing was kept. Report its result; new work is a new route."}
+    if closed and (stopped or not passed or closed.get("autoclose") or closed.get("terminal_gate_proven") is not True):
+        # Not a PASS this route was closed on (an owner waiting for its answer, a stopped or unused route): the
+        # owner input path answers as before, so a BLOCKED owner's answer keeps its own continuation.
+        return None
     if not follow_up_owner_route(route):
         return 69, {"state": "not-admitted", "reason": "owner-continue-route-shape", "route_id": route["route_id"],
                     "next_step": "Only a one-shot route its owner makes alone (no review, frame or resource node, "

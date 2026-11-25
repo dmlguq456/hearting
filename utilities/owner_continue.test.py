@@ -300,12 +300,16 @@ class CorrectOwnerRouteTest(unittest.TestCase):
         start.assert_not_called()
         self.assertEqual(UC.entries(self.jobs, ROUTE_ID), [])
 
-    def test_a_route_that_did_not_end_pass_or_was_stopped_takes_nothing(self):
-        for status, extra in (("done", {"failure_class": "blocked"}), ("cancelled", {}),
-                              ("done", {"failure_class": "pass", "parent_close_requested": "1"})):
-            self.rows = {FIRST: (status, owner(**extra))}
-            (code, receipt), start = self.call()
-            self.assertEqual((code, receipt["reason"]), (69, "owner-continue-not-passed"), status)
+    def test_a_route_not_closed_on_a_pass_keeps_the_owner_input_path_and_keeps_nothing_here(self):
+        # A BLOCKED owner's answer keeps its own continuation; a stopped route takes no later request.
+        cases = [("done", {"failure_class": "blocked"}, self.closed), ("cancelled", {}, self.closed),
+                 ("done", {"failure_class": "pass", "parent_close_requested": "1"}, self.closed),
+                 ("done", {"failure_class": "pass"}, {**self.closed, "terminal_gate_proven": False}),
+                 ("done", {"failure_class": "pass"}, {**self.closed, "autoclose": True})]
+        for status, extra, closed in cases:
+            self.rows, self.closed = {FIRST: (status, owner(**extra))}, closed
+            result, start = self.call()
+            self.assertIsNone(result, (status, extra, closed))
             start.assert_not_called()
         self.assertEqual(UC.entries(self.jobs, ROUTE_ID), [])
 
