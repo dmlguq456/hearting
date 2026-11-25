@@ -879,9 +879,7 @@ class CheckpointDisplayTitleTest(CheckpointTestBase):
         P.checkpoint(self.root, cycle_id=other["cycle_id"])
         self.assertIn(first, self.titles())
         self.assertEqual(len(self.titles()), 2)
-        def reader(raw, *_args, **_kwargs):
-            return CT.ReaderResult("accepted", frozenset(row["cycle_id"] for row in json.loads(raw)["entries"]), "", None)
-        result = CT.backfill(self.root, reader=reader)
+        result = CT.backfill(self.root)
         self.assertEqual(result["counts"]["existing_kept"], 2)
         self.assertEqual(result["counts"]["existing_dropped"], 0)
         self.assertEqual(result["post_digest"], result["pre_digest"])
