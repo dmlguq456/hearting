@@ -120,9 +120,9 @@ Per `_shared/dual-io.md`. Verdict examples: "✅ N/N URLs extracted",
 Prevent browser and Chromium process leaks:
 
 - Always guarantee `browser.close()` through `try/finally`.
-- At start, clean orphaned processes with `pkill -f chromium_headless_shell 2>/dev/null`.
-- At completion, run `pgrep -f chromium_headless_shell` and terminate any remaining
-  process.
+- Never end a process by name or pattern: it may be another session's browser.
+- At completion, check only the browser this run launched (Playwright's pid and its
+  children); end that pid only if still alive. Leave any other leftover and report it.
 
 ## 참고
 

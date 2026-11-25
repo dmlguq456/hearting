@@ -126,8 +126,8 @@ Per `_shared/dual-io.md`. Verdict examples: "✅ N papers, K figures total",
 ### Process Cleanup
 
 When Playwright is used, apply the same Chromium-leak prevention as
-`material/browser-fetch`: `try/finally browser.close()`, and clean
-`chromium_headless_shell` orphans at start and end.
+`material/browser-fetch`: `try/finally browser.close()`, never end a process by name
+or pattern, and at completion end only the browser pid this run launched.
 
 ## 참고
 
