@@ -18,7 +18,9 @@ dispatch wrapper and supervisor; the model is the loopback fixture.
 ``owner-continue-answer``
     The owner ends BLOCKED. The session's ``start`` continues it once (``observed``) in the same session with
     the runtime's observation only; it ends BLOCKED again. The session's answer (``correct --message-file``)
-    continues it in the same session; it ends PASS and the route closes.
+    continues it in the same session; it ends PASS and the route closes. A later request on that closed route
+    (``correct --route``) is then admitted as turn 2 although turn 1 took three owners, wakes the same session,
+    ends PASS and closes the route again.
 """
 from __future__ import annotations
 
@@ -340,7 +342,8 @@ class OwnerContinueScenario(SoloReviewScenario):
               and len(ev["superseded_closures"]) == 1 and (ev["closure"] or {}).get("terminal_gate_proven") is True
               and ev["closure"].get("terminal_owner_attempt_id") == second["attempt_id"]
               and all(a == b for a, b in ev["same_authority"].values())
-              and '"not-admitted"' in ev["other_caller"] and ev["kept_after_other"] == ev["kept"][:len(ev["kept_after_other"])]
+              and '"not-admitted"' in ev["other_caller"] and "work-parent-recovery-required" in ev["other_caller"]
+              and ev["kept_after_other"] == ev["kept"][:len(ev["kept_after_other"])]
               and len(ev["kept"]) == 1 and ev["rows_after_again"] == 2 and "already-asked" in ev["again_receipt"]
               and ev["start_route"].get("state") == "completed"
               and all(d.get("classification") == "success" for d in ev["earlier_delivery"])
@@ -384,7 +387,34 @@ class OwnerContinueScenario(SoloReviewScenario):
               and not ev["observed_request"].get("newest_has_kernel")
               and ev["answer_request"].get("has_t1_history") and not ev["answer_request"].get("newest_has_kernel")
               and (ev["closure"] or {}).get("terminal_gate_proven") is True)
-        run.note(f"rows={len(rows)} sessions={[r.get('session') for r in rows]} closed={bool(ev['closure'])}")
+        # A later request on the route closed on the answer's PASS: turn 2 follows the third owner of turn 1.
+        wait_for(lambda: (UnitContinueScenario.terminal_inspect(self, run, rows[-1]["attempt_id"]) or {}).get("state")
+                 == "completed", 90, 3)
+        self.ask(run, CONT)
+        later = self.wait_owner(4)
+        wait_for(lambda: (self.closure(run) or {}).get("terminal_owner_attempt_id")
+                 == (self.owner_rows() or [{}])[-1].get("attempt_id"), 90, 1)
+        self.idle(run, 8, 90)
+        rows = self.owner_rows()
+        ev["rows_after_follow_up"] = [self.row_view(r) for r in rows]
+        ev["follow_up_receipt"] = (self.tool_outputs(run, '"request_id"') or [""])[-1][:900]
+        ev["turn2_request"] = self.request_view(self.first_request_of(run, "t2"), first_attempt)
+        ev["follow_up_closure"] = {k: (self.closure(run) or {}).get(k)
+                                   for k in ("terminal_gate_proven", "terminal_owner_attempt_id")}
+        ev["superseded_closures"] = UnitContinueScenario.superseded(self, run)
+        ev["second_report_has_marker"] = any("HB-OC-T2-DONE" in p.read_text(encoding="utf-8") for p in self.reports(run))
+        if not later or len(rows) < 4:
+            run.note(f"rows={len(rows)} the later turn did not start")
+            return "fail" if ok else "inconclusive"
+        turn2 = rows[3]
+        ok = (ok and len(rows) == 4 and turn2.get("turn") == "2" and turn2.get("continues_attempt_id") == rows[2]["attempt_id"]
+              and turn2.get("session") == "resumed" and ev["turn2_request"].get("has_t1_history")
+              and not ev["turn2_request"].get("newest_has_kernel") and ev["second_report_has_marker"]
+              and len(ev["superseded_closures"]) == 1
+              and (ev["follow_up_closure"] or {}).get("terminal_gate_proven") is True
+              and ev["follow_up_closure"].get("terminal_owner_attempt_id") == turn2["attempt_id"])
+        run.note(f"rows={len(rows)} sessions={[r.get('session') for r in rows]} turn2={turn2.get('turn')} "
+                 f"closures_set_aside={len(ev['superseded_closures'])}")
         return "pass" if ok else "fail"
 
 
@@ -397,7 +427,8 @@ class OwnerContinueMissingScenario(OwnerContinueScenario):
 class OwnerContinueAnswerScenario(OwnerContinueScenario):
     name = "owner-continue-answer"
     summary = ("A BLOCKED owner is continued once by the runtime's observation and then by the person's answer, "
-               "both in the first owner's session; the route closes on the answer's PASS.")
+               "both in the first owner's session; the route closes on the answer's PASS, and a later request on it "
+               "runs as turn 2 in the same session.")
     variant = "answer"
 
 
