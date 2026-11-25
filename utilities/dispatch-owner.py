@@ -1274,7 +1274,10 @@ def main(argv):
                 try:
                     child_env.pop("AGENT_ARTIFACT_PARENT_OUTPUT_DIR", None)  # SD-163: no stale source
                     child_env.update(prepare_route_artifact_env(
-                        Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs)))
+                        Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs),
+                        # A later request on a closed route begins its own cycle, as a unit turn does.
+                        fresh_cycle=(values.get("--attempt-id") if values.get("--continues-attempt-id")
+                                     and not values.get("--automatic-retry-of") else None)))
                 except ProducerError as exc:
                     raise OwnerError(f"{exc.code}:{exc.detail}") from exc
         if overridden:

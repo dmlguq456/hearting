@@ -3388,6 +3388,37 @@ class DispatchContractTest(unittest.TestCase):
                         terminal_attempt_limit=2)
    self.assertEqual(caught.exception.reason,"quick-registered-headless-exhausted")
    self.assertEqual(len(jobs.read_text().splitlines()),2)
+ def test_a_later_turn_counts_each_earlier_turn_once_through_its_replacements(self):
+  # A BLOCKED, its replacement B PASS: turn 2 continues B with the limit one turn wider (1 + turn - 1).
+  # Only a later turn reads A as taken over; an ordinary launch counts as before.
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log"
+   def row(attempt,status="open",**extra):
+    pipe="".join(f",{key}={value}" for key,value in extra.items())
+    return (f"2026-11-26T00:00:00Z\t{status}\t/r\t/w\tquick\t{CURRENT},route_id=rt-t,"
+            f"route_node=one-shot,attempt_id={attempt}{pipe}")
+   exclusive={"route_id":"rt-t","route_node":"one-shot"}
+   first,second,later,other="att-turn00000a","att-turn00000b","att-turn00002a","att-turn0000xx"
+   self.assertTrue(D.claim_attempt_row(jobs,first,row(first),launch=True,
+                                       exclusive_live_metadata=exclusive,terminal_attempt_limit=1))
+   self.assertTrue(D.close_attempt_row(jobs,first,"dead-worker-blocked"))
+   with jobs.open("a") as handle:   # the runtime's replacement of A, settled PASS
+    handle.write(row(second,"done",automatic_retry_of=first,replacement_original_attempt_id=first,
+                     launch_claimed=1,note="completed-marker")+"\n")
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.claim_attempt_row(jobs,other,row(other),launch=True,exclusive_live_metadata=exclusive,
+                        terminal_attempt_limit=2)
+   self.assertEqual(caught.exception.reason,"quick-registered-headless-exhausted")
+   self.assertTrue(D.claim_attempt_row(jobs,later,row(later,continues_attempt_id=second,turn=2),launch=True,
+                                       exclusive_live_metadata=exclusive,terminal_attempt_limit=2))
+   # Turn 2 is replaced too; turn 3 counts B and the replacement of turn 2, under its limit of 3.
+   self.assertTrue(D.close_attempt_row(jobs,later,"dead-worker-blocked"))
+   with jobs.open("a") as handle:
+    handle.write(row("att-turn00002b","done",automatic_retry_of=later,launch_claimed=1,
+                     note="completed-marker")+"\n")
+   self.assertTrue(D.claim_attempt_row(jobs,"att-turn00003a",
+                                       row("att-turn00003a",continues_attempt_id="att-turn00002b",turn=3),
+                                       launch=True,exclusive_live_metadata=exclusive,terminal_attempt_limit=3))
  # Item 4: a failed terminal note in replacement_notes gets its own budget
  # (default 1) separate from terminal_attempt_limit, so one dead-protocol/
  # dead-permission-reject terminal allows exactly one same-route relaunch

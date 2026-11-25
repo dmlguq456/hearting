@@ -189,6 +189,53 @@ def dispatch_metadata_prompt(h, args, *, guard_session_id: bool = True) -> str:
     )
 
 
+def owner_continuation_prompt(h, args, prompt: str, recovery: str) -> str:
+    """The owner prompt and its recovery context (`dispatch_replacement.recovery_instructions`). An owner that
+    takes over from an earlier owner of its route is told `unit_continue.owner_turn_prompt` instead: a woken
+    session gets only this attempt's facts and what is new."""
+    import unit_continue
+    plan = getattr(args, "session_plan", None)
+    if not unit_continue.owner_predecessor(args) or plan is None:
+        return prompt + recovery
+    facts = dispatch_metadata_prompt(h, args) + (launch_policy_prompt(args) if plan.kind == "resumed" else "")
+    return unit_continue.owner_turn_prompt(args, plan, facts, prompt, recovery, args.jobs_path)
+
+
+def launch_policy_prompt(args) -> str:
+    """This launch's commit policy and this node's declared scope, which a woken owner session is told again:
+    the launch decides them, not the earlier attempt whose instructions the session holds."""
+    import commit_policy
+    import worker_bootstrap as wb
+    commit = commit_policy.prompt_clause(args) or "This launch's commit policy: commit as the owner contract says.\n"
+    return commit + wb.declared_scope_prompt(args, os.environ)
+
+
+def owner_session_arguments(args) -> list:
+    """The supervisor flag that wakes the earlier owner's session (Claude and OpenCode supervisors)."""
+    import unit_continue
+    plan = getattr(args, "session_plan", None)
+    if unit_continue.owner_predecessor(args) and plan is not None and plan.kind == "resumed":
+        return ["--resume-session", plan.session_id]
+    return []
+
+
+def carry_session(h, args, home, *, jobs: Path, prompt_path: Path, fresh_prompt: Callable[[], str]) -> None:
+    """Carry the earlier session's file into this launch's worker home (`unit_continue.transplant`).
+
+    The session was found before the claim. When it can no longer be carried (its home was removed since), this
+    launch starts fresh instead of failing: the plan becomes `fresh:session-missing`, the row says so, and the
+    prompt file holds what a fresh session is told (`fresh_prompt`, read after the plan changed)."""
+    import unit_continue
+    try:
+        unit_continue.transplant(getattr(args, "session_plan", None), home)
+        return
+    except (OSError, unit_continue.ContinueError):
+        pass
+    args.session_plan = unit_continue.SessionPlan("fresh", "session-missing", "", "")
+    h.annotate_attempt_row(jobs, args.attempt_id, {"session": args.session_plan.row_value})
+    Path(h.frame_repository.execution_path(prompt_path)).write_text(fresh_prompt(), encoding="utf-8")
+
+
 def assignment_prompt_tail(h, args, task: str, *, heartbeat: str, commit_clause: str) -> str:
     """Progress, commit policy, sub-session, released intent, unit and assignment sections."""
     return (

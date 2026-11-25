@@ -206,6 +206,9 @@ ATTEMPT_MUTABLE_METADATA = {
     "launch_mismatch_fields",
     "launch_mismatch_expected",
     "launch_mismatch_observed",
+    # A continued turn's session (`resumed` | `fresh:<reason>`): a launch whose earlier session file is gone by
+    # the time it is carried into the new home starts fresh after its claim (`carry_session`).
+    "session",
 }
 ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "api_status",

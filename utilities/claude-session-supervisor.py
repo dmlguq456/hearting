@@ -1279,6 +1279,8 @@ def run_turn(
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description=__doc__)
     value.add_argument("--runtime-harness", choices=("claude", "opencode"), default="claude")
+    # The earlier owner's session this owner wakes (an owner taking over from one of its route).
+    value.add_argument("--resume-session", help=argparse.SUPPRESS)
     value.add_argument("--opencode-command")
     value.add_argument("--opencode-agent", default="build")
     value.add_argument("--opencode-standalone", action="store_true",
@@ -1368,6 +1370,8 @@ def main(argv: list[str] | None = None) -> int:
         return 64
     prior_resource = read_supervisor_phase_state(Path(args.state_file), args.parent_attempt_id) if args.state_file else None
     saved_session = (prior_resource.resource or {}).get("session_id") if prior_resource else None
+    if not saved_session and args.runtime_harness == "claude":
+        saved_session = args.resume_session or None   # transplanted into this worker home by the adapter
     session_id = "" if args.runtime_harness == "opencode" else saved_session or str(uuid.uuid4())
     # This attempt log is a receipt log, never a transcript: it carries control rows
     # plus exactly one final `result`, and deliberately never echoes model text. A
@@ -1432,7 +1436,10 @@ def main(argv: list[str] | None = None) -> int:
             if recovered_rc is not None:
                 return recovered_rc
         if args.runtime_harness == "opencode":
-            from opencode_session_runtime import read_binding
+            from opencode_session_runtime import bind_session, read_binding
+            if args.resume_session and not read_binding(args):
+                # Bound under this attempt's lease before its first turn: that turn runs `--session <id>`.
+                bind_session(args, args.resume_session)
             input_thread = read_binding(args) or "pending-native-session"
         else:
             input_thread = session_id

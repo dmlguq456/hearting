@@ -889,6 +889,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             "--runtime-harness", "opencode", "--worktree", args.worktree,
             "--jobs", str(args.jobs_path), "--parent-attempt-id", args.attempt_id or "unassigned",
             "--state-file", str(lease.with_suffix(".json")), "--lease-file", str(lease),
+            *DISPATCH_MAIN.owner_session_arguments(args),
         ]
         route = _supervisor_route(args)
         if route:
@@ -1201,9 +1202,11 @@ def main(argv: list[str]) -> int:
         registry = resolve_global_registry(agent_home, args.jobs, args.dispatch_depth, action)
         jobs = registry.path
         args.jobs_path = jobs
+        import unit_continue
         if is_unit_leg_launch(args):
-            import unit_continue
             unit_continue.plan_for_args(args, jobs, "opencode")   # a unit leg's session lives in OpenCode's own store
+        else:   # an owner taking over from an earlier owner of its route wakes that session through its supervisor
+            unit_continue.owner_plan_for_args(args, jobs, "opencode", keeps_session=_supervised_owner(args))
         from review_input import prepare_request as prepare_review_input
         prepare_review_input(args)
         args.attempt_id = new_attempt_id(args.attempt_id) if action in ("register", "start") else args.attempt_id
@@ -1270,7 +1273,7 @@ def main(argv: list[str]) -> int:
     from review_input import prompt_block as review_input_prompt
     prompt_text += review_input_prompt(args)
     from dispatch_replacement import recovery_instructions
-    prompt_text += recovery_instructions(args)
+    prompt_text = DISPATCH_MAIN.owner_continuation_prompt(_ADAPTER, args, prompt_text, recovery_instructions(args))
     rc = DISPATCH_MAIN.rebind_replica_batch(_ADAPTER, args, action, "opencode", assignment_sha256=args.assignment_sha256)
     if rc is not None:
         return rc
