@@ -327,6 +327,7 @@ work or its tests passed. Missing, interrupted and running results stay unknown.
 Explicit `compose --start --shape direct --field <field> --prompt-file <task>`
 still prepares an isolated worktree and an inline route; `compose --shape direct
 --field <field>` records work already made in place. Their receipt and explicit finish contracts are unchanged.
+While a session keeps fixing the same files in place, it keeps one record: the automatic record takes each turn as one more line, and an in-place `compose --shape direct` that changes exactly the paths of that record's latest turn (same capability and campaign) returns that record, `joined`, and its `finish` only replays. Other paths, another kind of request, another session, or no recorded paths open their own route as before.
 When the direction is clear, open `--shape solo|staged` (below); otherwise use
 `compose --start --prompt-file <task>` with no `--shape`; the
 frame chooses the capability, stages, and solo or staged shape, judging each

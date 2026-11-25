@@ -789,6 +789,115 @@ class EndToEndTest(Fixture):
         self.assertEqual(list((self.root / ".runtime/artifact-producer/v1/cycles").glob("*.json")), [])
         print(f"\nturn_change_record end-to-end record seconds={elapsed:.2f}", file=sys.stderr)
 
+    # ---- an explicit in-place direct compose that continues the session's own record
+
+    def explicit(self, sid=SID, capability="autopilot-code", extra=()):
+        """The explicit direct path as an agent runs it: compose, then finish."""
+        env = {**self.env, **GIT_ENV, **T.QUIET_ENV, "CLAUDE_CODE_SESSION_ID": sid,
+               "AGENT_DISPATCH_CALLER_HARNESS": "claude", "GIT_CEILING_DIRECTORIES": str(self.tmp),
+               "DISPATCH_DEFAULTS_CONFIG": str(ROOT / "profiles/dispatch-defaults.yaml")}
+        task = self.tmp / "task.md"
+        task.write_text("Fix the greeting.\n")
+        run = lambda *args: subprocess.run([sys.executable, str(ROOT / "utilities/capability-route.py"), *args],
+                                           cwd=self.repo, env=env, capture_output=True, text=True, timeout=120)
+        composed = run("compose", "--shape", "direct", "--capability", capability, "--unassigned", "--slug", "fix",
+                       "--cwd", str(self.repo), "--prompt-file", str(task), "--parent-harness", "claude",
+                       "--spec-read", "fixture", "--drift-verdict", "within-spec", "--artifact-guard", "fixture", *extra)
+        self.assertEqual(composed.returncode, 0, composed.stderr)
+        receipt = json.loads(composed.stdout.strip().splitlines()[-1])
+        evidence, summary = self.tmp / "evidence.md", self.tmp / "summary.txt"
+        evidence.write_text("Edited and checked.\n")
+        summary.write_text("Fixed the greeting.\n")
+        finished = run("finish", "--route", receipt["route_file"], "--evidence", str(evidence),
+                       "--summary-file", str(summary))
+        self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+        self.wait_for_entrance()
+        return receipt
+
+    def explicit_turn(self, change, sid=SID, **kwargs):
+        T.turn_start("claude", sid, str(self.repo), self.env)
+        change()
+        receipt = self.explicit(sid, **kwargs)
+        T.turn_end("claude", sid, str(self.repo), self.env)
+        self.wait_for_entrance()
+        return receipt
+
+    def counts(self):
+        import artifact_journal as journal
+        routes = [p for p in (self.root / ".runtime" / "routes").glob("rt-*.json") if "." not in p.stem]
+        rows = sum(len(journal.read_day(day)["rows"]) for day in (self.root / "campaigns").glob("*/journals/*.md"))
+        return len(routes), rows
+
+    def write(self, name, text):
+        return lambda: (self.repo / name).write_text(text)
+
+    def test_the_same_file_edited_four_times_by_the_automatic_path_is_one_record_of_four_lines(self):
+        for number in range(4):
+            self.turn(self.write("greet.py", f'print("Hello {number}")\n'))
+        self.assertEqual(self.counts(), (1, 4))
+
+    def test_an_explicit_direct_compose_on_the_same_file_continues_the_record(self):
+        self.turn(self.write("greet.py", 'print("Hello 0")\n'))
+        first = self.state()["records"][str(self.root)]["route_id"]
+        for number in (1, 2, 3):
+            receipt = self.explicit_turn(self.write("greet.py", f'print("Hello {number}")\n'))
+            self.assertTrue(receipt.get("joined"), receipt)
+            self.assertEqual(receipt["route_id"], first)
+        self.assertEqual(self.counts(), (1, 4))
+
+    def test_a_different_file_or_a_different_request_opens_its_own_route(self):
+        self.turn(self.write("greet.py", 'print("Hello 0")\n'))
+        record = self.state()["records"][str(self.root)]["route_id"]
+        other_file = self.explicit_turn(self.write("README.md", "notes, revised\n"))
+        self.assertFalse(other_file.get("joined"), other_file)
+        self.assertNotEqual(other_file["route_id"], record)
+        self.assertEqual(self.counts()[0], 2)
+        # Same paths as the record's latest turn, but a request of another kind.
+        self.turn(self.write("README.md", "notes, again\n"))
+        other_kind = self.explicit_turn(self.write("README.md", "notes, a third time\n"), capability="autopilot-draft")
+        self.assertFalse(other_kind.get("joined"), other_kind)
+        self.assertEqual(self.counts()[0], 3)
+
+    def test_an_explicit_route_with_nothing_to_continue_finishes_as_before(self):
+        receipt = self.explicit_turn(self.write("greet.py", 'print("Hello 0")\n'))
+        self.assertFalse(receipt.get("joined"), receipt)
+        outcome = json.loads(Path(receipt["route_file"]).with_suffix(".outcome.json").read_text())
+        self.assertTrue(outcome["terminal_gate_proven"])
+
+    def test_a_record_without_its_paths_is_never_joined(self):
+        self.turn(self.write("greet.py", 'print("Hello 0")\n'))
+        path = T.state_path(self.env, "claude", SID)
+        state = json.loads(path.read_text())
+        del state["records"][str(self.root)]["paths"]
+        path.write_text(json.dumps(state))
+        receipt = self.explicit_turn(self.write("greet.py", 'print("Hello 1")\n'))
+        self.assertFalse(receipt.get("joined"), receipt)
+
+    def test_another_session_editing_the_same_file_never_joins_this_record(self):
+        self.turn(self.write("greet.py", 'print("Hello 0")\n'))
+        mine = self.state()["records"][str(self.root)]["route_id"]
+        T.turn_start("claude", "sess-other", str(self.repo), self.env)
+        (self.repo / "greet.py").write_text('print("Hello 1")\n')
+        receipt = self.explicit("sess-other")
+        self.assertFalse(receipt.get("joined"), receipt)
+        self.assertNotEqual(receipt["route_id"], mine)
+
+    def test_a_turn_that_never_ended_leaves_the_record_for_the_next_edit_to_join(self):
+        self.turn(self.write("greet.py", 'print("Hello 0")\n'))
+        first = self.state()["records"][str(self.root)]["route_id"]
+        T.turn_start("claude", SID, str(self.repo), self.env)  # its end never comes
+        (self.repo / "greet.py").write_text('print("Hello 1")\n')
+        receipt = self.explicit_turn(self.write("greet.py", 'print("Hello 2")\n'))
+        self.assertTrue(receipt.get("joined"), receipt)
+        self.assertEqual(receipt["route_id"], first)
+        self.assertEqual(self.counts()[0], 1)
+
+    def test_only_an_in_place_direct_compose_can_join(self):
+        route = {"selection": {"shape": "solo"}, "cwd": str(self.repo), "artifact_root": str(self.root)}
+        self.assertIsNone(T.joinable_record(route, self.env))
+        self.assertIsNone(T.joinable_record({**route, "selection": {"shape": "direct"}, "parent_cycle": "cyc_x"},
+                                            self.env))
+
     def test_a_route_left_open_by_a_failed_close_is_closed_at_the_next_turn(self):
         real = T.settle
         with mock.patch.object(T, "settle", return_value={"closed": False, "reason": "settle-failed"}):

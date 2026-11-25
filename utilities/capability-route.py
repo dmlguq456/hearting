@@ -2300,6 +2300,19 @@ def main():
                               "tracked_gate_evidence":route.get("tracked_gate_evidence"),
                               **compose_observations(route)},sort_keys=True))
             return 0
+        if shape == "direct" and not a.start and worktree is None and not getattr(a, "output", None):
+            # Continuing the same change in place: the session's own record takes this turn's
+            # line, so no second route opens. `finish` on it only replays.
+            try:
+                from turn_change_record import joinable_record
+                joined = joinable_record(route, source_cwd=promotion_cwd)
+            except Exception:
+                joined = None
+            if joined:
+                print("direct_record_joined=" + joined["route_id"], file=sys.stderr)
+                print(json.dumps({**joined, "joined": True, "note": "this session's automatic record takes "
+                                  "this turn's change as its next line; finish is a replay"}, sort_keys=True))
+                return 0
         path = _emit_compiled_route(a,route,artifact_root)
         promotion = None
         try:

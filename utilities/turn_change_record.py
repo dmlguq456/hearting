@@ -1040,6 +1040,10 @@ def _record_pass(path: Path, harness: str, sid: str, env, recorder, appender, no
                         if entry and root_items:
                             item = max(root_items, key=lambda row: row.get('began') or 0)
                             entry['last_turn'] = _last_turn(item)
+                            # The exact path set of this latest turn (None when sampled): what a
+                            # later explicit compose compares to see it continues this record.
+                            exact = item.get('source_count') == len(item['source'])
+                            entry['paths'] = list(item['source']) if exact else None
                         result = "recorded" if created else "appended"
                     elif carried:
                         state["last_carry_failure"] = {"reason": outcome.get("reason"),
@@ -1476,25 +1480,66 @@ def supplementary_records(harness, sid, cwd, env=None):
     return sorted(rows, key=lambda row: row.get('ended', 0))[-3:]
 
 
+def _open_turn(route, env, source_cwd=None):
+    """``(harness, sid, state, top, after)`` for this session's open turn in the route's work
+    tree, with a fresh snapshot of it; None when there is none."""
+    chain = gate._route_chain()
+    identity = chain.writer_identity(env)
+    if not identity:
+        return None
+    harness, sid = identity
+    state = _read(state_path(env, harness, sid))
+    if not (state.get("entries") is not None and state.get("turn_ended_at") is None
+            and state.get("top") == str(_top(source_cwd or route.get("cwd", ""), env))):
+        return None
+    top = Path(state["top"])
+    after = snapshot(top, env)
+    if not after or after.get("entries") is None:
+        return None
+    return harness, sid, state, top, after
+
+
+def joinable_record(route, env=None, *, source_cwd=None):
+    """The session's own closed automatic record that an explicit in-place direct compose
+    continues, as ``{"route_id", "route_file"}``; None keeps today's separate route.
+
+    It joins only when the evidence already at hand agrees: the turn's changed paths are the
+    very paths the record's latest turn changed, the record is closed, and the new route
+    would have the same capability and campaign and no predecessor cycle. A time gap is
+    never a reason; anything missing or unreadable is not a join.
+    """
+    env = os.environ if env is None else env
+    if is_automatic_route(route) or (route.get("selection") or {}).get("shape") != "direct" \
+            or route.get("parent_cycle"):
+        return None
+    try:
+        opened = _open_turn(route, env, source_cwd)
+        if not opened:
+            return None
+        _harness, _sid, state, top, after = opened
+        source, _commits = changes(state, after, top, state["root"], state["turn_started_at"], env)
+        entry = (state.get("records") or {}).get(state["root"]) or {}
+        if (not source or not entry.get("closed") or entry.get("paths") != source
+                or os.path.realpath(route.get("artifact_root") or "") != state["root"]):
+            return None
+        recorded = json.loads(Path(entry["route_file"]).read_text(encoding="utf-8"))
+        if any(recorded.get(key) != route.get(key) for key in ("capability", "campaign_key", "campaign_unassigned")):
+            return None
+        return {"route_id": entry["route_id"], "route_file": entry["route_file"]}
+    except Exception:  # noqa: BLE001 -- observation never blocks a compose
+        return None
+
+
 def link_promotion(route, env=None, *, source_cwd=None):
     """Attach this session's open turn to an explicit compose; never mutate source."""
     env = os.environ if env is None else env
     if is_automatic_route(route):
         return None
     try:
-        chain = gate._route_chain()
-        identity = chain.writer_identity(env)
-        if not identity:
+        opened = _open_turn(route, env, source_cwd)
+        if not opened:
             return None
-        harness, sid = identity
-        state = _read(state_path(env, harness, sid))
-        if not (state.get("entries") is not None and state.get("turn_ended_at") is None
-                and state.get("top") == str(_top(source_cwd or route.get("cwd", ""), env))):
-            return None
-        top = Path(state["top"])
-        after = snapshot(top, env)
-        if not after or after.get("entries") is None:
-            return None
+        harness, sid, state, top, after = opened
         now = time.time()
         source, commits = changes(state, after, top, state['root'], state['turn_started_at'], env)
         destination = str(_top(route['cwd'], env) or Path(route['cwd']).resolve())
