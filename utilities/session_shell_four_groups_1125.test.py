@@ -3,13 +3,15 @@
 (each checked on fake text only; the older panel suites hold their own forms):
 
 1. the four heads are one form, a frame row `├╴[NAME] value ───┤`; with no RESOURCES `[USAGE]` is the third head;
-2. one empty row before each head after the first, and short of rows these empty rows are the first thing given up (before any GPU row of RESOURCES);
+2. one empty row before each head after the first, and short of rows these empty rows are the first thing given up (before any GPU row of RESOURCES), one at a time (USAGE's,
+   RESOURCES', then SESSION's; with the lists SESSION's outlives the BACKLOG items, 11-23: "REPO와 SESSION 구분줄 사이에 여백이 한칸은 있어야 될것 같다"), and a panel with a row to spare has all of them;
 3. a list head is bold at the body's brightness, a value's name dim, a group's name bold and the brightest; mono and `NO_COLOR` keep the weights;
 4. a BACKLOG item has its dot; the number on a list head is the items off the screen (`+136/139 · FIX 54 · IMPR 36`), the sorts' counts going first when narrow;
 5. PEERS stands under TITLE and MEM ends REPO, each with its press rows following it, and a low panel's `[REPO]` head carries the two buttons with the documents' whole counts;
-6. RESOURCES: a host's name alone, under it one row with two GPUs in columns that line up across hosts, one gauge length for every host; the form by width (wide, 50, 44, 30);
-   `other`, `No GPU`, an idle GPU all dim; a GPU held by several sessions unfolds only its own host;
-7. every row of every size is as wide as the panel in cells (a Hangul is two), and the head cells move with the frame.
+6. RESOURCES: a host's name alone, under it one row with two GPUs in columns that line up across hosts, one gauge length for every host; the form by width (58, 52, 50, 44, 30), the memory
+   and the sessions never drawn together; `other`, `No GPU`, an idle GPU all dim; a GPU held by several sessions unfolds only its own host, and a card that overflows its own row gives up its
+   gauge, then its memory, then its use and keeps every session number;
+7. every row of every size is as wide as the panel in cells (a Hangul is two), the head cells move with the frame, and `rule` motion's light runs to the cell before `┤`.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -109,21 +111,42 @@ for(const h of hs.slice(1))assert(blank(tall[h.at-1]),h.name+'\n'+tall.join('\n'
 assert(!blank(tall[hs[0].at-1])&&!blank(tall[hs[0].at+1]),'no empty row beside the first head');
 // Every empty row stands directly before a head or after the last row of the fill above MESSAGES; none sits between a head and its first row.
 for(const h of hs)assert(!blank(tall[h.at+1]),h.name+' is followed by its first row');
-// Short of rows the three empty rows go first: from the tallest height that has them, losing a row takes an empty row, never a BACKLOG item or a GPU row.
 const countOf=(ls,re)=>ls.filter(l=>re.test(l)).length;
-const full=draw({height:70}),fl=lines(full);
-const kinds=ls=>({gaps:heads(ls).slice(1).filter(h=>blank(ls[h.at-1])).length,backlog:countOf(ls,/^│   · FIX /),gpus:gpuRows(ls).filter(l=>/^ \d/.test(l)).length,hosts:countOf(ls,/^│ (lab-[a-d]|testgpu) +│$/)});
-const base=kinds(fl);assert.equal(base.gaps,3);assert.equal(base.backlog,3);assert.equal(base.gpus,5);assert.equal(base.hosts,5);
-for(let h=70;h>=36;h--){
-  const k=kinds(lines(draw({height:h})));
-  // while a gap stands, nothing else has been given up for the lists or RESOURCES
-  if(k.gaps===3){assert.equal(k.backlog,3,h+' backlog');assert.equal(k.gpus,5,h+' gpus');}
-  // a GPU row goes only after every gap is gone
-  if(k.gpus<5)assert.equal(k.gaps,0,h+' a GPU row went while a gap stood');
+// `gaps`: the heads with their empty row; `fill`: the other empty rows (the middle's).
+const kinds=ls=>{const hs=heads(ls),before=new Set(hs.slice(1).filter(h=>blank(ls[h.at-1])).map(h=>h.at-1));
+  return {gaps:hs.slice(1).filter(h=>blank(ls[h.at-1])).map(h=>h.name).join(','),heads:hs.length,fill:ls.filter((l,i)=>blank(l)&&!before.has(i)).length,
+    backlog:countOf(ls,/^│   · FIX /),gpus:gpuRows(ls).filter(l=>/^ +\d /.test(l)).length,hosts:countOf(ls,/^│ (lab-[a-d]|testgpu) +│$/)};};
+const base=kinds(lines(draw({height:70})));
+assert.deepEqual([base.gaps,base.backlog,base.gpus,base.hosts],['SESSION,RESOURCES,USAGE',3,5,5]);
+for(const o of [{},{lists:false},{resources:[]},{lists:false,resources:[]},{question:false}]){
+  const at={};
+  for(let h=70;h>=24;h--){
+    const ls=lines(draw({...o,height:h})),k=at[h]=kinds(ls),tag=JSON.stringify(o)+' '+h+'\n'+ls.join('\n');
+    // a panel with a row to spare has every empty row between the groups (none stands in the middle while one is short)
+    if(k.fill>0)assert.equal(k.gaps.split(',').filter(Boolean).length,k.heads-1,tag);
+    // while all three stand nothing else has been given up for the lists or RESOURCES
+    if(k.gaps==='SESSION,RESOURCES,USAGE'){assert.equal(k.backlog,o.lists===false?0:3,tag);assert.equal(k.gpus,o.resources?0:5,tag);}
+    if(ls.some(l=>/^│  BACKLOG/.test(l))){
+      // the lists take the empty rows before RESOURCES and USAGE, then the BACKLOG items, then the one before SESSION (11-23: it outlives the BACKLOG items)
+      if(k.backlog<3)assert(!/RESOURCES|USAGE/.test(k.gaps),tag);
+      if(!k.gaps.startsWith('SESSION'))assert.equal(k.backlog,0,tag);
+    }
+  }
+  // one at a time, USAGE's first, then RESOURCES', then SESSION's; then (without the lists) a GPU row
+  const hs=Object.keys(at).map(Number).sort((a,b)=>b-a),full=hs.find(h=>at[h].fill===0);
+  assert.equal(at[full].gaps,o.resources?'SESSION,USAGE':'SESSION,RESOURCES,USAGE',JSON.stringify(o));
+  assert.equal(at[full-1].gaps,o.resources?'SESSION':'SESSION,RESOURCES',JSON.stringify(o));
+  if(!o.resources)assert.equal(at[full-2].gaps,'SESSION',JSON.stringify(o));
+  if(o.lists===false&&!o.resources){
+    assert.deepEqual([at[full-3].gaps,at[full-3].gpus],['',5]);
+    // a host's two rows go and one is used: the other goes back to the empty row before SESSION, not to the middle
+    assert.deepEqual([at[full-4].gaps,at[full-4].hosts,at[full-4].fill],['SESSION',4,0]);
+  }
 }
-// 50 x 52 (the draft's size): RESOURCES takes 11 rows, so the three gaps and two BACKLOG items stand back; every GPU row is there.
+// 50 x 52 (the draft's size): RESOURCES takes 11 rows; the two other empty rows and every BACKLOG item stand back, the one before SESSION stays; every GPU row is there.
 const at52=lines(draw({height:52})),k52=kinds(at52);
-assert.deepEqual(k52,{gaps:0,backlog:1,gpus:5,hosts:5},at52.join('\n'));
+assert.deepEqual([k52.gaps,k52.backlog,k52.gpus,k52.hosts,k52.fill],['SESSION',0,5,5,0],at52.join('\n'));
+const s52=heads(at52).find(h=>h.name==='SESSION').at;assert(blank(at52[s52-1])&&/^│   ◇ 8m note/.test(at52[s52-2]),at52.join('\n'));
 """)
 
     def test_a_list_head_is_bold_a_value_name_is_dim_and_mono_and_no_color_keep_the_weights(self):
@@ -206,13 +229,21 @@ assert.equal(low.hits.filter(h=>h.action==='popup:MEM').map(h=>h.row)[0],lm);
     def test_resources_a_host_name_then_one_row_of_two_gpus_in_columns_with_one_gauge_length(self):
         self.node(r"""
 const ls=lines(draw()),rs=gpuRows(ls);
-// 50 wide: the host's name alone, then both GPUs of the host on one row, the number alone, the gauge 5 cells.
+// 50 wide: the host's name alone, then both GPUs of the host on one row, the number alone, the gauge 4 cells and one cell between the memory and the sessions
+// (11-25 fix: the memory and the sessions never touch; the gauge goes down instead).
 assert.deepEqual(rs.map(l=>l.trimEnd()),[
- 'lab-a',' 0  92%━━━━─41/48G[c6]  1  48%━━───15/48G[d2]',
- 'lab-b',' 0 100%━━━━─26/32G[c6]  1  66%━━━──18/32G[a7]',
- 'lab-c',' 0  78%━━━━─17/24Gother 1   0%───── 0/24G',
- 'lab-d',' 0  32%━━━── 6/12G[d2]  1   0%───── 0/12G',
- 'testgpu',' 0  71%━━━━─37/48G[a7]  1   0%───── 0/48G'],rs.join('\n'));
+ 'lab-a',' 0  92%━━━─41/48G [c6]  1  48%━───15/48G [d2]',
+ 'lab-b',' 0 100%━━━─26/32G [c6]  1  66%━━──18/32G [a7]',
+ 'lab-c',' 0  78%━━━─17/24G other 1   0%──── 0/24G',
+ 'lab-d',' 0  32%━━── 6/12G [d2]  1   0%──── 0/12G',
+ 'testgpu',' 0  71%━━━─37/48G [a7]  1   0%──── 0/48G'],rs.join('\n'));
+assert.equal(ls.find(l=>/^│  0  92%/.test(l)),'│  0  92%━━━─41/48G [c6]  1  48%━───15/48G [d2]  │');
+// 52 to 57 wide: the 5-cell gauge and the cell; from 58: the spaced form; 44 to 49: no gauge, the cell kept.
+for(const [width,first] of [[52,' 0  92%━━━━─41/48G [c6]  1  48%━━───15/48G [d2]'],[57,' 0  92%━━━━─41/48G [c6]  1  48%━━───15/48G [d2]'],
+  [58,'  0  92% ━━━━─ 41/48G [c6]   1  48% ━━─── 15/48G [d2]'],[49,' 0  92% 41/48G [c6]  1  48% 15/48G [d2]'],[44,' 0  92% 41/48G [c6]  1  48% 15/48G [d2]']]){
+  const r=gpuRows(lines(draw({width})));assert.equal(r[1].trimEnd(),first,width+'\n'+r.join('\n'));
+  assert(r.every(l=>!/\dG(\[|other)/.test(l)),width+'\n'+r.join('\n'));
+}
 """)
 
     def test_resources_columns_line_up_across_hosts_and_every_gauge_has_one_length(self):
@@ -227,7 +258,9 @@ for(const width of [59,50,44,30]){
   const gauges=gpuLines.flatMap(l=>l.match(/[━─]+/gu)||[]);
   if(width===44){assert.equal(gauges.length,0,'no gauge at 44');}
   else{assert.equal(gauges.length,10,width);assert.equal(new Set(gauges.map(g=>g.length)).size,1,width+' '+gauges);
-    assert.equal(gauges[0].length,5,width);}
+    assert.equal(gauges[0].length,width===50?4:5,width);}
+  // the memory and the sessions never touch
+  assert(gpuLines.every(l=>!/\dG(\[|other)/.test(l)),width+'\n'+gpuLines.join('\n'));
   // the same column starts on every row of every host: the use's `%` and the memory's `G` stand on one cell each
   const marks=(re)=>new Set(gpuLines.flatMap(l=>{const out=[];let m;const r=new RegExp(re,'gu');while((m=r.exec(l)))out.push(cells(l.slice(0,m.index+m[0].length)));return out;}));
   if(width!==30){
@@ -238,7 +271,7 @@ for(const width of [59,50,44,30]){
 }
 // 59: spaced; 44: no gauge; 30: one GPU to a row (a host is its name and two rows).
 const w59=gpuRows(lines(draw({width:59,height:70})));assert.match(w59[1],/^ +0  92% ━━━━─ 41\/48G \[c6\] +1  48% ━━─── 15\/48G \[d2\]/);
-const w44=gpuRows(lines(draw({width:44,height:70})));assert.match(w44[1],/^ +0  92% 41\/48G\[c6\] +1  48% 15\/48G\[d2\]/);
+const w44=gpuRows(lines(draw({width:44,height:70})));assert.match(w44[1],/^ +0  92% 41\/48G \[c6\] +1  48% 15\/48G \[d2\]/);
 const w30=gpuRows(lines(draw({width:30,height:70})));assert.equal(w30.length,15,w30.join('\n'));assert.match(w30[1],/^ +0  92% ━━━━─ 41\/48G \[c6\]/);assert.match(w30[2],/^ +1  48% ━━─── 15\/48G \[d2\]/);
 // An idle GPU is all dim (`0%`, `0/24G`, its empty gauge), a busy one's use keeps its level colour; `other` is dim.
 const v=draw({height:70}),ls=lines(v),idle=v.rows[ls.findIndex(l=>/^│  0  78%/.test(l))];
@@ -257,9 +290,9 @@ const base=gpuRows(lines(draw({height:70})));
 const shared=gpuRows(lines(draw({height:70,resources:withHolders(1,0,['c6','d2'])})));
 assert.equal(shared.length,base.length+1,shared.join('\n'));
 const i=shared.findIndex(l=>/^lab-b/.test(l));
-assert.match(shared[i+1],/^ +0 100%━━━━─26\/32G\[c6\] \[d2\] *$/);assert.match(shared[i+2],/^ +1  66%━━━──18\/32G\[a7\] *$/);
+assert.match(shared[i+1],/^ +0 100%━━━─26\/32G \[c6\] \[d2\] *$/);assert.match(shared[i+2],/^ +1  66%━━──18\/32G \[a7\] *$/);
 for(const name of ['lab-a','lab-c','lab-d','testgpu']){const k=base.findIndex(l=>l.startsWith(name)),j=shared.findIndex(l=>l.startsWith(name));assert.equal(shared[j+1],base[k+1],name);}
-assert.deepEqual(shared.flatMap(l=>l.match(/[━─]+/gu)||[]).map(g=>g.length),Array(10).fill(5));
+assert.deepEqual(shared.flatMap(l=>l.match(/[━─]+/gu)||[]).map(g=>g.length),Array(10).fill(4));
 // Three sessions on one GPU, and two GPUs of one host each shared: the same, only that host.
 const three=gpuRows(lines(draw({height:70,resources:withHolders(1,0,['c6','d2','a7'])}))),j3=three.findIndex(l=>/^lab-b/.test(l));
 assert.match(three[j3+1],/\[c6\] \[d2\] \[a7\]/);assert.equal(three.length,base.length+1);
@@ -271,6 +304,33 @@ const odd=gpuRows(lines(draw({height:70,resources:[HOSTS[2],{host:[t('noaccel','
 assert(odd.some(l=>/^noaccel +No GPU *$/.test(l)),odd.join('\n'));assert(odd.some(l=>/other/.test(l)));
 const no=lines(draw({height:70,resources:[{host:[t('noaccel','loc_repo')],stats:[],gpus:[]}]}));
 assert(no.some(l=>/^│ noaccel +No GPU +│$/.test(l)),no.join('\n'));
+""")
+
+    def test_a_card_that_overflows_its_own_row_keeps_every_session_number(self):
+        self.node(r"""
+// Two and three sessions on lab-b's GPU 0, 30 to 40 wide: every session number is on the rows, none cut; that card alone gives up its gauge, then its memory, then its use.
+const withHolders=ids=>{const m=structuredClone(HOSTS);m[1].gpus[0].users=ids.flatMap((id,k)=>[...(k?[t(' ')]:[]),t('['+id+']','loc_repo')]);return m;};
+for(const ids of [['c6','d2'],['c6','d2','a7']])for(let width=30;width<=40;width++){
+  const ls=lines(draw({width,height:70,resources:withHolders(ids)})),rs=gpuRows(ls),tag=width+' '+ids+'\n'+rs.join('\n');
+  const at=rs.findIndex(l=>/^lab-b/.test(l)),card=rs[at+1];
+  for(const id of ids)assert(card.includes('['+id+']'),tag);
+  assert(!rs.some(l=>l.includes('…')),tag);
+  assert(rs.every(l=>!/\dG(\[|other)/.test(l)),tag);
+  // the card keeps what fits, in this order of giving up: the gauge, the memory, the use; the number stays
+  const has={gauge:/[━─]/.test(card),mem:/26\/32G/.test(card),pct:/100%/.test(card)};
+  assert(!has.mem||has.pct,tag);assert(!has.gauge||has.mem,tag);assert(/^ +0 /.test(card),tag);
+  // the host's other card and the other hosts keep the grid (the gauge where the section has one)
+  assert.match(rs[at+2],/^ +1  66% ━━━── 18\/32G \[a7\] *$/,tag);
+  for(const l of ls)assert.equal(cells(l),width,tag);
+}
+// 30 wide: two sessions give up the gauge, three the memory too.
+const at30=ids=>{const rs=gpuRows(lines(draw({width:30,height:70,resources:withHolders(ids)})));return rs[rs.findIndex(l=>/^lab-b/.test(l))+1].trimEnd();};
+assert.equal(at30(['c6','d2']),' 0 100% 26/32G [c6] [d2]');
+assert.equal(at30(['c6','d2','a7']),' 0 100% [c6] [d2] [a7]');
+// 34 wide: two sessions keep everything, three give up the gauge.
+const at34=ids=>{const rs=gpuRows(lines(draw({width:34,height:70,resources:withHolders(ids)})));return rs[rs.findIndex(l=>/^lab-b/.test(l))+1].trimEnd();};
+assert.equal(at34(['c6','d2']),' 0 100% ━━━━─ 26/32G [c6] [d2]');
+assert.equal(at34(['c6','d2','a7']),' 0 100% 26/32G [c6] [d2] [a7]');
 """)
 
     def test_short_of_rows_a_host_goes_whole_from_the_last_and_its_name_with_it(self):
@@ -311,9 +371,17 @@ for(const frame of [1000,1011,1023,1040]){
     const left=found[0],tick=found[1];assert.equal(JSON.stringify({...tick,text:''}),JSON.stringify({...left,text:''}),'the tick shares the left frame cell\'s phase');
   }
 }
-// Under `rule` the light runs over the SESSION head's rule alone.
-const r=draw({motion:'rule'}),rule=r.motion.cells.filter(c=>c.rule!==undefined);
-assert(rule.length>0&&new Set(rule.map(c=>c.row)).size===1&&rule[0].row===heads(lines(r)).find(h=>h.name==='SESSION').at);
+// Under `rule` the light runs over the SESSION head's rule alone, all of it: from after the name to the cell before `┤` (the right padding cell too).
+for(const width of [30,50,59]){
+  const r=draw({motion:'rule',width}),rl=lines(r),rule=r.motion.cells.filter(c=>c.rule!==undefined),at=heads(rl).find(h=>h.name==='SESSION').at;
+  assert(rule.length>0&&new Set(rule.map(c=>c.row)).size===1&&rule[0].row===at);
+  const run=/─+┤$/.exec(rl[at])[0].length-1;
+  assert.deepEqual(rule.map(c=>c.col),Array.from({length:run},(_,i)=>width-1-run+i),width+' '+rl[at]);
+  assert.deepEqual(rule.map(c=>c.rule),rule.map((_,i)=>i));
+  // the first paint's rule cells are the same ones the motion moves
+  let col=0;const painted=[];for(const p of r.rows[at]){const w=cells(p.text);if(p.rule)for(let x=0;x<w;x++)painted.push(col+x);col+=w;}
+  assert.deepEqual(painted,rule.map(c=>c.col));
+}
 """)
 
     def test_the_bottom_layout_has_no_group_heads_and_no_empty_rows_between_groups(self):

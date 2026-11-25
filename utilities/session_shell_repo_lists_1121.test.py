@@ -170,7 +170,7 @@ for(const width of [59,44,40,36,32,30]){
 const drawN=o=>view.render({width:o.width,height:o.height,side:true,model:{...model(o),messages:MSGS.slice(7-(o.messages??0))},state:'working',harness:'claude',frame:1000,since:990,
   brief:o.question?brief:undefined,sent:()=>[],cellWidth:cells,configuration:{side_width:o.width,rule_motion:'off',theme:'terminal',position:'right'}});
 function sort(v){
-  const ins=lines(v).map(l=>l.slice(2,-2)),act=new Map();
+  const ls=lines(v),ins=ls.map(l=>l.slice(2,-2)),act=new Map();
   for(const h of v.hits){if(!act.has(h.row))act.set(h.row,[]);act.get(h.row).push(h.action);}
   const out=[];let prev='';
   for(let i=1;i<ins.length-1;i++){
@@ -178,14 +178,15 @@ function sort(v){
     if(i===1)k='repo';
     else if(/^popup:(STATUS|BACKLOG)/.test(first))k='list';
     else if(/^popup:(MESSAGES|MEM)/.test(first)){const n=first.startsWith('popup:MESSAGES')?'MESSAGES':'MEM';k=prev===n?'mm-item':'mm-head:'+n;prev=n;}
-    else if(!ins[i].trim())k='blank';
+    // (11-25: an empty row right before a group head is the groups' gap; any other empty row is the middle's)
+    else if(!ins[i].trim())k=/^├╴\[/.test(ls[i+1]||'')?'gap:'+/^├╴\[([A-Z]+)\]/.exec(ls[i+1])[1]:'blank';
     if(!k.startsWith('mm-'))prev='';
     out.push({k,t:ins[i]});
   }
   return {lines:lines(v),rows:out};
 }
-// What the panel is apart from the lists, the empty rows and the rows under MESSAGES' and MEM's heads (their heads stand, their words are not compared: a count in them moves).
-const rest=p=>p.rows.filter(r=>!['list','blank','mm-item'].includes(r.k)).map(r=>r.k==='repo'?'REPO':r.k.startsWith('mm-head')?r.k:r.t);
+// What the panel is apart from the lists, the empty rows (the middle's and the groups' gaps) and the rows under MESSAGES' and MEM's heads (their heads stand, their words are not compared: a count in them moves).
+const rest=p=>p.rows.filter(r=>!['list','blank','mm-item'].includes(r.k)&&!r.k.startsWith('gap:')).map(r=>r.k==='repo'?'REPO':r.k.startsWith('mm-head')?r.k:r.t);
 const items=(p,name)=>{let on=false,n=0;for(const r of p.rows){if(r.k==='list'){if(/^ (STATUS|BACKLOG)\b/.test(r.t))on=r.t.startsWith(' '+name);else if(on)n++;}else on=false;}return n;};
 const mmRows=(p,name)=>{let on=false,n=0;for(const r of p.rows){if(r.k==='mm-head:'+name)on=true;else if(on&&r.k==='mm-item')n++;else on=false;}return n;};
 """
@@ -210,6 +211,10 @@ for(const width of [59,44,40,30])for(let height=6;height<=60;height++)for(const 
       const have=[3,1,0,0,0][n],bItems=items(p,'BACKLOG'),sItems=items(p,'STATUS'),blank=p.rows.filter(r=>r.k==='blank').length;
       if(bItems<have)short++;
       assert(!(bItems<have&&blank>0),'a BACKLOG item short with an empty row\n'+where);
+      // 11-25 (11-23, "REPO와 SESSION 구분줄 사이에 여백이 한칸은 있어야 될것 같다"): the empty row before SESSION outlives the BACKLOG items, and the two other gaps go before them.
+      const gaps=p.rows.filter(r=>r.k.startsWith('gap:')).map(r=>r.k.slice(4));
+      if(bItems>0)assert(gaps.includes('SESSION'),'a BACKLOG item standing without the empty row before SESSION\n'+where);
+      if(bItems<have)assert(!gaps.some(g=>g!=='SESSION'),'a BACKLOG item short with the empty row before '+gaps+'\n'+where);
       assert(!(bItems>0&&sItems<[3,1,0,0,3][n]),'a BACKLOG item standing with a STATUS item short\n'+where);
       assert(!v.hits.some(h=>h.row===1&&/^popup:(STATUS|BACKLOG)/.test(h.action)),'no buttons beside the heads\n'+where);
     }else{
@@ -232,7 +237,7 @@ const seen=[];
 for(let h=70;h>=14;h--){
   const p=sort(drawN({...o,height:h,status:status(),backlog:backlog()})),base=sort(drawN({...o,height:h}));
   const r={h,b:items(p,'BACKLOG'),s:items(p,'STATUS'),heads:p.rows.filter(x=>x.k==='list'&&/^ (STATUS|BACKLOG)\b/.test(x.t)).length,msg:mmRows(p,'MESSAGES'),mem:mmRows(p,'MEM'),
-    msg0:mmRows(base,'MESSAGES'),mem0:mmRows(base,'MEM'),gap:p.rows.filter(x=>x.k==='blank').length};
+    msg0:mmRows(base,'MESSAGES'),mem0:mmRows(base,'MEM'),gap:p.rows.filter(x=>x.k==='blank').length,sgap:p.rows.some(x=>x.k==='gap:SESSION')};
   seen.push(r);const w=JSON.stringify(r)+'\n'+p.lines.join('\n');
   assert.deepEqual(rest(p),rest(base),w);
   if(r.heads){
@@ -250,8 +255,10 @@ for(let i=1;i<seen.length;i++){const a=seen[i-1],b=seen[i];assert(b.s<=a.s&&b.he
 assert(seen.some(r=>r.heads&&r.b>0&&(r.msg<r.msg0||r.mem<r.mem0)),'the BACKLOG items stand on the rows a fold left');
 // And the four steps all stand in this run, in this order.
 const first=f=>seen.findIndex(f);
-const at=[first(r=>r.heads&&r.b<3),first(r=>r.heads&&(r.msg<r.msg0||r.mem<r.mem0)),first(r=>r.heads&&r.s<3),first(r=>!r.heads)];
-assert(at.every(x=>x>0)&&at[0]<at[1]&&at[1]<at[2]&&at[2]<at[3],JSON.stringify({at,seen:seen.slice(0,3)}));
+const at=[first(r=>r.heads&&r.b<3),first(r=>r.heads&&!r.sgap),first(r=>r.heads&&(r.msg<r.msg0||r.mem<r.mem0)),first(r=>r.heads&&r.s<3),first(r=>!r.heads)];
+// (11-25: the empty row before SESSION goes after the last BACKLOG item and before MESSAGES and MEM fold.)
+assert(at.every(x=>x>0)&&at[0]<at[1]&&at[1]<at[2]&&at[2]<at[3]&&at[3]<at[4],JSON.stringify({at,seen:seen.slice(0,3)}));
+assert(seen.every(r=>!r.heads||!r.b||r.sgap),'a BACKLOG item stands only with the empty row before SESSION');
 // The full panel stands whole and the same at a height with room to spare.
 assert.deepEqual([seen[0].b,seen[0].s,seen[0].heads],[3,3,2]);
 """)

@@ -2773,14 +2773,14 @@ for(const f of [0,3,59,60,1000])assert.equal(v3.motion.next(f),f+1);
  let t=0,wakes=0;while(t<60){const n=s.motion.next(t);assert(n>t);for(let k=t+1;k<n;k++)assert.deepEqual(s.motion.at(k),s.motion.at(t),String(k));t=n;wakes++;}
  assert.equal(wakes,P);}
 // (e) Between two frames only the frame's line cells and the spinner glyph change; the head rule never moves.
-// (11-22: the rule that stands still here and moves under `rule` is the SESSION head's: `├╴[SESSION] ───…┤`, 26 cells of rule (and a last one of its own) at 40 wide, 11-25.)
+// (11-22: the rule that stands still here and moves under `rule` is the SESSION head's: `├╴[SESSION] ───…┤`, 27 cells of rule at 40 wide, through the padding cell to `┤`, 11-25.)
 const ruleRow=v=>v.rows.findIndex((r,i)=>i>0&&r.some(p=>p.rule));
 for(const state of ['working','submitting','blocked']){
  const a=run({state,frame:5}),b=run({state,frame:state==='blocked'?17:6}),ga=grid(a),gb=grid(b),mc=new Set(a.motion.cells.map(c=>c.row+','+c.col));
  ga.forEach((r,y)=>r.forEach((c,x)=>{if(!c)return;if(mc.has(y+','+x)||c.p.spin)return;assert.deepEqual(c,gb[y][x],state+' '+y+','+x);}));
  const i=ruleRow(a);assert(i>0,state);
  for(const v of [a,b]){const parts=v.rows[i].filter(p=>p.rule);
-  assert(parts.length===1&&parts[0].text==='─'.repeat(26)&&parts[0].role==='messages'&&parts[0].dim===true&&!parts[0].motion&&!parts[0].tone,state+' '+JSON.stringify(parts));}
+  assert(parts.length===1&&parts[0].text==='─'.repeat(27)&&parts[0].role==='messages'&&parts[0].dim===true&&!parts[0].motion&&!parts[0].tone,state+' '+JSON.stringify(parts));}
 }
 // (f) Waiting: the whole frame breathes, one red at a time on every line cell; three shades in
 // 256 colors, six in 24-bit; it starts at its brightest (the frame's waiting red) and the host
@@ -2857,7 +2857,7 @@ for(let h=30;h>=8;h-=4){const v=run({state:'working',frame:7,height:h});assert(v
         # nothing moves. Waiting, the whole frame breathes red under every value but `off`, the rule
         # stays plain; idle, the still frame. The `on` saved before 11-15 reads as `rule`. The values
         # to tune stand at the top of panel-view.cjs.
-        # 11-25 (four groups): the light runs over the `[SESSION]` head's rule (26 cells at 40 wide, from column 12: `├╴[SESSION] `), and a group head's
+        # 11-25 (four groups): the light runs over the `[SESSION]` head's rule (27 cells at 40 wide, from column 12: `├╴[SESSION] `, to the cell before `┤`), and a group head's
         # frame cells `├` `╴` `┤` move with the frame, so the host's cells of a moving frame count three more per head than the line cells `ring` reads.
         script = self.FIXTURE + r"""
 const fs=require('node:fs');
@@ -2886,8 +2886,8 @@ const around=v=>{const g=grid(v),W=g[0].length,H=g.length,out=[];for(let x=0;x<W
  for(let x=W-1;x>=0;x--)out.push(g[H-1][x]);for(let y=H-2;y>0;y--)out.push(g[y][0]);return out.map(c=>c&&'┌┐└┘─│'.includes(c.ch)?c:null);};
 const ring=v=>around(v).filter(Boolean),heads=v=>v.rows.filter(r=>r[0].text==='├').length;   // (11-25: a group head's `├` `╴` `┤` move with the frame too: three cells a head, none of them in `ring`)
 const ruleAt=v=>v.rows.findIndex((r,i)=>i>0&&r.some(p=>p.rule));
-// (11-22: the light runs over the SESSION head's rule alone, `RULE`'s cells (26 at 40 wide, 11-25), not over its name or value.)
-const RULE=26,ruleCells=v=>v.rows[ruleAt(v)].filter(p=>p.rule).flatMap(p=>[...p.text].map(ch=>({ch,p})));
+// (11-22: the light runs over the SESSION head's rule alone, `RULE`'s cells (27 at 40 wide, through the padding cell to `┤`, 11-25), not over its name or value.)
+const RULE=27,ruleCells=v=>v.rows[ruleAt(v)].filter(p=>p.rule).flatMap(p=>[...p.text].map(ch=>({ch,p})));
 const plainRule=v=>{const parts=v.rows[ruleAt(v)].filter(p=>p.rule);return parts.length===1&&parts[0].text==='─'.repeat(RULE)&&parts[0].role==='messages'&&parts[0].dim===true&&!parts[0].tone;};
 // (a) `rule`, the default: the frame lit and still, the light over the rule.
 const ramp=view.FACES.dark.scan,CYCLE=26+10-1;

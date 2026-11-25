@@ -64,8 +64,15 @@ for(const name of names)for(const wt of [true,false])for(let w=24;w<=60;w++){
  assert(v.hits.filter(h=>h.row===1).length===0,tag);
  const inner=w-4,label=inner>=30;
  assert(row.startsWith('├╴[REPO] '),tag);   // 11-22: the same in every width (the group head's name, one cell, its value); 11-25: a frame row
- // The rule runs through to the right frame (a thin rule where three cells or more are free).
- assert(/─┤$/.test(row),tag);
+ // The rule runs through to the right frame: three cells or more free after the head's words take one space and a thin rule over the rest of them and the padding
+ // cell; fewer stay blank and the padding cell alone is rule (`· wt 12  ─┤`). A name that is cut ends in `…`.
+ const m=/^├╴(\[REPO\] .*[^ ─])( *)(─+)┤$/u.exec(row);
+ assert(m,tag);
+ const free=inner-cells(m[1]);
+ assert(free>=0,tag);
+ if(free>=3)assert(m[2]===' '&&m[3].length===free,tag);
+ else assert(m[2].length===free&&m[3].length===1,tag);
+ if(!row.includes(name))assert(m[1].endsWith('…'),tag);
  // The name is whole, or cut with `…`.
  assert(row.includes(name)||row.includes('…'),tag);
 }

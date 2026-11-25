@@ -74,10 +74,10 @@ const rows=plain(render(44,50,{resources:[A,B]}));
 const at=rows.findIndex(s=>/^├╴\[RESOURCES\] ─+┤$/.test(s)),us=rows.findIndex(s=>/^├╴\[USAGE\] ─+┤$/.test(s));
 assert(at>0&&us>at,rows.join('\n'));
 const body=resBody(rows);
-// (44 cells, 40 inside: the two groups of host-a are 16 wide each, one in and one apart: 34 inside 40, so they stand side by side on ONE row under the host's name.)
-assert.deepEqual(body,['host-a',' 0 92% 21/24G[3b] 3 58% 14/24G[c7]','host-b',' 1 71% 18/24G[d4]'],rows.join('\n'));
-// Narrower than the two groups need (36: 32 inside, 34 wanted), each stands on a row of its own; the level's color is the use's: 92 red, 58 yellow, 71 yellow.
-assert.deepEqual(resBody(plain(render(36,50,{resources:[A,B]}))),['host-a',' 0 92% 21/24G[3b]',' 3 58% 14/24G[c7]','host-b',' 1 71% 18/24G[d4]']);
+// (44 cells, 40 inside: the two groups of host-a are 17 wide each (one cell between the memory and the session, 11-25), one in and one apart: 36 inside 40, so they stand side by side on ONE row under the host's name.)
+assert.deepEqual(body,['host-a',' 0 92% 21/24G [3b] 3 58% 14/24G [c7]','host-b',' 1 71% 18/24G [d4]'],rows.join('\n'));
+// Narrower than the two groups need (36: 32 inside, 36 wanted), each stands on a row of its own; the level's color is the use's: 92 red, 58 yellow, 71 yellow.
+assert.deepEqual(resBody(plain(render(36,50,{resources:[A,B]}))),['host-a',' 0 92% 21/24G [3b]',' 3 58% 14/24G [c7]','host-b',' 1 71% 18/24G [d4]']);
 assert.deepEqual(resBody(plain(render(60,50,{resources:[A,B]}))),body);   // wider, the same rows (this sample has no gauge)
 const coloured=render(60,50,{resources:[A,B]}).rows.flat().filter(p=>/^\d+%$/.test(p.text)&&['92%','58%','71%'].includes(p.text));
 assert.deepEqual(coloured.map(p=>[p.text,p.foreground]),[['92%',217],['58%',186],['71%',186]]);
@@ -102,8 +102,8 @@ const four=host('host-d',5,10,[0,1,2,3].map(i=>idleGpu(i,'0/48G')));
 const none=host('host-e',7,8,[]);
 const body=(w,h)=>resBody(plain(render(w,h,{resources:[eight,four,none]})));
 const wide=body(60,60);
-assert.deepEqual(wide,['host-c',' 0 92% 21/24G[3b] 1  0%  0/24G',' 2  0%  0/24G     3 58% 14/24G[c7]',' 4  0%  0/24G     5  0%  0/24G',' 6  0%  0/24G     7  0%  0/24G',
- 'host-d',' 0  0%  0/48G     1  0%  0/48G',' 2  0%  0/48G     3  0%  0/48G','host-e  No GPU'],wide.join('\n'));
+assert.deepEqual(wide,['host-c',' 0 92% 21/24G [3b] 1  0%  0/24G',' 2  0%  0/24G      3 58% 14/24G [c7]',' 4  0%  0/24G      5  0%  0/24G',' 6  0%  0/24G      7  0%  0/24G',
+ 'host-d',' 0  0%  0/48G      1  0%  0/48G',' 2  0%  0/48G      3  0%  0/48G','host-e  No GPU'],wide.join('\n'));
 assert(!wide.some(s=>/idle|CPU|MEM|GPU\d/.test(s)));
 // The idle group is all dim (the use too: no level color); the working one keeps its level's color.
 const parts=render(60,60,{resources:[eight]}).rows.flat();
@@ -153,13 +153,14 @@ for(let width=28;width<=60;width++){
  // Every GPU of every host is there, once, in its number's order.
  assert.deepEqual(all.flatMap(r=>[...r.matchAll(/(?:^| )(\d) +\d+%/g)].map(m=>m[1])).join(''),'0123456'+'012',ctx);
 }
-// The picture at 60 (inner 56): a group 17 wide, two to a row, `100%` the widest use; the host rows the names alone.
-assert.deepEqual(bodyOf(60),['host-a',' 0  92% 21/24G[3b]   1  40% 10/48G[c7]',' 2   0%  0/48G       3   0%  0/48G',' 4 100% 48/48G[d4]   5   0%  0/48G',' 6   0%  0/48G',
+// The picture at 60 (inner 56): a group 19 wide (one cell between the memory and the sessions, 11-25), two to a row, `100%` the widest use; the host rows the names alone.
+assert.deepEqual(bodyOf(60),['host-a',' 0  92% 21/24G [3b]  1  40% 10/48G [c7]',' 2   0%  0/48G       3   0%  0/48G',' 4 100% 48/48G [d4]  5   0%  0/48G',' 6   0%  0/48G',
  'longer-host-b',' 0   0%  0/24G       1   0%  0/24G',' 2   7%  2/24G other','c  No GPU'],bodyOf(60).join('\n'));
 """)
 
     def test_narrow_groups_drop_the_memory_then_the_use_and_keep_the_number_of_the_session(self):
-        # 11-25: two to a row while 34 cells are inside, then one to a row under the host's name; only below 16 inside the memory goes, then the use.
+        # 11-25: two to a row while 36 cells are inside (one cell always between the memory and the sessions), then one to a row under the host's name; only below 17 inside the
+        # memory goes, then the use.
         self.node(r"""
 const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 for(const width of [18,20,22,24,26,28,32,36,40,44,60]){
@@ -171,11 +172,12 @@ for(const width of [18,20,22,24,26,28,32,36,40,44,60]){
 }
 // One GPU's group is whole or in a shorter form, never split between rows; the groups of the section take one form together.
 const at=w=>resBody(plain(render(w,50,{resources:[A]})));
-assert.deepEqual(at(40),['host-a',' 0 92% 21/24G[3b] 3 58% 14/24G[c7]']);      // 36 inside: the two stand side by side
-assert.deepEqual(at(36),['host-a',' 0 92% 21/24G[3b]',' 3 58% 14/24G[c7]']);    // 32 inside, 34 wanted: one to a row
-assert.deepEqual(at(24),['host-a',' 0 92% 21/24G[3b]',' 3 58% 14/24G[c7]']);
-assert.deepEqual(at(20),['host-a','0 92% 21/24G[3b]','3 58% 14/24G[c7]']);      // 16 inside: the group fills it, no indent
-assert.deepEqual(at(18),['host-a','0 92% [3b]','3 58% [c7]']);                  // 14 inside: the memory goes first; the use and the number stay
+assert.deepEqual(at(40),['host-a',' 0 92% 21/24G [3b] 3 58% 14/24G [c7]']);    // 36 inside: the two stand side by side
+assert.deepEqual(at(38),['host-a',' 0 92% 21/24G [3b]',' 3 58% 14/24G [c7]']);  // 34 inside, 36 wanted: one to a row
+assert.deepEqual(at(24),['host-a',' 0 92% 21/24G [3b]',' 3 58% 14/24G [c7]']);
+assert.deepEqual(at(21),['host-a','0 92% 21/24G [3b]','3 58% 14/24G [c7]']);    // 17 inside: the group fills it, no indent
+assert.deepEqual(at(20),['host-a','0 92% [3b]','3 58% [c7]']);                  // 16 inside: the memory goes first (it never touches the session); the use and the number stay
+assert.deepEqual(at(18),['host-a','0 92% [3b]','3 58% [c7]']);
 // A GPU whose session is not known keeps its use and memory, and reads `other`.
 const unknown=resBody(plain(render(24,50,{resources:[host('host-a',34,61,[gpu(0,92,'21/24G',null)])]})))[1];
 assert.equal(unknown,' 0 92% 21/24G other');
@@ -183,7 +185,8 @@ assert.equal(unknown,' 0 92% 21/24G other');
 
     def test_the_memory_gauge_stands_only_where_the_rows_are_as_many_and_otherwise_the_picture_is_what_it_was(self):
         # 11-19 (the person, on v4.59.6's panel: "가로로 길어지면 RESOURCE에 게이지도 넣어주면 좋고"): rows first, the gauge only with what the width leaves.
-        # 11-25: the gauge is 4 or 5 cells (half what it was), spaced or close to the numbers; two GPUs to a row without a gauge beat one to a row with it.
+        # 11-25: the gauge is 4 or 5 cells (half what it was), spaced or close to the numbers, the sessions always one cell after the memory; two GPUs to a row without a gauge
+        # beat one to a row with it.
         self.node(r"""
 const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 const two=host('host-a',34,61,[gpu(0,92,'21/24G','[3b]'),idleGpu(1,'0/24G')]),one=host('host-b',12,40,[idleGpu(0,'0/48G')]);
@@ -215,13 +218,14 @@ for(const [a,b] of [[two,one],[eight,four]].map(x=>[x,x.map(gaugeHost)])){
  }
 }
 assert(gauged>0&&plainOnes>0,gauged+' '+plainOnes);
-// The picture: hosts of two GPUs and one. 59 wide (55 inside): the gauge 5 cells, spaced, the two groups on a row. 50: close to the numbers.
+// The picture: hosts of two GPUs and one. 59 wide (55 inside): the gauge 5 cells, spaced, the two groups on a row. 50: close to the numbers, the session one cell after the memory.
 assert.deepEqual(body(59,[two,one].map(gaugeHost)),['host-a','  0 92% ━━━━─ 21/24G [3b]  1  0% ─────  0/24G','host-b','  0  0% ─────  0/48G']);
-assert.deepEqual(body(50,[two,one].map(gaugeHost)),['host-a',' 0 92%━━━━─21/24G[3b] 1  0%───── 0/24G','host-b',' 0  0%───── 0/48G']);
-assert.deepEqual(body(44,[two,one].map(gaugeHost)),['host-a',' 0 92%━━━─21/24G[3b] 1  0%──── 0/24G','host-b',' 0  0%──── 0/48G']);   // 4 cells
+assert.deepEqual(body(50,[two,one].map(gaugeHost)),['host-a',' 0 92%━━━━─21/24G [3b] 1  0%───── 0/24G','host-b',' 0  0%───── 0/48G']);
+assert.deepEqual(body(46,[two,one].map(gaugeHost)),['host-a',' 0 92%━━━─21/24G [3b] 1  0%──── 0/24G','host-b',' 0  0%──── 0/48G']);   // 4 cells
+assert.deepEqual(body(44,[two,one].map(gaugeHost)),['host-a',' 0 92% 21/24G [3b] 1  0%  0/24G','host-b',' 0  0%  0/48G']);   // no gauge: the cell before the session stays
 // Two to a row without a gauge (40: 36 inside) beat one to a row with it: the picture is what it was.
 assert.deepEqual(body(40,[two,one].map(gaugeHost)),body(40,[two,one]));
-assert.deepEqual(body(40,[two,one]),['host-a',' 0 92% 21/24G[3b] 1  0%  0/24G','host-b',' 0  0%  0/48G']);
+assert.deepEqual(body(40,[two,one]),['host-a',' 0 92% 21/24G [3b] 1  0%  0/24G','host-b',' 0  0%  0/48G']);
 // Narrower than the two need even so, one to a row with the gauge (the rows are the same as without).
 assert.deepEqual(body(30,[two,one].map(gaugeHost)),['host-a',' 0 92% ━━━━─ 21/24G [3b]',' 1  0% ─────  0/24G','host-b',' 0  0% ─────  0/48G']);
 // A host of eight GPUs and a host of four: the gauge costs no row.
@@ -267,15 +271,18 @@ assert.equal(rowOf(60,host(LONG,12,8,[])),LONG+'  No GPU');
 """)
 
     def test_short_of_rows_it_gives_way_first_gpu_rows_then_host_rows_and_the_rest_stands_as_without_it(self):
-        # 11-25: the empty rows between the groups go before any of RESOURCES' rows; a host stands with all its rows or not at all (from the last host first).
+        # 11-25: the empty rows between the groups go before any of RESOURCES' rows, one at a time; a host stands with all its rows or not at all (from the last host first),
+        # and what a host's rows leave over goes back to the empty rows (the one before SESSION first), never to the middle.
         self.node(r"""
 const C=host('host-c',2,2,[0,1,2,3].map(i=>idleGpu(i,'0/48G')));   // two rows at 44 (two to a row)
 const ROWS={'host-a':1,'host-b':1,'host-c':2};
 const kinds=rows=>({gpu:rows.filter(s=>isGpuRow(s.slice(2,-2))).length,host:rows.filter(s=>/^│ host-[abc]/.test(s)).length,
   head:rows.some(s=>/^├╴\[RESOURCES\]/.test(s)),usage:rows.filter(s=>/^│ (claude|codex|opencode) /.test(s)||/^├╴\[USAGE\]/.test(s)).length});
 const routeBox=rows=>{const a=rows.findIndex(s=>/╭─/.test(s)),z=rows.findIndex(s=>/╰─/.test(s));return a<0?null:rows.slice(a,z+1).join('\n');};
-// (the empty rows before [RESOURCES] and [USAGE] may also be the panel's spare room, so the group gap counted is the one before [SESSION]; the gaps are given up together.)
+// `gaps`: the empty row before [SESSION] (the last of them to go); `allGaps`: the empty rows right before any group head; `fill`: any other empty row (the middle's).
 const gaps=rows=>rows.filter((s,i)=>/^│ +│$/.test(s)&&/^├╴\[SESSION\]/.test(rows[i+1]||'')).length;
+const allGaps=rows=>rows.filter((s,i)=>/^│ +│$/.test(s)&&/^├╴\[/.test(rows[i+1]||'')).length;
+const fill=rows=>rows.filter((s,i)=>/^│ +│$/.test(s)&&!/^├╴\[/.test(rows[i+1]||'')).length;
 for(const hosts of [[A,B],[A,B,C]]){
  const names=hosts.map(h=>h.host[0].text),whole=names.reduce((n,x)=>n+ROWS[x],0);
  let seen=new Set();
@@ -289,9 +296,17 @@ for(const hosts of [[A,B],[A,B,C]]){
   const shown=names.slice(0,k.host);
   assert.equal(k.gpu,shown.reduce((n,x)=>n+ROWS[x],0),h+JSON.stringify(k)+'\n'+withR.join('\n'));
   assert.equal(k.head,k.host>=1,h+JSON.stringify(k));
-  // The empty rows between the groups are the first to go: while RESOURCES stands with some of its rows missing, there is none left (with none of it standing, the rows
-  // it would not fit in may be what the empty rows come back on).
-  if(k.host>=1&&k.gpu<whole)assert.equal(gaps(withR),0,h+' the empty rows go first\n'+withR.join('\n'));
+  // The empty rows between the groups are the first to go: while RESOURCES stands with some of its rows missing, no row is to spare (none in the middle), and of the empty
+  // rows between the groups only the rows the missing host's name and GPU rows left over stand, the one before SESSION first (with none of it standing, the rows it would
+  // not fit in may be what the empty rows come back on).
+  if(k.host>=1&&k.gpu<whole){
+   const left=ROWS[names[k.host]];   // (the missing host's name and GPU rows, less the one row that was wanted)
+   assert.equal(fill(withR),0,h+' no row in the middle while a host is short\n'+withR.join('\n'));
+   assert(allGaps(withR)<=left,h+' the empty rows go first\n'+withR.join('\n'));
+   if(allGaps(withR))assert.equal(gaps(withR),1,h+' the one before SESSION is the last to go\n'+withR.join('\n'));
+  }
+  // A panel with a row to spare has every empty row between the groups.
+  if(fill(withR))assert.equal(allGaps(withR),withR.filter(s=>/^├╴\[/.test(s)).length-1,h+' a row in the middle while a gap is short\n'+withR.join('\n'));
   seen.add(JSON.stringify([k.head,k.host,k.gpu]));
  }
  // Every step of the way shows at some height: no RESOURCES, each host more, all of them.

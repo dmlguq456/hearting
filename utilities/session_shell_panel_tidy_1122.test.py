@@ -152,12 +152,12 @@ for(const re of [/^ STATUS/,/^ BACKLOG/,/^ NOW /,/^ MESSAGES/,/^ MEM /])assert.e
 
     def test_the_rule_the_light_moves_over_is_the_session_heads_alone(self):
         self.node(r"""
-// Tall: `├╴[SESSION] ────…┤` (the rule runs from cell 12 to the last cell before `┤`, which is one plain `─` past the light's 30), the light on those 30 cells only, never on the frame cells or the name; no other row carries it.
+// Tall: `├╴[SESSION] ────…┤` (the rule runs from cell 12 to the last cell before `┤`, the right padding cell too), the light on those 31 cells only, never on the frame cells or the name; no other row carries it.
 {const v=drawW({question:true,routes:1,height:52,motion:'rule',state:'working',status:status(),backlog:backlog()}),ls=lines(v);
  const y=ls.findIndex(l=>/^├╴\[SESSION\] ─+┤$/.test(l));assert(y>0,ls.join('\n'));
  const run=ls[y].slice(12).match(/─+/)[0].length;assert.equal(run,31,ls[y]);
  const cs=v.motion.cells.filter(c=>c.rule!==undefined);
- assert.equal(cs.length,30);assert(cs.every((c,i)=>c.row===y&&c.col===12+i&&c.ch==='─'&&c.rule===i),JSON.stringify(cs.slice(0,3)));
+ assert.equal(cs.length,31);assert(cs.every((c,i)=>c.row===y&&c.col===12+i&&c.ch==='─'&&c.rule===i),JSON.stringify(cs.slice(0,3)));
  assert(!v.motion.cells.some(c=>c.rule===undefined&&c.row===y),'the name and the frame cells (`├╴` and `┤`) are not moved');
  // The light goes round and comes back: some frame lights cells, some frame (the rest) lights none; the next change is asked for from the rule's own length.
  const lit=f=>v.motion.at(989+f).filter(p=>p.tone==='scan').length;   // (`since` is 990 and a rule's own tick is one on: the host's frame 989+f is the rule's tick f)
@@ -168,11 +168,11 @@ for(const re of [/^ STATUS/,/^ BACKLOG/,/^ NOW /,/^ MESSAGES/,/^ MEM /])assert.e
 {const v=drawW({question:true,routes:1,messages:1,mem:1,height:24,motion:'rule',state:'working',status:status(),backlog:backlog()}),ls=lines(v);
  const y=ls.findIndex(l=>/^├╴\[SESSION\] Opus 5\.5 xhigh ─+┤$/.test(l));assert(y>0,ls.join('\n'));
  const first=ls[y].indexOf('─',10),cs=v.motion.cells.filter(c=>c.rule!==undefined);
- assert(cs.length>=3&&cs.every(c=>c.row===y&&c.col>=first&&c.ch==='─')&&cs.length===[...ls[y].slice(first)].filter(c=>c==='─').length-1,JSON.stringify(cs.slice(0,2)));}
+ assert(cs.length>=3&&cs.every(c=>c.row===y&&c.col>=first&&c.ch==='─')&&cs.length===[...ls[y].slice(first)].filter(c=>c==='─').length,JSON.stringify(cs.slice(0,2)));}
 // Still: the plain rule in every other mode (border, scanners, off and a waiting frame keep a rule that does not move).
 for(const [motion,state] of [['border','working'],['scanners','working'],['off','working'],['rule','idle'],['rule','blocked']]){
  const v=drawW({height:52,motion,state}),ls=lines(v),y=ls.findIndex(l=>/^├╴\[SESSION\] ─+┤$/.test(l));assert(y>0,motion+state);
- const parts=v.rows[y].filter(p=>p.rule);assert(parts.length===1&&parts[0].text==='─'.repeat(30)&&parts[0].role==='messages'&&parts[0].dim===true,motion+state+JSON.stringify(parts));
+ const parts=v.rows[y].filter(p=>p.rule);assert(parts.length===1&&parts[0].text==='─'.repeat(31)&&parts[0].role==='messages'&&parts[0].dim===true,motion+state+JSON.stringify(parts));
  assert(!(v.motion&&v.motion.cells.some(c=>c.rule!==undefined)),motion+state);
 }
 """)
@@ -267,8 +267,10 @@ const order=[first(r=>r.bItems<3),first(r=>r.sItems<3),first(r=>!r.heads),first(
 assert(seen.every(r=>r.title),'TITLE stands at every height');
 assert(order.every((x,i)=>x>0&&(!i||x<=order[i-1])),JSON.stringify(order));
 assert(order[0]>order[1]&&order[1]>order[2],JSON.stringify(order));
-// 11-25: the empty rows between the groups are the first thing given up, before BACKLOG loses an item.
-assert(first(r=>r.gap===0)>order[0],JSON.stringify([first(r=>r.gap===0),order]));
+// 11-25 (11-23, "REPO와 SESSION 구분줄 사이에 여백이 한칸은 있어야 될것 같다"): the empty row before SESSION outlives the BACKLOG items: it stands wherever
+// a BACKLOG item is short and some stand, and goes only after the last of them.
+assert(seen.filter(r=>r.bItems>0&&r.bItems<3).every(r=>r.gap>=1),JSON.stringify(seen.map(r=>[r.h,r.gap,r.bItems])));
+assert(first(r=>r.gap===0)<first(r=>r.bItems===0),JSON.stringify([first(r=>r.gap===0),first(r=>r.bItems===0)]));
 // The merged head costs no row more than the head that went: the head row is MODEL's row.
 const tall=lines(drawW({...o,height:60})).length,short=lines(drawW({...o,height:30})).length;assert.equal(tall,60);assert.equal(short,30);
 """)

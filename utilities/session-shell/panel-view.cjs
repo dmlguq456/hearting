@@ -1986,12 +1986,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const usageLines=()=>keepQuota&&usageOn?usageData.filter((_u,i)=>keepLine[i]):[];
     // 11-25 (the person: "GPU는 지금 상태에서 게이지를 절반정도로 짧게해서 한줄에 2개가 들어가게만 해주라", "RESOURCES는 CPU, MEM이 그렇게 중요해? GPU가 더 중요한데"):
     // RESOURCES is the third group (`[RESOURCES]`, above `[USAGE]`). A host is its name alone (no CPU, no MEM), and under it one row with two of its GPUs side by side:
-    // `0  92%━━━━─41/48G[c6]  1  48%━━───15/48G[d2]` (the number alone, the use in its level's color, a short memory gauge, the memory, the sessions that hold it:
+    // `0  92%━━━─41/48G [c6]  1  48%━───15/48G [d2]` (the number alone, the use in its level's color, a short memory gauge, the memory, one cell, the sessions that hold it:
     // `other` where it is used and the holder is not known). A GPU nothing runs on stands the same, all of it dim (`0%`, `0/24G`). A host with no GPU reads `No GPU`.
     // One grid for the whole section, from every host's values (11-19, "GPU 표시를 행과 열 간격을 맞춰"): the same columns and the same gauge length for every host. The widest
-    // form that puts two GPUs in a row wins: the gauge 5 cells, spaced; 5 cells; 4 cells; no gauge; then one GPU to a row. A host whose GPU is held by several
-    // sessions and whose row overflows alone stands one GPU to a row; the others keep the grid. Short of rows it gives way before everything else but the
-    // empty rows between the groups: the GPU rows (from the last host, a host with its GPU rows whole), the hosts.
+    // form that puts two GPUs in a row wins: the gauge 5 cells, spaced; 5 cells; 4 cells; no gauge (with two-digit memory from 58, 52, 50 and 44 cells wide); then one GPU to a row. The memory and the
+    // sessions are never drawn together: one cell parts them in every form. A host whose GPU is held by several sessions and whose row overflows alone stands one GPU
+    // to a row; the others keep the grid; a card that overflows its own row gives up its gauge, then its memory, then its use, and keeps the session numbers.
+    // Short of rows it gives way before everything else but the empty rows between the groups: the GPU rows (from the last host, a host with its GPU rows whole), the hosts.
     const resourceData=Array.isArray(model.resources)?model.resources.filter(h=>h&&typeof h==='object'&&Array.isArray(h.host)).slice(0,8):[];
     let resHosts=resourceData.length,resGpus=Infinity;
     const plainOf=parts=>parts.map(p=>String(p.text)).join('');
@@ -2021,18 +2022,20 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         mem:painted(g.mem).map(x=>({...x,dim:true})),users:gpuUsers(g)};
     };
     // The columns of a form (`n` the gauge's cells, none at 0; `open` a cell between the columns): each as wide as the widest GPU of the section (the sessions' column
-    // by the GPUs with one holder at most: a shared one stands past it or, overflowing, on a row of its own).
+    // by the GPUs with one holder at most: a shared one stands past it or, overflowing, on a row of its own). A cell always stands before the sessions: the memory
+    // and the sessions never touch (`41/48G [c6]`, `17/24G other`), and short of cells the gauge goes down instead (5 cells, 4, none).
     const gpuColumns=(n,open)=>{
       if(n&&cardList.some(g=>size(painted(g['gauge'+n]))!==n))return null;
-      const of=g=>{const v=gpuValues(g,n);if(!open&&!n&&plainOf(v.users)==='other')v.users=[pad(1),...v.users];return v;};
+      const of=g=>gpuValues(g,n);
       const keys=['label','pct',...(n?['gauge']:[]),'mem','users'];
       const widths=Object.fromEntries(keys.map(k=>[k,Math.max(0,...cardList.filter(g=>k!=='users'||gpuHolders(g).length<=1).map(g=>size(of(g)[k])))]));
-      const gap=k=>k==='pct'||!n&&k==='mem'||open&&['gauge','mem','users'].includes(k)?1:0;
+      const gap=(k,cols)=>k==='pct'||k==='users'||k==='mem'&&(open||!cols.includes('gauge'))||open&&k==='gauge'?1:0;
       const shown=keys.filter(k=>widths[k]>0);
-      const wide=shown.reduce((w,k)=>w+gap(k)+widths[k],0);
-      const draw=(g,last)=>{
-        const v=of(g);
-        const row=shown.flatMap(k=>[...blank(gap(k)),...(k==='pct'||k==='mem'?rightIn(v[k],widths[k]):leftIn(v[k],widths[k]))]);
+      const wide=shown.reduce((w,k)=>w+gap(k,shown)+widths[k],0);
+      // `drop`: the columns this card gives up (a card that overflows a row of its own, below); the others keep their columns.
+      const draw=(g,last,drop=[])=>{
+        const v=of(g),cols=shown.filter(k=>!drop.includes(k));
+        const row=cols.flatMap(k=>[...blank(gap(k,cols)),...(k==='pct'||k==='mem'?rightIn(v[k],widths[k]):leftIn(v[k],widths[k]))]);
         return last?trimEnd(row):row;
       };
       return {n,open,wide,draw};
@@ -2044,20 +2047,23 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const col=gpuColumns(t.n,t.open);if(col&&t.indent+col.wide<=inner)return {...t,perRow:1,col};}
       return null;
     })();
-    // A host's rows under its name: two GPUs to a row in the grid; a host whose pair overflows alone, one to a row.
+    // A host's rows under its name: two GPUs to a row in the grid; a host whose pair overflows alone, one to a row. A card that overflows even a row of its own
+    // (held by several sessions in a narrow panel) gives up, that card alone, its gauge, then its memory, then its use, and keeps the session numbers.
     const resourceGpuRows=h=>{
       const cards=painted(h.gpus);
       if(!gpuGrid)return cards.map(g=>{
-        const v=gpuValues(g,0),full=[...v.label,pad(1),...v.pct,pad(1),...v.mem,...v.users],use=[...v.label,pad(1),...v.pct,pad(1),...v.users];
-        return [full,use,[...v.label,pad(1),...v.users]].find(row=>size(row)<=inner)||cut([...v.label,pad(1),...v.users],inner);
+        const v=gpuValues(g,0),users=v.users.length?[pad(1),...v.users]:[];
+        const full=[...v.label,pad(1),...v.pct,pad(1),...v.mem,...users],use=[...v.label,pad(1),...v.pct,...users];
+        return [full,use,[...v.label,...users]].find(row=>size(row)<=inner)||cut([...v.label,...users],inner);
       });
       const {perRow,indent,between,col}=gpuGrid;
-      const rowOf=(group,last)=>[pad(indent),...group.flatMap((g,j)=>[...(j?[pad(between)]:[]),...col.draw(g,last&&j===group.length-1)])];
+      const rowOf=(group,last,drop)=>[pad(indent),...group.flatMap((g,j)=>[...(j?[pad(between)]:[]),...col.draw(g,last&&j===group.length-1,drop)])];
+      const alone=g=>[[],['gauge'],['gauge','mem'],['gauge','mem','pct']].map(drop=>rowOf([g],true,drop)).find(row=>size(row)<=inner)||rowOf([g],true,['gauge','mem','pct']);
       const rows=[];
       for(let i=0;i<cards.length;i+=perRow){
         const group=cards.slice(i,i+perRow);
-        if(group.length>1&&size(rowOf(group,true))>inner)group.forEach(g=>rows.push(rowOf([g],true)));
-        else rows.push(rowOf(group,true));
+        if(group.length>1&&size(rowOf(group,true))>inner)group.forEach(g=>rows.push(alone(g)));
+        else rows.push(group.length>1?rowOf(group,true):alone(group[0]));
       }
       return rows.map(r=>cut(r,inner));
     };
@@ -2085,9 +2091,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return side&&keepFootRule&&kept.MESSAGES?1:0;
     };
     const footRule=()=>footBase()+resourceCount();
-    // 11-25 (four groups): one empty row stands before each group head after the first (REPO, SESSION, RESOURCES, USAGE); short of rows these are the first to go.
-    let keepGroupGaps=true;
-    const groupGapCount=()=>keepGroupGaps&&side?Number(repoAt>=0&&sessionAt>=0)+Number(resourceCount()>0)+Number(usageOn&&keepUsageHead&&usageLines().length>0):0;
+    // 11-25 (four groups): one empty row stands before each group head after the first (REPO, SESSION, RESOURCES, USAGE); short of rows these are the first to go,
+    // one row at a step and given back one at a time: `gapKept` is how many stand, in this order of keeping: the one before SESSION (the last to go; with the lists it
+    // outlives the BACKLOG items, 11-23: "REPO와 SESSION 구분줄 사이에 여백이 한칸은 있어야 될것 같다"), the one before RESOURCES, the one before USAGE (the first to go).
+    let gapKept=3;
+    const gapSlots=()=>side?[repoAt>=0&&sessionAt>=0&&'session',resourceCount()>0&&'resources',usageOn&&keepUsageHead&&usageLines().length>0&&'usage'].filter(Boolean):[];
+    const groupGapCount=()=>Math.min(gapKept,gapSlots().length);
+    const gapStands=name=>gapSlots().slice(0,gapKept).includes(name);
+    const gapGive=()=>{gapKept=groupGapCount()-1;};
     // 11-16 (the person: "MEM과 가장 하단을 구분하는 줄이 필요"): beside the native area a thin rule (a section
     // head's rule, its color) parts the bottom sections (MESSAGES, MEM) from the last row (5h/7d, the gear and
     // the fold button); short of rows it goes before any content row.
@@ -2113,12 +2124,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const lowest=['MEM','MESSAGES'];
     // RESOURCES gives way first (it is the newest and the least needed of the bottom's sections): the GPU rows, then the host rows.
     const choices=()=>JSON.stringify([keepMulti,keepMetaGap,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
-      keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled,keepGroupGaps]);
+      keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled,gapKept]);
     // The give-back's restore: the way back to a state `choices()` recorded.
     const restore=json=>{const v=JSON.parse(json);[keepMulti,keepMetaGap,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-      Object.assign(take,v[8]);Object.assign(kept,v[9]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead]=v.slice(10,20);keepLine.splice(0,keepLine.length,...v[20]);keepRouteRule=v[21];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(22,28);keepGroupGaps=v[28];};
+      Object.assign(take,v[8]);Object.assign(kept,v[9]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead]=v.slice(10,20);keepLine.splice(0,keepLine.length,...v[20]);keepRouteRule=v[21];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(22,28);gapKept=v[28];};
     resGpus=resourceGpuTotal();
-    give(()=>groupGapCount()>0,()=>{keepGroupGaps=false;},()=>{keepGroupGaps=true;});
+    // The empty rows between the groups, one at a step (USAGE's, RESOURCES', SESSION's); the give-back below returns them one at a time.
+    give(()=>groupGapCount()>0,gapGive,()=>{gapKept++;});
     give(()=>side&&resHosts>0&&resGpus>0,()=>{resGpus--;},()=>{resGpus++;});
     give(()=>side&&resHosts>0,()=>{resHosts--;},()=>{resHosts++;});
     if(!usageOn)give(()=>!!footBase(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
@@ -2177,13 +2189,16 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     }
     // 11-22 (the person's STATUS and BACKLOG lists under REPO; one rule): the lists are the first to give way and nothing else gives way for them. The rest stands as it stands
     // in a window without them (the layout above); the lists take the empty rows and, short of those, rows MESSAGES and MEM fold (both keep their head and one row), in this order:
-    // the empty rows, the BACKLOG items (3, 2, 1, none: only the empty rows are theirs), MESSAGES and MEM folding, the STATUS items (they may stand on what was folded), then the two heads
-    // together (a fold that frees several rows at once and leaves empty ones is no reason to leave the BACKLOG items short: they stand on those again), where the REPO row ends in the two buttons and everything else is the window's own (what was folded unfolds).
+    // the empty rows before RESOURCES and USAGE, the BACKLOG items (3, 2, 1, none: only the empty rows are theirs), the empty row before SESSION (11-23: it outlives the BACKLOG items),
+    // MESSAGES and MEM folding, the STATUS items (they may stand on what was folded), then the two heads together (a fold that frees several rows at once and leaves empty ones is
+    // no reason to leave the BACKLOG items short: they stand on those again), where the REPO row ends in the two buttons and everything else is the window's own (what was folded unfolds).
+    const sessionGapFirst=()=>gapSlots()[0]==='session';
     if(lists.length>0){
       listsOn=true;
-      const own=[messageOne,take.MEM,take.MESSAGES,keepGroupGaps];
-      const steps=[[()=>groupGapCount()>0,()=>{keepGroupGaps=false;}],
+      const own=[messageOne,take.MEM,take.MESSAGES,gapKept];
+      const steps=[[()=>groupGapCount()>(sessionGapFirst()?1:0),gapGive],
         [()=>take.BACKLOG_ITEMS>0,()=>{take.BACKLOG_ITEMS--;}],
+        [()=>groupGapCount()>0,gapGive],
         [()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;}],
         [()=>kept.MEM&&take.MEM>2,()=>{take.MEM--;}],
         [()=>kept.MESSAGES&&take.MESSAGES>2,()=>{take.MESSAGES--;}],
@@ -2192,14 +2207,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         [()=>take.STATUS_ITEMS>0,()=>{take.STATUS_ITEMS--;}]];
       const backlogFull=take.BACKLOG_ITEMS;
       for(const [can,apply] of steps)while(need()>budget&&can())apply();
-      if(need()>budget){keepLists=false;[messageOne,take.MEM,take.MESSAGES,keepGroupGaps]=own;}
-      // A fold can free several rows at once and leave empty ones: the BACKLOG items stand on them again (up to what they were, and the STATUS items stand already).
-      else while(need()<budget&&take.BACKLOG_ITEMS<backlogFull)take.BACKLOG_ITEMS++;
+      if(need()>budget){keepLists=false;[messageOne,take.MEM,take.MESSAGES,gapKept]=own;}
+      // A fold can free several rows at once and leave empty ones: they go back in the order of keeping, the empty row before SESSION, then the BACKLOG items (up to what
+      // they were, and the STATUS items stand already), then the other empty rows (below).
+      else{
+        if(need()<budget&&groupGapCount()===0&&sessionGapFirst())gapKept=1;
+        while(need()<budget&&take.BACKLOG_ITEMS<backlogFull)take.BACKLOG_ITEMS++;
+      }
     }
+    // A row left over goes to an empty row between the groups, one at a time, so a panel with a row to spare has every one of them (none stands in the middle while one is short).
+    while(need()<budget&&groupGapCount()<gapSlots().length)gapKept=groupGapCount()+1;
     // 11-25 (four groups): the rows in their groups' order. REPO: its head, GIT, the STATUS and BACKLOG lists, MEM. SESSION: MODEL, CTX, TITLE, PEERS, NOW, then QUESTIONS, ROUTE, and MESSAGES at
-    // the bottom of it. Then RESOURCES, then USAGE. One empty row stands before each head after the first. A fold of the gaps the layout above decided
-    // may be undone where the lists' folding left rows over.
-    if(!keepGroupGaps){keepGroupGaps=true;if(need()>budget)keepGroupGaps=false;}
+    // the bottom of it. Then RESOURCES, then USAGE. One empty row stands before each head after the first (those `gapKept` keeps).
     const lanes={repo:[],memory:[],session:[],questions:[],route:[],messages:[],resources:[],usage:[]};
     const laneAdd=(lane,parts,action,groups)=>lanes[lane].push({parts,action,groups});
     top.forEach((row,i)=>{
@@ -2261,18 +2280,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         add(item.parts,item.action,item.groups);
       }
     };
-    const gapRow=()=>{if(side&&keepGroupGaps)add([]);};
+    const gapRow=name=>{if(gapStands(name))add([]);};
     putLane('repo');if(side)putLane('memory');
-    if(repoAt>=0&&sessionAt>=0)gapRow();
+    gapRow('session');
     putLane('session');
     const headRows=content.length;
     putLane('questions');putLane('route');
     if(fill)for(let i=Math.max(0,budget-1-added-ruled-groupGapCount());i>0;i--)add([]);
     putLane('messages');
     if(!side)putLane('memory');
-    if(lanes.resources.length)gapRow();
+    gapRow('resources');
     putLane('resources');
-    if(lanes.usage.length&&usageOn&&keepUsageHead)gapRow();
+    gapRow('usage');
     putLane('usage');
     if(ruled)add([{...text('─'.repeat(inner),'dim'),role:'messages'}]);
     // A reset time that does not fit goes whole, never as a cut `(↻ …`. Spec rule 49 (b): 5h/7d
@@ -2369,7 +2388,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const group=side&&parts.find(p=>p.div);
     if(group){
       const fitted=clip(parts,inner),gap=Math.max(0,inner-fitted.used)+1;
-      return [border(y,0,'├'),border(y,0,'╴'),...fitted.parts,{...text('─'.repeat(gap),'dim'),role:'messages'},border(y,W-1,'┤')];
+      // The SESSION head's rule (the one `rule motion` moves) runs on through the padding cell: its light reaches the cell before `┤`.
+      const ruled=fitted.parts.filter(p=>p.rule).reduce((n,p)=>n+cellsOf([p]),0);
+      const tail=ruled?ruleParts(ruled+gap):[{...text('─'.repeat(gap),'dim'),role:'messages'}];
+      return [border(y,0,'├'),border(y,0,'╴'),...fitted.parts.filter(p=>!ruled||!p.rule),...tail,border(y,W-1,'┤')];
     }
     const fitted=clip(parts,inner);return [border(y,0,'│'),text(' '),...fitted.parts,text(' '.repeat(Math.max(0,inner-fitted.used)+1)),border(y,W-1,'│')];};
   for(let i=0;i<count-2;i++)rows.push(frameRow(content[i]||[],i+1));
@@ -2390,8 +2412,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(let y=1;y<H-1;y++)cells.push({row:y,col:W-1,ch:rows[y].at(-1).text});
     for(let x=W-1;x>=0;x--)if(x<=1||x>1+foot.used&&x<W-1||x===W-1)cells.push({row:H-1,col:x,ch:x===0?'└':x===W-1?'┘':'─'});
     for(let y=H-2;y>0;y--){
-      // A group head's little stroke stands in the cell after the left frame and moves with it (the left frame's phase).
-      if(rows[y][1].text==='╴')cells.push({row:y,col:1,ch:'╴',sampleCol:0});
+      // A group head's little stroke stands in the cell after the left frame and moves with it (the left frame's phase: `place` takes no column on the left frame's rows).
+      if(rows[y][1].text==='╴')cells.push({row:y,col:1,ch:'╴'});
       cells.push({row:y,col:0,ch:rows[y][0].text});
     }
   }else if(ruleMoving){
@@ -2407,7 +2429,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   if(waitBlinks)cells.push(...blinkCells(rows,measure,clean,1,count-1));
   const blinked=cells.length>framed;
   const motion=cells.length?{cells,
-    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(tick)}:c.rule!==undefined?ruleLook(c.rule,tick,ruleLen):borderCell(place(c.row,c.sampleCol??c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background,harness})[0],
+    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(tick)}:c.rule!==undefined?ruleLook(c.rule,tick,ruleLen):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background,harness})[0],
     next:tick=>Math.min(blinked?blinkNext(tick):Infinity,framed?frameNext(tick):Infinity)}:null;
   function frameNext(tick){const local=borderTick(tick),shift=Math.trunc(tick)-local;
       if(ruleMoving){const r=ruleTick(tick);return Math.trunc(tick)+scanNext(r,ruleLen)-r;}

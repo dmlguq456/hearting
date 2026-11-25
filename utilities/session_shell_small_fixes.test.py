@@ -225,10 +225,10 @@ const paint=(harness,extra,o={})=>view.render({width:o.width||40,height:o.height
  frame:0,brief:()=>null,sent:()=>[],configuration:{},background:''});
 for(const harness of ['claude','codex','opencode'])for(const [name,extra] of [['title',{session_title:'제목'}],['none',{}],['now',{now:'그리는 중'}]]){
  const v=paint(harness,extra),lines=v.rows.map(str),tag=harness+' '+name+'\n'+lines.join('\n');
- const rule=lines.findIndex(r=>/^├╴\[SESSION\] ─{27}┤$/.test(r));   // 11-25: a frame row; the last rule cell (the padding's) is the frame's own, outside the light
+ const rule=lines.findIndex(r=>/^├╴\[SESSION\] ─{27}┤$/.test(r));   // 11-25: a frame row; the rule runs through the padding cell to `┤`, all of it under the light
  assert(rule>0,'the head rule stands\n'+tag);
  assert(!lines.some(r=>/^│ ─{36} │$/.test(r)),'no rule between the metadata and the title\n'+tag);
- assert(v.motion&&v.motion.cells.length===26&&v.motion.cells.every(c=>c.row===rule&&c.col>=12&&c.col<=37),'the default light moves over the rule alone\n'+tag);
+ assert(v.motion&&v.motion.cells.length===27&&v.motion.cells.every(c=>c.row===rule&&c.col>=12&&c.col<=38),'the default light moves over the rule alone\n'+tag);
  assert(lines[rule+1].includes('MODEL'),tag);
  if(name!=='none')assert(lines.some(r=>r.includes('TITLE')||r.includes('NOW')),tag);
  // No title and no NOW: no separate empty row stands under CTX, the next thing (the question's box) stands right under it.
