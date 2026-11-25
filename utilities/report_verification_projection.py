@@ -28,8 +28,6 @@ import route_identity
 MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_REPORT_BYTES = 8 * 1024 * 1024
 MAX_REGISTRY_BYTES = 32 * 1024 * 1024
-MAX_REPORT_CYCLES = 256
-MAX_REPORT_SCAN_BYTES = 64 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 128 * 1024 * 1024
 _SHA256 = re.compile(r"(?:sha256:)?[0-9a-f]{64}\Z")
 _ROUTE_ID = re.compile(r"rt-[A-Za-z0-9._-]{1,128}\Z")
@@ -537,10 +535,8 @@ def _peer_result(root: Path, route: Mapping[str, Any], node: Mapping[str, Any],
              "limitations": _verdict_limitations(verdict)}, verdict["verdict"])
 
 
-def _resolve_source(source: Path, root: Path, jobs: Path | None, snapshot: ReadSnapshot,
-                    *, expected_artifact_id: str | None = None,
-                    expected_digest: str | None = None,
-                    bucket_matches: list[tuple[Path, Mapping[str, Any]]] | None = None) -> dict[str, Any]:
+def _resolve_source(source: Path, root: Path, jobs: Path | None,
+                    snapshot: ReadSnapshot) -> dict[str, Any]:
     report_observation = {"state": "unknown"}
     try:
         if root.is_symlink() or not root.is_dir():
@@ -567,9 +563,8 @@ def _resolve_source(source: Path, root: Path, jobs: Path | None, snapshot: ReadS
             raise ProjectionProblem("report-source-unavailable")
         root = root.resolve(strict=True)
         source = source.resolve(strict=True)
-        candidates = (bucket_matches if bucket_matches is not None else
-                      artifact_reader.bucket_dirs(root, "report", include_shared=False,
-                                                  include_legacy=False))
+        candidates = artifact_reader.bucket_dirs(root, "report", include_shared=False,
+                                                 include_legacy=False)
         matches = [(path, meta) for path, meta in candidates
                    if path.resolve(strict=True) == source]
         if len(matches) != 1:
@@ -612,11 +607,6 @@ def _resolve_source(source: Path, root: Path, jobs: Path | None, snapshot: ReadS
         route_id = next(iter(producers))
         if not _ROUTE_ID.fullmatch(route_id):
             raise ProjectionProblem("route-identity-invalid")
-        if expected_artifact_id and not any(row.get("artifact_id") == expected_artifact_id
-                                            and (not expected_digest
-                                                 or row["_sha256"] == _digest_value(expected_digest))
-                                            for row in report_revisions.values()):
-            raise ProjectionProblem("remote-artifact-binding-mismatch")
         route_rows = [row for row in document.get("routes", [])
                       if isinstance(row, Mapping) and row.get("route_id") == route_id
                       and row.get("artifact_root_id") == identity.artifact_root_id]
@@ -695,13 +685,7 @@ def _resolve_source(source: Path, root: Path, jobs: Path | None, snapshot: ReadS
         required_state = "failed" if input_failures or unreadable else (
             "confirmed" if all(row.get("verdict") in {"PASS", "FAIL"}
                                for row in peer_results) else "unresolved")
-        if expected_artifact_id:
-            matched = [row for row in report_revisions.values()
-                       if row.get("artifact_id") == expected_artifact_id
-                       and (not expected_digest or row["_sha256"] == _digest_value(expected_digest))]
-            if len(matched) != 1:
-                raise ProjectionProblem("remote-artifact-binding-mismatch")
-        uri = lambda name: (source / name).resolve(strict=True).as_uri()
+        uri =lambda name: (source / name).resolve(strict=True).as_uri()
         entrypoints = [
             {"label": "보고서 HTML", "path": entrypoint, "href": uri(entrypoint)},
             {"label": "보고서 Markdown", "path": "REPORT.md", "href": uri("REPORT.md")},
@@ -803,114 +787,6 @@ def project_route(artifact_root: str | Path, route_id: str, route_hash: str | No
         return _display(_unresolved("projection-read-failed"))
 
 
-def project_rows(rows: Any, *, artifact_root: str | Path | None = None,
-                 jobs: str | Path | None = None) -> list[dict[str, Any]]:
-    """Join W3a rows to a local report revision by stable artifact ID and digest."""
-    if not isinstance(rows, list) or len(rows) > 256:
-        return []
-    root_value = artifact_root or os.environ.get("AGENT_ARTIFACT_ROOT")
-    jobs_value = jobs or os.environ.get("AGENT_DISPATCH_JOBS")
-    if not root_value:
-        return [{"stable_id": row.get("stable_id"), "payload": _display(_unresolved("local-root-unavailable"))}
-                for row in rows if isinstance(row, dict) and isinstance(row.get("stable_id"), str)]
-    root = Path(root_value).expanduser()
-    output = []
-    cache: dict[tuple[str, str], dict[str, Any]] = {}
-    snapshot = ReadSnapshot()
-    with artifact_reader.read_scope():
-        try:
-            if root.is_symlink() or not root.is_dir():
-                raise ProjectionProblem("artifact-root-unavailable")
-            root = root.resolve(strict=True)
-            root_identity = artifact_lifecycle.read_root_identity(root)
-            if root_identity is None:
-                raise ProjectionProblem("remote-root-binding-mismatch")
-            buckets = artifact_reader.bucket_dirs(root, "report", include_shared=False,
-                                                  include_legacy=False)
-            if len(buckets) > MAX_REPORT_CYCLES:
-                raise ProjectionProblem("report-cycle-scan-exceeds-bound")
-            sources: dict[Path, tuple[Path, Mapping[str, Any]]] = {}
-            scan_size = 0
-            for source, meta in buckets:
-                cycle_id = meta.get("cycle_id")
-                if not isinstance(cycle_id, str):
-                    continue
-                cycle_dir = artifact_locator.find_path_by_id(root, cycle_id)
-                if cycle_dir is None:
-                    continue
-                manifest_path = cycle_dir / "manifest.json"
-                manifest_raw = snapshot.read(manifest_path, MAX_JSON_BYTES)
-                scan_size += len(manifest_raw)
-                if scan_size > MAX_REPORT_SCAN_BYTES:
-                    raise ProjectionProblem("report-cycle-scan-exceeds-bound")
-                try:
-                    document = json.loads(manifest_raw.decode("utf-8"))
-                except (UnicodeError, ValueError) as exc:
-                    raise ProjectionProblem("cycle-manifest-invalid") from exc
-                if not isinstance(document, dict) or not artifact_manifest.validate(document).ok:
-                    continue
-                cycle = document.get("cycle")
-                if (not isinstance(cycle, dict) or cycle.get("cycle_id") != cycle_id
-                        or document.get("artifact_root_id") != root_identity.artifact_root_id):
-                    continue
-                sources[source.resolve(strict=True)] = (source, document)
-        except ProjectionProblem as exc:
-            reason = exc.code
-            return [{"stable_id": row.get("stable_id"), "payload": _display(_unresolved(reason))}
-                    for row in rows if isinstance(row, dict)
-                    and isinstance(row.get("stable_id"), str)]
-        except Exception:
-            reason = "remote-root-binding-mismatch"
-            return [{"stable_id": row.get("stable_id"), "payload": _display(_unresolved(reason))}
-                    for row in rows if isinstance(row, dict)
-                    and isinstance(row.get("stable_id"), str)]
-        for row in rows:
-            if not isinstance(row, dict) or not isinstance(row.get("stable_id"), str):
-                continue
-            stable_id = row["stable_id"]
-            integrity = row.get("integrity") if isinstance(row.get("integrity"), dict) else {}
-            expected = _digest_value(integrity.get("expected_digest"))
-            freshness = row.get("freshness") if isinstance(row.get("freshness"), dict) else {}
-            stale = (freshness.get("stale") is not False or row.get("degraded") is True
-                     or row.get("partial") is True or row.get("namespace_state") != "active")
-            payload = _display(_unresolved("remote-projection-stale" if stale else
-                                           "remote-integrity-unresolved"))
-            if not stale and expected and integrity.get("verified") is True:
-                matches = []
-                try:
-                    if row.get("artifact_root_id") != root_identity.artifact_root_id:
-                        raise ProjectionProblem("remote-root-binding-mismatch")
-                    for source, document in sources.values():
-                        for revision in document.get("artifact_revisions", []):
-                            loc = revision.get("locator") if isinstance(revision, dict) else None
-                            if (revision.get("artifact_id") == stable_id
-                                    and _digest_value(revision.get("content_digest")) == expected
-                                    and isinstance(loc, dict)
-                                    and str(loc.get("path", "")).startswith("artifacts/report/")):
-                                matches.append(source)
-                except ProjectionProblem as exc:
-                    payload = _display(_unresolved(exc.code))
-                    output.append({"stable_id": stable_id, "payload": payload})
-                    continue
-                except Exception:
-                    matches = []
-                if len(matches) == 1:
-                    key = (str(matches[0]), expected)
-                    if key not in cache:
-                        cache[key] = _resolve_source(matches[0], root,
-                                                     Path(jobs_value).expanduser() if jobs_value else None,
-                                                     snapshot, expected_artifact_id=stable_id,
-                                                     expected_digest=expected,
-                                                     bucket_matches=buckets)
-                    payload = cache[key]
-                elif matches:
-                    payload = _display(_unresolved("remote-artifact-binding-ambiguous"))
-                else:
-                    payload = _display(_unresolved("remote-artifact-not-current-report"))
-            output.append({"stable_id": stable_id, "payload": payload})
-    return output
-
-
 def _human(payload: Mapping[str, Any]) -> str:
     display = payload.get("display") or {}
     verification = payload.get("verification") or {}
@@ -950,7 +826,6 @@ def _html(payload: Mapping[str, Any]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("rows", help="join bounded Cairn rows to exact local revisions")
     for name in ("status", "read"):
         item = sub.add_parser(name)
         item.add_argument("--source", required=True)
@@ -960,20 +835,6 @@ def main(argv: list[str] | None = None) -> int:
         if name == "read":
             item.add_argument("--format", choices=("text", "html"), default="text")
     args = parser.parse_args(argv)
-    if args.command == "rows":
-        try:
-            raw = sys.stdin.buffer.read(4 * 1024 * 1024 + 1)
-            if len(raw) > 4 * 1024 * 1024:
-                raise ProjectionProblem("row-request-exceeds-read-bound")
-            request = json.loads(raw.decode("utf-8"))
-            if not isinstance(request, dict):
-                raise ProjectionProblem("row-request-invalid")
-            result = project_rows(request.get("rows"), artifact_root=request.get("artifact_root"),
-                                  jobs=request.get("jobs"))
-        except Exception:
-            result = []
-        print(json.dumps(result, sort_keys=True, ensure_ascii=False))
-        return 0
     payload = project_report(args.source, artifact_root=args.artifact_root, jobs=args.jobs)
     if args.json:
         print(json.dumps(payload, sort_keys=True, ensure_ascii=False))

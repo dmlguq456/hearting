@@ -450,7 +450,6 @@ utilities/artifact_workflow_groups.test.py	16.33
 utilities/atomic_publish.test.py	0.21
 utilities/attempt_view.test.py	3.64
 utilities/backlog_performance.test.py	6.08
-utilities/cairn-artifact-read.test.sh	0.15
 utilities/campaign_document.test.py	0.51
 utilities/campaign_title_repair.test.py	10.2
 utilities/capability_route.test.py	271.24

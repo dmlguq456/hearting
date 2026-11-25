@@ -53,8 +53,11 @@ def entries(jobs, route_id) -> list:
         return []
 
 
-def submit(jobs, route_id, text, request_id=None) -> dict:
+def submit(jobs, route_id, text, request_id=None, *, source_session=None, unit=None) -> dict:
     """Keep `text` for the route's next turn: `{"entry": …, "duplicate": bool}`.
+
+    `source_session` and `unit` (the `unit:<family/name>` label) are only noted on a new entry, for the sender's
+    work-style record (`memory_work_labels`); they never decide anything here and a duplicate keeps its first.
 
     The same id with the same text is a duplicate (nothing new is kept); the same id with other text is
     refused. Without `request_id` the id is a digest of the text, so sending a file twice is one request."""
@@ -79,6 +82,10 @@ def submit(jobs, route_id, text, request_id=None) -> dict:
                 raise ContinueError("correction-id-content-conflict")
             return {"entry": old, "duplicate": True}
         entry = {"id": request_id, "digest": digest, "text": text, "at": round(time.time(), 1)}
+        if source_session:
+            entry["source_session"] = source_session
+        if unit:
+            entry["unit"] = unit
         value["requests"].append(entry)
         handle, name = tempfile.mkstemp(prefix=".unit-continue-", dir=path.parent)
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
