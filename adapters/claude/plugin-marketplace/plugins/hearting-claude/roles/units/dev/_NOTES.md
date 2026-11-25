@@ -33,3 +33,21 @@ deployment need explicit scope; signature changes; preserve inputs and outputs),
 참고: the role sentence (it calls this unit the backend of a user-facing application although
 it executes every code route — kept as a default, not a must), Focus list, cross-project
 profile preload (`tools/memory/mem.py`), memory.
+
+## Two-layer move, turn 9-2 (2026-11-25) — placement log: dev/frontend, dev/new-lib, dev/refactor
+
+Same form as `dev/backend`; no line removed, old `##` headings became `###`. The `Context
+Sources (run before work)` heading is kept in both layers (the unit header still says "see
+Context Sources"): the spec-backed check is a must, the cross-project profile preload a default.
+`dev/frontend` — 지킬 것: ownership split (backend and design tokens belong elsewhere), spec
+check, the whole Procedure (token contract, visual verification, design critique), Guardrails,
+Output. 참고: role sentence, Focus list, profile preload, memory.
+`dev/new-lib` — 지킬 것: the UI/consumer-UX ownership sentence, spec check (library, CLI and
+research mode concerns), the whole Procedure (documentation required for every public API),
+Guardrails (deprecation contract, dependency approval), Output. 참고: role sentence with the
+deep-maker note, Focus list (call-site design, type safety, tests per public function, minimal
+dependencies), profile preload, memory.
+`dev/refactor` — 지킬 것: Core Rules (small steps, preserve function, signature safety, forbidden
+zones), spec check, both procedures (pipeline step log with the mandatory Decision field; direct
+branch with the user-confirmed plan and the interactive style line), Output. 참고: role
+sentence, profile preload, memory.

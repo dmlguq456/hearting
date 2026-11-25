@@ -267,6 +267,16 @@ REST_MUSTS = {
                    "not begin another cycle"),
     "research/research-survey": ("Keep canonical", "Never imply full-text", "no fabricated citations",
                                  "auxiliary_findings_considered"),
+    "dev/frontend": ("never do it unilaterally", "never silently diverge from spec", "Preserve inputs and outputs unless",
+                     "run the acting adapter's visual harness"),
+    "dev/new-lib": ("Breaking public API changes require a deprecation or migration contract", "External dependencies require explicit approval",
+                    "Preserve inputs and outputs unless", "no public API"),
+    "dev/refactor": ("Preserving functionality is the top priority", "Forbidden zones.", "Do NOT run syntax/import checks",
+                     "The Decision field is mandatory"),
+    "editorial/polish": ("Preserve LaTeX, code, equations", "Edit in place; create no snapshot", "never redesign paragraphs",
+                         "A direct editorial call is explicitly user-directed"),
+    "editorial/translate": ("never carry over source word order", "Never the body", "Finish only when the target passes the single quality check"),
+    "editorial/review": ("Never mutate the artifact body", "never edit the body", "Recommendations only; no body edits"),
 }
 KEPT_SINGLE = ("qa/assumption-check", "qa/edge-case-check", "qa/failure-mode-check", "qa/simplicity-check",
                "qa/test-gap-check")
