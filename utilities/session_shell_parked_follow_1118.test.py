@@ -7,14 +7,17 @@ the panel reads the held session's route chain, context, NOW, peers, requests, m
 Input, delivery and questions keep the host's own ids.
 
 Real child processes carry the argv; the records, the display tap and the title sidecar are real
-files in a private HOME. Only the shared route cache and the Fleet number are supplied.
+files in a private HOME. The route cache and Fleet number are supplied, and unrelated display
+refreshes stay off while the test reads those files.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
+import fcntl
 import importlib.util
 import json
 import re
+import select
 import subprocess
 import tempfile
 import time
@@ -31,14 +34,14 @@ spec.loader.exec_module(shell)
 
 import human_wait_state  # noqa: E402
 import session_tidy  # noqa: E402
-from fleet import session_line, session_registry as sr, titles  # noqa: E402
+from fleet import gitinfo, session_line, session_registry as sr, titles  # noqa: E402
 
 OLD = "92d7cdcd-3cef-4583-80e6-f9a4561ac629"
 NEW = "e675a253-0561-410f-aa04-c12345cabf70"
 ROUTE = {"id": "rt-new", "title": "route of the held session", "state": "running", "worker_stage": "plan",
          "shape": "one-shot", "owner": "autopilot-code", "stages": [{"name": "plan", "st": "active"}]}
 OLD_ROUTE = dict(ROUTE, id="rt-old", title="finished route of the original")
-SLEEP = "import time; time.sleep(60)"
+_HOLD = "import os; os.write(1, b'R'); os.read(0, 1)"
 
 
 class ParkedPanel(unittest.TestCase):
@@ -59,21 +62,31 @@ class ParkedPanel(unittest.TestCase):
                           XDG_STATE_HOME=str(self.home / ".local" / "state"),
                           XDG_CACHE_HOME=str(self.home / ".cache"),
                           AGENT_PEER_LEDGER_ROOT=str(self.root / "peer"))
-        self.children = []
-        self.addCleanup(self._reap)
+        # Git fields are outside the assertions. Don't launch a detached refresh into this home.
+        self.addCleanup(os.close, gitinfo._display_claim(gitinfo._display_request(str(self.root))))
 
-    def _reap(self):
-        for child in self.children:
+    def stop(self, child):
+        child.stdin.close()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
             child.kill()
             child.wait()
+            raise
 
     def spawn(self, *argv):
-        child = subprocess.Popen([sys.executable, "-c", SLEEP, *argv], stdin=subprocess.DEVNULL, cwd=self.root)
-        self.children.append(child)
+        child = subprocess.Popen([sys.executable, "-c", _HOLD, *argv],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, cwd=self.root)
+        self.addCleanup(self.stop, child)
+        with child.stdout:
+            # The record and the resume argv must describe a process that has finished exec.
+            self.assertTrue(select.select([child.stdout], [], [], 10)[0], "fixture child did not start")
+            self.assertEqual(child.stdout.read(1), b"R", "fixture child exited before it was ready")
         return child
 
     def record(self, child, **fields):
         start = sr._proc_start(child.pid)
+        self.assertIsNotNone(start, f"no process start for fixture PID {child.pid}")
         (self.config / "sessions" / ("%d.json" % child.pid)).write_text(json.dumps(
             {"pid": child.pid, "procStart": start, "startedAt": 1_700_000_000_000, "cwd": str(self.root), **fields}))
         return start
@@ -133,22 +146,36 @@ class ParkedPanel(unittest.TestCase):
         must show the same number for the same callback (rounding half up, no ceiling)."""
         self.scene()
         tap_path = self.config / ".statusline" / (NEW + ".json")
-        for used in (0, 22.4, 22.5, 23, 98.6, 99.5, 99.6, 100):
-            tap = json.loads(tap_path.read_text())
-            tap["context_window"]["used_percentage"] = used
-            tap_path.write_text(json.dumps(tap))
-            shown = subprocess.run(
-                ["bash", str(ROOT / "adapters/claude/statusline.sh")], input=json.dumps(tap), text=True,
-                capture_output=True, timeout=60, cwd=self.root,
-                env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "HOME": str(self.home),
-                     "CLAUDE_CONFIG_DIR": str(self.config), "AGENT_HOME": str(ROOT),
-                     "XDG_STATE_HOME": str(self.home / ".local" / "state")}).stdout
-            line = re.sub(r"\x1b\[[0-9;]*m", "", shown)
-            match = re.search(r"context [━─]+ (\d+)%", line)
-            self.assertIsNotNone(match, line)
-            out, _ = self.project()
-            self.assertIn(match.group(1) + "%", out["footer"], used)
-            self.assertEqual(session_line._percent(out["context"]), match.group(1) + "%", used)
+        tap = json.loads(tap_path.read_text())
+        bottom_line_config = self.root / "bottom-line"
+        bottom_line_config.mkdir()
+        # The real statusline script reaches across a process boundary. Hold the existing
+        # fixture-local lock so rendering never leaves an answer-wait producer behind.
+        projection = human_wait_state.state_root()
+        projection.mkdir(mode=0o700, parents=True)
+        lock = self.enterContext((projection / ".projection.lock").open("a"))
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "HOME": str(self.home),
+               "CLAUDE_CONFIG_DIR": str(bottom_line_config), "AGENT_HOME": str(ROOT),
+               "XDG_STATE_HOME": os.environ["XDG_STATE_HOME"], "PYTHONDONTWRITEBYTECODE": "1",
+               "HARNESS_CAPACITY_REFRESH_DISABLE": "1"}
+        for used, expected in ((0, 0), (22.4, 22), (22.5, 23), (23, 23), (98.6, 99),
+                               (99.5, 100), (99.6, 100), (100, 100)):
+            with self.subTest(used=used):
+                tap["context_window"]["used_percentage"] = used
+                payload = json.dumps(tap)
+                tap_path.write_text(payload)
+                shown = subprocess.run(
+                    ["bash", str(ROOT / "adapters/claude/statusline.sh")], input=payload, text=True,
+                    capture_output=True, timeout=60, cwd=self.root, env=env)
+                self.assertEqual(shown.returncode, 0, shown.stderr)
+                line = re.sub(r"\x1b\[[0-9;]*m", "", shown.stdout)
+                match = re.search(r"context [━─]+ (\d+)%", line)
+                self.assertIsNotNone(match, line)
+                self.assertEqual(int(match.group(1)), expected, line)
+                out, _ = self.project()
+                self.assertIn(match.group(1) + "%", out["footer"])
+                self.assertEqual(session_line._percent(out["context"]), match.group(1) + "%")
 
     def test_no_job_in_the_window_record_reads_the_original(self):
         self.scene(parked=False)
@@ -161,8 +188,7 @@ class ParkedPanel(unittest.TestCase):
     def test_link_ends_at_the_next_projection(self):
         self.scene()
         self.assertEqual(self.routes(self.project()[0]), ["rt-new"])
-        self.bg.kill()
-        self.bg.wait()
+        self.stop(self.bg)
         out, calls = self.project()
         self.assertEqual((calls, self.routes(out)), ([OLD], ["rt-old"]))
         self.assertIn("[c7]", out["footer"])
@@ -197,8 +223,7 @@ class ParkedPanel(unittest.TestCase):
             self.assertEqual(asked, [NEW])
             self.assertIs(out["panel"]["steward"], expected, marked)
         # No link: the window's own session, as before.
-        self.bg.kill()
-        self.bg.wait()
+        self.stop(self.bg)
         asked = []
         with mock.patch.object(steward_role, "role_flag", side_effect=lambda h, sid, **kw: asked.append(sid) or True):
             out, _ = self.project()

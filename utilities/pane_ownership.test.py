@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 import pty
+import select
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -25,6 +27,16 @@ import pane_ownership as po
 import session_tidy as st
 import session_tidy_native as native
 from split_module_fixture import patch_split
+
+
+_FIXTURE_RUNTIME = "import signal; print('ready', flush=True); signal.pause()"
+
+
+def _wait_for_runtime(test, process):
+    # A launcher PID can still name its old argv while exec is setting up the runtime.
+    with process.stdout:
+        test.assertTrue(select.select([process.stdout], [], [], 10)[0], "fixture runtime did not start")
+        test.assertEqual(process.stdout.readline(), b"ready\n", "fixture runtime exited before it was ready")
 
 
 class PaneOwnershipTest(unittest.TestCase):
@@ -208,9 +220,9 @@ class PaneOwnershipTest(unittest.TestCase):
             os.setsid()
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
-        proc = subprocess.Popen([harness, "-c", "import time; time.sleep(60)", *extra_argv],
+        proc = subprocess.Popen([harness, "-c", _FIXTURE_RUNTIME, *extra_argv],
                                 executable=sys.executable, stdin=slave,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
                                 preexec_fn=terminal)
         os.close(slave)
         self.addCleanup(os.close, master)
@@ -218,6 +230,7 @@ class PaneOwnershipTest(unittest.TestCase):
             proc.terminate()
             proc.wait(timeout=5)
         self.addCleanup(stop)
+        _wait_for_runtime(self, proc)
         return proc
 
     def foreground(self, proc, pane="wB:p3N"):
@@ -358,9 +371,10 @@ class PaneOwnershipTest(unittest.TestCase):
     def test_daemon_or_spare_with_no_controlling_terminal_is_not_foreground(self):
         foreground = self.runtime()
         self.foreground(foreground)
-        proc = subprocess.Popen(["claude", "-c", "import time; time.sleep(60)"],
-                                executable=sys.executable, start_new_session=True)
+        proc = subprocess.Popen(["claude", "-c", _FIXTURE_RUNTIME], executable=sys.executable,
+                                stdout=subprocess.PIPE, start_new_session=True)
         self.addCleanup(lambda: (proc.terminate(), proc.wait(timeout=5)))
+        _wait_for_runtime(self, proc)
         self.assertEqual(self.verify(proc.pid), "")
 
     def test_stale_foreground_pid_foreign_pane_and_changed_process_start_fail_closed(self):
@@ -730,7 +744,7 @@ class NativeCurrentSelectionTest(unittest.TestCase):
         self.codex = self.root / "codex"
         self.codex.write_text(
             "#!/bin/bash\n"
-            "exec -a codex /usr/bin/python3 -c 'import time; time.sleep(60)'\n"
+            f"exec -a codex /usr/bin/python3 -c {shlex.quote(_FIXTURE_RUNTIME)}\n"
         )
         self.codex.chmod(0o755)
         self.proc = self._spawn_codex()
@@ -755,7 +769,7 @@ class NativeCurrentSelectionTest(unittest.TestCase):
 
         process = subprocess.Popen(
             [str(self.codex)], stdin=slave if tty else subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
             preexec_fn=terminal if tty else None,
         )
         if slave is not None:
@@ -769,6 +783,7 @@ class NativeCurrentSelectionTest(unittest.TestCase):
                 process.wait(timeout=5)
 
         self.addCleanup(stop)
+        _wait_for_runtime(self, process)
         return process
 
     def _set_screens(self, screens, *, group=None, foreground_pid=None):

@@ -17,6 +17,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import select
 import subprocess
 import tempfile
 import unittest
@@ -25,6 +26,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "utilities"), str(ROOT / "tools")]
+import pane_ownership  # noqa: E402
 import peer_address  # noqa: E402
 import peer_steward_native  # noqa: E402
 import session_shell  # noqa: E402
@@ -39,12 +41,20 @@ _WORKER_MARKERS = ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH
 _SERVER = "t1117"
 _PANE = "wT:pT1"
 _SID = "01000000-0000-7000-8000-000000001117"
+_HOLD = "import os,sys;print(os.getpid(),flush=True);sys.stdin.buffer.read()"
 # A stand-in for Claude's background daemon: its title marks it a service; the session it
 # hosts is an ordinary `claude` process that inherited the daemon's environment.
-_DAEMON = ("import subprocess,sys\n"
-           "c=subprocess.Popen(['claude','-c','import sys;sys.stdin.buffer.read()'],"
-           "executable=sys.argv[1],stdin=subprocess.PIPE)\n"
-           "print(c.pid,flush=True)\nsys.stdin.buffer.read()\nc.stdin.close();c.wait()\n")
+_DAEMON = """\
+import subprocess
+import sys
+
+with subprocess.Popen(["claude", "-c", sys.argv[2]], executable=sys.argv[1],
+                      stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
+    sys.stdout.buffer.write(child.stdout.readline())
+    sys.stdout.buffer.flush()
+    sys.stdin.buffer.read()
+    child.stdin.close()
+"""
 
 
 class WindowValueTest(unittest.TestCase):
@@ -64,10 +74,21 @@ class WindowValueTest(unittest.TestCase):
             os.environ.pop(name, None)
         self.children = []
         self.addCleanup(self.close_children)
-        # The process table is this test's own children only: no other process is read.
+        # Only the fixture's children are candidates.
         real_listdir = os.listdir
         mock.patch("os.listdir", side_effect=lambda path=".": [str(pid) for pid in self.pids()]
                    if str(path) == "/proc" else real_listdir(path)).start()
+        # Keep the real daemon-to-session edge and stop the walk at the fixture root.
+        read_process = pane_ownership._process
+        test_pid = os.getpid()
+
+        def fixture_process(pid):
+            row = read_process(pid)
+            if row and row[1] == test_pid:
+                return (row[0], 1, *row[2:])
+            return row
+
+        mock.patch.object(pane_ownership, "_process", side_effect=fixture_process).start()
         mock.patch.object(terminal_surface, "native_turn", return_value="idle").start()
 
     def pids(self):
@@ -80,15 +101,24 @@ class WindowValueTest(unittest.TestCase):
         child = subprocess.Popen(argv, executable=sys.executable, stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, env=env)
         self.children.append(child)
-        return child
+        # Popen can return while procfs still has no argv or environment for the new image.
+        self.assertTrue(select.select([child.stdout], [], [], 10)[0], "fixture child did not start")
+        ready_pid = child.stdout.readline().strip()
+        self.assertTrue(ready_pid.isdigit(), "fixture child exited before announcing its PID")
+        return child, int(ready_pid)
 
     def close_children(self):
-        for child in reversed(self.children):
+        while self.children:
+            child = self.children.pop()
             with contextlib.suppress(OSError):
                 child.stdin.close()
-            child.wait(timeout=10)
-            child.stdout.close()
-        self.children.clear()
+            with child.stdout:
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+                    raise
 
     @contextlib.contextmanager
     def case(self, **params):
@@ -112,9 +142,8 @@ class WindowValueTest(unittest.TestCase):
 
     def attached_session(self, harness, **window):
         """A shell-attached native session: real host and native children, a valid record."""
-        host = self.spawn([sys.executable, "-c", "import sys;sys.stdin.buffer.read()"], self.window_env())
-        native = self.spawn([sys.executable, "-c", "import sys;sys.stdin.buffer.read()"],
-                            self.window_env(**window))
+        host, _ = self.spawn([sys.executable, "-c", _HOLD], self.window_env())
+        native, _ = self.spawn([sys.executable, "-c", _HOLD], self.window_env(**window))
         broker = session_shell.process(os.getpid())
         host_row, native_row = session_shell.process(host.pid), session_shell.process(native.pid)
         value = {"schema": session_shell.SCHEMA, "harness": harness, "sid": _SID,
@@ -130,8 +159,8 @@ class WindowValueTest(unittest.TestCase):
         return native
 
     def daemon_hosted_session(self, **window):
-        daemon = self.spawn(["claude bg-pty-host", "-c", _DAEMON, sys.executable], self.window_env(**window))
-        hosted = int(daemon.stdout.readline())
+        daemon, hosted = self.spawn(["claude bg-pty-host", "-c", _DAEMON, sys.executable, _HOLD],
+                                    self.window_env(**window))
         daemon.family = [daemon.pid, hosted]
         return hosted
 
@@ -208,7 +237,7 @@ class WindowValueTest(unittest.TestCase):
 
     def test_two_window_sessions_with_one_value_stay_ambiguous(self):
         self.attached_session("claude", **self.herdr_window())
-        self.spawn(["claude", "-c", "import sys;sys.stdin.buffer.read()"], self.window_env(**self.herdr_window()))
+        self.spawn(["claude", "-c", _HOLD], self.window_env(**self.herdr_window()))
         self.assertEqual(peer_address.resolve(_PANE, server=_SERVER), (None, "target-pane-ambiguous"))
 
 

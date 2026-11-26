@@ -467,7 +467,7 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
         clean = {key: value for key, value in os.environ.items()
                  if key not in identity_keys}
         parent_source = (
-            "import os, subprocess, sys\n"
+            "import os, select, subprocess, sys\n"
             "env = dict(os.environ)\n"
             "for key in ('CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID', "
             "'CODEX_SESSION_ID', 'OPENCODE_SESSION_ID'):\n"
@@ -482,9 +482,18 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
             "    env['CODEX_THREAD_ID'] = 'launch-thread'\n"
             "    env['CLAUDE_CODE_SESSION_ID'] = 'other-launcher'\n"
             "child = subprocess.Popen([sys.executable, '-c', "
-            "'import time; time.sleep(30)'], env=env)\n"
-            "print(child.pid, flush=True)\n"
-            "child.wait()\n"
+            "\"import os; os.write(1, b'R'); os.read(0, 1)\"], "
+            "env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE)\n"
+            "try:\n"
+            "    with child.stdout:\n"
+            "        if not select.select([child.stdout], [], [], 10)[0] or child.stdout.read(1) != b'R':\n"
+            "            raise RuntimeError('GPU fixture child did not become ready')\n"
+            "    print(child.pid, flush=True)\n"
+            "    sys.stdin.buffer.read(1)\n"
+            "finally:\n"
+            "    child.stdin.close()\n"
+            "    child.kill()\n"
+            "    child.wait(timeout=5)\n"
         )
 
         with tempfile.TemporaryDirectory(dir=os.environ.get("TEST_TMPDIR", "/tmp")) as tmp:
@@ -507,10 +516,9 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
             }
             for mode in ("exact", "missing", "conflict", "generic"):
                 with self.subTest(mode=mode):
-                    child_pid = None
                     parent = subprocess.Popen(
                         [sys.executable, "-c", parent_source, mode],
-                        text=True, stdout=subprocess.PIPE, env=stale_parent_env,
+                        text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=stale_parent_env,
                     )
                     try:
                         child_pid = int(parent.stdout.readline().strip())
@@ -536,13 +544,9 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
                         self.assertEqual(result.returncode, 0, result.stderr)
                         payload = json.loads(result.stdout)
                     finally:
-                        if child_pid is not None:
-                            try:
-                                os.kill(child_pid, 15)
-                            except ProcessLookupError:
-                                pass
+                        parent.stdin.close()
                         try:
-                            parent.wait(timeout=2)
+                            parent.wait(timeout=7)
                         except subprocess.TimeoutExpired:
                             parent.terminate()
                             parent.wait(timeout=2)

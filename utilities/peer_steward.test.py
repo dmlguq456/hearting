@@ -232,6 +232,28 @@ def _herdr_json(payload):
     return subprocess.CompletedProcess(["herdr"], 0, stdout=json.dumps(payload), stderr="")
 
 
+def _stop_fixture_claude(proc):
+    proc.kill()
+    proc.wait(timeout=5)
+
+
+def _spawn_fixture_claude(test, seconds, env):
+    argv = ["/usr/bin/claude", str(seconds)]
+    proc = subprocess.Popen(argv, executable="/bin/sleep", env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    test.addCleanup(_stop_fixture_claude, proc)
+    # Keep the fake runtime's executable. Wait for its exact argv and environment
+    # to be visible, since sleep has no startup output of its own.
+    expected = b"\0".join(os.fsencode(word) for word in argv) + b"\0"
+    directory = Path("/proc") / str(proc.pid)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and proc.poll() is None:
+        if (directory / "cmdline").read_bytes() == expected and (directory / "environ").read_bytes():
+            return proc
+        time.sleep(0.01)
+    test.fail("fixture Claude did not publish its argv and environment")
+
+
 class _NativeSeat:
     """A real native session the production readers can see, with no Herdr.
 
@@ -249,17 +271,8 @@ class _NativeSeat:
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("AGENT_", "HERDR_", "TMUX"))}
         env["HERDR_PANE_ID"] = pane
-        self.proc = subprocess.Popen(
-            ["bash", "-c", "exec -a /usr/bin/claude sleep 3600"], env=env,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        test.addCleanup(self.stop)
+        self.proc = _spawn_fixture_claude(test, 3600, env)
         self.pid = self.proc.pid
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            live = pane_ownership._process(self.pid)
-            if live and "claude" in Path(f"/proc/{self.pid}/cmdline").read_text(errors="replace"):
-                break
-            time.sleep(0.01)
         self.birth = str(pane_ownership._process(self.pid)[5])
         self.path = Path(os.environ["HOME"]) / ".claude" / "sessions" / f"{self.pid}.json"
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -278,12 +291,7 @@ class _NativeSeat:
         self.set("idle")
 
     def end(self):
-        self.stop()
-
-    def stop(self):
-        if self.proc.poll() is None:
-            self.proc.kill()
-        self.proc.wait(timeout=5)
+        _stop_fixture_claude(self.proc)
 
 
 def _idle_shell_run(argv, **kwargs):
@@ -1642,11 +1650,7 @@ class _WatchMixin(_TmpRootMixin):
         census_home = self.tmp_root / "home" / ".claude"
         (census_home / "sessions").mkdir(parents=True, exist_ok=True)
         (census_home / ".statusline").mkdir(parents=True, exist_ok=True)
-        self.census_process = subprocess.Popen(
-            ["bash", "-c", "exec -a /usr/bin/claude sleep 600"],
-            env=dict(os.environ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        self.addCleanup(self._stop_census_process)
+        _spawn_fixture_claude(self, 600, dict(os.environ))
         fake = self.bin / "herdr"
         fake.write_text(_FAKE_HERDR)
         fake.chmod(0o755)
@@ -1686,15 +1690,6 @@ class _WatchMixin(_TmpRootMixin):
             except subprocess.TimeoutExpired:
                 self.shell.kill()
                 self.shell.wait(timeout=3)
-
-    def _stop_census_process(self):
-        if self.census_process.poll() is None:
-            self.census_process.terminate()
-            try:
-                self.census_process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.census_process.kill()
-                self.census_process.wait(timeout=2)
 
     def _env(self, mode="idle", session_id="steward-1", with_herdr=True):
         env = dict(os.environ)
