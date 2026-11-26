@@ -49,19 +49,28 @@ def status_candidates(folder):
         return None
 
 
-def read_document(folder, name):
+def carries_marker(text, marker):
+    """Whether the first line of ``text`` is ``marker``: the one rule for a generated page's marker.
+
+    The line ends at ``\\n`` only, the way ``campaign_document`` writes and re-checks its page (every line it
+    writes ends that way, and its own overwrite guard splits there). A lone CR, U+2028 or FF is no line end
+    here, so a page whose "first line" runs on past one of them is not the generator's on any screen."""
+    return str(text).split('\n', 1)[0].strip() == marker
+
+
+def read_document(folder, name, limit=READ_LIMIT):
     """Bounded bytes and their fd's stat; no payload pathname is reopened.
 
     A file replaced while it is read (the generator's atomic write) is read once more."""
     try:
-        return _read_once(folder, name)
+        return _read_once(folder, name, limit)
     except ValueError as error:
         if str(error) != 'document-changed':
             raise
-    return _read_once(folder, name)
+    return _read_once(folder, name, limit)
 
 
-def _read_once(folder, name):
+def _read_once(folder, name, limit=READ_LIMIT):
     parent = open_root(folder)
     try:
         fd = open_relative(parent, [name])
@@ -71,7 +80,7 @@ def _read_once(folder, name):
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode):
             raise ValueError('document-not-regular')
-        chunks, remaining = [], READ_LIMIT + 1
+        chunks, remaining = [], limit + 1
         while remaining:
             chunk = os.read(fd, remaining)
             if not chunk:
@@ -83,7 +92,7 @@ def _read_once(folder, name):
         if (before.st_mtime_ns, before.st_size, before.st_ctime_ns) != (
                 after.st_mtime_ns, after.st_size, after.st_ctime_ns):
             raise ValueError('document-changed')
-        return raw[:READ_LIMIT], before, 'complete' if len(raw) <= READ_LIMIT else 'partial'
+        return raw[:limit], before, 'complete' if len(raw) <= limit else 'partial'
     finally:
         os.close(fd)
 
@@ -170,6 +179,7 @@ def entrance_snapshot(root):
     """Campaign documents join the existing entrance; source failures stay visible."""
     import artifact_identity
     import artifact_lifecycle
+    import artifact_campaign
     import artifact_locator
     root = Path(root).resolve()
     rows, errors = [], []
@@ -184,8 +194,12 @@ def entrance_snapshot(root):
                 errors.append('campaign-documents-bounded')
                 break
             try:
-                raw, _, coverage = read_document(campaign, 'campaign.json')
+                # the record is read with the limit of a campaign record (as the entrance's other JSON reads),
+                # not the 64 KiB of a page: a campaign with 1,650 members is over the page limit
+                raw, _, coverage = read_document(campaign, 'campaign.json', artifact_campaign.MAX_JSON)
                 meta = json.loads(raw) if coverage == 'complete' else {}
+                if coverage != 'complete':
+                    errors.append(campaign.relative_to(root).as_posix() + ':campaign-metadata-bounded')
                 if not isinstance(meta, dict):
                     meta = {}
             except (OSError, RuntimeError, ValueError):
