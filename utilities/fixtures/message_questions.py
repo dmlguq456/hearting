@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import importlib.util
 import os
 import json
@@ -38,6 +39,12 @@ class MessageQuestionFixture:
                     "AGENT_PEER_LEDGER_ROOT": str(self.root),
                     "PYTHONDONTWRITEBYTECODE": "1"}
         self.stack.enter_context(mock.patch.dict(os.environ, self.env, clear=True))
+        # CLI children share the private state, but cannot see the in-process mock.
+        # Keep the existing projection lock held until those children have finished.
+        projection = waits.state_root()
+        projection.mkdir(mode=0o700, parents=True)
+        lock = self.stack.enter_context((projection / ".projection.lock").open("a"))
+        fcntl.flock(lock, fcntl.LOCK_EX)
         self.stack.enter_context(mock.patch.object(waits, "_request_producer"))
         self.stack.enter_context(mock.patch.object(obligations, "ensure_normal_runner", return_value=False))
         self.stack.enter_context(mock.patch.object(obligations, "request_dispatch_reconciliation", return_value=False))
@@ -310,14 +317,27 @@ if (calls !== 1) throw Error("native callback did not run exactly one helper");
                 contexts.append(json.loads(line)["hookSpecificOutput"]["additionalContext"])
         return "\n\n".join(contexts)
 
+    # Keep the real context subcommand and its flush/receipt path. Its own
+    # spawn-to-flush deadline needs headroom in both fixture entry points.
+    _CONTEXT_DRIVER = """import importlib.util, sys
+sys.argv.pop(0)
+spec = importlib.util.spec_from_file_location("fixture_peer", sys.argv[0])
+peer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(peer)
+peer._CONTEXT_CLI_BUDGET_S = 15
+raise SystemExit(peer.main())
+"""
+
     _IDLE_DRIVER = r"""
 import { pathToFileURL } from "node:url";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { spawnSync as realSpawnSync, spawn as realSpawn } from "node:child_process";
 const realSetTimeout = globalThis.setTimeout.bind(globalThis);
-const sleep = (ms) => new Promise(r => realSetTimeout(r, ms));
-globalThis.setTimeout = (cb, ms, ...a) => ms === 0 ? {cancelled: true} : realSetTimeout(cb, ms, ...a);
+// Exercise delivery and ordering here. Keep a fixture watchdog without racing
+// production latency budgets against a busy test runner.
+const watchdogMs = 20_000;
+globalThis.setTimeout = (cb, ms, ...a) => ms === 0 ? {cancelled: true} : realSetTimeout(cb, Math.max(ms, watchdogMs), ...a);
 const intervals = [];   // the plugin's own timers (the carrier's 5 s pass) run only on a "tick" step
 globalThis.setInterval = (cb) => { intervals.push(cb); return {unref() {}} };
 const cfg = JSON.parse(process.env.FIX_CFG);
@@ -325,19 +345,30 @@ let guidanceReads = 0;   // every python CLI call and the guidance call are real
 globalThis.__fixtureSpawnSync = (exe, args, options) => {
   if (args?.[0] === "-c" && String(args[1]).includes("receiver_guidance")
       && (cfg.failGuidance || []).includes(++guidanceReads)) return {status: 1, stdout: "", stderr: "fixture"};
-  return realSpawnSync(exe, args, options);
+  const boundedCLI = args[0]?.endsWith("peer-message.py") || String(args[1]).includes("receiver_guidance");
+  return realSpawnSync(exe, args, boundedCLI ? {...options, timeout: watchdogMs} : options);
 };
+const children = new Set();
 globalThis.__fixtureSpawn = (exe, args, options) => {
-  if (Array.from(args || []).some(a => String(a).endsWith("peer-message.py"))) return realSpawn(exe, args, options);
+  if (args[0]?.endsWith("peer-message.py")) {
+    const command = args[1] === "context" ? ["-c", cfg.contextDriver, ...args] : args;
+    const child = realSpawn(exe, command, {...options, detached: false});
+    child.unref = () => child;
+    const closed = new Promise(resolve => child.once("close", resolve));
+    children.add(closed);
+    closed.then(() => children.delete(closed));
+    return child;
+  }
   const child = new EventEmitter(); child.pid = 4242; child.stdout = new PassThrough();
   child.stdin = new PassThrough(); child.unref = () => {}; child.kill = () => {};
-  setImmediate(() => { child.stdout.end("null"); child.emit("close", 0); child.emit("exit", 0) });
+  queueMicrotask(() => { child.stdout.end("null"); child.emit("close", 0); child.emit("exit", 0) });
   return child;
 };
 const {AgentHarnessGuards} = await import(pathToFileURL(process.env.FIX_GUARDS).href);
 const sid = cfg.sid, dir = process.cwd(), messages = cfg.history || [], systems = [], tools = [], log = [];
 const calls = {prompt: 0, promptAsync: 0};
 let hooks, n = 0, turns = 0, k = 0;
+const deferredTurns = [];
 const sdk = (data, status = 200) => ({data, error: undefined, response: {ok: true, status}});
 const root = {id: sid, projectID: "project_fixture", directory: dir, slug: "fixture-root", title: "fixture",
   version: "1.19.0", time: {created: 1, updated: 1}};
@@ -357,12 +388,10 @@ const person = async (id, parts, call = true) => {
 };
 // One started turn: the person's message (`personBetween`) may land before its model call.
 const turn = async (mid, parts) => {
-  if (cfg.pre > 0) await sleep(cfg.pre);   // a resume accepted (204) before OpenCode starts its loop
   turns++;
   try {
     await hooks["chat.message"]({sessionID: sid, messageID: mid}, {message: {id: mid, role: "user", sessionID: sid}, parts});
     if (cfg.personBetween) await person("person-between-" + mid, [{type: "text", text: cfg.personBetween}], false);
-    if (cfg.delay > 0) await sleep(cfg.delay);
     await modelCall(mid);
   } finally { turns--; }
 };
@@ -387,15 +416,30 @@ const session = {
       messages.push({info: {id: mid, role: "user", sessionID: sid, time: {created: Date.now()}}, parts: args.body.parts});
     }
     if (cfg.deadResume) return sdk(undefined, 204);   // accepted, and no turn ever starts
-    const run = turn(mid, args.body.parts);
-    if (!(cfg.delay > 0 || cfg.pre > 0)) await run;
+    if (cfg.deferTurn) deferredTurns.push(() => turn(mid, args.body.parts));
+    else await turn(mid, args.body.parts);
     return args.body.messageID ? sdk(undefined, 204) : sdk({});
   },
 };
 hooks = await AgentHarnessGuards({directory: dir, worktree: dir, client: {session, app: {log: async () => {}}},
   ...(cfg.v2 ? {nativeHost: "v2"} : {})});
-const settle = () => sleep((cfg.delay || 0) * 4 + (cfg.pre || 0) * 3 + 50);
-const idle = async () => { await hooks.event({event: {type: "session.idle", properties: {sessionID: sid}}}); await settle() };
+// Carrier ticks start work without returning its promise. Let their callbacks
+// run and join the real CLI children before observing the next event.
+const settle = async () => {
+  do {
+    await Promise.all([...children]);
+    await new Promise(setImmediate);
+  } while (children.size);
+};
+const runTurns = async () => {
+  for (const resume of deferredTurns.splice(0)) await resume();
+  await settle();
+};
+const idle = async (holdTurn = false) => {
+  await hooks.event({event: {type: "session.idle", properties: {sessionID: sid}}});
+  if (holdTurn) await settle();
+  else await runTurns();
+};
 const tool = async () => {   // one finished tool of a working turn
   const o = {output: "tool-ok", title: "", metadata: {}};
   await hooks["tool.execute.after"]({sessionID: sid, tool: "bash", callID: "c" + tools.length}, o);
@@ -412,9 +456,8 @@ if (cfg.imageOnly) await person("person-image", [{type: "file", mime: "image/png
 for (const step of cfg.steps || []) {
   const [kind, name] = step.split(":");
   if (kind === "arm") await hooks["shell.env"]({sessionID: sid}, {env: {}});
-  else if (kind === "idle" && name === "now") await hooks.event({event: {type: "session.idle", properties: {sessionID: sid}}});
-  else if (kind === "idle") await idle();
-  else if (kind === "wait") await sleep(Number(name));
+  else if (kind === "idle") await idle(name === "hold");
+  else if (kind === "turn") await runTurns();
   else if (kind === "status") { await hooks.event({event: {type: "session.status", properties: {sessionID: sid, status: {type: name}}}}); await settle() }
   else if (kind === "tick") { for (const cb of intervals) cb(); await settle() }
   else if (kind === "tool") await tool();
@@ -425,22 +468,24 @@ for (const step of cfg.steps || []) {
   else throw new Error("unknown step " + step);
   log.push({step, prompt: calls.prompt, promptAsync: calls.promptAsync});
 }
+if (deferredTurns.length) throw new Error("fixture still has deferred turns");
 hooks.dispose?.({silent: true});
+await settle();
 process.stdout.write(JSON.stringify({systems, tools, calls, log, history: messages.map(m => ({id: m.info.id, role: m.info.role,
-  text: (m.parts || []).map(p => p.text || "").join("")}))}));
-realSetTimeout(() => process.exit(0), 30);
+  text: (m.parts || []).map(p => p.text || "").join("")}))}), () => process.exit(0));
 """
 
     def opencode_plugin_session(self, sid, cfg, *, origin=True):
         """The OpenCode plugin itself under node, with a stand-in OpenCode server client: its own
         `session.idle` delivery (`pendingPeerDelivery`), tool boundaries (`tool.execute.after`) and the
-        model calls after them, a person's prompts. Only the window-origin proof (``origin``: this
-        session's own, or none as for `opencode -c`) and detached children are replaced; every
-        python CLI call and the guidance call are real. ``cfg`` may give ``steps``, an explicit order
-        (``idle``, ``idle:now``, ``status:<type>``, ``tick`` for the plugin's own carrier timer,
-        ``tool``, ``call:<name>``, ``text:<id>``, ``image:<id>``, ``answer:<id>``, ``wait:<ms>``,
-        ``arm``), ``v2`` (the OpenCode 2 host), ``pre`` / ``delay`` (a resume's turn start and its
-        model call, late), ``personBetween``, ``deadResume`` and ``failGuidance``. Returns the system
+        model calls after them, a person's prompts. The fixture supplies window-origin proof
+        (``origin``: this session's own, or none as for ``opencode -c``) and owns the child lifetime.
+        Delivery CLI and guidance calls are real, with a fixture time budget. ``cfg`` may give ``steps``, an explicit order
+        (``idle``, ``idle:hold``, ``turn``, ``status:<type>``, ``tick`` for the plugin's own carrier timer,
+        ``tool``, ``call:<name>``, ``text:<id>``, ``image:<id>``, ``answer:<id>``,
+        ``arm``), ``v2`` (the OpenCode 2 host), ``deferTurn`` (accept the resume before starting
+        the turn), ``personBetween``, ``deadResume`` and ``failGuidance``. A deferred turn starts after
+        idle processing, or at the ``turn`` step after ``idle:hold``. Returns the system
         context of every model call, the tool results, the session history and the count after
         each step."""
         if not self.node:
@@ -464,7 +509,8 @@ realSetTimeout(() => process.exit(0), 30);
             guards.write_text(source, encoding="utf-8")
             env = dict(os.environ, PATH=os.pathsep.join([os.path.dirname(self.node), os.path.dirname(sys.executable),
                                                          "/usr/bin", "/bin"]),
-                       AGENT_HOME=str(root), FIX_GUARDS=str(guards), FIX_CFG=json.dumps(dict(cfg, sid=sid)),
+                       AGENT_HOME=str(root), FIX_GUARDS=str(guards),
+                       FIX_CFG=json.dumps(dict(cfg, sid=sid, contextDriver=self._CONTEXT_DRIVER)),
                        PYTHONDONTWRITEBYTECODE="1")
             for key in ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
                         "OPENCODE_DISPATCH_SLUG", "HERDR_PANE_ID", "FLEET_TITLE_REFRESH"):
@@ -480,7 +526,8 @@ realSetTimeout(() => process.exit(0), 30);
         returns the context it appends to the finished tool result and the part it puts in the
         plugin's system context."""
         root = Path(tidy.__file__).resolve().parents[1]
-        child = subprocess.run([sys.executable, "-B", str(root / "utilities/peer-message.py"), "context",
+        child = subprocess.run([sys.executable, "-B", "-c", self._CONTEXT_DRIVER,
+                                str(root / "utilities/peer-message.py"), "context",
                                 "--to-harness", "opencode", "--to-session-id", sid,
                                 "--event", "PostToolUse", "--native-delivery"],
                                cwd=root, env=dict(os.environ, AGENT_HOME=str(root), HEARTING_PEER_DISPLAY_GATE="2"),

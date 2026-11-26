@@ -390,10 +390,10 @@ class QuestionAnswerLine(unittest.TestCase):
         # The plugin's own `session.idle` delivery (`pendingPeerDelivery`) saves the pointer and resumes
         # it: that resume's model call carries the full text, even when it reads the system context
         # late (one resume per idle, so no later save replaces it), and only then the row settles.
-        for case, second, delay in (("single", False, 0), ("two-late", True, 30)):
+        for case, second, deferred in (("single", False, False), ("two-late", True, True)):
             with self.subTest(case):
                 signal, ref, row, body, other = self.idle("idle-" + case, second=second)
-                result = self.f.opencode_plugin_session("idle-" + case, {"idles": 3, "delay": delay})
+                result = self.f.opencode_plugin_session("idle-" + case, {"idles": 3, "deferTurn": deferred})
                 self.assert_model_calls(result, body, row["text"],
                                         other="an ordinary peer message" if second else None)
                 self.settled(signal, ref)
@@ -427,7 +427,7 @@ class QuestionAnswerLine(unittest.TestCase):
                                      "time": {"created": int(time.time() * 1000) + index}},
                             "parts": [{"type": "text", "text": claimed["text"]}]})
         # Each resume's model call reads its system context late; one resume an idle keeps each its own.
-        result = self.f.opencode_plugin_session("idle-restart", {"history": history, "idles": 6, "delay": 30,
+        result = self.f.opencode_plugin_session("idle-restart", {"history": history, "idles": 6, "deferTurn": True,
                                                                  "personFirst": "the person's own prompt"})
         self.assert_model_calls(result, body, row["text"], other="an ordinary peer message")
         self.settled(signal, ref)
@@ -565,8 +565,8 @@ class QuestionAnswerLine(unittest.TestCase):
         # A resume is accepted (204) but its turn has not started when the plugin's own carrier timer
         # fires: no second pass opens beside it, and the next idle takes the other row.
         signal, ref, row, body, other = self.idle("timer-pass", second=True)
-        result = self.f.opencode_plugin_session("timer-pass", {"pre": 300, "delay": 300, "steps": [
-            "arm", "idle:now", "tick", "idle", "idle", "idle"]})
+        result = self.f.opencode_plugin_session("timer-pass", {"deferTurn": True, "steps": [
+            "arm", "idle:hold", "tick", "turn", "idle", "idle"]})
         tick = result["log"][2]
         self.assertEqual((tick["step"], tick["prompt"], tick["promptAsync"]), ("tick", 1, 1))
         self.assert_model_calls(result, body, row["text"], other="an ordinary peer message")
@@ -578,17 +578,17 @@ class QuestionAnswerLine(unittest.TestCase):
         # status event, and then the next row goes on.
         signal, ref, row, body, other = self.idle("dead-resume", second=True)
         result = self.f.opencode_plugin_session("dead-resume", {"deadResume": True, "steps": [
-            "arm", "idle:now", "tick", "wait:500", "status:idle", "tick", "wait:2500"]})
+            "arm", "idle", "tick", "status:idle", "tick"]})
         counts = [(entry["step"], entry["prompt"], entry["promptAsync"]) for entry in result["log"]]
         self.assertEqual(counts[2], ("tick", 1, 1))            # held: the resume was sent
-        self.assertEqual(counts[4], ("status:idle", 1, 1))
-        self.assertEqual(counts[-1], ("wait:2500", 2, 2))      # the next status event let it go on
+        self.assertEqual(counts[3], ("status:idle", 1, 1))
+        self.assertEqual(counts[4], ("tick", 2, 2))           # the next status event let it go on
 
     def test_the_opencode_2_delivery_keeps_the_answer_through_a_person_message(self):
         # OpenCode 2 sends the pointer as a prompt; a person's message lands before that turn's model
         # call, and the call still carries the full text.
         signal, ref, row, body, _other = self.idle("v2-person")
-        result = self.f.opencode_plugin_session("v2-person", {"v2": True, "idles": 4, "delay": 30,
+        result = self.f.opencode_plugin_session("v2-person", {"v2": True, "idles": 4, "deferTurn": True,
                                                               "personBetween": "the person's message"})
         self.assert_model_calls(result, body, row["text"])
         self.settled(signal, ref)
