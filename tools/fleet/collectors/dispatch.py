@@ -62,7 +62,7 @@ except Exception:  # a monitor must never fail to import over a bookkeeping help
     _note_worker_home_view = None
 from dispatch_completion_join import read_supervisor_phase_state, read_join_observation  # noqa: E402
 from dispatch_subsession_advance import row_is_registered_only  # noqa: E402
-from dispatch_attempt_policy import decide_attempt, terminal_conflict_pending  # noqa: E402
+from dispatch_attempt_policy import decide_attempt, provider_failure_kind, terminal_conflict_pending  # noqa: E402
 import dispatch_registry_cache as _dispatch_registry_cache  # noqa: E402
 from runtime_observation import ProjectionCache, retained_size, observe_once  # noqa: E402
 from codex_dispatch_terminal import terminal_envelope_observed  # noqa: E402
@@ -5196,6 +5196,8 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             caller_attempt_id=meta.get("caller_attempt_id") or None,
             is_child=bool(parent_slug or parent_sid or parent_cwd or parent_managed_dir),
             qa_source=qsrc, source="jobs", status=status,
+            provider_failure_kind=(provider_failure_kind(meta.get("provider_failure_kind")) or None
+                                   if status == "done" else None),
             harness=harness, model=meta.get("model"), resolved_model=meta.get("resolved_model"),
             pid=registry_pid, proc_start=registry_start,
             pid_scope=meta.get("pid_scope"),

@@ -1586,6 +1586,7 @@ def main(argv: list[str] | None = None) -> int:
                 process_rc != 0
                 or result.get("is_error") is True
                 or result.get("subtype") not in {None, "success"}
+                or (args.runtime_harness == "claude" and result.get("stop_reason") == "refusal")
             ):
                 if stream_session is not None:
                     teardown_started_ns = time.monotonic_ns()

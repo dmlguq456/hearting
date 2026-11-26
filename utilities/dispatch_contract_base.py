@@ -22,7 +22,7 @@ import subprocess
 import time
 import unicodedata
 from typing import Mapping, NamedTuple
-from dispatch_attempt_policy import committed_outcome
+from dispatch_attempt_policy import committed_outcome, provider_failure_kind
 from dispatch_receipt_identity import receipt_digest as shared_receipt_digest, unseal_receipt
 from dispatch_pending_delivery import RECIPIENT_KINDS
 
@@ -220,6 +220,7 @@ ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "detected_by",
     "failure_class",
     "process_exit",
+    "provider_failure_kind",
     "quota_model_scope",
     "quota_window",
     "reconcile_reason",
@@ -1605,6 +1606,8 @@ def _terminal_delivery_receipt(metadata: dict[str, str]) -> dict:
     }
     if not is_success:
         child["reason"] = "terminal-failure-or-unclosed"
+        if kind := provider_failure_kind(metadata.get("provider_failure_kind")):
+            child["provider_failure_kind"] = kind
     elif outcome == "cancelled":
         child["reason"] = "cancelled-by-parent"
     receipt = {

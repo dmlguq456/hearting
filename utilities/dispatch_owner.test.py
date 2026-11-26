@@ -482,7 +482,7 @@ class FrameTopDeclarationTest(unittest.TestCase):
     HARNESSES = ("claude", "codex", "opencode")
 
     def run_selector(self, *, declared, explicit=None, profile="top", scores=None,
-                     owner_order=("claude", "opencode", "codex")):
+                     owner_order=("claude", "opencode", "codex"), predecessor=None):
         import artifact_producer
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
@@ -503,6 +503,20 @@ class FrameTopDeclarationTest(unittest.TestCase):
             values = {"--model-profile": profile, "--worker-type": "frame", "--route-node": "frame",
                       "--worktree": str(base), "--capability": "autopilot-code",
                       "--capability-mode": "dev", "--intensity": "standard"}
+            if predecessor:
+                values.update({"--automatic-retry-of": "att-fixture-old", "--attempt-id": "att-fixture-next"})
+                import dispatch_replacement as replacement
+                family = "0" * 64
+                meta = {"harness": "codex", "attempt_id": "att-fixture-old", "attempt_schema_version": "2",
+                        "replacement_family_id": family, "replacement_attempt_id": "att-fixture-next",
+                        "note": "dead-runtime-error", "failure_class": "runtime", **predecessor}
+                fields = ",".join(f"{key}={value}" for key, value in meta.items())
+                jobs.write_text(f"2026-01-01T00:00:00Z\tdone\t/repo\t{base}\tframe\t{fields}\n")
+                claim = replacement._record_path(jobs, family)
+                claim.parent.mkdir(parents=True)
+                claim.write_text(json.dumps({"original_attempt_id": "att-fixture-old",
+                                             "replacement_attempt_id": "att-fixture-next",
+                                             "proof": {"death_kind": "runtime"}}))
             binding = SimpleNamespace(route_file=str(route_file), route_id=route["route_id"],
                 route_hash=route["route_hash"], route_node="frame", registry_digest="sha256:test",
                 write_scope=str(base), completion_gate="test")
@@ -520,6 +534,7 @@ class FrameTopDeclarationTest(unittest.TestCase):
                  mock.patch.object(OWNER._capacity, "capacity_report", return_value={"scores": scores, "sources": {}}), \
                  mock.patch.object(OWNER, "derive_frame_route_binding", return_value=binding), \
                  mock.patch.object(OWNER, "_declares_top", probe), \
+                 mock.patch("model_profile.resolve_runtime_profile", return_value=({"model": "fixture-current"}, {})), \
                  mock.patch.object(artifact_producer, "prepare_route_artifact_env", return_value={}), \
                  mock.patch.object(OWNER.os, "access", return_value=True), \
                  mock.patch.object(OWNER, "select_launch_lifecycle", return_value="detached"), \
@@ -527,6 +542,31 @@ class FrameTopDeclarationTest(unittest.TestCase):
                  contextlib.redirect_stdout(out):
                 code = OWNER.main([])
             return code, out.getvalue(), launch, probe
+
+    def test_policy_refusal_changes_only_the_unchanged_harness_and_model(self):
+        source = {"provider_failure_kind": "cyberPolicy", "model": "fixture-current"}
+        rank = ("codex", "claude", "opencode")
+        for predecessor, expected in (
+            (source, "claude"),
+            ({**source, "model": "fixture-different"}, "codex"),
+            ({**source, "provider_failure_kind": "serverOverloaded"}, "codex"),
+            ({**source, "provider_failure_kind": "usageLimitExceeded", "note": "dead-capacity",
+              "failure_class": "capacity"}, "codex"),
+        ):
+            with self.subTest(predecessor=predecessor):
+                code, out, launch, _probe = self.run_selector(
+                    declared=set(rank), predecessor=predecessor, owner_order=rank)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(Path(launch.call_args.args[0][0]).parts[-3], expected)
+
+    def test_only_rejected_candidate_reports_why_it_cannot_be_replayed(self):
+        code, out, launch, _probe = self.run_selector(
+            declared={"codex"}, predecessor={"provider_failure_kind": "cyberPolicy", "model": "fixture-current"},
+            owner_order=("codex", "claude", "opencode"))
+        self.assertEqual(code, 65, out)
+        launch.assert_not_called()
+        self.assertIn("reason=provider-refusal-no-alternative", out)
+        self.assertIn("same harness and model", out)
 
     def test_a_harness_without_a_top_declaration_is_never_chosen_even_with_the_most_headroom(self):
         code, out, launch, _probe = self.run_selector(declared={"codex", "opencode"})

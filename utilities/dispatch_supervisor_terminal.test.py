@@ -160,6 +160,76 @@ class SupervisorTerminalIntegrationTest(unittest.TestCase):
         self.assertIn("terminal_verdict=FAIL", result.stdout)
 
 
+    def test_provider_failure_in_exact_log_reaches_parent_completion(self):
+        from dispatch_contract import close_attempt_row
+        from dispatch_contract_base import _terminal_delivery_receipt
+
+        attempt = "att-fixture-provider-refusal"
+        cases = (
+            ("codex", {"type": "dispatch.supervisor.turn.failed",
+                       "codex_error_info": "cyberPolicy", "message": "private-fixture-output"}, "cyberPolicy"),
+            ("claude", {"type": "result", "subtype": "success", "is_error": False,
+                        "stop_reason": "refusal", "result": "private-fixture-output"}, "refusal"),
+            ("opencode", {"type": "error", "sessionID": "ses_fixture",
+                          "error": {"type": "provider.content-filter",
+                                    "message": "private-fixture-output"}}, "provider.content-filter"),
+        )
+        for harness, event, kind in cases:
+            with self.subTest(harness=harness):
+                raw = self.row("open", attempt, "PASS", "none").replace("harness=codex", f"harness={harness}")
+                self.jobs.write_text(raw, encoding="utf-8")
+                log = self.base / "pass.codex.jsonl"
+                log.write_text(json.dumps(event) + "\n", encoding="utf-8")
+                initial = JOIN.exact_attempt_row(self.jobs, attempt)
+                terminal = SUPERVISOR.missing_result_terminal(initial.metadata)
+                self.assertTrue(close_attempt_row(self.jobs, attempt, terminal.note, evidence=terminal.evidence()))
+                closed = JOIN.exact_attempt_row(self.jobs, attempt)
+                receipt = _terminal_delivery_receipt(closed.metadata)
+                child = receipt["children"][0]
+                self.assertEqual(child["reason"], "terminal-failure-or-unclosed")
+                self.assertEqual(child["required_action"], "inspect-done-failure")
+                self.assertEqual(child["provider_failure_kind"], kind)
+                self.assertEqual(
+                    JOIN.canonical_delivery_receipt(receipt)["children"][0]["provider_failure_kind"], kind
+                )
+                notice = JOIN.completion_followup_text(receipt, jobs=str(self.jobs))
+                self.assertIn(f"was {kind}.", notice)
+                self.assertIn("same harness and model", notice)
+                for output in (notice, json.dumps(receipt), closed.raw):
+                    self.assertNotIn("private-fixture-output", output)
+
+    def test_failed_last_turn_cannot_harvest_an_earlier_pass(self):
+        from codex_dispatch_terminal import inspect_terminal_attempt
+
+        log = self.terminal_log("PASS", "none")
+        with log.open("a", encoding="utf-8") as stream:
+            for row in ({"type": "dispatch.supervisor.turn.started"},
+                        {"type": "dispatch.supervisor.turn.failed", "codex_error_info": "cyberPolicy"}):
+                stream.write(json.dumps(row) + "\n")
+        result = inspect_terminal_attempt(log, worktree=self.repo, artifact_root_metadata=self.artifacts)
+        self.assertEqual(result["state"], "absent")
+        self.assertEqual(SUPERVISOR.missing_result_terminal(
+            {"harness": "codex", "log_file": str(log)}).provider_failure_kind, "cyberPolicy")
+
+    def test_turn_boundary_and_allowlist_keep_unproven_provider_kinds_out(self):
+        log = self.base / "worker.codex.jsonl"
+        metadata = {"harness": "codex", "log_file": str(log)}
+        failure = {"type": "dispatch.supervisor.turn.failed", "codex_error_info": "misalignmentPolicyViolation"}
+        cases = (
+            [dict(failure, codex_error_info="private-fixture-token")],
+            [dict(failure, codex_error_info="x" * 100)],
+            [failure, {"type": "dispatch.supervisor.turn.started"}],
+            [failure, {"type": "dispatch.supervisor.turn.completed", "status": "completed"}],
+            [{"type": "error", "message": "cyberPolicy"}],
+        )
+        for rows in cases:
+            with self.subTest(rows=rows):
+                log.write_text("\n".join(map(json.dumps, rows)) + "\n", encoding="utf-8")
+                result = SUPERVISOR.missing_result_terminal(metadata)
+                self.assertEqual(result.note, "dead-missing-result")
+                self.assertNotIn("provider_failure_kind", result.evidence())
+
+
 class OpencodeTerminalVocabularyTest(unittest.TestCase):
     """Gap 1 prep (C1): the two new helpers, action-neutral until C2 wires them in."""
 
@@ -467,6 +537,9 @@ class RuntimeFailureClassifierTest(unittest.TestCase):
             result = SUPERVISOR.classify_supervisor_log(str(log), "codex")
             self.assertEqual(result.note, "dead-capacity")
             self.assertEqual(result.failure_class, "capacity")
+            self.assertEqual(result.provider_failure_kind, "usageLimitExceeded")
+            from dispatch_attempt_policy import content_refusal
+            self.assertFalse(content_refusal(result.provider_failure_kind))
             # The live raiser's own answer, from the same payload dict, must
             # be byte-identical -- the one-classifier guarantee this exists
             # for.

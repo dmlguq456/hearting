@@ -3021,6 +3021,23 @@ class ReplacementTest(unittest.TestCase):
         self.assertEqual(result['record']['proof']['death_kind'], 'runtime')
         self.assertEqual(result['record']['proof']['note'], 'dead-runtime-exit')
 
+    def test_policy_refusal_can_release_a_bound_parent_notice_when_no_alternative_exists(self):
+        self._runtime_end(provider_failure_kind="cyberPolicy", model="fixture-model")
+        result = R.advance(
+            self.jobs, "att-source", authority_check=lambda *_: True,
+            run=lambda *_args, **_kw: SimpleNamespace(returncode=65,
+                stdout="reason=provider-refusal-no-alternative\n", stderr=""))
+        self.assertEqual(result["reason"], "provider-refusal-no-alternative")
+        self.assertEqual(result["failure"], "cyberPolicy")
+        self.assertEqual(R.recovery_delivery_state(self.jobs, "att-source"), "settled")
+        self.assertIn("same harness and model", result["detail"])
+        # A later explicit start may choose a new pin/model in the same claim.
+        runs = []
+        R.advance(self.jobs, "att-source", authority_check=lambda *_: True, resume_capacity=True,
+                  run=lambda command, **_kw: runs.append(command)
+                  or SimpleNamespace(returncode=65, stdout="", stderr=""))
+        self.assertEqual(len(runs), 1)
+
     def test_a_supervisor_tick_does_not_launch_a_runtime_end(self):
         self._runtime_end()
         result = R.advance(self.jobs, 'att-source',

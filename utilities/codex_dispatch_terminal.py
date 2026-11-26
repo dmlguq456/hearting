@@ -19,7 +19,8 @@ import subprocess
 import sys
 
 from dispatch_supervisor_terminal import (
-    classify_session_result, opencode_terminal_boundary, supervisor_terminal_from_event,
+    classify_session_result, latest_codex_turn_failure, opencode_terminal_boundary,
+    session_provider_failure_kind, supervisor_terminal_from_event,
 )
 
 # OPERATIONS §5.10 "Review verdict is a result, not a worker death": a review
@@ -295,6 +296,11 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
             rows.append(value)
             row_line_indices.append(line_index)
 
+    if latest_codex_turn_failure(rows) is not None:
+        # The last turn ended without a handoff. A completed earlier turn
+        # cannot hide this failure from the existing missing-result classifier.
+        return _result(2, "absent", "none", "-", "unchecked", "-", reason="terminal-event-absent")
+
     terminal_index = next(
         (
             index
@@ -323,7 +329,9 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
     final_message: str | None = None
     if terminal_event == "result":
         subtype = terminal_row.get("subtype")
-        if terminal_row.get("is_error") is True or subtype not in {None, "success"}:
+        runtime = "opencode" if terminal_row.get("runtime") == "opencode" else "claude"
+        if (terminal_row.get("is_error") is True or subtype not in {None, "success"}
+                or session_provider_failure_kind(terminal_row, runtime)):
             # The live supervisor already separates a rate-limit or auth death
             # from a broken envelope (`classify_claude_result`). This post-hoc
             # reader used to call all three "claude-result-runtime-error", so
@@ -332,7 +340,6 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
             # is how a `top` review that simply ran out of Fable quota was
             # reported as a malformed handoff (2026-09-10, att-2164dce2).
             # One classifier, both readers.
-            runtime = "opencode" if terminal_row.get("runtime") == "opencode" else "claude"
             supervised = classify_session_result(terminal_row, 1, runtime=runtime)
             from dispatch_capacity_evidence import native_quota
             quota = native_quota(rows[:terminal_index + 1], observed_at=log_path.stat().st_mtime)
@@ -352,6 +359,8 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
                         else f"{runtime}-result-{supervised.failure_class}"),
                 failure_note=supervised.note,
                 failure_class=supervised.failure_class,
+                **({"provider_failure_kind": supervised.provider_failure_kind}
+                   if supervised.provider_failure_kind else {}),
                 **quota_fields,
             )
         text = terminal_row.get("result")

@@ -2955,6 +2955,26 @@ class FallbackTest(unittest.TestCase):
   self.assertIn("prior-attempt-unverifiable",unknown.stdout)
   self.assertIn("child_spawned=0",unknown.stdout)
   self.assertEqual(self.jobs.read_bytes(),before)
+ def test_provider_refusal_skips_only_the_same_model_on_the_retried_harness(self):
+  from model_profile import resolve_runtime_profile
+  with self.dispatch_env():
+   path=self.route(same_status="supported")
+   route=json.loads(path.read_text())
+   node=next(item for item in route["nodes"] if item["id"]=="plan")
+   model=resolve_runtime_profile("codex",node["model_profile"],source_root=ROOT)[0]["model"]
+  attempt="att-provider-refusal-fixture"
+  base=(f"capability=autopilot-code,route_id={route['route_id']},route_node=plan,"
+        "parent=owner,harness=codex,parent_harness=codex,parent_transport=headless,"
+        "parent_sandbox=workspace-write,child_harness=codex,launch_authority=conductor")
+  self.jobs.write_text(
+   f"2026-07-16T00:00:00Z\tdone\t/repo\t{self.repo}\tworker-refused\t"
+   f"{base},attempt_id={attempt},note=dead-missing-result,provider_failure_kind=cyberPolicy,model={model}\n")
+  result=self.run_observed_chain(path,{attempt})
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+  self.assertIn("selected_hop=cross-harness-headless",result.stdout)
+  self.assertIn("skipped-provider-refusal",result.stdout)
+  self.assertNotIn("skipped-prior-unchanged-failure",result.stdout)
+
  def test_registry_worker_deaths_do_not_spend_a_launch_tuple(self):
   path=self.route(same_status="supported"); route=json.loads(path.read_text())
   base=(f"capability=autopilot-code,route_id={route['route_id']},route_node=plan,"
