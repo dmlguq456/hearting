@@ -58,6 +58,7 @@ GIT_TIMEOUT = 5
 GIT_BUDGET = 40
 VERDICT_CHARS = 60
 RECORD_KEY_CHARS = 200
+UNPROVEN_WORD = "미증명"   # the head of a page of work whose close was not proven: it ended, and passing is not shown
 ACTIVE_SECONDS = 6 * 3600
 DONE_LINES = 20
 READ_CAP = 400
@@ -155,7 +156,8 @@ def _start(member):
 
 def record_key(pr, locator):
     """The name of a piece of work's record page (`records/<key>.md`): `pr-<N>` when it has a PR, else the
-    folder name of its first route; None when the name has a character a file name or link should not."""
+    folder name of the cycle its first route stands on (`_choose`: a sealed one, else the latest started);
+    None when the name has a character a file name or link should not."""
     if pr:
         return f"pr-{int(pr)}"
     locator = locator if isinstance(locator, str) else ""
@@ -243,7 +245,7 @@ def link_units(facts, open_routes, titles, *, now, closed_total=None):
     done.sort(key=lambda u: (-u["closed_at"], u["key"]))
     shown = done[:DONE_LINES]
     total = closed_total if closed_total is not None else sum(len(i["closed"]) for i in units.values())
-    return {"active": active, "active_folded": active_folded, "done": shown,
+    return {"active": active, "active_folded": active_folded, "done": shown, "done_hidden": done[DONE_LINES:],
             "done_folded": max(0, total - sum(u["routes"] for u in shown))}
 
 
@@ -843,7 +845,7 @@ class _Pages:
     def page(self, unit):
         lines, files = self.lines(unit)
         head = [f"#{unit['pr']}" if unit.get("pr") else None, _escape(unit["v"]) if unit.get("v") else None,
-                "하는 중" if id(unit) in self.active_ids else self.day(unit.get("closed_at")),
+                "하는 중" if id(unit) in self.active_ids else UNPROVEN_WORD if unit.get("unproven") else self.day(unit.get("closed_at")),
                 f"기록 {unit['count']}", f"파일 {files}개"]
         return render_record(_unit_title(unit), " · ".join(part for part in head if part), lines)
 
@@ -1009,8 +1011,9 @@ def collect(root, campaign_dir, *, now, cache=None, persist=False, listing=None,
             live=None, pages=None, git=None):
     """`(document text, cache)` for one campaign, from its records. Writes nothing itself;
     `persist=False` is a faithful drawing from real records, `catch_up` persists. A dict given as `pages`
-    is filled with the record pages (`key -> text`) of the lines the document really shows; `git` is the
-    pass's `_GitPass` (one is made when none is given)."""
+    is filled with the record pages (`key -> text`) of the lines the document really shows and of the pages
+    `records/` already holds for work that is not on a line now; `git` is the pass's `_GitPass` (one is made
+    when none is given)."""
     root, campaign_dir = Path(root), Path(campaign_dir)
     campaign = store._read_json(campaign_dir / "campaign.json") or {}
     campaign_id = campaign.get("campaign_id")
@@ -1192,7 +1195,47 @@ def collect(root, campaign_dir, *, now, cache=None, persist=False, listing=None,
         for unit in shown:
             if unit.get("record"):
                 pages[unit["record"]] = drawing.page(unit)
+        _redraw_held_pages(campaign_dir, pages, drawing, units, shown, members, fact_rows, titles, now)
     return text, cache
+
+
+def _redraw_held_pages(campaign_dir, pages, drawing, units, shown, members, fact_rows, titles, now):
+    """Add to `pages` the pages `records/` already holds for work, whether or not its line is on the document and
+    under every name the work has had (its PR number became known, a later round began in another folder):
+    the name of each cycle of its routes, and its own. A name `records/` does not hold is not made, and a name a
+    line already has its page for is left to that line. A close that was not proven is no line and no count,
+    and its page shows `UNPROVEN_WORD`."""
+    held = _page_names(campaign_dir)   # one listing of `records/` for the pass
+    if not held:
+        return
+    unproven = [dict(row, ok=True) for row in fact_rows
+                if not row.get("ok") and row.get("kind") in ("work", "review")]
+    quiet = link_units(unproven, [], titles, now=now)["done"] if unproven else []
+    for unit in quiet:
+        unit["unproven"] = True
+    shown_ids = {id(unit) for unit in shown}
+    for unit in shown + units.get("done_hidden", []) + quiet:
+        names = set()
+        for member in unit["closed"] + unit["open"]:
+            row = members.get(member["rid"]) or {}
+            names.add(row.get("loc") or "")
+            names |= {c.get("loc") or "" for c in row.get("cycles") or [] if isinstance(c, dict)}
+        if id(unit) not in shown_ids:
+            names.add(unit.get("record") or "")
+        names = {name for name in names if name in held and name not in pages and _RECORD_KEY.fullmatch(name)}
+        if names:
+            text = drawing.page(unit)
+            for name in sorted(names):
+                pages[name] = text
+
+
+def _page_names(campaign_dir):
+    """The names (without `.md`) of the files in `records/`; a bare listing, nothing is read from them."""
+    try:
+        with os.scandir(Path(campaign_dir) / RECORDS_DIR) as entries:
+            return {entry.name[:-3] for entry in entries if entry.name.endswith(".md")}
+    except OSError:
+        return set()
 
 
 # ---------------------------------------------------------------------------
@@ -1293,7 +1336,8 @@ def remove_generated_records(campaign_dir):
 def _write_records(campaign_dir, pages):
     """Write the record pages (`key -> text`) into `records/`: made (inside a campaign folder that is there;
     never its parents) when there is a page to write, never a folder that is a link or a file, a page changed only when its text changed, a file of that name that
-    is not the generator's left as it is. Nothing is removed: a page whose line has folded stays."""
+    is not the generator's left as it is. Nothing is removed: a page whose line has folded stays (and is drawn
+    again while its work is known)."""
     if not pages:
         return
     folder = Path(campaign_dir) / RECORDS_DIR

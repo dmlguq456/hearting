@@ -1302,7 +1302,8 @@ class RecordPageTest(RecordFixture):
 
     def test_the_page_writer_has_no_way_to_remove_anything(self):
         import inspect
-        source = inspect.getsource(cd._write_records) + inspect.getsource(cd._Pages) + inspect.getsource(cd._GitPass)
+        source = (inspect.getsource(cd._write_records) + inspect.getsource(cd._Pages) + inspect.getsource(cd._GitPass)
+                  + inspect.getsource(cd._redraw_held_pages) + inspect.getsource(cd._page_names))
         for word in ("unlink", "rmdir", "rmtree", "os.remove", "os.rename", "shutil"):
             self.assertNotIn(word, source)
 
@@ -1623,6 +1624,160 @@ class RecordReportTest(RecordFixture):
         self.assertEqual(self.page_lines("pr-1701")[0].rsplit(" · ", 1)[1], "파일 2개")   # a link is not a file
         self.assertEqual(first, 2)
         self.assertEqual(spy.call_count - first, 2)   # the open route and the new one; the closed one is not counted again
+
+
+class RecordRenamedPageTest(RecordFixture):
+    """A page the generator already wrote is drawn again under every name its work has had, on or off the document."""
+
+    PR_REPORT = "# done\n\nPR: #1900\n"
+
+    def follow_up(self, rid, slug, *, started, locator, written):
+        """Another cycle of the same work route (a later round of it), sealed and newest."""
+        self.serial += 1
+        cycle_id = f"cyc_{self.serial:032x}"
+        record = {"campaign_id": self.campaign_id, "cycle_id": cycle_id, "route_id": rid, "slug": slug,
+                  "route_capability": "autopilot-code", "started_on": stamp(started), "state": "sealed",
+                  "locator": locator, "title": slug}
+        path = self.runtime / "artifact-producer/v1/cycles" / f"{cycle_id}.json"
+        path.write_text(json.dumps(record))
+        os.utime(path, (written, written))
+
+    def pages(self):
+        return sorted(os.listdir(self.folder / "records"))
+
+    def head(self, key):
+        return self.page(key).split("\n")[3]
+
+    def settled_document(self):
+        text = self.document()
+        return [self.bullets(text, "하는 중"), self.bullets(text, "최근에 끝난 것")]
+
+    def test_a_close_that_was_not_proven_draws_the_page_again_and_stays_off_the_document(self):
+        rid, _c = self.route("solo-build", started=NOW - HOUR)
+        self.catch_up()
+        self.assertTrue(self.head("2026-11-20_solo-build").startswith("하는 중"))
+        self.close(rid, NOW + 50, proven=False)
+        self.catch_up(now=NOW + 60)
+        head, lines = self.head("2026-11-20_solo-build"), self.page_lines("2026-11-20_solo-build")
+        self.assertEqual(head, f"{cd.UNPROVEN_WORD} · 기록 1 · 파일 0개")
+        self.assertNotIn("하는 중", self.page("2026-11-20_solo-build"))
+        self.assertNotIn("보고 아직 없음", self.page("2026-11-20_solo-build"))
+        self.assertEqual(lines, [f"- 구현 · {self.day(NOW + 50)} · solo-build · 파일 0개"])   # the line keeps the day it closed
+        self.assertEqual(self.settled_document(), [[], []])   # no line, no section entry, no link
+        self.assertNotIn("records/", self.document())
+
+    def test_a_close_that_was_not_proven_names_no_success_even_when_the_pr_is_in_the_name(self):
+        rid, _c = self.route("alpha-1700", started=NOW - HOUR)
+        self.catch_up()
+        self.assertEqual(self.pages(), ["pr-1700.md"])
+        self.close(rid, NOW + 50, proven=False)
+        self.catch_up(now=NOW + 60)
+        self.assertEqual(self.head("pr-1700"), f"#1700 · {cd.UNPROVEN_WORD} · 기록 1 · 파일 0개")
+        self.assertEqual(self.pages(), ["pr-1700.md"])
+        self.assertEqual(self.settled_document(), [[], []])
+
+    def test_a_page_named_before_the_pr_was_known_is_drawn_again_when_the_close_names_the_pr(self):
+        rid, _c = self.route("solo-build", started=NOW - 2 * HOUR)
+        self.catch_up()
+        old = "2026-11-20_solo-build"
+        self.assertTrue(self.head(old).startswith("하는 중"))
+        self.close(rid, NOW + 50, evidence=self.PR_REPORT)
+        self.catch_up(now=NOW + 60)
+        self.assertEqual(self.pages(), [old + ".md", "pr-1900.md"])   # the old page stays, and is the same page
+        self.assertEqual(self.page(old), self.page("pr-1900"))
+        self.assertEqual(self.head(old), f"#1900 · {self.day(NOW + 50)} · 기록 1 · 파일 0개")
+        self.assertNotIn("하는 중", self.page(old))
+        self.assertNotIn("보고 아직 없음", self.page(old))
+
+    def test_a_name_that_was_never_a_page_is_not_made(self):
+        self.route("solo-build", started=NOW - 2 * HOUR, closed=NOW - HOUR, evidence=self.PR_REPORT)   # closed before any pass drew it
+        self.route("alpha-1700", closed=NOW - 3 * HOUR)   # the PR is in the name from the start
+        self.catch_up()
+        self.assertEqual(self.pages(), ["pr-1700.md", "pr-1900.md"])
+        self.route("beta-1701", closed=NOW + 50)
+        self.catch_up(now=NOW + 60)
+        self.assertEqual(self.pages(), ["pr-1700.md", "pr-1701.md", "pr-1900.md"])
+
+    def test_a_close_that_folded_is_drawn_again_only_where_a_page_is_held(self):
+        rids = [self.route(f"solo-{n}", started=NOW - 2 * HOUR)[0] for n in range(4)]
+        self.catch_up()
+        for n in range(4):
+            self.assertTrue(self.head(f"2026-11-20_solo-{n}").startswith("하는 중"))
+        for index, rid in enumerate(rids[:3]):
+            self.close(rid, NOW + 50 + index, evidence=f"PR: #{1900 + index}\n")
+        self.close(rids[3], NOW + 5, evidence="PR: #1903\n")   # the oldest close: its line folds
+        self.route("solo-late", started=NOW - HOUR, closed=NOW + 40, evidence="PR: #1950\n")   # folds too, and never had a page
+        with mock.patch.object(cd, "DONE_LINES", 3):
+            self.catch_up(now=NOW + 60)
+        self.assertEqual([p for p in self.pages() if p.startswith("pr-")], ["pr-1900.md", "pr-1901.md", "pr-1902.md"])
+        for n in range(4):   # the old page of each is drawn again, the folded one's too
+            self.assertNotIn("하는 중", self.page(f"2026-11-20_solo-{n}"))
+        self.assertEqual(len(self.pages()), 7)   # four old, three shown; none made for what folded and was never a page
+
+    def test_a_later_cycle_of_the_same_route_draws_the_first_page_again(self):
+        rid, _c = self.route("solo-build", started=NOW - 3 * HOUR)
+        self.catch_up()
+        first = "2026-11-20_solo-build"
+        self.assertTrue(self.head(first).startswith("하는 중"))
+        self.follow_up(rid, "solo-build", started=NOW + 10, locator="2026-11-21_solo-build", written=NOW + 20)
+        self.close(rid, NOW + 50)
+        self.catch_up(now=NOW + 60)
+        later = "2026-11-21_solo-build"
+        self.assertEqual(self.pages(), [first + ".md", later + ".md"])   # the line's page is the later cycle's, the first one stays
+        self.assertEqual(self.page(first), self.page(later))
+        self.assertNotIn("하는 중", self.page(first))
+        self.assertIn(f"(<records/{later}.md>)", self.document())   # code: the name is the cycle the route now stands on
+
+    def test_a_file_that_is_not_the_generators_is_left_as_it_is(self):
+        rid, _c = self.route("solo-build", started=NOW - 2 * HOUR)
+        old = self.folder / "records" / "2026-11-20_solo-build.md"
+        old.parent.mkdir()
+        old.write_text("by hand\n")
+        os.utime(old, (1_700_000_000, 1_700_000_000))
+        self.catch_up()
+        self.close(rid, NOW + 50, evidence=self.PR_REPORT)
+        self.catch_up(now=NOW + 60)
+        self.assertEqual((old.read_text(), old.stat().st_mtime), ("by hand\n", 1_700_000_000))
+        self.assertEqual(self.pages(), [old.name, "pr-1900.md"])
+
+    def test_a_pass_that_changes_nothing_writes_none_of_the_old_pages(self):
+        rid, _c = self.route("solo-build", started=NOW - 2 * HOUR)
+        self.catch_up()
+        self.close(rid, NOW + 50, evidence=self.PR_REPORT)
+        self.catch_up(now=NOW + 60)
+        paths = [self.folder / "records" / name for name in self.pages()]
+        for path in paths:
+            os.utime(path, (1_700_000_000, 1_700_000_000))
+        before = {path.name: path.read_bytes() for path in paths}
+        self.catch_up(now=self.bump(1))   # the campaign moves; these pages do not
+        self.assertEqual({path.name: path.read_bytes() for path in paths}, before)
+        self.assertEqual({path.stat().st_mtime for path in paths}, {1_700_000_000})
+
+    def test_a_pass_lists_records_once_and_reads_no_more_files_than_before(self):
+        rid, _c = self.route("solo-build", started=NOW - 2 * HOUR)
+        self.files("solo-build", **{"one.md": "1"})
+        self.route("other-1701", closed=NOW - HOUR)
+        self.catch_up()
+        self.close(rid, NOW + 50, evidence=self.PR_REPORT)
+        real = os.scandir
+        listed = []
+
+        def spy(path=".", *a, **kw):
+            listed.append(str(path))
+            return real(path, *a, **kw)
+        with mock.patch.object(cd.os, "scandir", side_effect=spy), mock.patch.object(cd, "_count_files", wraps=cd._count_files) as counted:
+            self.catch_up(now=NOW + 60)
+        self.assertEqual([p for p in listed if p.endswith("records")], [str(self.folder / "records")])
+        self.assertLessEqual(counted.call_count, 1)   # the closed cycle was counted before; only this pass's close is new
+
+    def test_the_text_and_the_code_name_a_page_the_same_way(self):
+        self.assertEqual(cd.record_key(1900, "2026-11-20_x"), "pr-1900")
+        self.assertEqual(cd.record_key(None, "2026-11-20_x"), "2026-11-20_x")
+        text = (HERE.parent / "core" / "ARTIFACT_META.md").read_text()
+        self.assertIn("the cycle its first route stands on", text)
+        self.assertNotIn("the folder name of the work's first route", text)
+        self.assertIn("draws again a page it already wrote", text)
+        self.assertIn(cd.UNPROVEN_WORD, text)
 
 
 class RecordFolderMakingTest(RecordFixture):

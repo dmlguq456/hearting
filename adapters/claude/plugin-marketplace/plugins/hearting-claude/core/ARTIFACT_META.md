@@ -218,13 +218,20 @@ written again as the work moves, without the section.
 
 - **Record pages.** Each line of the document ends `[기록 N ›](<records/<key>.md>)`, a link to
   the record page of that work: `campaigns/<campaign>/records/<key>.md`, where `<key>` is
-  `pr-<N>` or, with no PR, the folder name of the work's first route (an ASCII letter or digit
+  `pr-<N>` or, with no PR, the folder name of the cycle its first route stands on (a sealed
+  cycle, else the latest started; an ASCII letter or digit
   first, then letters, digits, `.`, `_` or `-`, at most 200 characters; any other name gets no
   link). The
   same code writes it: first line `<!-- hearting:campaign-record v1 -->`, one line per record
   (a route, a publish, or the supervisor's `RV-…PR<N>….md` review file, found by name and not
   counted in `N`; a review route's rounds share its one line). It writes the pages of the lines the document shows and
-  only when their text changed; it never deletes a page, and a file of that name without the
+  draws again a page it already wrote, on a line or not, under every name its work has had (the
+  PR number became known; a later cycle of a route began in another folder): the folder name of
+  each cycle of its routes and its own, only a name `records/` already holds, so no name is made
+  that was never a page. A page is written only when its text changed. A close that was not proven
+  stays off the document, but a page already written for it is drawn again with `미증명` where
+  `하는 중` or the day stood (it closed; passing is not shown). It never deletes a page, and a file
+  of that name without the
   marker, a link or a `records` that is not a folder is left as it is and its line has no link.
   A route that closed with a commit (`head_commit` differs from `source_commit`) but no PR
   number is joined to the pull request merge that brought its head in: the first
