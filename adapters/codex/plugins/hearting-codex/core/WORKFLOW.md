@@ -1326,9 +1326,32 @@ to the other things a finished attempt leaves behind: a merged worktree and
 branch, a spec `pipeline_state.yaml` still naming a live phase, and a memory
 handoff still `pending` after its obligation is met. Registered delivery
 reconciliation expires only the exact record whose original recipient has
-positive dead PID/start evidence; a closed identity-matched route settles its
-bound duty as not-required while retaining the record. Unknown liveness and a
-live successor remain pending, and unchanged observations are not rewritten.
+positive dead PID/start evidence. A closed identity-matched route settles its
+bound duty as not-required while retaining the record, once a fresh presence
+read still finds the parent absent. The one exception is an owner's completion
+to a Claude parent whose record is still open: while the registered parent
+runtime is live, as after a plain `/clear` that gave the session a new id, the
+duty stays open as undelivered (`completion-undelivered`) without that fresh
+read; the next prompt of the session a plain `/clear` started in its place, in
+the same pane and runtime, adds one informational line to the model's context
+(naming the route, the attempt and, when the route close sealed one, its report
+path; it asks for nothing and may be passed to the person in one line), and the
+record then expires as `recipient-session-replaced`, or is ACKed when that
+session's transcript already holds its exact receipt. Only a session whose own
+start in the pane's seat ledger is `clear` reads it, reaching back through
+earlier plain clears; a resume, select, fork or startup start does not, so a
+session left that way keeps its completion for its own next prompt. The
+ledger shows only starts the hook recorded: when it is ambiguous (another
+session started or prompted between the two starts, or started after the
+clear) nothing is inferred, and when a long session's start has been folded
+away nothing is shown; in both cases the completion stays open. The line
+stands in for the receipt: if the cleared session is resumed afterwards, even
+in the same process, its completion is already settled. A dead runtime expires
+that record first.
+Gate and supervision notices, Codex and OpenCode parents, and a runtime with
+no PID/start evidence or one this host cannot observe keep the not-required
+settlement. Unknown liveness and a live successor remain pending, and
+unchanged observations are not rewritten.
 Close what the attempt opened, or the next session pays for it in reconstruction.
 
 ### 0.6. Tracked-Workflow Lifecycle and Continuation
@@ -1553,7 +1576,9 @@ continued the same way once: its PASS stays as recorded, and the replacement rec
 undone stages as observations. No gate, close, or recompose is needed. A replacement on the same
 harness wakes the earlier owner's session when it still exists and the runtime did not end it
 without a result, and starts fresh otherwise (`session: resumed | fresh:<reason>`, OPERATIONS §5.10c). The answer receipt names both actions a
-parent can take: `correction_command` with the answer, or `close_command` to stop the route.
+parent can take, and the person chooses: `correction_command` with the answer when the owner has something to
+do (a BLOCKED owner waits for one), or `close_command` to accept a FAIL's result as it is or stop the route (the closure stays unproven and the cycle is sealed
+`abandoned`). A later turn of a route closed PASS that ends without a PASS is answered the same way.
 
 A continuation route projects this contract onto its suffix. It drops a gate
 whose gated entry node was cut, never rebinds a retained raising continuation to
