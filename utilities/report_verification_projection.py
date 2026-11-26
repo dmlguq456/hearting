@@ -685,7 +685,7 @@ def _resolve_source(source: Path, root: Path, jobs: Path | None,
         required_state = "failed" if input_failures or unreadable else (
             "confirmed" if all(row.get("verdict") in {"PASS", "FAIL"}
                                for row in peer_results) else "unresolved")
-        uri =lambda name: (source / name).resolve(strict=True).as_uri()
+        uri = lambda name: (source / name).resolve(strict=True).as_uri()
         entrypoints = [
             {"label": "보고서 HTML", "path": entrypoint, "href": uri(entrypoint)},
             {"label": "보고서 Markdown", "path": "REPORT.md", "href": uri("REPORT.md")},
