@@ -9,9 +9,24 @@ const SENT_KEEP_MS=10*60*1000;
 const ANSWER_FULL=Symbol('answer full');
 // Home and End as terminals send them: `ESC [ H/F`, SS3, and the `~` forms of tmux/screen and rxvt.
 const START=['\x1b[H','\x1bOH','\x1b[1~','\x1b[7~'],END=['\x1b[F','\x1bOF','\x1b[4~','\x1b[8~'];
+// 11-26 (the person: "질문 답변에서 줄바꿈이 안되네.. 내가 자유도 높이라고 했지 않나?"): a written answer takes lines.
+// Enter alone still sends it. A line break goes in with every key the native input below takes for one in
+// this shell (the outer terminal's own bytes reach it unchanged): Ctrl+J (LF, apart from Enter's CR in the
+// raw terminal), Alt/Option+Enter (`ESC CR`, also what a terminal set up for Shift+Enter often sends), `\`
+// then Enter, and a modified Enter where the terminal reports one (kitty `CSI 13;<mods>u`, xterm
+// modifyOtherKeys `CSI 27;<mods>;13~`, kitty's Ctrl+J `CSI 106;5u`).
+const NEWLINE_CSI=/^\x1b\[(?:13;(?:[2-9]|1\d)u|27;(?:[2-9]|1\d);13~|106;5u)$/;
+// The word keys (Alt/Ctrl+←→, Alt+B/F, Ctrl+W, Alt+Backspace, Alt+D, Ctrl+Delete) step over one run of letters
+// and digits and what stands before it, as the native inputs do.
+const WORD_LEFT=['\x1b[1;3D','\x1b[1;5D'],WORD_RIGHT=['\x1b[1;3C','\x1b[1;5C'],WORD_DELETE=['\x1b[3;3~','\x1b[3;5~'];
+const TEXT_START=['\x1b[1;5H'],TEXT_END=['\x1b[1;5F'];
+const wordChar=c=>/[\p{L}\p{N}\p{M}_]/u.test(c||'');
 module.exports=function({changed,answer,action,cellWidth}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
-  let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false;
+  let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false,pasteCR=false;
+  // 11-26: the answer's rows are laid out at the popup's width when painted; ↑↓ move between those rows (the
+  // cell column held while they repeat), and the rows shown follow the place when the answer is taller than its room.
+  let answerColumns=60,goal=null,answerTop=0,answerSeat=null;
   let labels={},styles={},help='';
   const entries=new Map();
   const key=item=>item.id+'@'+item.revision;
@@ -49,6 +64,29 @@ module.exports=function({changed,answer,action,cellWidth}) {
   function after(chars,at){let i=at+1;while(i<chars.length&&joins(chars[i])){const zwj=chars[i]==='\u200d';i++;if(zwj&&i<chars.length)i++;}return Math.min(i,chars.length);}
   function before(chars,at){let i=at-1;while(i>0&&(joins(chars[i])||chars[i-1]==='\u200d'))i--;return Math.max(i,0);}
   function caretAt(local,id){const n=[...(local.drafts[id]||'')].length,c=local.caret[id];return Number.isInteger(c)?Math.max(0,Math.min(n,c)):n;}
+  // The characters as the answer row shows them: a line break stays one, a secret is bullets, any other
+  // control character one blank cell. One shown character stands for each typed one, so places agree.
+  const shownOf=(draft,secret)=>[...draft].map(c=>c==='\n'?'\n':secret?'•':/[\x00-\x1f\x7f-\x9f]/.test(c)?' ':c);
+  // The answer's rows at a width: each `{start,end}` of characters, broken at a line break (which no row
+  // shows) and where the next character no longer fits after the two-cell lead (`› ` or blank).
+  function answerRows(chars,columns){
+    const rows=[],limit=Math.max(3,columns-1);let start=0,width=2;
+    for(let i=0;i<chars.length;i++){
+      if(chars[i]==='\n'){rows.push({start,end:i});start=i+1;width=2;continue;}
+      const w=measure(chars[i]);
+      if(width+w>limit&&i>start){rows.push({start,end:i});start=i;width=2;}
+      width+=w;
+    }
+    rows.push({start,end:chars.length});
+    return rows;
+  }
+  // The row holding the place: the last row starting at or before it.
+  function rowOf(rows,at){let home=0;for(let i=0;i<rows.length;i++)if(rows[i].start<=at)home=i;return home;}
+  const cells=list=>measure(list.join(''));
+  const lineStart=(chars,at)=>{let i=at;while(i>0&&chars[i-1]!=='\n')i--;return i;};
+  const lineEnd=(chars,at)=>{let i=at;while(i<chars.length&&chars[i]!=='\n')i++;return i;};
+  function wordLeft(chars,at){let i=at;while(i>0&&!wordChar(chars[before(chars,i)]))i=before(chars,i);while(i>0&&wordChar(chars[before(chars,i)]))i=before(chars,i);return i;}
+  function wordRight(chars,at){let i=at;while(i<chars.length&&!wordChar(chars[i]))i=after(chars,i);while(i<chars.length&&wordChar(chars[i]))i=after(chars,i);return i;}
   // Spec rule 18: the highlighted choice, moved by ↑↓ and sent by Enter as
   // Claude's own question does. It starts on the recommended choice, else the
   // first. A decision (approve/reject/defer) keeps its explicit choice: nothing
@@ -64,7 +102,7 @@ module.exports=function({changed,answer,action,cellWidth}) {
   }
   // ↑↓ choose only while this question takes a choice; otherwise they scroll as before.
   function choosing(row){return !!row&&focused&&active(row)&&!state(row.item).typing[row.question.id]&&choices(row).length>0;}
-  function resetParser(){clearTimeout(escapeTimer);escapeTimer=undefined;decoder=new StringDecoder('utf8');escape='';pasting=false;skipTail=false;}
+  function resetParser(){clearTimeout(escapeTimer);escapeTimer=undefined;decoder=new StringDecoder('utf8');escape='';pasting=false;pasteCR=false;skipTail=false;goal=null;}
   // Correction 3 (11-13): a settled question (answered, expired, cancelled) is kept only while
   // the person reads its receipt in the focused editor; unfocused it is let go, so it is no
   // longer asked for as a retained reference and leaves the panel.
@@ -168,24 +206,25 @@ module.exports=function({changed,answer,action,cellWidth}) {
     const tail=[];let keyLines=[];
     const picked=local.answers[id];
     if(status==='open'&&writable(row)){
-      const draft=local.drafts[id]||'',safe=row.question.secret?'•'.repeat([...draft].length):draft;
-      const shownChars=[...safe.replace(/[\x00-\x1f\x7f-\x9f]/g,' ')],lines=[];let shown='› ',width=2,start=0;
-      shownChars.forEach((c,i)=>{
-        const w=measure(c);
-        if(width+w>Math.max(3,columns-1)){lines.push({text:shown,start});shown='  ';width=2;start=i;}
-        shown+=c;width+=w;
-      });
-      lines.push({text:shown,start});
-      // The row holding the place: the last row whose first character is at or before it.
-      const live=focused&&!!local.typing[id],at=caretAt(local,id);
-      let home=lines.length-1;for(let i=0;i<lines.length;i++)if(lines[i].start<=at)home=i;
-      lines.forEach((one,i)=>{
-        const mark={...span(one.text,'loc_repo'),answerRow:true};
-        if(!live||i!==home){tail.push(chosenRow([mark],focused&&!!local.typing[id]));return;}
-        const end=i+1<lines.length?lines[i+1].start:shownChars.length,rel=at-one.start;
-        const front=one.text.slice(0,2)+shownChars.slice(one.start,one.start+rel).join(''),rest=shownChars.slice(one.start+rel,end).join('');
+      const shownChars=shownOf(local.drafts[id]||'',row.question.secret),rows=answerRows(shownChars,columns);
+      answerColumns=columns;
+      const live=focused&&!!local.typing[id],at=caretAt(local,id),home=rowOf(rows,at);
+      // 11-26: the answer grows a row per line (and per wrap) while the question's first words, its choices
+      // and the key line stay in sight; taller than that, the rows shown follow the place (one unbroken
+      // stretch; only the answer's first row leads with `› `, so a missing one says the start is above).
+      const words=body.length+(view?.source||[]).length;
+      const room=Math.max(1,Math.max(2,budget)-1-Math.min(words,2)-(words>2?1:0)-(choices(row).length?marked.length+2:0)-1-(local.notice?1:0));
+      const size=Math.min(rows.length,room),here=seatOf(row);
+      if(answerSeat!==here){answerSeat=here;answerTop=0;}
+      if(!live)answerTop=0;else if(home<answerTop)answerTop=home;else if(home>=answerTop+size)answerTop=home-size+1;
+      answerTop=Math.max(0,Math.min(answerTop,rows.length-size));
+      for(let i=answerTop;i<answerTop+size;i++){
+        const one=rows[i],lead=i===0?'› ':'  ';
+        const mark={...span(lead+shownChars.slice(one.start,one.end).join(''),'loc_repo'),answerRow:true};
+        if(!live||i!==home){tail.push(chosenRow([mark],live));continue;}
+        const front=lead+shownChars.slice(one.start,at).join(''),rest=shownChars.slice(at,one.end).join('');
         tail.push(chosenRow([{...mark,text:front,caret:true},...(rest?[{...span(rest,'loc_repo'),answerRow:true}]:[])],true));
-      });
+      }
     }else if(picked&&!choosing(row)){
       const selected=picked.map(v=>{if(row.question.secret)return '•'.repeat([...String(v)].length);const n=choices(row).findIndex(c=>value(c)===v);return (n>=0?String(n+1)+' · ':'')+v;});
       tail.push(chosenRow([span('› '+selected.join(', '),'loc_repo')],active(row)));
@@ -197,7 +236,7 @@ module.exports=function({changed,answer,action,cellWidth}) {
       const instruction=active(row)?(choosing(row)?text('choose','↑↓ choose · Enter send'):ready?text('send','Enter send'):text('text','type answer')):text(status,status);
       const editing=active(row)&&writable(row);
       const navigate=text(editing?'navigate_write':'navigate','Tab next · Esc/Ctrl+] back');
-      const writeHint=local.typing[id]?(choices(row).length?text('writing_choices','Enter send · ↑ choices'):text('send','Enter send')):text('choose_write','↑↓ choose · type to write · Enter send');
+      const writeHint=local.typing[id]?(choices(row).length?text('writing_choices','Enter send · Ctrl+J newline · ↑ choices'):text('writing','Enter send · Ctrl+J newline')):text('choose_write','↑↓ choose · type to write · Enter send');
       keyLines=keys([...(active(row)?[writable(row)?writeHint:instruction]:[]),navigate],editing?1:Math.max(1,Math.max(2,budget)-2));
       tail.push(...keyLines);
     }else if(status==='open'){keyLines=[[span('Ctrl+] · '+text('open','answer needed'))]];tail.push(...keyLines);}
@@ -382,24 +421,74 @@ module.exports=function({changed,answer,action,cellWidth}) {
   }
   // The place moves and deletes only in a row being typed to that has text (11-22).
   function placing(row){return !!row&&active(row)&&writable(row)&&!!state(row.item).typing[row.question.id]&&!!state(row.item).drafts[row.question.id];}
+  // Home/End (Ctrl+A/E) go to the ends of the line holding the place, Ctrl+Home/End to the ends of the text.
   function place(row,to){
     const local=state(row.item),id=row.question.id,chars=[...local.drafts[id]],at=caretAt(local,id);
-    local.caret[id]=to==='home'?0:to==='end'?chars.length:to>0?after(chars,at):at>0?before(chars,at):0;
+    local.caret[id]=to==='home'?lineStart(chars,at):to==='end'?lineEnd(chars,at):to==='start'?0:to==='finish'?chars.length:
+      to==='wordLeft'?wordLeft(chars,at):to==='wordRight'?wordRight(chars,at):to>0?after(chars,at):at>0?before(chars,at):0;
+  }
+  function cut(row,from,to){
+    const local=state(row.item),id=row.question.id,chars=[...local.drafts[id]];
+    if(to<=from)return;
+    chars.splice(from,to-from);local.drafts[id]=chars.join('');local.caret[id]=from;
   }
   function removeAt(row){
     const local=state(row.item),id=row.question.id,chars=[...local.drafts[id]],at=caretAt(local,id);
-    if(at>=chars.length)return;
-    chars.splice(at,after(chars,at)-at);local.drafts[id]=chars.join('');local.caret[id]=at;
+    if(at<chars.length)cut(row,at,after(chars,at));
+  }
+  // Ctrl+W / Alt+Backspace the word before the place, Alt+D / Ctrl+Delete the one after it; Ctrl+U the line
+  // before it, Ctrl+K the line after it.
+  function cutWord(row,dir){
+    const local=state(row.item),chars=[...local.drafts[row.question.id]],at=caretAt(local,row.question.id);
+    if(dir<0)cut(row,wordLeft(chars,at),at);else cut(row,at,wordRight(chars,at));
+  }
+  function cutLine(row,dir){
+    const local=state(row.item),chars=[...local.drafts[row.question.id]],at=caretAt(local,row.question.id);
+    if(dir<0)cut(row,lineStart(chars,at),at);else cut(row,at,lineEnd(chars,at));
+  }
+  function newline(row){if(row&&active(row)&&writable(row))append(row,'\n');}
+  // ↑↓ inside a written answer of several rows: the place goes to the row above or below, at the cell column
+  // it stood in (held while ↑↓ repeat). False on the first or last row, where ↑↓ keep their meaning.
+  function vertical(row,dir){
+    const local=state(row.item),id=row.question.id,chars=shownOf(local.drafts[id]||'',row.question.secret),at=caretAt(local,id);
+    const rows=answerRows(chars,answerColumns),home=rowOf(rows,at),to=home+dir;
+    if(to<0||to>=rows.length)return false;
+    if(goal===null)goal=cells(chars.slice(rows[home].start,at));
+    const target=rows[to];let i=target.start,width=0;
+    while(i<target.end){const j=after(chars,i),w=cells(chars.slice(i,j));if(width+w>goal)break;width+=w;i=j;}
+    // A wrapped row's end is the next row's start: the place stays on this row, before its last character.
+    if(i===target.end&&i>target.start&&to+1<rows.length&&rows[to+1].start===target.end)i=before(chars,i);
+    local.caret[id]=i;return true;
   }
   function character(c){
     const row=current(),local=row&&state(row.item),id=row?.question.id;
-    if(pasting){if(row&&active(row)&&writable(row))append(row,c);return;}
+    goal=null;
+    if(pasting){
+      // 11-26: a pasted text goes in whole: its line breaks (CR, LF or CR LF, as terminals paste them) are
+      // line breaks, never Enter, and a tab stays; any other control character is left out (the delivery
+      // to the session refuses them).
+      if(row&&active(row)&&writable(row)){
+        if(c==='\n'&&pasteCR){pasteCR=false;return;}
+        pasteCR=c==='\r';
+        if(c==='\r'||c==='\n')append(row,'\n');
+        else if(c==='\t'||!/[\x00-\x1f\x7f-\x9f]/.test(c))append(row,c);
+      }
+      return;
+    }
     clearFullNotice(row);
     if(c==='\x1d'||c==='\x1b'){leave();return;}
     if(c==='\t'){move(1);return;}
+    // Ctrl+J (LF) puts a line break in a written answer; on a question answered only by a choice it is
+    // Enter, as before.
+    if(c==='\n'&&row&&active(row)&&writable(row)){newline(row);return;}
     if(c==='\r'||c==='\n'){
       if(!row)return;
       if(changeArmed){changeArmed=false;local.notice='';changed();return;}
+      // `\` then Enter (the native input's own way): the `\` before the place becomes a line break.
+      if(active(row)&&writable(row)&&local.typing[id]&&!row.question.secret){
+        const chars=[...(local.drafts[id]||'')],at=caretAt(local,id);
+        if(at>0&&chars[at-1]==='\\'){chars[at-1]='\n';local.drafts[id]=chars.join('');local.caret[id]=at;return;}
+      }
       // Enter sends the highlighted choice, the same value its number key picks.
       if(active(row)&&cursorOf(row)>=0){
         local.answers[id]=[value(choices(row)[cursorOf(row)])];local.notice='';
@@ -410,6 +499,7 @@ module.exports=function({changed,answer,action,cellWidth}) {
     if(!row){if('rwfp'.includes(c))action(c);return;}
     if(!active(row))return;
     if(c==='\x01'||c==='\x05'){if(placing(row))place(row,c==='\x01'?'home':'end');return;}
+    if(c==='\x17'||c==='\x15'||c==='\x0b'){if(placing(row)){if(c==='\x17')cutWord(row,-1);else cutLine(row,c==='\x15'?-1:1);}return;}
     if(c==='\x7f'||c==='\b'){
       const chars=[...(local.drafts[id]||'')],at=caretAt(local,id),from=before(chars,at);
       chars.splice(from,at-from);local.drafts[id]=chars.join('');local.caret[id]=from;return;
@@ -431,24 +521,34 @@ module.exports=function({changed,answer,action,cellWidth}) {
         // An application-cursor terminal sends arrows as SS3 (`ESC O A`).
         if(escape==='\x1b'&&c!=='['&&!(c==='O'&&!pasting)){
           if(pasting){escape='';character('\x1b');character(c);continue;}
-          clearFullNotice(current());
-          // Whatever follows an Esc in this read (or within the Esc window) other than `[` or `O` (an arrow or
-          // function key) is a combination this editor has no meaning for: Alt+letter, Shift/Alt+Enter,
-          // Esc then a control byte. It is dropped, never the native's (an Enter there would submit its
-          // text, a ^C interrupt its turn); the popup stands. Only a second Esc closes it, and is dropped.
+          const row=current();clearFullNotice(row);goal=null;
+          // What follows an Esc in this read (or within the Esc window) other than `[` or `O` (an arrow or
+          // function key) is an Alt combination. 11-26: Alt/Option+Enter (`ESC CR`, `ESC LF`) puts a line break
+          // in a written answer, Alt+B/F step a word, Alt+D and Alt+Backspace delete one. Any other one (Esc
+          // then a control byte too) is dropped, never the native's (an Enter there would submit its text, a ^C
+          // interrupt its turn); the popup stands. Only a second Esc closes it, and is dropped.
           escape='';
           if(byte===0x1b){leave();escapedAt=Date.now();return data.subarray(i+1);}
-          if(byte>=0xc0)skipTail=true;
+          if(byte===0x0d||byte===0x0a)newline(row);
+          else if(c==='b'||c==='f'){if(placing(row))place(row,c==='b'?'wordLeft':'wordRight');}
+          else if(c==='d'){if(placing(row))cutWord(row,1);}
+          else if(byte===0x7f||byte===0x08){if(placing(row))cutWord(row,-1);}
+          else if(byte>=0xc0)skipTail=true;
           continue;
         }
         escape+=c;
-        if(escape==='\x1b[200~'){if(!pasting)clearFullNotice(current());pasting=true;escape='';}
-        else if(escape==='\x1b[201~'){pasting=false;escape='';}
+        if(escape==='\x1b[200~'){if(!pasting)clearFullNotice(current());pasting=true;pasteCR=false;escape='';}
+        else if(escape==='\x1b[201~'){pasting=false;pasteCR=false;escape='';}
         else if(escape.length>2&&byte>=0x40&&byte<=0x7e||escape.length===3&&escape[1]==='O'){
           if(!pasting){
             const up=escape==='\x1b[A'||escape==='\x1bOA',down=escape==='\x1b[B'||escape==='\x1bOB',row=current();
             clearFullNotice(row);
+            if(!up&&!down)goal=null;
             if(escape==='\x1b[Z')move(-1);
+            else if(NEWLINE_CSI.test(escape))newline(row);
+            else if(WORD_LEFT.includes(escape)||WORD_RIGHT.includes(escape)){if(placing(row))place(row,WORD_LEFT.includes(escape)?'wordLeft':'wordRight');}
+            else if(TEXT_START.includes(escape)||TEXT_END.includes(escape)){if(placing(row))place(row,TEXT_START.includes(escape)?'start':'finish');}
+            else if(WORD_DELETE.includes(escape)){if(placing(row))cutWord(row,1);}
             else if(escape==='\x1b[C'||escape==='\x1b[D'||escape==='\x1bOC'||escape==='\x1bOD'){
               // 11-22 (the person: "구획을 안옮겨도 되는데. 굳이"): in the question input ←→ only move the place in
               // the text; with no text they do nothing, and no longer change sections.
@@ -456,6 +556,9 @@ module.exports=function({changed,answer,action,cellWidth}) {
             }
             else if(START.includes(escape)||END.includes(escape)){if(placing(row))place(row,START.includes(escape)?'home':'end');}
             else if(escape==='\x1b[3~'){if(placing(row))removeAt(row);}
+            // 11-26: in a written answer of several rows ↑↓ go between its rows; from its first row ↑ goes to the
+            // choices (or reads the question) and from its last ↓ reads on, as they did.
+            else if((up||down)&&placing(row)&&vertical(row,up?-1:1)){/* the place moved a row */}
             else if(up&&row&&state(row.item).typing[row.question.id]&&choices(row).length){state(row.item).typing[row.question.id]=false;delete state(row.item).caret[row.question.id];scroll=0;follow=true;}
             else if((up||down)&&choosing(row)){const local=state(row.item),id=row.question.id,n=choices(row).length,at=cursorOf(row);
               if(down&&at===n-1&&writable(row))local.typing[id]=true;

@@ -58,13 +58,15 @@ def _cell(item):
 def _shown(cell):
     """Whether the screen draws anything about this cell's following.
 
-    A cell followable is drawn; one that is not is not. A cell the answer does not know (no list to
-    tell: ``followable`` None, or no key) is drawn only when it has something to show: a record of
-    the follow, a next update, the user's Keep or a refused model. Else it looks as it did before."""
+    A cell followable is drawn. One that is not is drawn only for a record it already carries (a
+    follow it made, or a refused model it holds), so a model that left its list later still shows
+    that record and its undo. A cell the answer does not know (no list to tell: ``followable``
+    None, or no key) is drawn only when it has something to show: a record of the follow, a next
+    update, the user's Keep or a refused model. Else it looks as it did before."""
     if cell["followable"] is True:
         return True
     if cell["followable"] is False:
-        return False
+        return bool(cell["since"] or cell["held"])
     return bool(cell["since"] or cell["next"] or cell["state"] == "keep" or cell["held"])
 
 
@@ -97,7 +99,8 @@ def normalize(answer):
     answer, or None.
 
     A cell the answer says no update can follow (``followable`` false: a Claude alias, a model its
-    list does not know) is left out: nothing about following is drawn for it. So is a cell the
+    list does not know) is left out unless it carries a record of a follow or a refused model (see
+    ``_shown``): nothing else about following is drawn for it. So is a cell the
     answer cannot tell (``followable`` null, no list) that has nothing to show (see ``_shown``). A key the answer
     lacks, or holds a value this does not know, leaves out only what it would have told."""
     if not _seq(answer):
