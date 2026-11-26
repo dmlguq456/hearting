@@ -275,8 +275,10 @@ def _check_usage_cache(usage_cache) -> None:
         return
     except (OSError, ValueError, TypeError) as exc:
         raise RecordUnreadable(f"opencode: {type(exc).__name__}") from exc
+    # A cache written before it had `providers` cannot hold a refusal: no key is "nothing refused";
+    # one that is there and is not a dict cannot be read.
     if (not isinstance(item, dict) or item.get("schema_version") != usage_cache.SCHEMA_VERSION
-            or item.get("harness") != "opencode" or not isinstance(item.get("providers"), dict)):
+            or item.get("harness") != "opencode" or not isinstance(item.get("providers", {}), dict)):
         raise RecordUnreadable("opencode: not a cache of this version")
 
 

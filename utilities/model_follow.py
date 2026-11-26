@@ -409,17 +409,16 @@ def _shared() -> dict:
     """What the running update said to its passes (`REFRESHED_ENV`): `{harness: suffix}` for each
     harness whose list it asked about already, `suffix` being "" (no version asked), "-" (the CLI's
     version asked and not known) or the version the CLI said. The value is `<pid>:<harness>[@<suffix>],...`
-    and is believed only while that pid is alive: a value an update left in a process that outlived it
-    (or typed by hand in any other form) is no value."""
+    and is believed only when that pid is this process's own (update's own pass) or its parent's (the
+    activation and the redraw an update starts run as `sh harness.sh` -> `exec python`, so their parent is
+    the update). A copy that outlived its update, a reused pid, a pid that is not a number or is too
+    large, or a value of any other form is no value."""
     pid, _sep, names = os.environ.get(REFRESHED_ENV, "").partition(":")
     try:
         number = int(pid)
-        if number <= 0:
-            return {}
-        os.kill(number, 0)
-    except PermissionError:  # alive, owned by another user
-        pass
-    except (ValueError, OSError):
+    except (ValueError, OverflowError):
+        return {}
+    if number <= 0 or number not in (os.getpid(), os.getppid()):
         return {}
     found = {}
     for item in names.split(","):
@@ -874,7 +873,8 @@ def survey_harness(harness: str, *, source_root: str | Path | None = None,
                                    today)
             for entry in entries:
                 entry["reason"] = "record-unreadable"
-            return {**skipped, "reason": "record-unreadable", "entries": entries}
+            return {**skipped, "reason": "record-unreadable", "entries": entries,
+                    "record": _record_path(harness)}
         reverts = revert_stage(harness, values, marks, refused, today)
         skipped["plan"] = _plan_writes(reverts, [])
         try:
