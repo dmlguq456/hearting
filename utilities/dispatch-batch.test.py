@@ -26,6 +26,11 @@ from split_module_fixture import patch_split, split_patch  # noqa: E402
 
 PATH = Path(__file__).with_name("dispatch-batch.py")
 ROOT = PATH.resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
+
+# The owner id the batch fixtures run under. Some of them start real child processes that inherit it.
+PARENT_FIXTURE = unique_attempt_id("att-parent-fixture")
 
 
 _STATE_TMP = None
@@ -474,7 +479,7 @@ class DispatchBatchTest(unittest.TestCase):
         ]
         return contextlib.ExitStack(), assignments
 
-    def legs(self, assignments=None, prompt=None, parent_attempt="att-parent-fixture",
+    def legs(self, assignments=None, prompt=None, parent_attempt=PARENT_FIXTURE,
              producer_generation=None):
         assignments = assignments or self.common_patches()[1]
         legs = []
@@ -508,7 +513,7 @@ class DispatchBatchTest(unittest.TestCase):
 
     def write_existing(
         self, leg, *, status="open", note="", claimed="1", append=True,
-        live_identity=True, parent_attempt="att-parent-fixture",
+        live_identity=True, parent_attempt=PARENT_FIXTURE,
         all_legs=None, group_key="replica_group",
     ):
         all_legs = all_legs or self.legs()
@@ -574,7 +579,7 @@ class DispatchBatchTest(unittest.TestCase):
         with self.jobs.open(mode, encoding="utf-8") as handle:
             handle.write(row)
 
-    def partial_continuation(self, source_legs, parent_attempt="att-parent-fixture"):
+    def partial_continuation(self, source_legs, parent_attempt=PARENT_FIXTURE):
         legs = [dict(leg, leg_class="peer") for leg in source_legs]
         manifest, manifest_digest, leg_digests = BATCH.build_manifest(
             parallel_group="plan",
@@ -634,7 +639,7 @@ class DispatchBatchTest(unittest.TestCase):
         }
         return manifest, continuation, partial
 
-    def seal_original_input(self, parent_attempt="att-parent-fixture", *, prompt=None, source_legs=None):
+    def seal_original_input(self, parent_attempt=PARENT_FIXTURE, *, prompt=None, source_legs=None):
         from dispatch_replacement_batch import seal_launch_input
         source_legs = source_legs or self.legs(parent_attempt=parent_attempt, prompt=prompt)
         manifest, _continuation, _partial = self.partial_continuation(
@@ -691,7 +696,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen", side_effect=FakeProcess))
             stack.enter_context(mock.patch.dict(os.environ, {
-                "AGENT_DISPATCH_SELF_SLUG": "owner", "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_SELF_SLUG": "owner", "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex", "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write"}))
             with contextlib.redirect_stdout(output):
@@ -706,7 +711,7 @@ class DispatchBatchTest(unittest.TestCase):
         for leg in receipt["legs"]:
             expected = BATCH.stable_attempt_id(self.route,
                 next(node for node in self.route["nodes"] if node["id"] == leg["node"]),
-                "changed-display", "changed-owner", "att-parent-fixture",
+                "changed-display", "changed-owner", PARENT_FIXTURE,
                 leg["adapter"], leg["ordinal"], producer_generation=token)
             self.assertEqual(leg["attempt_id"], expected)
         payloads = list((self.jobs.parent / "automatic-replacements" / "batch-inputs").glob("*.json"))
@@ -828,7 +833,7 @@ class DispatchBatchTest(unittest.TestCase):
             initial_prompt = "original plan and checklist inputs"
             first_correction_prompt = "first approved correction"
             second_correction_prompt = "current approved review-findings correction"
-            parent_attempt = "att-parent-fixture"
+            parent_attempt = PARENT_FIXTURE
             initial_legs = self.legs(prompt=initial_prompt, parent_attempt=parent_attempt)
             self.seal_original_input(prompt=initial_prompt, source_legs=initial_legs)
             initial_rows = []
@@ -1137,7 +1142,7 @@ class DispatchBatchTest(unittest.TestCase):
             legs = self.legs(prompt=prompt, producer_generation=token)
             self.seal_original_input(prompt=prompt, source_legs=legs)
             exact = BATCH.unfinished_batch_input(
-                self.jobs, self.route, self.route["nodes"], "plan", "att-parent-fixture",
+                self.jobs, self.route, self.route["nodes"], "plan", PARENT_FIXTURE,
                 prompt, {}, route_file=self.route_path, producer_managed=True,
                 producer_generation=token, current_attempt_ids={},
             )
@@ -1147,7 +1152,7 @@ class DispatchBatchTest(unittest.TestCase):
             self.assertEqual(exact["options"]["prompt_text"], prompt)
             with self.assertRaises(BATCH.BatchError) as drift:
                 BATCH.unfinished_batch_input(
-                    self.jobs, self.route, self.route["nodes"], "plan", "att-parent-fixture",
+                    self.jobs, self.route, self.route["nodes"], "plan", PARENT_FIXTURE,
                     "unapproved changed prompt", {}, route_file=self.route_path,
                     producer_managed=True, producer_generation=token,
                     current_attempt_ids={},
@@ -1172,7 +1177,7 @@ class DispatchBatchTest(unittest.TestCase):
         before = self.jobs.read_bytes()
         with self.assertRaises(BATCH.BatchError) as error:
             BATCH.prior_batch_input(self.jobs, self.route, self.route["nodes"],
-                                   "plan", "att-parent-fixture", BATCH.DEFAULT_PROMPT)
+                                   "plan", PARENT_FIXTURE, BATCH.DEFAULT_PROMPT)
         self.assertEqual(error.exception.reason, "batch-prior-manifest-proof-missing")
         self.assertEqual(self.jobs.read_bytes(), before)
 
@@ -1186,7 +1191,7 @@ class DispatchBatchTest(unittest.TestCase):
         def read():
             with mock.patch.dict(os.environ, {'AGENT_DISPATCH_SELF_SLUG': 'owner'}):
                 return BATCH.unfinished_batch_input(self.jobs, self.route,
-                    self.route['nodes'], 'plan', 'att-parent-fixture', BATCH.DEFAULT_PROMPT,
+                    self.route['nodes'], 'plan', PARENT_FIXTURE, BATCH.DEFAULT_PROMPT,
                     admissions, route_file=self.route_path)
         payload = read()
         self.assertIsNotNone(payload)
@@ -1245,7 +1250,7 @@ class DispatchBatchTest(unittest.TestCase):
         for member in members:
             member["harness"] = "codex"
         kwargs = dict(parallel_group="plan", route_id=self.route["route_id"],
-                      parent_attempt_id="att-parent-fixture", members=members,
+                      parent_attempt_id=PARENT_FIXTURE, members=members,
                       required_independence_axes=["cross-harness", "model-profile", "perspective"],
                       realized_independence_axes=["model-profile", "perspective"])
         manifest, digest, legs = BATCH.build_manifest(**kwargs, independence="persona")
@@ -1271,7 +1276,7 @@ class DispatchBatchTest(unittest.TestCase):
             if encoding == "cross-harness":
                 axes.insert(0, "cross-harness")
             kwargs = dict(parallel_group="plan", route_id=self.route["route_id"],
-                          parent_attempt_id="att-parent-fixture", members=members,
+                          parent_attempt_id=PARENT_FIXTURE, members=members,
                           required_independence_axes=["cross-harness", "model-profile", "perspective"],
                           realized_independence_axes=axes)
             reason = "cross-harness-unavailable-user-allowed" if encoding == "degraded-same-harness" else ""
@@ -1293,7 +1298,7 @@ class DispatchBatchTest(unittest.TestCase):
         seal_launch_input(self.jobs, args, self.route, manifest, digest)
         before = self.jobs.read_bytes()
         payload = BATCH.prior_batch_input(self.jobs, self.route, self.route["nodes"],
-                                         "plan", "att-parent-fixture", BATCH.DEFAULT_PROMPT)
+                                         "plan", PARENT_FIXTURE, BATCH.DEFAULT_PROMPT)
         self.assertEqual(payload["manifest"], manifest)
         with mock.patch.object(BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect):
             assignments = BATCH.prior_batch_assignments(payload, self.route, self.route["nodes"], {})
@@ -1312,7 +1317,7 @@ class DispatchBatchTest(unittest.TestCase):
             reserve = stack.enter_context(mock.patch.object(BATCH, "reserve_batch"))
             spawn = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
             stack.enter_context(mock.patch.dict(os.environ, {
-                "AGENT_DISPATCH_SELF_SLUG": "owner", "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_SELF_SLUG": "owner", "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex", "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write"}))
             with contextlib.redirect_stdout(output):
@@ -1327,7 +1332,7 @@ class DispatchBatchTest(unittest.TestCase):
         rank.assert_not_called(); reserve.assert_not_called(); spawn.assert_not_called()
         with self.assertRaises(BATCH.BatchError):
             BATCH.prior_batch_input(self.jobs, self.route, self.route["nodes"],
-                                   "plan", "att-parent-fixture", "different task")
+                                   "plan", PARENT_FIXTURE, "different task")
         self.assertIsNone(BATCH.prior_batch_input(self.jobs, self.route, self.route["nodes"],
                                                 "plan", "different-parent", BATCH.DEFAULT_PROMPT))
 
@@ -1335,7 +1340,7 @@ class DispatchBatchTest(unittest.TestCase):
         from dispatch_replacement_batch import seal_launch_input
         from recovery_history import batch_input_path
 
-        parent_a = "att-parent-fixture"
+        parent_a = PARENT_FIXTURE
         parent_b = "att-successor-fixture"
         legs_a = self.legs(parent_attempt=parent_a)
         for leg in legs_a:
@@ -1515,7 +1520,7 @@ class DispatchBatchTest(unittest.TestCase):
             popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -1559,7 +1564,7 @@ class DispatchBatchTest(unittest.TestCase):
             popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -1717,7 +1722,7 @@ class DispatchBatchTest(unittest.TestCase):
                     "note=dead-opencode-context-limit-unavailable\n")
         return source_manifest, continuation, partial, seal
 
-    def _run_partial_main(self, continuation, partial, parent_attempt="att-parent-fixture"):
+    def _run_partial_main(self, continuation, partial, parent_attempt=PARENT_FIXTURE):
         argv = self.argv() + ["--continuation", str(self.base / "continuation.json")]
         output = io.StringIO()
         created = []
@@ -1832,7 +1837,7 @@ class DispatchBatchTest(unittest.TestCase):
                        fallback_ordinal=ordinal)
             manifest, manifest_digest, _ = BATCH.build_manifest(
                 parallel_group="plan", route_id=self.route["route_id"],
-                parent_attempt_id="att-parent-fixture", independence="cross-harness",
+                parent_attempt_id=PARENT_FIXTURE, independence="cross-harness",
                 members=members,
                 required_independence_axes=source["required_independence_axes"],
                 realized_independence_axes=source["realized_independence_axes"])
@@ -1853,7 +1858,7 @@ class DispatchBatchTest(unittest.TestCase):
                 manifest, manifest_digest, source_manifest, continuation, seal, peers)
 
     def _partial_continuation_launch(self, *, retry_prompt=None, sealed=False,
-                                    parent_attempt="att-parent-fixture", original_prompt=None):
+                                    parent_attempt=PARENT_FIXTURE, original_prompt=None):
         # D5/R-1: a successful Codex peer may be disabled today; only the
         # pending Claude gap owes current launch policy. All fixtures stay private.
         config = self.base / "d5-defaults.yaml"
@@ -2055,7 +2060,7 @@ class DispatchBatchTest(unittest.TestCase):
                         rows = rows.replace(f"batch_model_profile={legs[0]['model_profile']}",
                                             "batch_model_profile=mini")
                     elif mutation == "parent":
-                        rows = rows.replace("batch_parent_attempt_id=att-parent-fixture",
+                        rows = rows.replace(f"batch_parent_attempt_id={PARENT_FIXTURE}",
                                             "batch_parent_attempt_id=att-foreign")
                     else:
                         rows += original_rows.splitlines()[0] + "\n"
@@ -2109,22 +2114,22 @@ class DispatchBatchTest(unittest.TestCase):
         node = self.route["nodes"][0]
         first = BATCH.stable_attempt_id(
             self.route, node, "first-display", "owner",
-            "att-parent-fixture", "codex", 1,
+            PARENT_FIXTURE, "codex", 1,
         )
         second = BATCH.stable_attempt_id(
             self.route, node, "different-display", "renamed-owner",
-            "att-parent-fixture", "codex", 1,
+            PARENT_FIXTURE, "codex", 1,
         )
         self.assertEqual(first, second)
 
     def test_review_round_identity_keeps_replays_stable_and_rounds_distinct(self):
         node = self.route["nodes"][0]
         identities = [BATCH.stable_attempt_id(self.route, node, "display", "owner",
-            "att-parent-fixture", "codex", 1, review_round=round_number)
+            PARENT_FIXTURE, "codex", 1, review_round=round_number)
             for round_number in (1, 2, 3)]
         self.assertEqual(len(set(identities)), 3)
         self.assertEqual(identities[1], BATCH.stable_attempt_id(self.route, node,
-            "changed-display", "changed-owner-label", "att-parent-fixture", "codex", 1,
+            "changed-display", "changed-owner-label", PARENT_FIXTURE, "codex", 1,
             review_round=2))
 
     def _same_owner_next_review_round(self, prompt, parent_harness, *, notes=None, one_sided_revision=False):
@@ -2140,7 +2145,7 @@ class DispatchBatchTest(unittest.TestCase):
         self.seal_original_input()
         original_rows = self.jobs.read_bytes()
         source = BATCH.prior_batch_input(self.jobs, self.route, self.route["nodes"],
-                                        "plan", "att-parent-fixture", BATCH.DEFAULT_PROMPT)
+                                        "plan", PARENT_FIXTURE, BATCH.DEFAULT_PROMPT)
         source_path = _input_path(self.jobs, source["manifest_digest"])
         original_input = source_path.read_bytes()
         output = io.StringIO()
@@ -2168,7 +2173,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             process = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen", side_effect=spawn))
             stack.enter_context(mock.patch.dict(os.environ, {
-                "AGENT_DISPATCH_SELF_SLUG": "owner", "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_SELF_SLUG": "owner", "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": parent_harness, "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write"}))
             with contextlib.redirect_stdout(output):
@@ -2182,7 +2187,7 @@ class DispatchBatchTest(unittest.TestCase):
             self.assertEqual(self.jobs.read_bytes(), original_rows)
             self.assertEqual(source_path.read_bytes(), original_input)
             manifest, digest, _ = BATCH.build_manifest(
-                parallel_group="plan", route_id=self.route["route_id"], parent_attempt_id="att-parent-fixture",
+                parallel_group="plan", route_id=self.route["route_id"], parent_attempt_id=PARENT_FIXTURE,
                 independence="cross-harness", members=BATCH.manifest_members(receipt["legs"]),
                 required_independence_axes=["cross-harness", "model-profile", "perspective"],
                 realized_independence_axes=["cross-harness", "model-profile", "perspective"])
@@ -2294,7 +2299,7 @@ class DispatchBatchTest(unittest.TestCase):
                 {"kind":"review", "attempt":meta["attempt_id"], "artifact":node["id"]+".md",
                  "target":str(evidence), "command":"same-start"}))
             stack.enter_context(mock.patch.dict(os.environ, {"AGENT_DISPATCH_SELF_SLUG":"owner",
-                "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture", "AGENT_DISPATCH_CURRENT_HARNESS":"codex",
+                "AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE, "AGENT_DISPATCH_CURRENT_HARNESS":"codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless", "AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write"}))
             with contextlib.redirect_stdout(output):
                 result = BATCH.main(self.argv() + ["--reviewed-evidence", str(evidence)])
@@ -2346,7 +2351,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(worker,"attempt_outcome",return_value={"artifact":str(artifact)}))
             stack.enter_context(mock.patch.object(dc,"observe_terminal_review_failure"))
             stack.enter_context(mock.patch.dict(os.environ,{"AGENT_DISPATCH_SELF_SLUG":"owner",
-                "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture","AGENT_DISPATCH_CURRENT_HARNESS":"codex",
+                "AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE,"AGENT_DISPATCH_CURRENT_HARNESS":"codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless","AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write"}))
             with contextlib.redirect_stdout(output):
                 result=BATCH.main(self.argv()+["--reviewed-evidence",str(evidence)])
@@ -2398,7 +2403,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(worker,"attempt_outcome",return_value={"artifact":str(artifact)}))
             stack.enter_context(mock.patch.object(dc,"observe_terminal_review_failure"))
             stack.enter_context(mock.patch.dict(os.environ,{"AGENT_DISPATCH_SELF_SLUG":"owner",
-                "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture","AGENT_DISPATCH_CURRENT_HARNESS":"codex",
+                "AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE,"AGENT_DISPATCH_CURRENT_HARNESS":"codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless","AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write"}))
             with contextlib.redirect_stdout(output):
                 result=BATCH.main(self.argv()+["--reviewed-evidence",str(evidence)])
@@ -3534,7 +3539,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -3577,7 +3582,7 @@ class DispatchBatchTest(unittest.TestCase):
                         BATCH.subprocess, "check_output", return_value=str(self.base)))
                     stack.enter_context(mock.patch.dict(os.environ, {
                         "AGENT_DISPATCH_SELF_SLUG": "owner",
-                        "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                        "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                         "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                         "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                         "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -3611,7 +3616,7 @@ class DispatchBatchTest(unittest.TestCase):
                 BATCH.subprocess, "check_output", return_value=str(self.base)))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -3708,7 +3713,7 @@ class DispatchBatchTest(unittest.TestCase):
             popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -3726,7 +3731,7 @@ class DispatchBatchTest(unittest.TestCase):
              mock.patch.object(BATCH, "reserve_batch") as reserve, \
              mock.patch.dict(os.environ, {
                  "AGENT_DISPATCH_SELF_SLUG": "owner",
-                 "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                 "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
              }, clear=True), \
              contextlib.redirect_stdout(output):
             rc = BATCH.main(self.argv())
@@ -3784,7 +3789,7 @@ class DispatchBatchTest(unittest.TestCase):
         popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
         stack.enter_context(mock.patch.dict(os.environ, {
             "AGENT_DISPATCH_SELF_SLUG": "owner",
-            "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+            "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
             "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
             "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
             "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -3831,7 +3836,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen", side_effect=FakeProcess))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -3908,7 +3913,7 @@ class DispatchBatchTest(unittest.TestCase):
             ))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "opencode",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -3931,7 +3936,7 @@ class DispatchBatchTest(unittest.TestCase):
             BATCH.build_manifest(
                 parallel_group="plan",
                 route_id=route["route_id"],
-                parent_attempt_id="att-parent-fixture",
+                parent_attempt_id=PARENT_FIXTURE,
                 independence="cross-harness",
                 required_independence_axes=[
                     "cross-harness", "model-profile", "perspective"
@@ -3994,7 +3999,7 @@ class DispatchBatchTest(unittest.TestCase):
             killpg = stack.enter_context(mock.patch.object(BATCH.os, "killpg"))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -4074,7 +4079,7 @@ class DispatchBatchTest(unittest.TestCase):
                 self.jobs.write_text(line + f",route_hash={self.route['route_hash']},worker_type=review,failure_class=fail\n")
                 meta = BATCH.parse_registry_metadata(self.jobs.read_text().strip().split("\t", 5)[5])
                 artifact = self.base / "review.md"; artifact.write_text("blocking findings")
-                args = dict(repo=str(self.base), parent="owner", parent_attempt_id="att-parent-fixture",
+                args = dict(repo=str(self.base), parent="owner", parent_attempt_id=PARENT_FIXTURE,
                             parallel_group="plan", declared_size=2, manifest_digest=meta["batch_manifest_sha256"],
                             leg_digest=meta["batch_leg_sha256"], agent_home=self.base)
                 with mock.patch.object(worker, "attempt_outcome", return_value={"artifact": str(artifact)}), \
@@ -4191,7 +4196,7 @@ class DispatchBatchTest(unittest.TestCase):
             popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -4243,7 +4248,7 @@ class DispatchBatchTest(unittest.TestCase):
             popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -4297,7 +4302,7 @@ class DispatchBatchTest(unittest.TestCase):
             popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -4341,7 +4346,7 @@ class DispatchBatchTest(unittest.TestCase):
             popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen", side_effect=FakeProcess))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -4413,7 +4418,7 @@ class DispatchBatchTest(unittest.TestCase):
                 side_effect=lambda *a, **k: reused.append(real_peers(*a, **k)) or reused[-1]))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -4472,7 +4477,7 @@ class DispatchBatchTest(unittest.TestCase):
             popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -4509,7 +4514,7 @@ class DispatchBatchTest(unittest.TestCase):
             reserve = stack.enter_context(mock.patch.object(BATCH, "reserve_batch"))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -4536,7 +4541,7 @@ class DispatchBatchTest(unittest.TestCase):
         manifest, manifest_digest, leg_digests = BATCH.build_manifest(
             replica_group="plan",
             route_id=self.route["route_id"],
-            parent_attempt_id="att-parent-fixture",
+            parent_attempt_id=PARENT_FIXTURE,
             independence="cross-harness",
             members=[{
                 "assignment_sha256": str(leg["assignment_sha256"]),
@@ -4560,7 +4565,7 @@ class DispatchBatchTest(unittest.TestCase):
             self.route,
             repo=str(self.base),
             parent="owner",
-            parent_attempt_id="att-parent-fixture",
+            parent_attempt_id=PARENT_FIXTURE,
             parallel_group="plan",
             declared_size=2,
             manifest_digest=manifest_digest,
@@ -4609,7 +4614,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen", side_effect=FakeProcess))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -4678,7 +4683,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "cancel_unclaimed"))
             stack.enter_context(mock.patch.object(BATCH, "node_launch_command", side_effect=fixture_command))
             stack.enter_context(mock.patch.dict(os.environ, {
-                "AGENT_DISPATCH_SELF_SLUG": "owner", "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_SELF_SLUG": "owner", "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex", "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
                 "AGENT_DISPATCH_JOBS": str(jobs)}))
@@ -4841,7 +4846,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                 "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -5293,7 +5298,7 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
             user_models = claude_home / "agent-config" / "models.conf"
             user_models.parent.mkdir()
             user_models.write_text((ROOT / "adapters/claude/config/models.conf").read_text())
-            parent_attempt = "att-integration-parent"
+            parent_attempt = unique_attempt_id("att-integration-parent")
             raw = Path(f"/proc/{os.getpid()}/stat").read_text(encoding="utf-8")
             parent_start = raw[raw.rfind(")") + 2 :].split()[19]
             jobs.write_text(
@@ -5714,7 +5719,7 @@ class GroupLegReviewRoundCapTest(unittest.TestCase):
              ), \
              mock.patch.dict(os.environ, {
                  "AGENT_DISPATCH_SELF_SLUG": "owner",
-                 "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                 "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                  "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                  "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                  "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -5777,7 +5782,7 @@ class GroupLegReviewRoundCapTest(unittest.TestCase):
              ), \
              mock.patch.dict(os.environ, {
                  "AGENT_DISPATCH_SELF_SLUG": "owner",
-                 "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                 "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                  "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                  "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                  "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -5897,7 +5902,7 @@ class GroupLegReviewRoundCapTest(unittest.TestCase):
              mock.patch.object(BATCH.subprocess, "Popen", side_effect=FakeProcess), \
              mock.patch.dict(os.environ, {
                  "AGENT_DISPATCH_SELF_SLUG": "owner",
-                 "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                 "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
                  "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                  "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                  "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
@@ -6371,7 +6376,7 @@ class SelfParentAndForegroundNoticeTest(unittest.TestCase):
             argv = self.argv()
             argv[argv.index("--parent") + 1] = parent
         environment = {**(env or {}),
-            "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+            "AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE,
             "AGENT_DISPATCH_CURRENT_HARNESS": "codex", "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
             "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
         }
@@ -6449,7 +6454,7 @@ class SelfParentAndForegroundNoticeTest(unittest.TestCase):
                                subdivision_manifest=self.base / "manifest.json", slices=None)
         named = []
         out, err = io.StringIO(), io.StringIO()
-        environment = {"AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture"}
+        environment = {"AGENT_DISPATCH_ATTEMPT_ID": PARENT_FIXTURE}
         if self_slug:
             environment["AGENT_DISPATCH_SELF_SLUG"] = self_slug
         with mock.patch.object(admission, "route_node", return_value={"id": "execute"}), \

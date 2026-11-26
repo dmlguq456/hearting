@@ -27,6 +27,8 @@ import work_start as W
 from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 
 
 def load(name, path):
@@ -152,7 +154,7 @@ class GpuOwnerResourceStartTest(unittest.TestCase):
         fields, _row = self.f.row(owner)
         parent = {"parent_harness": "codex", "parent_transport": "headless", "parent_sandbox": "danger-full-access"}
         checked = D.resolve_checked_tuple(route, node, "codex", parent).tuple_row
-        attempt = "att-" + "d" * 32
+        attempt = unique_attempt_id("att-" + "d" * 32)
         argv = ["--start", "--worktree", str(self.f.worktree), "--jobs", str(self.f.jobs),
             "--log-dir", str(self.f.state / "logs"), "--slug", attempt, "--attempt-id", attempt,
             "--capability", "autopilot-lab", "--capability-mode", "setup", "--intensity", "standard", "--qa", "standard",

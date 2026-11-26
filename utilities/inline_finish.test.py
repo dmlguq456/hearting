@@ -22,6 +22,8 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import artifact_lifecycle
 import artifact_producer
 import dispatch_terminal_commit
@@ -1013,7 +1015,7 @@ class PublicInlineFinishTest(unittest.TestCase):
 
     def test_registered_caller_is_refused_before_intent(self):
         env = self.env.copy()
-        env["AGENT_DISPATCH_ATTEMPT_ID"] = "att-" + "a"*48
+        env["AGENT_DISPATCH_ATTEMPT_ID"] = unique_attempt_id("att-" + "a"*48)
         refused = subprocess.run(self.command, cwd=self.repo, env=env,
                                  capture_output=True, text=True)
         self.assertNotEqual(refused.returncode, 0)
@@ -1275,7 +1277,7 @@ class PublicInlineFinishTest(unittest.TestCase):
                 with self.assertRaisesRegex(inline_finish.InlineFinishError, "finish-route-not-direct"):
                     inline_finish.finish(args, candidate, self.route_file, CAP)
         env = self.env.copy()
-        env["AGENT_DISPATCH_ATTEMPT_ID"] = "att-" + "f" * 48
+        env["AGENT_DISPATCH_ATTEMPT_ID"] = unique_attempt_id("att-" + "f" * 48)
         env["AGENT_ROUTE_ID"] = "rt-" + "e" * 16
         foreign = subprocess.run(self.command, cwd=self.repo, env=env,
                                  capture_output=True, text=True)
