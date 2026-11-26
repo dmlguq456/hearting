@@ -248,6 +248,21 @@ assert.deepEqual(items(st),['FIX   2026-11-25  Questions  Discuss  Sample questi
 assert(/Sample question popup/.test(chosen(st)));
 """)
 
+    def test_a_priority_line_stands_in_the_detail_as_written_and_the_board_does_not_sort_by_it(self):
+        # 11-26 (fix 1 of #1863, the supervisor's decision): the board is drawn as before the panel read `priority:`: its list the same rows in the same
+        # order, and an opened item's detail the line as a line of text, `priority: 1` (a wrong value, `priority: 0`, the same way).
+        ranked = SAMPLE.replace("  kind: improve\n", "  kind: improve\n  priority: 1\n").replace("  kind: FIX\n", "  kind: FIX\n  priority: 0\n")
+        for text in (SAMPLE, ranked):
+            (self.root / "backlog.md").write_text(text, encoding="utf-8")
+            if text is SAMPLE:
+                plain = self.popup("list")["board"]
+        board = self.popup("list")["board"]
+        self.assertEqual(board, plain)
+        rows = {row[5]: row[0] for row in board["items"]}
+        for title, line in (("Sample panel head hides the count", "priority: 1"), ("Sample question popup forgets the answer", "priority: 0")):
+            detail = self.popup("detail", open=rows[title], indent=4)
+            self.assertIn("    " + line, ["".join(part[0] for part in row) for row in detail["rows"]], detail)
+
     def test_k_a_d_group_by_kind_area_and_date(self):
         self.node(r"""
 const st=fresh();

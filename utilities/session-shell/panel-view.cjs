@@ -819,8 +819,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // order of giving way: the counts, then the words, then the name is cut). `offset` cells of the row stand left of `room`; a press on a button opens its popup, on the rest of the row the status popup.
     // 11-22: `fit` is what the value and the buttons must fit in (the cells the row had when its label column stood: what is kept or dropped as the width falls is unchanged), `room` the row's cells.
     const buttonDocs=()=>[['STATUS',statusDoc],['BACKLOG',backlogDoc]].filter(([,d])=>d);
-    const placeButtons=(docs,stage)=>{const parts=[],spans=[];let used=0;
-      docs.forEach(([n,d],i)=>{const b=listButton(d,stage),gap=i?[text('  ')]:[];parts.push(...gap,...b);used+=size(gap);spans.push({name:n,left:used});used+=size(b);});
+    // 11-26 (fix 1 of #1863): beside the native area a folded button says what its head says: `STATUS 5 ›` (the board's whole count, no `+`; none
+    // for zero) and `BACKLOG +N ›` (the items not drawn: all of them, folded; a `+` after it where the file is longer than is read). The bottom
+    // layout's buttons keep their own numbers (`listButton`).
+    const listButtonB=(doc,stage)=>{const arrow=text('›','dim');if(stage>=2)return [arrow];
+      const n=listTotalOf(doc),word=clean(doc.word).trim(),status=word==='STATUS';
+      const count=stage===0&&doc.has_doc===true&&(n>0||!status&&doc.more===true)?[text(' '),text(status?String(n):countWords(n,doc.more===true),'loc_repo')]:[];
+      return [text(word,doc.has_doc===true?'loc_repo':'dim'),...count,text(' '),arrow];};
+    const placeButtons=(docs,stage,b=false)=>{const parts=[],spans=[];let used=0;
+      docs.forEach(([n,d],i)=>{const btn=(b?listButtonB:listButton)(d,stage),gap=i?[text('  ')]:[];parts.push(...gap,...btn);used+=size(gap);spans.push({name:n,left:used});used+=size(btn);});
       return {parts,spans,used};};
     const buildButtons=(lead,made,room,offset)=>{const at=offset+room-made.used;
       return {parts:[...lead,pad(room-size(lead)-made.used),...made.parts],
@@ -873,33 +880,40 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
           if(size(parts)<=room)return parts;
         return null;
       };
+      // Short of cells (11-26, fix 1 of #1863: the arrows and the warning are what the person asked for, so they go last): the branch is cut, down to
+      // one letter and `…`, then the name, down to one letter and `…`; only where even that does not fit do the Git words give way, from their end
+      // (the warning's letters first, then the arrows). A branch the backend already cut (`feature/update-pane…`) is cut again without its `…`,
+      // so no `… …` stands.
+      const bare=part=>({...part,text:String(part.text).replace(/…$/,'')});
+      const cutWord=(part,room)=>size([part])<=room?[part]:cut([bare(part)],room);
       const repoFit=room=>{
         const whole=repoWhole(room);if(whole)return whole;
         const tight=repoLead(false),[branch,...flags]=wrapped?[]:sideGit;
-        if(branch&&flags.length){
-          const lead=[...tight,...sideRepo,text(' (','dim')],tail=[...flags,text(')','dim')],left=room-size([...lead,...tail]);
-          if(left>=6)return [...lead,...cut([branch],left),...tail];
-          // (then the name gives way, to REPO_NAME_MIN cells at least, so six cells of the branch, the arrows and the warning stay)
-          const name=room-size([...tight,text(' (','dim'),...tail])-6;
-          if(name>=Math.min(size(sideRepo),REPO_NAME_MIN))return [...tight,...cut(sideRepo,name),text(' (','dim'),...cut([branch],6),...tail];
-        }
-        if(branch){const lead=[...tight,...sideRepo,text(' (','dim')];if(room>size(lead)+1)return [...lead,...cut([branch,...flags],room-size(lead)-1),text(')','dim')];}
-        return cut([...tight,...sideRepo,...repoGit],room);
+        if(!branch)return cut([...tight,...sideRepo,...repoGit],room);
+        const open=text(' (','dim'),tail=[...flags,text(')','dim')];
+        const left=room-size([...tight,...sideRepo,open,...tail]);
+        if(left>=2)return [...tight,...sideRepo,open,...cutWord(branch,left),...tail];
+        const stub=cutWord(branch,Math.min(2,size([branch]))),name=room-size([...tight,open,...stub,...tail]);
+        if(name>=Math.min(2,size(sideRepo)))return [...tight,...cut(sideRepo,name),open,...stub,...tail];
+        const lead=[...tight,...cut(sideRepo,Math.min(2,size(sideRepo))),open,...stub],gitRoom=room-size(lead)-1;
+        return gitRoom>=1?[...lead,...cut(flags,gitRoom),text(')','dim')]:cut([...lead,...tail],room);
       };
       if(sideRepo.length||sideGit.length){
-        // Where the two heads under REPO do not stand the row ends in the two buttons, as the bottom layout's first row does (`listButton`, the same
-        // words and order of giving way): beside the counted buttons, then beside the words alone, then beside `›` alone, the value whole (with `wt`,
-        // then without), else with its branch cut where the name and the Git status still stand whole; only at `›` is the value cut further. A press
-        // on a button opens its popup, on the rest of the row the status popup.
+        // Where the two heads under REPO do not stand the row ends in the two buttons, as the bottom layout's first row does (the same order of giving
+        // way: the counts, then the words, then `›` alone; 11-26, fix 1 of #1863: the numbers mean what the heads' do, `STATUS 5 ›` and `BACKLOG +N ›`,
+        // `listButtonB`). Beside the counted buttons, then beside the words alone, the value stands whole (with `wt`, then without), else with its
+        // branch cut as far as it must while the name, the arrows and the warning stand whole; failing that, beside `›` alone the value as `repoFit`
+        // cuts it. The arrows and the warning never go before the buttons' words or the branch's letters. A press on a button opens its popup, on
+        // the rest of the row the status popup.
         const docs=buttonDocs(),[,...gitFlags]=wrapped?[]:sideGit;
         const keeps=parts=>sideRepo.every(x=>parts.includes(x))&&gitFlags.every(x=>parts.includes(x));
         if(docs.length){
           let made=null;
-          for(const stage of [0,1,2]){const placed=placeButtons(docs,stage),room=inner-placed.used-1;
+          for(const stage of [0,1,2]){const placed=placeButtons(docs,stage,true),room=inner-placed.used-1;
             for(const withWt of [true,false]){const whole=repoWhole(room,withWt);if(whole){made=buildButtons(whole,placed,inner,0);break;}}
-            if(!made&&gitFlags.length){const fitted=repoFit(room);if(size(fitted)<=room&&keeps(fitted))made=buildButtons(fitted,placed,inner,0);}
+            if(!made&&stage<2&&sideGit.length&&!wrapped){const fitted=repoFit(room);if(size(fitted)<=room&&keeps(fitted))made=buildButtons(fitted,placed,inner,0);}
+            if(!made&&stage===2)made=buildButtons(repoFit(Math.max(1,room)),placed,inner,0);
             if(made)break;}
-          if(!made){const placed=placeButtons(docs,2);made=buildButtons(repoFit(Math.max(1,inner-placed.used-1)),placed,inner,0);}
           repoButtons=made;
         }
         repoAt=top.length;

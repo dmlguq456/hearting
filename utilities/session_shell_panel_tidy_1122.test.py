@@ -283,12 +283,71 @@ const mh=rowOf(/^MESSAGES/),eh=rowOf(/^MEM /);
 assert.deepEqual(act(mh),[[2,41,'popup:MESSAGES']]);assert.deepEqual(act(mh+1),[[2,41,'popup:MESSAGES']]);assert.deepEqual(act(mh+2),[[2,41,'popup:MESSAGES']]);assert.deepEqual(act(eh),[[2,41,'popup:MEM']]);assert.deepEqual(act(eh+1),[[2,41,'popup:MEM:0']]);assert.deepEqual(act(eh+2),[[2,41,'popup:MEM:1']]);
 // The REPO row where the heads go: the two buttons at its right end, STATUS's press from the row's first cell to BACKLOG's, BACKLOG's to the end.
 // 11-26 (panel B): the row's value now carries the Git words; it stays whole (its arrows and warning first, as B's rule says) and the buttons give
-// way to `›` where both do not fit (at 44 cells), as they did at narrower widths before; at 59 cells the counted buttons stand, `wt` gone first.
-for(const [width,re] of [[44,/^│  REPO   hearting \(branch ✓\)  wt 12  ›  › │$/],[59,/^│  REPO   hearting \(branch ✓\) +STATUS \+5 ›  BACKLOG \+14 › │$/]]){
+// way to `›` where both do not fit (at 44 cells), as they did at narrower widths before; at 59 cells the counted buttons stand, `wt` gone first
+// (fix 1 of #1863: their numbers mean what the heads' do, `STATUS 5` and `BACKLOG +14`).
+for(const [width,re] of [[44,/^│  REPO   hearting \(branch ✓\)  wt 12  ›  › │$/],[59,/^│  REPO   hearting \(branch ✓\) +STATUS 5 ›  BACKLOG \+14 › │$/]]){
  const w=drawW({width,question:true,routes:3,messages:7,mem:5,height:14,status:status(3,5),backlog:backlog(3,14)}),l=lines(w);
  assert(re.test(l[1]),width+' '+l[1]);
  const p=w.hits.filter(h=>h.row===1);assert.deepEqual(p.map(h=>h.action),['popup:STATUS','popup:BACKLOG']);assert.equal(p[0].left,2);assert.equal(p[1].right,width-3);assert.equal(p[0].right+1,p[1].left);
  assert.equal(l[1].slice(p[1].left).trimStart().slice(0,1)==='›'||l[1].slice(p[1].left).startsWith('BACKLOG'),true,l[1]);}
+""")
+
+    def test_a_rule_gives_way_before_a_ranked_backlog_item(self):
+        # 11-26 (fix 1 of #1863, the supervisor's decision): of the rows B's forms leave, the BACKLOG items the person ranked come before the rule over
+        # the equipment (a rule gives way before what is read, as the rule above the last row always did). At no height with the two heads up does that
+        # rule stand while a ranked item is short; some height has an item standing and the rule gone.
+        self.node(r"""
+const o={width:50,question:true,routes:1,messages:2,mem:2,usage:true,status:status(),backlog:backlog()};
+const seen=[];
+for(let h=60;h>=14;h--){
+  const ls=inside(drawW({...o,height:h})),u=ls.findIndex(l=>/^USAGE$/.test(l));
+  const heads=ls.some(l=>/^ BACKLOG\b/.test(l)),items=ls.filter(l=>/^  · /.test(l)).length,rule=u>0&&/^─+$/.test(ls[u-1]);
+  seen.push({h,heads,items,rule});
+  if(heads&&rule)assert.equal(items,3,h+'\n'+ls.join('\n'));
+}
+const short=seen.find(r=>r.heads&&r.items>0&&r.items<3&&!r.rule);
+assert(short,JSON.stringify(seen));
+// The picture at that height: the head counts what is not drawn, one item stands, and the row over USAGE is no rule.
+{const ls=inside(drawW({...o,height:short.h})),u=ls.findIndex(l=>/^USAGE$/.test(l));
+ assert(ls.some(l=>new RegExp('^ BACKLOG \\+'+(14-short.items)+' +›$').test(l))&&!/^─+$/.test(ls[u-1]),short.h+'\n'+ls.join('\n'));}
+""")
+
+    def test_the_repo_row_keeps_its_arrows_and_warning_and_the_buttons_their_words_where_they_fit(self):
+        # 11-26 (fix 1 of #1863): short of cells `wt` goes, then the label's column, then the branch is cut down to one letter and `…`, then the name;
+        # the arrows and the warning stand whole until even that does not fit (then the warning's letters go first). A branch the backend already cut is
+        # not cut into `… …`. Beside the folded buttons: the words with the Git status whole (the branch cut as it must), else `›  ›` with it.
+        self.node(r"""
+const git=(branch,...flags)=>[t(branch),...flags.map(f=>t(f,f.includes('↑')?'lvl_g':f.includes('↓')?'lvl_r':'dim'))];
+const row=(width,height,name,parts,lists=true)=>{const v=view.render({width,height,side:true,model:{...model({messages:2,mem:2,routes:1,
+  ...(lists?{status:status(),backlog:backlog()}:{})}),repo_side:[t(name,'loc_repo')],git_side:parts,worktrees:[t('wt 12')]},state:'working',harness:'claude',frame:1000,since:990,
+  brief,sent:()=>[],cellWidth:cells,configuration:{side_width:width,rule_motion:'off',theme:'terminal',position:'right'}});return {line:lines(v)[1],hits:v.hits.filter(h=>h.row===1)};};
+const cases=[   // (the letters a cut leaves depend on the cells; what is pinned: which part is cut, the Git words whole, the buttons)
+  [40,24,'hearting',git('bl-git-index-lock-1…',' ↑2',' ↓5',' ⚠️merge'),/^│  REPO hear\S*… \(b… ↑2 ↓5 ⚠️merge\) ›  › │$/],
+  [36,52,'hearting',git('main',' ↑2',' ↓5',' ⚠️merge'),/^│  REPO hear\S*… \(m… ↑2 ↓5 ⚠️merge\) │$/],
+  [30,52,'hearting',git('main',' ↑2',' ↓5'),/^│  REPO hearting \(ma… ↑2 ↓5\) │$/],
+  [30,24,'trial',git('main',' ↑2',' ↓5'),/^│  REPO t\S*… \(m… ↑2 ↓5\) ›  › │$/],
+  [40,52,'trial',git('feature/update-pane…',' ↑12',' ↓345',' ⚠️rebase'),/^│  REPO trial \(fea\S*… ↑12 ↓345 ⚠️rebase\) │$/],
+  [50,24,'hearting',git('main',' ↑2',' ↓5'),/^│  REPO hearting \(ma… ↑2 ↓5\) STATUS ›  BACKLOG › │$/]];
+for(const [w,h,name,parts,re] of cases){const r=row(w,h,name,parts);
+  assert(re.test(r.line)&&!r.line.includes('… …')&&cells(r.line)===w,w+'x'+h+' '+r.line);
+  if(h===24)assert(r.hits.length===2&&r.hits[0].action==='popup:STATUS'&&r.hits[1].action==='popup:BACKLOG'&&r.hits[1].right===w-3,JSON.stringify(r.hits));}
+// Every width from 30 to 60, both heights: the Git words are cut only where the name and the branch are already one letter and `…`, and then
+// the warning's letters go first (the arrows stand).
+let whole=0;
+for(let w=30;w<=60;w++)for(const h of [52,24]){const r=row(w,h,'hearting',git('main',' ↑2',' ↓5',' ⚠️merge'));
+  if(r.line.includes('↑2 ↓5 ⚠️merge)'))whole++;
+  else assert(/^│  REPO \S… \(m… ↑2 ↓5 \S*…\)/.test(r.line),w+'x'+h+' '+r.line);
+  assert(!r.line.includes('… …')&&cells(r.line)===w,r.line);}
+assert(whole>=55,String(whole));   // (of 62 rows the seven short ones are 30 × 52 and 30–35 × 24, beside the folded buttons: `⚠️mer…` … `…`)
+// Truly no room (30 × 24, the folded buttons beside): the warning's letters go first, the arrows stay.
+assert(/^│  REPO h… \(m… ↑2 ↓5 …\) ›  › │$/.test(row(30,24,'hearting',git('main',' ↑2',' ↓5',' ⚠️merge')).line),row(30,24,'hearting',git('main',' ↑2',' ↓5',' ⚠️merge')).line);
+// The folded buttons' numbers mean what the heads' do: `STATUS 5` (the board's whole count, no `+`; none for zero) and `BACKLOG +N` (every item, none drawn).
+{const v=drawW({width:60,height:24,question:true,routes:1,messages:2,mem:2,status:status(),backlog:backlog()});
+ assert(/STATUS 5 ›  BACKLOG \+14 › │$/.test(lines(v)[1]),lines(v)[1]);}
+{const v=drawW({width:60,height:24,question:true,routes:1,messages:2,mem:2,status:status(0,0),backlog:backlog(0,0)});
+ assert(/ STATUS ›  BACKLOG › │$/.test(lines(v)[1]),lines(v)[1]);}
+// The bottom layout keeps its own buttons (`STATUS +5 ›  BACKLOG +14 ›`: the items not shown there are all of them).
+{const v=drawW({width:120,height:10,side:false,status:status(),backlog:backlog()});assert(lines(v).some(l=>/STATUS \+5 ›  BACKLOG \+14 ›/.test(l)),lines(v).join('\n'));}
 """)
 
     def test_nothing_stands_where_it_did_not_and_every_row_is_as_wide_as_the_panel(self):

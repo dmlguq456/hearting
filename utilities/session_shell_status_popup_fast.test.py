@@ -306,6 +306,7 @@ const press=async(x,y,ms=100)=>{child.write(`\x1b[<0;${x+1};${y+1}M\x1b[<0;${x+1
 const key=async(bytes,ms=250)=>{child.write(bytes);await sleep(ms);};
 const box=s=>{const top=s.findIndex(l=>l.includes('╭─')&&l.includes('✕ ─╮'));if(top<0)return null;
   const left=[...s[top]].indexOf('╭'),bottom=s.findIndex((l,i)=>i>top&&[...l][left]==='╰'&&l.includes('╯'));
+  if(bottom<0)return null;   // (a popup whose bottom line is not drawn yet is no box yet: every wait reads it as "not yet")
   return {top,bottom,left,rows:s.slice(top,bottom+1).map(l=>l.slice(left))};};
 const popupHas=word=>s=>{const b=box(s);return !!b&&b.rows.some(l=>l.includes(word));};
 const place=s=>{const m=(box(s)?box(s).rows.join('\n'):'').match(/(\d+)\/(\d+) · /);return m?[+m[1],+m[2]]:null;};

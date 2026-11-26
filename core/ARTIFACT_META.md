@@ -403,8 +403,9 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
 - **`priority:` line.** A session writes it only where the person said the order: a positive whole
   number, 1 first (`priority: 1`); the same number again keeps the document's order. The panel's
   BACKLOG part shows the ranked jobs alone, the first three; a job without one is not shown there
-  (it stays on the board, which neither shows nor changes the number). Another value (`0`, a sign,
-  a fraction, a word) or two different numbers is no priority.
+  (it stays on the board, which neither sorts by nor changes the number). The value read is 1 to
+  999999; another value (`0`, a sign, a fraction, a word, seven digits or more) or two different
+  numbers is no priority.
   A wrong value in any of these lines leaves only that cell undecided; the document still opens.
 - **Counting rule.** Lines are read by their shape, not by what Markdown makes of them (lines end
   as Python's `str.splitlines` ends them). A job is a line whose first two characters are `- `,

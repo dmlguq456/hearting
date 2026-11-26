@@ -926,9 +926,7 @@ def backlog_detail(root, own, key, width, indent=0):
                        (item["area"] or "No area", "soft" if item["area"] else "dim"), (" · ", "dim"),
                        (STATE_MARKS[item["state"]], "soft" if item["state"] else "dim")]]
         out = [_cut_row(out[0], width)]
-        # (the order the person gave, `priority:`, is the panel's: the board neither shows nor changes it)
-        shown = [(BACKLOG_WORDS["campaign"], campaign or "—")] + [(name, value) for name, value in item["lines"]
-                                                                   if name not in ("kind", "state", "area", "date", "priority")]
+        shown = [(BACKLOG_WORDS["campaign"], campaign or "—")] + [(name, value) for name, value in item["lines"] if name not in ("kind", "state", "area", "date")]
         for name, value in shown[:1 + DETAIL_LINES]:
             text = transcript.clean(project_status._plain(value) if value else "")
             rows = _wrapped((name + " " + text) if name else text, room, NOTE_ROWS if name == "note" else DETAIL_ROWS, "soft")

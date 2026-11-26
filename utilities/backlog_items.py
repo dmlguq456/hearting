@@ -16,7 +16,7 @@ in the document's order (``line`` the heading line, its blanks cut; ``heading`` 
 
 ``priority`` (11-26, panel B) is the order the person gave (1 first); a session writes it only where the person said the order.
 ``lines`` (kept only with ``detail``) are the job's indented lines in order, ``name`` the lower-case line name
-(``kind``, ``area``, ``state``, ``date``, ``priority``, ``source``, ``note``) or ``None`` for a line of other text.
+(``kind``, ``area``, ``state``, ``date``, ``source``, ``note``) or ``None`` for a line of other text (a ``priority:`` line is one: it stands as written).
 ``counts(parsed)`` is the number of jobs of each kind and state and in all.
 """
 import datetime
@@ -132,7 +132,8 @@ def parse(lines, detail=True):
                 elif name in ("source", "note") and not job[name]:
                     job[name] = value
                 if detail and len(job["lines"]) < 4 * DETAIL_LINES:
-                    job["lines"].append((name, value))
+                    # (a `priority:` line stays a line of text, as written: the board shows it as it did before it was read, and neither sorts by it nor changes it)
+                    job["lines"].append((None, stripped) if name == "priority" else (name, value))
             continue
         close()
         job = None

@@ -286,8 +286,12 @@ const at=(o)=>{const v=draw({...o,status:status(),routes:1,messages:2,mem:1});re
 // beside the native area, short of rows: the REPO row ends in the buttons and no list stands (11-26 panel B: the repository row's own text is
 // longer, so at 44 wide the buttons are folded to `›  ›`; wider, the same words and numbers as before stand after it)
 {const {a}=at({width:44,height:14,backlog:host(docs.ranked)});assert(/^ REPO .* ›  ›$/.test(a[1])&&!a.some(l=>/^  · /.test(l)),a.join('\n'));}
-for(const [name,want] of [['mixed',/STATUS \+5 ›  BACKLOG \+5 ›$/],['legacy',/STATUS \+5 ›  BACKLOG \? ›$/],['notes',/STATUS \+5 ›  BACKLOG ›$/]]){
- const {a}=at({width:70,height:14,backlog:host(docs[name])});assert(/^ REPO /.test(a[1])&&want.test(a[1])&&!a.some(l=>/^  · /.test(l)),a.join('\n'));}
+// (11-26, fix 1 of #1863: beside the native area the numbers mean what the heads' do: `STATUS 5` the board's whole count, `BACKLOG +N` every item
+// of the document, none drawn, whatever its kinds; the bottom layout above keeps FIX and TASK together)
+for(const name of ['mixed','legacy','notes']){
+ const {a}=at({width:70,height:14,backlog:host(docs[name])}),want=new RegExp('STATUS 5 ›  BACKLOG \\+'+docs[name].total+' ›$');
+ assert(/^ REPO /.test(a[1])&&want.test(a[1])&&!a.some(l=>/^  · /.test(l)),a.join('\n'));}
+{const {a}=at({width:70,height:14,backlog:host(docs.empty)});assert(/STATUS 5 ›  BACKLOG ›$/.test(a[1]),a[1]);}
 """, self.docs())
 
 
