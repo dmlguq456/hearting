@@ -693,6 +693,7 @@ class RuntimeLines(unittest.TestCase):
         work = self.record(children=[{"attempt_id": "att-1"}])
         gate = {"delivery_id": "d", "receipt": {"kind": "human-gate"}}
         failure = self.record(children=[{"attempt_id": "att-2"}])
+        # A fake answer_binding cannot be read, so the sweep hides it; these tests check the line's shape and use a stand-in (the real path is in peer_display_answer.test.py).
         with mock.patch("work_intent.ui_translator", return_value=self.t("ko")), \
                 mock.patch.object(sweep, "_followup", side_effect=lambda root, record: (
                 "Owner finished; no harvest.\n" + self.KO if record is work else "no summary here")), \
@@ -717,6 +718,7 @@ class RuntimeLines(unittest.TestCase):
             return {"delivery_id": delivery_id, "receipt": {"kind": "notice", "subject": "Question answer",
                     "text": "x", "answer_binding": {"request_id": "S4:" + "a" * 64}}}
         first, second = answer("delivery-1"), answer("delivery-2")
+        # A fake answer_binding cannot be read, so the sweep hides it; these tests check the line's shape and use a stand-in (the real path is in peer_display_answer.test.py).
         with mock.patch("work_intent.ui_translator", return_value=self.t("ko")), \
                 mock.patch.object(sweep, "_answered_question_secret", return_value=False), \
                 mock.patch("human_wait_state.message_answer_body", return_value="네"):
@@ -733,12 +735,14 @@ class RuntimeLines(unittest.TestCase):
         # records with no delivery id cannot be told apart: they are never merged
         bare1, bare2 = answer("x"), answer("x")
         bare1.pop("delivery_id"), bare2.pop("delivery_id")
+        # A fake answer_binding cannot be read, so the sweep hides it; these tests check the line's shape and use a stand-in (the real path is in peer_display_answer.test.py).
         with mock.patch("work_intent.ui_translator", return_value=self.t("ko")), \
                 mock.patch.object(sweep, "_answered_question_secret", return_value=False), \
                 mock.patch("human_wait_state.message_answer_body", return_value="네"):
             self.assertEqual(sweep.delivery_display_text([(Path("/x"), [bare1, bare2])]), "↳ 질문에 답함: 네 ×2")
         # a work line shared by two finished works counts the same way, after the answers
         work1, work2 = {"delivery_id": "delivery-w1", "receipt": {}}, {"delivery_id": "delivery-w2", "receipt": {}}
+        # A fake answer_binding cannot be read, so the sweep hides it; these tests check the line's shape and use a stand-in (the real path is in peer_display_answer.test.py).
         with mock.patch("work_intent.ui_translator", return_value=self.t("ko")), \
                 mock.patch.object(sweep, "_followup", return_value="Owner finished; no harvest.\n" + self.KO), \
                 mock.patch.object(sweep, "_answered_question_secret", return_value=False), \

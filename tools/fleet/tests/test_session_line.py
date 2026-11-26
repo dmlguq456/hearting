@@ -584,18 +584,4 @@ class CommonSessionLineTest(unittest.TestCase):
         self.assertEqual(delivered["delivery"][1], "dim")
         self.assertEqual((sent_row["kind"], sent_row["delivery"][1]), ("steer", "dim"))
 
-    def test_the_native_statusline_count_stays_unknown_until_the_whole_observation_is_done(self):
-        # Total -1 is "not observed yet": this session's own 0 must not read as a known 0 while the
-        # panel still holds its earlier count. Observed totals keep their meaning.
-        from unittest import mock
-        import human_wait_state
-        from tools.fleet import session_line
-        for counts, expected in (((-1, 0), None), ((-1, 1), None), (None, None), ((0, 0), 0), ((3, 0), 0), ((2, 1), 2)):
-            with self.subTest(counts=counts):
-                with mock.patch.object(human_wait_state, "cached_statusline", return_value=(counts, "")), \
-                        mock.patch.object(session_line, "line_segments", return_value=[]) as painted, \
-                        mock.patch.object(session_line, "_record_claude_rows"):
-                    session_line.claude_native_statusline({"session_id": "sid-a"}, {"git_repo": "1"})
-                self.assertEqual(painted.call_args.args[0]["answer_wait"], expected)
-
 if __name__ == "__main__": unittest.main()

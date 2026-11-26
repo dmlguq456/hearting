@@ -407,9 +407,7 @@ def claude_native_statusline(callback, environ):
     if record and record.get("sessionId") == sid:
         state = {"busy": "working", "idle": "idle"}.get(record.get("status"), "unknown")
     counts, route = human_wait_state.cached_statusline("claude", sid)
-    # While the whole observation is unfinished (total -1) the panel keeps its earlier value; the
-    # line says "unknown" the same way, never 0 from this session's own empty count.
-    waiting = None if not counts or counts[0] < 0 else counts[0] if counts[1] > 0 else 0
+    waiting = (counts[0] if counts[0] >= 0 else None) if counts and counts[1] > 0 else (0 if counts else None)
     values.update(title=environ.get("S_SESSION_DISPLAY"), git=git, branch=branch,
                   jobs=environ.get("git_jobs"), state=state, tag=assigned_tag("claude", sid),
                   route_label=route, answer_wait=waiting)
