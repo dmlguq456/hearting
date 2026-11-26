@@ -167,9 +167,10 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
             if gen.host.pid<=1:raise ValueError('unsafe display pid')
             try:
                 if birth(gen.host.pid)!=gen.start:return
-                # No pidfd (pidfd_open failed after Popen): the birth check above already proved the pid is ours.
-                if gen.fd is None:gen.host.terminate()
-                else:signal.pidfd_send_signal(gen.fd,signal.SIGTERM)
+                # No pidfd, or a build whose signal module cannot send through one: the birth check above already proved the pid is ours.
+                send=getattr(signal,'pidfd_send_signal',None)
+                if gen.fd is None or not callable(send):gen.host.terminate()
+                else:send(gen.fd,signal.SIGTERM)
                 gen.term_sent=True
             except (FileNotFoundError,ProcessLookupError):pass
     def spawn_display(number,successor,c):
