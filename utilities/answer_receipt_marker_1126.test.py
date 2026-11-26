@@ -111,6 +111,21 @@ class AnswerReceiptMarker(unittest.TestCase):
                     self.assertEqual(identity, pending.received_ack_identity(
                         pending.read(self.f.root, sid, record["delivery_id"]), sid, record["delivery_id"]))
 
+    def test_an_ordinary_delivery_reads_no_answer_to_judge_its_markers(self):
+        # Review 1861: one marker line (the one ending an ordinary delivery) holds no answer's; the answer is not read.
+        for harness in ("claude", "opencode"):
+            with self.subTest(harness=harness):
+                sid = "ordinary-" + harness
+                signal, envelope = self.f.ask(harness, sid)
+                self.f.submit(envelope, "plain answer\nline two")
+                text = self.claimed_text(harness, sid, signal)
+                with mock.patch.object(rr, "without_answer_text", side_effect=AssertionError("answer read")):
+                    self.assertEqual(rr.bound_delivery_ids(text, sid, [self.f.root]), [self.f.record(signal)["delivery_id"]])
+                    if harness == "opencode":
+                        messages = [{"info": {"sessionID": sid, "role": "user"}, "parts": [{"type": "text", "text": text}]}]
+                        rebuilt = sweep._opencode_delivery_expectations([self.f.root], KIND[harness], sid, messages)
+                        self.assertEqual([item["text"] for item in rebuilt], [text])
+
     def test_a_copied_marker_names_nothing_and_a_persons_own_words_stay_the_persons(self):
         harness, sid = "opencode", "copied-marker"
         first, first_envelope = self.f.ask(harness, sid, text="earlier")

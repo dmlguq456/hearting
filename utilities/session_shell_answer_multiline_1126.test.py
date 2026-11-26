@@ -180,36 +180,38 @@ class AnswerMultilineTest(unittest.TestCase):
 """)
 
     def test_key_line_names_the_break_key_in_both_languages_and_widths(self):
-        from fleet.config import ui_text
+        import session_shell
+        widths = (46, 48, 50, 54, 60, 64, 72, 100, 136)
         labels = {}
         for lang in ("en", "ko"):
             with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
-                keys = ("choose", "choose_write", "writing", "writing_choices", "send", "navigate",
-                        "navigate_write", "text")
-                wide = {k: ui_text("fleet.session_block." + k) for k in keys}
-                # A popup narrower than 64 cells (session_shell: `editor < 64`) takes the compact closing key.
-                narrow = dict(wide, navigate_write=ui_text("fleet.session_block.compact_navigate_write"))
-                labels[lang] = {"wide": wide, "narrow": narrow}
+                # The backend's own words for each popup width (`session_shell.block_labels`, what the editor is sent).
+                labels[lang] = {str(width): session_shell.block_labels(width) for width in widths}
         out = self.node(r"""
 (async()=>{
- const all=labels;
- for(const lang of ['en','ko'])for(const choices of [[],['one','two']])for(const cols of [54,60,68,100,140]){
-  const popup=view.popupWidth(cols,'question'),inner=popup-4,set=all[lang][popup<64?'narrow':'wide'];
+ const all=labels,rows=[];
+ for(const lang of ['en','ko'])for(const choices of [[],['one','two']])for(const popup of WIDTHS){
+  const inner=popup-4,set=all[lang][String(popup)];
   let sent;const b=create({cellWidth:cells,changed(){},action(){},answer:async x=>(sent=x,{state:'submitted'})});
   b.update([{id:'x',revision:'r',answerable:true,questions:[{id:'q',question:'Q?',free_text:true,choices}]}],'',{labels:set});b.enter();
   b.input(Buffer.from('글'));const last=b.detail({columns:inner,budget:20}).at(-1).map(p=>p.text).join('');
-  // 11-26 follow-up: while writing the row names Enter (it sends) and the line-break key at every width.
-  assert(cells(last)<=inner,last);assert(last.startsWith('Enter'),lang+' '+cols+': '+last);assert(last.includes('Ctrl+J'),lang+' '+cols+': '+last);
+  // 11-26 follow-up, review 1861: while writing the row names Enter (it sends) and the line-break key at every
+  // width from 46 cells; the closing key is shortened first (`뒤로`, then Esc alone under 50 cells).
+  assert(cells(last)<=inner,last);assert(last.startsWith('Enter'),lang+' '+popup+': '+last);assert(last.includes('Ctrl+J'),lang+' '+popup+': '+last);
   assert(last.endsWith(lang==='en'?'back':popup<64?'뒤로':'돌아가기'),last);
-  // (In Korean a 64-cell popup is one cell short of it, as before: the packing leaves it out there.)
-  if(choices.length&&popup>=72)assert(last.includes('↑'),'the way back to the choices stays: '+last);
+  assert.equal(last.includes('Esc/Ctrl+]'),popup>=50,last);
+  // `↑ choices` is named exactly where the row holding it (without `Tab next`) fits.
+  if(choices.length){const back=set.navigate_write.split(' · ').at(-1),up=[...set.writing_choices.split(' · '),back].join(' · ');
+   assert.equal(last.includes('↑'),cells(up)<=inner,popup+' '+last);}
   // A 50-cell popup (46 inside): the three keys, `Tab next` (and `↑ choices`) left out first.
-  if(cols===54)assert.equal(last,lang==='en'?'Enter send · Ctrl+J newline · Esc/Ctrl+] back':'Enter 보내기 · Ctrl+J 줄바꿈 · Esc/Ctrl+] 뒤로');
-  console.log(JSON.stringify({lang,cols,choices:choices.length,keys:last}));
+  if(popup===50)assert.equal(last,lang==='en'?'Enter send · Ctrl+J newline · Esc/Ctrl+] back':'Enter 보내기 · Ctrl+J 줄바꿈 · Esc/Ctrl+] 뒤로');
+  rows.push({lang,popup,choices:choices.length,keys:last});
  }
+ console.log(JSON.stringify(rows));
 })().catch(e=>{console.error(e);process.exit(1)});
-""".replace("const all=labels;", "const all=" + json.dumps(labels, ensure_ascii=False) + ";"))
-        print(out, flush=True)
+""".replace("const all=labels,", "const all=" + json.dumps(labels, ensure_ascii=False) + ",")
+                   .replace("WIDTHS", json.dumps(list(widths))))
+        print("KEY_ROWS=" + out.strip(), flush=True)
 
     def test_a_sent_answer_of_several_lines_is_one_line_in_the_panel(self):
         self.node(r"""
@@ -272,6 +274,7 @@ class PrivateTmuxScenesTest(unittest.TestCase):
             code = code.replace("raise SystemExit(m._backend())",
                 "def answer(binding, request):\n    with open(" + repr(str(case / "answers")) +
                 ", 'a') as log: log.write(json.dumps(request, ensure_ascii=False)+'\\n')\n" +
+                "    if 'submitted' in str(request.get('question_id')): return {'ok': True, 'state': 'submitted'}\n" +
                 "    return {'ok': True, 'state': 'unknown', 'reason': 'synthetic recorded'}\n" +
                 "m._block_answer=answer\nraise SystemExit(m._backend())")
             backend.write_text(code)
@@ -331,9 +334,9 @@ class PrivateTmuxScenesTest(unittest.TestCase):
                 bottom = next(i for i, row in enumerate(rows) if i > top and "╰─ QUESTIONS" in row)
                 return rows[top:bottom + 1]
 
-            def ask(index, question, choices=()):
+            def ask(index, question, choices=(), item=None):
                 q = dict(id="q", question=question, free_text=True, choices=list(choices))
-                qp.write_text(json.dumps({sid: [dict(id=f"fixture-{index}", revision=f"{index + 1:064x}",
+                qp.write_text(json.dumps({sid: [dict(id=item or f"fixture-{index}", revision=f"{index + 1:064x}",
                                                      answerable=True, questions=[q])]}))
                 waitfor(lambda rows: any(question[:8] in row for row in rows), "the question in the panel")
                 send("\x1d")
@@ -387,25 +390,72 @@ class PrivateTmuxScenesTest(unittest.TestCase):
                 self.assertEqual(len(sent[-1].split("\n")), 30)
                 self.assertIn("27. 줄 +27", sent[-1])
                 send("\x1d")
-                # Scene 3 (11-26 follow-up): a paste whose end mark never comes. A second after its last byte it is
-                # over: a typed key is typed and Esc closes the popup; Ctrl+] closes it at once, mid paste.
-                ask(2, "끝나지 않는 붙여넣기 질문입니다.")
-                send("\x1b[200~끝 표지가\r오지 않는다", delay=.3)
-                send("\x1b", delay=.1)
-                # The popup's own title row (the panel's question box below draws `╭` too).
+                # Scene 3 (review 1861): a paste whose bytes stop for a second has stalled, not ended. The key row says
+                # so and names the way out; what comes after is still the paste's text. Esc pressed then closes the
+                # popup, Enter pressed sends what came, and the rest of that paste is never typed nor the native's.
                 shown = lambda rows: any("╭─ ›" in row for row in rows)  # noqa: E731
-                self.assertTrue(shown(screen()), "an Esc inside the paste is part of it")
-                time.sleep(1.2)
-                send("!", delay=.3)
-                rows = waitfor(lambda rows: any("오지 않는다!" in row for row in rows), "the key typed after the paste")
-                print("SCENE_UNENDED=" + json.dumps(popup(screen(cursor=True)), ensure_ascii=False), flush=True)
+                stalled = lambda rows: any("붙여넣기 멈춤" in row for row in rows)  # noqa: E731
+
+                def received():
+                    path = case / "received"
+                    return path.read_bytes() if path.exists() else b""
+                ask(2, "끝나지 않는 붙여넣기 질문입니다.")
+                native = len(received())
+                send("\x1b[200~끝 표지가\r오지 않는다", delay=.1)
+                waitfor(stalled, "the stalled paste's key row")
+                picture = popup(screen(cursor=True))
+                print("SCENE_STALLED=" + json.dumps(picture, ensure_ascii=False), flush=True)
+                self.assertTrue(any("│ 붙여넣기 멈춤 · Enter 보내기 · Esc/Ctrl+] 뒤로 │" in row for row in picture), picture)
+                send("!\t?", delay=.3)
+                waitfor(lambda rows: any("오지 않는다!" in row for row in rows), "the rest of the paste as its text")
+                self.assertTrue(shown(screen()), "a tab of the paste is no Tab key")
+                waitfor(stalled, "stalled again")
                 send("\x1b", delay=.5)
-                waitfor(lambda rows: not shown(rows), "the popup closed by Esc")
+                waitfor(lambda rows: not shown(rows), "the popup closed by Esc pressed")
+                send("\x1b[201~", delay=.3)
+                self.assertEqual(received()[native:], b"", "the paste's late end mark is not the native's")
+                self.assertEqual(answers(), [["첫째 줄입니다\n둘째 줄\n셋째\n넷째가\n나\n다\n끝"], sent])
                 send("\x1d")
                 waitfor(shown, "the popup again")
-                send("\x1b[200~또 끝나지 않는", delay=.2)
+                send("\x1b[200~ 더", delay=.1)
+                waitfor(stalled, "a stall again")
+                send("\r")
+                waitfor(lambda rows: any("synthetic recorded" in row for row in rows), "what came sent by Enter pressed")
+                self.assertEqual(answers()[-1], ["끝 표지가\n오지 않는다!\t? 더"])
+                send("나머지\r끝\x1b[201~", delay=.5)
+                self.assertEqual(len(answers()), 3, "the rest of that paste sends nothing")
+                self.assertFalse(any("나머지" in row for row in screen()))
+                self.assertEqual(received()[native:], b"")
                 send("\x1d", delay=.3)
-                waitfor(lambda rows: not shown(rows), "the popup closed by Ctrl+] mid paste")
+                # The review's scenes (RV-PR1861 🔴1, 🟡1): bytes of one paste cut by a stall (or by a Ctrl+] byte read
+                # alone). None sends a half-written answer or the same twice, and none reaches the native.
+                scenes = (("A", "fixture-a", [("\x1b[200~첫 줄\r둘", 1.4), ("째 줄\r셋째 줄\x1b[201~", 1.0)], ["첫 줄\n둘째 줄\n셋째 줄"]),
+                          ("B-submitted", "fixture-submitted-b",
+                           [("\x1b[200~하나\r둘", 1.4), ("째\r", .6), ("셋째\r넷째\x1b[201~", 1.0)], ["하나\n둘째\n셋째\n넷째"]),
+                          ("B-unknown", "fixture-b", [("\x1b[200~하나\r둘", 1.4), ("째\r", .6), ("셋째\r넷째\x1b[201~", 1.0)],
+                           ["하나\n둘째\n셋째\n넷째"]),
+                          ("C", "fixture-c", [("\x1b[200~로그 앞", 1.4), ("\x1b", .2), ("[31m빨강\x1b[0m 다음\r끝\x1b[201~", 1.0)], None),
+                          ("E", "fixture-e", [("\x1b[200~앞 글", .3), ("\x1d", .3), ("뒤 글\r다음 줄\x1b[201~", 1.0)], None))
+                for number, (name, item, steps, whole) in enumerate(scenes):
+                    ask(10 + number, name + " 장면의 느린 붙여넣기 질문입니다.", item=item)
+                    count, native = len(answers()), len(received())
+                    for data, pause in steps:
+                        send(data, delay=pause)
+                    result = {"scene": name, "sent": answers()[count:], "native": received()[native:].decode("utf-8", "replace"),
+                              "popup": shown(screen())}
+                    self.assertEqual(result["sent"], [], name + ": no half-written answer")
+                    self.assertEqual(result["native"], "", name + ": the paste is never the native's")
+                    if whole is not None:
+                        self.assertTrue(result["popup"], name)
+                        send("\r", delay=1.0)    # the person's Enter: the whole paste, once
+                        result["after_enter"] = answers()[count:]
+                        self.assertEqual(result["after_enter"], [whole], name)
+                    elif name == "E":
+                        self.assertFalse(result["popup"], "Ctrl+] pressed closed it")
+                    print("SCENE_REVIEW=" + json.dumps(result, ensure_ascii=False), flush=True)
+                    if shown(screen()):
+                        send("\x1d", delay=.3)
+                    self.assertEqual(received()[native:], b"", name + ": nothing of it reached the native")
                 send("\x04")
             finally:
                 try:

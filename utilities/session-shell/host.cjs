@@ -2044,6 +2044,9 @@ function userInput(data){if(data.length){epoch+=data.length;empty=false;if(pick&
 function inputBytes(data) {
   if(!data.length)return;
   while(data.length){
+    // 11-26 (review 1861): the rest of a paste a pressed key ended in the question popup (Esc, Enter or Ctrl+], the
+    // popup may be closed by now) is dropped up to its end mark or a second with no byte: never the native's.
+    if(block.discarding){const rest=block.swallow(data);epoch+=data.length-rest.length;data=rest;if(!data.length){queueDisplay();return;}}
     // Mouse-opened shell editors own their visible keys even while a peer's
     // paste is admitted. Only native-directed bytes enter the retained queue.
     if(settings&&!relay){settingsInput(data);epoch+=data.length;return;}

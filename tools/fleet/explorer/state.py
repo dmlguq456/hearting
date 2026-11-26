@@ -1431,6 +1431,16 @@ def _reduce(state, event, frame=None):
         if key == "newline" and _question_secret(overlay):
             # 11-26: in a secret every line-break key is Enter, as Ctrl+J was before (the shell's popup does the same).
             key = "enter"
+        # Review 1861: a paste that stalled goes in by parts as it comes (``paste-part:``). Whether one of them put a line
+        # break in a secret (``paste_lines``) is kept until the paste's end, which any other key is.
+        part = isinstance(key, str) and key.startswith("paste-part:")
+        if part:
+            key = "text:" + key[len("paste-part:"):]
+        paste_lines = bool(overlay.get("paste_lines"))
+        if "paste_lines" in overlay and not part:
+            overlay = dict(overlay)
+            overlay.pop("paste_lines")
+            state = replace(state, question_overlay=overlay)
         # 11-26: the cell column ↑↓ hold while they repeat inside a written answer; any other key lets it go.
         goal = overlay.get("caret_goal") if key in ("up", "down") else None
         if "caret_goal" in overlay and key not in ("up", "down"):
@@ -1467,9 +1477,16 @@ def _reduce(state, event, frame=None):
                 # 11-26: a line break (Ctrl+J, Alt+Enter) is a character of the answer like any other.
                 addition = "\n" if key == "newline" else key[5:] if key.startswith("text:") else key
                 question = next(item for item in specs if item["id"] == qid)
+                secret_lines = False
                 if key.startswith("text:") and (question.get("is_secret") or question.get("isSecret")):
-                    # A pasted secret keeps its inner line breaks (a key of several lines) but not the ones it ends with.
-                    addition = addition.rstrip("\n")
+                    if part:
+                        # A part never ends with line breaks (they wait for what comes after them).
+                        secret_lines = paste_lines or "\n" in addition
+                    else:
+                        # A pasted secret keeps its inner line breaks; of the ones it ends with, one stays when it was
+                        # pasted in several lines (a private key needs its last one), none for a one-line secret.
+                        body = addition.rstrip("\n")
+                        addition = body + ("\n" if body != addition and (paste_lines or "\n" in body) else "")
                     if not addition:
                         return state, ()
                 choices = question.get("choices", question.get("options"))
@@ -1478,8 +1495,12 @@ def _reduce(state, event, frame=None):
                     at = question_caret(overlay, qid, text)
                     joined = text[:at] + addition + text[at:]
                     if len(joined.encode("utf-8")) <= 4096:
-                        return _question_with_caret(_question_set_answer(state, qid, joined), qid,
-                                                    at + len(addition))
+                        result = _question_with_caret(_question_set_answer(state, qid, joined), qid,
+                                                      at + len(addition))
+                        if secret_lines:
+                            result = replace(result[0], question_overlay=dict(
+                                _question_overlay(result[0]), paste_lines=True)), result[1]
+                        return result
                     # As much of a paste as fits goes in, and the limit is said (the shell's popup does the same).
                     room = 4096 - len(text.encode("utf-8"))
                     fit = addition.encode("utf-8")[:max(0, room)].decode("utf-8", "ignore")

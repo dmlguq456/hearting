@@ -1,10 +1,12 @@
 """11-26 follow-up to the written answer of several lines (the person: "깔짝깔짝 고칠래 계속?"): what review left open.
 
 A paste reads to the same text in the shell's question popup and in Fleet (an escape sequence is left out whole). A
-paste whose end mark never comes is over a second after its last byte, and Ctrl+] leaves the popup even before that.
-In a secret every line-break key sends, as Ctrl+J did before, and a pasted key keeps its inner line breaks but not the
-ones it ends with. A draw failure that hands the terminal to the plain relay gives it back the native's own modes.
-These run the real editor (and Fleet's real reader) with synthetic values.
+paste whose bytes stop for a second has stalled, not ended (review 1861): what comes after is still its text, so a
+line break of it never sends a half-written answer; only a key pressed then (a read of its own: Enter, Esc, and
+Ctrl+] at any time) ends it and is that key, and the rest of that paste is dropped, never typed and never the
+native's. In a secret every line-break key sends, as Ctrl+J did before; a pasted key keeps its inner line breaks and,
+pasted in several lines, one of those it ends with. A draw failure that hands the terminal to the plain relay gives it
+back the native's own modes. These run the real editor (and Fleet's real reader and reducer) with synthetic values.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -23,13 +25,92 @@ const assert=require('node:assert/strict'),path=require('node:path'),dir=process
 const create=require(path.join(dir,'block-input.cjs'));
 const cells=s=>[...s].reduce((n,c)=>n+(/\p{Mark}/u.test(c)?0:c.codePointAt(0)>=0x2e80?2:1),0);
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
-function make(extra={}){let sent;const b=create({cellWidth:cells,changed(){},action(){},answer:async x=>(sent=x,{state:'submitted'})});
+// `idle`: the editor's stall time, short here; a stall is waited for by its state, never by a fixed sleep.
+function make(extra={},{idle=60,state='submitted'}={}){let sent;const all=[];const b=create({cellWidth:cells,pasteIdle:idle,changed(){},action(){},
+  answer:async x=>(sent=x,all.push(x.answers.q[0]),{state,reason:'kept'})});
  b.update([{id:'x',revision:'r',answerable:true,questions:[{id:'q',question:'Synthetic question?',free_text:true,...extra}]}],'',{labels:{}});b.enter();
- return {b,get sent(){return sent},
+ return {b,get sent(){return sent},all,
+  async stall(){for(let i=0;i<400&&!b.stalled;i++)await wait(5);assert.equal(b.stalled,true,'the paste stalled');},
   draft(){return b.detail({columns:200,budget:60}).filter(r=>r.some(p=>p.answerRow)).map(r=>r.map(p=>p.text).join('').slice(2)).join('\n');},
   async send(keys){for(const k of [].concat(keys)){b.input(Buffer.isBuffer(k)?k:Buffer.from(k));await wait(30);}},
   async enter(){b.input(Buffer.from('\r'));await new Promise(r=>setImmediate(r));return sent;}};}
 """
+
+
+def fleet_answers(steps, *, secret=False):
+    """What Fleet sends for the same bytes: its real reader (a stall is its clock moved on, so no sleep), the explorer's
+    key names (``answer_key``, then ``_explorer_key_name``) and the reducer, on a question taking a written answer."""
+    import time
+    from fleet.render_explorer import _explorer_key_name
+    from fleet.render_input import _CursesInput, answer_key
+    from fleet.explorer.state import NavState, reduce
+
+    class Curses:
+        ERR = -1
+        KEY_MOUSE = 409
+        KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT = 259, 258, 260, 261
+        KEY_PPAGE, KEY_NPAGE, KEY_HOME, KEY_END, KEY_DC = 339, 338, 262, 360, 330
+
+    class Screen:
+        def __init__(self, data=b""):
+            self.values = list(data)
+
+        def timeout(self, delay):
+            pass
+
+        def getch(self):
+            return self.values.pop(0) if self.values else Curses.ERR
+
+    ref = {"id": "S4:synthetic", "harness": "codex", "session_id": "synthetic-session",
+           "request_id": "synthetic-request", "question_id": "q"}
+    question = {"id": "q", "question": "Synthetic question?", "is_other": True, "choices": [],
+                **({"is_secret": True} if secret else {})}
+    envelope = {"kind": "question", "state": "open", "harness": "codex", "questions": [question],
+                "support": {"supported": True}, "native_ref": {"transport": "hearting-message-answer"}}
+    state = NavState(view="QUESTIONS", title="QUESTIONS", folds=(("qsel:QUESTIONS", ref["id"]),),
+                     question_overlay={"ref": ref, "detail": envelope, "draft": None, "state": "open",
+                                       "editing": False, "pending": False})
+    state, _ = reduce(state, {"type": "click", "action": ("question.edit", "q")})
+    reader, sent = _CursesInput(Curses, explorer_mode=True), []
+    reader.alt_keys = True
+
+    def feed(events):
+        nonlocal state
+        for code, payload in events:
+            editing = bool(state.question_overlay.get("editing"))
+            key = answer_key(code, payload, writable=True, editing=editing, cr_enter=True)
+            if key is None:
+                key = _explorer_key_name(code)
+            if key:
+                state, effects = reduce(state, {"type": "key", "key": key, "tabs": ["QUESTIONS"], "question_refs": [ref]})
+                sent.extend(effect[2]["answers"]["q"][0] for effect in effects if effect[0] == "questions.submit")
+
+    def drain(screen):
+        events = []
+        for _ in range(4096):
+            event = reader.read(screen)
+            if event[0] != Curses.ERR:
+                events.append(event)
+            elif not screen.values and not reader.ready:
+                break
+        return events
+
+    for step in steps:
+        if step in ("STALL", "QUIET"):
+            reader.paste_since -= 2
+            if reader.paste_key is not None:
+                reader.paste_key_since -= 1
+            feed(drain(Screen()))
+        elif step == "WAIT":                     # an Esc's 25 ms
+            if reader.paste_key is not None:
+                reader.paste_key_since -= 1
+            feed(drain(Screen()))
+        elif step == "REOPEN":                   # the popup opened again; in Fleet the board is still there
+            continue
+        else:
+            feed(drain(Screen(step if isinstance(step, bytes) else step.encode())))
+    time.sleep(0)
+    return sent
 
 
 class FollowupTest(unittest.TestCase):
@@ -90,32 +171,104 @@ class FollowupTest(unittest.TestCase):
                 if index in want:
                     self.assertEqual(shell[index], want[index])
 
-    def test_a_paste_that_never_ends_is_over_a_second_after_its_last_byte(self):
+    def test_a_paste_that_stalls_goes_on_and_only_a_pressed_key_ends_it(self):
         self.node(r"""
 (async()=>{
- // No end mark: a second after the last byte the paste is over; what is typed then is typed, and Esc closes.
- {const x=make();await x.send(['\x1b[200~abc\rdef']);assert.equal(x.b.pasting,true);
-  await x.send(['\x1b']);assert.equal(x.b.focused,true,'an Esc inside the paste is part of it');
-  await wait(1100);assert.equal(x.b.pasting,false,'over a second after its last byte');
-  await x.send(['g']);assert.equal(x.draft(),'abc\ndefg');
-  x.b.input(Buffer.from('\x1b'));await wait(60);assert.equal(x.b.focused,false,'Esc closes the popup again');}
- // Ctrl+] pressed leaves at once, the paste under way ends with the popup; what is typed next is the native's.
- {const x=make();await x.send(['\x1b[200~abc']);assert.equal(x.b.pasting,true);
-  assert.equal(x.b.input(Buffer.from('\x1d')).length,0);assert.equal(x.b.focused,false);assert.equal(x.b.pasting,false);
-  assert.equal(x.b.input(Buffer.from('z')).toString(),'z','after it the keys are the native\'s');}
- // A Ctrl+] inside the pasted bytes is their control character: left out, the popup stands (none of it reaches the native).
+ const row=x=>x.b.detail({columns:60,budget:20}).at(-1).map(p=>p.text).join('');
+ // A stall is no end: the rest is still the paste's text (its CR a line break, its Tab a tab, its escape sequence left
+ // out); no half-written answer goes, and the popup stands. The key row says how out while it stands stalled.
+ {const x=make({},{state:'unknown'});await x.send(['\x1b[200~첫 줄\r둘']);await x.stall();
+  assert.equal(x.b.pasting,true);assert.equal(row(x),'paste stalled · Enter send · Esc/Ctrl+] back');
+  await x.send(['째 줄\r셋째\t줄\x1b[31m빨강\x1b[0m\x1b[201~']);assert.deepEqual(x.all,[],'no half-written answer');
+  assert.equal(x.b.focused,true);assert.equal(x.b.pasting,false);assert.notEqual(row(x),'paste stalled · Enter send · Esc/Ctrl+] back');
+  assert.deepEqual((await x.enter()).answers.q,['첫 줄\n둘째 줄\n셋째\t줄빨강']);assert.equal(x.all.length,1);}
+ // Stalled, a pressed Enter (a read of its own) sends what came, once; the rest of that paste is dropped, up to its end
+ // mark; after it the keys are keys again.
+ {const x=make({},{state:'unknown'});await x.send(['\x1b[200~부분 글']);await x.stall();
+  await x.send(['\r']);assert.deepEqual(x.all,['부분 글']);assert.equal(x.b.discarding,true);assert.equal(x.b.pasting,true,'panel-mouse reads it as a paste');
+  assert.equal(x.b.input(Buffer.from('나머지\r끝\x1b[2')).length,0);assert.equal(x.b.input(Buffer.from('01~')).length,0);
+  assert.equal(x.b.discarding,false);assert.deepEqual(x.all,['부분 글'],'never twice');assert.equal(x.draft(),'부분 글');}
+ // Stalled, a pressed Esc closes after its 25 ms; the rest of the paste is never the native's (given back from the end mark on).
+ {const x=make();await x.send(['\x1b[200~로그 앞']);await x.stall();
+  x.b.input(Buffer.from('\x1b'));await wait(60);assert.equal(x.b.focused,false);assert.equal(x.b.discarding,true);
+  assert.equal(x.b.swallow(Buffer.from('[31m빨강\x1b[0m 다음\r끝')).length,0);assert.equal(x.b.swallow(Buffer.from('\x1b[201~z')).toString(),'z');
+  assert.equal(x.sent,undefined);x.b.enter();assert.equal(x.draft(),'로그 앞','the draft stays');}
+ // Stalled, an Esc then `[` within its 25 ms is an escape sequence of the paste (a late end mark too): the paste goes on.
+ {const x=make();await x.send(['\x1b[200~ab']);await x.stall();x.b.input(Buffer.from('\x1b'));x.b.input(Buffer.from('[201~'));
+  await wait(60);assert.equal(x.b.focused,true);assert.equal(x.b.pasting,false);assert.equal(x.b.discarding,false);assert.equal(x.draft(),'ab');}
+ // A paste that never ends does not hold the popup: stalled again and again, Esc pressed closes it.
+ {const x=make();await x.send(['\x1b[200~끝 없음']);await x.stall();await x.send(['x']);assert.equal(x.b.stalled,false);await x.stall();
+  x.b.input(Buffer.from('\x1b'));await wait(60);assert.equal(x.b.focused,false);x.b.enter();assert.equal(x.draft(),'끝 없음x');}
+ // Ctrl+] pressed (a read of its own) leaves at once, stalled or not; the rest of that paste is dropped, never the native's.
+ {const x=make();await x.send(['\x1b[200~앞 글']);assert.equal(x.b.stalled,false);
+  assert.equal(x.b.input(Buffer.from('\x1d')).length,0);assert.equal(x.b.focused,false);
+  assert.equal(x.b.swallow(Buffer.from('뒤 글\r다음 줄\x1b[201~')).length,0);assert.equal(x.b.input(Buffer.from('z')).toString(),'z');}
+ // The panel's mouse reader hands the start mark on alone, then the Ctrl+] of the same read: the rest is dropped too.
+ {const x=make();x.b.input(Buffer.from('\x1b[200~'));x.b.input(Buffer.from('\x1d'));assert.equal(x.b.focused,false);
+  assert.equal(x.b.swallow(Buffer.from('pasted\rtext\x1b[201~')).length,0);}
+ // A second with no byte while dropping: the dropping ends, and what comes then is the native's.
+ {const x=make();await x.send(['\x1b[200~a']);x.b.input(Buffer.from('\x1d'));assert.equal(x.b.discarding,true);
+  for(let i=0;i<400&&x.b.discarding;i++)await wait(5);assert.equal(x.b.discarding,false);assert.equal(x.b.swallow(Buffer.from('q')).toString(),'q');}
+ // A Ctrl+] inside the pasted bytes is their control character: left out, the popup stands.
  {const x=make();assert.equal(x.b.input(Buffer.from('\x1b[200~ab\x1dcd')).length,0);assert.equal(x.b.focused,true);
   await x.send(['\x1b[201~']);assert.equal(x.draft(),'abcd');}
- // A paste whose bytes keep coming is not cut: each byte gives it another second.
- {const x=make();await x.send(['\x1b[200~a']);await wait(600);await x.send(['b']);await wait(600);await x.send(['c']);
-  assert.equal(x.b.pasting,true);await x.send(['\x1b[201~','d']);assert.equal(x.draft(),'abcd');}
- // An end mark cut by the second: what came of it is dropped, and the keys after it are keys.
- {const x=make();await x.send(['\x1b[200~ab\x1b[20']);await wait(1100);assert.equal(x.b.pasting,false);
-  await x.send(['c']);assert.equal(x.draft(),'abc');}
+ // Not stalled (bytes keep coming), a lone Enter or Esc is the paste's own.
+ {const x=make({},{idle:400});await x.send(['\x1b[200~a','\r','b','\x1b','c\x1b[201~']);assert.equal(x.sent,undefined);
+  assert.equal(x.b.focused,true);assert.deepEqual((await x.enter()).answers.q,['a\nbc']);}
 })().catch(e=>{console.error(e);process.exit(1)});
 """)
 
-    def test_a_secret_takes_every_line_break_key_as_enter_and_a_pasted_key_keeps_its_inner_lines(self):
+    def test_the_same_stalled_paste_gives_the_same_answer_on_both_screens(self):
+        """The same bytes, cut where a paste stalls, through the popup and through Fleet's reader, key names and reducer."""
+        import base64
+        STALL = "STALL"
+        cases = [
+            ("A: stalled, the rest has a CR", ["\x1b[200~첫 줄\r둘", STALL, "째 줄\r셋째 줄\x1b[201~", "\r"], {}),
+            ("B: stalled, the rest in two reads", ["\x1b[200~하나\r둘", STALL, "째\r", "셋째\r넷째\x1b[201~", "\r"], {}),
+            ("C: stalled, a lone Esc, the rest", ["\x1b[200~로그 앞", STALL, "\x1b", "WAIT", "[31m빨강\x1b[0m 다음\r끝\x1b[201~", "REOPEN", "\r"], {}),
+            ("E: Ctrl+] alone mid paste", ["\x1b[200~앞 글", "\x1d", "뒤 글\r다음 줄\x1b[201~", "REOPEN", "\r"], {}),
+            ("stalled, Enter pressed", ["\x1b[200~부분 글", STALL, "\r", "나머지\r끝\x1b[201~"], {}),
+            # The rest of a paste that never ends is dropped until a second goes by with no byte (keys in it too).
+            ("never ends, Esc", ["\x1b[200~끝 없음", STALL, "x", STALL, "\x1b", "WAIT", "QUIET", "REOPEN", "\r"], {}),
+            ("CR LF cut by a stall", ["\x1b[200~a\r", STALL, "\nb\x1b[201~", "\r"], {}),
+            ("a character cut by a stall", [b"\x1b[200~\xea\xb0", STALL, b"\x80\xeb\x82\x98\x1b[201~", "\r"], {}),
+            ("a sequence cut by a stall", ["\x1b[200~x\x1b[3", STALL, "1my\x1b[201~", "\r"], {}),
+            ("secret of several lines, stalled", ["\x1b[200~k1\nk2\n", STALL, "\r"], {"secret": True}),
+            ("secret of one line, stalled", ["\x1b[200~token\n", STALL, "\r"], {"secret": True}),
+            ("secret of several lines, in parts", ["\x1b[200~a\n", STALL, "b\n", STALL, "\x1b[201~", "\r"], {"secret": True}),
+            ("secret of one line, in parts", ["\x1b[200~ab", STALL, "c\n\n\x1b[201~", "\r"], {"secret": True}),
+        ]
+        encode = lambda step: base64.b64encode(step if isinstance(step, bytes) else step.encode()).decode()  # noqa: E731
+        shell = json.loads(self.node(r"""
+(async()=>{
+ const out=[];
+ for(const c of JSON.parse(process.argv[2])){
+  const x=make(c.extra,{state:'unknown'});
+  for(const step of c.steps){
+   if(step==='STALL')await x.stall();else if(step==='WAIT')await wait(60);else if(step==='REOPEN')x.b.enter();
+   else if(step==='QUIET'){for(let i=0;i<400&&x.b.discarding;i++)await wait(5);assert.equal(x.b.discarding,false);}
+   else{const data=Buffer.from(step,'base64');(x.b.focused?x.b.input(data):x.b.swallow(data));await new Promise(r=>setImmediate(r));}
+  }
+  await wait(20);out.push(x.all);
+ }
+ console.log(JSON.stringify(out));
+})().catch(e=>{console.error(e);process.exit(1)});
+""", json.dumps([{"steps": [s if s in (STALL, "WAIT", "REOPEN", "QUIET") else encode(s) for s in steps], "extra": extra}
+                 for _name, steps, extra in cases])))
+        for index, (name, steps, extra) in enumerate(cases):
+            with self.subTest(case=name):
+                fleet = fleet_answers(steps, secret=bool(extra.get("secret")))
+                self.assertEqual(shell[index], fleet, "the two screens send the same")
+                self.assertEqual(len(shell[index]), 1, "sent once, when Enter was pressed")
+        self.assertEqual(shell[0], ["첫 줄\n둘째 줄\n셋째 줄"])
+        self.assertEqual(shell[2], ["로그 앞"])
+        self.assertEqual(shell[4], ["부분 글"])
+        self.assertEqual(shell[9], ["k1\nk2\n"])
+        self.assertEqual(shell[10], ["token"])
+        self.assertEqual(shell[11], ["a\nb\n"])
+        self.assertEqual(shell[12], ["abc"])
+
+    def test_a_secret_takes_every_line_break_key_as_enter_and_a_pasted_key_keeps_its_lines(self):
         self.node(r"""
 (async()=>{
  for(const [name,key] of [['Ctrl+J','\n'],['Alt+Enter','\x1b\r'],['Alt+LF','\x1b\n'],['kitty Shift+Enter','\x1b[13;2u'],
@@ -123,13 +276,16 @@ class FollowupTest(unittest.TestCase):
   const x=make({secret:true});await x.send(['pw',key]);await new Promise(r=>setImmediate(r));
   assert.deepEqual(x.sent?.answers.q,[name==='\\ then Enter'?'pw\\':'pw'],name+' sends the secret');
  }
- // A pasted key of several lines keeps them; the line breaks it ends with are left out (CR, LF, CR LF alike).
+ // A pasted key of several lines keeps them and one of the line breaks it ends with (a private key needs its last one;
+ // CR, LF, CR LF alike); a one-line secret keeps none.
  {const x=make({secret:true});await x.send(['\x1b[200~-----BEGIN\r\nline1\nline2\r\n\r\n\x1b[201~']);
-  assert.deepEqual((await x.enter()).answers.q,['-----BEGIN\nline1\nline2']);}
- // Typed after the paste, the held breaks were the paste's end: they stay left out.
- {const x=make({secret:true});await x.send(['\x1b[200~k1\nk2\n\x1b[201~','3']);assert.deepEqual((await x.enter()).answers.q,['k1\nk23']);}
- // Split reads and a paste whose end mark never comes: the same.
- {const x=make({secret:true});await x.send(['\x1b[200~a\r','\nb\n']);await wait(1100);assert.deepEqual((await x.enter()).answers.q,['a\nb']);}
+  assert.deepEqual((await x.enter()).answers.q,['-----BEGIN\nline1\nline2\n']);}
+ {const x=make({secret:true});await x.send(['\x1b[200~token\r\n\x1b[201~']);assert.deepEqual((await x.enter()).answers.q,['token']);}
+ {const x=make({secret:true});await x.send(['\x1b[200~\n\n\x1b[201~']);assert.equal(x.draft(),'','line breaks alone put nothing in');}
+ // Typed after the paste: the kept break was the paste's end.
+ {const x=make({secret:true});await x.send(['\x1b[200~k1\nk2\n\x1b[201~','3']);assert.deepEqual((await x.enter()).answers.q,['k1\nk2\n3']);}
+ // Split reads, a stall, then Enter pressed: the same rule.
+ {const x=make({secret:true});await x.send(['\x1b[200~a\r','\nb\n']);await x.stall();assert.deepEqual((await x.enter()).answers.q,['a\nb\n']);}
  // Not a secret: a line-break key breaks the line and a paste goes in whole.
  {const x=make();await x.send(['a','\n','\x1b[200~b\n\x1b[201~']);assert.deepEqual((await x.enter()).answers.q,['a\nb\n']);}
 })().catch(e=>{console.error(e);process.exit(1)});

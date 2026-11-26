@@ -2182,9 +2182,11 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
 
     expected, seen = [], set()
     for native_text, markers in native_rows:
-        # 11-26: a marker line inside an answer its records carry is the person's words, not a member.
-        named = [record for delivery_id, _digest in markers for _root, record in by_id.get(delivery_id, ())]
-        markers = OPENCODE_MARKER_LINE_RE.findall(without_answer_text(native_text, named))
+        # 11-26: a marker line inside an answer its records carry is the person's words, not a member (one marker
+        # line, an ordinary delivery, holds no answer's: no answer is read for it, review 1861).
+        if native_text.count("HEARTING_RECEIPT_V1") > 1:
+            named = [record for delivery_id, _digest in markers for _root, record in by_id.get(delivery_id, ())]
+            markers = OPENCODE_MARKER_LINE_RE.findall(without_answer_text(native_text, named))
         if not markers or len({delivery_id for delivery_id, _digest in markers}) != len(markers):
             continue
         selected, identities, valid = [], [], True

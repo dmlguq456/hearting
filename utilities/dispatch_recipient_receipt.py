@@ -146,17 +146,21 @@ def bound_delivery_ids(text: str, storage_recipient: str, roots) -> list[str]:
     above, _newline, last = body.rpartition("\n")
     if not above or MARKER_LINE_RE.fullmatch(last) is None:
         return []
-    # 11-26: an answer the delivery's own records carry is the person's words; a marker line copied into it
-    # (a piece of a session record) is neither one of the delivery's markers nor a break in it.
-    named = {}
-    for line in body.split("\n"):
-        found = MARKER_LINE_RE.fullmatch(line)
-        if found and found.group(1) not in named:
-            bound = _bound_record(found.group(1), found.group(2), storage_recipient, roots)
-            if bound is not None:
-                named[found.group(1)] = bound
-    matches = [MARKER_LINE_RE.fullmatch(line) for line in without_answer_text(body, named.values()).split("\n")
-               if "HEARTING_RECEIPT_V1" in line]
+    lines = [line for line in body.split("\n") if "HEARTING_RECEIPT_V1" in line]
+    if len(lines) > 1:
+        # 11-26: an answer the delivery's own records carry is the person's words; a marker line copied into it
+        # (a piece of a session record) is neither one of the delivery's markers nor a break in it. One marker line
+        # (an ordinary delivery: the one ending it) holds no answer's, and no answer is read (review 1861).
+        named = {}
+        for line in lines:
+            found = MARKER_LINE_RE.fullmatch(line)
+            if found and found.group(1) not in named:
+                bound = _bound_record(found.group(1), found.group(2), storage_recipient, roots)
+                if bound is not None:
+                    named[found.group(1)] = bound
+        lines = [line for line in without_answer_text(body, named.values()).split("\n")
+                 if "HEARTING_RECEIPT_V1" in line]
+    matches = [MARKER_LINE_RE.fullmatch(line) for line in lines]
     if not matches or any(match is None for match in matches):
         return []
     ids = [match.group(1) for match in matches]

@@ -21,6 +21,7 @@ KEY_WORD_DELETE = _SYNTHETIC + 6  # Alt+D, Ctrl/Alt+Delete
 KEY_TEXT_START = _SYNTHETIC + 7   # Ctrl+Home
 KEY_TEXT_END = _SYNTHETIC + 8     # Ctrl+End
 KEY_ALT_OTHER = _SYNTHETIC + 9    # any other Alt combination while an answer is written: dropped
+KEY_PASTE_PART = _SYNTHETIC + 10  # what came of a paste that stalled (it goes on); its text in the second slot
 _NEWLINE_CSI = re.compile(rb"^\x1b\[(?:13;(?:[2-9]|1\d)u|27;(?:[2-9]|1\d);13~|106;5u)$")
 _TEXT_KEYS = {b"\x1b[1;3D": KEY_WORD_LEFT, b"\x1b[1;5D": KEY_WORD_LEFT,
               b"\x1b[1;3C": KEY_WORD_RIGHT, b"\x1b[1;5C": KEY_WORD_RIGHT,
@@ -30,6 +31,7 @@ _ALT_TEXT_KEYS = {ord("b"): KEY_WORD_LEFT, ord("f"): KEY_WORD_RIGHT, ord("d"): K
                   0x7f: KEY_WORD_BACK, 0x08: KEY_WORD_BACK}
 _PASTE_START, _PASTE_END = b"\x1b[200~", b"\x1b[201~"
 _PASTE_LIMIT = 65536
+# A paste whose bytes stop this long has stalled; review 1861: it is not over then (``_CursesInput._expire``).
 _PASTE_IDLE = 1.0
 # 11-26: an escape sequence inside a paste (a coloured log): `ESC [`, then anything up to its final byte, as
 # the shell's question popup reads one (it gives up after 62 bytes without a final one, those bytes dropped).
@@ -50,11 +52,13 @@ def answer_key(ch, payload=None, *, writable=False, editing=False, finding=False
 
     ``writable``: the question shown takes a written answer; ``editing``: one is being written;
     ``finding``: the model filter takes text; ``cr_enter``: Enter arrives as CR, so LF is Ctrl+J."""
-    if ch == KEY_PASTE:
+    if ch in (KEY_PASTE, KEY_PASTE_PART):
         # A paste is text only where text goes: a written answer takes it whole (its line breaks are line
-        # breaks, never Enter), the model filter as one line; anywhere else it is no key at all.
+        # breaks, never Enter), the model filter as one line; anywhere else it is no key at all. What came of a
+        # stalled paste is ``paste-part:`` (more of the same paste may come).
         text = payload if isinstance(payload, str) else ""
-        return ("text:" + text if text and writable else
+        lead = "paste-part:" if ch == KEY_PASTE_PART else "text:"
+        return (lead + text if text and writable else
                 "text:" + " ".join(text.split()) if text.strip() and finding else "")
     if ch == KEY_NEWLINE or (ch == 10 and cr_enter):
         # Alt+Enter, a reported Shift/Ctrl+Enter and Ctrl+J put a line break in a written answer; elsewhere
@@ -74,6 +78,23 @@ def paste_text(raw):
     text = raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
     return "".join(char for char in text
                    if char in "\n\t" or not (ord(char) < 32 or 0x7f <= ord(char) < 0xa0))
+
+
+def _paste_cut(raw):
+    """How much of a stalled paste goes in now: all but what may still join the bytes after it (an Esc or an escape
+    sequence not ended, a character's first bytes, the line breaks it ends with), so the parts read as the whole."""
+    cut = len(raw)
+    esc = raw.rfind(b"\x1b", 0, cut)
+    if esc >= 0:
+        whole = _PASTED_CSI.match(raw, esc)
+        if not (whole and whole.end() <= cut) and not (esc + 1 < cut and raw[esc + 1] != 0x5b):
+            cut = esc
+    lead = next((i for i in range(cut - 1, max(-1, cut - 4), -1) if raw[i] >= 0xc0), None)
+    if lead is not None and cut - lead < (2 if raw[lead] < 0xe0 else 3 if raw[lead] < 0xf0 else 4):
+        cut = lead
+    while cut and raw[cut - 1] in (10, 13):
+        cut -= 1
+    return cut
 
 
 def _prompt_button_segs(stage, key):
@@ -267,6 +288,14 @@ class _CursesInput:
         # combination is the answer's (a word key, or dropped) rather than Esc and then a key.
         self.paste = None
         self.paste_since = None
+        # Review 1861: a paste whose bytes stopped for ``_PASTE_IDLE`` has stalled (what came went in); a byte that
+        # may be a key pressed then (Esc, Enter; Ctrl+] at any time) waits to see whether more comes right after it;
+        # after a pressed key the rest of that paste is dropped (``paste_discard``) up to its end mark or a second.
+        self.paste_stalled = False
+        self.paste_key = None
+        self.paste_key_since = None
+        self.paste_discard = False
+        self.timeout_ms = 100
         self.skip_utf8 = 0
         self.alt_keys = False
         self.key_sequences = {}
@@ -443,9 +472,18 @@ class _CursesInput:
         return None
 
     def _paste_byte(self, code, now):
-        """One byte of a bracketed paste: the whole text comes as one ``KEY_PASTE`` at its end marker."""
+        """One byte of a bracketed paste: the whole text comes as one ``KEY_PASTE`` at its end marker (after what a
+        stall let in, ``KEY_PASTE_PART``)."""
         self.paste_since = now
         self.paste.append(code)
+        if self.paste_discard:
+            # The rest of a paste a pressed key ended: dropped, up to and with its end mark.
+            if self.paste.endswith(_PASTE_END):
+                self.paste, self.paste_discard = None, False
+            elif len(self.paste) > 16:
+                del self.paste[:-16]
+            return self.curses.ERR, None
+        self.paste_stalled = False
         if len(self.paste) > _PASTE_LIMIT + 16:
             del self.paste[_PASTE_LIMIT:-16]
         if self.paste.endswith(_PASTE_END):
@@ -454,14 +492,35 @@ class _CursesInput:
             return KEY_PASTE, text
         return self.curses.ERR, None
 
+    def _paste_key_pressed(self, now):
+        """A key pressed in a paste (Enter or Esc after it stalled, Ctrl+] at any time): the paste ends as what came,
+        then that key; the rest of the paste, if more comes, is dropped up to its end mark or a second with no byte."""
+        code, self.paste_key = self.paste_key, None
+        text = paste_text(bytes(self.paste)[:_PASTE_LIMIT])
+        self.paste, self.paste_since, self.paste_stalled, self.paste_discard = bytearray(), now, False, True
+        self.ready.append((code, None))
+        return KEY_PASTE, text
+
     def _expire(self, now):
         if self.paste is not None:
-            # A paste whose end marker never came ends a second after its last byte, as what came.
-            if now - self.paste_since < _PASTE_IDLE:
+            if self.paste_discard:
+                if now - self.paste_since >= _PASTE_IDLE:
+                    self.paste, self.paste_discard = None, False
                 return self.curses.ERR, None
-            text = paste_text(self.paste[:_PASTE_LIMIT])
-            self.paste = None
-            return KEY_PASTE, text
+            if self.paste_key is not None:
+                # Nothing came after it (an Esc waits its usual 25 ms): a key pressed.
+                if self.paste_key != 27 or now - self.paste_key_since >= self._ESC_DELAY:
+                    return self._paste_key_pressed(now)
+                return self.curses.ERR, None
+            if self.paste_stalled or now - self.paste_since < _PASTE_IDLE:
+                return self.curses.ERR, None
+            # 11-26 (review 1861): a paste whose bytes stop for a second (its end marker not come) has stalled, not
+            # ended: what came goes in now, and what comes after is still its text (a line break is never Enter).
+            self.paste_stalled = True
+            cut = _paste_cut(self.paste)
+            text = paste_text(bytes(self.paste[:cut])[:_PASTE_LIMIT])
+            del self.paste[:cut]
+            return (KEY_PASTE_PART, text) if text else (self.curses.ERR, None)
         if not self.pending:
             return self._ready_event()
         raw = bytes(self.pending)
@@ -487,6 +546,7 @@ class _CursesInput:
         return bool(self.pending or self.discarding_sgr or self.paste is not None)
 
     def read(self, stdscr, *, timeout_ms=100):
+        self.timeout_ms = timeout_ms
         result = self._read_one(stdscr)
         if result[0] != self.curses.ERR or not self._undecided():
             return result
@@ -505,6 +565,9 @@ class _CursesInput:
                 result = self._read_one(stdscr, code)
                 if result[0] != self.curses.ERR or not self._undecided():
                     break
+            if result[0] == self.curses.ERR and self.paste_key not in (None, 27):
+                # Nothing came right after it: a key pressed, not the paste's byte (an Esc waits its 25 ms).
+                return self._paste_key_pressed(time.monotonic())
             return result
         finally:
             stdscr.timeout(timeout_ms)
@@ -512,6 +575,7 @@ class _CursesInput:
     def _read_one(self, stdscr, code=None):
         if self.ready:
             return self._ready_event()
+        first = code is None
         if code is None:
             code = stdscr.getch()
         now = time.monotonic()
@@ -520,6 +584,18 @@ class _CursesInput:
                 return self._expire(now)
             if code < 0 or code > 255:
                 return code, None
+            if self.paste_key is not None:
+                if self.paste_key == 27 and now - self.paste_key_since >= self._ESC_DELAY:
+                    result = self._paste_key_pressed(now)
+                    self._paste_byte(code, now)
+                    return result
+                # What came right after it: it was the paste's own byte.
+                held, self.paste_key = self.paste_key, None
+                self._paste_byte(held, now)
+            elif (first and not self.paste_discard
+                  and (code == 29 or self.paste_stalled and code in (13, 27))):
+                self.paste_key, self.paste_key_since = code, now
+                return self.curses.ERR, None
             return self._paste_byte(code, now)
         if self.skip_utf8 and 0x80 <= code < 0xc0:
             self.skip_utf8 -= 1
