@@ -236,6 +236,7 @@ def _opencode_rejected() -> frozenset:
         import opencode_runtime
     except ImportError:  # package import in focused unit tests
         from utilities import opencode_runtime
+    _check_usage_cache(usage_cache)
     found = set()
     for row in usage_cache.unavailable_provider_rows("opencode"):
         name = f"{row['provider']}/{row['model']}"
@@ -249,6 +250,34 @@ def _opencode_rejected() -> frozenset:
 
 class RecordUnreadable(Exception):
     """The record exists but cannot be read (damaged, not ours, or a later version's)."""
+
+
+def record_path(harness: str) -> str:
+    """The file that holds this harness's refusals (OpenCode's is its usage cache)."""
+    if harness == "opencode":
+        tools = str(Path(__file__).resolve().parents[1] / "tools")
+        if tools not in sys.path:
+            sys.path.insert(0, tools)
+        from fleet.collectors import usage_cache
+        return usage_cache._path("opencode")
+    return _path(harness)
+
+
+def _check_usage_cache(usage_cache) -> None:
+    """The usage cache reader gives no rows for a cache that is absent and for one that is there
+    and cannot be read alike; here only an absent file is "no refusal". Only this check is added:
+    the reader and its other callers are as they were."""
+    path = usage_cache._path("opencode")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            item = json.load(fh)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError, TypeError) as exc:
+        raise RecordUnreadable(f"opencode: {type(exc).__name__}") from exc
+    if (not isinstance(item, dict) or item.get("schema_version") != usage_cache.SCHEMA_VERSION
+            or item.get("harness") != "opencode" or not isinstance(item.get("providers"), dict)):
+        raise RecordUnreadable("opencode: not a cache of this version")
 
 
 def _load_checked(harness: str) -> dict:

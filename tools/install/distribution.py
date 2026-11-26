@@ -5567,16 +5567,15 @@ def _list_refresh_begin(harnesses: Iterable[str]):
     """Have the installed CLIs write their model lists once for this whole update: the activation
     of the new release, this update's own pass and the agent-definition refresh each read the
     list, and a CLI that ends late or never would otherwise be waited for in each of them. The
-    environment (which the child activations inherit) then says the lists were asked for.
-    Never raises; `_list_refresh_end` puts the environment back."""
+    environment (which the child activations inherit) then says, with this update's pid, which
+    lists were asked for (and the CLI's version, so it is asked for once). Never raises;
+    `_list_refresh_end` puts the environment back."""
     try:
         utilities = str(Path(__file__).resolve().parents[2] / "utilities")
         if utilities not in sys.path:
             sys.path.insert(0, utilities)
         import model_follow
-        chosen = list(harnesses)
-        model_follow.refresh_lists_once(chosen)
-        return model_follow.list_refresh_done(chosen)
+        return model_follow.list_refresh_done(model_follow.refresh_lists_once(list(harnesses)))
     except Exception:
         return None
 

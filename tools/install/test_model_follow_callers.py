@@ -422,7 +422,7 @@ class OneRefreshPerUpdateTests(AnotherListThroughCallersTests):
         return len(path.read_text().split()) if path.exists() else 0
 
     def test_before_each_pass_asked_again(self):  # the old behaviour, by leaving the new step out
-        with mock.patch.object(model_follow, "refresh_lists_once"), \
+        with mock.patch.object(model_follow, "refresh_lists_once", return_value={}), \
                 mock.patch.object(model_follow, "list_refresh_done", return_value={"before": None}):
             self.update_with_an_activation()
         self.assertEqual(self.asked(), 2)  # the activation's pass and update's own
@@ -440,10 +440,47 @@ class OneRefreshPerUpdateTests(AnotherListThroughCallersTests):
         self.assertEqual(self.asked(), 2)  # outside an update a pass still asks for its own
 
     def test_a_child_that_inherits_the_value_does_not_ask(self):
-        with mock.patch.dict(os.environ, {model_follow.REFRESHED_ENV: "codex"}):
+        with mock.patch.dict(os.environ, {model_follow.REFRESHED_ENV: f"{os.getpid()}:codex"}):
             self.assertEqual(self.bounded(lambda: runtime_activation._follow_models("codex", ROOT, "global")),
                              [self.LINE])
         self.assertEqual(self.asked(), 0)
+
+
+    def dead_pid(self):
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        return proc.pid
+
+    def test_a_value_left_by_an_update_that_has_ended_is_no_value(self):
+        for name, value in {"dead pid": f"{self.dead_pid()}:codex", "no pid": "codex", "pid not a number": "x:codex",
+                            "empty": ""}.items():
+            with self.subTest(value=name), mock.patch.dict(os.environ, {model_follow.REFRESHED_ENV: value}):
+                (self.root / "refreshed").unlink(missing_ok=True)
+                self.update_with_an_activation()
+                self.assertEqual(self.asked(), 1)  # this update asked once for itself
+        with mock.patch.dict(os.environ, {model_follow.REFRESHED_ENV: f"{self.dead_pid()}:codex"}):
+            (self.root / "refreshed").unlink(missing_ok=True)
+            self.bounded(lambda: runtime_activation._follow_models("codex", ROOT, "global"))
+            self.assertEqual(self.asked(), 1)  # a pass that no live update stands behind asks as ever
+
+    def test_the_value_does_not_carry_an_earlier_one_and_names_only_the_judged_harnesses(self):
+        inside = []
+        with mock.patch.dict(os.environ, {model_follow.REFRESHED_ENV: f"{os.getpid()}:claude@1.2.3,codex@9.9"}), \
+                mock.patch.object(distribution, "_update_release",
+                                  side_effect=lambda *a, **k: inside.append(os.environ[model_follow.REFRESHED_ENV]) or {}):
+            distribution.update(runtimes=["codex"])
+        self.assertEqual(inside, [f"{os.getpid()}:codex"])   # this update's own, nothing of the earlier value
+        with mock.patch.object(model_follow, "_own_home", side_effect=RuntimeError("fixture")):
+            self.assertEqual(model_follow.refresh_lists_once(["codex"]), {})   # raised: not judged, not in the value
+        self.assertEqual(model_follow.list_refresh_done({}), {"before": None})
+        self.assertNotIn(model_follow.REFRESHED_ENV, os.environ)
+
+    def test_the_cli_version_the_update_looked_at_is_not_asked_for_again(self):
+        versions = []
+        real = model_follow.installed_cli
+        with mock.patch.object(model_follow, "installed_cli", side_effect=lambda h: versions.append(h) or real(h)):
+            self.update_with_an_activation()
+        self.assertEqual(versions, ["codex"])  # once for the pre-step, the activation's pass and update's own reuse it
 
 
 class UnreadableRecordTests(Fixture):
@@ -484,10 +521,34 @@ class UnreadableRecordTests(Fixture):
                                  ("skipped", "record-unreadable", [], []))
                 self.assertEqual((self.table("codex").read_bytes(), self.baks("codex")), (before, []))
                 self.assertEqual(model_follow.lines([result]),
-                                 ["model follow: codex not followed (the record of rejected models cannot be read)"])
+                                 ["model follow: codex not followed (the record of rejected models cannot be read: "
+                                  f"{self.record_path()})"])
                 view = model_follow.fleet_view(["codex"])[0]
                 self.assertEqual({c["followable"] for c in view["cells"]}, {None})
                 self.assertEqual([c["next"] for c in view["cells"]], [None] * len(view["cells"]))
+
+    def test_opencode_is_read_the_same_way_its_usage_cache_being_the_record(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from fleet.collectors import usage_cache
+        import model_outcome_record as M
+        path = Path(usage_cache._path("opencode"))
+        self.assertEqual(M.rejected_models("opencode"), frozenset())  # no cache: nothing refused
+        path.parent.mkdir(parents=True, exist_ok=True)
+        before = self.table("opencode").read_bytes()
+        for name, data in {"not json": "{not json", "not ours": json.dumps(
+                {"schema_version": 1, "harness": "claude", "providers": {}}), "another schema": '{"schema_version": 99}',
+                           "providers not a dict": '{"schema_version": 1, "harness": "opencode", "providers": []}'}.items():
+            with self.subTest(record=name):
+                path.write_text(data)
+                with self.assertRaises(M.RecordUnreadable):
+                    M.rejected_models("opencode")
+                result = model_follow.apply_harness("opencode")
+                self.assertEqual((result["status"], result["reason"], result["written"], result["reverted"]),
+                                 ("skipped", "record-unreadable", [], []))
+                self.assertEqual((self.table("opencode").read_bytes(), self.baks("opencode")), (before, []))
+                self.assertEqual(model_follow.lines([result]),
+                                 ["model follow: opencode not followed (the record of rejected models cannot be "
+                                  f"read: {path})"])
 
     def test_a_readable_record_is_read_as_before(self):
         import model_outcome_record as M

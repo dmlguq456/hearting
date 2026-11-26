@@ -405,39 +405,89 @@ def _refresh(harness, observe, wait) -> bool:
     return clean and proc.returncode == 0
 
 
+def _shared() -> dict:
+    """What the running update said to its passes (`REFRESHED_ENV`): `{harness: suffix}` for each
+    harness whose list it asked about already, `suffix` being "" (no version asked), "-" (the CLI's
+    version asked and not known) or the version the CLI said. The value is `<pid>:<harness>[@<suffix>],...`
+    and is believed only while that pid is alive: a value an update left in a process that outlived it
+    (or typed by hand in any other form) is no value."""
+    pid, _sep, names = os.environ.get(REFRESHED_ENV, "").partition(":")
+    try:
+        number = int(pid)
+        if number <= 0:
+            return {}
+        os.kill(number, 0)
+    except PermissionError:  # alive, owned by another user
+        pass
+    except (ValueError, OSError):
+        return {}
+    found = {}
+    for item in names.split(","):
+        name, _at, suffix = item.partition("@")
+        if name:
+            found[name] = suffix
+    return found
+
+
 def _refreshed(harness) -> bool:
-    return harness in os.environ.get(REFRESHED_ENV, "").split(",")
+    return harness in _shared()
+
+
+def _cli_of_this_update(harness):
+    """The CLI's `(version, path)` for a pass: what the update's first look at it said (one
+    `--version` per update), else the CLI is asked as always."""
+    suffix = _shared().get(harness)
+    if suffix:
+        path = shutil.which(harness)
+        return (None if suffix == "-" else _numbers(suffix)), path
+    return installed_cli(harness)
 
 
 def refresh_lists_once(harnesses: Iterable[str], *, runtime: str | Path | None = None,
                        source_root: str | Path | None = None, read_catalog: Callable | None = None,
-                       probe: Callable | None = None, refresh_wait: float = REFRESH_WAIT) -> None:
+                       probe: Callable | None = None, refresh_wait: float = REFRESH_WAIT) -> dict:
     """Ask the installed CLI to write its list again for each harness of `harnesses` whose table
     is the user's and whose list another CLI version wrote; at most once per harness. Never
-    raises. `update` calls it once before its first pass and then sets `REFRESHED_ENV`
-    (see `list_refresh_done`), so a CLI that ends late or never is waited for once per update."""
+    raises. `update` calls it once before its first pass and then sets `REFRESHED_ENV` from the
+    result (`list_refresh_done`), so a CLI that ends late or never is waited for once per update.
+
+    Returns `{harness: suffix}` for the harnesses it came to a judgment on (see `_shared`); one
+    that raised is not in it, and its passes ask as they always did."""
+    done = {}
     for harness in harnesses:
         try:
             if harness not in _REFRESH or _refreshed(harness):
+                done[harness] = ""
                 continue
             home = _own_home(harness, runtime)
             _values, receipt = model_config.resolve_config(harness, runtime=home, source_root=source_root)
-            if receipt.source != "user":
-                continue
-            catalog = _read_catalog(harness, read_catalog)
-            observe = _observer(harness, probe or installed_cli)
-            if catalog is not None and _other_cli(catalog, observe):
-                _refresh(harness, observe, refresh_wait)
+            suffix = ""
+            if receipt.source == "user":
+                catalog = _read_catalog(harness, read_catalog)
+                observe = _observer(harness, probe or _cli_of_this_update)
+                if catalog is not None:
+                    if any(row.get("min_cli") for row in catalog.rows) or getattr(catalog, "client_version", None):
+                        have = observe()[0]  # the one look at the CLI's version this update takes
+                        suffix = "-" if have is None else ".".join(map(str, have))
+                    if _other_cli(catalog, observe):
+                        _refresh(harness, observe, refresh_wait)
+            done[harness] = suffix
         except Exception:  # noqa: BLE001 - a list that is not refreshed is the answer, never an error
             pass
+    return done
 
 
-def list_refresh_done(harnesses: Iterable[str]) -> dict:
-    """The environment value that says `harnesses` had their list asked for already: the old
-    value of `REFRESHED_ENV` is returned for the caller to put back (`None` when it was unset)."""
+def list_refresh_done(done: Mapping) -> dict:
+    """Say, for this update's passes and the activations it starts (through the environment), that
+    the lists of `done` (the result of `refresh_lists_once`) were asked about. The value carries
+    this process's pid (the update's own); nothing of an earlier value is kept. Returns what
+    `list_refresh_restore` needs to put the old value back."""
     before = os.environ.get(REFRESHED_ENV)
-    kept = [name for name in (before or "").split(",") if name]
-    os.environ[REFRESHED_ENV] = ",".join(dict.fromkeys([*kept, *harnesses]))
+    names = ",".join(name + (f"@{suffix}" if suffix else "") for name, suffix in done.items())
+    if names:
+        os.environ[REFRESHED_ENV] = f"{os.getpid()}:{names}"
+    else:
+        os.environ.pop(REFRESHED_ENV, None)
     return {"before": before}
 
 
@@ -739,6 +789,17 @@ def _rejected(harness: str) -> frozenset | None:
         return None
 
 
+def _record_path(harness: str) -> str:
+    try:
+        import model_outcome_record
+    except ImportError:  # package import in focused unit tests
+        from utilities import model_outcome_record
+    try:
+        return model_outcome_record.record_path(harness)
+    except Exception:  # noqa: BLE001 - the line is then said without the path
+        return ""
+
+
 def _observer(harness, probe):
     seen = {}
 
@@ -820,7 +881,7 @@ def survey_harness(harness: str, *, source_root: str | Path | None = None,
             catalog = _read_catalog(harness, read_catalog)
         except Exception:  # a list that cannot be read: the table's own states are still shown
             catalog = None
-        observe = _observer(harness, probe or installed_cli)
+        observe = _observer(harness, probe or _cli_of_this_update)
         # A list another CLI version wrote is no list of the installed CLI: its cells are not known.
         other = _other_cli(catalog, observe) if catalog else None
         rows = catalog.rows if catalog and not other else None
@@ -911,13 +972,13 @@ def apply_harness(harness: str, *, source_root: str | Path | None = None,
             return {**result, "reason": "no-user-file"}
         refused = _rejected(harness) if rejected is None else frozenset(rejected)
         if refused is None:  # the record cannot be read: it may hold a refusal, so nothing is written
-            return {**result, "reason": "record-unreadable"}
+            return {**result, "reason": "record-unreadable", "record": _record_path(harness)}
         catalog = None
         try:
             catalog = _read_catalog(harness, read_catalog)
         except Exception:
             catalog = None
-        observe = _observer(harness, probe or installed_cli)
+        observe = _observer(harness, probe or _cli_of_this_update)
         if catalog is not None and (any(row.get("min_cli") for row in catalog.rows)
                                     or getattr(catalog, "client_version", None)):
             observe()  # the CLI is asked before the table is locked, never under the lock
@@ -1146,7 +1207,7 @@ def lines(results: Iterable[Mapping]) -> list[str]:
             out.append(f"model follow: {harness} table not updated ({result['error']})")
         if result.get("reason") == "record-unreadable":
             out.append(f"model follow: {harness} not followed (the record of rejected models "
-                       "cannot be read)")
+                       "cannot be read" + (f": {result['record']})" if result.get("record") else ")"))
         if result.get("read_only"):
             out.append(f"model follow: {harness} table is read-only · not updated")
         for entry in result.get("entries", ()):
