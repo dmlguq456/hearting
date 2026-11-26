@@ -675,6 +675,9 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
     overlay = state.question_overlay if isinstance(state.question_overlay, Mapping) else {}
     if state.view == "QUESTIONS" and state.scope == "-" and overlay.get("editing"):
         from .state import _question_text_draft
+        # 11-26: while an answer is written Enter sends it and Ctrl+J puts a line break in it.
+        legend = [item for key, label in legend
+                  for item in ((("⏎", "send"), ("Ctrl+J", "newline")) if key == "⏎" else ((key, label),))]
         if _question_text_draft(overlay):
             # 11-22: while an answer with text is typed these keys move inside it, so the legend says so
             # (Tab still switches the view).
