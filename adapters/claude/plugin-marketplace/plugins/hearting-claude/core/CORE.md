@@ -369,8 +369,8 @@ is support material that is kept but not listed. When `finalize` picks a
 primary artifact itself, it skips any path through a top-level `C-INT` name
 that is not a cycle bucket (`_internal/`, `shards/`) while the cycle holds
 another file, then takes a project status document (`현황.md`, then `STATUS.md`)
-directly under `artifacts/`, so Cairn's status row and Fleet's project line read
-the same file, then the first `PRIMARY_CANDIDATES` name (including nested
+directly under `artifacts/`, the file Fleet's project line reads, then the
+first `PRIMARY_CANDIDATES` name (including nested
 `report.html`; a copy under `dev_logs/`, `test_logs/` or `evidence/` comes after
 the same name elsewhere), then a Markdown or HTML document, then the first
 remaining file; an explicit `--primary` is kept as given. A non-support row for a
