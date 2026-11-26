@@ -104,15 +104,31 @@ def _started(harness, sid, started=None):
     return time.time()
 
 
+def _parked(session_registry):
+    """``{viewer key: held key}`` for every window whose conversation was sent to the background.
+
+    The one judgment (``session_registry.parked_links``, read live): while it holds, the window's
+    old id is not an observation of a session, and the held session continues its number."""
+    try:
+        links = session_registry.parked_links("claude")
+    except Exception:
+        return {}
+    return {("claude", viewer): ("claude", link["session_id"])
+            for viewer, link in (links.get("successor") or {}).items()}
+
+
 def _inventory(sessions):
     from .session_handle import _claude_tag_candidate
     from .collectors.herdr import list_agents
     from . import session_registry
     from .collectors.procscan import read_proc_start
     live = {}
+    viewers = _parked(session_registry)
     for sess in sessions:
         harness, sid = sess.harness, getattr(sess, "session_id", None)
         if harness not in {"claude", "codex", "opencode"} or not isinstance(sid, str) or not sid:
+            continue
+        if (harness, sid) in viewers:
             continue
         row = {"harness": harness, "session_id": sid,
                "started_at": _started(harness, sid, getattr(sess, "started_at", None)),
@@ -137,7 +153,7 @@ def _inventory(sessions):
             if record.get("procStart") is not None and str(record["procStart"]) != str(start):
                 continue
             sid = record.get("sessionId")
-            if not isinstance(sid, str) or not sid:
+            if not isinstance(sid, str) or not sid or (harness, sid) in viewers:
                 continue
             row = live.setdefault((harness, sid), {"harness": harness, "session_id": sid,
                                   "started_at": _started(harness, sid, session_registry._ms_to_sec(record.get("startedAt")))})
@@ -150,7 +166,8 @@ def _inventory(sessions):
         if not isinstance(identity, dict) or identity.get("kind") != "id":
             continue
         harness, sid = agent.get("agent"), identity.get("value")
-        if harness not in {"claude", "codex", "opencode"} or not isinstance(sid, str) or not sid:
+        if (harness not in {"claude", "codex", "opencode"} or not isinstance(sid, str) or not sid
+                or (harness, sid) in viewers):
             continue
         row = live.setdefault((harness, sid), {"harness": harness, "session_id": sid,
                               "started_at": _started(harness, sid)})
@@ -197,7 +214,12 @@ def assign(sessions):
         except FileNotFoundError:
             baseline, stamp = {}, None
         live, agents = _inventory(sessions)
-        return _assign(live, agents, baseline=baseline, baseline_stamp=stamp)
+        # Read again here, not passed through: a link that changed in between only keeps a
+        # number where it was (the edge needs the old id unobserved), never moves a wrong one.
+        from . import session_registry
+        viewers = _parked(session_registry)
+        return _assign(live, agents, baseline=baseline, baseline_stamp=stamp,
+                       lineage={held: viewer for viewer, held in viewers.items()}, viewers=viewers)
     except (OSError, ValueError, TypeError, ImportError):
         return []
 
@@ -272,8 +294,12 @@ def _continuations(live, observed, lineage):
     return edges
 
 
-def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=None, lineage=None):
-    """Reserve against the latest snapshot and persist atomically under one lock."""
+def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=None, lineage=None,
+            viewers=None):
+    """Reserve against the latest snapshot and persist atomically under one lock.
+
+    The agents returned are the panes whose header shows an assigned number: a pane
+    of a window in ``viewers`` ({viewer key: held key}) shows the held session's."""
     from .session_handle import minted_tag
     observed = set(live)
     path = _path()
@@ -387,8 +413,12 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
                     if os.path.exists(temp):
                         os.unlink(temp)
         assigned = {(row["harness"], row["session_id"]) for row in rows}
-        return [agent for agent in agents or []
-                if (agent.get("agent"), (agent.get("agent_session") or {}).get("value")) in assigned]
+        viewers = viewers or {}
+
+        def shown(agent):
+            key = (agent.get("agent"), (agent.get("agent_session") or {}).get("value"))
+            return viewers.get(key, key)
+        return [agent for agent in agents or [] if shown(agent) in assigned]
     except (OSError, ValueError, TypeError, ImportError):
         return []  # observation must not block any session or consumer
 

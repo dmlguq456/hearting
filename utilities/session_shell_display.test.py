@@ -50,6 +50,16 @@ class WrappedDisplayTest(unittest.TestCase):
                 self.assertEqual(record['session_id'],'synthetic-native-session')
                 self.assertEqual('\n'.join(record['lines']),line)
 
+    def test_the_row_outside_the_shell_is_the_same_formula(self):
+        # A conversation sent to the background goes on in its own process outside the shell
+        # (11-18 diagnosis F5): the row it paints and the shell's row read one formula.
+        folder=lambda text:re.sub(r'shell-native-line-[^ /]+','shell-native-line-*',text)
+        for percentage in (37,36.5,0,None):
+            with self.subTest(percentage=percentage):
+                outside,inside=self.statusline(False,percentage),self.statusline(True,percentage)
+                self.assertEqual(folder(outside),folder(inside))
+                self.assertIn('Opus',outside);self.assertIn('7d 42%',outside);self.assertIn('◑',outside)
+
     def test_the_native_row_stays_complete_even_beside_a_stale_panel_report(self):
         # A panel report left by an earlier host (painted=true) must not shrink
         # the callback: if the panel is gone, every value is already here.

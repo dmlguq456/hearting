@@ -185,6 +185,8 @@ def session_aliases(harness, pid, *, argv=None):
 # that reads them, and any change of shape falls to "not linked" (``None``). Replace it with
 # an official signal when Claude Code offers one. The link is never stored: every call
 # decides it again from the live processes, so it ends the moment either one does.
+# Every reader asks here: the shell panel and peer delivery (:func:`parked_successor`), Fleet's
+# row, number and pane header (:func:`parked_links`), and a pane proof (:func:`holds_parked_job`).
 _MAX_RECORDS = 512
 
 
@@ -227,6 +229,15 @@ def _live_claude_records(home):
 
 def _usable_sid(value):
     return value.lower() if isinstance(value, str) and _SID_RE.fullmatch(value) else None
+
+
+def holds_parked_job(record):
+    """True when a process record says its window holds a backgrounded job (one fact only).
+
+    Enough to stop treating that window's ``sessionId`` as the conversation it shows (a pane
+    proof withdraws on doubt); never enough to link it to another session — that needs both facts
+    (:func:`parked_successor`). Any value counts here: this side only ever withdraws."""
+    return isinstance(record, dict) and bool(record.get("parkedJobId"))
 
 
 def _parked_from_viewer(records, viewer_sid, viewer_pid, viewer_start):

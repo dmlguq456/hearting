@@ -419,14 +419,18 @@ fi
 
 dir=$(basename "$S_CWD")
 
-# A wrapped Claude paints every field with the same common formatter as the panel.
-# The shell blanks this exact output only while its visible panel paints them.
-if [ -n "${HEARTING_SHELL_SOCKET:-}" ]; then
-  line_helper="$AGENT_HOME/tools/fleet/session_line.py"
-  [ -f "$line_helper" ] || line_helper="$(dirname "${BASH_SOURCE[0]}")/../../tools/fleet/session_line.py"
-  export S_SESSION_DISPLAY git_repo git_branch git_operation git_merged git_branch_done
-  export git_extra_worktrees git_ahead git_behind git_dirty git_observation git_observed_label git_jobs
-  if [ -f "$line_helper" ] && printf '%s' "$input" | HEARTING_STATUS_DISPLAY_PID="$display_pid" python3 -c '
+# Every Claude row is painted by the same common formatter as the panel and Fleet, in the
+# shell or not (a plain terminal, or a conversation sent to the background, which Claude runs
+# in its own process outside the shell): one formula, so the row a window shows and the panel's
+# values agree. In the shell the output is also recorded for its exact-match blanking (the
+# shell blanks it only while its visible panel paints the fields) and the display facts kept.
+line_helper="$AGENT_HOME/tools/fleet/session_line.py"
+[ -f "$line_helper" ] || line_helper="$(dirname "${BASH_SOURCE[0]}")/../../tools/fleet/session_line.py"
+export S_SESSION_DISPLAY git_repo git_branch git_operation git_merged git_branch_done
+export git_extra_worktrees git_ahead git_behind git_dirty git_observation git_observed_label git_jobs
+common_line=""
+if [ -f "$line_helper" ] && [ -n "${HEARTING_SHELL_SOCKET:-}" ]; then
+  if printf '%s' "$input" | HEARTING_STATUS_DISPLAY_PID="$display_pid" python3 -c '
 import json, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]).resolve().parents[1]))
@@ -438,8 +442,18 @@ print(claude_native_statusline(callback, os.environ))
 ' "$line_helper"; then
     exit 0
   fi
-  # A missing/broken optional formatter keeps the existing native rendering.
+elif [ -f "$line_helper" ] && [ -n "$S_SID" ]; then
+  # Outside the shell the running jobs keep their own `>_ running:` row below the common line.
+  # A callback without a session id reads no session badges (as before), so it keeps the fallback.
+  common_line=$(printf '%s' "$input" | git_jobs= HEARTING_STATUS_DISPLAY_PID="$display_pid" python3 -c '
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).resolve().parents[1]))
+from fleet.session_line import claude_native_statusline
+print(claude_native_statusline(json.load(sys.stdin), os.environ))
+' "$line_helper" 2>/dev/null) || common_line=""
 fi
+# A missing/broken optional formatter keeps the existing native rendering below.
 
 # ANSI 색 + 퍼센트 색 헬퍼 (녹 <50 / 황 <80 / 적 ≥80)
 DIM=$'\033[2m'; CYAN=$'\033[36m'; YEL=$'\033[33m'; GRN=$'\033[32m'; RED=$'\033[31m'; MAG=$'\033[35m'; RST=$'\033[0m'
@@ -498,17 +512,20 @@ if [ -n "$S_SID" ] && command -v python3 >/dev/null 2>&1; then
     wait_helper="$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")/../../utilities/human_wait_state.py"
   fi
   if [ -f "$wait_helper" ]; then
-    wait_display=$(python3 "$wait_helper" --statusline claude "$S_SID" 2>/dev/null || true)
-    wait_counts="${wait_display%%$'\n'*}"
-    route_label="${wait_display#*$'\n'}"
-    [ "$route_label" = "$wait_display" ] && route_label=""
-    set -- $wait_counts
-    if [ "$#" -eq 2 ] && [ "${2:-0}" -gt 0 ] 2>/dev/null; then
-      wait_total="$1"
-      [ "$wait_total" = "-1" ] && wait_total="?"
-      wseg="${RED}${S_WAIT_WORD:-◑답 대기} ${wait_total}${RST}"
+    # The common row above already carries these badges; only the fallback reads them here.
+    if [ -z "$common_line" ]; then
+      wait_display=$(python3 "$wait_helper" --statusline claude "$S_SID" 2>/dev/null || true)
+      wait_counts="${wait_display%%$'\n'*}"
+      route_label="${wait_display#*$'\n'}"
+      [ "$route_label" = "$wait_display" ] && route_label=""
+      set -- $wait_counts
+      if [ "$#" -eq 2 ] && [ "${2:-0}" -gt 0 ] 2>/dev/null; then
+        wait_total="$1"
+        [ "$wait_total" = "-1" ] && wait_total="?"
+        wseg="${RED}${S_WAIT_WORD:-◑답 대기} ${wait_total}${RST}"
+      fi
+      [ -z "$route_label" ] || rseg="${YEL}${route_label}${RST}"
     fi
-    [ -z "$route_label" ] || rseg="${YEL}${route_label}${RST}"
     # A session-tidy result line (a continue that was not sent) otherwise waits for the
     # next hook, which in a cleared window is the person's next input. Display only.
     tidy_notice=$(python3 - "$(dirname "$wait_helper")" "$S_SID" <<'PY' 2>/dev/null || true
@@ -559,6 +576,8 @@ for s in "$mseg" "$cseg" "$wseg" "$rseg" "${u# }"; do [ -n "$s" ] && segs_arr+=(
 # join with 세로선 파티션
 out=""; sep=" ${DIM}│${RST} "
 for s in "${segs_arr[@]}"; do [ -z "$out" ] && out="$s" || out="${out}${sep}${s}"; done
+# The common row replaces this fallback rendering of the first row whenever it painted.
+[ -n "$common_line" ] && out="$common_line"
 [ -n "${jobs_lbl:-}" ] && out="${out}
 ${GRN}>_${RST}${DIM} running:${RST} ${jobs_lbl}"
 [ -n "${tidy_notice:-}" ] && out="${out}
