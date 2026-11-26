@@ -67,8 +67,8 @@ person or a frame already chose, using `--shape staged --capability
 Before unapproved material work, present the §0.4 intent card (진행 / 수정 /
 중단). Peer requests need only compose's `[경로]` line and scope, except for
 destructive or external-facing work. To hand another agent a read-only job, open a unit route:
-`--unit qa/code-review` keeps its report, `--unit general/explore --ephemeral` returns
-a lookup and keeps no record (§0.2.1).
+a short check or a lookup keeps no record (`--unit editorial/review --ephemeral`, `--unit general/explore --ephemeral`);
+a review whose verdict and evidence need keeping keeps its report (no `--ephemeral`, or `audit`; §0.2.1).
 
 ## Following the runtime
 

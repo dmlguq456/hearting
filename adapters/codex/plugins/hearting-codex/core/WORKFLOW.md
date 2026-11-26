@@ -340,7 +340,7 @@ its task gives, and cannot close any of them itself), or omit `--shape` and let 
 `staged` when the size of the work calls for stages (`staged` is chosen for size, not to
 obtain a review where the kind declares a one-shot review; where it declares none, work that
 needs an independent review opens `staged`). The session checks a direct change itself; a second look it
-wants from another worker is a unit route (below).
+wants from another worker is a short check that keeps no record (below).
 
 | Main decision | Command | Result |
 |---|---|---|
@@ -351,11 +351,14 @@ wants from another worker is a unit route (below).
 | Other new work (more than one reading is plausible) | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
 
 Handing one read-only job to another worker opens that unit as a route of its own, with no owner
-(decision 2026-11-17: every call to another agent is a route, and one that needs no record keeps none).
-A judgment, such as a review, keeps its report: `compose --start --unit qa/code-review --prompt-file <brief>`.
-Gathering material, such as a lookup or many files to read, keeps none: `compose --start --unit general/explore
---ephemeral --prompt-file <brief>` writes nothing to the artifact folder or campaign records and brings the answer
-back in the notice (`stages --capability unit` lists the units). Its one worker starts with the brief, and its end closes
+(decisions 2026-11-17 and 2026-11-26: every call to another agent is a route, and one that needs no record keeps none).
+A short check (a sentence, a term, whether a bounded finding was applied, a second look at a direct change) or
+gathering material (a lookup, many files to read) keeps none: `compose --start --unit editorial/review --ephemeral
+--prompt-file <brief>` (`qa/code-review` for code, `general/explore` for a lookup) writes nothing to the artifact folder
+or campaign records and brings the answer back in the notice (`stages --capability unit` lists the units). A review
+whose verdict and evidence need keeping (an independent judgment, evidence read later) keeps its report: the same
+command without `--ephemeral`, or `audit`. After one revision, that review is one request naming every section it
+checks (`capabilities/audit.md`). A unit route's one worker starts with the brief, and its end closes
 the route and returns the sealed summary to the session that opened it; a worker opens one the same way (`core/OPERATIONS.md` §5.10c). A unit route has no intensity
 (one unit does one job and nothing checks it; `core/CONVENTIONS.md` §1). This adds a
 way to start; it does not change the choices above. `--prompt-file -` reads the brief
