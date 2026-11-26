@@ -596,7 +596,13 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
             closing_boundaries = set(terminal_ids)
             owner_id, suffix = "owner-close", 1
             occupied = {node["id"] for node in nodes} | {out for node in nodes for out in node["outputs"]}
-            while owner_id in occupied or owner_id + ".md" in occupied:
+            # A literal-anchor kind (design, spec) spells its bucket in every write scope:
+            # the summary sits at each anchor's root, the first being the output.
+            literal_roots = scope.get("cycle_anchors") if scope.get("anchor_mode") == "literal" else None
+
+            def closing(name, _roots=tuple(literal_roots or ())):
+                return [f"{root}/{name}.md" for root in _roots] or [name + ".md"]
+            while owner_id in occupied or set(closing(owner_id)) & occupied:
                 suffix += 1
                 owner_id = f"owner-close-{suffix}"
             terminals = [node for node in nodes if node["id"] in terminal_ids]
@@ -605,7 +611,7 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
                 "depends_on": [node["id"] for node in terminals], "role": "deep orchestrator",
                 "inputs": list(dict.fromkeys(item for node in terminals
                                              for item in node["inputs"] + node["outputs"])),
-                "outputs": [owner_id + ".md"], "write_scope": [owner_id + ".md"],
+                "outputs": closing(owner_id)[:1], "write_scope": closing(owner_id),
                 "resource_class": "normal", "completion_gate": "compose-owner-close",
                 "dispatch_depth": 1, "model_profile": registry["owner_profile_by_intensity"]["standard"],
                 "fallback_hops": ["same-harness-headless", "cross-harness-headless", "inline"],
