@@ -1757,11 +1757,21 @@ function rawRelay() {
   table=null;heldStop();
   clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);frameTimer=projectionTimer=beatTimer=undefined;
   mouseInput?.flush();
+  // 11-26: the outer terminal goes back to the native's own modes. What the host turned on for itself (bracketed
+  // paste while the question popup had the keys, the panel's mouse) goes off; what the native asked for stays.
+  let own='';
+  try{
+    const m=terminal.modes,mouse=({x10:9,vt200:1000,drag:1002,any:1003})[m.mouseTrackingMode];
+    const modes=new Map([[2004,m.bracketedPasteMode],[1,m.applicationCursorKeysMode],
+      ...[9,1000,1002,1003].map(n=>[n,n===mouse]),[1006,!!mouse],[1004,m.sendFocusMode]]);
+    for(const enabled of [false,true])for(const [mode,value] of modes)
+      if(!!value===enabled&&paintedModes.has(mode)&&paintedModes.get(mode)!==enabled){own+=`\x1b[?${mode}${enabled?'h':'l'}`;paintedModes.set(mode,enabled);}
+  }catch{}
   try{terminal.dispose();}catch{}
   for(const vt of displayVTs)try{vt.dispose();}catch{}
   displayVTs.clear();
   for(const row of watchers.values())row.watch.close();watchers.clear();
-  try{emit('\x1b[0m\x1b[?25h\x1b[2J\x1b[H');}catch{}
+  try{emit('\x1b[0m'+own+'\x1b[?25h\x1b[2J\x1b[H');}catch{}
   try{child?.resize(cols,rows);}catch{}
 }
 // A display exception never owns the lifetime of the native terminal.
@@ -2061,7 +2071,11 @@ function nativePointer(code,release,raw){
 }
 // The next input of any kind takes the selection's flipped cells back (a press that starts another
 // makes its own); a key typed while one is being dragged ends it.
-function userInput(data){if(data.length){epoch+=data.length;empty=false;if(pick&&(!pick.live||data[0]!==27||data[1]!==91||data[2]!==60))clearPick();mouseInput.feed(data);}}
+// 11-26 (review 1861): while the bulk of a paste a pressed key ended in the question popup is dropped (the popup may be
+// closed by now), each read is asked first, as it came: the paste's bulk is dropped, never the native's (a read of the
+// person's holding several keys is the bulk too); a read holding one key (a mouse or focus report too) and a new paste
+// go on their own way.
+function userInput(data){if(block.discarding){data=block.swallow(data);if(!data.length){queueDisplay();return;}}if(data.length){epoch+=data.length;empty=false;if(pick&&(!pick.live||data[0]!==27||data[1]!==91||data[2]!==60))clearPick();mouseInput.feed(data);}}
 function inputBytes(data) {
   if(!data.length)return;
   while(data.length){

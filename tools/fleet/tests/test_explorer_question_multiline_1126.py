@@ -22,8 +22,8 @@ from tools.fleet import render_input
 from tools.fleet.explorer.frame import draw
 from tools.fleet.explorer.state import NavState, _question_text_draft, question_answer_rows, reduce
 from tools.fleet.explorer.view_model import ExplorerViewModel
-from tools.fleet.render_input import (KEY_ALT_OTHER, KEY_NEWLINE, KEY_PASTE, KEY_TEXT_END, KEY_TEXT_START,
-                                      KEY_WORD_DELETE, KEY_WORD_LEFT, _CursesInput, answer_key)
+from tools.fleet.render_input import (KEY_ALT_OTHER, KEY_NEWLINE, KEY_PASTE, KEY_PASTE_PART, KEY_TEXT_END,
+                                      KEY_TEXT_START, KEY_WORD_DELETE, KEY_WORD_LEFT, _CursesInput, answer_key)
 
 TOOLS = Path(__file__).resolve().parents[2]
 TABS = ["QUESTIONS", "OVERVIEW"]
@@ -83,14 +83,105 @@ class ReaderTest(unittest.TestCase):
         self.assertTrue(reader.has_buffered_input())
         self.assertEqual(decode(b"\ntwo\x1b[20", reader=reader), [])
         self.assertEqual(decode(b"1~", reader=reader), [(KEY_PASTE, "one\ntwo")])
-        # A paste whose end marker never comes ends a second after its last byte, as what came.
+        # A paste whose bytes stop for a second has stalled (review 1861): what came goes in, and the paste goes on.
         reader = _CursesInput(FakeCurses, explorer_mode=True)
         decode(b"\x1b[200~late", reader=reader)
         reader.paste_since -= 2
-        self.assertEqual(reader.read(FakeScreen()), (KEY_PASTE, "late"))
+        self.assertEqual(reader.read(FakeScreen()), (KEY_PASTE_PART, "late"))
+        self.assertTrue(reader.has_buffered_input())
+        self.assertEqual(decode(b" more\r\x1b[201~", reader=reader), [(KEY_PASTE, " more\n")])
         self.assertFalse(reader.has_buffered_input())
         # Outside the explorer a paste's markers stay inert as before.
         self.assertEqual(decode(b"\x1b[200~ab\x1b[201~", explorer=False), [(ord("a"), None), (ord("b"), None)])
+        # 11-26 follow-up: an escape sequence in a paste (a coloured log) is left out whole, not only its Esc.
+        self.assertEqual(decode(b"\x1b[200~a\x1b[31mb\x1b[0mc\x1b[201~"), [(KEY_PASTE, "abc")])
+        self.assertEqual(decode("\x1b[200~가\x1b[1;32m나\x1b[m\r\n다\x1b[201~".encode()), [(KEY_PASTE, "가나\n다")])
+
+    def test_a_stalled_paste_goes_on_and_only_a_key_pressed_then_ends_it(self):
+        """Review 1861: after a stall the rest of a paste is its text; a key pressed then (a read holding one key with
+        nothing after it for the key's wait: Enter, Esc; Ctrl+] at any time) ends the paste and is that key; then only
+        the paste's bulk is dropped, a read holding one key goes on. A clock moved on stands in for every wait."""
+        def stalled(data):
+            reader = _CursesInput(FakeCurses, explorer_mode=True)
+            events = decode(data, reader=reader)
+            reader.paste_since -= 2
+            events.append(reader.read(FakeScreen()))
+            return reader, events
+
+        def waited(reader):
+            reader.paste_key_since -= 1
+            return [reader.read(FakeScreen()), reader.read(FakeScreen())]
+        # The rest's CR, tab and escape sequence are text (a CR never Enter).
+        reader, events = stalled("\x1b[200~첫 줄\r둘".encode())
+        self.assertEqual(events, [(KEY_PASTE_PART, "첫 줄\n둘")])
+        self.assertEqual(decode("째 줄\r셋\t째\x1b[31m!\x1b[201~".encode(), reader=reader), [(KEY_PASTE, "째 줄\n셋\t째!")])
+        # A lone CR, then the rest within the wait: the paste's line break (review 1861, A).
+        reader, _ = stalled("\x1b[200~첫 줄".encode())
+        self.assertEqual(decode(b"\r", reader=reader), [])
+        self.assertEqual(decode("둘째 줄\r셋째\x1b[201~".encode(), reader=reader), [(KEY_PASTE, "\n둘째 줄\n셋째")])
+        # Enter pressed: the paste ends as what came, then Enter; its bulk after it is dropped up to its end mark.
+        reader, _ = stalled("\x1b[200~부분 글".encode())
+        self.assertEqual(decode(b"\r", reader=reader), [])
+        self.assertEqual(waited(reader), [(KEY_PASTE, ""), (13, None)])
+        self.assertEqual(decode("나머지\r끝\x1b[201~q".encode(), reader=reader), [(ord("q"), None)])
+        # A byte right after it: the paste's own CR.
+        reader, _ = stalled(b"\x1b[200~a")
+        self.assertEqual(decode(b"\rb\x1b[201~", reader=reader), [(KEY_PASTE, "\nb")])
+        # Esc pressed after the wait; a `[` within it is a sequence of the paste (a late end mark too).
+        reader, _ = stalled(b"\x1b[200~log")
+        self.assertEqual(decode(b"\x1b", reader=reader), [])
+        self.assertEqual(waited(reader), [(KEY_PASTE, ""), (27, None)])
+        self.assertEqual(decode(b"[31mred\r\x1b[201~", reader=reader), [])
+        reader, _ = stalled(b"\x1b[200~ab")
+        self.assertEqual(decode(b"\x1b", reader=reader), [])
+        self.assertEqual(decode(b"[201~", reader=reader), [(KEY_PASTE, "")])
+        self.assertFalse(reader.has_buffered_input())
+        # While the bulk is dropped a read holding one key goes on (review 1861, B): a typed key, a character of several
+        # bytes, an arrow, a mouse report; several characters in one read are the bulk; a new paste goes on and ends it.
+        reader, _ = stalled(b"\x1b[200~endless")
+        decode(b"\x1b", reader=reader)
+        waited(reader)
+        self.assertEqual(decode(b"h", reader=reader), [(ord("h"), None)])
+        self.assertEqual(decode("가".encode(), reader=reader), [(0xea, None), (0xb0, None), (0x80, None)])
+        self.assertEqual(decode(b"\x1b[A", reader=reader), [(FakeCurses.KEY_UP, None)])
+        self.assertEqual(decode("안녕".encode(), reader=reader), [])
+        self.assertTrue(reader.paste_discard)
+        self.assertEqual(decode(b"\x1b[200~new\x1b[201~", reader=reader), [(KEY_PASTE, "new")])
+        self.assertFalse(reader.has_buffered_input())
+        # Its end: a second after the last read it dropped; keys going on do not count it.
+        reader, _ = stalled(b"\x1b[200~endless")
+        decode(b"\x1b", reader=reader)
+        waited(reader)
+        reader.paste_since -= 2
+        self.assertEqual(decode(b"k", reader=reader), [(ord("k"), None)])
+        reader.read(FakeScreen())
+        self.assertFalse(reader.paste_discard)
+        # Ctrl+] at any time, not stalled too; with no end mark the dropping ends a second after the last bulk.
+        reader = _CursesInput(FakeCurses, explorer_mode=True)
+        decode("\x1b[200~앞 글".encode(), reader=reader)
+        self.assertEqual(decode(b"\x1d", reader=reader), [])
+        self.assertEqual(waited(reader), [(KEY_PASTE, "앞 글"), (29, None)])
+        self.assertEqual(decode(b"more", reader=reader), [])
+        reader.paste_since -= 2
+        reader.read(FakeScreen())
+        self.assertFalse(reader.has_buffered_input())
+        self.assertEqual(decode(b"z", reader=reader), [(ord("z"), None)])
+        # Not stalled, a lone Enter or Esc is the paste's own.
+        self.assertEqual(decode(b"\x1b[200~a\rb\x1b[201~"), [(KEY_PASTE, "a\nb")])
+        # What a stall lets in stops before what may join the bytes after it.
+        for head, tail, whole in ((b"a\r", b"\nb", "a\nb"), ("\uac00".encode()[:2], "\uac00".encode()[2:] + b"x", "\uac00x"),
+                                  (b"x\x1b[3", b"1my", "xy"), (b"a\n\n", b"b", "a\n\nb")):
+            with self.subTest(head=head):
+                reader, events = stalled(b"\x1b[200~" + head)
+                parts = [payload for _code, payload in events if payload]
+                parts += [payload for _code, payload in decode(tail + b"\x1b[201~", reader=reader)]
+                self.assertEqual("".join(parts), whole)
+        # A pressed key leaves out what is not whole of the paste (review 1861, 🟡1).
+        for head in (b"x\x1b[3", b"x" + "\uac00".encode()[:2]):
+            with self.subTest(head=head):
+                reader, events = stalled(b"\x1b[200~" + head)
+                decode(b"\r", reader=reader)
+                self.assertEqual([payload for _code, payload in events + waited(reader) if payload], ["x"])
 
     def test_word_text_and_delete_keys(self):
         self.assertEqual(decode(b"\x1b[1;5D\x1b[1;3D"), [(KEY_WORD_LEFT, None)] * 2)
@@ -242,6 +333,44 @@ class AnswerTest(unittest.TestCase):
             state, _ = reduce(state, {"type": "key", "key": "up", "tabs": TABS}, frame)
         self.assertFalse(state.question_overlay["editing"])
         self.assertEqual(self.typed(state), text)
+
+    def test_up_and_down_stay_on_a_wrapped_row_at_its_end(self):
+        # A wrapped row's end is the next row's start: ↓ from a column past it stays on the row, before its last
+        # character (the shell's popup does the same), never on the next row's first cell.
+        from tools.fleet.explorer.state import _question_vertical
+        self.assertEqual(question_answer_rows("abcd\nabcdefgh", 4), ((0, 4), (5, 9), (9, 13)))
+        self.assertEqual(_question_vertical("abcd\nabcdefgh", 4, 4, 1, None), (8, 4))
+        self.assertEqual(_question_vertical("abcdefgh\nabcd", 8, 4, -1, None), (3, 4))
+        # Through the reducer at the width Fleet drew the answer.
+        state, _vm, frame, _ = self.keys(["click-write", "text:" + "0123456789" * 30], cols=60)
+        width = dict(frame.answer_layout)["q"]
+        text = "x" * width + "\n" + "y" * (width * 2)
+        state, _vm, frame, _ = self.keys(["click-write", "text:" + text, "text-start", "end"], cols=60)
+        self.assertEqual(state.question_overlay["caret"], ("q", width))
+        state, _ = reduce(state, {"type": "key", "key": "down", "tabs": TABS}, frame)
+        self.assertEqual(state.question_overlay["caret"], ("q", 2 * width), "the place stays on the wrapped row")
+
+    def test_a_secret_takes_a_line_break_key_as_enter_and_a_pasted_key_keeps_its_inner_lines(self):
+        # 11-26 follow-up: in a secret every line-break key sends, as Ctrl+J did before (the shell's popup alike).
+        _, _, _, effects = self.keys(self.text("pw") + ["newline"], is_secret=True)
+        submit = next(effect for effect in effects if effect[0] == "questions.submit")
+        self.assertEqual(submit[2]["answers"]["q"], ["pw"])
+        # A pasted key of several lines keeps them and one of the line breaks it ends with (a private key needs its
+        # last one); a one-line secret keeps none.
+        state, _, _, _ = self.keys(["click-write", "text:line1\nline2\n\n"], is_secret=True)
+        self.assertEqual(self.typed(state), "line1\nline2\n")
+        state, _, _, _ = self.keys(["click-write", "text:token\n"], is_secret=True)
+        self.assertEqual(self.typed(state), "token")
+        # In parts (a stalled paste): whether a part put a line break in decides at the paste's end.
+        state, _, _, _ = self.keys(["click-write", "paste-part:a", "paste-part:\nb", "text:\n"], is_secret=True)
+        self.assertEqual(self.typed(state), "a\nb\n")
+        state, _, _, _ = self.keys(["click-write", "paste-part:ab", "text:c\n"], is_secret=True)
+        self.assertEqual(self.typed(state), "abc")
+        state, _, _, _ = self.keys(["click-write", "text:\n"], is_secret=True)
+        self.assertEqual(self.typed(state), "")
+        # Not a secret: the paste goes in whole, its last line breaks too.
+        state, _, _, _ = self.keys(["click-write", "text:line1\nline2\n"])
+        self.assertEqual(self.typed(state), "line1\nline2\n")
 
     def test_the_answer_grows_within_the_page_and_follows_the_place(self):
         lines = "\n".join(f"줄 {n}" for n in range(1, 31))

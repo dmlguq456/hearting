@@ -1418,6 +1418,10 @@
    "en": "expired",
    "ko": "만료"
   },
+  "fleet.session_block.compact_navigate_write": {
+   "en": "Tab next · Esc/Ctrl+] back",
+   "ko": "Tab 다음 · Esc/Ctrl+] 뒤로"
+  },
   "fleet.session_block.compact_open": {
    "en": "answer needed",
    "ko": "답 필요"
@@ -1433,14 +1437,6 @@
   "fleet.session_block.compact_unknown": {
    "en": "unknown",
    "ko": "미확인"
-  },
-  "fleet.session_block.compact_writing": {
-   "en": "Ctrl+J newline",
-   "ko": "Ctrl+J 줄바꿈"
-  },
-  "fleet.session_block.compact_writing_choices": {
-   "en": "Ctrl+J newline · ↑ choices",
-   "ko": "Ctrl+J 줄바꿈 · ↑ 선택지"
   },
   "fleet.session_block.complete": {
    "en": "answer every field · Tab next",
@@ -1490,6 +1486,10 @@
    "en": "more · focus and PgUp/PgDn to read",
    "ko": "더 있음 · 포커스 후 PgUp/PgDn 읽기"
   },
+  "fleet.session_block.narrow_navigate_write": {
+   "en": "Tab next · Esc back",
+   "ko": "Tab 다음 · Esc 뒤로"
+  },
   "fleet.session_block.navigate": {
    "en": "Tab next · Esc/Ctrl+] back",
    "ko": "Tab 다음 · Esc/Ctrl+] 돌아가기"
@@ -1501,6 +1501,10 @@
   "fleet.session_block.open": {
    "en": "answer needed",
    "ko": "답 필요"
+  },
+  "fleet.session_block.paste_stalled": {
+   "en": "paste stalled",
+   "ko": "붙여넣기 멈춤"
   },
   "fleet.session_block.questions": {
    "en": "QUESTIONS",

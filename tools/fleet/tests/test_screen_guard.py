@@ -509,6 +509,15 @@ def _explorer_child(directory, old, data, state):
     render._collect_governor = lambda: None
     render.set_explorer_mode(True)
     collects = [0]
+    read = render._CursesInput.read
+
+    def read_keys(self, stdscr, **kwargs):
+        # Enter and Ctrl+J as the real loop's reader gets them from curses.
+        event = read(self, stdscr, **kwargs)
+        if event and event[0] in (10, 13):
+            _append_event(directory, event="key", code=event[0])
+        return event
+    render._CursesInput.read = read_keys
 
     def collect(harness_filter=None, **_options):
         collects[0] += 1
@@ -691,6 +700,33 @@ class RealTerminalTest(unittest.TestCase):
         self.assertEqual(terminal.child.returncode, 0)
         terminal.read_for(1.0)
         self.assertIn(b"\x1b[?1006l\x1b[?1002l", bytes(terminal.received).rsplit(b"~", 1)[-1])
+        # 11-26: bracketed paste, asked for by the explorer, goes off after its last request too.
+        received = bytes(terminal.received)
+        self.assertIn(b"\x1b[?2004h", received)
+        self.assertGreater(received.rfind(b"\x1b[?2004l"), received.rfind(b"\x1b[?2004h"))
+
+    def test_the_explorer_reads_enter_as_cr_and_ctrl_j_as_lf(self):
+        """11-26: the real loop turns curses' newline mode off (Enter arrives as CR, Ctrl+J as LF), so a
+        written answer can tell them apart; SIGTERM ends it through its own way out (paste and mouse off)."""
+        none = str(self.base / "no-release")
+        terminal = self.start("explorer", str(self.base), none, none, none)
+        started = terminal.read_for(45, lambda: self.progress().get("collects", 0) >= 2
+                                    and b"\x1b[?2004h" in terminal.received)
+        self.assertTrue(started, self.stderr_log())
+        keys = lambda: [event["code"] for event in self.events() if event.get("event") == "key"]  # noqa: E731
+        os.write(terminal.master, b"\r")
+        self.assertTrue(terminal.read_for(10, lambda: len(keys()) >= 1), self.stderr_log())
+        os.write(terminal.master, b"\n")
+        self.assertTrue(terminal.read_for(10, lambda: len(keys()) >= 2), self.stderr_log())
+        self.assertEqual(keys(), [13, 10])
+        os.kill(terminal.child.pid, signal.SIGTERM)
+        self.assertTrue(terminal.read_for(15, lambda: terminal.child.poll() is not None), self.stderr_log())
+        self.assertEqual(terminal.child.returncode, -signal.SIGTERM, "it still ends by the signal")
+        terminal.read_for(0.5)
+        received = bytes(terminal.received)
+        for mode in (b"2004", b"1002", b"1006"):
+            self.assertGreater(received.rfind(b"\x1b[?" + mode + b"l"), received.rfind(b"\x1b[?" + mode + b"h"), mode)
+        self.assertGreater(received.rfind(b"\x1b[?1049l"), received.rfind(b"\x1b[?1049h"), "curses gave the screen back")
 
     def test_repeated_ctrl_c_quits_the_explorer_while_its_terminal_is_not_reading(self):
         """RV-1042 S2: no Ctrl-C leaves the viewer waiting on a terminal that is not reading."""

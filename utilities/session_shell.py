@@ -1181,6 +1181,29 @@ def _panel_read_target(harness, sid, native_pid, native_start):
     return sid, native_pid, native_start, None
 
 
+def block_labels(editor: int) -> dict:
+    """The question block's words for a popup of ``editor`` cells (the editor and the tests read the same)."""
+    from fleet.config import ui_text
+    # Spec E9 rule 54: the five `answer_*` words say where a wait not answerable here is answered.
+    states = ("open", "submitted", "received", "applied", "expired", "cancelled", "unknown",
+              "answer_below", "answer_there", "answer_parent", "answer_sending", "answer_closed")
+    labels = {key: ui_text("fleet.session_block." + key) for key in (
+        *states, "choose", "choose_write", "writing", "writing_choices", "send", "navigate", "navigate_write",
+        "text", "changed", "complete", "busy", "empty", "full", "more", "more_choose", "more_down",
+        "more_page", "more_choices", "sent", "questions", "paste_stalled")}
+    if editor < 64:
+        # 11-26: a narrow popup keeps `Enter send` and the line-break key while an answer is written: its
+        # closing key's word is short enough that the key packing leaves out `Tab next` (then `↑ choices`)
+        # first, so the three keys fit one row of a 50-cell popup (46 cells inside).
+        for key in (*states, "navigate_write"):
+            labels[key] = ui_text("fleet.session_block.compact_" + key)
+    if editor < 50:
+        # Review 1861: narrower still (46-48 cells, 42-44 inside) the closing key names Esc alone, so the line-break
+        # key stays too.
+        labels["navigate_write"] = ui_text("fleet.session_block.narrow_navigate_write")
+    return labels
+
+
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
                      native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False,
@@ -1302,18 +1325,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         for question in item.get("questions") or ():
             question["display"] = {key: ([styled(line) for line in value] if key not in ("head", "brief_line") else styled(value))
                                    for key, value in question["display"].items()}
-    # Spec E9 rule 54: the five `answer_*` words say where a wait not answerable here is answered.
-    states = ("open", "submitted", "received", "applied", "expired", "cancelled", "unknown",
-              "answer_below", "answer_there", "answer_parent", "answer_sending", "answer_closed")
-    labels = {key: ui_text("fleet.session_block." + key) for key in (
-        *states, "choose", "choose_write", "writing", "writing_choices", "send", "navigate", "navigate_write",
-        "text", "changed", "complete", "busy", "empty", "full", "more", "more_choose", "more_down",
-        "more_page", "more_choices", "sent", "questions")}
-    if editor < 64:
-        # 11-26: a narrow popup keeps the line-break key while an answer is written (Enter, which sends,
-        # was named before writing began).
-        for key in (*states, "writing", "writing_choices"):
-            labels[key] = ui_text("fleet.session_block.compact_" + key)
+    labels = block_labels(editor)
     if pane_binding:
         try:
             from fleet import herdr_projection
