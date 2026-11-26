@@ -1658,6 +1658,20 @@ def _answered_question_secret(binding) -> bool:
         return True
 
 
+def delivery_holds_secret_answer(batches: list[tuple[Path, list[dict]]]) -> bool:
+    """Whether the delivery carries the answer to a question asked as a secret one (or one whose
+    secrecy cannot be read: :func:`_answered_question_secret` hides a doubtful one). Its body then
+    reaches the person's window only as the sealed ``•••`` line; a delivery that gets no such line
+    shows the window a pointer to its private copy instead (peer-message ``private_body``)."""
+    for _root, records in batches:
+        for record in records:
+            receipt = record.get("receipt") if isinstance(record, dict) else None
+            if (isinstance(receipt, dict) and "answer_binding" in receipt
+                    and _answered_question_secret(receipt["answer_binding"])):
+                return True
+    return False
+
+
 def delivery_display_text(batches: list[tuple[Path, list[dict]]]) -> str | None:
     """What the person's window shows for the delivery ``delivery_context(batches)`` renders.
 

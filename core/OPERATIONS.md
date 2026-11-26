@@ -3311,7 +3311,24 @@ read-everywhere contract agree. The native queue checks the Codex contract again
 at submission. Unknown, stale, unresolved, contradictory, and other-runtime
 evidence keeps the complete body inline; SID-less panes remain inline until
 session binding. Helper file reads and model-readable access are separate
-observations.
+observations. One runtime delivery takes a payload on every harness: a body
+holding a secret question's answer that gets no one-line display form (to
+OpenCode none at all, since its idle plugin delivery pastes a row's sealed text)
+shows the window only a pointer to its private payload (`private-answer`).
+Each carrier that takes the row gives the agent the verified full text in an
+agent-only place before the row settles: the Claude and Codex prompt hooks and
+the OpenCode plugin's system context for the pointer as a prompt (an idle
+resume sets that message's own guidance first, one resume an idle), Claude's
+hook context at a tool or prompt boundary, and at an OpenCode tool boundary
+the plugin's system context, while the tool result, which its TUI draws, gets
+the pointer alone. The OpenCode plugin holds that text, whatever message comes,
+until a model call of the session has carried it, and drops it when that turn
+ends; one no call carried waits for the next turn. A row that fits
+one Claude hook context alone but not beside other text waits for a boundary
+with room. No file read is needed, except for a delivery too long for one
+Claude hook context even alone, whose context says so and names the file.
+Only the recipient gets the text: another session given the same pointer gets
+no recovery copy.
 
 Queued and ambiguous envelopes retain their original wire body, digest, and
 identity. When queue submission or a receiver callback cannot establish current

@@ -6825,7 +6825,8 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     import dispatch_pending_delivery as pending
     from dispatch_notice_state import keep_claim
     from dispatch_seat_handover import record_recipient_binding
-    from dispatch_session_sweep import STORAGE_KEY, IDENTITY_KEY, delivery_context, delivery_display_text
+    from dispatch_session_sweep import (STORAGE_KEY, IDENTITY_KEY, delivery_context, delivery_display_text,
+                                        delivery_holds_secret_answer)
     from dispatch_recipient_receipt import claimed_send_current, release_unsubmitted_claim
     from peer_read_context import PeerReadContext
     import session_notice
@@ -7209,6 +7210,9 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
             return
         body = delivery_context([(root, [entry[5] for entry in claimed])])
         display_line = None if folded else delivery_display_text([(root, [entry[5] for entry in claimed])])
+        # A secret answer's body never reaches the window: without its sealed `•••` line the
+        # window gets a pointer to the private copy instead (peer-message `private_body`).
+        private_body = delivery_holds_secret_answer([(root, [entry[5] for entry in claimed])])
         if folded:
             body += ("\n\nfolded run notices (parent completion already received):\n"
                      + "\n".join(f"- {line}" for line in folded))
@@ -7254,7 +7258,8 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                     return
             code = cmd_prompt(args, expected_recipient=(harness, recipient_sid),
                               on_prepared=bind_transfer, producer_binding=producer,
-                              **({"display_line": display_line} if display_line else {}))
+                              **({"display_line": display_line} if display_line else {}),
+                              **({"private_body": True} if private_body else {}))
             submitted = code in {0, 3}
     finally:
         globals()["_HERDR_SESSION"] = old_server
@@ -8171,7 +8176,7 @@ def _codex_shell_start_gate(binding):
 def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
                        expected_recipient=None, on_prepared=None, producer_binding=None, handoff=None,
                        binding=None, pane=None, native_owner=None, sender_row=None, request=None,
-                       display_line=None):
+                       display_line=None, private_body=False):
     """Native-session address using the existing sealed message and carrier.
 
     Delivery never types into a window: a shell attachment takes it through its host
@@ -8197,7 +8202,8 @@ def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
             reference_evidence=reference_evidence,
             producer_binding=producer_binding, handoff=handoff,
             original_target=args.target, server=_HERDR_SESSION or "default", prepared=prepared,
-            namespace=_PEER_NAMESPACE, request=request, display_line=display_line)
+            namespace=_PEER_NAMESPACE, request=request, display_line=display_line,
+            private_body=private_body)
         if on_prepared is not None:
             on_prepared(ref)
     except (OSError, ValueError):
@@ -8294,7 +8300,7 @@ def _prompt_sealed_unread(args, sealed, producer_binding, target, *, ref=None):
 
 
 def _prompt_unresolved(args, body, reason, *, from_identity, from_name, from_harness, from_sid,
-                       on_prepared=None, producer_binding=None, handoff=None):
+                       on_prepared=None, producer_binding=None, handoff=None, private_body=False):
     """An address Hearting's records cannot resolve: a named, retained refusal."""
     _prompt_failure_ledger(args.target, reason, [], kind=_prompt_message_kind(body), ref=args.ref,
                            from_identity=from_identity, from_name=from_name)
@@ -8306,7 +8312,7 @@ def _prompt_unresolved(args, body, reason, *, from_identity, from_name, from_har
             defer=True, refs=args.ref, receipt=reason, with_trailer=not args.no_trailer,
             producer_binding=producer_binding, handoff=handoff,
             original_target=args.target, server=_HERDR_SESSION or "default", prepared=prepared,
-            namespace=_PEER_NAMESPACE)
+            namespace=_PEER_NAMESPACE, private_body=private_body)
         if on_prepared is not None:
             on_prepared(ref)
         row = peer_message._read_pending(ref)
@@ -8324,7 +8330,8 @@ def _prompt_unresolved(args, body, reason, *, from_identity, from_name, from_har
 
 
 def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_binding=None,
-               handoff=None, resolved_recipient=None, sender=None, request=None, display_line=None):
+               handoff=None, resolved_recipient=None, sender=None, request=None, display_line=None,
+               private_body=False):
     """Seal a peer message and route it through the recipient's native carrier.
 
     ``sender`` is the observed predecessor identity for a supervisor-issued
@@ -8377,7 +8384,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         sender_row["pane_id"] = relay_pane
     unresolved = dict(from_identity=from_identity, from_name=from_name, from_harness=from_harness,
                       from_sid=from_sid, on_prepared=on_prepared,
-                      producer_binding=producer_binding, handoff=handoff)
+                      producer_binding=producer_binding, handoff=handoff, private_body=private_body)
     unresolved_reply = _prompt_unresolved
     if request is not None:
         # A request is bound to one exact session; an unresolved address is
@@ -8415,7 +8422,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         native_owner=native_owner, from_identity=from_identity, from_name=from_name,
         expected_recipient=expected_recipient, on_prepared=on_prepared,
         producer_binding=producer_binding, handoff=handoff, sender_row=sender_row,
-        request=request, display_line=display_line)
+        request=request, display_line=display_line, private_body=private_body)
 
 
 def cmd_request(args):

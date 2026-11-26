@@ -4739,8 +4739,52 @@ def cached_count(harness: str, session_id: str, *, now: float | None = None,
     return total, len(counts.get(key, ()))
 
 
+_SIGNAL_NAME = re.compile(r"[0-9a-f]{64}\.json")
+
+
+def _own_open_signal(harness, session_id):
+    """Whether this exact session has a question source of its own in the private store that
+    the producer would count: ``read_signals`` lists it (a message question only while open)
+    and it is not older than ``OLDER_AFTER`` (``wait_fold``), as a complete observation says.
+    Read only while the observation is incomplete and lists none of this session's waits: one
+    directory listing, and only the recent signal files are opened, never the projection."""
+    try:
+        entries = list(os.scandir(state_root()))
+    except OSError:
+        return False
+    now = time.time()
+    needle = json.dumps(session_id, ensure_ascii=False).encode("utf-8")   # as `_write` stores it
+    for entry in entries:
+        try:
+            if not _SIGNAL_NAME.fullmatch(entry.name) or not entry.is_file(follow_symlinks=False):
+                continue
+            # A source is written when its question is asked and its ``since`` never moves, so a
+            # file last written longer ago than ``OLDER_AFTER`` holds an older wait: not opened.
+            if now - entry.stat(follow_symlinks=False).st_mtime >= OLDER_AFTER:
+                continue
+            fd = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as handle:
+                if needle not in handle.read(65536):
+                    continue
+        except OSError:
+            continue
+        path = Path(entry.path)
+        value = _read(path)
+        if (value is None or value.get("harness") != harness or value.get("session_id") != session_id
+                or value.get("mode") == "message" and value.get("lifecycle") != "open"
+                or not isinstance(value.get("since"), (int, float))
+                or wait_fold(value["since"], now) is not None):
+            continue
+        if path == _signal_path(value):
+            return True
+    return False
+
+
 def cached_statusline(harness, session_id):
-    """One cache read for both badges; never imports the collection pipeline."""
+    """One cache read for both badges; never imports the collection pipeline.
+
+    The count is this session's listed waits, or one when an incomplete observation lists none
+    and the session's own open question source is there (``_own_open_signal``)."""
     value = _read_cache()
     key = str(harness) + "\0" + str(session_id)
     sessions = value.get("route_sessions", {}) if value else {}
@@ -4756,6 +4800,10 @@ def cached_statusline(harness, session_id):
         return None, ""
     total = int(value.get("total", 0)) if value.get("complete") else -1
     count = len(value["by_session"].get(key, ()))
+    if total < 0 and not count and _own_open_signal(harness, session_id):
+        # An incomplete observation may have missed this session's own open question: it still
+        # may wait (one, unknown in all: `?`). A session with none keeps no badge.
+        count = 1
     routes = value.get("route_status", {})
     label = routes.get(key, "") if isinstance(routes, dict) else ""
     if not isinstance(label, str) or len(label) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in label):
