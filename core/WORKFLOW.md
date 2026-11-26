@@ -1333,7 +1333,11 @@ record then expires as `recipient-session-replaced`, or is ACKed when that
 session's transcript already holds its exact receipt. Only a session whose own
 start in the pane's seat ledger is `clear` reads it, reaching back through
 earlier plain clears; a resume, select, fork or startup start does not, so a
-session left that way keeps its completion for its own next prompt. The line
+session left that way keeps its completion for its own next prompt. The
+ledger shows only starts the hook recorded: when it is ambiguous (another
+session started or prompted between the two starts, or started after the
+clear) nothing is inferred, and when a long session's start has been folded
+away nothing is shown; in both cases the completion stays open. The line
 stands in for the receipt: if the cleared session is resumed afterwards, even
 in the same process, its completion is already settled. A dead runtime expires
 that record first.

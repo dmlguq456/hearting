@@ -2353,14 +2353,18 @@ def _replaced_report_path(row) -> str:
     The same value the sealed completion summary names as its artifact (`owner-envelope.json`
     `primary_path` in the attempt's terminal slot, found the way `work_intent.sealed_summary`
     finds that summary). Only an existing file whose absolute path fits one line whole, with no
-    whitespace or control character, is named; anything else, or any failure to read, names none."""
+    whitespace or control character, is named, and only from an envelope that names no other owner
+    attempt; anything else, or any failure to read, names none."""
     try:
         meta = row.metadata
         route_file = meta.get("owner_route_file") or meta.get("route_file")
         route = json.loads(Path(route_file).read_text(encoding="utf-8"))
         from dispatch_terminal_commit import terminal_slot
         slot = terminal_slot(Path(route["artifact_root"]), route["route_id"], row.attempt_id)
-        primary = json.loads((slot / "owner-envelope.json").read_text(encoding="utf-8"))["primary_path"]
+        envelope = json.loads((slot / "owner-envelope.json").read_text(encoding="utf-8"))
+        primary = envelope["primary_path"]
+        if envelope.get("owner_attempt_id", row.attempt_id) != row.attempt_id:
+            return ""  # sealed for another attempt: the slot rule changed under this reader
         if (isinstance(primary, str) and len(primary) <= REPLACED_REPORT_PATH_CHARS
                 and os.path.isabs(primary) and re.fullmatch(r"[^\s\x00-\x1f\x7f]+", primary)
                 and Path(primary).is_file()):

@@ -5059,6 +5059,45 @@ class ReplacedSessionNoticeTest(IsolatedRootMixin, unittest.TestCase):
         self.assertEqual(PD.read(self.root, "sess-D", replaced["delivery_id"])["expiry_reason"],
                          "recipient-session-replaced")
 
+    def _prompt_row(self, sid):
+        """The session's prompt hook wrote its row: it was active, whether or not its start was recorded."""
+        import session_tidy
+        session_tidy.run_hook("claude", "prompt", sid, cwd=str(self.root), env=dict(os.environ),
+                              render_context=False)
+
+    def test_a_missing_start_row_stops_the_chain(self):
+        # RV-PR1857 2nd 🔴 (a): A ->resume-> X ->clear-> B, but X's start row was never written (the
+        # background SessionStart hook did not finish); X's prompt row shows it was there. The row
+        # before B's clear is A's start, yet B did not replace A: nothing is inferred.
+        _meta, record = self._completion()
+        self._start("sess-A", "startup")
+        self._prompt_row("sess-X")
+        self._start("sess-B", "clear")
+        self.assertEqual(self._prompt("sess-B"), "")
+        self.assertEqual(self._state(record), ("pending", None))
+        self._back_and_received(record)
+
+    def test_a_start_row_recorded_after_the_clear_stops_the_chain(self):
+        # RV-PR1857 2nd 🔴 (b): A ->fork-> X ->clear-> B, but X's start row landed after B's. B's clear
+        # then seems to follow A directly; another session's later start makes it ambiguous.
+        _meta, record = self._completion()
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        self._start("sess-X", "fork")
+        self.assertEqual(self._prompt("sess-B"), "")
+        self.assertEqual(self._state(record), ("pending", None))
+        self._back_and_received(record)
+
+    def test_a_repeated_session_ends_the_walk(self):
+        # A real `/clear` always gives a new id, so a repeat comes only from a damaged ledger: the walk
+        # stops at it instead of reaching this session again.
+        import session_tidy
+        seat = session_tidy.Seat("pane", "fixture-key", "fixture:pane", "claude", "")
+        rows = [{"event": "start", "harness": "claude", "sid": sid, "source": "clear", "ts": at}
+                for at, sid in enumerate(("sess-A", "sess-B", "sess-A"), 1)]
+        self.assertEqual(session_tidy.plain_clear_predecessors(seat, "claude", "sess-A", rows=rows),
+                         ["sess-B"])
+
     def test_a_resume_after_a_clear_breaks_the_chain(self):
         # A ->clear-> B ->resume-> X: X does not read A's completion.
         _meta, record = self._completion()
@@ -5103,7 +5142,8 @@ class ReplacedSessionNoticeTest(IsolatedRootMixin, unittest.TestCase):
         if envelope:
             slot = terminal_slot(self.root / "artifacts", route_id, attempt)
             slot.mkdir(parents=True, exist_ok=True)
-            (slot / "owner-envelope.json").write_text(json.dumps({"primary_path": str(report)}))
+            (slot / "owner-envelope.json").write_text(json.dumps({"primary_path": str(report),
+                                                                   "owner_attempt_id": attempt}))
         return str(route_file), str(report)
 
     def test_the_line_names_the_report_the_route_close_sealed_in_every_form(self):
@@ -5148,13 +5188,26 @@ class ReplacedSessionNoticeTest(IsolatedRootMixin, unittest.TestCase):
         cases["long"] = route_file
         route_file, _report = self._sealed_report("att-noreport-space", name="final report.md")
         cases["space"] = route_file
+        # The sealed file is gone, the sealed path is relative (it names an existing file from here),
+        # or the envelope names another owner attempt.
+        route_file, report = self._sealed_report("att-noreport-deleted")
+        os.remove(report)
+        cases["deleted"] = route_file
+        for case, envelope in (("relative", lambda report: {"primary_path": os.path.relpath(report)}),
+                               ("other-owner", lambda report: {"primary_path": report,
+                                                               "owner_attempt_id": "att-someone-else"})):
+            route_file, report = self._sealed_report("att-noreport-" + case)
+            self.assertTrue(Path(os.path.relpath(report)).is_file())
+            (terminal_slot(self.root / "artifacts", "rt-" + "a" * 16, "att-noreport-" + case)
+             / "owner-envelope.json").write_text(json.dumps(envelope(report)))
+            cases[case] = route_file
         records = {}
         for case, route_file in cases.items():
             _meta, records[case] = self._completion("att-noreport-" + case, route_file=route_file)
         self._start("sess-A", "startup")
         self._start("sess-B", "clear")
         seen = []
-        for _ in range(2):  # three notices per prompt at most
+        for _ in range(3):  # three notices per prompt at most
             seen += [line for line in self._prompt("sess-B").splitlines()
                      if line.startswith(SWEEP.REPLACED_NOTICE_PREFIX)]
         self.assertEqual(len(seen), len(cases), seen)

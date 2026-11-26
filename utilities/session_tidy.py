@@ -1885,8 +1885,12 @@ def plain_clear_predecessors(seat: Seat, harness: str, sid: str, *, limit: int =
     must have ``source == "clear"``: the session that started right before it is the one it
     replaced, and the walk goes on while that session's own last start is ``clear`` too. Any other
     start source (``startup``, ``resume``, ``select``, ``fork``, another value or none), a start no
-    longer in the raw rows, or a repeated session ends the walk. This is not a lineage edge:
-    nothing is written and no handover, wake or delivery authority follows from it."""
+    longer in the raw rows, or a repeated session ends the walk. So does an ambiguous ledger, since
+    Claude runs the ``/clear`` SessionStart hook in the background and a start row can be missing or
+    late: a third session's ``start`` or ``prompt`` row between the predecessor's start and this
+    clear (a start that was never recorded), or, for this session's own clear, another session's
+    ``start`` row after it (a start recorded late). This is not a lineage edge: nothing is written
+    and no handover, wake or delivery authority follows from it."""
     rows = _read_ledger_lines(seat) if rows is None else rows
     chain: list[str] = []
     current, end = sid, len(rows)
@@ -1901,6 +1905,16 @@ def plain_clear_predecessors(seat: Seat, harness: str, sid: str, *, limit: int =
         previous = _previous_distinct_start(rows, index, seat, harness, current, {}, "")
         if not previous or previous == sid or previous in chain:
             break
+        begun = next((at for at in range(index - 1, -1, -1)
+                      if rows[at].get("event") == "start" and rows[at].get("harness") == harness
+                      and rows[at].get("sid") == previous), None)
+        if begun is None or any(row.get("harness") == harness and row.get("event") in {"start", "prompt"}
+                                and row.get("sid") not in (previous, current)
+                                for row in rows[begun + 1:index]):
+            break  # another session started or prompted in between: a start row is missing
+        if not chain and any(row.get("harness") == harness and row.get("event") == "start"
+                             and row.get("sid") != sid for row in rows[index + 1:]):
+            break  # another session's start was recorded after this clear: a late row
         chain.append(previous)
         current, end = previous, index
     return chain
