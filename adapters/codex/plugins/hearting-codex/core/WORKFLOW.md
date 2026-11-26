@@ -1327,7 +1327,8 @@ runtime is live, as after a plain `/clear` that gave the session a new id, the
 duty stays open as undelivered (`completion-undelivered`) without that fresh
 read; the next prompt of the session a plain `/clear` started in its place, in
 the same pane and runtime, adds one informational line to the model's context
-(it asks for nothing and may be passed to the person in one line), and the
+(naming the route, the attempt and, when the route close sealed one, its report
+path; it asks for nothing and may be passed to the person in one line), and the
 record then expires as `recipient-session-replaced`, or is ACKed when that
 session's transcript already holds its exact receipt. Only a session whose own
 start in the pane's seat ledger is `clear` reads it, reaching back through

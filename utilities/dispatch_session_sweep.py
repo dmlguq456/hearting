@@ -2319,6 +2319,7 @@ REPLACED_NOTICE_PREFIX = "previous_session_completion:"
 REPLACED_SESSION_LOOKBACK = 8
 REPLACED_SCOPE_ENTRIES = 64
 _REPLACED_NOTICE_TAIL = "you may tell the person in one line"
+REPLACED_REPORT_PATH_CHARS = 240
 # What the line says about the record depends on what is known of its send: never sent (`pending`),
 # sent by a carrier (`sent-ambiguous`), or taken by a carrier whose lease lapsed before it recorded a
 # send (`claimed`), where whether it reached any session is unknown.
@@ -2346,6 +2347,29 @@ def _notice_value(value, limit: int = 96) -> str:
     return text[:limit]
 
 
+def _replaced_report_path(row) -> str:
+    """The report path the runtime sealed for this attempt's route close, or "".
+
+    The same value the sealed completion summary names as its artifact (`owner-envelope.json`
+    `primary_path` in the attempt's terminal slot, found the way `work_intent.sealed_summary`
+    finds that summary). Only an existing file whose absolute path fits one line whole, with no
+    whitespace or control character, is named; anything else, or any failure to read, names none."""
+    try:
+        meta = row.metadata
+        route_file = meta.get("owner_route_file") or meta.get("route_file")
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+        from dispatch_terminal_commit import terminal_slot
+        slot = terminal_slot(Path(route["artifact_root"]), route["route_id"], row.attempt_id)
+        primary = json.loads((slot / "owner-envelope.json").read_text(encoding="utf-8"))["primary_path"]
+        if (isinstance(primary, str) and len(primary) <= REPLACED_REPORT_PATH_CHARS
+                and os.path.isabs(primary) and re.fullmatch(r"[^\s\x00-\x1f\x7f]+", primary)
+                and Path(primary).is_file()):
+            return primary
+    except Exception:  # noqa: BLE001 - the line is the same without it
+        pass
+    return ""
+
+
 def _replaced_notice_line(record: dict, row, previous_sid: str) -> str:
     receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
     classification = receipt.get("delivery_classification")
@@ -2358,6 +2382,7 @@ def _replaced_notice_line(record: dict, row, previous_sid: str) -> str:
             f"attempt_id={_notice_value(row.attempt_id)} status={_notice_value(row.status)} "
             f"classification={_notice_value(classification)} "
             f"previous_session={_notice_value(previous_sid, 8)} "
+            + (f"report={report} " if (report := _replaced_report_path(row)) else "")
             + _REPLACED_NOTICE_ENDINGS.get(record.get("state"), _REPLACED_NOTICE_ENDINGS["claimed"]))
 
 

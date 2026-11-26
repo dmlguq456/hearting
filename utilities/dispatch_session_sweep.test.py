@@ -5089,6 +5089,82 @@ class ReplacedSessionNoticeTest(IsolatedRootMixin, unittest.TestCase):
                       "you may tell the person in one line)", context)
         self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
 
+    def _sealed_report(self, attempt, name="final_report.md", *, envelope=True):
+        """A route file the owner row names and, when `envelope`, the primary path the route close
+        sealed in that attempt's terminal slot (what the completion summary names as its artifact)."""
+        from dispatch_terminal_commit import terminal_slot
+        route_id = "rt-" + "a" * 16
+        route_file = self.root / "routes" / (attempt + ".json")
+        route_file.parent.mkdir(parents=True, exist_ok=True)
+        route_file.write_text(json.dumps({"route_id": route_id, "artifact_root": str(self.root / "artifacts")}))
+        report = self.root / "artifacts" / attempt / name
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("# report\n", encoding="utf-8")
+        if envelope:
+            slot = terminal_slot(self.root / "artifacts", route_id, attempt)
+            slot.mkdir(parents=True, exist_ok=True)
+            (slot / "owner-envelope.json").write_text(json.dumps({"primary_path": str(report)}))
+        return str(route_file), str(report)
+
+    def test_the_line_names_the_report_the_route_close_sealed_in_every_form(self):
+        # 🟡 2: the session a plain `/clear` started gets the way to the result, not only its ids.
+        # Never-sent, sent, and lapsed-claim records follow the same rule.
+        reports = {}
+        for state in ("pending", "sent-ambiguous", "claimed"):
+            attempt = "att-report-" + state
+            route_file, reports[state] = self._sealed_report(attempt)
+            _meta, record = self._completion(attempt, route_file=route_file)
+            if state != "pending":
+                self._carried(record, sent=state == "sent-ambiguous", lease_seconds=600)
+                if state == "claimed":
+                    path = PD.record_path(self.root, "sess-A", record["delivery_id"])
+                    value = json.loads(path.read_text())
+                    value["claim_deadline_ns"] = 0
+                    path.write_text(json.dumps(value))
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        context = self._prompt("sess-B")
+        notices = {line.split("attempt_id=att-report-", 1)[1].split(" ", 1)[0]: line
+                   for line in context.splitlines() if line.startswith(SWEEP.REPLACED_NOTICE_PREFIX)}
+        self.assertEqual(sorted(notices), ["claimed", "pending", "sent-ambiguous"], context)
+        for state, line in notices.items():
+            self.assertIn(" report=" + reports[state] + " (", line)
+            for word in ("required_action", "resume_command", "parent_next", "correction_command"):
+                self.assertNotIn(word, line)
+
+    def test_no_report_field_when_none_was_sealed_or_it_cannot_be_read(self):
+        # Fail-open: no sealed primary, an unreadable envelope, a missing route file, or a path that
+        # does not fit one line whole leaves the field out; the line and the expiry are as before.
+        from dispatch_terminal_commit import terminal_slot
+        cases = {}
+        route_file, _report = self._sealed_report("att-noreport-none", envelope=False)
+        cases["none"] = route_file
+        route_file, _report = self._sealed_report("att-noreport-broken")
+        (terminal_slot(self.root / "artifacts", "rt-" + "a" * 16, "att-noreport-broken")
+         / "owner-envelope.json").write_text("{not json")
+        cases["broken"] = route_file
+        cases["no-route"] = str(self.root / "routes" / "missing.json")
+        route_file, _report = self._sealed_report("att-noreport-long", name="d" * 120 + "/" + "d" * 120 + "/final_report.md")
+        cases["long"] = route_file
+        route_file, _report = self._sealed_report("att-noreport-space", name="final report.md")
+        cases["space"] = route_file
+        records = {}
+        for case, route_file in cases.items():
+            _meta, records[case] = self._completion("att-noreport-" + case, route_file=route_file)
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        seen = []
+        for _ in range(2):  # three notices per prompt at most
+            seen += [line for line in self._prompt("sess-B").splitlines()
+                     if line.startswith(SWEEP.REPLACED_NOTICE_PREFIX)]
+        self.assertEqual(len(seen), len(cases), seen)
+        for line in seen:
+            self.assertNotIn(" report=", line)
+            self.assertTrue(line.endswith("(notice only; this session holds no task from it; "
+                                          "you may tell the person in one line)"), line)
+        for case, record in records.items():
+            self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"), case)
+
     def test_a_gate_or_supervision_record_is_not_a_completion_to_replace(self):
         _meta, record = self._completion()
         receipt = {"kind": "human-gate", "route_id": "rt-" + "a" * 16, "gate": "spec",
