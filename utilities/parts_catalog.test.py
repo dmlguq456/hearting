@@ -793,6 +793,27 @@ class BorrowReadPartsTest(CatalogBase):
         self.assertEqual(self.node(synthesis, "report")["inputs"],
                          ["reviews/audit/**", *self.node(synthesis, "autopilot-research-synthesis")["outputs"]])
 
+    def test_a_kernel_node_after_a_review_keeps_what_it_names(self):
+        # A resource run and a deploy bind exactly the inputs they name, so they keep main's inputs
+        # (sealed before the review handed anything on) and the deploy keeps main's command reviewers.
+        run = self.compose(graph="autopilot-research:synthesis,autopilot-lab:smoke,autopilot-lab:full-run,test,report")
+        R.verify_route(run, R.ROOT)
+        self.assertEqual(self.node(run, "autopilot-lab-full-run")["inputs"],
+                         ["_internal/parts/autopilot-lab/smoke/reviews/smoke-attestation.json", "config"])
+        import ship_parent_deploy
+        for graph, inputs, judges in (
+                ("release-setup,autopilot-lab:diagnose,security-review,deploy,post-deploy-verify",
+                 ["reviews/security-verdict.json", "release-config/**"], {"security-review"}),
+                ("autopilot-lab:diagnose,release-review,deploy", ["reviews/release-verdict.json"], {"release-review"})):
+            with self.subTest(graph=graph):
+                ship = self.compose("autopilot-ship", "default", graph)
+                R.verify_route(ship, R.ROOT)
+                deploy = self.node(ship, "deploy")
+                self.assertEqual(deploy["inputs"], inputs)
+                reviews = [n["id"] for n in ship["nodes"] if n["kind"] == "review-worker"
+                           and n["id"] != "post-deploy-verify"]
+                self.assertEqual(ship_parent_deploy.command_reviewers(ship, deploy, reviews), judges)
+
     def test_a_writer_or_an_approval_still_cannot_be_borrowed(self):
         for capability, mode, graph in (
                 ("autopilot-code", "dev", "analyze-project:analysis,autopilot-draft:draft-production,report"),

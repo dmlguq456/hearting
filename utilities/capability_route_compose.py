@@ -573,9 +573,12 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
             handed = [out for out in nodes[index - 1]["outputs"] if not TOPO._is_semantic_output(out)]
             if handed and not set(handed) & (set(inputs) | set(io.values())):
                 inputs.extend(handed)
-        if index and nodes[index - 1].get("kind") == "review-worker":
+        if (index and nodes[index - 1].get("kind") == "review-worker"
+                and node.get("kind") not in ("capability-owner", "resource-runner")):
             # A review hands on the borrowed result it read together with its verdict, whether the
-            # review is borrowed or the host's own: the stage after it reads what was reviewed.
+            # review is borrowed or the host's own: the worker stage after it reads what was reviewed.
+            # A kernel node binds exactly what it names (a resource run its attestation and config,
+            # a deploy every review whose output it reads as a judge of its command), so it gets none.
             review = nodes[index - 1]
             reviewed = [name for name in review["inputs"] if name in borrowed_results]
             if reviewed:
