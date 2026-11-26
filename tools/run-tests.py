@@ -775,6 +775,8 @@ class SuiteResult:
         "duration_s",
         "profile",
         "failing_test_ids",
+        "tests_run",
+        "tests_skipped",
         "child_stderr",
         "run_deadline",
     )
@@ -788,6 +790,7 @@ class SuiteResult:
         self.duration_s = duration_s
         self.profile = profile
         self.failing_test_ids = extract_failing_test_ids(stdout, stderr)
+        self.tests_run, self.tests_skipped = extract_unittest_counts(stdout, stderr)
         self.child_stderr = ""
         # "not-started" or "stopped" when the --deadline run budget, not this
         # suite's own --timeout, ended the attempt; "" otherwise.
@@ -796,6 +799,18 @@ class SuiteResult:
     @property
     def passed(self) -> bool:
         return self.returncode == 0 and not self.timed_out
+
+
+_UNITTEST_RAN_RE = re.compile(r"^Ran (\d+) tests? in ", re.MULTILINE)
+_UNITTEST_SKIPPED_RE = re.compile(r"^OK \(.*?\bskipped=(\d+)", re.MULTILINE)
+
+
+def extract_unittest_counts(stdout: str, stderr: str) -> tuple[int, int]:
+    """``(tests run, tests skipped)`` read from a unittest summary; ``(0, 0)`` when absent."""
+    text = "\n".join((stderr or "", stdout or ""))
+    ran = _UNITTEST_RAN_RE.findall(text)
+    skipped = _UNITTEST_SKIPPED_RE.findall(text)
+    return (int(ran[-1]) if ran else 0, int(skipped[-1]) if skipped else 0)
 
 
 _UNITTEST_FAIL_RE = re.compile(r"^(FAIL|ERROR):\s+(\S+)\s+\(([\w.]+)\)", re.MULTILINE)
@@ -1807,7 +1822,13 @@ def classify_result(
             verdicts.append(Verdict(suite_path, test_id, "BASELINE-FOREIGN",
                                     detail="baseline row recorded under another environment"))
         if not verdicts:
-            verdicts.append(Verdict(suite_path, "-", "PASS"))
+            # A file whose every test was skipped (a missing node/npm, say) ran
+            # nothing: it is not a PASS, though it does not fail the run.
+            if result.tests_run and result.tests_skipped >= result.tests_run:
+                verdicts.append(Verdict(suite_path, "-", "SKIPPED",
+                                        detail=f"skipped={result.tests_skipped}/{result.tests_run}"))
+            else:
+                verdicts.append(Verdict(suite_path, "-", "PASS"))
         return verdicts
 
     # Suite failed (nonzero exit or timeout).
@@ -2886,6 +2907,7 @@ def _run_main(argv: list[str]) -> int:
     xpass_nonfatal: list[str] = []
     report_rows: list[dict[str, str]] = []
     verdict_counts: dict[str, int] = {}
+    skipped_tests = 0
     # One summary line per test name that failed and then passed, so a log grep
     # across CI runs counts how often each test flakes (a suite row keeps only
     # the names, folded into one detail field).
@@ -3040,6 +3062,7 @@ def _run_main(argv: list[str]) -> int:
                 verdicts = classify_result(retries[-1], baseline, today, run_fingerprint)
         else:
             verdicts = classify_result(result, baseline, today, run_fingerprint)
+        skipped_tests += result.tests_skipped
         for v in verdicts:
             verdict_counts[v.verdict] = verdict_counts.get(v.verdict, 0) + 1
             result_kind = v.kind if v.kind is not None else (
@@ -3219,11 +3242,13 @@ def _run_main(argv: list[str]) -> int:
     print(f"collected={total}")
     print(f"env: jobs={args.jobs} nproc={os.cpu_count()} timeout={args.timeout} profile={explicit_profile}")
     print(f"fingerprint={run_fingerprint}")
-    for key in ("PASS", "FAIL", "ERROR", "TIMEOUT", "KNOWN-FAIL", "FLAKY-KNOWN-FAIL", "FLAKY-PASS", "XPASS", "STALE", "EXPIRED", "KIND-MISMATCH",
+    for key in ("PASS", "SKIPPED", "FAIL", "ERROR", "TIMEOUT", "KNOWN-FAIL", "FLAKY-KNOWN-FAIL", "FLAKY-PASS", "XPASS", "STALE", "EXPIRED", "KIND-MISMATCH",
                 "BASELINE-FOREIGN",
                 "UNDECLARED-ISOLATION-OPTOUT", "ISOLATION-OPTOUT-UNNEEDED"):
         if key in verdict_counts:
             print(f"{key}={verdict_counts[key]}")
+    if skipped_tests:
+        print(f"skipped-tests={skipped_tests}")
     unclassified = sum(1 for row in report_rows if row["verdict"] == "KNOWN-FAIL")
     for profile in ISOLATION_PROFILES:
         print(f"profile[{profile}]={len(suites_by_profile[profile])}")

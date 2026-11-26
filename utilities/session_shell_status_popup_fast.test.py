@@ -318,11 +318,12 @@ const checks={};
   if(cfg.scenario==='open'){
     // The button's read is slow (a scan of a slow disk); Fleet's collection is slower still.
     control('read-delay',1.5);control('vm-delay',4);
-    await until(hasButton,'the button');await sleep(500);
+    // The button stands once a read has ended; wait for that (no read under way), not a fixed time.
+    await until(hasButton,'the button');await until(()=>count('read-start')>=1&&count('read-end')>=count('read-start'),'the first read ended');
     const r0=count('read-start'),v0=count('vm');
-    // 100 paints: no read.
+    // 100 paints: no read. The count is taken once the typed letters stand on the panel (the paints reached it).
     for(let i=0;i<100;i++){child.write('a');await sleep(10);}
-    await sleep(400);checks.reads_after_paints=count('read-start')-r0;
+    await until(has(/❯ a+/),'the paints on the panel');checks.reads_after_paints=count('read-start')-r0;
     // The press: the document stands under a second; Fleet's lines are not there yet.
     const began=Date.now();await opened();
     let r=await until(popupHas('NEWEST_DOC_LINE'),'the document in the popup');

@@ -265,6 +265,36 @@ class XPassFixture(RunTestsFixtureBase):
         self.assertEqual(verdicts, {"XPASS"})
 
 
+class SkippedSuiteFixture(RunTestsFixtureBase):
+    """A file whose every test was skipped is not a PASS; a partly skipped one still is."""
+
+    BODY = """
+        import unittest
+        class T(unittest.TestCase):
+            def test_a(self):
+                self.skipTest('no node')
+            def test_b(self):
+                {second}
+        unittest.main()
+    """
+
+    def test_whole_file_skip_is_a_skipped_verdict_and_the_run_still_passes(self):
+        write_suite(self.root, "all_skipped.test.py", self.BODY.format(second="self.skipTest('no node')"))
+        result, rows = self.run_fixture([])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual({r["verdict"] for r in rows}, {"SKIPPED"})
+        self.assertRegex(result.stdout, r"(?m)^SKIPPED=1$")
+        self.assertNotRegex(result.stdout, r"(?m)^PASS=")
+        self.assertRegex(result.stdout, r"(?m)^skipped-tests=2$")
+
+    def test_a_partly_skipped_file_stays_a_pass_and_its_skips_are_counted(self):
+        write_suite(self.root, "part_skipped.test.py", self.BODY.format(second="pass"))
+        result, rows = self.run_fixture([])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual({r["verdict"] for r in rows}, {"PASS"})
+        self.assertRegex(result.stdout, r"(?m)^skipped-tests=1$")
+
+
 class UnlistedFailFixture(RunTestsFixtureBase):
     def test_unlisted_fail_is_hard_failure(self):
         write_suite(self.root, "surprise_fail.test.py", "import sys\nsys.exit(1)\n")

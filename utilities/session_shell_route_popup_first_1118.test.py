@@ -519,14 +519,21 @@ const measure=async(label,press_=opened)=>{
     if(sc==='page_scroll'){
       // Enter pressed on a route while the collection is still under way (the window is lower than the page): the page opens at its top.
       await resize(120,16);
+      // The collection is held under way (not a delay the keys must beat): the Enter lands while it is out, on any machine.
+      fs.writeFileSync(cfg.vm+'.hang','');
       await opened();await until(either,'a first content');
       for(let i=0;i<8;i++)await key('\x1b[B',60);await key('\r',100);
       const pageRead=s=>paged(s)&&!staleWords(s)&&plain(s).some(l=>/\d+\/\d+ ·/.test(l));
-      const s1=(await until(pageRead,'the page read',cfg.delay*1000+20000)).s;checks.page_top=plain(s1).slice(0,4);checks.page_foot=(plain(s1).find(l=>/\d+\/\d+ ·/.test(l))||'').match(/\d+\/\d+/)?.[0]||'';frames.page_pressed=plain(s1);checks.page_title=title(s1);
+      await until(s=>plain(s).some(l=>/\d+\/\d+ ·/.test(l)),'the page while the collection is under way');
+      fs.unlinkSync(cfg.vm+'.hang');
+      // A frame is taken once the page has stopped changing (a frame drawn between two steps of the redraw is not the page).
+      const quiet=async s0=>{let last=JSON.stringify(plain(s0)),same=0,cur=s0;const began=Date.now();
+        while(same<8&&Date.now()-began<10000){await sleep(25);const s=await screen(),now=JSON.stringify(plain(s));if(now===last)same++;else{same=0;last=now;cur=s;}}return cur;};
+      const s1=await quiet((await until(pageRead,'the page read',cfg.delay*1000+20000)).s);checks.page_top=plain(s1).slice(0,4);checks.page_foot=(plain(s1).find(l=>/\d+\/\d+ ·/.test(l))||'').match(/\d+\/\d+/)?.[0]||'';frames.page_pressed=plain(s1);checks.page_title=title(s1);
       // The same page, asked when nothing is under way (back to the table, then Enter).
       await key('\r',500);await until(s=>!paged(s)&&filled(s),'the table again');
-      await key('\r',500);await until(paged,'the page again');await sleep(600);
-      const s2=await screen();checks.calm_page_top=plain(s2).slice(0,4);checks.calm_foot=(plain(s2).find(l=>/\d+\/\d+ ·/.test(l))||'').match(/\d+\/\d+/)?.[0]||'';frames.page_calm=plain(s2);
+      await key('\r',500);await until(paged,'the page again');
+      const s2=await quiet((await until(pageRead,'the calm page')).s);checks.calm_page_top=plain(s2).slice(0,4);checks.calm_foot=(plain(s2).find(l=>/\d+\/\d+ ·/.test(l))||'').match(/\d+\/\d+/)?.[0]||'';frames.page_calm=plain(s2);
     }
   }
   fs.writeFileSync(cfg.result,JSON.stringify({frames,checks}));
