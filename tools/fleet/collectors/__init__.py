@@ -441,19 +441,87 @@ def answer_wait_view(answer_waits, sessions):
     return fleet_answer_wait_view(answer_waits)
 
 
+# Where a row's window is, display only: what a viewer hands to the session it holds.
+_WINDOW_FIELDS = ("herdr_attached", "pane_location", "multiplexer", "pane_corner",
+                  "tmux_pane", "tmux_server", "detached", "_herdr_name")
+
+
+def merge_parked_viewers(sessions, *, links=None):
+    """One row for a conversation sent to the background: the held session's, in the viewer's window.
+
+    Claude's `/bg` leaves the window's process as a viewer of the old session id while the
+    conversation goes on as another session in another process, so two live processes would draw
+    two rows: the window under the old id, and the held session with no window. When
+    ``session_registry.steady_parked_links`` (the one judgment, read live once for the pass) links
+    them, the viewer's row goes and its window placement and its waits for the person move to the
+    held session's row, which also answers to the old id (a display join, like a resume alias).
+    No link, a missing or second row on either side, or a row whose process start is not the
+    link's keeps both rows: two rows are better than one wrong one.
+
+    This is the pass's decision: each merged row carries ``_parked_viewer`` (the old id), and the
+    number assignment and the pane header read that, never a second judgment. ``sessions`` is
+    changed in place; the merged ``{viewer id: held id}`` is returned.
+    """
+    from .. import session_registry
+    from . import interaction as interaction_collector
+    if links is None:
+        if not any(getattr(s, "harness", None) == "claude" for s in sessions):
+            return {}
+        links = session_registry.steady_parked_links("claude")
+    gone, merged = set(), {}
+    for viewer_sid, link in (links.get("successor") or {}).items():
+        def rows(sid, pid):
+            return [s for s in sessions if getattr(s, "harness", None) == "claude"
+                    and getattr(s, "session_id", None) == sid and getattr(s, "pid", None) == pid]
+        viewers, held = rows(viewer_sid, link.get("viewer_pid")), rows(link.get("session_id"), link.get("pid"))
+        if len(viewers) != 1 or len(held) != 1 or id(viewers[0]) in gone:
+            continue
+        viewer, row = viewers[0], held[0]
+        if getattr(row, "proc_start", None) not in (None, link.get("proc_start")):
+            continue
+        for name in _WINDOW_FIELDS:
+            if hasattr(viewer, name):
+                setattr(row, name, getattr(viewer, name))
+        # The old id still owns its waits for the person (ownership does not move): the row the
+        # window now shows carries them, as the window's row did.
+        row.interaction_state = interaction_collector.prefer(
+            getattr(row, "interaction_state", None), getattr(viewer, "interaction_state", None))
+        seen = {item.get("item_id") for item in (row.interaction_observations or []) if isinstance(item, dict)}
+        row.interaction_observations = list(row.interaction_observations or []) + [
+            item for item in (getattr(viewer, "interaction_observations", None) or [])
+            if not (isinstance(item, dict) and item.get("item_id") in seen)]
+        row.session_aliases = list(dict.fromkeys(
+            [*(getattr(row, "session_aliases", None) or []), viewer_sid,
+             *(getattr(viewer, "session_aliases", None) or [])]))
+        row._parked_viewer = viewer_sid
+        merged[viewer_sid] = row.session_id
+        gone.add(id(viewer))
+    if gone:
+        sessions[:] = [s for s in sessions if id(s) not in gone]
+    return merged
+
+
 def apply_session_aliases(sessions):
     """Attach each row's prior session ids (resume/fork), display-join use only.
 
     Must run before the peer and steward joins — both key on `(harness, session_id)` and
-    both can be addressed by an id the session no longer uses.
+    both can be addressed by an id the session no longer uses. A window whose conversation was
+    sent to the background becomes the held session's row first (``merge_parked_viewers``).
     """
     from .. import session_registry
-    live_ids = {(str(getattr(s, "harness", "") or "").lower(), s.session_id)
-                for s in sessions if getattr(s, "session_id", None)}
+    try:
+        merge_parked_viewers(sessions)
+    except Exception:
+        pass
+    # A merged window's old id is still a live process's identity: only its own merged row
+    # answers to it.
+    live_ids = {(str(getattr(s, "harness", "") or "").lower(), sid) for s in sessions
+                for sid in (getattr(s, "session_id", None), getattr(s, "_parked_viewer", None)) if sid}
     for s in sessions:
         harness = str(getattr(s, "harness", "") or "").lower()
         if not getattr(s, "pid", None) or harness not in session_registry.HARNESSES:
             continue
+        own = getattr(s, "_parked_viewer", None)
         try:
             aliases = session_registry.session_aliases(harness, s.pid)
         except Exception:
@@ -461,10 +529,10 @@ def apply_session_aliases(sessions):
         # A `--fork-session` parent can still be running under its own row. Adopting its
         # id here would make two rows answer to one key and hand the parent's messages to
         # the child, so an id that is still someone's current identity is never an alias.
-        aliases = [a for a in aliases if (harness, a) not in live_ids]
+        aliases = [a for a in aliases if a == own or (harness, a) not in live_ids]
         existing = getattr(s, "session_aliases", None) or []
         merged = list(dict.fromkeys(
-            alias for alias in (*existing, *aliases) if (harness, alias) not in live_ids
+            alias for alias in (*existing, *aliases) if alias == own or (harness, alias) not in live_ids
         ))
         if merged:
             s.session_aliases = merged
@@ -709,10 +777,19 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
                                 {"source": "cache", "state": "unknown"}]}
         from ..refresh import fleet_answer_wait_view
         fleet_answer_waits = fleet_answer_wait_view(answer_waits)
+        # A row answers for its own id and its resume/fork aliases (a merged window's old id
+        # among them); an id more than one row answers to belongs to none of them here.
+        from .. import session_registry
+        answering = {}
         for session in sessions:
-            key = (getattr(session, "harness", None), getattr(session, "session_id", None))
+            for key in session_registry.session_join_keys(session):
+                answering.setdefault(key, set()).add(id(session))
+        for session in sessions:
+            own = {key[1] for key in session_registry.session_join_keys(session)
+                   if answering.get(key) == {id(session)}}
+            harness = getattr(session, "harness", None)
             ids = {item.get("id") for item in answer_waits.get("items", ())
-                   if item.get("session_id") == key[1] and item.get("harness") == key[0]
+                   if item.get("session_id") in own and item.get("harness") == harness
                    and item.get("stale") == "current" and item.get("answer") != "sent"}
             if ids:
                 session.interaction_observations.extend(

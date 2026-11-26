@@ -6,7 +6,9 @@ import os
 import sys
 import io
 import json
+import subprocess
 import tempfile
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -22,6 +24,11 @@ class F51OptOutTest(unittest.TestCase):
         pane_patch = mock.patch("fleet.collectors.herdr.enrich", return_value=None)
         pane_patch.start()
         self.addCleanup(pane_patch.stop)
+        # Keep --json/--once's version header off git in the checkout under test; the
+        # index test below runs the real resolver.
+        self.info_patch = mock.patch.object(fleet.installinfo, "collect", return_value={})
+        self.info_patch.start()
+        self.addCleanup(self.info_patch.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.dispatch_tmp = tempfile.TemporaryDirectory()
         self.old_state_dir = os.environ.get("FLEET_USAGE_STATE_DIR")
@@ -102,6 +109,35 @@ class F51OptOutTest(unittest.TestCase):
                             os.environ.pop(k, None)
                         else:
                             os.environ[k] = v
+
+    def test_snapshot_runs_leave_the_checkouts_git_index_alone(self):
+        """installinfo.collect() reads git in Fleet's own checkout. It used `describe
+        --dirty`, which locks and may rewrite the index even with GIT_OPTIONAL_LOCKS=0, and
+        its 2 s timeout SIGKILLed git under load: on the NFS worktree a kill inside the
+        lock's create left a holderless 0-byte, mode-000 index.lock that stopped a merge
+        (2026-11-16). This repository stands in for that checkout; the real resolver must
+        leave its .git unchanged."""
+        self.info_patch.stop()
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            git = ["git", "-C", td, "-c", "user.name=Fixture", "-c", "user.email=f@example.invalid"]
+            (repo / "tracked").write_text("base\n", encoding="utf-8")
+            for args in (["init", "-q"], ["add", "tracked"], ["commit", "-qm", "base"]):
+                subprocess.run(git + args, check=True, capture_output=True)
+            os.utime(repo / "tracked", (1_000_000_000, 1_000_000_000))  # a refresh would rewrite
+            index = repo / ".git" / "index"
+
+            def git_state():
+                stat = index.stat()
+                return (stat.st_ino, stat.st_mtime_ns, index.read_bytes(),
+                        sorted(os.listdir(repo / ".git")))
+
+            before = git_state()
+            with mock.patch.object(fleet.installinfo, "_root_from_module", return_value=repo):
+                for argv in (["--json"], ["--once"]):
+                    with self.subTest(argv=argv):
+                        self._run(argv)
+                        self.assertEqual(git_state(), before)
 
     def test_json_disabled_field_reflects_flet_disable_env_end_to_end(self):
         """A14: `FLEET_DISABLE=usage-api, ,BOGUS` must surface end-to-end through --json as
