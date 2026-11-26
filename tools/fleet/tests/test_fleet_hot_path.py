@@ -43,6 +43,7 @@ if _UTILITIES not in sys.path:
 
 import artifact_reader as reader                                  # noqa: E402
 import dispatch_contract as D                                     # noqa: E402
+from fixture_processes import unique_attempt_id                   # noqa: E402
 from fleet import projection, render                              # noqa: E402
 from fleet.collectors import codex                                # noqa: E402
 from fleet.collectors import dispatch as dispatch_collector       # noqa: E402
@@ -202,7 +203,7 @@ class ProcessTableScanScopeTest(unittest.TestCase):
         return proc
 
     def test_scope_answers_like_the_single_shot_probes_from_one_walk(self):
-        attempt = "att-fleet-hot-path-scope-fixture"
+        attempt = unique_attempt_id("att-fleet-hot-path-scope-fixture")
         proc = self._spawn_tagged(attempt)
         identity = dict(D.process_launch_identity(os.getpid()), attempt_id=attempt)
         single = None

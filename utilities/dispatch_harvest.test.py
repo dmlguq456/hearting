@@ -15,6 +15,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 SPEC = importlib.util.spec_from_file_location(
     "capability_route_harvest", ROOT / "utilities/capability-route.py"
 )
@@ -182,7 +184,7 @@ class HarvestTest(unittest.TestCase):
 
     def _supervised_inspection_preserves_delivery(self, extra):
         attempt = "att-supervisor-failure-detail"
-        parent = "att-supervisor-parent"
+        parent = unique_attempt_id("att-supervisor-parent")
         jobs = self.base / "supervisor.jobs.log"
         current = self.terminal_row(
             attempt,

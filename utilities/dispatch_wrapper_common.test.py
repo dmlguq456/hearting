@@ -22,6 +22,8 @@ from shutil import copy2 as shutil_copy
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import dispatch_wrapper_common as C  # noqa: E402
 import dispatch_resource_wait as WAIT  # noqa: E402
 from dispatch_contract import resolve_agent_home  # noqa: E402
@@ -1048,7 +1050,7 @@ class WatcherRealCleanupTest(unittest.TestCase):
         temporary._finalizer.detach()
         base = Path(temporary.name)
         jobs = base / "jobs.log"
-        attempt = "att-real-watcher-cleanup"
+        attempt = unique_attempt_id("att-real-watcher-cleanup")
         children = []
 
         def finish():

@@ -11,6 +11,8 @@ import threading
 import unittest
 from unittest import mock
 from split_module_fixture import patch_split
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 
 
 def load(name, filename):
@@ -502,7 +504,7 @@ class CorrectionTest(unittest.TestCase):
         import ship_parent_deploy as ship
         deploy = next(n for n in f.f.route["nodes"] if n["id"] == "deploy")
         self.assertEqual({p["attempt_id"] for p in ship.reviews(f.f.route, deploy, f.jobs, f.request).values()},
-                         {"att-review-self", "att-security"})
+                         {"att-review-self", unique_attempt_id("att-security")})
         self.assertEqual(len(list(f.f.directory.glob("release-review.[0-9]*.json"))), 2)
         forged = json.loads(json.dumps(marker))
         forged['reviewer_disposition']['recorded_at'] = f.cr.datetime.now(f.cr.timezone.utc).isoformat()
