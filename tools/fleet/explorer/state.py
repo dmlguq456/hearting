@@ -202,6 +202,96 @@ def question_char_before(text, at):
     return max(i, 0)
 
 
+def _question_word_char(char):
+    return bool(char) and (char.isalnum() or char == "_" or unicodedata.category(char).startswith("M"))
+
+
+def question_word_left(text, at):
+    """The place a word back: past what is not a letter or digit, then past the run of them (11-26)."""
+    i = at
+    while i > 0 and not _question_word_char(text[question_char_before(text, i)]):
+        i = question_char_before(text, i)
+    while i > 0 and _question_word_char(text[question_char_before(text, i)]):
+        i = question_char_before(text, i)
+    return i
+
+
+def question_word_right(text, at):
+    i = at
+    while i < len(text) and not _question_word_char(text[i]):
+        i = question_char_after(text, i)
+    while i < len(text) and _question_word_char(text[i]):
+        i = question_char_after(text, i)
+    return i
+
+
+def question_line_start(text, at):
+    """The start of the line holding the place: Home and Ctrl+A go there (11-26)."""
+    return text.rfind("\n", 0, at) + 1
+
+
+def question_line_end(text, at):
+    end = text.find("\n", at)
+    return len(text) if end < 0 else end
+
+
+def question_answer_rows(text, width):
+    """The rows a written answer takes at ``width`` cells: ``(start, end)`` ranges of its characters, broken
+    at a line break (which no row shows) and where the next character no longer fits (11-26; the shell's
+    question popup lays its answer out the same way)."""
+    from .grid import cell_width
+    rows, start, used, width = [], 0, 0, max(1, int(width))
+    for i, char in enumerate(text):
+        if char == "\n":
+            rows.append((start, i))
+            start, used = i + 1, 0
+            continue
+        cells = cell_width(char)
+        if used + cells > width and i > start:
+            rows.append((start, i))
+            start, used = i, 0
+        used += cells
+    rows.append((start, len(text)))
+    return tuple(rows)
+
+
+def question_answer_row(rows, at):
+    """The row holding the place: the last one starting at or before it."""
+    return max((i for i, (start, _end) in enumerate(rows) if start <= at), default=0)
+
+
+def question_shown_text(text):
+    """A written answer as its rows show it: a line break stays one, any other control character a blank."""
+    return "".join(char if char == "\n" or not (ord(char) < 32 or 0x7f <= ord(char) < 0xa0) else " "
+                   for char in str(text))
+
+
+def _question_vertical(text, at, width, step, goal):
+    """``(place, goal)`` one row up or down at the cell column ``goal`` (the place's own when ``None``),
+    or ``None`` on the first or last row, where ↑↓ keep their meaning."""
+    from .grid import cell_width
+    shown = question_shown_text(text)
+    rows = question_answer_rows(shown, width)
+    home = question_answer_row(rows, at)
+    to = home + step
+    if not 0 <= to < len(rows):
+        return None
+    if goal is None:
+        goal = cell_width(shown[rows[home][0]:at])
+    start, end = rows[to]
+    i, used = start, 0
+    while i < end:
+        j = question_char_after(shown, i)
+        cells = cell_width(shown[i:j])
+        if used + cells > goal:
+            break
+        used, i = used + cells, j
+    # A wrapped row's end is the next row's start: the place stays on this row, before its last character.
+    if i == end and i > start and to + 1 < len(rows) and rows[to + 1][0] == end:
+        i = question_char_before(shown, i)
+    return i, goal
+
+
 def question_caret(overlay, question_id, text):
     """The place inside the typed text: a screen value only, the end unless set while typing (11-22)."""
     caret = overlay.get("caret") if isinstance(overlay, Mapping) else None
@@ -1328,6 +1418,25 @@ def _reduce(state, event, frame=None):
             overlay = dict(overlay)
             overlay.pop("answer_full")
             state = replace(state, question_overlay=overlay)
+        # 11-26: the cell column ↑↓ hold while they repeat inside a written answer; any other key lets it go.
+        goal = overlay.get("caret_goal") if key in ("up", "down") else None
+        if "caret_goal" in overlay and key not in ("up", "down"):
+            overlay = dict(overlay)
+            overlay.pop("caret_goal")
+            state = replace(state, question_overlay=overlay)
+        if key in ("up", "down") and unfolded and overlay.get("editing") and overlay.get("state") == "open":
+            # In a written answer of several rows ↑↓ go between its rows (at the width Fleet drew it); from its
+            # first row ↑ leaves the typing and from its last ↓ goes on, as they did.
+            questions = question_items(overlay.get("detail"))
+            question_id = overlay.get("editing_question_id") or (questions[0]["id"] if questions else None)
+            text = _question_text_draft(overlay, question_id) if question_id else ""
+            width = dict(getattr(frame, "answer_layout", ()) or ()).get(question_id)
+            if text and width:
+                moved = _question_vertical(text, question_caret(overlay, question_id, text), width,
+                                           -1 if key == "up" else 1, goal)
+                if moved is not None:
+                    return replace(state, question_overlay=dict(
+                        overlay, caret=(question_id, moved[0]), caret_goal=moved[1])), ()
         if key == "up" and unfolded and overlay.get("editing"):
             overlay = _question_without_caret(dict(overlay, editing=False))
             return replace(state, question_overlay=overlay), ()
@@ -1337,12 +1446,13 @@ def _reduce(state, event, frame=None):
             step = -1 if key == "up" else 1
             return _question_selection(state, refs[(index + step) % len(refs)])
         if (unfolded and overlay.get("state") == "open" and isinstance(key, str)
-                and (key.startswith("text:") or len(key) == 1 and key.isprintable())):
+                and (key.startswith("text:") or key == "newline" or len(key) == 1 and key.isprintable())):
             detail = overlay.get("detail")
             specs = question_items(detail)
             qid = overlay.get("editing_question_id") or (specs[0]["id"] if specs else "")
             if qid and question_free_text_supported(detail, qid):
-                addition = key[5:] if key.startswith("text:") else key
+                # 11-26: a line break (Ctrl+J, Alt+Enter) is a character of the answer like any other.
+                addition = "\n" if key == "newline" else key[5:] if key.startswith("text:") else key
                 question = next(item for item in specs if item["id"] == qid)
                 choices = question.get("choices", question.get("options"))
                 if overlay.get("editing") or not choices or not (len(addition) == 1 and addition in "123456789"):
@@ -1352,6 +1462,14 @@ def _reduce(state, event, frame=None):
                     if len(joined.encode("utf-8")) <= 4096:
                         return _question_with_caret(_question_set_answer(state, qid, joined), qid,
                                                     at + len(addition))
+                    # As much of a paste as fits goes in, and the limit is said (the shell's popup does the same).
+                    room = 4096 - len(text.encode("utf-8"))
+                    fit = addition.encode("utf-8")[:max(0, room)].decode("utf-8", "ignore")
+                    if fit and len(addition) > 1:
+                        result = _question_with_caret(_question_set_answer(state, qid, text[:at] + fit + text[at:]),
+                                                      qid, at + len(fit))
+                        return replace(result[0], question_overlay=dict(
+                            _question_overlay(result[0]), answer_full=True)), result[1]
                     return replace(state, question_overlay=dict(overlay, answer_full=True)), ()
         if key in ("e", "E"):
             return _reduce(state, {"type": "click", "action": ("question.edit",)}, frame)
@@ -1385,25 +1503,39 @@ def _reduce(state, event, frame=None):
             overlay = _question_without_caret(overlay)
             overlay.update(editing=False, status="Editing paused; draft retained.")
             return replace(state, question_overlay=overlay), ()
+        text_keys = ("delete", "ctrl-a", "ctrl-e", "ctrl-u", "ctrl-k", "word-left", "word-right", "word-back",
+                     "word-delete", "text-start", "text-end")
         if unfolded and overlay.get("editing") and overlay.get("state") == "open" and key in (
-                "left", "right", "home", "end", "ctrl-a", "ctrl-e", "delete"):
+                "left", "right", "home", "end", *text_keys):
             # 11-22: while an answer is typed, these keys move inside its text, or delete at the place
-            # (Delete and Ctrl+A/E belong to the text whether or not it has any yet). With no text
-            # ←→ and Home/End keep their meaning (the view switch, the pane scroll).
+            # (Delete, Ctrl+A/E and the word and line keys belong to the text whether or not it has any yet).
+            # With no text ←→ and Home/End keep their meaning (the view switch, the pane scroll).
+            # 11-26: Home/End (Ctrl+A/E) go to the ends of the line holding the place, Ctrl+Home/End to the
+            # ends of the text; Alt/Ctrl+←→ step a word, Ctrl+W and Alt+Backspace delete the word before the
+            # place, Alt+D and Ctrl+Delete the one after it, Ctrl+U the line before it, Ctrl+K the line after it.
             questions = question_items(overlay.get("detail"))
             question_id = overlay.get("editing_question_id") or (
                 questions[0]["id"] if questions else None)
             text = _question_text_draft(overlay, question_id) if question_id else ""
-            if text or key in ("delete", "ctrl-a", "ctrl-e"):
+            if text or key in text_keys:
                 at = question_caret(overlay, question_id, text)
-                if key == "delete":
-                    if at < len(text):
-                        end = question_char_after(text, at)
+                cuts = {"delete": (at, question_char_after(text, at)),
+                        "word-back": (question_word_left(text, at), at),
+                        "word-delete": (at, question_word_right(text, at)),
+                        "ctrl-u": (question_line_start(text, at), at),
+                        "ctrl-k": (at, question_line_end(text, at))}
+                if key in cuts:
+                    start, end = cuts[key]
+                    if end > start:
                         return _question_with_caret(
-                            _question_set_answer(state, question_id, text[:at] + text[end:]),
-                            question_id, at)
+                            _question_set_answer(state, question_id, text[:start] + text[end:]),
+                            question_id, start)
                     return state, ()
-                place = (0 if key in ("home", "ctrl-a") else len(text) if key in ("end", "ctrl-e")
+                place = (question_line_start(text, at) if key in ("home", "ctrl-a")
+                         else question_line_end(text, at) if key in ("end", "ctrl-e")
+                         else 0 if key == "text-start" else len(text) if key == "text-end"
+                         else question_word_left(text, at) if key == "word-left"
+                         else question_word_right(text, at) if key == "word-right"
                          else question_char_after(text, at) if key == "right"
                          else question_char_before(text, at) if at else 0)
                 return replace(state, question_overlay=dict(overlay, caret=(question_id, place))), ()
@@ -1420,6 +1552,16 @@ def _reduce(state, event, frame=None):
                     question_id, start)
             return state, ()
         if key in ("enter", "\n"):
+            if unfolded and overlay.get("editing") and overlay.get("state") == "open":
+                # 11-26: `\` then Enter (the native input's own way): the `\` before the place becomes a line break.
+                questions = question_items(overlay.get("detail"))
+                question_id = overlay.get("editing_question_id") or (questions[0]["id"] if questions else None)
+                spec = next((item for item in questions if item["id"] == question_id), {})
+                text = _question_text_draft(overlay, question_id) if question_id else ""
+                at = question_caret(overlay, question_id, text)
+                if at and text[at - 1] == "\\" and not (spec.get("is_secret") or spec.get("isSecret")):
+                    return _question_with_caret(
+                        _question_set_answer(state, question_id, text[:at - 1] + "\n" + text[at:]), question_id, at)
             if (unfolded and overlay.get("state") == "open"
                     and _question_draft_response(overlay) is not None):
                 if overlay.get("editing") and not question_answer_supported(overlay.get("detail")):

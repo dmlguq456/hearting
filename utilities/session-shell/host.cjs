@@ -1425,7 +1425,9 @@ function render() {
     else if(target!==paintedCursor)text=target;
     paintedCursor=target;
     const mouse=!fleetView&&height()>0?1002:({x10:9,vt200:1000,drag:1002,any:1003})[m.mouseTrackingMode];
-    const modes=new Map([[2004,m.bracketedPasteMode],[1,m.applicationCursorKeysMode],
+    // 11-26: while the question popup takes the keys a paste comes marked even if the native has not asked
+    // for it, so a pasted line break is a line break of the answer and never its Enter.
+    const modes=new Map([[2004,m.bracketedPasteMode||owning&&block.focused],[1,m.applicationCursorKeysMode],
       ...[9,1000,1002,1003].map(n=>[n,n===mouse]),[1006,!!mouse],
       [1004,m.sendFocusMode],[25,owning?!!blockCursor:cursorVisible]]);
     // Disable an old mouse mode before enabling its replacement. Reasserting focus/paste

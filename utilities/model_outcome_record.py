@@ -236,6 +236,7 @@ def _opencode_rejected() -> frozenset:
         import opencode_runtime
     except ImportError:  # package import in focused unit tests
         from utilities import opencode_runtime
+    _check_usage_cache(usage_cache)
     found = set()
     for row in usage_cache.unavailable_provider_rows("opencode"):
         name = f"{row['provider']}/{row['model']}"
@@ -247,17 +248,68 @@ def _opencode_rejected() -> frozenset:
     return frozenset(found)
 
 
+class RecordUnreadable(Exception):
+    """The record exists but cannot be read (damaged, not ours, or a later version's)."""
+
+
+def record_path(harness: str) -> str:
+    """The file that holds this harness's refusals (OpenCode's is its usage cache)."""
+    if harness == "opencode":
+        tools = str(Path(__file__).resolve().parents[1] / "tools")
+        if tools not in sys.path:
+            sys.path.insert(0, tools)
+        from fleet.collectors import usage_cache
+        return usage_cache._path("opencode")
+    return _path(harness)
+
+
+def _check_usage_cache(usage_cache) -> None:
+    """The usage cache reader gives no rows for a cache that is absent and for one that is there
+    and cannot be read alike; here only an absent file is "no refusal". Only this check is added:
+    the reader and its other callers are as they were."""
+    path = usage_cache._path("opencode")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            item = json.load(fh)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError, TypeError) as exc:
+        raise RecordUnreadable(f"opencode: {type(exc).__name__}") from exc
+    # A cache written before it had `providers` cannot hold a refusal: no key is "nothing refused";
+    # one that is there and is not a dict cannot be read.
+    if (not isinstance(item, dict) or item.get("schema_version") != usage_cache.SCHEMA_VERSION
+            or item.get("harness") != "opencode" or not isinstance(item.get("providers", {}), dict)):
+        raise RecordUnreadable("opencode: not a cache of this version")
+
+
+def _load_checked(harness: str) -> dict:
+    """The file's lines: `{}` when the file is absent, `RecordUnreadable` when it is there and
+    cannot be read as ours. An absent record holds no refusal; a damaged one may."""
+    try:
+        with open(_path(harness), encoding="utf-8") as fh:
+            item = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, TypeError) as exc:  # a text that is not UTF-8 is a ValueError
+        raise RecordUnreadable(f"{harness}: {type(exc).__name__}") from exc
+    if (not isinstance(item, dict) or item.get("schema_version") != SCHEMA_VERSION
+            or item.get("harness") != harness or not isinstance(item.get("providers"), dict)):
+        raise RecordUnreadable(f"{harness}: not a record of this version")
+    return item["providers"]
+
+
 def rejected_models(harness) -> frozenset:
     """The models this harness's record holds as `unavailable`, for any account scope.
 
     Claude and Codex name a model as the record keeps it (`model_key`). OpenCode keeps its lines
     in the usage cache and names `provider/model`; only a model-level reason counts there, for
-    the account in use (see `_opencode_rejected`). Read only; an absent or unreadable record
-    gives an empty set.
+    the account in use (see `_opencode_rejected`). Read only. An absent record holds no refusal
+    (an empty set); one that is there and cannot be read raises `RecordUnreadable`, so a caller
+    that follows models can leave them alone instead of taking it for "nothing refused".
     """
     if harness == "opencode":
         return _opencode_rejected()
-    lines = _load(harness) if harness in HARNESSES else None
+    lines = _load_checked(harness) if harness in HARNESSES else {}
     return frozenset(model_key(row.get("model")) for row in (lines or {}).values()
                      if isinstance(row, dict) and row.get("state") == "unavailable"
                      and row.get("model"))
