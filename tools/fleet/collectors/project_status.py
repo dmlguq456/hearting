@@ -277,7 +277,7 @@ def parse(text):
     Anything else is ignored; a missing part stays empty.  A generated campaign document (marker on its first line) has
     no ``decisions``: its ``기다리는 것`` section, where an older one still has it, is not read.
     """
-    generated = str(text).split("\n", 1)[0].strip() == CAMPAIGN_MARKER
+    generated = campaign_documents.carries_marker(text, CAMPAIGN_MARKER)
     title = line = first_paragraph = None
     sections = {"decisions": [], "next": []}
     current, level, in_body = None, 0, False
