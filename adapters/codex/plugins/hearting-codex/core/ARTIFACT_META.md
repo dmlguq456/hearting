@@ -249,7 +249,7 @@ written again as the work moves, without the section.
   `finalize` picks the
   primary itself, this file is the cycle's primary (`현황.md` first, then `STATUS.md`,
   after the official spec PRD; an explicit `--primary` still wins), and its row carries
-  `audience: "user"`, so Cairn's status row and Fleet's project line read the same file
+  `audience: "user"`; Fleet's project line reads the same file
   (`core/CORE.md` §3, primary selection). Names match NFC-normalized and case-folded. A
   file at the cycle root (`campaigns/<campaign>/<cycle>/현황.md`) makes the seal fail
   with `file-outside-artifacts` and is not read; copies under `_internal/` or
