@@ -181,8 +181,8 @@ PRIMARY_CANDIDATES = (
     "final_report.md", "report.md", "report.html", "prd.md", "plan.md", "handoff.md", "verdict.json",
 )
 # A project status document (one page: a `**한 줄**:` line, `## 결정 필요`, `## 다음`).
-# Directly under a cycle's `artifacts/` it is that cycle's automatic primary, so Cairn
-# pins it as the project's status row and Fleet's project line reads the same file.
+# Directly under a cycle's `artifacts/` it is that cycle's automatic primary, and Fleet's
+# project line reads the same file.
 STATUS_DOCUMENT_NAMES = ("현황.md", "STATUS.md")
 # What a person opens the artifact store for: reports, summaries, the canonical PRD and
 # the status document. Their manifest rows carry `audience: "user"`; other rows carry no
