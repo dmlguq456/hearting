@@ -602,6 +602,24 @@ _DEAD_RECIPIENT_ROW_FIELDS = (
 )
 
 
+def recorded_parent_runtime(owner_metadata: dict[str, str]) -> tuple[str, str, str]:
+    """The parent runtime an owner row recorded at launch: `(pid, start, pid namespace)`."""
+    return tuple(str(owner_metadata.get(key, "") or "") for key in (
+        "parent_runtime_pid", "parent_runtime_pid_start", "parent_runtime_ns"))
+
+
+def is_recorded_parent_runtime(owner_metadata: dict[str, str], binding) -> bool:
+    """Whether `binding` (a live process's `(pid, start, pid namespace)`) is exactly the recorded one.
+
+    All three recorded values must be present and equal; a partial record never matches."""
+    recorded = recorded_parent_runtime(owner_metadata)
+    try:
+        observed = tuple(str(part) for part in binding)
+    except TypeError:
+        return False
+    return all(recorded) and observed == recorded
+
+
 def expire_pending_for_dead_recipient(
     jobs: Path, owner_metadata: dict[str, str], record: dict, *, attempt_id: str,
 ) -> str:
@@ -674,10 +692,7 @@ def _expire_exact_pending(
             return "skipped"
     except (TypeError, ValueError):
         return "skipped"
-    if runtime_binding is not None and (
-            len(runtime_binding) != 3 or not all(runtime_binding)
-            or (raw_pid, pid_start, owner_metadata.get("parent_runtime_ns", "")) != tuple(
-                str(part) for part in runtime_binding)):
+    if runtime_binding is not None and not is_recorded_parent_runtime(owner_metadata, runtime_binding):
         return "pending"
 
     from dispatch_seat_handover import effective_parent, lineage_effect_lock

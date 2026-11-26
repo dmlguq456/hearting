@@ -2310,10 +2310,13 @@ def ack_delivered(root: Path, session_id: str, records: list[dict], *, acked_by:
 # A plain `/clear` starts another session in the same runtime and pane. The completion record of
 # work the earlier session started stays stored under that session, and no handover makes the new
 # one its recipient. This notice tells the new session once that such a completion exists; it grants
-# no task, and the record then expires as `recipient-session-replaced`.
+# no task, and the record then expires as `recipient-session-replaced`. A record the earlier
+# session's wake already carried gets a neutral line instead, and when that wake's exact receipt is
+# in this session's own transcript the record is ACKed as received here, with no line at all.
 REPLACED_NOTICE_PREFIX = "previous_session_completion:"
 REPLACED_SESSION_LOOKBACK = 8
 REPLACED_SCOPE_ENTRIES = 64
+_REPLACED_NOTICE_TAIL = "you may tell the person in one line"
 
 
 class ReplacedSessionNotice(NamedTuple):
@@ -2323,6 +2326,7 @@ class ReplacedSessionNotice(NamedTuple):
     record: dict
     line: str
     binding: tuple
+    received: bool = False
 
 
 def _notice_value(value, limit: int = 96) -> str:
@@ -2330,7 +2334,7 @@ def _notice_value(value, limit: int = 96) -> str:
     return text[:limit]
 
 
-def _replaced_notice_line(record: dict, row, previous_sid: str) -> str:
+def _replaced_notice_line(record: dict, row, previous_sid: str, *, carried: bool = False) -> str:
     receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
     classification = receipt.get("delivery_classification")
     if not classification:
@@ -2342,11 +2346,23 @@ def _replaced_notice_line(record: dict, row, previous_sid: str) -> str:
             f"attempt_id={_notice_value(row.attempt_id)} status={_notice_value(row.status)} "
             f"classification={_notice_value(classification)} "
             f"previous_session={_notice_value(previous_sid, 8)} "
-            "(notice only; this session holds no task from it)")
+            + ("(already carried once to an earlier session; this line neither adds to nor cancels "
+               f"that receipt; {_REPLACED_NOTICE_TAIL})" if carried else
+               f"(notice only; this session holds no task from it; {_REPLACED_NOTICE_TAIL})"))
+
+
+def _receipt_shown_here(evidence, session_id: str, record: dict, storage_recipient: str) -> bool:
+    """Whether this session's own native transcript holds the record's exact receipt marker."""
+    if (not isinstance(evidence, dict) or evidence.get("harness") != "claude"
+            or evidence.get("session_id") != session_id):
+        return False
+    from dispatch_recipient_receipt import binding_digest
+    bindings = {tuple(item) for item in evidence.get("bindings") or () if isinstance(item, (list, tuple))}
+    return (record.get("delivery_id"), binding_digest(record, storage_recipient)) in bindings
 
 
 def replaced_session_notices(roots, session_id: str, *, env=None, deadline_ns: int | None = None,
-                             limit: int = 3) -> list[ReplacedSessionNotice]:
+                             limit: int = 3, evidence=None) -> list[ReplacedSessionNotice]:
     """Completions of an earlier session of this pane that this runtime can no longer deliver.
 
     Read-only. The earlier sessions are the other Claude sessions the pane's seat ledger lists;
@@ -2354,7 +2370,9 @@ def replaced_session_notices(roots, session_id: str, *, env=None, deadline_ns: i
     open, addressed to such a session, and exactly the completion its owner row names (digest,
     delivery id and intent), the row records this very runtime (`runtime_ancestry_binding` of this
     process), and no handover moved the recipient. Anything else, including a pane-less terminal,
-    yields nothing."""
+    yields nothing. A record a carrier holds under a live lease is left to that carrier. One a
+    carrier already took gets the neutral line, or is ``received`` (no line) when ``evidence``, this
+    session's native transcript, holds its exact receipt marker."""
     import dispatch_contract_process as process
     import dispatch_seat_handover as handover
     import session_tidy
@@ -2386,13 +2404,16 @@ def replaced_session_notices(roots, session_id: str, *, env=None, deadline_ns: i
                     if (not isinstance(record, dict) or record.get("state") not in pending_delivery.OPEN_STATES
                             or record.get("recipient_kind") != "claude-parent-runtime"):
                         continue
+                    if (record.get("state") == "claimed"
+                            and int(record.get("claim_deadline_ns") or 0) > time.monotonic_ns()):
+                        continue  # a carrier holds it right now; its own send settles it
                     attempts = record.get("attempt_ids") or []
                     jobs = record_jobs(Path(root), record)
                     if len(attempts) != 1 or jobs is None:
                         continue
                     # Loaded only once an open completion of an earlier session exists: the common
                     # prompt has none, and this module is the heavier import.
-                    from dispatch_completion_join import current_attempt_row
+                    from dispatch_completion_join import current_attempt_row, is_recorded_parent_runtime
                     row = current_attempt_row(jobs, attempts[0])
                     meta = row.metadata if row is not None else {}
                     if (row is None or row.status != "done" or meta.get("parent_sid") != previous_sid
@@ -2402,38 +2423,47 @@ def replaced_session_notices(roots, session_id: str, *, env=None, deadline_ns: i
                         continue
                     if binding is None:
                         binding = process.runtime_ancestry_binding(os.getpid()) or ()
-                    owner_runtime = (meta.get("parent_runtime_pid", ""), meta.get("parent_runtime_pid_start", ""),
-                                     meta.get("parent_runtime_ns", ""))
-                    if (len(binding) != 3 or not all(owner_runtime)
-                            or owner_runtime != tuple(str(part) for part in binding)):
+                    if not is_recorded_parent_runtime(meta, binding):
                         continue
                     if handover.effective_parent(meta, jobs) != previous_sid:
                         continue
+                    carried = record.get("state") != "pending"
+                    received = carried and _receipt_shown_here(evidence, session_id, record, previous_sid)
                     found.append(ReplacedSessionNotice(
                         Path(root), jobs, dict(meta), record,
-                        _replaced_notice_line(record, row, previous_sid), tuple(binding)))
+                        "" if received else _replaced_notice_line(record, row, previous_sid, carried=carried),
+                        tuple(binding), received))
                 except Exception:  # noqa: BLE001 - one unreadable record never blocks the prompt
                     continue
     return found
 
 
-def settle_replaced_session_notices(items) -> int:
-    """Expire the exact records whose notice was shown; returns how many expired.
+def settle_replaced_session_notices(items, *, session_id: str = "", evidence=None) -> int:
+    """Settle the exact records of shown or received notices; returns how many settled.
 
-    Called after the notice was rendered and flushed. An expiry that is refused (the runtime or
-    recipient changed meanwhile) leaves the record open, so a later prompt shows it again."""
+    A shown notice's record expires (called after the line was rendered and flushed). A received
+    one is ACKed through the shared native-receipt check against ``evidence`` for ``session_id``.
+    A refused settlement (the runtime, recipient or record changed meanwhile) leaves the record
+    open, so a later prompt looks at it again."""
     from dispatch_completion_join import expire_pending_for_replaced_recipient
+    from dispatch_recipient_receipt import settle_native_receipt
 
-    expired = 0
+    settled = 0
     for item in items:
         try:
+            if item.received:
+                outcome = settle_native_receipt(
+                    item.root, item.metadata["parent_sid"], "claude", session_id, item.record,
+                    evidence, acked_by=f"native-receipt:claude:{session_id}")
+                settled += bool(outcome.get("settled"))
+                continue
             result = expire_pending_for_replaced_recipient(
                 item.jobs, item.metadata, item.record, attempt_id=item.metadata["attempt_id"],
                 runtime_binding=item.binding)
         except Exception:  # noqa: BLE001
             continue
-        expired += result == "expired"
-    return expired
+        settled += result == "expired"
+    return settled
 
 
 def sweep(

@@ -4723,12 +4723,16 @@ class ReplacedSessionNoticeTest(IsolatedRootMixin, unittest.TestCase):
         self.assertIsNotNone(seat)
         return session_tidy.physical_seat(seat)
 
-    def _prompt(self, sid, event="UserPromptSubmit", chars=None, prompt_id=None):
+    def _prompt(self, sid, event="UserPromptSubmit", chars=None, prompt_id=None, transcript=None):
         out = io.StringIO()
         payload = {"session_id": sid, "hook_event_name": event}
         if prompt_id:
             payload["prompt_id"] = prompt_id
         extra = [mock.patch.object(HOOK, "CLAUDE_CONTEXT_CHARS", chars)] if chars else []
+        if transcript is not None:
+            runtime_home, path = transcript
+            payload["transcript_path"] = str(path)
+            extra.append(mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(runtime_home)}))
         with contextlib.ExitStack() as stack:
             for patcher in extra:
                 stack.enter_context(patcher)
@@ -4751,6 +4755,34 @@ class ReplacedSessionNoticeTest(IsolatedRootMixin, unittest.TestCase):
     def _state(self, record):
         current = PD.read(self.root, "sess-A", record["delivery_id"])
         return current["state"], current.get("expiry_reason")
+
+    def _carried(self, record, *, sent=True, lease_seconds=30):
+        """Carrier 1 (the earlier session's asyncRewake waiter) took the record, maybe sent it."""
+        owner = "claude-async-rewake:fixture"
+        PD.claim(self.root, "sess-A", record["delivery_id"], claim_owner=owner,
+                 lease_seconds=lease_seconds, require_generation_proof=False)
+        if sent:
+            PD.mark_sent_ambiguous(self.root, "sess-A", record["delivery_id"], claim_owner=owner)
+        return PD.read(self.root, "sess-A", record["delivery_id"])
+
+    def _transcript(self, sid, *records):
+        """`sid`'s native transcript, holding the wake that carried each record's exact receipt."""
+        import claude_project_dir
+        import dispatch_recipient_receipt as recipient_receipt
+        runtime_home = self.root.parent / ("claude-home-" + uuid.uuid4().hex[:8])
+        project = runtime_home / "projects" / claude_project_dir.encode_project_dir(str(self.root))
+        project.mkdir(parents=True)
+        path = project / (sid + ".jsonl")
+        markers = "".join(recipient_receipt.receipt_marker(record, "sess-A") for record in records)
+        path.write_text(json.dumps({
+            "type": "user", "sessionId": sid,
+            "origin": {"kind": "task-notification", "producer": "session-task"},
+            "promptSource": "system", "turnOrigin": "task_notification",
+            "message": {"content": ("<task-notification><task-id>fixture</task-id>"
+                                    "<summary>Stop hook feedback</summary>" + markers
+                                    + "</task-notification>")},
+        }) + "\n", encoding="utf-8")
+        return runtime_home, path
 
     def test_next_prompt_in_the_same_runtime_shows_one_notice_then_the_record_expires(self):
         import dispatch_seat_handover as handover
@@ -4912,6 +4944,60 @@ class ReplacedSessionNoticeTest(IsolatedRootMixin, unittest.TestCase):
         context = self._prompt("sess-A")
         self.assertNotIn(SWEEP.REPLACED_NOTICE_PREFIX, context)
         self.assertEqual(self._state(record), ("acked", None))
+
+    def test_a_completion_the_earlier_wake_already_put_into_this_conversation_is_acked_without_a_line(self):
+        # Y1: A's asyncRewake waiter is bound to the process, so after a plain `/clear` its wake
+        # lands in B's conversation. Its full receipt is there; a "holds no task" line would
+        # contradict it, and an expiry would say it was not delivered. It is ACKed as received.
+        _meta, record = self._completion()
+        carried = self._carried(record)
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        transcript = self._transcript("sess-B", carried)
+        context = self._prompt("sess-B", transcript=transcript)
+        self.assertFalse(any(line.startswith(SWEEP.REPLACED_NOTICE_PREFIX)
+                             for line in context.splitlines()), context)
+        acked = PD.read(self.root, "sess-A", record["delivery_id"])
+        self.assertEqual((acked["state"], acked["acked_by"]), ("acked", "native-receipt:claude:sess-B"))
+        self.assertEqual(self._prompt("sess-B", transcript=transcript), "")
+
+    def test_a_carried_completion_not_found_here_gets_a_neutral_line_then_expires(self):
+        # Y1: carried, but its receipt is not in this session's transcript (it reached the earlier
+        # session before the `/clear`). The line neither grants nor cancels anything.
+        _meta, record = self._completion()
+        self._carried(record)
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        context = self._prompt("sess-B", transcript=self._transcript("sess-B"))
+        notices = [line for line in context.splitlines()
+                   if line.startswith(SWEEP.REPLACED_NOTICE_PREFIX)]
+        self.assertEqual(len(notices), 1, context)
+        self.assertIn("neither adds to nor cancels that receipt", notices[0])
+        self.assertNotIn("holds no task", notices[0])
+        self.assertIn("you may tell the person in one line", notices[0])
+        self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
+
+    def test_a_completion_a_carrier_holds_now_is_left_to_that_carrier(self):
+        # A live claim is a carrier sending right now: no line and no expiry until its lease lapses.
+        _meta, record = self._completion()
+        self._carried(record, sent=False, lease_seconds=1)
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        self.assertEqual(self._prompt("sess-B"), "")
+        self.assertEqual(self._state(record), ("claimed", None))
+        time.sleep(1.1)
+        context = self._prompt("sess-B")
+        self.assertIn("neither adds to nor cancels that receipt", context)
+        self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
+
+    def test_a_never_sent_completion_keeps_the_no_task_line(self):
+        _meta, record = self._completion()
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        context = self._prompt("sess-B", transcript=self._transcript("sess-B"))
+        self.assertIn("(notice only; this session holds no task from it; "
+                      "you may tell the person in one line)", context)
+        self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
 
     def test_a_gate_or_supervision_record_is_not_a_completion_to_replace(self):
         _meta, record = self._completion()

@@ -171,15 +171,26 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
     # A plain `/clear` leaves the earlier session's completion with no recipient. One notice line per
     # such completion joins this prompt's context when it fits whole; the rest wait for the next prompt.
     # The notices are collected whole before any line joins the context, so a failure while collecting
-    # leaves the context exactly as the ordinary delivery built it.
+    # leaves the context exactly as the ordinary delivery built it. A completion the earlier session's
+    # wake already put into this conversation (its exact receipt is in this transcript) needs no line:
+    # it is ACKed as received here.
     candidate_notices = []
+    evidence = None
     if prompt:
         try:
-            candidate_notices = list(replaced_session_notices(roots, session_id, deadline_ns=deadline_ns))
+            evidence = receipt_observer(None, None, None) if receipt_observer else None
+            candidate_notices = list(replaced_session_notices(
+                roots, session_id, deadline_ns=deadline_ns, evidence=evidence))
         except Exception:  # noqa: BLE001 -- fail-open: a notice never blocks the prompt
             candidate_notices = []
+    received_notices = [notice for notice in candidate_notices if notice.received]
+    if received_notices:
+        try:
+            settle_replaced_session_notices(received_notices, session_id=session_id, evidence=evidence)
+        except Exception:  # noqa: BLE001
+            pass
     shown_notices = []
-    for notice in candidate_notices:
+    for notice in (notice for notice in candidate_notices if not notice.received):
         joined = f"{context}\n{notice.line}" if context else notice.line
         if len(joined) > CLAUDE_CONTEXT_CHARS:
             break
