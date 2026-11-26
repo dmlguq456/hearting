@@ -18,7 +18,9 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools/install"))
+sys.path.insert(0, str(ROOT / "tools"))
 import fixture_env
+import fixture_processes
 
 spec = importlib.util.spec_from_file_location("codex_start_memory", ROOT / "adapters/codex/hooks/sessionstart-lifecycle.py")
 bridge = importlib.util.module_from_spec(spec)
@@ -29,6 +31,9 @@ class SessionStartMemoryTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="codex-start-memory-")
         self.addCleanup(self.tmp.cleanup)
+        # The hook detaches helpers that write into the state folder late; end them
+        # first (cleanups run last-in first) so the folder can be removed.
+        self.addCleanup(fixture_processes.reap, self.tmp.name)
         self.cwd = Path(self.tmp.name) / "project"
         self.cwd.mkdir()
         env = fixture_env.build_environment(self.tmp.name, ROOT, base={"PATH": os.environ["PATH"]})

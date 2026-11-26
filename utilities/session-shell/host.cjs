@@ -46,6 +46,7 @@ const SUCCESSOR=SUCCESSION&&process.env.HEARTING_SHELL_SUCCESSOR==='1';
 const GENERATION=Number(process.env.HEARTING_SHELL_GENERATION)||0;
 const panelView=require('./panel-view.cjs');
 const statusList=require('./status-list.cjs');
+const backlogBoard=require('./backlog-board.cjs');
 let displayConfiguration={...panelView.defaults};
 try{displayConfiguration=JSON.parse(process.env.HEARTING_SHELL_LAYOUT||'{}');}catch{}
 // Spec rule 49 (d): a window too narrow for the open panel starts with it folded.
@@ -676,14 +677,19 @@ function statusRoutes(panel=panelModel){return [...new Set((Array.isArray(panel.
 function statusHeld(){const v=statusValue;
   return v&&typeof v==='object'?{word:String(v.word||''),title:String(v.title||''),has_doc:v.has_doc===true,path:String(v.path||''),slot:String(v.slot||'')}:null;}
 // 11-20: the panel draws the button alone (the word, and whether a document stands: dim when none); the document's lists are the popup's.
-// The name of the folder this window's status document is in: the backlog puts the group of that name first.
+// The name of the folder this window's status document is in (the backlog's read is asked for it; 11-26: its order is the dates', whichever folder).
 function ownFolder(){const p=statusValue&&typeof statusValue.path==='string'?statusValue.path:'';return p?path.basename(path.dirname(p)):'';}
-const BACKLOG_KINDS=['fix','improve','note','tbd'];
+const BACKLOG_KINDS=['fix','task','note','tbd'];
+// 11-26 (scheme A): a backlog item carries its kind, state, area and date as the backend read them (`session_status.panel_backlog_items`), so the
+// panel's drawing can take them as they are; a value that is not one the backend sends is left out.
+const BACKLOG_STATES=['discuss','ready','waiting'],BACKLOG_DAY=/^\d{4}-\d{2}-\d{2}$/;
 function listItems(v){return (Array.isArray(v?.items)?v.items:[]).filter(i=>i&&typeof i.text==='string').slice(0,3).map(i=>({mark:i.mark==='!'?'!':'',text:i.text,key:typeof i.key==='string'?i.key:'',
-  ...(BACKLOG_KINDS.includes(i.kind)?{kind:i.kind}:{})}));}
-// 11-22: the backlog's count of each sort (`fix`, `improve`, `note`, `tbd`), as the document was read; a backend that does not send them has none and the part is drawn as it was.
+  ...(BACKLOG_KINDS.includes(i.kind)?{kind:i.kind}:{}),...(BACKLOG_STATES.includes(i.state)?{state:i.state}:{}),
+  ...(typeof i.area==='string'&&i.area.trim()?{area:i.area.trim().slice(0,80)}:{}),...(BACKLOG_DAY.test(String(i.date||''))?{date:i.date}:{})}));}
+// 11-22: the backlog's count of each kind (`fix`, `task`, `note`, `tbd`; 11-26 and of each state), as the document was read; a backend that does not send them has none and the part is drawn as it was.
 function listCounts(v){const c=v?.counts;if(!c||typeof c!=='object')return null;const out={};
-  for(const name of BACKLOG_KINDS){if(!Number.isInteger(c[name])||c[name]<0)return null;out[name]=c[name];}return out;}
+  for(const name of BACKLOG_KINDS){if(!Number.isInteger(c[name])||c[name]<0)return null;out[name]=c[name];}
+  for(const name of BACKLOG_STATES)if(Number.isInteger(c[name])&&c[name]>=0)out[name]=c[name];return out;}
 function listTotal(v,items){return Math.max(items.length,Number.isInteger(v?.total)&&v.total>=0?v.total:0);}
 function statusDoc(){
   if(!(statusValue&&typeof statusValue.word==='string'))return null;
@@ -739,6 +745,8 @@ function tableGuide(kind){
     :kind==='NOW'?label(table?.page?'popup_now_page':'popup_now',table?.page?'Enter back to the list':'↑↓ · Enter read that part')
     // 11-21: the status popup with a list screen names its keys; one without (a hand-written page, none) keeps the keys it had.
     // (the document read whole has the keys every popup has: its Esc goes back to the list, and Enter does too)
+    // 11-26: the backlog's board names its own keys too (`k/a/d` group, `t` state, `/` find, Home/End).
+    :kind==='BACKLOG'&&table?.board&&table.screen!=='full'?label('popup_backlog','↑↓ · Enter open · k/a/d group · t state · / find · Home/End')
     :listed(kind)&&table?.listing&&table.screen!=='full'?label('popup_status','↑↓ · Enter open'):'';
   const fold=label(expanded?'popup_fold':'popup_unfold',expanded?'p fold panel':'p open panel');
   return [own,label('popup_keys','←→ section · PgUp/PgDn').replace('{panel}',fold)].filter(Boolean);
@@ -779,6 +787,8 @@ function tableRows(inner){
   if(t.kind==='NOW')return nowRows(t);
   if(!t.loaded)return [[{text:t.error?label('popup_unread','could not read'):'⠏',dim:true}]];
   if(listed(t.kind))t.hits=[];
+  // 11-26: the backlog's board makes its entries from its rows by its own state (grouping, state shown, what is found) at this width.
+  if(t.board&&t.screen==='list')t.listing=boardEntries(t,inner);
   if(statusListing(t)){
     // 11-21: the list screen, laid out by the popup's own state. A line chosen that the document no longer has (read again,
     // or its group closed) falls to the first one, at the top.
@@ -796,6 +806,16 @@ function tableRows(inner){
 }
 // The status popup is on its list screen (a generated campaign page; the document read whole is `full document ›`).
 function statusListing(t){return !!t&&listed(t.kind)&&!!t.listing&&t.screen==='list';}
+// The backlog board's entries (`backlog-board.cjs`) at `inner` cells (the popup's inside; before the first drawing, its width's). The same board,
+// grouping, state shown, what is found and width give the entries made last (a drawing does not lay a long backlog out again).
+function boardEntries(t,inner){
+  const width=Number.isInteger(inner)?inner:Math.max(0,t.width-4),bs=t.boardState,key=JSON.stringify([bs.axis,bs.filter,bs.find,width]);
+  if(t.boardMade&&t.boardMade.board===t.board&&t.boardMade.key===key)return t.boardMade.entries;
+  const entries=backlogBoard.entries(t.board,bs,{width,measure:cellWidth});t.boardMade={board:t.board,key,entries};return entries;}
+// The board is open on its list and takes its own keys.
+function boardOn(t){return !!t&&t.kind==='BACKLOG'&&!!t.board&&t.screen==='list';}
+// After a key changed the board's state: its entries again at once (a key that follows in the same read moves over the new view), then a drawing.
+function boardChanged(t){t.listing=boardEntries(t);queueDisplay();}
 // The NOW popup's rows: the list with the row stood on shown as a chosen row (the frame's `tint`, reversed
 // where there is no color), or the part being read. Until the first answer, the NOW the panel already holds
 // stands on its own row, so the popup is never empty.
@@ -820,9 +840,12 @@ function popupNow(){
     // table is longer than its rows, the reading's place first (`3/20 · …`).
     const all=tableRows(inner);
     let place,guide,space;
+    // (11-26: while a title or an area is being found on the backlog's board, its row stands above the keys)
+    const input=boardOn(table)?backlogBoard.inputRow(table.board,table.boardState,inner,cellWidth):null;
     const lay=()=>{
       place=all.length>Math.max(1,room-tableGuide(table.kind).length)?`${Math.min(all.length,table.scroll+1)}/${all.length}`:'';
       guide=wrapGuide([place,...tableGuide(table.kind)].filter(Boolean),inner,Math.max(1,room-1)).map(text=>[{text,dim:true}]);
+      if(input)guide=[input,...guide];
       space=Math.max(1,room-guide.length);
     };
     const clamp=()=>{table.scroll=Math.max(0,Math.min(table.scroll,Math.max(0,all.length-space)));};
@@ -956,7 +979,11 @@ function askTable(){
       // the lines' own ids; a line the page no longer has falls to the top) and none of its rows, the document read whole being the
       // other answer (`askDoc`); for any other document the rows as they always came, with Fleet's lines after.
       t.title=typeof result.title==='string'?result.title:'';
-      t.listing=statusEntries(result);
+      // 11-26: the backlog's answer is its board (one short row per item); the board's state is kept while the popup stands.
+      const board=t.kind==='BACKLOG'?backlogBoard.fromAnswer(result):null;
+      t.board=board;
+      if(board){t.boardState=t.boardState||backlogBoard.newState();backlogBoard.prepare(board,t.boardState,t);t.listing=boardEntries(t);}
+      else t.listing=statusEntries(result);
       if(t.listing){
         t.rows=[];
         if(!t.screen)t.screen='list';
@@ -1133,10 +1160,10 @@ function openPopup(name,open='',page=false){
     ...(name==='NOW'?{sel:'',list:null,read:null,reveal:true,listScroll:0,loaded:false}:{}),
     // 11-21: the status popup's list screen state: the line chosen, the groups and items opened (by their own words).
     // (a press on one of the panel's items opens it standing on that item: `open` is the item's key, taken if the list has it)
-    ...(listed(name)?{listing:null,screen:'',sel:open,fold:new Set(),items:new Set(),more:{},moreAsking:new Set(),reveal:true,listScroll:0}:{})};
-  // An item of another campaign's group (`i:<group id>:…`) pressed on the backlog panel stands in a folded group of the popup: that group opens with it,
-  // else its line is not on the screen and the popup would fall back to the first line.
-  if(name==='BACKLOG'&&table.fold&&/^i:[^:]+:/.test(open))table.fold.add(open.split(':')[1]);
+    ...(listed(name)?{listing:null,screen:'',sel:open,fold:new Set(),items:new Set(),more:{},moreAsking:new Set(),reveal:true,listScroll:0}:{}),
+    // 11-26: the backlog's board and its state (grouping, state shown, what is found): the popup's alone, gone when it closes. An item pressed on the
+    // panel stands the board on it, its group open (`backlogBoard.prepare`).
+    ...(name==='BACKLOG'?{board:null,boardState:null}:{})};
   // The status popup's rows as read last, while no watch event came and the width is the same.
   const kept=name==='STATUS'&&statusPopup&&statusPopup.width===table.width&&statusPopup.generation===statusGeneration;
   if(kept)Object.assign(table,{rows:statusPopup.rows,head:statusPopup.head,doc:statusPopup.doc,title:statusPopup.title,loaded:true,
@@ -1222,10 +1249,12 @@ function askDetail(t,key){
   const entry=t.listing.find(e=>e.key===key);
   if(!entry||!entry.lazy||(t.more&&t.more[key])||(t.moreAsking&&t.moreAsking.has(key)))return;
   t.more=t.more||{};t.moreAsking=t.moreAsking||new Set();t.moreAsking.add(key);
-  const columns=Math.max(20,Math.min(200,t.width-4)),selected=selection,listing=t.listing;
-  readAction({kind:POPUP_KIND.BACKLOG,columns,open:key,page:false,rows:6,cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),own:ownFolder(),part:'detail'},'popup',true).then(result=>{
+  // (an answer for a list read again is dropped: the board's entries are made again at every drawing, so for it the read is its board's)
+  const columns=Math.max(20,Math.min(200,t.width-4)),selected=selection,listing=t.board||t.listing;
+  readAction({kind:POPUP_KIND.BACKLOG,columns,open:key,page:false,rows:6,cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),own:ownFolder(),part:'detail',
+    ...(t.board?{indent:backlogBoard.DETAIL_INDENT}:{})},'popup',true).then(result=>{
     if(t.moreAsking)t.moreAsking.delete(key);
-    if(selected!==selection||table!==t||t.listing!==listing)return;
+    if(selected!==selection||table!==t||(t.board||t.listing)!==listing)return;
     t.more[key]=result?.ok?tableParts(result):[];
     queueDisplay();
   });
@@ -1247,6 +1276,8 @@ function statusBack(t){t.screen='list';t.scroll=t.listScroll||0;t.reveal=true;qu
 // Esc on the document read whole goes back to the list; true when that is all it did (else the popup closes).
 function popupBack(){
   const t=table;
+  // 11-26: on the backlog's board Esc first undoes the board's own state (what is being typed, the opened items, what was found, the state shown).
+  if(boardOn(t)&&backlogBoard.back(t.board,t.boardState,t)){boardChanged(t);return true;}
   if(!t||!listed(t.kind)||!t.listing||t.screen!=='full')return false;
   statusBack(t);return true;
 }
@@ -2139,6 +2170,8 @@ function tableInput(data){
         text=text.slice(2);continue;
       }
       const key=csi[0].replace('\x1bO','\x1b[');text=text.slice(csi[0].length);
+      // 11-26: Home and End on the backlog's board: its first and its last item (the group opens with it).
+      if(/^\x1b\[(?:H|F|[1478]~)$/.test(key)&&boardOn(table)){if(backlogBoard.ends(table.board,table.boardState,table,/F|4~|8~/.test(key)))boardChanged(table);continue;}
       if(key==='\x1b[A')moveRow(-1);else if(key==='\x1b[B')moveRow(1);
       else if(key==='\x1b[C')moveSection(1);else if(key==='\x1b[D')moveSection(-1);
       else if(key==='\x1b[Z')moveRow(-1);
@@ -2148,6 +2181,17 @@ function tableInput(data){
       continue;
     }
     const c=text[0];text=text.slice(1);
+    // 11-26: the backlog's board: while a title or an area is being found every key is the finder's; else `k`/`a`/`d` group, `t` the state, `/` finds.
+    if(boardOn(table)&&backlogBoard.typing(table.boardState)){
+      const named=c==='\t'?'tab':c==='\r'||c==='\n'?'enter':c==='\x7f'||c==='\x08'?'backspace':'';
+      if(named||c>=' ')backlogBoard.type(table.board,table.boardState,table,named,named?'':c);
+      boardChanged(table);continue;
+    }
+    if(boardOn(table)&&(backlogBoard.AXIS_KEYS[c]||c==='t'||c==='/')){
+      const bs=table.boardState;
+      if(c==='t')backlogBoard.cycleFilter(table.board,bs,table);else if(c==='/')backlogBoard.startFind(bs);else backlogBoard.setAxis(table.board,bs,table,backlogBoard.AXIS_KEYS[c]);
+      boardChanged(table);continue;
+    }
     if(c==='\t')moveRow(1);
     else if(c==='\r'||c==='\n')enterRow();
     else if(c==='p'||c==='f'||c==='r')blockAction(c);

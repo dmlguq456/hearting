@@ -3,7 +3,7 @@
   "canonical_manifest": "harness-manifest.json",
   "topology_registry": {
     "source": "capabilities/topologies.json",
-    "digest": "sha256:6157861cba7a184f7ec95892cbff89aa987c898cf94d4d10429f88d7b3d42d6f",
+    "digest": "sha256:52cc1ab7d4f831791dfd33d99240fcfa92f00fc6497f4124eddc36e2e4b3e9b6",
     "capabilities": 14,
     "recipes": 30
   },
@@ -371,6 +371,12 @@
     }
   ],
   "units": {
+    "analysis/analyze": {
+      "family": "analysis",
+      "role": "deep maker",
+      "worker_type": "stage",
+      "floor": "high"
+    },
     "design/critic": {
       "family": "design",
       "role": "fast reviewer",
@@ -583,6 +589,10 @@
     }
   },
   "modes": {
+    "analysis/analyze": {
+      "unit": "analysis/analyze",
+      "status": "portable-persona"
+    },
     "design/_design_rules": {
       "status": "adapter-coupled",
       "internal": true
