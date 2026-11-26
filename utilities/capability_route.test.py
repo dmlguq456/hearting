@@ -27,7 +27,13 @@ FLEET_P=P.parent.parent/"tools"/"fleet"/"route.py"
 FLEET_S=importlib.util.spec_from_file_location("fleet_route",FLEET_P)
 FLEET_ROUTE=importlib.util.module_from_spec(FLEET_S); FLEET_S.loader.exec_module(FLEET_ROUTE)
 sys.path.insert(0,str(P.parent))
+sys.path.insert(0,str(P.parent.parent/"tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import dispatch_contract as D
+CLI_STAGE_COMPILE=unique_attempt_id("att-cli-stage-compile")
+CLI_OWNER=unique_attempt_id("att-cli-owner")
+CLI_STAGE=unique_attempt_id("att-cli-stage")
+CLI_REPLAY=unique_attempt_id("att-cli-replay")
 import dispatch_runtime_support as RUNTIME_SUPPORT
 from split_module_fixture import patch_split, set_split
 ALL=["atomic-outcome","known-scope","no-shared-contract","no-resource-run","no-artifact-handoff","no-independent-verifier","focused-verification"]
@@ -1386,6 +1392,91 @@ class TestRoute(unittest.TestCase):
    with self.assertRaisesRegex(ValueError,"invalid dispatch_allocation"):
     R.verify_route(bad,R.ROOT)
 
+ # --- field weights: a route with a field seals that field's applied row beside the allocation ---
+ SHIPPED_WEIGHTS="  harness_weights:\n    claude: 0.5\n    opencode: 0.3\n"
+ def _shipped_config(self,weights=None):
+  text=(R.ROOT/"profiles"/"dispatch-defaults.yaml").read_text(encoding="utf-8")
+  self.assertIn(self.SHIPPED_WEIGHTS,text)
+  return text if weights is None else text.replace(self.SHIPPED_WEIGHTS,weights)
+ def _reseal(self,route):
+  route["route_hash"]=R.route_hash(route); route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
+  return route
+ def test_a_field_route_seals_its_applied_row_and_keeps_harness_weights_flat(self):
+  with dispatch_defaults_config(self._shipped_config()):
+   route=self._standard()
+  self.assertEqual(route["field"],"code")
+  allocation=route["dispatch_allocation"]
+  self.assertEqual(allocation["field_weights"],{"claude":0.95,"codex":0.85,"opencode":1.0})
+  self.assertEqual(allocation["harness_weights"],{"claude":0.5,"opencode":0.3})
+  R.verify_route(route,R.ROOT)
+ def test_the_users_field_block_overrides_cell_by_cell_without_touching_harness_weights(self):
+  weights=self.SHIPPED_WEIGHTS+"    code:\n      claude: 1.0\n    design: 0.5\n"
+  with dispatch_defaults_config(self._shipped_config(weights)):
+   route=self._standard()
+  allocation=route["dispatch_allocation"]
+  self.assertEqual(allocation["field_weights"],{"claude":1.0,"codex":0.85,"opencode":1.0})  # unnamed cells keep the default
+  self.assertEqual(allocation["harness_weights"],{"claude":0.5,"opencode":0.3})
+  R.verify_route(route,R.ROOT)
+ def test_a_neutral_row_a_non_balanced_strategy_or_no_field_seal_no_key(self):
+  # code at 1.0 in every cell: nothing to seal, so the allocation is what it was before the key existed
+  with dispatch_defaults_config(self._shipped_config(self.SHIPPED_WEIGHTS+"    code: 1.0\n")):
+   neutral=self._standard()
+  with dispatch_defaults_config(self._shipped_config()):
+   expected=R.DEFAULTS.query_allocation(R.DEFAULTS.load_validated(R.DEFAULTS.default_config_path(),R.DEFAULTS.default_topology_path())[0])
+  self.assertEqual(neutral["dispatch_allocation"],expected)
+  self.assertNotIn("field_weights",neutral["dispatch_allocation"])
+  # the legacy-schema configs these older tests use never read a field row
+  with dispatch_defaults_config(DD_CONFIG_A):
+   legacy=self._standard()
+  self.assertNotIn("field_weights",legacy["dispatch_allocation"])
+ def test_a_number_override_or_equal_cells_seal_no_row_and_one_odd_cell_seals_it(self):
+  # `docs: 0.5` puts the same factor on every cell; it cancels in the share, so the route is
+  # byte-identical to one sealed without any field override (only the user file's own digest differs).
+  def seal(extra):
+   with dispatch_defaults_config(self._shipped_config(self.SHIPPED_WEIGHTS+extra)):
+    return self._standard()
+  base=seal("")
+  for extra in ("    code: 0.5\n","    code: 1.0\n","    code:\n      claude: 0.7\n      codex: 0.7\n      opencode: 0.7\n"):
+   route=seal(extra)
+   self.assertNotIn("field_weights",route["dispatch_allocation"],extra)
+   self.assertEqual(route["dispatch_allocation"],{k:v for k,v in base["dispatch_allocation"].items() if k!="field_weights"},extra)
+  odd=seal("    code:\n      claude: 0.7\n      codex: 0.7\n      opencode: 0.8\n")
+  self.assertEqual(odd["dispatch_allocation"]["field_weights"],{"claude":0.7,"codex":0.7,"opencode":0.8})
+ def test_a_continuation_receipt_names_the_row_the_choice_multiplies_though_the_route_lost_the_field(self):
+  import dispatch_allocation as DA, dispatch_allocation_receipt as REC
+  with dispatch_defaults_config(self._shipped_config()):
+   source=self._standard()
+  first=source["nodes"][0]["id"]
+  cont=R.build_continuation_route(source,resume_from_node=first,requested_boundary=first,
+                                  reason="review-fixture",artifact_root=source["artifact_root"])
+  self.assertIsNone(cont.get("field"))  # the continuation does not carry the field (route bytes stay)
+  self.assertEqual(cont["dispatch_allocation"]["field_weights"],source["dispatch_allocation"]["field_weights"])
+  tails={}
+  for label,route in (("source",source),("continuation",cont)):
+   with tempfile.TemporaryDirectory() as home:
+    jobs=Path(home)/"jobs.log"; jobs.write_text("")
+    REC.record_allocation_receipt(route_id=route["route_id"],route_node="execute",route_hash=route["route_hash"],
+     dispatch_depth=2,writer="stage-dispatch-fallback.py",child_harness="claude",
+     allocation=route["dispatch_allocation"],rank=["claude","codex"],field=route.get("field"),
+     attempt_id="att-x",jobs=jobs)
+    line=REC.format_row(REC.read_rows(jobs=jobs)[0])
+   tails[label]=line[line.index("field="):]
+  used=REC._fmt_map(DA.effective_harness_weights(cont["dispatch_allocation"]),digits=3)
+  self.assertEqual(tails["source"],"field=code w="+used)
+  self.assertEqual(tails["continuation"],"field=- w="+used)
+ def test_a_route_sealed_before_field_weights_existed_verifies_and_reads_neutral(self):
+  import dispatch_allocation as DA
+  with dispatch_defaults_config(self._shipped_config()):
+   route=self._standard()
+  route["dispatch_allocation"].pop("field_weights")
+  R.verify_route(self._reseal(route),R.ROOT)
+  self.assertEqual(DA.effective_harness_weights(route["dispatch_allocation"]),{"claude":0.5,"opencode":0.3})
+ def test_verify_rejects_invalid_field_weights(self):
+  with dispatch_defaults_config(self._shipped_config()): route=self._standard()
+  for value in (0,1.5,True,{},{"claude":0},{"claude":1.2},{"claude":True},{"gemini":0.5},"claude:0.5"):
+   bad=json.loads(json.dumps(route)); bad["dispatch_allocation"]["field_weights"]=value
+   with self.assertRaisesRegex(ValueError,"invalid dispatch_allocation"):
+    R.verify_route(self._reseal(bad),R.ROOT)
  def test_verify_rejects_short_balanced_window(self):
   with dispatch_defaults_config(DD_CONFIG_A):
    route=self._standard()
@@ -2560,6 +2651,7 @@ class TestRoute(unittest.TestCase):
     R.close_route(route,outside,commit="6"*40)
    self.assertFalse(R.outcome_path(canonical).exists())
  def test_f47_1_new_route_records_carry_owner_attempt_and_family_key(self):
+  FIXTURE_OWNER=unique_attempt_id("att-fixture-owner")
   previous=os.environ.pop("AGENT_DISPATCH_ATTEMPT_ID",None)
   try:
    unowned=R.compile_route(**self.args())
@@ -2569,13 +2661,13 @@ class TestRoute(unittest.TestCase):
     R.route_family_key(
      unowned["capability"],unowned["cwd"],unowned["capability_mode"],"-"),
    )
-   os.environ["AGENT_DISPATCH_ATTEMPT_ID"]="att-fixture-owner"
+   os.environ["AGENT_DISPATCH_ATTEMPT_ID"]=FIXTURE_OWNER
    owned=R.compile_route(**self.args())
-   self.assertEqual(owned["owner_attempt_id"],"att-fixture-owner")
+   self.assertEqual(owned["owner_attempt_id"],FIXTURE_OWNER)
    self.assertEqual(
     owned["route_family_key"],
     R.route_family_key(
-     owned["capability"],owned["cwd"],owned["capability_mode"],"att-fixture-owner"),
+     owned["capability"],owned["cwd"],owned["capability_mode"],FIXTURE_OWNER),
    )
    self.assertNotEqual(unowned["route_family_key"],owned["route_family_key"])
   finally:
@@ -2603,10 +2695,11 @@ class TestRoute(unittest.TestCase):
   self.assertEqual(R.route_hash(owner_varied),digest)
   self.assertEqual(FLEET_ROUTE.route_hash(owner_varied),digest)
  def test_f47_2_selection_structurally_identical(self):
+  FIXTURE_OWNER=unique_attempt_id("att-fixture-owner")
   previous=os.environ.pop("AGENT_DISPATCH_ATTEMPT_ID",None)
   try:
    a=R.compile_route(**self.args())
-   os.environ["AGENT_DISPATCH_ATTEMPT_ID"]="att-fixture-owner"
+   os.environ["AGENT_DISPATCH_ATTEMPT_ID"]=FIXTURE_OWNER
    b=R.compile_route(**self.args())
   finally:
    if previous is None: os.environ.pop("AGENT_DISPATCH_ATTEMPT_ID",None)
@@ -3489,7 +3582,7 @@ class TestContinuation(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    artifact=Path(tmp)/"artifacts"; jobs=Path(tmp)/"state"/"jobs.log"
    jobs.parent.mkdir(parents=True)
-   attempt="att-cli-post-launch"
+   attempt=unique_attempt_id("att-cli-post-launch")
    jobs.write_text(
     "2099-01-01T00:00:00Z\topen\t%s\t%s\towner\t"
     "attempt_schema_version=2,worker_type=owner,unit=_kernel/owner,"
@@ -3541,14 +3634,14 @@ class TestContinuation(unittest.TestCase):
     "2099-01-01T00:00:00Z\topen\t%s\t%s\tstage\t"
     "attempt_schema_version=2,worker_type=stage,unit=dev/backend,"
     "dispatch_depth=2,registered_worker=1,execution_surface=registered-headless,"
-    "attempt_id=att-cli-stage-compile\n" % (R.ROOT,R.ROOT), encoding="utf-8",
+    "attempt_id=%s\n" % (R.ROOT,R.ROOT,CLI_STAGE_COMPILE), encoding="utf-8",
    )
    dispatch_path=Path(tmp)/"dispatch.json"
    dispatch_path.write_text(json.dumps(self._dispatch()),encoding="utf-8")
    env=os.environ.copy()
    env.update({
     "AGENT_HOME":str(R.ROOT), "AGENT_DISPATCH_JOBS":str(jobs),
-    "AGENT_DISPATCH_ATTEMPT_ID":"att-cli-stage-compile",
+    "AGENT_DISPATCH_ATTEMPT_ID":CLI_STAGE_COMPILE,
     "AGENT_DISPATCH_WORKER_TYPE":"stage", "AGENT_DISPATCH_DEPTH":"2",
     "AGENT_DISPATCH_ATTEMPT_SCHEMA_VERSION":"2",
     "AGENT_DISPATCH_EXECUTION_SURFACE":"registered-headless",
@@ -3573,7 +3666,7 @@ class TestContinuation(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp); artifact=root/"artifacts"; jobs=root/"state"/"jobs.log"
    jobs.parent.mkdir(parents=True)
-   attempt="att-real-owner-lifecycle"
+   attempt=unique_attempt_id("att-real-owner-lifecycle")
    source_root=self._source_fixture()
    owner_meta=",".join((
     "attempt_schema_version=2","worker_type=owner","unit=_kernel/owner",
@@ -4482,8 +4575,8 @@ class TestContinuation(unittest.TestCase):
       "dispatch_depth=1,registered_worker=1,execution_surface=registered-headless,"
       "capability=autopilot-code,capability_mode=dev,intensity=strong,artifact_root=%s,"
       "owner_harness=codex,parent_sid=thread-source,"
-      "attempt_id=att-cli-owner,owner_route_file=%s,owner_route_id=%s,owner_route_hash=%s\n"
-      % (source["cwd"], source["cwd"], source["artifact_root"], source_path, source["route_id"], source["route_hash"]))
+      "attempt_id=%s,owner_route_file=%s,owner_route_id=%s,owner_route_hash=%s\n"
+      % (source["cwd"], source["cwd"], source["artifact_root"], CLI_OWNER, source_path, source["route_id"], source["route_hash"]))
     env=os.environ.copy()
     for key in ("AGENT_DISPATCH_OWNER_HARNESS","AGENT_DISPATCH_CURRENT_HARNESS",
                 "AGENT_DISPATCH_WORKER_TYPE","AGENT_DISPATCH_DEPTH",
@@ -4491,7 +4584,7 @@ class TestContinuation(unittest.TestCase):
                 "AGENT_DISPATCH_EXECUTION_SURFACE","AGENT_DISPATCH_REGISTERED_WORKER",
                 "CODEX_THREAD_ID","CLAUDE_CODE_SESSION_ID","AGENT_DISPATCH_PARENT_SESSION_ID"):
      env.pop(key,None)
-    env["AGENT_DISPATCH_ATTEMPT_ID"]="att-cli-owner"; env["AGENT_OWNER_ROUTE_FILE"]=str(source_path)
+    env["AGENT_DISPATCH_ATTEMPT_ID"]=CLI_OWNER; env["AGENT_OWNER_ROUTE_FILE"]=str(source_path)
     env["AGENT_OWNER_ROUTE_ID"]=source["route_id"]
     env["AGENT_OWNER_ROUTE_HASH"]=source["route_hash"]
     env["AGENT_DISPATCH_DEPTH"]="1"
@@ -4524,8 +4617,8 @@ class TestContinuation(unittest.TestCase):
      handle.write(
       "2099-01-01T00:00:00Z\topen\trepo\t%s\tstage\t"
       "attempt_schema_version=2,dispatch_depth=2,registered_worker=1,"
-      "worker_type=stage,unit=dev/backend,attempt_id=att-cli-stage\n" % source["cwd"])
-    env=os.environ.copy(); env["AGENT_DISPATCH_ATTEMPT_ID"]="att-cli-stage"
+      "worker_type=stage,unit=dev/backend,attempt_id=%s\n" % (source["cwd"],CLI_STAGE))
+    env=os.environ.copy(); env["AGENT_DISPATCH_ATTEMPT_ID"]=CLI_STAGE
     env["AGENT_DISPATCH_DEPTH"]="2"
     env["AGENT_DISPATCH_REGISTERED_WORKER"]="1"
     env["AGENT_DISPATCH_WORKER_TYPE"]="stage"
@@ -4559,9 +4652,9 @@ class TestContinuation(unittest.TestCase):
       "attempt_schema_version=2,worker_type=owner,unit=_kernel/owner,"
       "dispatch_depth=1,registered_worker=1,execution_surface=registered-headless,"
       "capability=autopilot-code,capability_mode=dev,intensity=strong,artifact_root=%s,"
-      "owner_harness=codex,parent_sid=thread-source,attempt_id=att-cli-replay,"
+      "owner_harness=codex,parent_sid=thread-source,attempt_id=%s,"
       "owner_route_file=%s,owner_route_id=%s,owner_route_hash=%s\n"
-      % (source["cwd"], source["cwd"], source["artifact_root"], source_path, source["route_id"], source["route_hash"]))
+      % (source["cwd"], source["cwd"], source["artifact_root"], CLI_REPLAY, source_path, source["route_id"], source["route_hash"]))
     env=os.environ.copy()
     for key in ("AGENT_DISPATCH_OWNER_HARNESS","AGENT_DISPATCH_CURRENT_HARNESS",
                 "AGENT_DISPATCH_WORKER_TYPE","AGENT_DISPATCH_DEPTH",
@@ -4569,7 +4662,7 @@ class TestContinuation(unittest.TestCase):
                 "AGENT_DISPATCH_EXECUTION_SURFACE","AGENT_DISPATCH_REGISTERED_WORKER",
                 "CODEX_THREAD_ID","CLAUDE_CODE_SESSION_ID","AGENT_DISPATCH_PARENT_SESSION_ID"):
      env.pop(key,None)
-    env["AGENT_DISPATCH_ATTEMPT_ID"]="att-cli-replay"; env["AGENT_OWNER_ROUTE_FILE"]=str(source_path)
+    env["AGENT_DISPATCH_ATTEMPT_ID"]=CLI_REPLAY; env["AGENT_OWNER_ROUTE_FILE"]=str(source_path)
     env["AGENT_OWNER_ROUTE_ID"]=source["route_id"]
     env["AGENT_OWNER_ROUTE_HASH"]=source["route_hash"]
     env["AGENT_DISPATCH_DEPTH"]="1"
@@ -7552,7 +7645,7 @@ class ShapeIntensityDiagnosticTest(unittest.TestCase):
   return R.compose_route(**d)
 
  def test_cli_mismatch_names_allowed_values(self):
-  cases=(("direct", "standard", "direct"), ("solo", "strong", "quick,standard"),
+  cases=(("direct", "standard", "direct"), ("solo", "direct", "quick,standard,strong,thorough,adversarial"),
          ("staged", "quick", "standard,strong,thorough,adversarial"))
   for shape, intensity, allowed in cases:
    with self.subTest(shape=shape):
@@ -10160,12 +10253,22 @@ class FrameBootstrapLayerTest(unittest.TestCase):
   self.assertEqual(explicit,{"__owner__":"top"})
   with self.assertRaises(ValueError) as refused:
    R._profile_input_maps(nodes,demands,{"execute":"top"})
-  self.assertEqual(str(refused.exception),"profile-explicit-top-owner-only:execute")
+  self.assertTrue(str(refused.exception).startswith("profile-explicit-top-owner-only:execute: "))
+  # at strong and above a named depth-2 stage node is accepted (2026-11-23); below it stays refused
+  _demands,explicit=R._profile_input_maps(nodes,demands,{"execute":"top"},"strong")
+  self.assertEqual(explicit,{"execute":"top"})
+  with self.assertRaises(ValueError) as refused:
+   R._profile_input_maps(nodes,demands,{"execute":"top"},"standard")
+  self.assertIn("this route is standard",str(refused.exception))
   # a node that only LOOKS like a frame leg does not get the exception either
   impostor=[dict(nodes[0],id="frame",worker_type="stage")]+nodes[1:]
   with self.assertRaises(ValueError) as refused:
    R._profile_input_maps(impostor,demands,{"frame":"top"})
-  self.assertEqual(str(refused.exception),"profile-explicit-top-owner-only:frame")
+  self.assertTrue(str(refused.exception).startswith("profile-explicit-top-owner-only:frame: "))
+  # ...and a depth-1 node that is neither owner nor frame is refused at every intensity
+  with self.assertRaises(ValueError) as refused:
+   R._profile_input_maps(impostor,demands,{"frame":"top"},"adversarial")
+  self.assertTrue(str(refused.exception).startswith("profile-explicit-top-owner-only:frame: "))
 
  # -- the frame tier ladder is stamped, never inherited from the recipe -----
  def test_the_recipe_placeholder_profile_never_reaches_a_compiled_frame_leg(self):
@@ -11347,5 +11450,108 @@ class DeterministicSmokeOwnerRunTest(unittest.TestCase):
   marker=json.loads(result.stdout.splitlines()[0])
   self.assertEqual((marker["reviewer_kind"],marker["review_independence"]),("owner-inline","degraded"))
   self.assertIn("completed-review-degraded",result.stderr)
+
+class MarkerModelRecordTest(unittest.TestCase):
+ """The marker transaction hands the row it closed to the per-model record, after every lock is released.
+
+ The real `complete_node` runs to the end on an invented route; only the record call is observed.
+ """
+ def setUp(self):
+  import fcntl, model_outcome_record
+  self.fcntl=fcntl
+  self.M=model_outcome_record
+  self.temp=tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+  self.base=Path(self.temp.name)
+  patcher=mock.patch.dict(os.environ,{"XDG_STATE_HOME":str(self.base/"state"),
+   "FLEET_USAGE_STATE_DIR":str(self.base/"usage")})
+  patcher.start(); self.addCleanup(patcher.stop)
+  self.count=0
+ def _fixture(self,*,row_status="open",extra=None,refused=True):
+  """A fresh route with one attempt row of node `execute`; returns the pieces `complete_node` takes."""
+  self.count+=1
+  fixture=TestContinuation(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+  base=self.base/f"case{self.count}"; base.mkdir()
+  route=fixture._source(base/"artifacts")
+  node=next(n for n in route["nodes"] if n["id"]=="execute")
+  jobs=fixture._jobs; attempt="att-marker-fixture"
+  meta=dict(attempt_id=attempt,attempt_schema_version="2",dispatch_depth=str(node["dispatch_depth"]),
+   transport="headless",execution_surface="registered-headless",registered_worker="1",
+   fallback_hop="same-harness-headless",route_id=route["route_id"],route_hash=route["route_hash"],
+   route_node=node["id"],harness="codex",model="model-x",model_source="explicit",launch_started="1")
+  meta.update(extra or {})
+  jobs.write_text("\t".join(["2026-11-01T00:00:00Z",row_status,route["cwd"],route["cwd"],"fixture",
+   ",".join(f"{k}={v}" for k,v in meta.items())])+"\n")
+  evidence=base/"result.md"; evidence.write_text("execute exact output\n")
+  if refused: self.M.record_unavailable("codex","codex","model-x","unscoped","model-unavailable")
+  return route,node,jobs,attempt,evidence
+ def _state(self):
+  return self.M.read("codex","codex","model-x","unscoped")["state"]
+ def _complete(self,fixture,explicit):
+  route,node,jobs,attempt,evidence=fixture
+  return R.complete_node(route,node,node["id"],evidence,jobs=jobs,attempt_id=attempt if explicit else None)
+ def _spy(self,fixture,seen):
+  """Wrap the record call: note each metadata and whether both completion locks can be taken now."""
+  route,node,jobs,_attempt,_evidence=fixture
+  real=self.M.note_row_closed
+  locks=[Path(f"{jobs}.lock"),R.completion_dir(route["route_id"])/f".{node['id']}.completion.lock"]
+  def note(meta):
+   free=[]
+   for path in locks:
+    with open(path,"a") as handle:
+     try: self.fcntl.flock(handle.fileno(),self.fcntl.LOCK_EX|self.fcntl.LOCK_NB); free.append(True)
+     except BlockingIOError: free.append(False)
+   seen.append((dict(meta),free))
+   return real(meta)
+  return mock.patch.object(self.M,"note_row_closed",side_effect=note)
+ def test_an_explicit_and_an_omitted_attempt_id_both_lift_the_refusal_once_outside_the_locks(self):
+  for explicit in (True,False):
+   with self.subTest(explicit=explicit):
+    fixture=self._fixture(); seen=[]
+    self.assertEqual(self._state(),"unavailable")
+    with self._spy(fixture,seen):
+     marker,first=self._complete(fixture,explicit)
+     state=self._state()
+     _marker,replay=self._complete(fixture,explicit)
+    self.assertEqual((first["status"],replay["status"],state,self._state()),("closed","already-closed","usable","usable"))
+    self.assertEqual(len(seen),1)
+    (meta,free),=seen
+    self.assertEqual((meta["attempt_id"],meta["note"],meta["model"]),("att-marker-fixture","completed-marker","model-x"))
+    self.assertEqual(free,[True,True])
+    self.assertEqual(set(first),{"attempt_id","status"})
+    self.assertEqual(json.dumps(first,sort_keys=True),'{"attempt_id": "att-marker-fixture", "status": "closed"}')
+ def test_a_marker_appended_to_a_row_another_writer_closed_calls_nothing(self):
+  fixture=self._fixture(row_status="done",extra={"note":"completed-supervisor","failure_class":"pass"})
+  seen=[]
+  with self._spy(fixture,seen):
+   _marker,row=self._complete(fixture,True)
+  self.assertEqual((row["status"],seen,self._state()),("marker-appended",[],"unavailable"))
+ def test_a_record_that_cannot_be_kept_leaves_the_return_as_it_was(self):
+  kept=self._complete(self._fixture(),True)
+  failures={"raises":mock.patch.object(self.M,"note_row_closed",side_effect=RuntimeError("boom")),
+   "missing-module":mock.patch.dict(sys.modules,{"model_outcome_record":None})}
+  for label,failure in failures.items():
+   with self.subTest(label):
+    with failure:
+     marker,row=self._complete(self._fixture(),True)
+    self.assertEqual((row,sorted(marker),marker["sequence"]),(kept[1],sorted(kept[0]),kept[0]["sequence"]))
+ def test_the_record_reads_no_registry_of_its_own(self):
+  opened=[]
+  def hook(event,args):
+   if event=="open" and opened is not None and getattr(self,"_counting",None) and str(args[0])==self._counting:
+    opened.append(args[0])
+  sys.addaudithook(hook)
+  counts={}
+  for label,patched in (("record",None),("no-record",mock.patch.dict(sys.modules,{"model_outcome_record":None}))):
+   fixture=self._fixture()
+   self._counting=str(fixture[2]); before=len(opened)
+   try:
+    if patched is None: self._complete(fixture,True)
+    else:
+     with patched: self._complete(fixture,True)
+   finally:
+    self._counting=None
+   counts[label]=len(opened)-before
+  self.assertGreater(counts["no-record"],0)
+  self.assertEqual(counts["record"],counts["no-record"])
 
 if __name__=="__main__": unittest.main()

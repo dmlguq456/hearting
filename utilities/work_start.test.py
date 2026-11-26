@@ -21,6 +21,8 @@ import unittest
 from unittest import mock
 from types import SimpleNamespace
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import work_start as W
 from dispatch_completion_join import CurrentDeliveryState
 from split_module_fixture import patch_split, split_patch
@@ -884,6 +886,9 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual((result["state"], result["reason"], result["required_action"]),
                          ("needs-attention", "workflow-executor-exited", "report-unfinished-work"), result)
         self.assertIn("already a continuation", result["next_step"])
+        # A PASS row takes no owner input, so this receipt offers no correction; it names the close.
+        self.assertNotIn("correction_command", result)
+        self.assertIn(" close --route ", result["close_command"])
 
     def test_completed_deferred_owner_still_reports_workflow_gaps(self):
         """C15 (S3a): `verdict_pass` recognizes a marker-bound deferred owner
@@ -1369,8 +1374,10 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual((result['state'],result['reason'],result['required_action']),
                          ('needs-attention','owner-blocked','answer-blocked-owner'),result)
         self.assertIn('--attempt-id '+owner,result['correction_command'])
-        for token in ('correction_command','--message-file','replacement owner','Do not close or recompose'):
+        for token in ('correction_command','--message-file','replacement owner','Do not recompose','close_command'):
             self.assertIn(token,result['next_step'])
+        # Both actions the receipt names can be run: the answer, and the parent's close of this route.
+        self.assertIn(' close --route ',result['close_command'])
         self.assertEqual(len(self.calls),3)   # nothing new launched while it waits
 
     def test_blocked_owner_with_unreadable_report_and_log_waits_instead_of_asking_a_person(self):
@@ -5301,17 +5308,17 @@ class CoupledReviewSelfDispositionTest(unittest.TestCase):
         node = next(n for n in self.f.route["nodes"] if n["id"] == "security-review")
         evidence = self.f.output / "security.json"
         evidence.write_text(json.dumps({"verdict":"PASS", "findings":[], "gate_met":True}))
-        meta = dict(self.f.meta, attempt_id="att-security", route_node=node["id"], log_file=str(self.f.base/"security.jsonl"))
+        meta = dict(self.f.meta, attempt_id=unique_attempt_id("att-security"), route_node=node["id"], log_file=str(self.f.base/"security.jsonl"))
         # The normal completion writer receives the real settled process
         # identity, rather than a late identity overwrite without a receipt.
         child=subprocess.Popen([sys.executable,"-c","import sys;sys.stdin.read()"],stdin=subprocess.PIPE,
-                               start_new_session=True,env={**os.environ,"AGENT_DISPATCH_ATTEMPT_ID":"att-security"})
+                               start_new_session=True,env={**os.environ,"AGENT_DISPATCH_ATTEMPT_ID":unique_attempt_id("att-security")})
         meta.update(self.d.process_launch_identity(child.pid))
         child.communicate(timeout=5)
         with self.jobs.open("a") as handle:
             handle.write("\t".join([self.cr.datetime.now(self.cr.timezone.utc).isoformat(), "running", str(self.f.repo), str(self.f.repo), "security",
                                        ",".join(f"{k}={v}" for k,v in meta.items())])+"\n")
-        self.cr.complete_node(self.f.route,node,node["id"],evidence,jobs=self.jobs,attempt_id="att-security")
+        self.cr.complete_node(self.f.route,node,node["id"],evidence,jobs=self.jobs,attempt_id=unique_attempt_id("att-security"))
         self.security_bytes=evidence.read_bytes()
 
     def cli(self, arguments, env):
@@ -5403,7 +5410,7 @@ class CoupledReviewSelfDispositionTest(unittest.TestCase):
         self.assertEqual(ship_parent_deploy.exact_attempt_row(self.jobs,"att-review-self").metadata["worker_type"],"review")
         verified_request,_=ship_parent_deploy.load_request(self.request_path)
         proof=ship_parent_deploy.reviews(self.f.route,deploy,self.jobs,verified_request)
-        self.assertEqual({p["attempt_id"] for p in proof.values()},{"att-review-self","att-security"})
+        self.assertEqual({p["attempt_id"] for p in proof.values()},{"att-review-self",unique_attempt_id("att-security")})
         for review_id in ("security-review","release-review"):
             current_marker=json.loads((self.f.directory/(review_id+".json")).read_text())
             self.assertEqual(current_marker["round_census"]["verdict_rounds"],3)
@@ -5412,7 +5419,7 @@ class CoupledReviewSelfDispositionTest(unittest.TestCase):
         for path,before in self.f.preserved.items():
             if path!=self.jobs:self.assertEqual(path.read_bytes(),before)
         before={p:p.read_bytes() for p in self.f.base.rglob('*') if p.is_file()}
-        for actor in ("att-foreign",""):
+        for actor in (unique_attempt_id("att-foreign"),""):
             refused={**env,"AGENT_DISPATCH_ATTEMPT_ID":actor,"CODEX_THREAD_ID":"foreign" if actor else ""}
             result=subprocess.run([sys.executable,str(W.ROOT/"utilities/capability-route.py"),*complete],
                                   env=refused,text=True,capture_output=True)

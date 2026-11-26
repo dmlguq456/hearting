@@ -136,6 +136,11 @@ const frames={},checks={};
 const box=s=>{const top=s.findIndex(l=>l.includes('╭─')&&l.includes('✕ ─╮'));if(top<0)return null;
   const left=[...s[top]].indexOf('╭'),bottom=s.findIndex((l,i)=>i>top&&[...l][left]==='╰'&&l.includes('╯'));
   return {top,bottom,title:s[top],foot:s[bottom]||'',rows:s.slice(top,bottom+1),left};};
+// 11-22: the question popup's ←→ no longer change sections; a section is reached by a press on its name on the
+// popup's bottom line (or on the panel's section head).
+const toSection=async(name,ms=300)=>{await flush();const s=await screen(),b=box(s);if(!b)throw Error('no popup to press in');
+  const text=[],where=[];cells(b.bottom).forEach((ch,x)=>{for(const _ of ch){where.push(x);text.push(_);}});
+  const i=text.join('').indexOf(name);if(i<0)throw Error('no '+name+' on the bottom line: '+b.foot);await press(where[i],b.bottom,ms);};
 const popupHas=word=>s=>{const b=box(s);return !!b&&b.rows.some(l=>l.includes(word));};
 const unfolded=s=>{const b=box(s);return b?b.rows.find(l=>l.includes('▶'))||'':'';};
 // 11-15 (panel polish 3): how many cells outside the standing popup (its frame and the empty cell
@@ -190,14 +195,14 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   // → the next section with something in it (11-15: the LAB and SESSIONS popups are gone; no message here):
   // the question popup; ← back.
   await key('\x1b[C',300);s=await until(s=>!!box(s)&&box(s).title.includes('QUESTIONS'),'the question popup by →');frames.next=s;checks.next_foot=box(s).foot;veil.next=await outside();
-  await key('\x1b[D',300);s=await until(popupHas('PROGRESS'),'back to the routes');veil.back=await outside();
+  await toSection('ROUTE');s=await until(popupHas('PROGRESS'),'back to the routes');veil.back=await outside();
   await key('\x1b',300);s=await until(s=>!box(s),'closed after the sections');
   // Nothing of it reached the native: its draft stands, never submitted.
   s=await screen();checks.draft=s.some(l=>l.startsWith('❯ draft9'));checks.submitted=s.some(l=>l.includes('DONE_draft9'));
   checks.native_mouse=raw.includes('NATIVE_ESC_');
   // A resize while a popup stands: it stands again in the middle, Fleet's table read at the new width.
   await key('\x1d',300);await until(s=>!!box(s),'the question popup by Ctrl+]');
-  await key('\x1b[C',300);await until(popupHas('PROGRESS'),'the routes popup by →');
+  await toSection('ROUTE');await until(popupHas('PROGRESS'),'the routes popup by a press on its name');
   await resize(120,30);s=await until(s=>!!box(s)&&popupHas('ROUTE')(s),'the popup after a resize');frames.resized=s;veil.resized=await outside();
   checks.resized_width=[...box(s).title.trimEnd()].length-box(s).left;checks.resized_left=box(s).left;
   await key('\x1b',300);await until(s=>!box(s),'closed');
@@ -211,7 +216,7 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   await resize(60,16);await key('\x1d',400);s=await until(s=>!!box(s),'the question popup at 60×16');frames.narrow_question=s;
   const before=box(s).rows.join('\n');const b=box(s);await wheel(b.left+4,b.top+2);await wheel(b.left+4,b.top+2);
   s=await screen();checks.wheel_question=!!box(s)&&box(s).rows.join('\n')!==before;
-  await key('\x1b[C',300);s=await until(popupHas('ROUTE'),'the routes popup at 60×16');
+  await toSection('ROUTE');s=await until(popupHas('ROUTE'),'the routes popup at 60×16');
   s=await until(s=>!!box(s)&&box(s).rows.some(l=>/│ \d+\/\d+ · /.test(l)),'a routes popup longer than its rows');frames.narrow_route=s;
   const page=box(s).rows.join('\n');await wheel(box(s).left+4,box(s).top+2);await wheel(box(s).left+4,box(s).top+2);
   s=await screen();checks.wheel_table=!!box(s)&&box(s).rows.join('\n')!==page;frames.narrow_wheel=s;
@@ -228,7 +233,7 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   const draft=async()=>{const t=(await screen()).find(l=>l.startsWith('❯ '));return t?t.slice(2).split('│')[0].trimEnd():null;};
   const kinds=['QUESTIONS','ROUTE'];
   const open=async kind=>{await key('\x1d',400);await until(s=>!!box(s),'a popup by Ctrl+]');
-    for(let i=0;i<kinds.indexOf(kind);i++)await key('\x1b[C',400);
+    if(kind==='ROUTE')await toSection('ROUTE',400);
     return until(s=>!!box(s)&&box(s).title.includes(kind),'the '+kind+' popup');};
   checks.esc={};
   for(const kind of kinds){
@@ -278,7 +283,7 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
   checks.paste.front_closed=!box(s);await open('ROUTE');await key('01~',200);await key('\x1b[C',300);s=await screen();
   checks.paste.front_next=!!box(s)&&box(s).title.includes('QUESTIONS');await key('\x1b',300);checks.paste.front_draft=await kept();
   // ↑↓ follow: a popup longer than its rows keeps the unfolded row in view, up and down (60×16).
-  await resize(60,16);await key('\x1d',400);await until(s=>!!box(s),'a popup at 60×16');await key('\x1b[C',400);
+  await resize(60,16);await key('\x1d',400);await until(s=>!!box(s),'a popup at 60×16');await toSection('ROUTE',400);
   s=await until(popupHas('ROUTE'),'the routes popup at 60×16');
   // (11-18: a table read before stands at once with words after its title; the keys below are for the one read now.)
   await until(s=>unfolded(s)!==''&&!/에 읽은 내용/.test(box(s).title),'the unfolded route in view, read now');
@@ -294,10 +299,10 @@ const write=(file,value)=>{fs.writeFileSync(file+'.new',JSON.stringify(value),{m
     const live=new Set([child.pid]);for(let again=true;again;){again=false;for(const [id,k] of kids)if(!live.has(id)&&live.has(k.ppid)){live.add(id);again=true;}}
     return [...live].filter(id=>kids.get(id)&&kids.get(id).cmd.includes(cfg.backend)).length;};
   const idle=reads();checks.children={idle};
-  for(let i=0;i<100;i++){child.write('\x1d');await sleep(25);child.write('\x1b[C');await sleep(25);child.write('\x1d');await sleep(25);}
+  {const head=await at('2 ROUTE');for(let i=0;i<100;i++){await press(head.x+2,head.y,60);child.write('\x1b');await sleep(60);}}
   await sleep(2500);checks.children.after_100=reads();
   if(cfg.harness==='claude'){
-    fs.writeFileSync(cfg.vm+'.hang','');await key('\x1d',400);await key('\x1b[C',500);
+    fs.writeFileSync(cfg.vm+'.hang','');{const head=await at('2 ROUTE');await press(head.x+2,head.y,500);}
     checks.children.hanging=reads();await sleep(13500);checks.children.ended=reads();
     s=await screen();checks.children.stood=!!box(s);
     fs.unlinkSync(cfg.vm+'.hang');await key('\x1b',300);

@@ -1772,6 +1772,139 @@ class BackgroundIdleCardTests(unittest.TestCase):
                     self.assertEqual(st.read_latest_card(seat), previous)
 
 
+class SelfCalledTidyTests(unittest.TestCase):
+    """A tidy the session runs itself on a turn nobody typed is a manually invoked tidy."""
+    setUp = IdleObserverTests.setUp
+    transcript = IdleObserverTests.transcript
+
+    NOTICE = "<task-notification>\n<task-id>bx1</task-id>\n<status>completed</status>\n</task-notification>"
+    INPUTS = {"peer message": (IdleObserverTests.PEER, "peer"),
+              "runtime notice": ("<system-reminder>context is above 700K; tidy now</system-reminder>", "runtime"),
+              "completion wake": (NOTICE, "notification")}
+
+    def booked(self, harness, sid, clock):
+        """A person's turn, then a turn end above the floor: one unspent idle booking."""
+        st.run_hook(harness, "start", sid, cwd=str(self.cwd), now=clock[0])
+        st.run_hook(harness, "prompt", sid, cwd=str(self.cwd), prompt_text="Do the approved work", now=clock[0])
+        self.assertEqual(clear.observe_idle_event(harness, sid, str(self.cwd), event_id="work",
+                                                  tokens=855000, now=clock[0]), "booking=scheduled")
+        seat = st.resolve_seat(harness, str(self.cwd), sid=sid)
+        return seat, clear.read_reservation(seat.key)
+
+    def wake(self, seat, harness, sid, text, source, clock):
+        """Another turn that is not the person's; its end moves the idle deadline."""
+        clock[0] += 600
+        st.run_hook(harness, "prompt", sid, cwd=str(self.cwd), prompt_text=text, now=clock[0])
+        self.assertEqual(st.prompt_state(st.session_seat(seat, harness, sid))["source"], source)
+        self.assertEqual(clear.observe_idle_event(harness, sid, str(self.cwd), event_id="wake-" + source,
+                                                  tokens=855000, now=clock[0] + 1), "booking=scheduled")
+
+    def tidy(self, seat, harness, sid, **kwargs):
+        st.write_card(seat, harness, sid, "manual card", cwd=str(self.cwd), prompt_seq=st.read_prompt_seq(seat))
+        return st._enqueue_caller((seat, harness, sid), str(self.cwd), no_clear=kwargs.get("no_clear", False),
+                                  no_continue=False)
+
+    def test_a_tidy_the_session_runs_on_a_turn_nobody_typed_compacts_like_a_manual_one(self):
+        import session_tidy_runner as runner
+        for harness in ("claude", "codex", "opencode"):
+            for label, (text, source) in self.INPUTS.items():
+                clock = [1000.0]
+                sid = "self-" + harness + "-" + source
+                self.extra["HERDR_PANE_ID"] = "self-called:" + sid
+                with self.subTest(harness=harness, input=label), self.iso.patched_environ(self.extra), \
+                        mock.patch.object(clear, "_start_helper", return_value=12345), \
+                        mock.patch.object(runner, "start_detached", return_value=None), \
+                        mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+                    seat, idle_booking = self.booked(harness, sid, clock)
+                    self.wake(seat, harness, sid, text, source, clock)
+                    self.assertIsNone(clear.read_reservation(seat.key).get("idle_request"))
+                    line, context = self.tidy(seat, harness, sid)
+                    self.assertIsNone(context)
+                    self.assertIn("clear=scheduled", line)
+                    self.assertNotIn("idle-request-not-eligible", line)
+                    booking = clear.read_reservation(seat.key)
+                    self.assertEqual((booking["status"], booking.get("origin")), ("reserved", None))
+                    self.assertNotEqual(booking["nonce"], idle_booking["nonce"])
+                    item = runner.read_item(line.split()[0].split("=", 1)[1])
+                    self.assertNotEqual(item.get("operation_id"), idle_booking["idle"]["identity"])
+                    self.assertNotEqual(item.get("origin"), "idle")
+                    self.assertFalse(item["id"].startswith("tidy-op-"))
+                    self.assertTrue(st.tidy_report_line(line, origin="").startswith(
+                        st._ui_translator()("tidy.say.compact_and_continue")[:12]))
+                    # The unspent idle booking gave way: its helper stands down, nothing else queues.
+                    self.assertEqual(clear.run_helper(seat.key, idle_booking["nonce"],
+                                                      sleep=lambda _: None), "superseded")
+
+    def test_no_clear_on_a_turn_nobody_typed_turns_the_booking_off(self):
+        import session_tidy_runner as runner
+        clock = [1000.0]
+        text, source = self.INPUTS["peer message"]
+        with self.iso.patched_environ(self.extra), mock.patch.object(clear, "_start_helper", return_value=12345), \
+                mock.patch.object(runner, "start_detached", return_value=None), \
+                mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+            seat, _idle_booking = self.booked("claude", "self-off", clock)
+            self.wake(seat, "claude", "self-off", text, source, clock)
+            line, context = self.tidy(seat, "claude", "self-off", no_clear=True)
+            self.assertIsNone(context)
+            self.assertIn("clear=off", line)
+            held = clear.read_reservation(seat.key)
+            self.assertNotEqual((held or {}).get("status"), "reserved")     # the idle booking is gone too
+
+    def test_after_the_manual_compaction_the_interval_sends_nothing_and_a_person_rearms_it(self):
+        import session_tidy_runner as runner
+        clock = [1000.0]
+        text, source = self.INPUTS["completion wake"]
+        with self.iso.patched_environ(self.extra), mock.patch.object(clear, "_start_helper", return_value=12345), \
+                mock.patch.object(runner, "start_detached", return_value=None), \
+                mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+            seat, idle_booking = self.booked("claude", "self-rearm", clock)
+            self.wake(seat, "claude", "self-rearm", text, source, clock)
+            line, _context = self.tidy(seat, "claude", "self-rearm")
+            self.assertIn("clear=scheduled", line)
+            manual = clear.read_reservation(seat.key)
+            # One booking file, the manual one; the old unspent window cannot send a request.
+            self.assertEqual(len(list(Path(clear.reservation_path(seat.key)).parent.glob(
+                Path(clear.reservation_path(seat.key)).name))), 1)
+            clock[0] = idle_booking["idle"]["due_at"] + 1
+            self.assertEqual(clear.validate_idle_request(clear.reservation_path(seat.key),
+                                                          idle_booking["nonce"])[1], "superseded")
+            self.assertEqual(clear.run_helper(seat.key, idle_booking["nonce"], sleep=lambda _: None), "superseded")
+            self.assertIsNone(clear.read_reservation(seat.key).get("idle_request"))
+            # The manual compaction ends; the short conversation books no new automatic request.
+            self.assertTrue(clear._finish(seat.key, manual["nonce"], "compacted"))
+            self.assertEqual(clear.observe_idle_event("claude", "self-rearm", str(self.cwd), event_id="after",
+                                                      tokens=60000, now=clock[0] + 5),
+                             "booking=skipped reason=below-threshold")
+            # A person's next input arms the interval again as usual.
+            st.run_hook("claude", "prompt", "self-rearm", cwd=str(self.cwd), prompt_text="Next real task",
+                        now=clock[0] + 10)
+            self.assertEqual(clear.observe_idle_event("claude", "self-rearm", str(self.cwd), event_id="next-work",
+                                                      tokens=600000, now=clock[0] + 11), "booking=scheduled")
+            self.assertEqual(clear.read_reservation(seat.key)["origin"], "idle")
+
+    def test_a_tidy_on_the_turn_the_automatic_request_arrived_stays_the_idle_answer(self):
+        # The existing arrival path: the request's own turn is still an idle compaction.
+        import session_tidy_runner as runner
+        clock = [1000.0]
+        with self.iso.patched_environ(self.extra), mock.patch.object(clear, "_start_helper", return_value=12345), \
+                mock.patch.object(runner, "start_detached", return_value=None), \
+                mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+            seat, booking = self.booked("claude", "self-arrived", clock)
+            clock[0] = booking["idle"]["due_at"] + 1
+            claim, why = _legacy_idle_claim(clear.reservation_path(seat.key), booking["nonce"])
+            self.assertEqual(why, "")
+            st.run_hook("claude", "prompt", "self-arrived", cwd=str(self.cwd),
+                        prompt_text=clear.idle_card_request_text(claim), now=clock[0])
+            self.assertTrue(clear.finish_idle_card_request(claim, accepted=True))
+            line, context = self.tidy(seat, "claude", "self-arrived")
+            self.assertTrue(context["eligible"])
+            self.assertEqual(context["origin"], "idle")
+            self.assertIn("clear=scheduled", line)
+            self.assertEqual(clear.read_reservation(seat.key)["idle_request"]["state"], "accepted")
+            self.assertEqual(st.tidy_report_line(line, origin="idle"),
+                             st._ui_translator()("tidy.say.compact_soon"))
+
+
 
 if __name__ == "__main__":
     unittest.main()

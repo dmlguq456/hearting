@@ -37,9 +37,13 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import dispatch_completion_join as JOIN  # noqa: E402
 import dispatch_contract  # noqa: E402
 from codex_dispatch_terminal import terminal_envelope_observed  # noqa: E402
+
+PARENT_PIDNS = unique_attempt_id("att-parent-pidns")
 
 # This fixture builds its own route and registry. Inheriting the caller's
 # dispatch identity makes the wrapper verify the *caller's* owner route against
@@ -712,7 +716,7 @@ class NamespaceE2E(unittest.TestCase):
                 "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
                 "execution_surface=registered-headless,registered_worker=1,"
                 f"fallback_hop=same-harness-headless,worker_type=owner,harness={harness},"
-                f"runtime_sandbox={config['parent_sandbox']},attempt_id=att-parent-pidns,"
+                f"runtime_sandbox={config['parent_sandbox']},attempt_id={PARENT_PIDNS},"
                 f"parent_sid=pidns-fixture,owner_route_id={route['route_id']},"
                 # A fixture-only depth-0 recipient on the supported human-gate
                 # carrier; independent of the mock child's harness below.
@@ -727,7 +731,7 @@ class NamespaceE2E(unittest.TestCase):
             fake.write_text(config["fake_script"], encoding="utf-8")
             fake.chmod(0o755)
 
-            attempt = f"att-{harness}-pidns-pass"
+            attempt = unique_attempt_id(f"att-{harness}-pidns-pass")
             argv = [
                 "dispatch-headless.py", "--start",
                 "--worktree", str(repo),
@@ -779,7 +783,7 @@ class NamespaceE2E(unittest.TestCase):
                 "AGENT_MODEL_GOVERNOR_ROOT": str(model_governor_root),
                 "AGENT_DISPATCH_JOBS": str(jobs),
                 "AGENT_DISPATCH_CHILD": "1",
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-pidns",
+                "AGENT_DISPATCH_ATTEMPT_ID": PARENT_PIDNS,
                 "AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN": "1",
                 "FAKE_EVIDENCE": str(evidence),
                 "FAKE_PID_FILE": str(base / f"{harness}-fake.pid"),
@@ -944,7 +948,7 @@ class NamespaceE2E(unittest.TestCase):
                 self.fail(f"{harness} terminal envelope was not published")
             blocked_receipt = JOIN.join_batch(
                 jobs=jobs,
-                parent_attempt_id="att-parent-pidns",
+                parent_attempt_id=PARENT_PIDNS,
                 interval=0.005,
                 timeout=0.03,
             )
@@ -998,7 +1002,7 @@ class NamespaceE2E(unittest.TestCase):
 
             ready = JOIN.join_batch(
                 jobs=jobs,
-                parent_attempt_id="att-parent-pidns",
+                parent_attempt_id=PARENT_PIDNS,
                 interval=0.01,
                 timeout=1,
             )
@@ -1160,6 +1164,8 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 sys.path.insert(0, str(root / 'utilities'))
+sys.path.insert(0, str(root / 'tools'))
+from fixture_processes import unique_attempt_id
 import dispatch_contract as D
 import dispatch_completion_join as J
 import resource_run_registry as R
@@ -1204,7 +1210,7 @@ brief = art / 'frame.md'
 brief.write_text('---\nstatus: framed\n---\n# Direction\nUse the existing module.\n')
 original_brief = brief.read_bytes()
 identity_file, log = base / 'identity.json', base / 'frame.claude.jsonl'
-attempt = 'att-boot-frame'
+attempt = unique_attempt_id('att-boot-frame')
 child_code = """
 import json, sys
 from pathlib import Path

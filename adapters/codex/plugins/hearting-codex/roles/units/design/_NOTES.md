@@ -101,3 +101,28 @@ infinite regress). Rule preserved in the unit; date/rationale only here.
 EN `_design_rules.md:22` "three to five useful iterations" vs KO "최대 3-5 회전"
 (hard cap). Unit bodies follow the LAW fragment (EN, "up to"); no semantic conflict
 judged, recorded for completeness.
+
+## Two-layer move, turn 9-3 (2026-11-25) — placement log: design/verifier
+
+No line removed; old `##` headings became `###`; one added stance pointer line. Everything
+that decides the verdict is 지킬 것: input and procedure, Layer 1 (zero tolerance), Layer 2 (derived
+pass rate), main-context protection, the output schema, the rendering-unavailable rule.
+참고: only the closing memory line, under its own `Memory` heading. `_design-rules.md` is still
+not carried by the runtime; the "read it first" pointer stays in 지킬 것 and no line of it was
+copied in.
+
+## Two-layer move, turn 9-4 (2026-11-25) — placement log: design/maker, design/critic
+
+No line removed; old `##` headings became `###`. `design/maker` — 지킬 것: the "read
+`_design-rules.md` before work" pointer, the ownership boundaries (data figures to material,
+production integration to dev, critique to the critic; no edits to LaTeX, code or equations),
+the whole Procedure (the figure-layout-guide limit, context before work, scaffolds, the render
+loop, sibling reviews), the Environment contract (never install automatically), Output.
+참고: the matrices-and-lanes layout line (the `Procedure` heading is repeated in both layers),
+the cross-project profile defaults, memory (under its own `Memory` heading).
+`design/critic` (plus the added stance pointer line) — 지킬 것: read-only and scope, the
+verifier-first split, the Rendered-result branch (render through the harness, never critique
+code as text), the Plan-review branch (pre-render gate, review log path), the Output cap of five
+to seven findings and the fields each item names. 참고: the six-axis Axes table, the tone
+sentences of Output (strengths, references, "may be intentional"; the Output heading is
+repeated in both layers), memory.

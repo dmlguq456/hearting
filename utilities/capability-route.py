@@ -176,7 +176,7 @@ from capability_route_nodes import (  # noqa: F401
     _capture_unit_frontmatter, _expected_nodes_under_frame_policy, _frame_node,
     _frameless_recipe, _load_sd160_snapshots, _no_model_node, _one_leg_frame_recipe,
     _owner_node, _profile_input_maps, _quick_frame_diversity, _quick_gate_bindings,
-    one_shot_owner_default, one_shot_review_declared, one_shot_review_node,
+    one_shot_owner_default, one_shot_review_declared, one_shot_review_node, one_shot_review_nodes,
     _recipe_has_frame, _resolve_owner_profile, _sd160_snapshot_path, _seal_confirmation_mode,
     _seal_profile_demands, _seal_small_work_confirmation, _seal_terminal_commit_support,
     _stamp_frame_profiles, _unit_blocks_digest, _verify_profile_contract, unit_leg_node,
@@ -196,7 +196,7 @@ from capability_route_compose import (  # noqa: F401
     _versioned_subgraph, _without_implicit_frame_briefs, COMPOSE_DEFAULT_CAPABILITY,
     COMPOSE_DEFAULT_CHILDREN, COMPOSE_SHAPES, compose_spec_read, compose_subgraph_recipe,
     DECIDED_SHAPES, DEFAULT_ARTIFACT_GUARD, DEFAULT_DRIFT_VERDICT, INTENSITY_SHAPE,
-    parse_graph_spec, proposal_readiness, ROUTE_FRAME_CAPABILITY, ROUTE_ORIGINS,
+    parse_graph_spec, proposal_readiness, read_compose_task, ROUTE_FRAME_CAPABILITY, ROUTE_ORIGINS,
     shape_for_intensity, SHAPE_INTENSITY, SPEC_READ_MARKER_PREFIX, SPEC_READ_SHARED_PREFIX,
 )
 from capability_route_scope import (  # noqa: F401
@@ -862,7 +862,7 @@ def _note_warning(line):
         DISPATCH_DEFAULTS_WARNINGS.append(line)
 
 
-def _seal_dispatch_defaults(nodes, capability, owner_profile=None):
+def _seal_dispatch_defaults(nodes, capability, owner_profile=None, field=None, field_table=None):
     """Return defaults digest/allocation and stamp each dispatch-depth-2 node's
     harness_affinity, BEFORE route_hash is computed. Absent config -> all
     'unspecified' + digest None. Structurally corrupt config -> fail-loud
@@ -871,7 +871,10 @@ def _seal_dispatch_defaults(nodes, capability, owner_profile=None):
     Each depth-2 node and each depth-1 frame leg carries its profile's sealed
     harness_policy, so a frame launched later reads the same bands the route
     was sealed with instead of re-reading the live file. registry_digest is a
-    separate field and is never touched here."""
+    separate field and is never touched here. A route with a field seals that
+    field's applied weight row beside the allocation (`field_weights`, from the
+    registry's default table plus the user's override); a neutral row or no
+    field seals no key, so those routes keep their bytes."""
     config_path = DEFAULTS.default_config_path()
     if not os.path.exists(config_path):
         for node in nodes:
@@ -899,9 +902,13 @@ def _seal_dispatch_defaults(nodes, capability, owner_profile=None):
             node["harness_policy"] = DEFAULTS.query_profile_policy(
                 cfg, node["model_profile"]
             )
+    allocation = DEFAULTS.query_allocation(cfg)
+    field_weights = DEFAULTS.query_field_weights(cfg, field, field_table)
+    if field_weights:
+        allocation["field_weights"] = field_weights
     return (
         "sha256:" + hashlib.sha256(canonical(cfg)).hexdigest(),
-        DEFAULTS.query_allocation(cfg),
+        allocation,
         DEFAULTS.query_profile_policy(cfg, owner_profile) if owner_profile else None,
     )
 
@@ -1200,8 +1207,10 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         elif unit is not None:
             nodes = [{"id": TOPO.UNIT_NODE_ID, "write_scope": list(base["quick"]["write_scope"])}]
         elif middle_cell:
-            # The middle cell: the kind's declared review node, then the owner's end node.
-            nodes = [one_shot_review_node(base), {"id": "one-shot", "write_scope": list(base["quick"]["write_scope"])}]
+            # The middle cell: the kind's declared verification nodes at this intensity, then the owner's end node.
+            cell_intensity = max((requested, "standard" if signals else "quick"), key=ORDER.get)
+            nodes = [*one_shot_review_nodes(base, cell_intensity, registry),
+                     {"id": "one-shot", "write_scope": list(base["quick"]["write_scope"])}]
         elif shape == "solo" and not signals:
             if resume_graph and RESOURCE_RESUME.recipe_selected(base):
                 nodes = RESOURCE_RESUME.nodes(base, registry["owner_profile_by_intensity"]["quick"])
@@ -1614,11 +1623,13 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
             nodes = RESOURCE_RESUME.nodes(recipe, owner_model_profile)
             gates = ["resource-exit", "quick-complete"]
         if review_cell:
-            # The middle cell `solo·standard`: the kind's declared review node, then the owner's end node,
-            # which waits on it (the review never waits on the owner). No frame pair (a decided shape).
-            nodes = [one_shot_review_node(recipe), nodes[-1]]
-            nodes[1]["depends_on"] = [nodes[0]["id"]]
-            gates = [nodes[0]["completion_gate"], "quick-complete"]
+            # The middle cell (`solo` at `standard` and up): the kind's declared verification nodes at this
+            # intensity (one review, or its review legs from `strong`), then the owner's end node, which waits
+            # on all of them (a review never waits on the owner). No frame pair (a decided shape).
+            review_nodes = one_shot_review_nodes(recipe, effective, registry)
+            nodes = [*review_nodes, nodes[-1]]
+            nodes[-1]["depends_on"] = [n["id"] for n in review_nodes]
+            gates = [review_nodes[0]["completion_gate"], "quick-complete"]
         selection_basis=[{"axis":"direct-predicate-gap","signal":p,"source":"compiler"} for p in sorted(known_pred-set(predicates))]
     else:
         if transport not in (None, "headless"):
@@ -1666,7 +1677,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
             raise ValueError("profile-explicit-unknown:" + str(profile))
         explicit_profiles = {**{n["id"]: profile for n in nodes if not _no_model_node(n)},
                              "__owner__": profile, **(explicit_profiles or {})}
-    profile_demands, explicit_profiles = _profile_input_maps(nodes, profile_demands, explicit_profiles)
+    profile_demands, explicit_profiles = _profile_input_maps(nodes, profile_demands, explicit_profiles, effective)
     owner_demand = profile_demands.get("__owner__")
     owner_model_profile, owner_profile_selection = _resolve_owner_profile(
         effective, registry, owner_demand, explicit_profiles.get("__owner__"),
@@ -1695,8 +1706,13 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
     for node in nodes:
         if _owner_node(node, effective, form) and node["model_profile"] != owner_model_profile:
             raise ValueError("owner-node-profile-selection-conflict:" + node["id"])
+    try:
+        route_field = _sealed_field(registry, recipe, capability, capability_mode, field, field_source).get("field")
+    except ValueError:
+        route_field = None  # the same call below refuses an unknown field
     dispatch_defaults_digest,dispatch_allocation,owner_harness_policy=_seal_dispatch_defaults(
-        nodes, capability, owner_model_profile
+        nodes, capability, owner_model_profile,
+        field=route_field, field_table=registry.get("field_harness_weights"),
     )
     spec_touch=any(_scope_touches_spec(scope) for node in nodes for scope in node["write_scope"])
     # Seal the same finite workload derivation used by legacy bound routes.
@@ -1855,7 +1871,7 @@ def main():
     c.add_argument("--campaign-key",help="explicit work stream passed to the producer owner")
     c.add_argument("--parent-cycle",help="open or sealed predecessor cycle; causal link, not input approval")
     c.add_argument("--profile-demands", help="JSON file mapping node ids and __owner__ to full SD-88 demands")
-    c.add_argument("--explicit-profiles", help="JSON file mapping demanded node ids to explicit profiles")
+    c.add_argument("--explicit-profiles", help="JSON file mapping node ids to explicit profiles; keys: __owner__ (the owner) or a node id (a parallel-group leg by its realized id, e.g. impl-review-alternative); a value of top is for the owner at any intensity, or for a depth-2 stage worker or review/verification leg you name at strong or higher (set --intensity; one top leg per parallel group; a route-wide worker pin's model still wins; never route-wide)")
     c.add_argument("--intensity",default="auto"); c.add_argument("--cwd",required=True); c.add_argument("--artifact-root",required=True)
     c.add_argument("--predicate",action="append",default=[]); c.add_argument("--signal",action="append",default=[])
     c.add_argument("--transport",default=None); c.add_argument("--transport-evidence",default="caller-selected")
@@ -1872,7 +1888,7 @@ def main():
     cp=sub.add_parser("compose",help="preset-free work route: name the shape (and stage subgraph), defaults fill the rest")
     cp.add_argument("--slug",default=None,help="default: named from the task's first line with ASCII words")
     cp.add_argument("--start",action="store_true",help="prepare and start the selected work; the runtime owns frame launches and waiting")
-    cp.add_argument("--prompt-file",type=Path,help="the user's task, stored with the route for frame and owner execution")
+    cp.add_argument("--prompt-file",type=Path,help="the user's task, stored with the route for frame and owner execution; `-` (and `./-`) reads it once from standard input (a pipe or a heredoc), with no file to write first; a file named `-` cannot be given here")
     cp.add_argument("--owner",choices=("claude","codex","opencode"),help="explicit owner runtime; otherwise use normal selection (same as --pin owner=<harness>)")
     cp.add_argument("--pin",action="append",default=[],metavar="TARGET=HARNESS[:MODEL[@EFFORT]]",
                     help="choose the tool (and optionally model and effort) once; the route seals it for the owner, "
@@ -1885,7 +1901,7 @@ def main():
     cp.add_argument("--plan",default=None,help="optional declared capability sequence for this session's route chain, e.g. research,draft,apply; shown in Fleet, not sealed into the route")
     cp.add_argument("--route-plan",default=None,metavar="RECORD#INDEX",help="runtime-generated: leg INDEX of an approved route decision record; compiles without frame nodes and seals its reference")
     cp.add_argument("--profile-demands", help="JSON file mapping node ids and __owner__ to full SD-88 demands")
-    cp.add_argument("--explicit-profiles", help="JSON file mapping demanded node ids to explicit profiles")
+    cp.add_argument("--explicit-profiles", help="JSON file mapping node ids to explicit profiles; keys: __owner__ (the owner) or a node id (a parallel-group leg by its realized id, e.g. impl-review-alternative); a value of top is for the owner at any intensity, or for a depth-2 stage worker or review/verification leg you name at strong or higher (set --intensity; one top leg per parallel group; a route-wide worker pin's model still wins; never route-wide)")
     cp.add_argument("--profile", choices=sorted(PROFILE.PORTABLE_PROFILES),
                     help="explicit model budget for owner and model nodes; node-specific --explicit-profiles takes precedence; mini only with --shape direct (a registered owner or stage needs light or higher)")
     cp.add_argument("--shape",choices=COMPOSE_SHAPES,default=None,help="direct (inline) | solo (one registered owner) | staged (capability recipe, optionally narrowed by --graph) | framed (two top frame legs propose the route by default; explicit quick/direct may use one deep leg for unprotected work; --capability, --capability-mode, --graph and --profile are recorded as hints only); default: framed; use --shape direct for inline work; --graph without --shape is a frame routing hint")
@@ -1896,7 +1912,7 @@ def main():
     cp.add_argument("--unit",default=None,metavar="FAMILY/NAME",help="open one read-only unit as a route of its own (the kind unit, one leg, no owner, no intensity); its field is the unit head's `field:`, or name --field; with --start --prompt-file the unit's one worker starts with the brief and its end closes the route")
     cp.add_argument("--ephemeral",action="store_true",help="with --unit: leave nothing in the project's artifact folder or campaign records; the route's files stay in a scratch root under the runtime directory and the worker's answer comes back with its completion")
     cp.add_argument("--field",default=None,help="the field of the work (plan, design, code, lab, research, docs, admin, other); alone it opens that field's default recipe, and admin or other also need --capability; a hint only with --shape framed")
-    cp.add_argument("--intensity",default=None,help="default by shape: direct/quick/standard; framed defaults to two frame legs, while explicit quick/direct may use one for unprotected work; staged accepts strong+")
+    cp.add_argument("--intensity",default=None,help="default by shape: direct/quick/standard; framed defaults to two frame legs, while explicit quick/direct may use one for unprotected work; solo accepts standard and higher where the kind declares a one-shot review; staged accepts standard and higher")
     cp.add_argument("--cwd",default=None,help="default: current directory"); cp.add_argument("--artifact-root",default=None,help="default: utilities/artifact-root.sh for cwd")
     cp.add_argument("--signal",action="append",default=[],
                     help="promotion signal (repeatable), e.g. shared-contract: promotes shared spec/contract "
@@ -1916,7 +1932,7 @@ def main():
     cp.add_argument("--full-record",action="store_true",help="print all sealed evidence; default prints choices and the canonical route_file")
     cp.add_argument("--help-all",action="help",help="also show advanced/compatibility inputs")
     if "--help-all" not in sys.argv:
-        advanced = {"route_plan", "parent_cycle", "profile_demands", "explicit_profiles", "intensity", "artifact_root",
+        advanced = {"route_plan", "parent_cycle", "profile_demands", "artifact_root",
                     "drift_verdict", "tracking", "artifact_guard", "parent_harness", "jobs",
                     "dispatch_evidence", "registered_headless_evidence", "transport_evidence", "output", "full_record"}
         for option in cp._actions:
@@ -2068,7 +2084,7 @@ def main():
         shape=a.shape or ("solo" if a.unit is not None else "framed")
         if a.start and (a.explain or a.prompt_file is None):
             raise ValueError("compose-start-requires-task: use --start --prompt-file <task>, without --explain")
-        compose_task = a.prompt_file.read_text() if a.prompt_file else ""
+        compose_task = read_compose_task(a.prompt_file)
         cwd_was_explicit = a.cwd is not None
         cwd=a.cwd or os.getcwd()
         promotion_cwd = cwd
@@ -2330,6 +2346,8 @@ def main():
     if a.command=="correct":
         from dispatch_owner_input import submit, inspect, InputError
         jobs=Path(a.jobs or _compose_default_jobs())
+        # Read once: the message may be a pipe (`--message-file /dev/stdin`) that every path below shares.
+        message=a.message_file.read_text() if a.message_file else None
         given=a.attempt_id or a.correct_route
         if given is None:
             found,source,rows=caller_open_route(os.getcwd())
@@ -2347,11 +2365,27 @@ def main():
             # A unit route has no owner to answer: the text is the route's next turn (work_start.correct_unit_route).
             from work_start import correct_unit_route
             code,result=correct_unit_route(verify_route(frame_raw),frame_path,jobs,
-                                           a.message_file.read_text() if a.message_file else None,a.request_id)
+                                           message,a.request_id)
             print(json.dumps(result,ensure_ascii=False))
             from start_receipt import print_next_line
             print_next_line(result)
             return code
+        if isinstance(frame_raw,dict) and a.message_file and not ROUTE_PLAN.is_framed_route(frame_raw):
+            # A closed one-shot route its owner finished PASS takes the text as its next owner turn
+            # (work_start.correct_owner_route); any other state keeps the owner input path below.
+            from work_start import correct_owner_route
+            try:
+                verified=verify_route(frame_raw)
+            except (ValueError, KeyError, TypeError, OSError):
+                verified=None   # an unverifiable record keeps the owner input path, which reports it
+            taken=(correct_owner_route(verified,frame_path,jobs,message,a.request_id)
+                   if verified is not None else None)
+            if taken is not None:
+                code,result=taken
+                print(json.dumps(result,ensure_ascii=False))
+                from start_receipt import print_next_line
+                print_next_line(result)
+                return code
         if ROUTE_PLAN.is_framed_route(frame_raw):
             from work_start import _framed_cycle
             _first = {}
@@ -2367,7 +2401,7 @@ def main():
                 given = _leg_owner
             else:
                 from dispatch_owner_input import frame_input
-                result = frame_input(verify_route(frame_raw), a.message_file.read_text() if a.message_file else None,
+                result = frame_input(verify_route(frame_raw), message,
                                      a.request_id, jobs=jobs)
                 if result.get("redirect_owner"):
                     given = result["redirect_owner"]
@@ -2392,7 +2426,7 @@ def main():
         except Exception:
             stage_unit=None  # a label that cannot be read is no label
         try:
-            result=(submit(jobs,attempt,a.message_file.read_text(),a.request_id,unit=stage_unit)
+            result=(submit(jobs,attempt,message,a.request_id,unit=stage_unit)
                     if a.message_file else inspect(jobs,attempt))
         except InputError as exc:
             refusal={"state":"not-admitted","reason":str(exc),

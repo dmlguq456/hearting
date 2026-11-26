@@ -107,12 +107,13 @@ class Reply:
     stays running on the model's side."""
 
     def __init__(self, text: str = "", shell: str | None = None, tool=None,
-                 input_tokens: int = 1, gate=None):
+                 input_tokens: int = 1, gate=None, http_error=None):
         self.gate = gate
         self.text = text
         self.shell = shell
         self.tool = tool
         self.input_tokens = input_tokens
+        self.http_error = http_error
 
     def call(self, protocol: str, names):
         """The (name, arguments) of this reply's tool call, or None."""
@@ -124,6 +125,8 @@ class Reply:
         value = {"text": self.text, "shell": self.shell}
         if self.tool:
             value["tool"] = list(self.tool)
+        if self.http_error:
+            value["http_status"] = self.http_error[0]
         return value
 
 
@@ -299,6 +302,9 @@ class ModelFixture:
                 self.send_response(code)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
+                if code == 429:
+                    self.send_header("Retry-After", "1")
+                    self.send_header("x-should-retry", "false")
                 if ctype == "text/event-stream":
                     self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
@@ -340,8 +346,8 @@ class ModelFixture:
                 else:
                     self._send(404, b"{}")
                     return
-                body, ctype = owner._answer(protocol, payload, raw)
-                self._send(200, body, ctype)
+                status, body, ctype = owner._answer(protocol, payload, raw)
+                self._send(status, body, ctype)
 
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
@@ -379,12 +385,17 @@ class ModelFixture:
             self.requests.append(record)
         if reply.gate is not None:
             reply.gate.wait(GATE_LIMIT)
+        if reply.http_error is not None:
+            status, error = reply.http_error
+            return status, json.dumps(error).encode(), "application/json"
         streaming = bool(payload.get("stream", protocol != "anthropic"))
         if protocol == "anthropic":
-            return self._anthropic(reply, streaming, names)
-        if protocol == "responses":
-            return self._responses(reply, names)
-        return self._chat(reply, streaming, names)
+            body, ctype = self._anthropic(reply, streaming, names)
+        elif protocol == "responses":
+            body, ctype = self._responses(reply, names)
+        else:
+            body, ctype = self._chat(reply, streaming, names)
+        return 200, body, ctype
 
     def main_requests(self) -> list[dict]:
         with self.lock:

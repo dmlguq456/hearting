@@ -432,6 +432,23 @@ class EmptyAnswerEndTest(U.UnitLegBase):
         view = self.read(self.root, "")
         self.assertEqual(view["state"], "valid")              # this PR changes no existing route's end
 
+    def test_a_lookup_leg_that_ends_with_no_artifact_reads_as_no_answer(self):
+        # The end a literal reading of "read-only" could produce: `artifact: -` and PASS. The unit's text tells the leg
+        # its report is the only file it writes, because this end carries no answer to the caller.
+        log = Path(self.root) / "leg-none.jsonl"
+        log.write_text(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                                   "result": "artifact: -\nverdict: PASS\nblocker: none"}) + "\n")
+        binding = DC.parse_registry_metadata(self.leg_row(
+            self.route, self.path, status="done", log_file=str(log), artifact_root=str(self.scratch),
+            worker_type="support").split("\t")[5].strip())
+        view = TERMINAL.inspect_terminal_attempt(log, worktree=self.worktree, artifact_root_metadata=str(self.scratch),
+                                                 worker_type="support", artifact_binding=binding)
+        self.assertEqual(view.get("artifact_state"), "none", view)
+        self.assertFalse(view.get("artifact") or view.get("primary_artifact"), view)
+        # nothing was written, so the caller is given no `Answer:` (the end is not read as a finished job)
+        self.assertEqual(unit_ephemeral.answer_summary(self.route, self.scratch / "units" / "unit" / "report.md",
+                                                       head="x"), "")
+
     def test_an_answer_with_text_is_finished_work_even_when_it_blocks(self):
         view = self.read(self.scratch, self.REPORT)
         self.assertEqual((view["state"], view["verdict"]), ("valid", "PASS"))

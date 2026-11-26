@@ -141,6 +141,27 @@ def print_next_line(receipt, stream=None):
         print(line, file=stream or sys.stderr, flush=True)
 
 
+def _route_closed(receipt):
+    """True only when the receipt's own route is read as closed; unreadable means not closed.
+
+    Reads the route file and its `.outcome.json` beside it through the notice state's
+    `closed_outcome`, the same closure read the dispatch notices use: two small files,
+    no registry. A closure whose inline finish is still pending does not count.
+    """
+    try:
+        path = Path(str(receipt.get("route_file") or ""))
+        if not path.is_absolute():
+            return False
+        route = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(route, dict) or route.get("route_id") != receipt.get("route_id"):
+            return False
+        from dispatch_notice_state import closed_outcome
+        outcome = closed_outcome(path, route)
+        return bool(outcome) and not outcome.get("finish_pending")
+    except Exception:
+        return False
+
+
 def context(harness, sid, jobs=None):
     """Observe once; a receipt is a hint, never completion or launch authority."""
     if harness not in {"claude", "codex", "opencode"} or not sid:
@@ -161,6 +182,8 @@ def context(harness, sid, jobs=None):
             receipt = row["receipt"]
             if not isinstance(receipt, dict) or not receipt.get("parent_next"):
                 return ""
+            if _route_closed(receipt):
+                return ""  # a finished route is no longer running; a compaction must not say it is
             text = "[start-receipt] " + " ".join(f"{k}={receipt[k]}" for k in ("route_id", "state") if k in receipt)
             text += f"\nreceipt_file={path}"
             for name in ("parent_next", "parent_next_reason", "parent_next_command", "required_action", "resume_command"):

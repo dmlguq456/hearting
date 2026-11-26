@@ -370,7 +370,8 @@ def projection(world, harness, sid, *, columns=40, rows=46, state="working", pop
     # The host puts the status button's value in the model (``host.cjs`` ``statusDoc``).
     status = world.status(sid)
     if isinstance(status, dict) and isinstance(status.get("word"), str):
-        payload["panel"] = {**payload["panel"], "status_doc": {"word": status["word"], "has_doc": status.get("has_doc") is True}}
+        payload["panel"] = {**payload["panel"], "status_doc": {"word": status["word"], "has_doc": status.get("has_doc") is True},
+                            "backlog_doc": {"word": "BACKLOG", "has_doc": False}}      # (11-21: the BACKLOG part stands beside STATUS)
     return payload
 
 
@@ -438,8 +439,8 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const plain=part=>({text:part.text,fg:part.foreground??null,bg:part.background??null,
   dim:part.dim===true,bold:part.bold===true,reverse:part.reverse===true});
 const cellWidth=s=>[...String(s)].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
-const SECTIONS=['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES'];
-// host.cjs: tableParts, statusDoc, sectionLabel, sections, label, tableGuide, wrapGuide, tableTitle
+const SECTIONS=['STATUS','BACKLOG','NOW','QUESTIONS','ROUTE','MESSAGES','MEM'];
+// host.cjs: tableParts, statusDoc, sections, label, tableGuide, wrapGuide, tableTitle
 // (the same code, over the job's model and table instead of the host's globals).
 function tableParts(result){
   const styles=Array.isArray(result.styles)?result.styles:[];
@@ -447,11 +448,10 @@ function tableParts(result){
     ...(Number.isInteger(run?.[2])&&run[2]>=0&&run[2]<=400?{cells:run[2]}:{})})));
 }
 const statusDoc=m=>m.status_doc&&typeof m.status_doc.word==='string'?m.status_doc:null;
-const sectionLabel=(m,name)=>name==='STATUS'?String(statusDoc(m)?.word||'STATUS'):name;
 function sections(m,block,table){
   const list=v=>Array.isArray(v)&&v.length>0;
-  const has={STATUS:!!statusDoc(m),NOW:!!m.now,QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
-    MESSAGES:list(m.messages)||list(m.requests)};
+  const has={STATUS:!!statusDoc(m),BACKLOG:!!(m.backlog_doc&&typeof m.backlog_doc.word==='string'),NOW:!!m.now,QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
+    MESSAGES:list(m.messages)||list(m.requests),MEM:list(m.memory_items)};
   const current=table?table.kind:'QUESTIONS';
   return SECTIONS.filter(name=>has[name]||name===current);
 }
@@ -467,7 +467,7 @@ function wrapGuide(lines,inner,rows){
 function tableTitle(m,kind,table){
   const dim=v=>({text:v,dim:true});
   if(kind==='ROUTE'){const r=/^route (\d+)(.*)$/.exec(String(m.route_label||'').trim());return r?[{text:r[1]},dim(' ROUTE'+r[2])]:[dim('ROUTE')];}
-  if(kind==='STATUS'){const word=sectionLabel(m,'STATUS'),whole=String(table?.result?.title||word);
+  if(kind==='STATUS'){const word='STATUS',whole=String(table?.result?.title||word);
     return whole.startsWith(word)&&whole.length>word.length?[dim(word),{text:whole.slice(word.length)}]:[dim(whole)];}
   return [dim('MESSAGES')];
 }
@@ -510,7 +510,7 @@ function tableTitle(m,kind,table){
         if(block.question){const all=block.detail({budget:room+1,columns:inner});title=all[0]||label;body=all.slice(1);}
         else body=block.detail({budget:room,columns:inner});
       }
-      const shown=view.popup({cols,rows,band:0,kind,title,body,sections:names,labels:names.map(name=>sectionLabel(base,name)),
+      const shown=view.popup({cols,rows,band:0,kind,title,body,sections:names,
         current,model:base,configuration,cellWidth,background:'dark'});
       const veil=view.veil(configuration,{colors:base.colors??256,noColor:base.no_color===true,background:'dark'});
       popup={left:shown.left,top:shown.top,rows:shown.rows.map(row=>row.map(plain)),veil};

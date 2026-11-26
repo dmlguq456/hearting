@@ -62,7 +62,7 @@ class ResourcesPanelTest(unittest.TestCase):
     def test_resources_stand_above_usage_with_their_hosts_gpus_and_the_session_numbers(self):
         self.node(r"""
 const rows=plain(render(44,50,{resources:[A,B]}));
-const at=rows.findIndex(s=>/^│ RESOURCES ─+ │$/.test(s)),us=rows.findIndex(s=>/^│ USAGE ─+ │$/.test(s));
+const at=rows.findIndex(s=>/^│ RESOURCES +│$/.test(s)),us=rows.findIndex(s=>/^│ USAGE +│$/.test(s));
 assert(at>0&&us>at,rows.join('\n'));
 const body=rows.slice(at+1,us).map(s=>s.slice(2,-2).trimEnd());
 // (44 cells: the two groups of host-a are 20 wide each, 2 in and 2 apart: 44 inside 40 is too much, so each stands on a row.)

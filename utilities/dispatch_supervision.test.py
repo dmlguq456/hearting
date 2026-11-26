@@ -20,6 +20,8 @@ import time
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import dispatch_attempt_policy as policy
 import dispatch_contract as contract
 import dispatch_supervision as supervision
@@ -27,10 +29,12 @@ import dispatch_pending_delivery as pending
 import dispatch_session_sweep as sweep
 from split_module_fixture import patch_split
 
+ATT_OWNER = unique_attempt_id("att-owner")
+
 CURRENT = {"attempt_schema_version": "2", "dispatch_depth": "2", "transport": "headless",
            "execution_surface": "registered-headless", "registered_worker": "1",
            "fallback_hop": "same-harness-headless", "route_id": "rt-policy", "route_node": "test",
-           "parent_attempt_id": "att-owner", "pid_observer_ns": contract.process_namespace_identity()}
+           "parent_attempt_id": ATT_OWNER, "pid_observer_ns": contract.process_namespace_identity()}
 
 
 def row(attempt, *, status="open", **metadata):
@@ -70,6 +74,15 @@ class SupervisorExitedSettlementTest(unittest.TestCase):
                 "workflow_completion": "runtime-v1", "failure_class": "pass", "note": "completed-supervisor",
                 "parent_sid": "parent", **extra}
 
+    def test_an_armed_unit_capacity_notice_names_the_start_that_can_read_the_result(self):
+        self.jobs.touch()
+        receipt = {**self.receipt("att-unit"), "reason": supervision.UNIT_CAPACITY_PAUSE}
+        with mock.patch.object(supervision, "_resume_text",
+                               return_value="python3 capability-route.py start --route rt-unit"):
+            text = supervision.render_text(receipt, continued={"resume_at": "2099-01-01T00:00:00Z"})
+        self.assertIn("Its result comes back here.", text)
+        self.assertIn("You can also read the result with python3 capability-route.py start --route rt-unit.", text)
+
     def test_a_settlement_past_the_ceiling_is_the_attention_notice_in_any_harness(self):
         """RV-PR1559-1112: the watcher records a PASS owner's settlement-only exit only past
         SETTLING_NOTICE_SECONDS, so that one notice -- an undelivered completion, an incomplete
@@ -80,7 +93,7 @@ class SupervisorExitedSettlementTest(unittest.TestCase):
                                                   ("unverifiable", "attempt-descendant-unverifiable"),
                                                   ("quiescent", "governed-process-group-drained")]:
                 with self.subTest(harness=harness, process=process_reason):
-                    text = self.render({"att-owner": ("done", self.owner(harness, attempt_id="att-owner"))},
+                    text = self.render({ATT_OWNER: ("done", self.owner(harness, attempt_id=ATT_OWNER))},
                                        process_state, process_reason=process_reason)
                     self.assertTrue(text.startswith("Hearting supervision needs attention."), text)
                     self.assertIn("Explain the blockage", text)
@@ -89,7 +102,7 @@ class SupervisorExitedSettlementTest(unittest.TestCase):
                         self.assertNotIn(claim, text)
         for status, extra in (("open", {}), ("done", {"failure_class": "fail", "note": "dead-runtime"})):
             with self.subTest(status=status, **extra):   # no committed PASS: the attention text alone
-                text = self.render({"att-owner": (status, self.owner("claude", attempt_id="att-owner", **extra))},
+                text = self.render({ATT_OWNER: (status, self.owner("claude", attempt_id=ATT_OWNER, **extra))},
                                    "unverifiable", process_reason="post-exit-receipt-incomplete")
                 self.assertTrue(text.startswith("Hearting supervision needs attention."), text)
                 self.assertNotIn("not a blockage", text)
@@ -98,7 +111,7 @@ class SupervisorExitedSettlementTest(unittest.TestCase):
         """RV-PR1444-1110 F1: a live tagged descendant may be work the worker started, not a helper."""
         for harness in ("claude", "codex", "opencode"):
             with self.subTest(harness=harness):
-                text = self.render({"att-owner": ("done", self.owner(harness, attempt_id="att-owner"))}, "live")
+                text = self.render({ATT_OWNER: ("done", self.owner(harness, attempt_id=ATT_OWNER))}, "live")
                 self.assertIn("not a blockage, and not finished either", text)
                 self.assertIn("Do not report the work as finished while it runs", text)
                 for claim in ("only Hearting's own settlement", "do not restart, retry, cancel",
@@ -107,13 +120,13 @@ class SupervisorExitedSettlementTest(unittest.TestCase):
 
     def test_a_real_running_descendant_is_named_by_pid_before_any_residue_seal(self):
         """No liveness mock: a real process tagged with the attempt keeps the notice from settling."""
-        self.jobs.write_text(row("att-owner", status="done", **{k: v for k, v in self.owner("claude").items()}))
-        receipt = self.receipt("att-owner")
-        work = subprocess.Popen(["sleep", "60"], env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": "att-owner"},
+        self.jobs.write_text(row(ATT_OWNER, status="done", **{k: v for k, v in self.owner("claude").items()}))
+        receipt = self.receipt(ATT_OWNER)
+        work = subprocess.Popen(["sleep", "60"], env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": ATT_OWNER},
                                 start_new_session=True)
         try:
             deadline = time.monotonic() + 5
-            while supervision.settling_after_pass(receipt) != [("att-owner", "wait")] and time.monotonic() < deadline:
+            while supervision.settling_after_pass(receipt) != [(ATT_OWNER, "wait")] and time.monotonic() < deadline:
                 time.sleep(0.05)
             text = supervision.render_text(receipt)
             self.assertIn("not a blockage, and not finished either", text)
@@ -135,16 +148,16 @@ class SupervisorExitedSettlementTest(unittest.TestCase):
         }
         for name, (status, extra, process) in cases.items():
             with self.subTest(case=name):
-                text = self.render({"att-owner": (status, self.owner("codex", attempt_id="att-owner", **extra))}, process)
+                text = self.render({ATT_OWNER: (status, self.owner("codex", attempt_id=ATT_OWNER, **extra))}, process)
                 self.assertTrue(text.startswith("Hearting supervision needs attention."), text)
                 self.assertIn("Explain the blockage", text)
 
     def test_one_unsettled_attempt_or_another_reason_keeps_the_attention_notice(self):
-        rows = {"att-owner": ("done", self.owner("claude", attempt_id="att-owner")),
+        rows = {ATT_OWNER: ("done", self.owner("claude", attempt_id=ATT_OWNER)),
                 "att-child": ("done", {**self.owner("claude", attempt_id="att-child", failure_class="fail",
-                                                   note="dead-runtime"), "parent_attempt_id": "att-owner"})}
+                                                   note="dead-runtime"), "parent_attempt_id": ATT_OWNER})}
         self.assertIn("Explain the blockage", self.render(rows, "quiescent"))
-        only = {"att-owner": ("done", self.owner("claude", attempt_id="att-owner"))}
+        only = {ATT_OWNER: ("done", self.owner("claude", attempt_id=ATT_OWNER))}
         closure = self.render(only, "quiescent", reason="closure-blocked")   # keeps its own wording
         self.assertNotIn("settlement in progress", closure)
         self.assertIn("Explain this to the user", closure)
@@ -161,51 +174,51 @@ class ResponsibilityTest(unittest.TestCase):
     def test_transient_capacity_wait_is_exact_attempt_bounded_and_superseded_by_next_turn(self):
         log = self.root / "owner.jsonl"
         start = {"type": "dispatch.supervisor.transient-wait.started",
-                 "parent_attempt_id": "att-owner", "thread_id": "thread-a",
+                 "parent_attempt_id": ATT_OWNER, "thread_id": "thread-a",
                  "turn_id": "turn-a", "reason_code": "transient-capacity",
                  "ordinal": 1, "deadline_monotonic": 160.0}
         log.write_text(json.dumps(start) + "\n")
         metadata = {"harness": "codex", "log_file": str(log)}
         with mock.patch.object(supervision.time, "monotonic", return_value=100.0):
-            self.assertTrue(supervision._transient_retry_wait_active(metadata, "att-owner"))
+            self.assertTrue(supervision._transient_retry_wait_active(metadata, ATT_OWNER))
             self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-other"))
         with mock.patch.object(supervision.time, "monotonic", return_value=161.0):
-            self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-owner"))
+            self.assertFalse(supervision._transient_retry_wait_active(metadata, ATT_OWNER))
         log.write_text(json.dumps(start) + "\n" + json.dumps({
-            "type": "dispatch.supervisor.turn.started", "parent_attempt_id": "att-owner",
+            "type": "dispatch.supervisor.turn.started", "parent_attempt_id": ATT_OWNER,
             "thread_id": "thread-a", "turn_id": "turn-b"}) + "\n")
         with mock.patch.object(supervision.time, "monotonic", return_value=100.0):
-            self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-owner"))
+            self.assertFalse(supervision._transient_retry_wait_active(metadata, ATT_OWNER))
 
     def test_claude_and_opencode_retry_waits_are_read_by_their_turn_ordinal(self):
         log = self.root / "owner.jsonl"
         start = {"type": "dispatch.supervisor.transient-wait.started",
-                 "parent_attempt_id": "att-owner", "turn_ordinal": 3,
+                 "parent_attempt_id": ATT_OWNER, "turn_ordinal": 3,
                  "reason_code": "transient-edge-block", "ordinal": 1, "deadline_monotonic": 160.0}
         for harness in ("claude", "opencode"):
             with self.subTest(harness=harness):
                 metadata = {"harness": harness, "log_file": str(log)}
                 with mock.patch.object(supervision.time, "monotonic", return_value=100.0):
                     log.write_text(json.dumps(start) + "\n")
-                    self.assertTrue(supervision._transient_retry_wait_active(metadata, "att-owner"))
+                    self.assertTrue(supervision._transient_retry_wait_active(metadata, ATT_OWNER))
                     self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-other"))
                     for changed in ({"turn_ordinal": None}, {"reason_code": "transient-capacity"},
                                     {"turn_ordinal": None, "thread_id": "t", "turn_id": "u"}):
                         log.write_text(json.dumps({**start, **changed}) + "\n")
-                        self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-owner"))
+                        self.assertFalse(supervision._transient_retry_wait_active(metadata, ATT_OWNER))
                     for after in ({"type": "dispatch.supervisor.transient-wait.ended",
-                                   "parent_attempt_id": "att-owner", "turn_ordinal": 3},
+                                   "parent_attempt_id": ATT_OWNER, "turn_ordinal": 3},
                                   {"type": "dispatch.supervisor.turn-started",
-                                   "parent_attempt_id": "att-owner", "turn_ordinal": 4}):
+                                   "parent_attempt_id": ATT_OWNER, "turn_ordinal": 4}):
                         log.write_text(json.dumps(start) + "\n" + json.dumps(after) + "\n")
-                        self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-owner"))
+                        self.assertFalse(supervision._transient_retry_wait_active(metadata, ATT_OWNER))
                     # Another turn's end does not close this wait.
                     log.write_text(json.dumps(start) + "\n" + json.dumps({
                         "type": "dispatch.supervisor.transient-wait.ended",
-                        "parent_attempt_id": "att-owner", "turn_ordinal": 2}) + "\n")
-                    self.assertTrue(supervision._transient_retry_wait_active(metadata, "att-owner"))
+                        "parent_attempt_id": ATT_OWNER, "turn_ordinal": 2}) + "\n")
+                    self.assertTrue(supervision._transient_retry_wait_active(metadata, ATT_OWNER))
                 with mock.patch.object(supervision.time, "monotonic", return_value=161.0):
-                    self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-owner"))
+                    self.assertFalse(supervision._transient_retry_wait_active(metadata, ATT_OWNER))
 
     def test_committed_success_survives_delays_and_unknown_cleanup_for_all_harnesses(self):
         for harness in ("claude", "codex", "opencode"):
@@ -272,37 +285,37 @@ class ResponsibilityTest(unittest.TestCase):
         route_file = self.root / "route.json"
         jobs = self.root / "jobs.log"
         jobs.write_text("")
-        metadata = {**CURRENT, "attempt_id": "att-owner", "worker_type": "owner",
+        metadata = {**CURRENT, "attempt_id": ATT_OWNER, "worker_type": "owner",
                     "parent_sid": "parent", "owner_route_id": "rt-owner"}
         record = {"receipt": {"kind": supervision.KIND, "reason": "no-progress",
-                               "job_registry": str(jobs), "owner_attempt_id": "att-owner"}}
+                               "job_registry": str(jobs), "owner_attempt_id": ATT_OWNER}}
         seen = []
 
         def arm(result, path, registry, *, environ=None):
             seen.append((result, path, registry, environ))
             return {"state": "armed", "cause": "replacement"}
 
-        with mock.patch.object(supervision, "_rows", return_value={"att-owner": ("done", metadata)}), \
+        with mock.patch.object(supervision, "_rows", return_value={ATT_OWNER: ("done", metadata)}), \
              mock.patch("dispatch_replacement._route", return_value=(route_file, {"route_id": "rt-owner"})):
             continued = supervision.continue_for_parent(record, session_id="parent",
                 recipient_kind="codex-managed-gateway", environ={}, arm=arm)
         self.assertEqual(continued, {"state": "armed", "cause": "replacement"})
         self.assertEqual(seen[0][0], {"reason": "no-progress", "route_id": "rt-owner",
-                                      "source_attempt_id": "att-owner"})
+                                      "source_attempt_id": ATT_OWNER})
         self.assertEqual((seen[0][1], seen[0][2]), (route_file, jobs))
         self.assertEqual(seen[0][3]["CODEX_THREAD_ID"], "parent")
         with mock.patch("dispatch_replacement.parent_resume_obligation", return_value={}), \
              mock.patch("route_parent_close.row_requested", return_value=False):
-            self.assertTrue(supervision._pending({"att-owner": ("done", metadata)},
-                ["att-owner"], jobs, reason="no-progress"))
+            self.assertTrue(supervision._pending({ATT_OWNER: ("done", metadata)},
+                [ATT_OWNER], jobs, reason="no-progress"))
         with mock.patch("dispatch_replacement.parent_resume_obligation", return_value=None), \
              mock.patch("route_parent_close.row_requested", return_value=False):
-            self.assertFalse(supervision._pending({"att-owner": ("done", metadata)},
-                ["att-owner"], jobs, reason="no-progress"))
+            self.assertFalse(supervision._pending({ATT_OWNER: ("done", metadata)},
+                [ATT_OWNER], jobs, reason="no-progress"))
 
     def test_attempt_stall_is_not_a_parent_start_or_retry_authorization(self):
         record = {"receipt": {"kind": supervision.KIND, "reason": "attempt-stalled",
-                               "owner_attempt_id": "att-owner",
+                               "owner_attempt_id": ATT_OWNER,
                                "job_registry": str(self.jobs)}}
         arm = mock.Mock(side_effect=AssertionError("stall advisory must not arm"))
         self.assertIsNone(supervision.continue_for_parent(
@@ -395,7 +408,7 @@ class ResponsibilityTest(unittest.TestCase):
         refusal = {"state": "needs-attention", "reason": "replacement-parent-identity-unproven"}
         with mock.patch("dispatch_owner_input.retained", return_value=[]), \
              mock.patch.object(supervision, "materialize", return_value=[{}]) as materialize:
-            handed = supervision.handover_identity_refusal(self.jobs, "att-owner", refusal)
+            handed = supervision.handover_identity_refusal(self.jobs, ATT_OWNER, refusal)
         self.assertEqual(materialize.call_args.kwargs["reason"], "no-progress")
         self.assertTrue(handed["parent_notified"])
         self.assertEqual(set(handed), {"parent_notified", "next_step"})
@@ -482,7 +495,7 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         self.assertEqual(contract.completion_attempt_readiness(route, node, marker, self.jobs).reason, "terminal-evidence-conflict")
         self.assertFalse(observe()["passed"])
         self.assertEqual(marker_path.read_bytes(), marker_bytes)
-        joined = join.join_batch(jobs=self.jobs, parent_attempt_id="att-owner", timeout=0, interval=0.05)
+        joined = join.join_batch(jobs=self.jobs, parent_attempt_id=ATT_OWNER, timeout=0, interval=0.05)
         self.assertEqual(joined["children"][0]["required_action"], "inspect-done-failure")
         notice = supervision.materialize(self.jobs, {"att-child"}, reason="terminal-evidence-conflict")[0]
         self.assertTrue(supervision.notice_is_current(notice))
@@ -555,7 +568,7 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         contract.reconcile_attempt_terminal(self.jobs, "att-first", "dead-worker-fail", evidence={"failure_class":"fail"})
         before = self.jobs.read_bytes()
         meta = contract.parse_registry_metadata(self.jobs.read_text().splitlines()[0].split("\t")[5])
-        result = chain.advance_chain_step(self.jobs, "att-owner",
+        result = chain.advance_chain_step(self.jobs, ATT_OWNER,
             {"att-first": SimpleNamespace(attempt_id="att-first", status="done", metadata=meta)})
         self.assertEqual((result.outcome, result.reason), ("unavailable", "terminal-evidence-conflict"))
         with self.assertRaises(contract.DispatchContractError) as caught:
@@ -569,7 +582,7 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         self.assertTrue(contract.claim_attempt_row(self.jobs, "att-second", successor, launch=True))
 
     def _notice_rows(self, kind="codex-managed-gateway"):
-        self.jobs.write_text(row("att-owner", dispatch_depth="1", parent_attempt_id="", parent_sid="parent-test",
+        self.jobs.write_text(row(ATT_OWNER, dispatch_depth="1", parent_attempt_id="", parent_sid="parent-test",
             parent_completion_delivery=kind, route_node="__owner__",
             managed_sealed_batch_id="batch-test", pid="99999999", pid_start="1")
             + row("att-child", pid="99999998", pid_start="1"))
@@ -591,18 +604,18 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         # RA-10: a non-parent's answer to a BLOCKED owner is not a dead end; the parent is told.
         for kind in ("claude-parent-runtime", "codex-native-queue", "opencode-turn"):
             with self.subTest(kind=kind):
-                self.jobs.write_text(row("att-owner", status="done", dispatch_depth="1", parent_attempt_id="",
+                self.jobs.write_text(row(ATT_OWNER, status="done", dispatch_depth="1", parent_attempt_id="",
                     parent_sid="parent-test", parent_completion_delivery=kind, worker_type="owner",
                     note="dead-worker-blocked"))
                 kept = [{"id": "input-1", "digest": "d1", "text": "use the smaller batch"}]
                 with mock.patch("dispatch_owner_input.blocked_owner_answers", return_value=kept), \
                      mock.patch("dispatch_replacement._replacement_in_flight", return_value=False), \
                      mock.patch.object(supervision, "_resume_text", return_value="python3 capability-route.py start --route /r.json"):
-                    record = supervision.materialize(self.jobs, {"att-owner"}, reason=supervision.ANSWER_AWAITING_PARENT)[0]
+                    record = supervision.materialize(self.jobs, {ATT_OWNER}, reason=supervision.ANSWER_AWAITING_PARENT)[0]
                     self.assertEqual(record["recipient_kind"], kind)
                     self.assertTrue(supervision.notice_is_current(record))
                     text = supervision.render_text(record["receipt"])
-                    again = supervision.materialize(self.jobs, {"att-owner"}, reason=supervision.ANSWER_AWAITING_PARENT)[0]
+                    again = supervision.materialize(self.jobs, {ATT_OWNER}, reason=supervision.ANSWER_AWAITING_PARENT)[0]
                 self.assertEqual(again, record)                       # one answer, one notice
                 self.assertIn("answer is kept", text)
                 self.assertIn("Do not ask for the answer again", text)
@@ -625,7 +638,7 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
                  ("claude-parent-runtime", "claude", None)]
         for kind, harness, outcome in cases:
             with self.subTest(kind=kind, armed=bool(outcome)):
-                self.jobs.write_text(row("att-owner", status="done", dispatch_depth="1", parent_attempt_id="",
+                self.jobs.write_text(row(ATT_OWNER, status="done", dispatch_depth="1", parent_attempt_id="",
                     parent_sid="parent-test", parent_completion_delivery=kind, worker_type="owner",
                     note="dead-worker-blocked"))
                 armed = []
@@ -636,7 +649,7 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
                      mock.patch("capacity_auto_resume.arm",
                                 side_effect=lambda result, route_file, jobs, environ: armed.append(
                                     (result, route_file, environ)) or outcome):
-                    supervision.materialize(self.jobs, {"att-owner"}, reason=supervision.ANSWER_AWAITING_PARENT)
+                    supervision.materialize(self.jobs, {ATT_OWNER}, reason=supervision.ANSWER_AWAITING_PARENT)
                     records, _ = sweep.sweep_deliver(self.jobs.parent, kind, "parent-test")
                     text = sweep.delivery_context([(self.jobs.parent, records)])
                 self.assertEqual(len(armed), 1)
@@ -668,7 +681,7 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         self.assertNotIn("recipient_epoch", first["receipt"])
         self.assertEqual(self.jobs.read_bytes(), before)
         supervision.validate_pending_record(first, jobs=self.jobs, expected_thread_id="parent-test",
-            expected_epoch=1, expected_attempts={"att-owner"}, expected_sealed_batch_id="batch-test")
+            expected_epoch=1, expected_attempts={ATT_OWNER}, expected_sealed_batch_id="batch-test")
         self.assertIn("not workflow completion", supervision.render_text(first["receipt"]))
 
     def test_output_invalid_notice_does_not_promise_automatic_retry(self):
@@ -773,17 +786,17 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
     def test_notice_observation_leaves_full_controller_pending_observation_intact(self):
         import dispatch_notice_state
         from types import SimpleNamespace
-        meta = {**CURRENT, "attempt_id": "att-owner", "workflow_completion": "runtime-v1"}
-        rows = {"att-owner": ("done", meta)}
+        meta = {**CURRENT, "attempt_id": ATT_OWNER, "workflow_completion": "runtime-v1"}
+        rows = {ATT_OWNER: ("done", meta)}
         with mock.patch.object(supervision, "_settlement_decision", return_value=(None, SimpleNamespace(action="advance"))), \
              mock.patch("route_parent_close.row_requested", return_value=False), \
              mock.patch("dispatch_terminal_commit.recorded_owner_completion_notice", return_value={"state": "unknown"}), \
              mock.patch("dispatch_terminal_commit.owner_completion_pending", return_value=True) as full:
             self.jobs.write_text("")
-            self.assertTrue(supervision._pending(rows, ["att-owner"], self.jobs))
+            self.assertTrue(supervision._pending(rows, [ATT_OWNER], self.jobs))
             full.assert_called_once()
             full.reset_mock()
-            self.assertTrue(supervision._pending(rows, ["att-owner"], self.jobs,
+            self.assertTrue(supervision._pending(rows, [ATT_OWNER], self.jobs,
                 notice_context=dispatch_notice_state.NoticeReadContext()))
             full.assert_not_called()
 
@@ -792,11 +805,11 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         from types import SimpleNamespace
         self.jobs.write_text("")
         metadata = {aid: {"attempt_id": aid, "parent_sid": "parent", "delivery_id": "delivery-result",
-                         "parent_completion_delivery": "claude-parent-runtime"} for aid in ("att-owner", "att-sibling")}
+                         "parent_completion_delivery": "claude-parent-runtime"} for aid in (ATT_OWNER, "att-sibling")}
         completed = {"parent_attempt_id": "-", "children": [
             {"attempt_id": aid, "status": "done", "readiness": "ready", "required_action": "advance-completed"}
             for aid in metadata]}
-        receipt = {"job_registry": str(self.jobs), "monitored_attempt_ids": ["att-owner"], "recipient_thread_id": "parent"}
+        receipt = {"job_registry": str(self.jobs), "monitored_attempt_ids": [ATT_OWNER], "recipient_thread_id": "parent"}
         targets = {aid: "parent" for aid in metadata}
         context = NoticeReadContext()
         with mock.patch("dispatch_completion_join.current_attempt_row", side_effect=lambda _jobs, aid: SimpleNamespace(metadata=metadata[aid])), \
@@ -928,14 +941,14 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         self.assertEqual(json.loads(records[0].read_text())["receipt"]["reason"], "join-observer-failed")
 
     def test_join_error_keeps_exact_typed_reason_but_rejects_foreign_or_raw_output(self):
-        valid = dict(schema_version=2, state="contract-error", parent_attempt_id="att-owner",
+        valid = dict(schema_version=2, state="contract-error", parent_attempt_id=ATT_OWNER,
                      children=[], reason="join-internal-error-PermissionError")
         self.assertIn("exit=69:reason=join-internal-error-PermissionError",
-                      supervision.join_process_error(69, valid, "att-owner"))
+                      supervision.join_process_error(69, valid, ATT_OWNER))
         for change in ({"parent_attempt_id": "att-foreign"}, {"state": "ready"},
                        {"reason": "secret log: /private/path\nbody"}, {"reason": "x" * 129},
                        {"children": [{"attempt_id": "att-child"}]}):
-            self.assertTrue(supervision.join_process_error(69, {**valid, **change}, "att-owner")
+            self.assertTrue(supervision.join_process_error(69, {**valid, **change}, ATT_OWNER)
                             .endswith("reason=unverified-error-receipt"))
 
     def test_runtime_join_error_reaches_shared_wait_and_next_observation_recovers(self):
@@ -952,11 +965,11 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
                 spec.loader.exec_module(module)
                 script = self.root / "failed-observer.py"
                 script.write_text('import json\nprint(json.dumps(dict(schema_version=2, '
-                                  'state="contract-error", parent_attempt_id="att-owner", children=[], '
+                                  'state="contract-error", parent_attempt_id="' + ATT_OWNER + '", children=[], '
                                   'reason="join-internal-error-PermissionError")))\nraise SystemExit(69)\n')
                 import shlex
                 args = SimpleNamespace(join_command=shlex.join([sys.executable, str(script)]),
-                                       jobs=str(self.jobs), parent_attempt_id="att-owner",
+                                       jobs=str(self.jobs), parent_attempt_id=ATT_OWNER,
                                        join_interval=0.01, join_timeout=0)
                 def first_join(attempts):
                     return module.run_join(args, attempts)
@@ -968,7 +981,7 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
                 events = []
                 with mock.patch.object(supervision.time, "sleep"), mock.patch.object(module, "emit"):
                     result = supervision.wait_for_batch(join=observer, attempts={"att-child"},
-                        jobs=self.jobs, parent_attempt_id="att-owner", emit=events.append)
+                        jobs=self.jobs, parent_attempt_id=ATT_OWNER, emit=events.append)
                 self.assertEqual(result["state"], "ready")
                 self.assertIn("exit=69:reason=join-internal-error-PermissionError", events[0]["observer_error"])
                 self.assertEqual(events[0]["responsible"], "supervision-controller")
@@ -982,7 +995,7 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         events, stops = [], []
         with mock.patch.object(supervision.time, "sleep"):
             result = supervision.wait_for_batch(
-                join=join, attempts={"att-child"}, jobs=self.jobs, parent_attempt_id="att-owner",
+                join=join, attempts={"att-child"}, jobs=self.jobs, parent_attempt_id=ATT_OWNER,
                 emit=events.append, stop_check=lambda: stops.append(1) or "", **extra)
         return failure, result, events, len(stops)
 
@@ -1020,7 +1033,7 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         events=[]
         with mock.patch.object(supervision.time, "sleep"):
             result = supervision.wait_for_batch(join=join, attempts={"att-child"}, jobs=self.jobs,
-                                                 parent_attempt_id="att-owner", emit=events.append)
+                                                 parent_attempt_id=ATT_OWNER, emit=events.append)
         self.assertEqual(result["state"], "ready")
         self.assertEqual(len(events), 9)
         self.assertEqual(len(list(pending.record_directory(self.root,"parent-test").glob("delivery-*.json"))), 1)
@@ -1134,7 +1147,7 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
             second = supervision.materialize(self.jobs, {"att-child"}, reason="join-deadline")
         self.assertEqual(first[0]["delivery_id"], second[0]["delivery_id"])
         self.assertEqual(len(visited), 4, "each checkpoint should project only child and owner rows")
-        self.assertEqual(set(visited), {"att-child", "att-owner"})
+        self.assertEqual(set(visited), {"att-child", ATT_OWNER})
         metrics = metrics_snapshot()
         self.assertEqual(metrics["content_reads"], 1)
         self.assertEqual(metrics["full_metadata_parses"], 1)
@@ -1165,7 +1178,7 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         with mock.patch.object(supervision.time, "sleep"):
             try:
                 supervision.wait_for_child_settlement(
-                    jobs=self.jobs, attempts=set(attempts), parent_attempt_id="att-owner",
+                    jobs=self.jobs, attempts=set(attempts), parent_attempt_id=ATT_OWNER,
                     join=join, reconcile=lambda _monitored: None, emit=lambda _event: None)
             except supervision.StopWaiting:
                 return False, len(calls)
@@ -1189,7 +1202,7 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         self.addCleanup(lambda: (live.kill(), live.wait()))
         raw = Path(f"/proc/{live.pid}/stat").read_text()
         start = raw[raw.rfind(")") + 2:].split()[19]
-        self.jobs.write_text(row("att-owner", dispatch_depth="1", parent_attempt_id="", parent_sid="parent-test",
+        self.jobs.write_text(row(ATT_OWNER, dispatch_depth="1", parent_attempt_id="", parent_sid="parent-test",
             parent_completion_delivery="codex-managed-gateway", route_node="__owner__",
             managed_sealed_batch_id="batch-test", pid="99999999", pid_start="1")
             + row("att-child", pid=str(live.pid), pid_start=start, pgid=str(live.pid)))
@@ -1224,15 +1237,15 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         with self.jobs.open("a", encoding="utf-8") as handle:
             for index in range(20):
                 handle.write(row(f"att-unrelated-{index}", parent_attempt_id="att-other"))
-        rows = supervision._owned_rows(self.jobs, "att-owner")
-        self.assertEqual(set(rows), {"att-owner", "att-child"})
+        rows = supervision._owned_rows(self.jobs, ATT_OWNER)
+        self.assertEqual(set(rows), {ATT_OWNER, "att-child"})
         with self.jobs.open("a", encoding="utf-8") as handle:
             handle.write(row("att-unrelated-3", parent_attempt_id="att-other"))
         with self.assertRaisesRegex(supervision.SupervisionError, "supervision-attempt-ambiguous"):
-            supervision._owned_rows(self.jobs, "att-owner")
+            supervision._owned_rows(self.jobs, ATT_OWNER)
         with self.assertRaisesRegex(supervision.SupervisionError, "supervision-attempt-ambiguous"):
-            supervision._rows(self.jobs, {"att-owner"}, require_unique=True)
-        self.assertEqual(set(supervision._rows(self.jobs, {"att-owner"})), {"att-owner"})
+            supervision._rows(self.jobs, {ATT_OWNER}, require_unique=True)
+        self.assertEqual(set(supervision._rows(self.jobs, {ATT_OWNER})), {ATT_OWNER})
 
     def test_stop_waiting_aborts_without_materializing_or_retrying(self):
         self._notice_rows()
@@ -1336,7 +1349,7 @@ class ConfirmedExecutionNoticeTest(unittest.TestCase):
         self.executions = {}
 
     def _rows(self, child_status="open", owner_status="open"):
-        self.jobs.write_text(row("att-owner", status=owner_status, **self.owner_meta)
+        self.jobs.write_text(row(ATT_OWNER, status=owner_status, **self.owner_meta)
                              + row("att-child", status=child_status, **self.child_meta))
 
     def _execution(self, metadata):
@@ -1437,18 +1450,18 @@ class ConfirmedExecutionNoticeTest(unittest.TestCase):
 
     def test_owner_waiting_on_a_live_child_counts_the_childs_execution_as_its_progress(self):
         self._rows()
-        self.executions["att-owner"] = contract.AttemptExecutionObservation(
+        self.executions[ATT_OWNER] = contract.AttemptExecutionObservation(
             "unknown", "attempt-process-role-unclassified")
         self.executions["att-child"] = contract.AttemptExecutionObservation("active", "runtime-command-live")
         self._enter(self._patched())
         observation = supervision.update_attempt_stall_observation(
-            self.jobs, "att-owner", persist=False)
+            self.jobs, ATT_OWNER, persist=False)
         self.assertEqual((observation["state"], observation["reason"]), ("active", "owned-child-executing"))
-        self.assertFalse(supervision._pending(supervision._rows(self.jobs, {"att-owner"}),
-                                              ["att-owner"], self.jobs, "attempt-stalled"))
+        self.assertFalse(supervision._pending(supervision._rows(self.jobs, {ATT_OWNER}),
+                                              [ATT_OWNER], self.jobs, "attempt-stalled"))
 
     def test_owner_without_a_confirmed_child_keeps_its_unverified_classification(self):
-        self.executions["att-owner"] = contract.AttemptExecutionObservation(
+        self.executions[ATT_OWNER] = contract.AttemptExecutionObservation(
             "unknown", "attempt-process-role-unclassified")
         self._enter(self._patched())
         for case, child_status, child_execution in (
@@ -1459,17 +1472,17 @@ class ConfirmedExecutionNoticeTest(unittest.TestCase):
                 self._rows(child_status=child_status)
                 self.executions["att-child"] = child_execution
                 observation = supervision.update_attempt_stall_observation(
-                    self.jobs, "att-owner", persist=False)
+                    self.jobs, ATT_OWNER, persist=False)
                 self.assertNotEqual(observation["reason"], "owned-child-executing")
                 self.assertIn(observation["state"], {"observing", "unknown"})
 
     def test_absent_owner_with_a_live_child_is_still_a_stall(self):
         self._rows()
-        self.executions["att-owner"] = contract.AttemptExecutionObservation("absent", "attempt-tag-census-empty")
+        self.executions[ATT_OWNER] = contract.AttemptExecutionObservation("absent", "attempt-tag-census-empty")
         self.executions["att-child"] = contract.AttemptExecutionObservation("active", "runtime-command-live")
         self._enter(self._patched())
         observation = supervision.update_attempt_stall_observation(
-            self.jobs, "att-owner", persist=False)
+            self.jobs, ATT_OWNER, persist=False)
         self.assertEqual((observation["state"], observation["reason"]), ("stalled", "execution-absent"))
 
 
@@ -2246,7 +2259,7 @@ class StallNoticeRunningToolTest(unittest.TestCase):
                            + (f"subprocess.Popen(['bash','-c',{script!r}])\n" if script else "")
                            + "time.sleep(0.3); print('ready',flush=True); time.sleep(60)\n")
         runtime.chmod(0o755)
-        aid = "att-tool-" + harness
+        aid = unique_attempt_id("att-tool-" + harness)
         process = subprocess.Popen([str(runtime)], stdout=subprocess.PIPE, text=True, start_new_session=True,
                                    env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                                         "AGENT_DISPATCH_ATTEMPT_ID": aid})

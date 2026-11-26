@@ -201,73 +201,86 @@ the goal and deciding metric are. One file per project root, next to `project-me
 
 One short page a person reads first to see where a project stands. Fleet puts its one
 line on the project's OVERVIEW rule and its parts at the top of the project page.
-Writing one is optional and nothing waits on it:
-without one, Fleet builds the line from the routes, questions and results it already
-shows.
 
-- **Where.** `campaigns/<campaign-locator>/현황.md` (or `STATUS.md`), directly in
-  the campaign folder. Fleet prefers these campaign pages, reads up to three newest
-  summaries on the repo page, and keeps the newest summary on OVERVIEW. Editing a
-  page in place is observed even when the campaign directory's timestamp is old.
+**The campaign document is made by code. A main session does not edit it by hand.** The
+entrance refresh worker (`utilities/campaign_document.py`, one turn after a begin, any
+close or a seal; the generator leaves a close that is not proven out of the document) writes `campaigns/<campaign>/campaign.md` for each campaign that
+moved: the sections `## 하는 중` → `## 최근에 끝난 것` (→ `## 나중에 할 것`,
+not yet written), one line per piece of work, routes of one PR joined. It creates the file or
+replaces one whose first line is its marker `<!-- hearting:campaign-document v1 -->`; a
+`campaign.md` without the marker, a link, a directory and a hand-written `현황.md` /
+`STATUS.md` are never written. Nothing waits on it: without a document, Fleet builds the line
+from the routes, questions and results it already shows. **The document says nothing about what
+waits for a person's answer: that is a registered question, and a question stands on the
+question screens only** (the panel's QUESTIONS, Fleet's question board). An older generated
+document that still has a `## 기다리는 것` section is read without it, and the document is
+written again as the work moves, without the section.
+
+- **Record pages.** Each line of the document ends `[기록 N ›](<records/<key>.md>)`, a link to
+  the record page of that work: `campaigns/<campaign>/records/<key>.md`, where `<key>` is
+  `pr-<N>` or, with no PR, the folder name of the work's first route (an ASCII letter or digit
+  first, then letters, digits, `.`, `_` or `-`, at most 200 characters; any other name gets no
+  link). The
+  same code writes it: first line `<!-- hearting:campaign-record v1 -->`, one line per record
+  (a route, a publish, or the supervisor's `RV-…PR<N>….md` review file, found by name and not
+  counted in `N`; a review route's rounds share its one line). It writes the pages of the lines the document shows and
+  only when their text changed; it never deletes a page, and a file of that name without the
+  marker, a link or a `records` that is not a folder is left as it is and its line has no link.
+  A route that closed with a commit (`head_commit` differs from `source_commit`) but no PR
+  number is joined to the pull request merge that brought its head in: the first
+  `Merge pull request #N` between its head and `origin/HEAD`, `origin/main` or `main` whose
+  first parent is not already a descendant of the head. A head on that base's own first-parent
+  line has no PR: a commit pushed straight to `main` (even when a longer branch later took
+  `main` in by a pull request and came back) or a head that is itself a merge there. A head that
+  went through a longer branch is joined to its own pull request into that branch, and a merge
+  with three or more parents counts by its subject. Only a full 40-hex `head_commit` and
+  `source_commit` are asked; a pass makes at most 40 `git log` calls (its `rev-parse` base
+  lookups are not counted) and one timeout ends git for that pass; read only, no fetch. A
+  number already known is never changed. `records/` is not a cycle folder:
+  the locator, tidy, closeout and residue passes skip it as they skip `journals/`.
+- **Where.** `campaigns/<campaign-locator>/campaign.md`, directly in the campaign
+  folder, made by the code above. Fleet prefers these campaign pages, reads up to three
+  newest summaries on the repo page, and keeps the newest summary on OVERVIEW. A
+  hand-written `현황.md` / `STATUS.md` left in the same folder stays but is not shown once
+  a `campaign.md` is there, and nothing edits it. Editing a page in place is observed even
+  when the campaign directory's timestamp is old.
 - **Legacy documents.** With no campaign page, Fleet reads status documents directly
   in a cycle's `artifacts/`, not the chronological research folders. When
   `finalize` picks the
   primary itself, this file is the cycle's primary (`현황.md` first, then `STATUS.md`,
   after the official spec PRD; an explicit `--primary` still wins), and its row carries
-  `audience: "user"`, so Cairn's status row and Fleet's project line read the same file
+  `audience: "user"`; Fleet's project line reads the same file
   (`core/CORE.md` §3, primary selection). Names match NFC-normalized and case-folded. A
   file at the cycle root (`campaigns/<campaign>/<cycle>/현황.md`) makes the seal fail
   with `file-outside-artifacts` and is not read; copies under `_internal/` or
-  `versions/`, or deeper inside `artifacts/`, are not read either. A campaign keeps one
-  and edits it in place (a finalized cycle still takes writes, D-123).
+  `versions/`, or deeper inside `artifacts/`, are not read either. These cycle documents
+  are legacy: nothing keeps them current now (a finalized cycle still takes writes, D-123).
 - **`campaign.md` first.** A campaign folder's `campaign.md` is opened by name before
   any older name (no folder listing, no ownership marker required); too large or unreadable,
   it is unknown and no older name stands in for it.
-- **One selection rule.** Fleet, the close-time stamp updater and the artifact
-  entrance use the common campaign-document reader. Conflicting campaign-root
-  `STATUS.md` / `현황.md` candidates remain ambiguous; neither mtime nor a legacy
-  copy resolves that conflict. Unreadable, oversized or symlinked canonical
-  candidates remain unknown and are not edited. Legacy-only pages retain their
-  read compatibility. Automatic updates change only their existing stamp and
-  runtime closure lines, preserving the person's decisions and prose.
+- **One selection rule.** Fleet and the artifact entrance use the common campaign-document
+  reader. Conflicting campaign-root `STATUS.md` / `현황.md` candidates remain ambiguous;
+  neither mtime nor a legacy copy resolves that conflict. Unreadable, oversized or symlinked
+  canonical candidates remain unknown. Legacy-only pages (a hand-written `현황.md` /
+  `STATUS.md`, or one in a cycle's `artifacts/`) keep their read compatibility; the runtime
+  never edits them.
 - **Other campaign documents.** Optional handoffs and topic Markdown documents
   also live directly under the campaign. The common entrance lists them as
   campaign documents, with their existing ownership and locator; it creates no
   cycle or authority ID for them. Missing identity remains unknown. This does
   not move historical research/cycle documents or require a new page.
-- **Shape.** Markdown in the reader's language. Only the parts below are read; other
-  sections are free.
-
-  ```markdown
-  # <project or campaign> 현황
-
-  갱신 2026-11-02 21:50 · optional pointers
-
-  **한 줄**: where the work stands, in one sentence.
-
-  ## 결정 필요
-  - one bullet per thing that waits on the person: a decision or an action
-
-  ## 다음
-  - the next step first
-  ```
-
-  English headings read the same: `**One line**:`, `## Decisions needed`, `## Next`.
-  Readers take the one-line paragraph (else the first paragraph above the first section
-  that is not the `갱신`/`Updated` stamp, else the title), count the top-level bullets
-  under the decisions heading, and take the first bullet under the next heading. A
-  section that records decisions already made (`## 사용자 결정 기록`, `## Decision log`)
-  is not counted. The file's modification time is when the status last changed.
-- **Refresh.** Whoever runs the work edits it when the state changes. A route's proven
-  close (`capability-route finish`, or an owner's runtime close) also refreshes the
-  campaign's page when one exists (`utilities/status_board.py`): it sets the `갱신`/`Updated` stamp
-  and puts one line first under `## 최근 마감` / `## Recently closed` (at most five:
-  when, the route's intent, the route id and any PR link in the close summary). The
-  one line, `## 결정 필요`, `## 다음` and anything else a person writes, inside that
-  section too, stay the person's; a page is never created and a
-  failure leaves it as it was. A PR merge has no Hearting event, so nothing refreshes
-  on it, and nothing checks freshness. Fleet shows the age in front of a document older
-  than three days.
+- **Reading.** Readers take the one-line paragraph (else the first paragraph above the first
+  section that is not the `갱신`/`Updated` stamp, else the title), count the top-level
+  bullets under the decisions heading of a hand-written page (`## 결정 필요`, `## Decisions needed`;
+  a generated `campaign.md` has none, and a `## 기다리는 것` left in an older one is not counted)
+  and take the first bullet under the next heading (`## 나중에 할 것`, `## 다음`, `## Next`).
+  A section that records decisions already made (`## 사용자 결정 기록`, `## Decision log`) is
+  not counted. The file's modification time is when the status last changed. Fleet shows the
+  age in front of a document older than three days. The shell's status popup opens a generated
+  `campaign.md` on a list of its sections' own words (what is in progress first, the
+  other headings folded, `full document ›` for the whole page) and any other page as it always
+  drew it (`core/references/session-shell.md`); a section it does not know is a folded line,
+  so a new heading never breaks it.
 
 ### Root `README.md` / `index.html` — the read entrance
 
@@ -280,15 +293,18 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
 
 - **When.** Right after a seal (the first seal and a re-seal refresh alike), and whenever
   `hearting reports` or `hearting open` runs. No other write path touches them.
-- **Content.** The entrance has three sections, top to bottom: **spec** (the 3 most
+- **Content.** The entrance has up to four sections, top to bottom: **spec** (the 3 most
   recently changed spec topics, each with the day it was last changed and its title, and
   one "N more" line, N being the topics not shown, absent when none is hidden, that opens
   `all-spec.*`), **campaigns** (the 3 most recent campaigns with date, title and the
   campaign's one-line summary from `meta.json`, then one "All N campaigns" line, N being
-  every campaign, that opens `all-campaigns.*`) and **records** (a link to the recent
+  every campaign, that opens `all-campaigns.*`), **backlog** (one line that opens the
+  root's `backlog.md`, see the next section; its meta is the count of each sort, the total and
+  the file's `갱신` date (`FIX 2 · IMPR 1 · NOTE 1 · TBD 2 · 6 total`; a document with no sort written on any line says `FIX ? · IMPR ? · NOTE ?` and its `TBD`); there is no section when that regular file is absent or a link, and
+  `Counts unavailable` instead of the counts when it cannot be read or is over 1 MiB) and **records** (a link to the recent
   route reports page and a link to the ID index `campaigns/INDEX.md`), plus the root
   totals. The line counts are the constants `ENTRANCE_SPEC_LINES` and
-  `ENTRANCE_CAMPAIGN_LINES` (not settings). Under the spec and campaigns titles one
+  `ENTRANCE_CAMPAIGN_LINES` (not settings). Under the spec, campaigns and backlog titles one
   explanatory line says what the section is (the spec line carries the topic count), and
   the "recent route reports" line carries one line saying the page is not usually opened;
   none of these lines is numbered. `all-spec.*` lists every spec topic in the entrance's
@@ -337,6 +353,52 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   completion summary whose primary report lies in that cycle adds one "Artifact list:
   `<root>/README.md`" line above its artifact line. Only the first user-facing cycle
   qualifies, so a root whose entrance was made by hand from the CLI stays quiet.
+
+### `backlog.md` — what was put off
+
+- **Place.** One file at the artifact root: `<artifact root>/backlog.md`, for the whole repo.
+- **Form.** A title line, then `갱신 YYYY-MM-DD HH:MM`, then one `## <campaign folder name>`
+  heading per campaign, with `## Unassigned` for work with no campaign. A job is one top-level
+  `- ` bullet (a title line of at most 60 columns) with optional indented `date:`, `source:`,
+  `note:` and `kind:` lines (when it came up, where from, what the person said then, what sort of
+  work it is). The title line carries no tag, status or owner mark; the sort is the optional
+  `kind:` line alone.
+- **`kind:` line.** An indented line under a job, `kind: <value>`; the value is `fix` (left
+  alone, the flow or result in use keeps a problem), `improve` (it can be used and is to be made
+  better) or `note` (worth knowing; its effect or follow-up is not settled). Case and the blanks
+  around the value are not read. A job with no `kind:` line, a value that is none of the three,
+  or two different values is unsorted (shown `TBD`): nothing is refused, warned or gated, and a
+  document with no `kind:` line at all opens as before, every job unsorted. A `kind:` line counts
+  only under a job (not under a heading or other text, not inside a code fence). What waits for
+  the person's answer is not put here: register it as a question, which stands on the question
+  screens (the status document does not list it).
+- **Counting rule.** Lines are read by their shape, not by what Markdown makes of them (lines end
+  as Python's `str.splitlines` ends them). A job is a line whose first two characters are `- `,
+  below the first heading line and outside a code fence.
+  - A heading line is `##` followed by a space, a tab or the end of the line, after at most three
+    spaces: ` ## C` is a heading, four spaces make it no heading, and `###` is none.
+  - A `- ` line before the first heading is not a job. Neither is any line that does not start
+    with `- ` at its left edge: `*`, `+` and numbered items, `-` with no space after it,
+    indented lines, sub-bullets, `> - `.
+  - Markdown's meaning is not read: `- - -`, and a `- ` line inside an HTML comment, each count
+    as a job.
+  - A fence line is at most three spaces, then three or more of one character, `` ` `` or `~`;
+    the rest of an opening line is not read. A fence closes only with a line of the same
+    character, at least as long, followed by nothing but whitespace; an unclosed fence runs to
+    the end of the file. Fence lines and everything between them are not counted and are no
+    heading.
+- **`갱신` line.** Read only before the first heading line and outside a code fence, in the shape
+  `갱신 YYYY-MM-DD HH:MM` (ASCII digits) with a date and time that exist; surrounding
+  whitespace is ignored. The first line of that shape and a real time is the date; any other
+  line, or `갱신 2026-13-45 99:99`, is no date.
+- **Who and when.** The session that puts a job off adds one line, at that moment, under the
+  campaign's heading (and refreshes `갱신`), with its `kind:` line then (left out when it is not
+  known). A person writes it by hand.
+- **Done.** The line is deleted. The file holds open work only.
+- **Readers.** The panel's BACKLOG and the entrance only read it; no code writes it. Both read
+  the sort by this one rule and count each sort the same (`FIX`, `IMPR`, `NOTE`, `TBD`).
+  The entrance reads it by name, never through a link, at most 1 MiB, the panel's own limit.
+  No command, setting or step is added.
 
 ### Optional local artifact viewer
 

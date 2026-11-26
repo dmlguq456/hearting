@@ -67,3 +67,22 @@ Sources merged per unit: `roles/modes/material/<mode>.md` (EN),
     exploration teams on 2026-05-25") and the **Language Rule pointer**
     (`material-team.md:17-20`, response-policy): history and surface-owned policy;
     not unit content.
+
+## Two-layer move, turn 9-3 (2026-11-25) — placement log: the five material units
+
+No line removed; old `##` headings became `###` (a `###` inside figure-gen became `####`).
+These units are tool contracts, so 지킬 것 is thick: everything that fixes what a run writes,
+the limits (rate, timeout, concurrency, no login, no CAPTCHA solving), the cleanup rules, the
+Return shape and the scope boundary. Headings that split across the layers are repeated in both.
+`material/browser-fetch` — 참고: the Capabilities list and typical targets, Automatic Entry Point,
+memory. `material/data-script` — 참고: the invocation line, the paper-table defaults (column
+order, direction marks, row order, domain metric table, profile pointers), Automatic Entry
+Points, memory; the one must kept from that section is "never evaluate a result from only one
+group". `material/figure-gen` — 참고: the invocation line, `Branch: paper (defaults)` and
+`Branch: presentation`, the profile pointers inside Spectrogram Integrity, the script-constant
+defaults inside Script Convention, Automatic Entry Points, memory; the spectrogram law, the
+metric/display band contract with `tools/figure-semantic-verify.py`, the output packaging
+rule and Return are 지킬 것. `material/pdf-extract` — 참고: the cross-skill reuse note,
+Automatic Entry Point, memory. `material/web-image-search` — 참고: Automatic Entry Point,
+memory. The unit text of `browser-fetch` still tells the worker to clean up Chromium orphans
+by process name; that is the unit's own text and was not changed.

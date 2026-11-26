@@ -20,7 +20,6 @@ import artifact_campaign_documents as documents
 import artifact_entrance as entrance
 import artifact_lifecycle as lifecycle
 import artifact_producer as producer
-import status_board
 
 CAMPAIGN_PAGE = (
     '<!-- hearting:campaign-document v1 -->\n# Demo campaign\n\n갱신 2026-11-19 18:16\n\n'
@@ -50,17 +49,15 @@ class CampaignDocumentsTest(unittest.TestCase):
         path.write_text(PAGE)
         return path
 
-    def close(self):
-        return status_board.note_route_closed(self.route, {'terminal_gate_proven': True, 'summary': 'done'},
-                                             now=datetime(2026, 11, 7, 22, 0))
+    def status(self):
+        return documents.campaign_status(self.campaign)
 
     def test_campaign_page_wins_over_a_newer_legacy_page_without_moving_it(self):
         canonical = self.campaign / '현황.md'; canonical.write_text(PAGE)
         old = self.legacy()
         os.utime(canonical, (1, 1)); os.utime(old, (2000000000, 2000000000))
-        self.assertEqual(self.close(), canonical)
-        self.assertIn('2026-11-07 22:00', canonical.read_text())
-        self.assertIn('- keep this decision', canonical.read_text())
+        self.assertEqual(self.status()['path'], canonical)
+        self.assertEqual(canonical.read_text(), PAGE)
         self.assertEqual(old.read_text(), PAGE)
 
     def test_campaign_md_is_opened_by_name_before_the_older_names(self):
@@ -127,7 +124,7 @@ class CampaignDocumentsTest(unittest.TestCase):
         a = self.campaign / '현황.md'; b = self.campaign / 'STATUS.md'
         a.write_text(PAGE); b.write_text(PAGE.replace('Demo', 'Another'))
         old = self.legacy(); before = {p: p.read_bytes() for p in (a, b, old)}
-        self.assertIsNone(self.close())
+        self.assertEqual((self.status()['status'], self.status()['path']), ('ambiguous', None))
         self.assertEqual({p: p.read_bytes() for p in before}, before)
 
     def test_campaign_status_handoff_and_topic_join_the_common_entrance_without_cycles(self):
@@ -138,6 +135,86 @@ class CampaignDocumentsTest(unittest.TestCase):
         self.assertEqual({Path(r['doc_path']).name for r in rows}, set(names))
         self.assertEqual(result['totals']['cycles'], 0)
         self.assertTrue(all(not r.get('cycle_id') for r in rows))
+
+    def test_the_campaigns_own_page_is_no_route_report_row_and_hides_the_hand_written_status_names(self):
+        (self.campaign / 'campaign.md').write_text(CAMPAIGN_PAGE)
+        (self.campaign / '현황.md').write_text(PAGE)
+        (self.campaign / 'status.md').write_text(PAGE)
+        (self.campaign / 'HANDOFF-seat.md').write_text('# Handoff\n')
+        rows = [r for r in entrance.scan(self.root)['recent'] if r.get('kind') == 'campaign-document']
+        self.assertEqual({Path(r['doc_path']).name for r in rows}, {'HANDOFF-seat.md'})
+        self.assertEqual(documents.campaign_status(self.campaign)['path'], self.campaign / 'campaign.md')
+        self.assertEqual(PAGE, (self.campaign / '현황.md').read_text())   # hidden, never touched
+
+    def test_a_campaign_md_of_another_case_is_not_the_page_and_hides_nothing(self):
+        """Round 3: the readers open the exact name `campaign.md`; `Campaign.md` is an ordinary document."""
+        (self.campaign / 'Campaign.md').write_text(CAMPAIGN_PAGE)
+        (self.campaign / '현황.md').write_text(PAGE)
+        rows = [r for r in entrance.scan(self.root)['recent'] if r.get('kind') == 'campaign-document']
+        self.assertEqual({Path(r['doc_path']).name for r in rows}, {'Campaign.md', '현황.md'})
+        self.assertEqual(documents.campaign_status(self.campaign)['path'], self.campaign / '현황.md')
+
+    def test_a_campaign_without_campaign_md_still_lists_its_hand_written_status_page(self):
+        (self.campaign / '현황.md').write_text(PAGE)
+        (self.campaign / 'HANDOFF-seat.md').write_text('# Handoff\n')
+        rows = [r for r in entrance.scan(self.root)['recent'] if r.get('kind') == 'campaign-document']
+        self.assertEqual({Path(r['doc_path']).name for r in rows}, {'현황.md', 'HANDOFF-seat.md'})
+
+    def snapshot_rows(self):
+        (self.campaign / '현황.md').write_text(PAGE)
+        snapshot = documents.entrance_snapshot(self.root)
+        return snapshot, [r for r in snapshot['rows'] if r['doc_path'].endswith('현황.md')]
+
+    def test_a_campaign_record_over_64_kib_still_gives_its_documents_the_campaign_id(self):
+        record = json.loads((self.campaign / 'campaign.json').read_text())
+        record['cycles'] = ['cyc_%032x' % n for n in range(1650)]  # 1,650 members, as the backlog line says
+        (self.campaign / 'campaign.json').write_text(json.dumps(record))
+        self.assertGreater((self.campaign / 'campaign.json').stat().st_size, documents.READ_LIMIT)
+        snapshot, rows = self.snapshot_rows()
+        self.assertEqual([r['campaign_id'] for r in rows], [self.campaign_id])
+        self.assertEqual((snapshot['errors'], snapshot['coverage']), ([], 'complete'))
+
+    def test_a_campaign_record_over_the_record_limit_is_named_in_the_errors_not_silently_dropped(self):
+        import artifact_campaign
+        record = json.loads((self.campaign / 'campaign.json').read_text())
+        record['cycles'] = ['cyc_%032x' % n for n in range(100)]
+        (self.campaign / 'campaign.json').write_text(json.dumps(record))
+        with mock.patch.object(artifact_campaign, 'MAX_JSON', 1000):
+            snapshot, rows = self.snapshot_rows()
+        self.assertEqual([r['campaign_id'] for r in rows], [None])
+        self.assertEqual(snapshot['errors'], ['campaigns/2026-11-01_demo:campaign-metadata-bounded'])
+        self.assertEqual(snapshot['coverage'], 'partial')
+
+    def test_a_page_over_64_kib_is_still_read_to_64_kib(self):
+        (self.campaign / '현황.md').write_text('# Big\n' + 'x' * (documents.READ_LIMIT + 10))
+        snapshot = documents.entrance_snapshot(self.root)
+        self.assertIn('campaigns/2026-11-01_demo/현황.md:document-bounded', snapshot['errors'])
+
+    def test_one_rule_names_the_first_line_of_a_generated_page_and_ends_it_at_a_newline_only(self):
+        marker = '<!-- hearting:campaign-document v1 -->'
+        for tail in ('\n# T\n', '\r\n# T\n', '  \n# T\n', '\n'):
+            self.assertTrue(documents.carries_marker(marker + tail, marker), repr(tail))
+        for sep in ('\r', '\u2028', '\x0c', '\x0b', '\x85'):  # lines end there only for `str.splitlines`
+            self.assertFalse(documents.carries_marker(marker + sep + '# T\n', marker), repr(sep))
+        self.assertFalse(documents.carries_marker('# T\n' + marker, marker))
+
+    def test_a_document_replaced_while_it_is_read_is_read_once_more(self):
+        (self.campaign / 'campaign.md').write_text(CAMPAIGN_PAGE)
+        real, calls = documents._read_once, []
+
+        def once(folder, name, limit):
+            calls.append(name)
+            if len(calls) == 1:
+                raise ValueError('document-changed')
+            return real(folder, name, limit)
+        with mock.patch.object(documents, '_read_once', once):
+            raw, _info, coverage = documents.read_document(self.campaign, 'campaign.md')
+        self.assertEqual((len(calls), coverage, raw.decode()), (2, 'complete', CAMPAIGN_PAGE))
+        calls.clear()
+        with mock.patch.object(documents, '_read_once', side_effect=ValueError('document-changed')) as always:
+            with self.assertRaises(ValueError):
+                documents.read_document(self.campaign, 'campaign.md')
+        self.assertEqual(always.call_count, 2)   # one more read, not a loop
 
     def test_normal_writer_links_the_legacy_root_but_read_only_resolution_does_not(self):
         project = self.project / 'legacy-project'; root = project / '.claude_reports'
@@ -221,13 +298,12 @@ class CampaignDocumentsTest(unittest.TestCase):
         self.assertFalse(any(Path(r['doc_path']).name == 'topic.md' for r in result['recent']))
         self.assertEqual(outside.read_bytes(), before)
 
-    def test_legacy_only_status_still_refreshes_and_no_page_is_created(self):
-        self.assertIsNone(self.close())
+    def test_legacy_only_status_is_still_read_and_no_page_is_created(self):
+        self.assertIsNone(self.status()['path'])
         self.assertFalse((self.campaign / '현황.md').exists())
         old = self.legacy()
-        self.assertEqual(self.close(), old)
-        self.assertIn('2026-11-07 22:00', old.read_text())
-        self.assertIn('- keep this decision', old.read_text())
+        self.assertEqual(self.status()['path'], old)
+        self.assertEqual(old.read_text(), PAGE)
 
     def test_another_campaigns_newer_status_is_not_the_routes_page(self):
         own = self.campaign / '현황.md'; own.write_text(PAGE)
@@ -235,7 +311,7 @@ class CampaignDocumentsTest(unittest.TestCase):
         other.parent.mkdir(); other.write_text(PAGE.replace('Demo', 'Other'))
         os.utime(own, (1, 1)); os.utime(other, (2000000000, 2000000000))
         before = other.read_bytes()
-        self.assertEqual(self.close(), own)
+        self.assertEqual(self.status()['path'], own)
         self.assertEqual(other.read_bytes(), before)
 
     def test_conflicting_status_rows_keep_both_candidates_and_report_uncertainty(self):
@@ -254,7 +330,7 @@ class CampaignDocumentsTest(unittest.TestCase):
         outside = self.project / 'outside-status.md'; outside.write_text(PAGE)
         canonical = self.campaign / '현황.md'; canonical.symlink_to(outside)
         old = self.legacy()
-        self.assertIsNone(self.close())
+        self.assertEqual((self.status()['status'], self.status()['path']), ('unknown', None))
         self.assertEqual(old.read_text(), PAGE)
         self.assertEqual(outside.read_text(), PAGE)
 
@@ -271,7 +347,7 @@ class CampaignDocumentsTest(unittest.TestCase):
     def test_oversized_canonical_status_keeps_the_legacy_copy_and_partial_coverage(self):
         canonical = self.campaign / '현황.md'; canonical.write_text('# Large\n' + 'x' * 70000)
         old = self.legacy()
-        self.assertIsNone(self.close())
+        self.assertEqual((self.status()['status'], self.status()['path']), ('unknown', None))
         self.assertEqual(old.read_text(), PAGE)
         result = entrance.scan(self.root)
         row = next(r for r in result['recent'] if r.get('kind') == 'campaign-document')
@@ -288,7 +364,7 @@ class CampaignDocumentsTest(unittest.TestCase):
         self.assertEqual(project_status.find_documents(str(self.root)), [str(a)])
         b.write_text('# Conflicting judgment\n')  # Parent directory mtime need not change.
         self.assertEqual(project_status.find_documents(str(self.root)), [])
-        self.assertIsNone(self.close())
+        self.assertEqual(self.status()['status'], 'ambiguous')
 
     def test_conflicts_remain_visible_in_korean_and_english_entrances(self):
         (self.campaign / '현황.md').write_text(PAGE)
@@ -318,22 +394,6 @@ class CampaignDocumentsTest(unittest.TestCase):
         self.assertFalse((project / '.agent_reports').exists())
         self.assertEqual((root / 'sentinel').read_text(), 'keep replacement')
         self.assertEqual(lifecycle.read_root_identity(project / 'retained-original'), identity)
-
-    def test_status_parent_swap_during_refresh_does_not_write_outside_the_root(self):
-        canonical = self.campaign / '현황.md'; canonical.write_text(PAGE)
-        outside = self.project / 'outside-campaign'; outside.mkdir()
-        (outside / '현황.md').write_text(PAGE)
-        original = status_board.refreshed
-        retained = self.campaign.with_name('retained-original')
-        def replace_parent(*args, **kwargs):
-            self.campaign.rename(retained)
-            self.campaign.symlink_to(outside, target_is_directory=True)
-            return original(*args, **kwargs)
-        with mock.patch.object(status_board, 'refreshed', side_effect=replace_parent):
-            self.assertIsNone(self.close())
-        self.assertEqual((outside / '현황.md').read_text(), PAGE)
-        self.assertEqual((retained / '현황.md').read_text(), PAGE)
-        self.assertFalse(list(outside.glob('.status-*')))
 
     def test_existing_unicode_locator_and_hash_percent_links_are_preserved(self):
         names = [unicodedata.normalize('NFD', '현황.md'), 'HANDOFF #1 100%.md']

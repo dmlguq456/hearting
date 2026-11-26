@@ -16,37 +16,22 @@ aliases: {}
 
 # Unit: material/figure-gen
 
-Invocation: `figure <name> <spec>` or an equivalent natural-language request.
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
 
 Create reproducible matplotlib or seaborn figures for papers and presentations. One
 output unit includes the vector PDF, the raster preview PNG, and the script that
 generated them.
 
-## Outputs
+### Outputs
 
 - `<paper_dir>/figures/<name>.pdf` — vector PDF, with `pdf.fonttype=42`
 - `<paper_dir>/figures/plot_<name>.py` — self-contained reproduction script with minimal
   dependencies
 - `<paper_dir>/figures/<name>_preview.png` — raster preview, about 200 DPI by default
 
-## Branch: paper (defaults)
-
-- Serif font fallback: Times New Roman → Nimbus Roman → Liberation Serif → DejaVu
-  Serif; STIX fontset for math (Times-compatible glyphs).
-- Choose dimensions for the placement: 6.4×2.8 in single-column landscape, 4.5×2.8 in
-  each side-by-side panel, or 3.5×2.6 in vertical single-column use.
-- Keep a coherent palette across figures in the same paper (e.g. an OrRd sequential for
-  ordered variants; cool/warm separation for categorical groups).
-- Use subtle grids around alpha 0.25 and linewidth 0.5, with `which='both'` so minor
-  grids appear on logarithmic axes.
-- Embed-safe fonts: set both `pdf.fonttype=42` and `ps.fonttype=42` (PMLR/ICML
-  validation-safe).
-
-## Branch: presentation
-
-Sans-serif treatment (Noto Sans / DejaVu Sans), larger figsize sized for 16:9 slides.
-
-## Spectrogram Integrity (domain LAW — speech/signal)
+### Spectrogram Integrity (domain LAW — speech/signal)
 
 Both the per-rate window sizes and the shared color axis are principles, not
 preferences; they guarantee the honesty of the material itself.
@@ -67,13 +52,7 @@ preferences; they guarantee the honesty of the material itself.
   consistent scale. Separate figures may use different ranges.
 - Deviations only on an explicit current-turn user instruction.
 
-Panel layout and label patterns follow `mem profile 01_paper_figure_style`
-(`python3 <agent-home>/tools/memory/mem.py profile 01_paper_figure_style`); run it and
-treat its body as the default, overridden by explicit current-turn instructions.
-Presentation-asset structure follows `mem profile 03_presentation_strategy`; caption and
-label terminology follows `mem profile 05_domain_expertise`.
-
-### Metric and Display Bands (fail-closed report QA)
+#### Metric and Display Bands (fail-closed report QA)
 
 - Declare analysis and presentation ranges as separate constants, for example
   `METRIC_BAND_HZ = (20, 1000)` and `FIGURE_BAND_HZ = (0, 24000)` for a 48 kHz
@@ -106,13 +85,8 @@ label terminology follows `mem profile 05_domain_expertise`.
   Record the PNG SHA-256, reviewer/tool, timestamp, and verdict in the manifest;
   re-review whenever the PNG changes.
 
-## Script Convention
+### Script Convention
 
-- Collect constants (color hex, figsize, font lists) at the top of the script in one
-  place so the user can swap them in one line.
-- Comment domain equations (e.g. loss formulas) so the reproduction evidence is
-  explicit.
-- Preview PNG at 200 DPI by default; increase only when the requested review needs it.
 - Output packaging (individual PNGs; at most one combined PPTX; never one PPTX
   wrapper per figure) follows the durable figure-production rule
   `mem show feedback_feedback-figure-자동-제작_6eade0 --all`
@@ -120,7 +94,7 @@ label terminology follows `mem profile 05_domain_expertise`.
   run it and treat its body as the default, overridden by explicit current-turn
   instructions.
 
-## Return
+### Return
 
 Per `_shared/dual-io.md`: `<output path> -- <verdict>` plus a 3–5 line summary in the
 user's communication language, naming the reproduction script. Example:
@@ -132,19 +106,60 @@ latex_v3/figures/robust_loss_family.pdf -- ✅ generated
 - reproduction script latex_v3/figures/plot_robust_loss_family.py
 ```
 
-## Scope Boundary
+### Scope Boundary
 
 This unit owns data figures. UI components and brand visual design belong to the design
 family (maker); editorial wording polish belongs to the editorial family.
 
-## Automatic Entry Points
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+Invocation: `figure <name> <spec>` or an equivalent natural-language request.
+
+### Branch: paper (defaults)
+
+- Serif font fallback: Times New Roman → Nimbus Roman → Liberation Serif → DejaVu
+  Serif; STIX fontset for math (Times-compatible glyphs).
+- Choose dimensions for the placement: 6.4×2.8 in single-column landscape, 4.5×2.8 in
+  each side-by-side panel, or 3.5×2.6 in vertical single-column use.
+- Keep a coherent palette across figures in the same paper (e.g. an OrRd sequential for
+  ordered variants; cool/warm separation for categorical groups).
+- Use subtle grids around alpha 0.25 and linewidth 0.5, with `which='both'` so minor
+  grids appear on logarithmic axes.
+- Embed-safe fonts: set both `pdf.fonttype=42` and `ps.fonttype=42` (PMLR/ICML
+  validation-safe).
+
+### Branch: presentation
+
+Sans-serif treatment (Noto Sans / DejaVu Sans), larger figsize sized for 16:9 slides.
+
+### Spectrogram Integrity (domain LAW — speech/signal)
+
+Panel layout and label patterns follow `mem profile 01_paper_figure_style`
+(`python3 <agent-home>/tools/memory/mem.py profile 01_paper_figure_style`); run it and
+treat its body as the default, overridden by explicit current-turn instructions.
+Presentation-asset structure follows `mem profile 03_presentation_strategy`; caption and
+label terminology follows `mem profile 05_domain_expertise`.
+
+### Script Convention
+
+- Collect constants (color hex, figsize, font lists) at the top of the script in one
+  place so the user can swap them in one line.
+- Comment domain equations (e.g. loss formulas) so the reproduction evidence is
+  explicit.
+- Preview PNG at 200 DPI by default; increase only when the requested review needs it.
+
+### Automatic Entry Points
 
 - **autopilot-draft, paper mode:** supply a missing PDF referenced by
   `\includegraphics{<path>}`.
 - **autopilot-research:** create report figures.
 - **autopilot-code:** visualize results.
 
-## Memory
+### Memory
 
 Per `_shared/memory-flow.md`. Retention targets: venue-specific figure conventions,
 reusable domain plotting templates, and user-approved figure style decisions.

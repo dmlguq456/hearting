@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from datetime import datetime, timezone
@@ -64,6 +65,151 @@ _OWNER_SPEC.loader.exec_module(OWNER)
 # already skips its codex runtime discovery.
 CLAUDE_CLI = shutil.which("claude")
 NEEDS_CLAUDE_CLI = "no claude binary: the selector's session-resume probe cannot be proven here"
+
+
+class UnreadGaugeTest(unittest.TestCase):
+    """G2 (11-20): a start does not read the capacity gauge of a harness it can never choose, unless that read
+    refreshes the shared usage cache (codex, opencode): the next start's limit judgment depends on it."""
+
+    STATES = {"claude": "ok", "codex": "ok", "opencode": "limited(2026-12-01)"}
+
+    def test_a_limited_harness_is_not_read_unless_its_read_refreshes_the_shared_cache(self):
+        self.assertEqual(OWNER._unread_gauges({**self.STATES, "claude": "limited(2026-12-01)"}, None), {"claude": "limited"})
+        self.assertEqual(OWNER._unread_gauges(self.STATES, None), {})
+        self.assertEqual(OWNER._unread_gauges({h: "ok" for h in self.STATES}, None), {})
+        self.assertEqual(OWNER._unread_gauges({"claude": "limited", "codex": "limited(unknown-reset)", "opencode": "ok"}, None),
+                         {"claude": "limited"})
+
+    def test_a_named_eligible_harness_leaves_only_the_read_only_gauge_unread(self):
+        self.assertEqual(OWNER._unread_gauges({h: "ok" for h in self.STATES}, "codex"), {"claude": "not-needed"})
+        self.assertEqual(OWNER._unread_gauges({h: "ok" for h in self.STATES}, "claude"), {})
+
+    def test_a_named_harness_that_is_limited_leaves_the_automatic_choice_its_gauges(self):
+        # The named harness cannot be used, so the choice falls to the others and ranks on their headroom.
+        states = {"claude": "limited(2026-12-01)", "codex": "ok", "opencode": "ok"}
+        self.assertEqual(OWNER._unread_gauges(states, "claude"), {"claude": "limited"})
+        self.assertEqual(OWNER._unread_gauges({**states, "claude": "ok", "codex": "limited"}, "codex"), {})
+
+    def test_the_receipt_of_a_run_that_skipped_a_gauge_names_it(self):
+        scores = {"claude": None, "codex": 50.0, "opencode": 80.0}
+        sources = {"claude": "skipped:limited", "codex": "live", "opencode": "live"}
+        lines = OWNER._audit("eligible", "codex", "configured-balanced", ["claude", "codex", "opencode"], None,
+                             {"claude": "limited(2026-12-01)", "codex": "ok", "opencode": "ok"},
+                             allocation={"strategy": "balanced", "window": 30, "usage_gate_used_percent": 85,
+                                         "depth_affinity": {}, "depth_affinity_weight": 0.5,
+                                         "usage_headroom_exponent": 1},
+                             counts={"claude": 0, "codex": 0, "opencode": 0}, rejected=["claude"],
+                             capacity=scores, capacity_sources=sources, capacity_freshness={})
+        text = "\n".join(lines)
+        self.assertIn("capacity_headroom.claude=unknown", text)
+        self.assertIn("capacity_source.claude=skipped:limited", text)
+
+
+class GaugeCacheChainTest(unittest.TestCase):
+    """Two consecutive starts: the second reads the usage cache the first left behind.
+
+    The gauge reads of codex and opencode write the shared cache that `usage_states` (`gauge_limits`) turns
+    into the next start's limit judgment, so a start that leaves them unread changes the next start's choice.
+    Real `usage_states`, `_unread_gauges`, `capacity_report` and `select`; only the two HTTP readers are fakes.
+    """
+
+    HOUR = 3600.0
+
+    def setUp(self):
+        from importlib import import_module
+        self.addCleanup(mock.patch.stopall)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / "usage"
+        self.jobs = Path(self.tmp.name) / "jobs.log"
+        self.jobs.write_text("", encoding="utf-8")
+        mock.patch.dict(os.environ, {"FLEET_USAGE_STATE_DIR": str(self.state), "AGENT_DISPATCH_JOBS": str(self.jobs),
+                                     "HARNESS_CAPACITY_SCORES": "", "HOME": self.tmp.name,
+                                     "CODEX_HOME": self.tmp.name}).start()
+        self.cap = OWNER._capacity
+        self.cap._fleet_collectors()
+        self.cache = import_module("fleet.collectors.usage_cache")
+        self.codex_calls = 0
+        self.live = {}
+        mock.patch.object(import_module("fleet.collectors.codex"), "_api_usage_detail", self._fake_codex).start()
+        mock.patch.object(import_module("fleet.collectors.zen_go_usage"), "account_usage",
+                          return_value={"error": "no-key"}).start()
+        mock.patch.object(self.cap, "_claude_cache_score", return_value=(None, None)).start()
+        mock.patch.object(self.cap, "_claude_capacity_reading", return_value=(None, None)).start()
+        import dispatch_capacity_evidence
+        self.dce = dispatch_capacity_evidence
+
+    def _fake_codex(self):
+        self.codex_calls += 1
+        return dict(self.live), None
+
+    def _start(self, now, explicit=None):
+        """What `dispatch-owner` does at one start: the usage states, then the gauges not ruled out by them."""
+        states = self.dce.usage_states(self.jobs, now=now, recheck=False)
+        report = self.cap.capacity_report(now=now, skip=OWNER._unread_gauges(states, explicit))
+        return states, report
+
+    def _pick(self, states, report, primary):
+        policy = {"primary": primary, "relief": [], "last_resort": [], "promote_relief_below": 0}
+        return self.cap.select(policy, states, {h: 0 for h in self.cap.HARNESSES}, primary, report["scores"],
+                               strategy="balanced", usage_gate_used_percent=90)[0]
+
+    def _limited_until_reset(self, now):
+        return {"windows": [["5h", 100, now + 3 * self.HOUR], ["7d", 40, now + 5 * 86400]]}
+
+    def test_a_recovery_the_cache_has_not_seen_is_seen_by_the_start_that_is_pinned_elsewhere(self):
+        # The cache says codex is at 100% until a reset 3 h away; since then the account got credits and the
+        # live endpoint says it is usable. A start that names claude must still read codex, or the next
+        # start keeps reading `limited` for up to an hour.
+        now = time.time()
+        self.cache._write("codex", self._limited_until_reset(now), now - 120, now - 120)
+        self.live = {**self._limited_until_reset(now), "credits": {"has_credits": True}}
+        states, _ = self._start(now, explicit="claude")
+        self.assertTrue(states["codex"].startswith("limited("), states)
+        self.assertEqual(self.codex_calls, 1)
+        states, report = self._start(now + 60)
+        self.assertEqual(states["codex"], "ok", states)
+        self.assertEqual(self._pick(states, report, ["codex"]), "codex")
+
+    def test_a_limit_that_is_still_real_does_not_lapse_between_two_starts(self):
+        # codex really is at 100% for 3 more hours, the cache was written 50 minutes ago by someone else, and
+        # starts come every 30 minutes: the first start's read keeps the limit judgment alive for the second.
+        now = time.time()
+        self.cache._write("codex", {"windows": [["5h", 100, now + 3 * self.HOUR]]}, now - 3000, now - 3000)
+        self.live = {"windows": [["5h", 100, now + 3 * self.HOUR]]}
+        with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": "claude:0"}):
+            states, report = self._start(now, explicit="claude")
+            self.assertTrue(states["codex"].startswith("limited("), states)
+            self.assertEqual(self._pick(states, report, ["codex"]), None)
+            states, report = self._start(now + 1800)
+        self.assertTrue(states["codex"].startswith("limited("), states)
+        self.assertEqual(self._pick(states, report, ["codex"]), None)
+        self.assertEqual(self._pick(states, report, ["codex", "claude"]), "claude")
+
+    def test_the_gauge_wiring_of_one_start_shows_in_its_receipt(self):
+        # The start passes the unread gauges to `capacity_report`: a pinned, eligible harness leaves only the
+        # read-only gauge (claude) unread; the two that refresh the shared cache are read.
+        buf = io.StringIO()
+        route = RouteOwnerPinTest._route(self, pin="codex")
+        self.jobs.touch()
+        binding = SimpleNamespace(route_file=str(route), route_id="rt-x", route_hash="sha256:x")
+        self.live = self._limited_until_reset(time.time())
+        self.live["windows"][0][1] = 20
+        with mock.patch.object(OWNER.subprocess, "run", return_value=SimpleNamespace(returncode=0)), \
+             mock.patch.object(OWNER, "_usage", return_value={"claude": "ok", "codex": "ok", "opencode": "ok"}), \
+             mock.patch.object(OWNER, "validate_owner_route_binding", return_value=binding), \
+             mock.patch.object(OWNER, "export_owner_route_env", return_value=None), \
+             mock.patch("artifact_producer.prepare_route_artifact_env", return_value={}), \
+             mock.patch.dict(os.environ, _isolated_env({"AGENT_DISPATCH_JOBS": str(self.jobs),
+                                                        "FLEET_USAGE_STATE_DIR": str(self.state),
+                                                        "HARNESS_CAPACITY_SCORES": ""}), clear=True), \
+             contextlib.redirect_stdout(buf):
+            rc = OWNER.main(["--dry-run", "--route-evidence", str(route), "--prompt-text", "probe"])
+        out = buf.getvalue()
+        self.assertEqual(rc, 0, out)
+        self.assertRegex(out, r"(?m)^capacity_source\.claude=skipped:not-needed$")
+        self.assertRegex(out, r"(?m)^capacity_source\.codex=live$")
+        self.assertEqual(self.codex_calls, 1)
 
 
 class FrameAlternativeSelectionTest(unittest.TestCase):
@@ -1827,6 +1973,75 @@ class FrameModelRoleHandoffTest(unittest.TestCase):
             self.assertEqual(args.dispatch_depth, 1)
             self.assertEqual(adapter.resolve_model_settings(args)["profile"], "light")
 
+    def test_a_lookup_unit_leg_is_launched_as_support_only_from_its_route_node(self):
+        # G1: `general/explore` is a `support` unit; the one leg of its unit route starts at depth 1 through the
+        # same selector, on the three harnesses. Route-free (or without its node) a support tuple stays refused.
+        path = self._route(nodes=[{"id": "unit", "role": "fast tool worker", "model_profile": "light",
+                                 "unit": "general/explore", "dispatch_depth": 1, "worker_type": "support",
+                                 "launch_authority": "depth-0"}])
+        with mock.patch.dict(os.environ, {}, clear=True):
+            _, values, forwarded, _, _ = OWNER._parse([
+                "--start", "--route-evidence", path, "--route-node", "unit", "--prompt-text", "probe"])
+            for argv in (["--start", "--worker-type", "support", "--unit", "general/explore", "--dispatch-depth", "1",
+                          "--route-evidence", path],
+                         ["--start", "--worker-type", "support", "--unit", "general/explore", "--dispatch-depth", "1",
+                          "--route-node", "unit"]):
+                with self.assertRaises(OWNER.OwnerError, msg=argv):
+                    OWNER._parse([*argv, "--prompt-text", "probe"])
+        self.assertEqual((values["--worker-type"], values["--unit"], values["--dispatch-depth"]),
+                         ("support", "general/explore", "1"))
+        for harness in ("codex", "claude", "opencode"):
+            with self.subTest(harness=harness):
+                spec = importlib.util.spec_from_file_location("lookup_leg_" + harness,
+                    ROOT / "adapters" / harness / "bin" / "dispatch-headless.py")
+                adapter = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = adapter
+                spec.loader.exec_module(adapter)
+                args = adapter.parser().parse_args(forwarded)
+                self.assertEqual((args.worker_type, args.dispatch_depth), ("support", 1))
+                self.assertEqual(adapter.resolve_model_settings(args)["profile"], "light")
+
+    def test_a_route_leg_never_inherits_its_callers_route_environment(self):
+        # A unit route opened from inside an owner: the caller's route variables are in the selector's
+        # environment, and the wrapper reads them as "this is an owner bundle" and refuses any other start. The
+        # frame, review and lookup (`support`) legs all start without them; the owner's own start keeps them.
+        import artifact_producer
+        parent = {"AGENT_OWNER_ROUTE_FILE": "/parent/owner-route.json", "AGENT_OWNER_ROUTE_ID": "rt-parent",
+                  "AGENT_OWNER_ROUTE_HASH": "sha256:parent", "AGENT_ROUTE_FILE": "/parent/route.json",
+                  "AGENT_ROUTE_ID": "rt-parent", "AGENT_ROUTE_NODE": "one-shot"}
+        for worker_type, unit in (("frame", "plan/frame"), ("review", "qa/code-review"),
+                                  ("support", "general/explore")):
+            with self.subTest(worker_type=worker_type):
+                path = self._route(nodes=[{"id": "unit", "role": "fast tool worker", "model_profile": "light",
+                                         "unit": unit, "dispatch_depth": 1, "worker_type": worker_type,
+                                         "launch_authority": "depth-0"}])
+                jobs = Path(path).parent / "jobs.log"
+                jobs.touch()
+                binding = SimpleNamespace(route_file=path, route_id="rt-x", route_hash="sha256:x",
+                                          route_node="unit", registry_digest="sha256:test",
+                                          write_scope=str(Path(path).parent), completion_gate="test")
+                harnesses = ("claude", "codex", "opencode")
+                with mock.patch.object(OWNER, "_load_defaults", return_value={
+                         "schema_version": 3, "harnesses": {"enabled": list(harnesses)}}), \
+                     mock.patch.object(OWNER._defaults, "query_profile_policy", return_value={
+                         "primary": list(harnesses), "relief": [], "last_resort": [], "promote_relief_below": 0}), \
+                     mock.patch.object(OWNER, "_usage", return_value={h: "ok" for h in harnesses}), \
+                     mock.patch.object(OWNER._allocation, "attempt_counts", return_value={h: 0 for h in harnesses}), \
+                     mock.patch.object(OWNER._capacity, "capacity_report", return_value={
+                         "scores": {h: 80.0 for h in harnesses}, "sources": {h: "test" for h in harnesses}}), \
+                     mock.patch.object(OWNER, "derive_frame_route_binding", return_value=binding), \
+                     mock.patch.object(artifact_producer, "prepare_route_artifact_env", return_value={}), \
+                     mock.patch.object(OWNER, "select_launch_lifecycle", return_value="detached"), \
+                     mock.patch.object(OWNER, "run_owner_wrapper", return_value=0) as wrapper, \
+                     mock.patch.dict(os.environ, _isolated_env({"AGENT_DISPATCH_JOBS": str(jobs), **parent}),
+                                     clear=True), \
+                     contextlib.redirect_stdout(io.StringIO()) as out:
+                    rc = OWNER.main(["--start", "--route-evidence", path, "--route-node", "unit",
+                                     "--prompt-text", "probe"])
+                self.assertEqual(rc, 0, out.getvalue())
+                env = wrapper.call_args.args[1]
+                self.assertEqual({key for key in parent if key in env}, set(), env)
+
     def test_actual_adapter_parsers_and_resolvers_consume_the_selected_node_role(self):
         for node in ("frame", "frame-alternative"):
             _, values, forwarded, _, _ = OWNER._parse(self._args(node))
@@ -2690,6 +2905,50 @@ class FrameAssignmentIncidentTest(unittest.TestCase):
         self.assertNotEqual(got.source, "route-pin")
         # primary (codex, claude) outranks the relief band although opencode has the most headroom
         self.assertEqual(got.wrapper, "codex", got.out)
+
+    def _field_route(self, incident, *, pins="sealed", field="code", row=None, flat=None):
+        path, doc = self._route(incident, pins=pins)
+        doc["field"] = field
+        if row is not None:
+            doc["dispatch_allocation"]["field_weights"] = row
+        if flat is not None:
+            doc["dispatch_allocation"]["harness_weights"] = flat
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return path
+
+    def test_the_start_receipt_names_the_flat_weights_the_field_and_its_row(self):
+        row = {"claude": 0.95, "codex": 0.85, "opencode": 1.0}
+        path = self._field_route("rt_ad3fb", row=row, flat={"opencode": 0.4})
+        got = self._launch(path, "frame")
+        self.assertEqual(got.rc, 0, got.out)
+        lines = got.out.splitlines()
+        self.assertIn("harness_weights=opencode:0.4", lines)
+        self.assertIn("field=code", lines)
+        self.assertIn("field_weights=claude:0.95,codex:0.85,opencode:1.0", lines)
+        # a route with no field and no row says so in the same three lines
+        bare = self._route("rt_ad3fb")[0]
+        out = self._launch(bare, "frame").out.splitlines()
+        self.assertIn("field=-", out)
+        self.assertIn("field_weights=none", out)
+        self.assertTrue(any(line.startswith("harness_weights=") for line in out), out)
+
+    def test_a_field_row_does_not_move_a_route_pin(self):
+        # the sealed pin places the frame on opencode; a row that weighs hard against it changes nothing
+        row = {"claude": 1.0, "codex": 1.0, "opencode": 0.05}
+        path = self._field_route("rt_ad3fb", row=row)
+        got = self._launch(path, "frame")
+        self.assertEqual((got.rc, got.wrapper, got.source), (0, "opencode", "route-pin"), got.out)
+
+    def test_a_field_row_cannot_lift_a_harness_over_the_usage_gate_or_a_band(self):
+        # owner pin only: the frame falls to the automatic selection. Primary (codex, claude) outranks
+        # the relief opencode, and a row that favours opencode cannot change that.
+        _, doc = self._route("rt_ad3fb")
+        owner_only = {"contract_version": 1, "owner": doc["selection_pins"]["owner"]}
+        row = {"claude": 0.05, "codex": 0.05, "opencode": 1.0}
+        path = self._field_route("rt_ad3fb", pins=owner_only, row=row)
+        got = self._launch(path, "frame", scores={"claude": 40.0, "codex": 70.0, "opencode": 95.0})
+        self.assertEqual((got.rc, got.source), (0, "configured-balanced"), got.out)
+        self.assertIn(got.wrapper, {"claude", "codex"}, got.out)
 
     def test_a_frame_pin_on_a_limited_harness_gives_the_choice_back_to_the_selection(self):
         path, _ = self._route("rt_ad3fb")

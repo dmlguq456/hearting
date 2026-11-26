@@ -1152,7 +1152,7 @@ def _recheck_answer(jobs, recorded, models, env, now, allow):
     return _verdict(recorded, _answers(_read_probes(jobs), scope), reader_model, now)
 
 
-_RESET_SENTENCE = re.compile(r"resets\s+([^()\n.·]+?)\s*(?:\(([^()]+)\)|[.·]|$)", re.I)
+_RESET_SENTENCE = re.compile(r"(?:resets|try again at)\s+([^()\n.·]+?)\s*(?:\(([^()]+)\)|[.·]|$)", re.I)
 _TZ_NAME = re.compile(r"[A-Za-z0-9_+/-]+")
 TAIL_BYTES = 64 * 1024
 
@@ -1199,15 +1199,27 @@ def _result_reset(meta):
     except OSError:
         return "-", None
     for line in reversed(lines):
-        if b'"type"' not in line or b'"result"' not in line:
+        if b'"type"' not in line or (b'"result"' not in line and b'"dispatch.supervisor.turn.failed"' not in line):
             continue
         try:
             row = json.loads(line)
         except (ValueError, UnicodeError):
             continue
-        if isinstance(row, dict) and row.get("type") == "result":
-            found = _RESET_SENTENCE.search(row.get("result") if isinstance(row.get("result"), str) else "")
-            return (found.group(1).strip(), found.group(2)) if found else ("-", None)
+        if not isinstance(row, dict):
+            continue
+        if row.get("type") == "dispatch.supervisor.turn.failed":
+            from dispatch_supervisor_terminal import codex_turn_failure_terminal
+            if codex_turn_failure_terminal(row).failure_class != "capacity":
+                return "-", None
+            message = "\n".join(str(row.get(key) or "") for key in ("message", "additional_details"))
+        elif row.get("type") == "result":
+            message = row.get("result")
+            if row.get("runtime") == "opencode" and isinstance(row.get("error"), dict):
+                message = row["error"].get("message")
+        else:
+            continue
+        found = _RESET_SENTENCE.search(message if isinstance(message, str) else "")
+        return (found.group(1).strip(), found.group(2)) if found else ("-", None)
     return "-", None
 
 

@@ -45,6 +45,26 @@ class ArmTest(unittest.TestCase):
         record = json.loads(Path(armed["record"]).read_text())
         self.assertEqual((record["state"], record["route_file"]), ("armed", str(self.route.resolve())))
 
+    def test_unit_carrier_arms_only_for_the_parent_and_only_once(self):
+        source = "att-unit"
+        offer = {"reason": C.UNIT_CAPACITY_PAUSE, "route_id": PAUSE["route_id"], "source_attempt_id": source}
+        pending = {"route_id": offer["route_id"], "route_file": str(self.route),
+                   "route_hash": "sha256:sealed", "source_attempt_id": source, "source": {"parent_sid": "parent"}}
+        with mock.patch("dispatch_replacement.unit_capacity_pause", return_value=pending), \
+                mock.patch("session_identity.identity", return_value=SimpleNamespace(known=True, session_id="parent")), \
+                mock.patch("route_authority.owns", return_value=False) as owns:
+            self.assertIsNone(self.arm(offer))
+            owns.return_value = True
+            armed = self.arm(offer)
+            self.assertEqual(self.arm(offer)["state"], "already-armed")
+        self.assertEqual(len(self.spawned), 1)
+        path = Path(armed["record"])
+        self.assertEqual(json.loads(path.read_text())["unit_route_hash"], pending["route_hash"])
+        with mock.patch("dispatch_replacement.unit_capacity_pause", return_value=None):
+            C.run(path, now=lambda: RETRY_EPOCH, call=mock.Mock(side_effect=AssertionError("unit already settled")),
+                  follow=lambda _: None)
+        self.assertEqual(json.loads(path.read_text())["notice"], "skipped-unit-no-longer-pending")
+
     def test_the_record_names_the_paused_harness_attempt_and_usage_state(self):
         armed = self.arm({**PAUSE, "harness": "claude", "source_attempt_id": "att-dead",
                           "usage_state": "allocation-usage-gate"})
@@ -316,6 +336,38 @@ class RunTest(unittest.TestCase):
                 mock.patch.object(C, "_notify") as notify:
             C.run(self.path, sleep=self.sleep, now=lambda: self.clock[0], call=lambda argv, **kw: done)
         notify.assert_called_once()
+
+    def test_unit_resume_hands_off_the_exact_successors_completion(self):
+        record = {**json.loads(self.path.read_text()), "unit_route_hash": "sha256:unit",
+                  "source_attempt_id": "att-limited"}
+        self.path.write_text(json.dumps(record))
+        receipt = {"state": "completed", "unit_attempt_id": "att-resumed",
+                   "continues_attempt_id": "att-limited", "summary": "the sealed review"}
+        done = SimpleNamespace(returncode=0, stdout=json.dumps(receipt) + "\n")
+        pending = {"route_file": record["route_file"], "route_hash": record["unit_route_hash"]}
+        row = SimpleNamespace(metadata={"route_hash": record["unit_route_hash"],
+                                        "replacement_original_attempt_id": "att-limited",
+                                        "parent_sid": "unit-parent",
+                                        "parent_completion_delivery": "claude-parent-runtime"})
+        for state in ("running", "completed"):
+            for ack in (None, "acked"):
+                with self.subTest(state=state, ack=ack), \
+                        mock.patch("dispatch_replacement.unit_capacity_pause", return_value=pending), \
+                        mock.patch("dispatch_completion_join.exact_attempt_row", return_value=row), \
+                        mock.patch("peer_obligations._registered_terminal_state", return_value=ack), \
+                        mock.patch("peer_obligations.retain_registered_completion", return_value=True) as retain, \
+                        mock.patch.object(C, "_route_finished", return_value=True), \
+                        mock.patch.object(C, "_notify") as notify:
+                    self.path.write_text(json.dumps(record))
+                    current = {**receipt, "state": state}
+                    done.stdout = json.dumps(current) + "\n"
+                    C.run(self.path, now=lambda: RETRY_EPOCH + C.SLACK_SECONDS, call=lambda *args, **kw: done)
+                    if state == "running":
+                        retain.assert_called_once_with(
+                            Path(record["jobs"]), "att-resumed", "unit-parent", "claude-parent-runtime")
+                    else:
+                        retain.assert_not_called()
+                    self.assertEqual(notify.call_count, int(state == "running" or ack is None))
 
     def test_the_resume_runs_the_installed_release_not_the_arming_one(self):
         done = SimpleNamespace(returncode=0, stdout="{}\n")

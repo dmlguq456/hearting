@@ -332,7 +332,47 @@ def observed_variants(value):
     return tuple(result)
 
 
-def read_model_catalog(*, directory=None, environ=None):
+def _deadline_opener(deadline):
+    """An opener with no redirects or proxies whose whole exchange ends at `deadline`.
+
+    The connection and each socket read wait at most what is left, so a service that
+    accepts and never answers, or sends bytes a few at a time, cannot hold the caller
+    past the deadline (a per-operation timeout alone resets with every byte).
+    """
+    # urllib.request loads platform proxy helpers. Keep that dependency at the HTTP
+    # boundary, away from shared runtime/dispatch-only imports.
+    import socket
+    import urllib.request
+
+    def left():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("service read deadline")
+        return remaining
+
+    class DeadlineSocket(socket.socket):
+        def recv_into(self, *args, **kwargs):
+            self.settimeout(min(2.0, left()))
+            return super().recv_into(*args, **kwargs)
+
+    class Connection(http.client.HTTPConnection):
+        def connect(self):
+            plain = socket.create_connection((self.host, self.port),
+                                             min(self.timeout, left()), self.source_address)
+            self.sock = DeadlineSocket(plain.family, plain.type, plain.proto, fileno=plain.detach())
+
+    class Handler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(Connection, req)
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), Handler, NoRedirect())
+
+
+def read_model_catalog(*, directory=None, environ=None, deadline=None):
     """Read the existing V2 service's catalog without starting or refreshing it.
 
     ``None`` permits the V1 cache reader. A known V2 service/version with no
@@ -341,6 +381,9 @@ def read_model_catalog(*, directory=None, environ=None):
     boundary, never service credentials/settings. The native location is the
     caller's cwd unless an existing caller supplies a directory. An unavailable
     directory stays unknown, never server-default.
+
+    Every read waits at most 2 seconds per socket operation. ``deadline`` (seconds) is
+    for a caller that must also bound the whole exchange; it is never a default.
     """
     env = os.environ if environ is None else environ
     home = Path(env.get("HOME") or Path.home())
@@ -399,11 +442,14 @@ def read_model_catalog(*, directory=None, environ=None):
         # the HTTP boundary, away from shared runtime/dispatch-only imports.
         import urllib.request
 
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, *args, **kwargs):
-                return None
+        if deadline is None:
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, *args, **kwargs):
+                    return None
 
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        else:  # only a caller that asks (the model-follow survey) gets a whole-exchange end
+            opener = _deadline_opener(time.monotonic() + deadline)
         query = urlencode({"location[directory]": str(directory)})
         request = urllib.request.Request(url.rstrip("/") + "/api/model?" + query, headers=headers)
         limit = 16 * 1024 * 1024
@@ -420,6 +466,7 @@ def read_model_catalog(*, directory=None, environ=None):
         models = []
         seen = set()
         variants = {}
+        records = {}
         for row in rows:
             if not isinstance(row, dict):
                 return unknown
@@ -438,8 +485,22 @@ def read_model_catalog(*, directory=None, environ=None):
                 ids = observed_variants(row.get("variants"))
                 if ids:
                     variants[identifier] = ids
+                family = row.get("family")
+                cost = row.get("cost")
+                cost = cost.get("input") if isinstance(cost, dict) else cost
+                try:  # a price this parser cannot read is no price, never a failed read
+                    price = (float(cost) if isinstance(cost, (int, float))
+                             and not isinstance(cost, bool) else None)
+                except OverflowError:
+                    price = None
+                records[identifier] = {
+                    "family": family if isinstance(family, str) else None,
+                    "status": row["status"],
+                    "cost": price,
+                }
         return {"state": "available" if models else "empty", "source": source,
-                "models": tuple(models), "variants": variants, "observed_at": time.time()}
+                "models": tuple(models), "variants": variants, "records": records,
+                "observed_at": time.time()}
     except (OSError, ValueError, TypeError, RuntimeError, http.client.HTTPException):
         return unknown
 

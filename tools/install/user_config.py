@@ -165,6 +165,34 @@ def status(ids=None) -> list[dict]:
     return rows
 
 
+def with_model_follow(rows) -> list[dict]:
+    """Add "newer n · proposal n · followed n · kept n · held n" to each models.conf reading
+    (read-only; a count of 0 is not written)."""
+    try:
+        utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        import model_follow
+    except Exception:
+        return rows
+    for row in rows:
+        runtime = row["id"].partition("models-conf.")[2]
+        if not runtime or row["status"] != "valid":
+            continue
+        try:
+            result = model_follow.survey_harness(runtime)
+            newer, proposal = model_follow.counts(result)
+            followed, kept, held = model_follow.state_counts(result)
+        except Exception:
+            continue
+        notes = [f"{name} {count}" for name, count in
+                 (("newer", newer), ("proposal", proposal), ("followed", followed),
+                  ("kept", kept), ("held", held)) if count]
+        if notes:
+            row["reading"] += " · " + " · ".join(notes)
+    return rows
+
+
 def lines(rows, *, verbose=False) -> list[str]:
     out = []
     for row in rows:

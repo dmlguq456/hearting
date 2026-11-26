@@ -61,6 +61,16 @@ class TextStoreTest(unittest.TestCase):
             with self.assertRaises(UC.ContinueError, msg=reason):
                 UC.submit(self.jobs, "rt-abc", text, request_id)
 
+    def test_the_sender_and_unit_are_noted_on_a_new_entry_and_a_duplicate_keeps_its_first(self):
+        first = UC.submit(self.jobs, "rt-abc", "ask", source_session="sess-1", unit="unit:qa/test")["entry"]
+        self.assertEqual((first["source_session"], first["unit"]), ("sess-1", "unit:qa/test"))
+        again = UC.submit(self.jobs, "rt-abc", "ask", source_session="sess-2", unit="unit:qa/other")
+        self.assertTrue(again["duplicate"])
+        self.assertEqual((again["entry"]["source_session"], again["entry"]["unit"]), ("sess-1", "unit:qa/test"))
+        bare = UC.submit(self.jobs, "rt-abc", "plain")["entry"]
+        self.assertNotIn("source_session", bare)
+        self.assertNotIn("unit", bare)
+
     def test_routes_keep_separate_texts(self):
         UC.submit(self.jobs, "rt-abc", "a")
         self.assertEqual(UC.entries(self.jobs, "rt-other"), [])
@@ -268,6 +278,7 @@ class TurnPromptTest(unittest.TestCase):
         self.assertIn("please recheck", text)
         self.assertIn("Verdict: changes requested", text)
         self.assertNotIn("THE BRIEF", text)
+        self.assertIn("keep the earlier report as it is", text)
 
     def test_a_fresh_session_gets_the_brief_and_the_previous_result(self):
         with mock.patch.object(UC, "previous_result", return_value="Verdict: changes requested"):
@@ -275,6 +286,29 @@ class TurnPromptTest(unittest.TestCase):
         self.assertIn("THE BRIEF", text)
         self.assertIn("session-missing", text)
         self.assertIn("Verdict: changes requested", text)
+        self.assertIn("leave the earlier report as it is", text)
+
+    def test_capacity_retry_finishes_the_interrupted_turns_report(self):
+        for plan, context in (
+            (UC.SessionPlan("resumed", "", "s", "f", "r"), "artifact_output_dir: /same"),
+            (UC.SessionPlan("fresh", "harness-changed", "", ""), "THE BRIEF"),
+        ):
+            for turn in (1, 2):
+                with self.subTest(session=plan.kind, turn=turn):
+                    args = types.SimpleNamespace(**{**vars(self.args), "turn": turn, "automatic_retry_of": FIRST})
+                    prior = "Verdict: changes requested" if turn == 2 else ""
+                    with mock.patch.object(UC, "previous_result", return_value=prior) as previous:
+                        text = UC.turn_prompt(args, plan, "artifact_output_dir: /same", "THE BRIEF", "jobs")
+                    previous.assert_called_once_with("jobs", FIRST, after_capacity=True)
+                    self.assertIn(context, text)
+                    self.assertIn("Finish the interrupted turn's report under artifact_output_dir", text)
+                    self.assertIn("If that file already exists, continue from what is there", text)
+                    self.assertIn(self.args.continuation_text, text)
+                    self.assertNotIn("earlier report as it is", text)
+                    self.assertNotIn("This is turn 1", text)
+                    if prior:
+                        self.assertIn("Previous turn's result (turn 1)", text)
+                        self.assertIn(prior, text)
 
 
 class KeepWindowTest(unittest.TestCase):
@@ -420,6 +454,34 @@ class CorrectUnitRouteTest(unittest.TestCase):
         self.assertEqual((code, receipt["state"]), (69, "not-admitted"))
         start.assert_not_called()
         self.assertEqual(UC.entries(self.jobs, "rt-abc"), [])
+
+    def test_a_taken_correction_carries_the_field_and_unit_labels_and_notes_them_in_the_store(self):
+        Path(self.dir.name, "rt.json").write_text(json.dumps({"field": "research"}))
+        with mock.patch.object(self.W, "unit_leg", return_value={"id": NODE, "unit": "qa/code-review"}), \
+                mock.patch.object(self.W.route_authority, "correction_source_session", return_value="sess-1"):
+            (code, receipt), _ = self.call("ask")
+        self.assertEqual((code, receipt["memory_labels"]), (0, ["field:research", "unit:qa/code-review"]))
+        entry = UC.entries(self.jobs, "rt-abc")[0]
+        self.assertEqual((entry["source_session"], entry["unit"]), ("sess-1", "unit:qa/code-review"))
+
+    def test_a_refused_correction_carries_no_labels_and_keeps_nothing(self):
+        from dispatch_contract import DispatchContractError
+        Path(self.dir.name, "rt.json").write_text(json.dumps({"field": "research"}))
+        with mock.patch.object(self.W, "unit_leg", return_value={"id": NODE, "unit": "qa/code-review"}):
+            (code, receipt), _ = self.call("ask", side_effect=DispatchContractError("work-parent-recovery-required", "x"))
+            self.assertEqual((code, "memory_labels" in receipt), (69, False))
+            (code, receipt), _ = self.call("  ")
+            self.assertEqual((code, "memory_labels" in receipt), (69, False))
+        self.assertEqual(UC.entries(self.jobs, "rt-abc"), [])
+
+    def test_an_unreadable_unit_or_field_gives_only_what_can_be_read(self):
+        for leg, written, expected in (({"id": NODE}, {"field": "docs"}, ["field:docs"]),
+                                       ({"id": NODE, "unit": "_kernel/owner"}, {"field": "docs"}, ["field:docs"]),
+                                       ({"id": NODE, "unit": "qa/test"}, {"field": "dev"}, ["unit:qa/test"]),
+                                       ({"id": NODE}, {}, [])):
+            with self.subTest(leg=leg, route=written):
+                Path(self.dir.name, "rt.json").write_text(json.dumps(written))
+                self.assertEqual(self.W._unit_memory_labels(self.dir.name + "/rt.json", leg), expected)
 
     def test_a_leg_of_an_approved_plan_is_refused(self):
         self.route["route_plan"] = {"decision": "d", "index": 0, "digest": "x"}

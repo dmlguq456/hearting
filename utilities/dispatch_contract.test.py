@@ -10,6 +10,8 @@ from types import SimpleNamespace
 P=Path(__file__).with_name("dispatch_contract.py")
 ROOT=P.parent.parent
 sys.path.insert(0,str(P.parent))
+sys.path.insert(0,str(ROOT/"tools"))
+from fixture_processes import reap, unique_attempt_id  # noqa: E402
 import dispatch_contract as D
 from replica_batch_contract import build_manifest
 from split_module_fixture import patch_split
@@ -3388,6 +3390,37 @@ class DispatchContractTest(unittest.TestCase):
                         terminal_attempt_limit=2)
    self.assertEqual(caught.exception.reason,"quick-registered-headless-exhausted")
    self.assertEqual(len(jobs.read_text().splitlines()),2)
+ def test_a_later_turn_counts_each_earlier_turn_once_through_its_replacements(self):
+  # A BLOCKED, its replacement B PASS: turn 2 continues B with the limit one turn wider (1 + turn - 1).
+  # Only a later turn reads A as taken over; an ordinary launch counts as before.
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log"
+   def row(attempt,status="open",**extra):
+    pipe="".join(f",{key}={value}" for key,value in extra.items())
+    return (f"2026-11-26T00:00:00Z\t{status}\t/r\t/w\tquick\t{CURRENT},route_id=rt-t,"
+            f"route_node=one-shot,attempt_id={attempt}{pipe}")
+   exclusive={"route_id":"rt-t","route_node":"one-shot"}
+   first,second,later,other="att-turn00000a","att-turn00000b","att-turn00002a","att-turn0000xx"
+   self.assertTrue(D.claim_attempt_row(jobs,first,row(first),launch=True,
+                                       exclusive_live_metadata=exclusive,terminal_attempt_limit=1))
+   self.assertTrue(D.close_attempt_row(jobs,first,"dead-worker-blocked"))
+   with jobs.open("a") as handle:   # the runtime's replacement of A, settled PASS
+    handle.write(row(second,"done",automatic_retry_of=first,replacement_original_attempt_id=first,
+                     launch_claimed=1,note="completed-marker")+"\n")
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.claim_attempt_row(jobs,other,row(other),launch=True,exclusive_live_metadata=exclusive,
+                        terminal_attempt_limit=2)
+   self.assertEqual(caught.exception.reason,"quick-registered-headless-exhausted")
+   self.assertTrue(D.claim_attempt_row(jobs,later,row(later,continues_attempt_id=second,turn=2),launch=True,
+                                       exclusive_live_metadata=exclusive,terminal_attempt_limit=2))
+   # Turn 2 is replaced too; turn 3 counts B and the replacement of turn 2, under its limit of 3.
+   self.assertTrue(D.close_attempt_row(jobs,later,"dead-worker-blocked"))
+   with jobs.open("a") as handle:
+    handle.write(row("att-turn00002b","done",automatic_retry_of=later,launch_claimed=1,
+                     note="completed-marker")+"\n")
+   self.assertTrue(D.claim_attempt_row(jobs,"att-turn00003a",
+                                       row("att-turn00003a",continues_attempt_id="att-turn00002b",turn=3),
+                                       launch=True,exclusive_live_metadata=exclusive,terminal_attempt_limit=3))
  # Item 4: a failed terminal note in replacement_notes gets its own budget
  # (default 1) separate from terminal_attempt_limit, so one dead-protocol/
  # dead-permission-reject terminal allows exactly one same-route relaunch
@@ -3543,7 +3576,7 @@ class DispatchContractTest(unittest.TestCase):
  # asserts on _attempt_process_quiescence_impl are the point: they pin that this
  # fixture is red without the seam and green with it, permanently.
  def test_escaped_attempt_descendant_refuses_a_false_quiescent_verdict(self):
-  attempt="att-escaped-descendant-fixture"
+  attempt=unique_attempt_id("att-escaped-descendant-fixture")
   script=("import os,subprocess,sys\n"
           "env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=sys.argv[1])\n"
           "subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'],\n"
@@ -3566,15 +3599,13 @@ class DispatchContractTest(unittest.TestCase):
                     ("live","attempt-descendant-live"))
    self.assertEqual(verdict.pid,probe.members[0][0])
   finally:
-   for pid,_start,_state in probe.members if probe else ():
-    try:os.kill(pid,9)
-    except OSError:pass
+   reap(attempt)
 
  # SD-OPEN-47 (H7-b): the recorded parent leader is an ancestor of the child,
  # never its descendant. Even a mis-tagged owner process must not keep the
  # child's row alive for as long as the owner lives.
  def test_sd_open_47_parent_leader_pid_is_never_a_descendant_of_its_child(self):
-  attempt="att-child-of-owner-fixture"
+  attempt=unique_attempt_id("att-child-of-owner-fixture")
   owner=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],
                          env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=attempt),
                          start_new_session=True)
@@ -3611,7 +3642,7 @@ class DispatchContractTest(unittest.TestCase):
  # SD-OPEN-47 (H7): a sidecar-sealed residue receipt names the survivors as
  # leftovers of a finished worker; they never veto quiescence again.
  def test_historical_residue_receipt_does_not_lift_live_descendant_veto(self):
-  attempt="att-residue-receipt-fixture"
+  attempt=unique_attempt_id("att-residue-receipt-fixture")
   residue=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],
                            env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=attempt),
                            start_new_session=True)
@@ -3762,7 +3793,7 @@ class DispatchContractTest(unittest.TestCase):
  # A-P2. A sibling attempt whose row was closed by a false death verdict, but
  # whose tagged descendant is still running, stops the launch before any spawn.
  def test_live_sibling_attempt_blocks_the_node_before_any_spawn(self):
-  attempt="att-live-sibling-fixture"
+  attempt=unique_attempt_id("att-live-sibling-fixture")
   script=("import os,subprocess,sys\n"
           "env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=sys.argv[1])\n"
           "subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'],\n"
@@ -3785,9 +3816,7 @@ class DispatchContractTest(unittest.TestCase):
    # The one exit code every caller maps to "nothing spawned, waiting may help".
    self.assertIn("prior-attempt-still-live",D.PRELAUNCH_PROCESS_BLOCK_REASONS)
   finally:
-   for pid,_start,_state in probe.members if probe else ():
-    try:os.kill(pid,9)
-    except OSError:pass
+   reap(attempt)
 
  # A-N4/A-N5. An ordinary retry follows a sibling that really did stop, whether
  # it was cooled off for capacity or gave up on its own. This is the control
@@ -5251,11 +5280,12 @@ class TerminalCleanupResponsibilityTest(ControlledConsumerTestCase):
   self.assertEqual(self.jobs.read_bytes(),original)
 
  def test_live_terminal_child_remains_owned_then_real_exit_settles(self):
+  attempt=unique_attempt_id("att-cleanup-live")
   child=subprocess.Popen([sys.executable,"-c","import sys; sys.stdin.read()"],
                          stdin=subprocess.PIPE,start_new_session=True,
-                         env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID="att-cleanup-live"))
+                         env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=attempt))
   self.addCleanup(lambda: child.poll() is None and (child.kill(),child.wait(timeout=5)))
-  metadata={**D.process_launch_identity(child.pid),"attempt_id":"att-cleanup-live",
+  metadata={**D.process_launch_identity(child.pid),"attempt_id":attempt,
             "note":"completed-marker","launch_lifecycle":"foreground-scoped",
             "pid_scope":"namespace-local"}
   self.jobs.write_text(attempt_row(metadata,"done")+"\n")
@@ -5384,7 +5414,7 @@ class DrainReceiptDeniedEnvironTest(unittest.TestCase):
  def setUp(self):
   proc=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],start_new_session=True)
   identity=dict(D.process_launch_identity(proc.pid),pgid=str(proc.pid),
-                attempt_id="att-drained-denied-environ",launch_lifecycle="detached")
+                attempt_id=unique_attempt_id("att-drained-denied-environ"),launch_lifecycle="detached")
   proc.terminate();proc.wait(timeout=5)
   self.plain=identity
   self.sealed=dict(identity,launch_outcome="governed-process-group-drained",
@@ -5491,7 +5521,7 @@ class LaunchCgroupDeniedEnvironTest(unittest.TestCase):
  def setUp(self):
   proc=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],start_new_session=True)
   self.plain=dict(D.process_launch_identity(proc.pid),pgid=str(proc.pid),
-                  attempt_id="att-launch-cgroup",launch_lifecycle="detached")
+                  attempt_id=unique_attempt_id("att-launch-cgroup"),launch_lifecycle="detached")
   proc.terminate();proc.wait(timeout=5)
   self.recorded=dict(self.plain,**D.launch_cgroup_values(self.LAUNCH,self.NS))
   self.late=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"])

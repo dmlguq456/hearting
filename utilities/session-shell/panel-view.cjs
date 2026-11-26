@@ -26,8 +26,20 @@ const BORDER_ARC=1/4,BORDER_LAP=60;
 // second) in the lit red of `FACES.*.waitBlink`, as many in its other red.
 const WAIT_BLINK=10;
 // 11-16 (the person: "최대 5개 정도로 늘리고, 그전에 원래 형식으로 돌려"): MESSAGES shows the newest MESSAGES_MAX
-// messages at most, each its head row and its first line (spec rule 31).
-const MESSAGES_MAX=5;
+// messages at most, each its head row and its first line (spec rule 31). 11-20 (the person: "대신 MESSAGE도 최대 3개 정도로
+// 다시 줄이고"): three at most.
+const MESSAGES_MAX=3;
+const REPO_NAME_MIN=8;
+// 11-20 (the person: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" / "REPO ---- SESSION ----"): the panel beside the native area has two groups: REPO
+// (the repository's: its row, GIT, PEERS) and SESSION (this session's: MODEL, CTX, TITLE, NOW, QUESTIONS, the route box, MESSAGES, MEM). Each group's head
+// is one row `REPO ────` / `SESSION ────`. REPO's head is the REPO row itself (`REPO hearting · wt 12 ────`, no row more). SESSION's head stands
+// where the empty row between the two groups' metadata stood, so it costs no row either, and goes with it short of rows. The bottom layout has no group
+// heads: first row, GIT, PEERS, then the title and NOW row and the route box.
+// 11-22 (the person, on the three drafts of the panel's tidy-up: "두칸이 아니라 한칸만 띄우도록 하자 그러면"): the line forms are one table (`core/references/session-shell.md`, *Two groups*). A group
+// head is its bold name, its value and a rule, no indent (REPO, SESSION). The rows under it stand one cell in (GIT, PEERS, STATUS, BACKLOG; MODEL, CTX, TITLE, NOW), the items of STATUS and BACKLOG two. An activity
+// is a rounded box with its `›` at the right end of its top line (QUESTIONS, ROUTE). The sections at the bottom are their name and a `›` at the right end, no rule, their items one cell in, a message's second row two.
+// Every row a press opens ends in that one `›`. The line between CTX and TITLE is gone; `rule motion`'s light runs over the SESSION head's rule alone. Short of rows the SESSION head takes MODEL's value
+// and row (`SESSION Opus 5.5 xhigh ───`), so the rows give way in the order and at the heights they did. What a row shows is cut by the old rule in the cells the indent leaves.
 // 11-16 (the person: "메모리도 메시지랑 같은 맥락이야"): MEM shows the newest MEM_MAX records at most, each its
 // dim head row and its headline on up to two rows (spec rule 46 (b)). 11-18 (the person: "MEM는 최대 최근 3개만 띄워도 되겠다"): three at most.
 const MEM_MAX=3;
@@ -334,7 +346,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const summary=(()=>{if(typeof brief!=='function')return null;try{const b=brief();return b&&b.count>0?b:null;}catch{return null;}})();
   // `groups` names the statusline groups a row paints (head, git, context, wait, jobs, route, quota).
   const contentGroups=[];
-  function add(parts,action,groups){const row=content.length;if(action)hits.push({row:row+1,left:2,right:width-3,action});content.push(parts);contentGroups.push(groups||[]);}
+  function add(parts,action,groups){const row=content.length;if(Array.isArray(action))for(const span of action)hits.push({row:row+1,left:2+span.left,right:2+span.right,action:span.action});else if(action)hits.push({row:row+1,left:2,right:width-3,action});content.push(parts);contentGroups.push(groups||[]);}
   // Spec rule 34 (a): a row breaks only between tokens. A token is a word (text with no
   // space in it, across parts too), a model name with its version (`Sonnet 5.5`,
   // `(Opus 5.5·xhigh)`), or a lone `·`/`›` with the word after it (`· failed`, `› test`).
@@ -595,9 +607,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const ruleTick=t=>borderTick(t)+(anchored?1:0);
   // Spec rule 52: the thin rule under the metadata; under `rule` while the session runs, its cells
   // carry the light (`rule` marks them, so the host gets them as the moving cells).
-  const ruleLook=(i,tick)=>{const level=scanLevel(ruleTick(tick),i,inner);
+  // 11-22: the light runs over the cells of the SESSION head's rule alone (`n` of them: not the name, not the value), whatever length that rule has.
+  const ruleLook=(i,tick,n)=>{const level=scanLevel(ruleTick(tick),i,n);
     return level?{...text('─','g_spin'),role:'orbit',tone:'scan',level,rule:true}:{...text('─','dim'),role:'messages',rule:true};};
-  const ruleParts=()=>ruleMoving?Array.from({length:inner},(_,i)=>ruleLook(i,frame)):[{...text('─'.repeat(inner),'dim'),role:'messages',rule:true}];
+  const ruleParts=n=>ruleMoving?Array.from({length:n},(_,i)=>ruleLook(i,frame,n)):[{...text('─'.repeat(n),'dim'),role:'messages',rule:true}];
+  let ruleLen=1;
   // Values the host could not refresh for a while are shown, not claimed:
   // nothing spins and the frame takes no route state (spec rule 12).
   const stale=model.stale===true;
@@ -685,7 +699,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const title=clean(model.session_title||'').trim(),now=clean(model.now||'').trim();
     const nowKey=state==='working'||state==='submitting'||state==='blocked'?'loc_repo':'dim';
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
-    const top=[],spacers=new Set(),metaGaps=new Set(),rules=new Set(),optional=new Set(),gitRows=new Set(),jobRows=new Set(),topGroups=new Map();
+    const top=[],spacers=new Set(),metaGaps=new Set(),optional=new Set(),gitRows=new Set(),jobRows=new Set(),topGroups=new Map();
+    // 11-21: the STATUS and BACKLOG parts under the REPO group: each a head row and its first items (all of them `listRows`). They are laid out last, after
+    // everything else has its rows (the same layout a window without them has): they take the empty rows and, short of those, rows MESSAGES and MEM fold; they are the first to go.
+    const lists=[],listRows=new Set(),listHeads=new Map(),listItemAt=new Map();
+    let repoAt=-1,repoButtons=null,sessionAt=-1,modelValueOf=null;
+    // The width of the rows under a group head: one cell less (`IND`, below) for what is laid out in them.
+    const narrow=fn=>{const was=inner;inner=Math.max(1,was-(side?1:0));try{return fn();}finally{inner=was;}};
     // A value that runs over several rows (spec rule 29 (c)): its rows after the first go
     // first when rows run short, and the first row then ends in `…`.
     const extra=new Set(),oneRow=new Map();
@@ -700,30 +720,38 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // column and every value starts at the same cell; its next rows start there too.
     // Narrower than 30 cells inside, the labels go before any value is cut.
     const labelWidth=inner>=30?7:0;
+    // 11-22: beside the native area the rows under a group head stand one cell in (GIT, PEERS, STATUS, BACKLOG; MODEL, CTX, TITLE, NOW), their items two.
+    const IND=side?1:0;
     // A row that ends a value cut short: its last cell becomes `…` (spec rule 36 (c), 37 (b)).
     const ellipsis=(row,limit)=>{const all=size(row);if(all+1<=limit)return [...row,{...(row.at(-1)||text('')),text:'…'}];
       const fit=clip(row,Math.max(0,limit-1));return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'}];};
     // `tail` stands after the value's last row and keeps its cells (the `›` of a row a press opens). The value is cut
     // and wrapped as it is without it: the tail takes room only where the last row has it, else it stands at that
     // row's end as `…›`, so neither the value's rows nor any row around them depend on the tail.
+    // 11-22: the mark stands at the row's right end (`pad` cells before it), the one place a press's `›` is looked for.
     const tailed=(row,limit,tail)=>{
-      if(!tail.length||size(row)+size(tail)<=limit)return [...row,...tail];
-      const fit=clip(row,Math.max(0,limit-2));
-      return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'},tail.at(-1)];
+      if(!tail.length)return row;
+      const mark=tail.filter(x=>clean(x.text).trim());
+      if(size(row)+size(tail)<=limit)return [...row,pad(limit-size(row)-size(mark)),...mark];
+      // A row `cut` already ended in `…` loses that mark first (one `…` only), and the cells a wide character left
+      // empty at the cut stand between `…` and `›`, so the `›` is always the row's last cell.
+      const last=row.at(-1),ends=last&&clean(last.text).endsWith('…'),bare=ends?[...row.slice(0,-1),...(clean(last.text).length>1?[{...last,text:clean(last.text).slice(0,-1)}]:[])]:row;
+      const fit=clip(bare,Math.max(0,limit-2));
+      return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'},pad(limit-2-fit.used),tail.at(-1)];
     };
     const field=(label,parts,max=Infinity,tail=[])=>{
-      const lead=labelWidth?text(label.padEnd(labelWidth),'dim'):null,rest=pad(labelWidth),room=inner-labelWidth;
+      const lead=[pad(IND),...(labelWidth?[text(label.padEnd(labelWidth),'dim')]:[])],rest=[pad(IND+labelWidth)],room=inner-IND-labelWidth;
       let rows=wrapAll(parts,room);const from=top.length;
       if(rows.length>max){rows=rows.slice(0,max);rows[max-1]=ellipsis(rows[max-1],room);}
-      rows.forEach((row,i)=>{top.push([...(lead?[i?rest:lead]:[]),...(i===rows.length-1?tailed(row,room,tail):row)]);if(i)extra.add(top.length-1);});
-      if(rows.length>1)oneRow.set(from,[...(lead?[lead]:[]),...tailed(cut(parts,room),room,tail)]);
+      rows.forEach((row,i)=>{top.push([...(i?rest:lead),...(i===rows.length-1?tailed(row,room,tail):row)]);if(i)extra.add(top.length-1);});
+      if(rows.length>1)oneRow.set(from,[...lead,...tailed(cut(parts,room),room,tail)]);
     };
     // Spec rules 37 (a), 41: beside the native area the worktree count stands beside the
-    // repository name (`REPO   hearting · wt 12`) and the Git row keeps the branch, whether it
+    // repository name (`REPO hearting · wt 12`) and the Git row keeps the branch, whether it
     // is up to date and the warnings (`GIT    main ✓`), the labels as TITLE's and NOW's.
     const worktrees=painted(model.worktrees),sideGit=Array.isArray(model.git_side)?painted(model.git_side):git;
     const sideRepo=Array.isArray(model.repo_side)?painted(model.repo_side):repo;
-    const labelled=(label,parts)=>labelWidth?[text(label.padEnd(labelWidth),'dim'),...parts]:parts;
+    const labelled=(label,parts)=>[...(IND?[pad(IND)]:[]),...(labelWidth?[text(label.padEnd(labelWidth),'dim')]:[]),...parts];
     // 11-17 (the person's PEERS sketch): `PEERS  [c7] ⚑  ─ [d4] [3b]`: the supervising session, its flag, two cells, a dash, then the
     // ones it supervises; the same order from every window. Each number is its harness's color (this window's own bold),
     // the flag alone Fleet's steward pink, the dash and the `·` between two groups dim. No state of any session. Short of
@@ -758,27 +786,74 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       for(let keep=total;keep>=1;keep--){const row=build(keep);if(size(row)<=room)return row;}
       return cut(build(1),room);
     };
-    // 11-15 (the person: "현황은 REPO 옆에 버튼을 만드는게 나을거 같은데", design 2 as recommended): the status
-    // button `현황 ›` (`STATUS ›`, Fleet's `fleet.repo.status`) at the right end of the REPO row: the word in
-    // the body color, `›` dim as a section head's, no ground, no count; no status document: all of it dim
-    // (a press still opens it). Short of cells the word goes first (`›` stays), then `· wt N` whole, then
-    // the name is cut with `…`; the name and `›` stay to the last. A press anywhere on the row opens the
-    // status popup. No artifact root: no button (`status_doc` absent).
-    const statusDoc=model.status_doc&&typeof model.status_doc==='object'&&clean(model.status_doc.word).trim()?model.status_doc:null;
+    // 11-15 (the person: "현황은 REPO 옆에 버튼을 만드는게 나을거 같은데"), 11-20 ("현황은 미리보기 없이 버튼만 만들자"), 11-21 (the person: "버튼을 REPO의 아래에
+    // 각각을 두고 +? 숫자 띄우고 백로그랑 현황을 나열하자" / "각각 3줄 정도씩 목록으로 만들고 추가분을 +? 형식으로"): beside the native area the REPO group ends in a STATUS
+    // part and a BACKLOG part, each a section head (` STATUS +2        ›`, one cell in, no rule, a press opens that popup) and its first three items (one row each; a press
+    // opens the popup standing on it); `+N` on the head counts the items not shown, as MESSAGES' does. The REPO row has no button. In the bottom
+    // layout the first row ends in the two buttons `STATUS +N ›  BACKLOG +N ›` (nothing is listed there). `status_doc` and `backlog_doc` are
+    // `{word, has_doc, items: [{mark, text, key}], total}` (the host's; no artifact root: neither); a document that is not there is dim, and pressable.
+    const docOf=v=>v&&typeof v==='object'&&clean(v.word).trim()?v:null;
+    const statusDoc=docOf(model.status_doc),backlogDoc=docOf(model.backlog_doc);
     const topActions=new Map();
-    const statusButton=whole=>{const arrow=text('›','dim');if(!whole)return [arrow];
-      return [text(clean(statusDoc.word).trim(),statusDoc.has_doc===true?'loc_repo':'dim'),text(' '),arrow];};
-    // `name` and `count` with the button at the right end of `room` cells, or null without a button.
-    const withButton=(name,count,room)=>{
-      if(!statusDoc)return null;
-      // In order: the whole button, `›` alone, then `› ` without the count; the word does not come back.
-      for(const [lead,whole] of [[[...name,...count],true],[[...name,...count],false],...(count.length?[[name,false]]:[])]){
-        const b=statusButton(whole);if(size(lead)+1+size(b)<=room)return [...lead,pad(room-size(lead)-size(b)),...b];
-      }
-      return [...cut(name,Math.max(1,room-2)),pad(Math.max(1,room-Math.min(size(name),Math.max(1,room-2))-1)),...statusButton(false)];
+    const ruleRun=n=>({...text('─'.repeat(Math.max(1,n)),'dim'),role:'messages'});
+    const fillEnd=n=>n>=3?[text(' '),ruleRun(n-1)]:[pad(n)];
+    // One bottom-layout button of a document at a stage (0: word, count and `›`; 1: word and `›`; 2: `›`), its pieces.
+    // `+N` and, where the document has more than was read (a very long backlog), a `+` after it: `+2997+` (`+` alone where nothing is hidden by the rows).
+    const countWords=(n,more)=>n>0?'+'+n+(more?'+':''):'+';
+    const listTotalOf=doc=>Math.max(0,Math.min(Number.isInteger(doc.total)?doc.total:0,99999));
+    // 11-22 (the person: "알파벳 하나가 아니라 그래도 적절히 3~4자로 약어든 단어든 붙이는게 맞지"): a BACKLOG item's sort word and its colour (colours of the table the panel has).
+    const KIND_WORDS={fix:{word:'FIX',key:'lvl_y'},improve:{word:'IMPR',key:'lvl_g'},note:{word:'NOTE',key:'dim'},tbd:{word:'TBD',key:'dim'}};
+    // The BACKLOG head's text after the word, widest first (what is dropped as the width falls; the sorts' words outlast the numbers, as the person wanted a word of 3~4 letters, not one):
+    // `FIX 14 · IMPR 26 · +37 /125`, then `/N`, then the ` · `, then `+N` (`FIX 14 IMPR 26`), then the words (`14 26`), then nothing. `+N` is the FIX and IMPR not shown
+    // (none: left out), `/N` every line of the document, `?` the sorts of a document nothing in is sorted yet; a `+` after the number where the document has more than was read.
+    const kindStages=(k,hidden,doc)=>{
+      const plus=doc.more===true?'+':'',total=Math.max(0,Math.min(Number.isInteger(doc.total)?doc.total:0,99999));
+      const q=unsortedOnly(k),nf=q?'?':String(k.fix),ni=q?'?':String(k.improve);
+      const more=hidden>0||plus?[text(countWords(hidden,doc.more===true),'loc_repo')]:[];
+      const sep=text(' · ','dim'),gap=text(' '),word=n=>text(KIND_WORDS[n].word,KIND_WORDS[n].key),num=v=>text(v,'loc_repo');
+      const join=(parts,s)=>parts.flatMap((p,i)=>i?[s,...p]:p);
+      const tail=[text('/'+total+plus,'dim')];
+      const full=join([[word('fix'),gap,num(nf)],[word('improve'),gap,num(ni)],...(more.length?[more]:[])],sep);
+      const bare=join([[word('fix'),gap,num(nf)],[word('improve'),gap,num(ni)],...(more.length?[more]:[])],gap);
+      const named=join([[word('fix'),gap,num(nf)],[word('improve'),gap,num(ni)]],gap);
+      const nums=join([[num(nf)],[num(ni)]],gap);
+      return [[...full,gap,...tail],full,bare,named,nums];
     };
+    // 11-22: a BACKLOG that tells its sorts (`counts`) has its button's number the FIX and IMPR together (what is to be done), `?` where nothing in the document is sorted yet;
+    // no row of a button is shown, so every one of them is hidden. Any other value is the items' own count.
+    const kindsOf=doc=>{const c=doc&&doc.counts;if(!c||typeof c!=='object')return null;const out={};
+      for(const name of ['fix','improve','note','tbd']){if(!Number.isInteger(c[name])||c[name]<0)return null;out[name]=Math.min(c[name],99999);}return out;};
+    const unsortedOnly=k=>k.tbd>0&&!(k.fix||k.improve||k.note);
+    const listButton=(doc,stage)=>{const arrow=text('›','dim');if(stage>=2)return [arrow];
+      const k=kindsOf(doc),n=k?k.fix+k.improve:listTotalOf(doc),q=!!k&&n===0&&unsortedOnly(k);
+      return [text(clean(doc.word).trim(),doc.has_doc===true?'loc_repo':'dim'),...(stage===0&&(n>0||q||doc.more===true)?[text(' '),text(q?'?':countWords(n,doc.more===true),'loc_repo')]:[]),text(' '),arrow];};
+    // The REPO row where the two heads do not stand: `REPO hearting · wt 12 ──── STATUS +N ›  BACKLOG +N ›`, the bottom layout's first row's buttons (the same words, the same
+    // order of giving way: the counts, then the words, then the name is cut). `offset` cells of the row stand left of `room`; a press on a button opens its popup, on the rest of the row the status popup.
+    // 11-22: `fit` is what the value and the buttons must fit in (the cells the row had when its label column stood: what is kept or dropped as the width falls is unchanged), `room` the row's cells.
+    const buttonsAt=(room,name,count,offset,fit=room)=>{
+      const docs=[['STATUS',statusDoc],['BACKLOG',backlogDoc]].filter(([,d])=>d);
+      if(!docs.length)return null;
+      const place=stage=>{const parts=[],spans=[];let used=0;
+        docs.forEach(([n,d],i)=>{const b=listButton(d,stage),gap=i?[text('  ')]:[];parts.push(...gap,...b);used+=size(gap);spans.push({name:n,left:used});used+=size(b);});
+        return {parts,spans,used};};
+      const build=(lead,made)=>{const at=offset+room-made.used;
+        return {parts:[...lead,pad(room-size(lead)-made.used),...made.parts],
+          actions:made.spans.map((sp,i)=>({left:i?at+sp.left:0,right:i===made.spans.length-1?inner-1:at+made.spans[i+1].left-1,action:'popup:'+sp.name}))};};
+      for(const stage of [0,1,2]){
+        const made=place(stage);
+        for(const lead of count.length?[[...name,...count],name]:[name])if(size(lead)+1+made.used<=fit)return build(lead,made);
+        const left=fit-made.used-1;
+        if(left>=Math.min(size(name),REPO_NAME_MIN))return build(cut(name,left),made);
+      }
+      const made=place(2);
+      return build(cut(name,Math.max(1,fit-made.used-1)),made);
+    };
+    // A group's head row: its name (the title role, as a section's), a thin rule to the row's end.
+    // 11-22: SESSION's rule is the one `rule motion` moves (`ruleParts`); its value (MODEL's, short of rows) stands after the name.
+    const groupHead=(name,value=[])=>{const lead=[{...text(name,'dim'),role:'title',bold:true},...(value.length?[text(' '),...value]:[])],rest=inner-size(lead);
+      return rest>=3?[...lead,text(' '),...ruleParts(rest-1)]:cut(lead,inner);};
     // Spec rule 46: the newest saved memory records (this repository's and the global ones, MEM_MAX at
-    // most) stand in their own section under the messages, two rows or three each (below). An older backend
+    // most) stand in their own section under the messages, one row each (below). An older backend
     // sends the newest one as painted pieces only (`3m decision headline`): that one record,
     // without its kind (rule 46 (e)); the head carries no MEM row either way.
     const memItems=(()=>{
@@ -797,11 +872,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // effort, context]; without Git it parts the repository from the model.
       if(sideRepo.length){
         // The name keeps its color; the count (dim) shows whole or not at all.
-        const room=inner-labelWidth,count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
-        const withCount=count.length>0&&size(sideRepo)+size(count)<=room;
-        const button=withButton(sideRepo,count,room);
-        if(button)topActions.set(top.length,'popup:STATUS');
-        top.push(labelled('REPO',button||(withCount?[...sideRepo,...count]:cut(sideRepo,room))));mark(0,'head',...(withCount&&!sideGit.length?['git']:[]));
+        // 11-20: the REPO group's head is this row: `REPO hearting · wt 12 ────` (the same in every width: the word stands first, `REPO `,
+        // as the other labels do not).
+        const count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
+        // 11-22: a group head is its bold name, one cell, its value, then the rule (no label column: the rows under it are the ones in a column).
+        const word=[{...text('REPO','dim'),role:'title',bold:true},text(' ')],room=inner-5,fit=inner-(labelWidth||5);
+        const withCount=count.length>0&&size(sideRepo)+size(count)<=fit;
+        const value=withCount?[...sideRepo,...count]:cut(sideRepo,fit);
+        const row=[...value,...fillEnd(room-size(value))];
+        // Where the two heads under REPO do not stand the row ends in the two buttons, as the bottom layout's first row does (`buttonsAt`, below).
+        if(statusDoc||backlogDoc){
+          const made=buttonsAt(room,sideRepo,withCount?count:[],5,fit);
+          repoButtons=made&&{parts:[...word,...made.parts],actions:made.actions};
+        }
+        repoAt=top.length;
+        top.push([...word,...row]);mark(top.length-1,'head',...(withCount&&!sideGit.length?['git']:[]));
       }
       // Short of cells the first part (the branch, the model name) gives way so what follows
       // it (the status and a warning, the effort) stays whole.
@@ -810,9 +895,27 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const rest=parts.slice(1),left=room-size(rest);
         return left>=6?[...cut(parts.slice(0,1),left),...rest]:cut(parts,room);
       };
-      if(sideGit.length){gitRows.add(top.length);top.push(labelled('GIT',firstGives(sideGit,inner-labelWidth)));mark(top.length-1,'git');}
-      {const peerParts=peerRow(inner-labelWidth);if(peerParts.length){gitRows.add(top.length);top.push(labelled('PEERS',peerParts));}}
-      if(top.length){metaGaps.add(top.length);top.push([]);}
+      if(sideGit.length){gitRows.add(top.length);top.push(labelled('GIT',firstGives(sideGit,inner-IND-labelWidth)));mark(top.length-1,'git');}
+      {const peerParts=peerRow(inner-IND-labelWidth);if(peerParts.length){gitRows.add(top.length);top.push(labelled('PEERS',peerParts));}}
+      // 11-21: the STATUS and BACKLOG parts: each a head and its items (what a part shows is chosen after the layout, below).
+      for(const [name,doc] of [['STATUS',statusDoc],['BACKLOG',backlogDoc]]){
+        if(!doc)continue;
+        const items=(Array.isArray(doc.items)?doc.items:[]).filter(i=>i&&typeof i==='object'&&clean(i.text).trim()).slice(0,3),entry={name,doc,items,total:Math.max(items.length,listTotalOf(doc))};
+        listRows.add(top.length);topActions.set(top.length,'popup:'+name);listHeads.set(top.length,entry);top.push([]);
+        items.forEach((item,j)=>{
+          const at=top.length,sorted=name==='BACKLOG'&&kindsOf(doc);
+          // 11-22: a BACKLOG item stands behind its sort's word in four cells (`FIX `, `IMPR`, `NOTE`, `TBD `), the word and its colour (the colour table's own: yellow, green, dim) both tell it.
+          const kind=KIND_WORDS[item.kind]||KIND_WORDS.tbd,
+            mark=sorted?[text(kind.word.padEnd(4),kind.key),text(' ')]:[item.mark==='!'?text('! ','lvl_y'):text('· ','dim')];
+          listRows.add(at);listItemAt.set(at,{entry,j});
+          topActions.set(at,'popup:'+name+(typeof item.key==='string'&&item.key?':'+item.key:''));
+          top.push([pad(2),...cut([...mark,text(clean(item.text).trim(),'loc_repo')],inner-2)]);
+        });
+        lists.push(entry);
+      }
+      // 11-20: the SESSION group's head stands where the empty row between the two groups of metadata stood. 11-22: short of rows the head does not
+      // go: it takes MODEL's value and MODEL's row (`SESSION Opus 5.5 xhigh ───`), so the group keeps its name and the rows are as many as when it went.
+      metaGaps.add(top.length);top.push(groupHead('SESSION'));sessionAt=top.length-1;
       if(labelWidth){
         // Spec rule 42: `MODEL` and `CTX` as REPO's and GIT's; `CTX` stands for the word
         // `context` (a backend without `context_side` has its word taken off here).
@@ -820,22 +923,20 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
           return !first||rest===String(first.text)?parts:rest?[{...first,text:rest},...parts.slice(1)]:parts.slice(1);};
         const gauge=Array.isArray(model.context_side)?painted(model.context_side):word(painted(model.context));
         const value=mcp.length||cost.length?joined([gauge,mcp,cost]):gauge;
-        top.push(labelled('MODEL',firstGives(selected,inner-labelWidth)));
-        if(value.length){top.push(labelled('CTX',cut(value,inner-labelWidth)));mark(top.length-1,'context');}
+        modelValueOf=room=>size(selected)<=room?firstGives(selected,room):null;
+        top.push(labelled('MODEL',firstGives(selected,inner-IND-labelWidth)));
+        if(value.length){top.push(labelled('CTX',cut(value,inner-IND-labelWidth)));mark(top.length-1,'context');}
       }else{
-        // Narrower than 30 cells inside, the rows as they were, without labels.
-        top.push(selected);
-        if(contextParts.length){top.push(contextParts);mark(top.length-1,'context');}
+        // Narrower than 30 cells inside, the rows as they were, without labels (one cell in, as the rows of the group above).
+        modelValueOf=room=>size(selected)<=room?firstGives(selected,room):null;
+        top.push(labelled('MODEL',firstGives(selected,inner-IND)));
+        if(contextParts.length){top.push(labelled('CTX',cut(contextParts,inner-IND)));mark(top.length-1,'context');}
       }
-      if(jobs.length){const from=top.length;put(top,jobs,2);mark(from,'jobs');for(let i=from;i<top.length;i++){optional.add(i);jobRows.add(i);}}
-      if(work.length){optional.add(top.length);top.push(cut(work,inner));}
-      if(model.warning)top.push(line(model.warning,'lvl_r'));
+      if(jobs.length){const from=top.length;const rowsOf=[];narrow(()=>put(rowsOf,jobs,2));top.push(...rowsOf.map(r=>[pad(IND),...r]));mark(from,'jobs');for(let i=from;i<top.length;i++){optional.add(i);jobRows.add(i);}}
+      if(work.length){optional.add(top.length);top.push([pad(IND),...cut(work,inner-IND)]);}
+      if(model.warning)top.push([pad(IND),...cut(line(model.warning,'lvl_r'),inner-IND)]);
       const content=title||now||(tidy&&!asking);
-      // Spec rule 34 (c): the rule parts the head's block from what follows it; it is not an empty row
-      // but it stands without a title too (11-15 small fixes: what the default `rule motion` moves
-      // must not wait on a title), where something stands above it.
-      // Spec rule 47: it follows this session's state (above).
-      if(content||top.length){rules.add(top.length);top.push(ruleParts());}
+      // 11-22: no rule between CTX and TITLE any more; the rule `rule motion` moves is the SESSION head's.
       // Spec rule 44: the title's value bold, in this session's harness color (Fleet's `hb_*`;
       // the label stays dim). No color keeps the weight, as the steward's `⚑` (rule 35 (a)).
       const own='hb_'+(['claude','codex','opencode'].includes(harness)?harness:'other');
@@ -846,21 +947,39 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         // 11-16: a notice of something that ended well (`tidy_quiet`) is one or two dim rows without `⚠`; what
         // leaves the person something to do keeps the caution look on up to three rows.
         const quiet=model.tidy_quiet===true,key=quiet?'dim':'lvl_y',most=quiet?2:3;
-        const rows=[];wrap(quiet?line(tidy,key):line('⚠ '+tidy,key),most+1,undefined,rows);
+        const rows=[];narrow(()=>wrap(quiet?line(tidy,key):line('⚠ '+tidy,key),most+1,undefined,rows));
         const kept=rows.slice(0,most);
-        if(rows.length>kept.length){const last=kept.length-1,fit=clip(kept[last],inner-1);kept[last]=[...fit.parts,text('…',key)];}
-        top.push(...kept);
+        if(rows.length>kept.length){const last=kept.length-1,fit=clip(kept[last],inner-IND-1);kept[last]=[...fit.parts,text('…',key)];}
+        top.push(...kept.map(r=>[pad(IND),...r]));
       }
-      // One empty row parts the head from the route box below it (a head with no content has its rule).
+      // One empty row parts the metadata from the content below it (a session with no content has none).
       if(content){spacers.add(top.length);top.push([]);}
     }else{
       // The bottom layout has few rows: the metadata row (or rows) first, then one
       // content row; the row break parts them (no rule).
       const first=joined([repo,selected,contextParts]);
-      // The status button at the first row's right end (the word first gives way, then the row is cut).
-      const atEnd=row=>{if(!statusDoc)return row;topActions.set(0,'popup:STATUS');
-        for(const whole of [true,false]){const b=statusButton(whole);if(size(row)+1+size(b)<=inner)return [...row,pad(inner-size(row)-size(b)),...b];}
-        return [...cut(row,Math.max(1,inner-2)),pad(Math.max(1,inner-Math.min(size(row),Math.max(1,inner-2))-1)),...statusButton(false)];};
+      // The two buttons at the first row's right end, `STATUS +N ›  BACKLOG +N ›` (the counts give way first, then the words; then the row is cut).
+      // A press on a button opens its popup; on the rest of the row, the status popup. (`topActions` carries the spans.)
+      const atEnd=row=>{
+        const docs=[['STATUS',statusDoc],['BACKLOG',backlogDoc]].filter(([,d])=>d);
+        if(!docs.length)return row;
+        const place=(lead,stage)=>{
+          const parts=[],spans=[];let used=size(lead);
+          docs.forEach(([name,d],i)=>{const b=listButton(d,stage),gap=i?[text('  ')]:[];parts.push(...gap,...b);used+=size(gap);spans.push({name,left:used,width:size(b)});used+=size(b);});
+          return {parts,spans,used:size(parts)};
+        };
+        for(const stage of [0,1,2]){
+          const made=place([],stage);
+          if(size(row)+1+made.used<=inner){
+            const start=inner-made.used;
+            topActions.set(0,made.spans.map((sp,i)=>({left:i?start+sp.left-0:0,right:i===made.spans.length-1?inner-1:start+made.spans[i+1].left-1,action:'popup:'+sp.name})));
+            return [...row,pad(inner-size(row)-made.used),...made.parts];
+          }
+        }
+        const made=place([],2),room=Math.max(1,inner-made.used-1),keep=Math.min(size(row),room);
+        topActions.set(0,made.spans.map((sp,i)=>({left:i?inner-made.used+sp.left:0,right:i===made.spans.length-1?inner-1:inner-made.used+made.spans[i+1].left-1,action:'popup:'+sp.name})));
+        return [...cut(row,room),pad(Math.max(1,inner-keep-made.used)),...made.parts];
+      };
       if(size(first)<=inner){top.push(atEnd(first));mark(0,'head',...(contextParts.length?['context']:[]));}
       else{put(top,joined([repo,selected]),1);top[0]=atEnd(top[0]);mark(0,'head');const from=top.length;put(top,contextParts,1);mark(from,'context');}
       // Running jobs join that row when they fit; otherwise they take a row (below Git) that can give way.
@@ -895,13 +1014,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // tag in dark gray upper case, the counts by state, a thin rule, and `›` where a press opens the
     // section's popup (Fleet's own table, whole). A press on the head or on any row of a section
     // opens it there; nothing opens in place. The rows are the table's own columns, picked.
-    const sectionHead=(count,name,after=[],rights=[[]],arrow=true)=>{
-      const lead=[...count,...(count.length?[text(' ')]:[]),{...text(name,'dim'),role:'title'}];
+    const sectionHead=(count,name,after=[],rights=[[]],arrow=true,faint=false,alts=[])=>{
+      const lead=[...count,...(count.length?[text(' ')]:[]),faint?text(name,'dim'):{...text(name,'dim'),role:'title'}];
       const close=arrow?[text(' '),text('›','dim')]:[];
-      for(const a of [after,[]])for(const r of rights){
+      for(const a of [after,...alts,[]])for(const r of rights){
         const head=[...lead,...(a.length?[text(' '),...a]:[])],tail=[...(r.length?[text(' '),...r]:[]),...close];
         const rest=inner-size(head)-size(tail);
-        if(rest>=2)return [...head,text(' '),{...text('─'.repeat(rest-1),'dim'),role:'messages'},...tail];
+        // 11-22: beside the native area a section's head has no rule: its name and count, then the `›` at the right end.
+        if(rest>=2&&!side)return [...head,text(' '),{...text('─'.repeat(rest-1),'dim'),role:'messages'},...tail];
         if(rest>=0)return [...head,pad(rest),...tail];
       }
       return cut(lead,inner);
@@ -1232,8 +1352,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return out;
     };
     // A note on the right of a border (the route box's hidden counts) shows whole or not at all.
-    const boxTop=(label,key,{action,ellipsis=false,note=[],alt=[]}={})=>{
-      const room=Math.max(0,inner-2),tail=note.length&&size(note)+3<=room?[L(' ',key),...note,L(' ─',key)]:[];
+    // 11-22: a box that a press on its top line opens (`arrow`) ends that line in `›` at the right end (`╭─ 3 QUESTIONS ───── ›─╮`), after a hidden count where it has one.
+    const boxTop=(label,key,{action,ellipsis=false,note=[],alt=[],arrow=false}={})=>{
+      const room=Math.max(0,inner-2),mark=arrow&&room>=8?[text('›','dim')]:[],
+        tail=note.length&&size(note)+3+(mark.length?2:0)<=room?[L(' ',key),...note,...(mark.length?[L(' ',key),...mark,L('─',key)]:[L(' ─',key)])]:mark.length?[L(' ',key),...mark,L('─',key)]:[];
       // A shorter form of the title (the route box's `REQUEST`, then its route count alone, never a count without its
       // name) stands where the whole one does not fit.
       const fits=form=>form&&form.length&&size(form)<=room-size(tail)-3;
@@ -1702,7 +1824,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const inView=sorted.slice(routeOffset,routeOffset+routeLimit);
       const above=routeOffset,below=routeRows.length-routeOffset-inView.length+unsent;
       const hiddenNote=n=>[text(n,'loc_repo')];
-      const block=[{...boxTop(routeTitle,key,{action:'popup:ROUTE',note:above?hiddenNote('↑'+above):[],alt:routeTitleAlt}),groups:['route']}];
+      const block=[{...boxTop(routeTitle,key,{action:'popup:ROUTE',note:above?hiddenNote('↑'+above):[],alt:routeTitleAlt,arrow:true}),groups:['route']}];
       let before=null;
       (routeRows.length?inView:routeChecking).forEach(item=>{
         if(routeRule()&&item.zone&&(!before||before.zone!==item.zone))block.push(zoneRow(item.zone,key));
@@ -1725,8 +1847,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     let messageOne=false;
     const arrowOf=m=>text(m.way,m.way==='←'?'lvl_g':'loc_repo');
     const bodyOf=m=>String(m.body||m.text||'');
-    const messageLine=m=>cut([arrowOf(m),text(' '),text(String(m.who||''),'loc_repo'),text(' '),text(bodyOf(m),'loc_repo')],inner);
-    const messageTop=m=>{
+    // 11-22: beside the native area an item of MESSAGES and MEM stands one cell in (a message's second row two), laid out in the cells that leaves.
+    const itemIn=fn=>side?[pad(1),...narrow(fn)]:fn();
+    const messageLine=m=>itemIn(()=>cut([arrowOf(m),text(' '),text(String(m.who||''),'loc_repo'),text(' '),text(bodyOf(m),'loc_repo')],inner));
+    const messageTop=m=>itemIn(()=>{
       const arrow=arrowOf(m),who=text(String(m.who||''),'loc_repo');
       const delivery=Array.isArray(m.delivery)&&m.delivery[0]?[text(' · ','dim'),text(String(m.delivery[0]),m.delivery[1]||'dim')]:[];
       const pieces=[m.harness?[text(' '+m.harness,'dim')]:[],m.when?[text(' · '+m.when,'dim')]:[],m.kind?[text(' · '+m.kind,'dim')]:[]];
@@ -1744,7 +1868,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         return [...cut([arrow,text(' '),who],Math.max(1,inner-3-measure(word))),text(' · ','dim'),text(word,m.delivery[1]||'dim')];
       }
       return cut([arrow,text(' '),who,...delivery],inner);
-    };
+    });
     const messageBody=m=>{
       const body=wrapAll([text(bodyOf(m),'loc_repo')],inner-2),first=body[0]||[];
       return [text('  '),...(body.length>1?cut([...first,text(' '),...body[1].slice(0,1)],inner-2):first)];
@@ -1762,29 +1886,33 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // (`◆ project · decision · 10m`); short of cells the kind leaves, then the scope (the mark and the
     // age stay). Short of rows (below) every headline takes one row, then fewer records show. No popup:
     // its head has no `›`.
-    let memBody=2;
-    const memTop=m=>{
+    // 11-20 (the person: "메모리 내용은 한줄로 바꾸고 (지금은 두줄이네) 메시지 처럼 팝업이 가능하게"): a record is one row, as a message's one-row form
+    // (`messageLine`): its mark, age and kind dim, then the headline in the body color (`…` where it goes on; the kind goes first where the
+    // headline would be left under 14 cells). A press on it opens the MEM popup (below, `memoryBody`: the record whole).
+    const memLine=m=>itemIn(()=>{
       const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
-      for(const words of [[m.scope,m.kind],[m.scope],[]]){
-        const row=[text([mark,...words.filter(Boolean),m.age].filter(Boolean).join(' · ').replace(/^(.) · /,'$1 '),'dim')];
-        if(size(row)<=inner)return row;
+      for(const lead of [[mark,m.age,m.kind],[mark,m.age]]){
+        const head=text(lead.filter(Boolean).join(' ')+' ','dim');
+        if(inner-size([head])>=14||lead.length===2)return cut([head,text(m.text,'loc_repo')],inner);
       }
-      return cut([text([mark,m.age].filter(Boolean).join(' '),'dim')],inner);
-    };
-    const memRows=m=>{
-      let body=wrapAll([text(m.text,'loc_repo')],inner-2);
-      if(body.length>memBody)body=[...body.slice(0,memBody-1),ellipsis(body[memBody-1],inner-2)];
-      return [memTop(m),...body.map(row=>[text('  '),...row])];
-    };
+    });
+    const memRows=m=>[memLine(m)];
     // The sections in order, each with the most rows it takes and its rows at a given count.
     const SECTIONS=[
       {name:'QUESTIONS',on:asked,max:3,head:()=>sectionHead(questionCount?[{...text(questionCount,'g_blocked'),role:'accent'}]:[],summary?.label||'QUESTIONS'),
         rows:()=>questionRows(),action:'question',groups:model.wait?['wait']:[]},
       {name:'ROUTE',on:!!routeTitle,box:true},
       {name:'MESSAGES',on:messageTotal>0,max:MESSAGES_MAX,head:()=>messagesHead(take.MESSAGES),rows:n=>messageRows(n),action:'popup:MESSAGES'},
-      {name:'MEM',on:memItems.length>0,max:MEM_MAX,head:()=>sectionHead([],'MEM',[],[[]],false),rows:n=>memItems.slice(0,n).flatMap(memRows)}];
+      // (11-20: the head and every record open the MEM popup, the record pressed first on screen: `popup:MEM:<n>`.)
+      {name:'MEM',on:memItems.length>0,max:MEM_MAX,head:()=>sectionHead([],'MEM',[],[[]],true),rows:n=>memItems.slice(0,n).flatMap(memRows),action:'popup:MEM',rowAction:i=>'popup:MEM:'+i}];
     const take={},kept={};
     for(const s of SECTIONS){take[s.name]=s.max;kept[s.name]=s.on;}
+    // (the items each part of the lists shows: three at most, given up by `give` below)
+    for(const e of lists)take[e.name+'_ITEMS']=e.items.length;
+    const listShown=()=>lists.reduce((n,e)=>n+Math.min(take[e.name+'_ITEMS'],e.items.length),0);
+    // The lists count only in the second pass (below), once the rest has its rows as it has in a window without them.
+    let listsOn=false,keepLists=true;
+    const listNeed=()=>listsOn&&keepLists?lists.length+listShown():0;
     // 11-16 (the person: "질문은 이전처럼 그냥 붉은색 블록으로 감싸는게 모양은 제일 나아" / "붉은 바운더리 말이야"): the QUESTIONS
     // section is one thin rounded box again (v4.33.1's, as the route box's line), its name `N QUESTIONS ›` in
     // the top border; the line is the rose where this window has a question to answer, dim otherwise. The rows
@@ -1795,8 +1923,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const questionRowsIn=()=>boxedQuestions()?within(questionRows):questionRows();
     const sectionRows=s=>s.name==='QUESTIONS'?questionRowsIn():s.rows(take[s.name]);
     const sectionSize=s=>!kept[s.name]?0:s.box?routeBox():(s.name==='QUESTIONS'&&boxedQuestions()?2:1)+sectionRows(s).length;
-    const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size;
-    let keepGit=true,keepSpacers=true,keepMetaGap=true,keepRules=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0,keepFootRule=true,keepQuestionBox=true;
+    const core=top.length-spacers.size-metaGaps.size-optional.size-gitRows.size-extra.size-listRows.size;
+    let keepGit=true,keepSpacers=true,keepMetaGap=true,keepOptional=true,keepMulti=true,keepQuota=quota.length>0,keepFootRule=true,keepQuestionBox=true;
     // 11-16 (the person: "그 라우트는 다른 하네스도 쓰니까 usage에 3가지를 전부 띄우는게 좋겠어" / "구분줄을 USAGE로 해서 넣자"): the
     // panel's bottom is the USAGE section: its name row (the thin rule above the last row, now named), then
     // one row for each harness (Claude, Codex, OpenCode, Fleet's header order): the harness's name dim, then the
@@ -1958,7 +2086,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // head's rule, its color) parts the bottom sections (MESSAGES, MEM) from the last row (5h/7d, the gear and
     // the fold button); short of rows it goes before any content row.
     const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)
-      +(keepRules?rules.size:0)+(keepOptional?optional.size:0)+SECTIONS.reduce((n,s)=>n+sectionSize(s),0)+footRule()+1;
+      +(keepOptional?optional.size:0)+listNeed()+SECTIONS.reduce((n,s)=>n+sectionSize(s),0)+footRule()+1;
     const budget=rows;
     // Short of rows (spec rule 34 (b), 11-15): the empty rows, the rule above the last row (11-16) and a
     // value's further rows first (a route title's second row too); then MEM and the question step down
@@ -1978,24 +2106,33 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const give=(can,apply,undo,family=null)=>{while(need()>budget&&can()){apply();gave.push({undo,family});}};
     const lowest=['MEM','MESSAGES'];
     // RESOURCES gives way first (it is the newest and the least needed of the bottom's sections): the GPU rows, then the host rows.
+    const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
+      keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]);
+    // The give-back's restore: the way back to a state `choices()` recorded.
+    const restore=json=>{const v=JSON.parse(json);[keepSpacers,keepMulti,keepMetaGap,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
+      Object.assign(take,v[9]);Object.assign(kept,v[10]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead]=v.slice(11,21);keepLine.splice(0,keepLine.length,...v[21]);keepRouteRule=v[22];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(23,29);};
     resGpus=resourceGpuTotal();
     give(()=>side&&resHosts>0&&resGpus>0,()=>{resGpus--;},()=>{resGpus++;});
     give(()=>side&&resHosts>0,()=>{resHosts--;},()=>{resHosts++;});
     give(()=>keepSpacers,()=>{keepSpacers=false;},()=>{keepSpacers=true;});
     if(!usageOn)give(()=>!!footBase(),()=>{keepFootRule=false;},()=>{keepFootRule=true;});
     give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
-    for(const down of [2,1])for(const name of ['MEM','QUESTIONS']){
-      // (MEM, 11-16: its headlines take one row before fewer records show.)
-      if(name==='MEM'&&down===2)give(()=>kept.MEM&&memBody>1,()=>{memBody=1;},()=>{memBody=2;});
-      if(name==='QUESTIONS'){if(down===2)give(()=>here&&keepAction,()=>{keepAction=false;},()=>{keepAction=true;});
-        if(down===1){give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});}continue;}
-      give(()=>kept[name]&&take[name]>down,()=>{take[name]--;},()=>{take[name]++;});
-    }
+    // 11-20 (the person: "MESSAGE, MEM은 좀 더 세로길이 따라서 과감하게 표시 줄을 줄여버려 1~2줄 수준으로"): MEM and MESSAGES are the first
+    // sections to go down, before QUESTIONS or the route box give up a row. The messages take their one-row form (a record is
+    // one row already), then MEM shows two records and MESSAGES two messages, then one of each (`+N` on the MESSAGES head counts the rest): from six
+    // rows down to two rows, then one, each.
+    give(()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
+    give(()=>kept.MEM&&take.MEM>2,()=>{take.MEM--;},()=>{take.MEM++;});
+    give(()=>kept.MESSAGES&&take.MESSAGES>2,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
+    give(()=>kept.MEM&&take.MEM>1,()=>{take.MEM--;},()=>{take.MEM++;});
+    give(()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
+    // QUESTIONS: the action row, then the second row of the summary and the guide line.
+    give(()=>here&&keepAction,()=>{keepAction=false;},()=>{keepAction=true;});
+    give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});
+    give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});
     give(()=>keepMetaGap,()=>{keepMetaGap=false;},()=>{keepMetaGap=true;});
-    give(()=>keepRules,()=>{keepRules=false;},()=>{keepRules=true;});
     // (11-16: the QUESTIONS box's two border rows go after its content rows above, before the structural rows below.)
     give(()=>kept.QUESTIONS&&keepQuestionBox,()=>{keepQuestionBox=false;},()=>{keepQuestionBox=true;});
-    give(()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
     // The box comes back with its context rows only while the workers stand.
     // The unit rows a worker's calls add are the first of the route's rows to go.
     give(()=>anyCalled&&keepCalled,()=>{keepCalled=false;},()=>{keepCalled=true;},'route');
@@ -2007,12 +2144,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>anyWorkers&&keepWorkers&&!keepNow,()=>{keepWorkers=false;},()=>{keepWorkers=true;},'route');
     give(()=>keepPlace,()=>{keepPlace=false;},()=>{keepPlace=true;},'route');
     give(()=>twoRows,()=>{twoRows=false;},()=>{twoRows=true;},'route');
-    give(()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
     give(()=>routeLimit>1,()=>{routeLimit--;},()=>{routeLimit++;});
     give(()=>kept.ROUTE&&routeRule(),()=>{keepRouteRule=false;},()=>{keepRouteRule=true;});
     give(()=>keepGit,()=>{keepGit=false;},()=>{keepGit=true;});
-    give(()=>kept.ROUTE,()=>{kept.ROUTE=false;},()=>{kept.ROUTE=true;});
-    give(()=>keepOptional,()=>{keepOptional=false;},()=>{keepOptional=true;});
+    // 11-20 (the person: "NOW·QUESTIONS·ROUTE가 MESSAGES·MEM보다 먼저 자리를 받게"): MESSAGES and MEM give their last rows (their
+    // rows, then their heads; the USAGE rows after MEM as before) before the route box goes; the running jobs after it.
     for(const name of lowest){
       give(()=>kept[name]&&take[name]>0,()=>{take[name]--;},()=>{take[name]++;});
       give(()=>kept[name],()=>{kept[name]=false;},()=>{kept[name]=true;});
@@ -2022,22 +2158,54 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         give(()=>keepUsageHead,()=>{keepUsageHead=false;},()=>{keepUsageHead=true;});
       }
     }
+    give(()=>kept.ROUTE,()=>{kept.ROUTE=false;},()=>{kept.ROUTE=true;});
+    give(()=>keepOptional,()=>{keepOptional=false;},()=>{keepOptional=true;});
     give(()=>keepSent&&sentRows.length>0,()=>{keepSent=false;},()=>{keepSent=true;});
     // (11-16: this window's own usage row beside the buttons costs no row, so it stays while no other usage row is left to give.)
     give(()=>keepQuota&&(!usageOn||footRule()>0),()=>{keepQuota=false;},()=>{keepQuota=true;});
-    const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
-      keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]);
     const stuck=new Set();
     for(const {undo,family} of gave.reverse()){
       if(family&&stuck.has(family))continue;
       const was=choices();undo();
-      if(need()>budget){if(family)stuck.add(family);const v=JSON.parse(was);[keepSpacers,keepMulti,keepMetaGap,keepRules,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
-        Object.assign(take,v[10]);Object.assign(kept,v[11]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,memBody,keepQuestionBox,keepUsageHead]=v.slice(12,23);keepLine.splice(0,keepLine.length,...v[23]);keepRouteRule=v[24];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(25,31);}
+      if(need()>budget){if(family)stuck.add(family);restore(was);}
+    }
+    // 11-22 (the person's STATUS and BACKLOG lists under REPO; one rule): the lists are the first to give way and nothing else gives way for them. The rest stands as it stands
+    // in a window without them (the layout above); the lists take the empty rows and, short of those, rows MESSAGES and MEM fold (both keep their head and one row), in this order:
+    // the empty rows, the BACKLOG items (3, 2, 1, none: only the empty rows are theirs), MESSAGES and MEM folding, the STATUS items (they may stand on what was folded), then the two heads
+    // together (a fold that frees several rows at once and leaves empty ones is no reason to leave the BACKLOG items short: they stand on those again), where the REPO row ends in the two buttons and everything else is the window's own (what was folded unfolds).
+    if(lists.length>0){
+      listsOn=true;
+      const own=[keepSpacers,messageOne,take.MEM,take.MESSAGES];
+      const steps=[[()=>keepSpacers,()=>{keepSpacers=false;}],
+        [()=>take.BACKLOG_ITEMS>0,()=>{take.BACKLOG_ITEMS--;}],
+        [()=>kept.MESSAGES&&!messageOne,()=>{messageOne=true;}],
+        [()=>kept.MEM&&take.MEM>2,()=>{take.MEM--;}],
+        [()=>kept.MESSAGES&&take.MESSAGES>2,()=>{take.MESSAGES--;}],
+        [()=>kept.MEM&&take.MEM>1,()=>{take.MEM--;}],
+        [()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;}],
+        [()=>take.STATUS_ITEMS>0,()=>{take.STATUS_ITEMS--;}]];
+      const backlogFull=take.BACKLOG_ITEMS;
+      for(const [can,apply] of steps)while(need()>budget&&can())apply();
+      if(need()>budget){keepLists=false;[keepSpacers,messageOne,take.MEM,take.MESSAGES]=own;}
+      // A fold can free several rows at once and leave empty ones: the BACKLOG items stand on them again (up to what they were, and the STATUS items stand already).
+      else while(need()<budget&&take.BACKLOG_ITEMS<backlogFull)take.BACKLOG_ITEMS++;
     }
     const order=[];
-    top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
-      order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});});
+    top.forEach((row,i)=>{
+      if(!keepLists&&listRows.has(i))return;
+      if(!keepLists&&i===repoAt&&repoButtons){order.push({parts:repoButtons.parts,groups:topGroups.get(i),action:repoButtons.actions});return;}
+      if(!keepMetaGap&&sessionAt>=0&&i===sessionAt+1&&modelValueOf){const value=modelValueOf(Math.max(1,inner-8));if(value){order.push({parts:groupHead('SESSION',value),groups:topGroups.get(i)});return;}}
+      const at=listItemAt.get(i);
+      if(at&&at.j>=take[at.entry.name+'_ITEMS'])return;
+      if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i))){
+        const head=listHeads.get(i);
+        // A list part's head: ` STATUS +2        ›` (one cell in; the count of the items not shown, as MESSAGES' head; the word dim, not titled, where its document is not there).
+        const shownRows=head?head.items.slice(0,take[head.name+'_ITEMS']):[],k=head&&head.name==='BACKLOG'?kindsOf(head.doc):null;
+        const hidden=head?(k?k.fix+k.improve-shownRows.filter(it=>it&&(it.kind==='fix'||it.kind==='improve')).length:head.total-shownRows.length):0;
+        const stages=k?kindStages(k,hidden,head.doc):null;
+        order.push({parts:head?[pad(IND),...narrow(()=>sectionHead([],head.name,stages?stages[0]:hidden>0||head.doc.more===true?[text(countWords(hidden,head.doc.more===true),'loc_repo')]:[],[[]],true,head.doc.has_doc!==true,stages?stages.slice(1):[]))]:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});}});
     for(const item of order)add(item.parts,item.action,item.groups);
+    const headRows=content.length;
     // Each section stands whole (its head and the rows it kept), one after another from the top; the
     // rows left over stand between the sections above and MESSAGES·MEM (spec rule 14: those two keep to
     // the panel's bottom, right above the last row), or under the last section when there are none.
@@ -2055,15 +2223,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       if(s.name==='QUESTIONS'&&boxedQuestions()){
         const key={key:here?'lvl_y':'dim',role:here?'accent-line':'messages',blink:here&&waitBlinks};
-        const label=[...(questionCount?[{...text(questionCount,'g_blocked'),role:'accent'},text(' ')]:[]),{...text(summary?.label||'QUESTIONS','dim'),role:'title'},text(' '),text('›','dim')];
-        add(boxTop(label,key,{action:'question'}).parts,'question',s.groups);
+        const label=[...(questionCount?[{...text(questionCount,'g_blocked'),role:'accent'},text(' ')]:[]),{...text(summary?.label||'QUESTIONS','dim'),role:'title'}];
+        add(boxTop(label,key,{action:'question',arrow:true}).parts,'question',s.groups);
         for(const row of questionRowsIn())add(boxRow({parts:row},key).parts,'question');
         add(boxBottom(key).parts,'question');
         continue;
       }
       const into=['MESSAGES','MEM'].includes(s.name)?(parts,action,groups)=>lower.push({parts,action,groups}):add;
       into(s.head(),s.action,s.groups);
-      sectionRows(s).forEach(row=>into(row,s.action));
+      sectionRows(s).forEach((row,i)=>into(row,s.rowAction?s.rowAction(i):s.action));
     }
     // 11-16: the USAGE rows stand last in the lower block (the last harness's row, where it fits, on the last row below).
     if(resourceCount()){lower.push({parts:resourceHead()});for(const line of resourceLines())lower.push({parts:line});}
@@ -2098,7 +2266,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return join(tries.find(gs=>size(join(gs))<=quotaRoom)||[]);
     })();
     const lastEnd=usageOn?usageLines().at(-1):null;
-    lastRow(keepQuota?quotaRow:[],usageOn?(lastEnd&&lastUsage.length&&lastEnd.harness===harness?['quota']:[]):keepQuota&&quota.length?['quota']:[],order.length,kept.QUESTIONS?0:1);
+    lastRow(keepQuota?quotaRow:[],usageOn?(lastEnd&&lastUsage.length&&lastEnd.harness===harness?['quota']:[]):keepQuota&&quota.length?['quota']:[],headRows,kept.QUESTIONS?0:1);
   }
   const count=fill?height:Math.min(height,content.length+2),rows=[];
   // Spec rules 16-17, 29 (a): the top border carries Fleet's session-row head on the
@@ -2188,18 +2356,21 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(let y=H-2;y>0;y--)cells.push({row:y,col:0,ch:'│'});
   }else if(ruleMoving){
     // `rule`: the head rule's cells (where the rule stands; a panel short of rows that drops it moves nothing).
+    // 11-22: the SESSION head's rule alone: its cells, from its first to its last, wherever the head's name and value leave them.
     const y=rows.findIndex((r,i)=>i>0&&i<count-1&&r.some(part=>part.rule));
-    if(y>0)for(let x=0;x<inner;x++)cells.push({row:y,col:2+x,ch:'─',rule:x});
+    if(y>0){let col=0,k=0;const row=[];
+      for(const part of rows[y]){const w=cellsOf([part]);if(part.rule)for(let x=0;x<w;x++)row.push({row:y,col:col+x,ch:'─',rule:k++});col+=w;}
+      ruleLen=Math.max(1,row.length);cells.push(...row);}
   }
   // 11-15: the waiting blink's cells (the QUESTIONS rows' red letters) ride the same motion, on Fleet's beat (11-16).
   const framed=cells.length;
   if(waitBlinks)cells.push(...blinkCells(rows,measure,clean,1,count-1));
   const blinked=cells.length>framed;
   const motion=cells.length?{cells,
-    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(tick)}:c.rule!==undefined?ruleLook(c.rule,tick):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background,harness})[0],
+    at:tick=>appearance([cells.map(c=>c.blink?{...c.blink,text:c.ch,blinkTone:blinkTone(tick)}:c.rule!==undefined?ruleLook(c.rule,tick,ruleLen):borderCell(place(c.row,c.col),c.ch,tick))],cfg,{colors:borderColors,noColor:model.no_color===true,background,harness})[0],
     next:tick=>Math.min(blinked?blinkNext(tick):Infinity,framed?frameNext(tick):Infinity)}:null;
   function frameNext(tick){const local=borderTick(tick),shift=Math.trunc(tick)-local;
-      if(ruleMoving){const r=ruleTick(tick);return Math.trunc(tick)+scanNext(r,inner)-r;}
+      if(ruleMoving){const r=ruleTick(tick);return Math.trunc(tick)+scanNext(r,ruleLen)-r;}
       if(moving==='scanners')return Math.trunc(tick)+1;
       if(moving==='border'){const k=Math.floor(local*around/BORDER_LAP);let n=Math.ceil((k+1)*BORDER_LAP/around);if(n<=local)n=local+1;return n+shift;}
       const now=breathStep(local,breathSteps);for(let t=local+1;t<=local+BORDER_BREATHE;t++)if(breathStep(t,breathSteps)!==now)return t+shift;return local+BORDER_BREATHE+shift;}
@@ -2287,7 +2458,7 @@ function popupWidth(cols,kind='text'){
 // frame first (under 8 rows), then its bottom line (3 rows or fewer), so the content keeps rows.
 function popupHeight(space){return space>=8?space-2:space;}
 function popupRoom(rows,band=0){const H=popupHeight(Math.max(1,rows-band));return Math.max(0,H>3?H-2:H-1);}
-function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],labels=sections,current=0,model={},configuration,cellWidth,background=''}){
+function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],current=0,model={},configuration,cellWidth,background=''}){
   const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
   const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
   const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
@@ -2311,8 +2482,8 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],labels
   const close=W>=8?[text(' ','dim'),text('✕','dim'),line(' ─╮')]:[line('╮')];
   const top=[...head,line('─'.repeat(Math.max(0,W-size(head)-size(close)))),...close];
   // The bottom line: the sections, the current one bright.
-  // (11-15: a section's name on the line is its label, `현황` for STATUS; its press opens it by its key.)
-  const named=i=>String(labels[i]??sections[i]);
+  // (11-20: a section's name on the line is its own, `STATUS` in English like the rest; its press opens it by its key.)
+  const named=i=>String(sections[i]);
   const names=sections.flatMap((s,i)=>[...(i?[text(' · ','dim')]:[]),{...text(named(i),i===current?'loc_repo':'dim'),role:i===current?'':'title',bold:i===current}]);
   const listed=names.length&&size(names)+6<=W?[line('╰─ '),...names,line(' ')]:[line('╰─')];
   const bottom=[...listed,line('─'.repeat(Math.max(0,W-size(listed)-1))),line('╯')];
@@ -2348,6 +2519,11 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],labels
   painted=painted.map(row=>row.map(({popupLine,popupTitle,chosenRow,tint,...part})=>part));
   // Presses, in window cells: `✕` closes, a section's name opens its popup.
   const hits=[];
+  list.forEach((parts,i)=>{
+    if(parts.some(p=>p.answerRow))hits.push({row:y+i+1,left:x+2,right:x+W-3,action:'answer-write'});
+    const choice=parts.find(p=>Number.isInteger(p.choiceIndex));
+    if(choice)hits.push({row:y+i+1,left:x+2,right:x+W-3,action:'answer-choice:'+choice.choiceIndex});
+  });
   if(close.length>1)hits.push({row:y,left:x+W-4,right:x+W-3,action:'popup-close'});
   let at=x+3;for(let i=0;i<sections.length&&shut&&listed.length>2;i++){const n=measure(clean(named(i)));hits.push({row:y+H-1,left:at,right:at+n-1,action:'popup:'+sections[i]});at+=n+3;}
   return {rows:painted,left:x-left,top:y-above,width:W+left+right,height:out.length,frame:{left:x,top:y,width:W,height:H},inner,body:list.length,hits};
@@ -2423,15 +2599,10 @@ function requestForms(q,{text,measure,width,arrow='loc_repo'}){
   })();
   return {head,title:titleRow,status:statusRow,titled,one};
 }
-// 11-15 (popup design E): the MESSAGES popup's rows: the requests this session sent or received
-// (their numbers, reports and body) and the recent messages, the newest first, each its head (the
-// direction, the other session, then dim harness, time, kind and a sent one's delivery state) and
-// its whole text under it, two cells in. What the panel's rows cut reads whole here.
-function messagesBody({model={},columns=72,cellWidth}={}){
-  const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
-  const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
-  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
-  const wrapText=(value,key,width,lead='  ')=>{
+// A text wrapped at word boundaries into rows of `width` cells, each led by `lead` (a word wider than a row goes on by grapheme); shared by the
+// MESSAGES popup and the MEM popup (11-20), which draw their rows by one rule.
+function makeWrapText(measure,text,clean){
+  return (value,key,width,lead='  ')=>{
     const out=[];const room=Math.max(4,width-measure(lead));
     for(const paragraph of clean(value).split(/\s*\n\s*/)){
       let row='',used=0;
@@ -2446,6 +2617,39 @@ function messagesBody({model={},columns=72,cellWidth}={}){
     }
     return out;
   };
+}
+// 11-20 (the person: "메모리 내용은 한줄로 바꾸고 ... 메시지 처럼 팝업이 가능하게"): the MEM popup's rows, drawn as the MESSAGES popup's: the records the
+// panel's model holds (`memory_items`, newest first), each its head (`◆ project · decision · 10m`: `◆` durable or `◇` working, its scope, kind and age,
+// dim), its headline whole in the body color two cells in, and its body (the record's snippet the backend carried, never anything else) under it.
+// `rows.starts` is the row each record starts at, for the popup that opens on a pressed record.
+function memoryBody({model={},columns=72,cellWidth}={}){
+  const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
+  const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
+  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
+  const wrapText=makeWrapText(measure,text,clean);
+  const out=[];out.starts=[];
+  for(const m of (Array.isArray(model.memory_items)?model.memory_items:[]).filter(m=>m&&typeof m==='object'&&clean(m.text).trim())){
+    if(out.length)out.push([]);
+    out.starts.push(out.length);
+    const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
+    const head=[mark,...[m.scope,m.kind].map(v=>clean(v).trim()).filter(Boolean),clean(m.age).trim()].filter(Boolean).join(' · ').replace(/^(.) · /,'$1 ');
+    out.push([text(head,'dim')]);
+    const title=clean(m.text).trim(),body=clean(m.body).trim();
+    // (a body that goes on from the headline, a record with no headline of its own, is read once, whole.)
+    if(!body.startsWith(title))out.push(...wrapText(title,'loc_repo',columns));
+    if(body&&body!==title)out.push(...wrapText(body,body.startsWith(title)?'loc_repo':'dim',columns));
+  }
+  return out.length?out:[[text('·')]];
+}
+// 11-15 (popup design E): the MESSAGES popup's rows: the requests this session sent or received
+// (their numbers, reports and body) and the recent messages, the newest first, each its head (the
+// direction, the other session, then dim harness, time, kind and a sent one's delivery state) and
+// its whole text under it, two cells in. What the panel's rows cut reads whole here.
+function messagesBody({model={},columns=72,cellWidth}={}){
+  const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
+  const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
+  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
+  const wrapText=makeWrapText(measure,text,clean);
   const out=[];
   for(const q of (Array.isArray(model.requests)?model.requests:[]).filter(q=>q&&typeof q.id==='string')){
     if(out.length)out.push([]);
@@ -2657,7 +2861,7 @@ function stageWordOf(shape){return /^staged/.test(shape)?'staged':/^(|unknown|fr
 function stageLeadOf(r){const word=stageWordOf(String((r&&r.shape)||''));return word==='staged'?'':word;}
 function stageLinedOf(r){const shape=String((r&&r.shape)||''),n=Array.isArray(r&&r.stages)?r.stages.length:0;
   return shape!=='framed'&&(/^staged/.test(shape)?n>0:n>1);}
-module.exports={render,keyRows,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,veil,
+module.exports={render,keyRows,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES,breathStep,popup,popupWidth,popupRoom,messagesBody,memoryBody,veil,
   RULE:{PEAK:RULE_PEAK,FADE:RULE_FADE,SCAN:RULE_SCAN,REST:RULE_REST,EASE:RULE_EASE},scanAt,WAVE:{COUNT:WAVE_COUNT,LAP:WAVE_LAP,STEPS:WAVE_STEPS,FLOOR:WAVE_FLOOR,MIN:WAVE_MIN},
   BORDER:{LIT:BORDER_LIT,ARC:BORDER_ARC,LAP:BORDER_LAP,SHADES:BORDER_SHADES,BREATHE:BORDER_BREATHE,BREATHE_STEPS:BORDER_BREATHE_STEPS,BREATHE_STEPS_256:BORDER_BREATHE_STEPS_256}};
 module.exports.routesBody=routesBody;

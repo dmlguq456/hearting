@@ -240,6 +240,89 @@ class SharedCacheFallbackTests(unittest.TestCase):
         self.assertTrue(report["sources"]["opencode"].startswith("unknown:"))
         self.assertEqual(report["sources"]["claude"], "unknown:no-fresh-taps")
 
+    def test_the_two_networked_gauges_are_read_side_by_side(self):
+        # Each is its own HTTP call; one start waits for the slower, not for both. Neither can return
+        # until the other has begun, so a sequential read would stop here for the whole wait.
+        import threading
+        begun = {"codex": threading.Event(), "opencode": threading.Event()}
+        other = {"codex": "opencode", "opencode": "codex"}
+
+        def probe(name, score):
+            def read():
+                begun[name].set()
+                if not begun[other[name]].wait(5):
+                    raise AssertionError("the other gauge was not started while this one was read")
+                return score
+            return read
+
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": "", "HARNESS_CAPACITY_SCORES": ""}), \
+                mock.patch.object(C, "_codex_api_score", probe("codex", 60.0)), \
+                mock.patch.object(C, "_opencode_api_score", probe("opencode", 40.0)), \
+                mock.patch.object(C, "_claude_capacity_reading", return_value=(None, None)):
+            report = C.capacity_report(now=0.0)
+        self.assertEqual((report["scores"]["codex"], report["scores"]["opencode"]), (60.0, 40.0))
+        self.assertEqual((report["sources"]["codex"], report["sources"]["opencode"]), ("live", "live"))
+        self.assertEqual(list(report["scores"]), ["codex", "claude", "opencode"])     # the same order as before
+
+    def test_a_probe_that_raises_raises_out_of_the_report_as_it_did_in_turn(self):
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": "", "HARNESS_CAPACITY_SCORES": ""}), \
+                mock.patch.object(C, "_codex_api_score", side_effect=RuntimeError("boom")), \
+                mock.patch.object(C, "_opencode_api_score", return_value=10.0), \
+                mock.patch.object(C, "_claude_capacity_reading", return_value=(None, None)):
+            with self.assertRaises(RuntimeError):
+                C.capacity_report(now=0.0)
+
+    def test_a_skipped_gauge_is_not_read_and_says_why_but_the_cache_writing_gauges_are_always_read(self):
+        # A harness the caller has ruled out is never selected on its headroom: the read-only gauge (claude) is
+        # not read and the receipt shows `skipped:<why>`. The two gauges whose read refreshes the shared usage
+        # cache (codex, opencode) are read whatever is asked, because the next start's limit judgment reads it.
+        asked = []
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": "", "HARNESS_CAPACITY_SCORES": ""}), \
+                mock.patch.object(C, "_codex_api_score", side_effect=lambda: asked.append("codex") or 60.0), \
+                mock.patch.object(C, "_opencode_api_score", side_effect=lambda: asked.append("opencode") or 40.0), \
+                mock.patch.object(C, "_claude_capacity_reading", side_effect=lambda *a: asked.append("claude") or (70.0, None)), \
+                mock.patch.object(C, "_claude_cache_score", return_value=(None, None)):
+            self.assertEqual(C.CACHE_WRITING_GAUGES, {"codex", "opencode"})
+            report = C.capacity_report(now=0.0, skip={"claude": "limited"})
+            self.assertEqual(sorted(asked), ["codex", "opencode"])
+            self.assertEqual((report["scores"]["claude"], report["sources"]["claude"]), (None, "skipped:limited"))
+            self.assertEqual((report["scores"]["codex"], report["sources"]["codex"]), (60.0, "live"))
+            asked.clear()
+            report = C.capacity_report(now=0.0, skip={"claude": "not-needed", "codex": "not-needed", "opencode": "limited"})
+            self.assertEqual(sorted(asked), ["codex", "opencode"])
+            self.assertEqual((report["sources"]["codex"], report["sources"]["opencode"]), ("live", "live"))
+            self.assertEqual(report["sources"]["claude"], "skipped:not-needed")
+
+    def test_a_manual_score_stands_over_a_skip_and_a_report_without_skip_is_unchanged(self):
+        with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": "opencode:33", "AGENT_DISPATCH_JOBS": ""}), \
+                mock.patch.object(C, "_codex_api_score", return_value=55.0), \
+                mock.patch.object(C, "_claude_capacity_reading", return_value=(None, None)), \
+                mock.patch.object(C, "_claude_cache_score", return_value=(None, None)):
+            skipped = C.capacity_report(now=0.0, skip={"opencode": "limited"})
+            plain = C.capacity_report(now=0.0)
+        self.assertEqual((skipped["scores"]["opencode"], skipped["sources"]["opencode"]), (33.0, "manual"))
+        self.assertEqual(skipped, plain)
+        with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": "claude:33", "AGENT_DISPATCH_JOBS": ""}), \
+                mock.patch.object(C, "_codex_api_score", return_value=55.0), \
+                mock.patch.object(C, "_opencode_api_score", return_value=44.0):
+            skipped = C.capacity_report(now=0.0, skip={"claude": "limited"})
+        self.assertEqual((skipped["scores"]["claude"], skipped["sources"]["claude"]), (33.0, "manual"))
+
+    def test_the_skipped_harness_could_not_have_changed_the_choice(self):
+        # Why the skip is safe: `select` ranks only harnesses whose usage state is not limited, so the
+        # headroom of a limited one (any number, or none) gives the same choice and the same ranks.
+        names = ["claude", "codex", "opencode"]
+        policy = {"primary": names, "relief": [], "last_resort": [], "promote_relief_below": 0}
+        states = {"claude": "ok", "codex": "ok", "opencode": "limited(2026-12-01)"}
+        for strategy in ("balanced", "capacity-aware"):
+            outcomes = set()
+            for opencode in (None, 0.0, 5.0, 100.0):
+                scores = {"claude": 70.0, "codex": 55.0, "opencode": opencode}
+                choice, band, ranks, promoted = C.select(policy, states, {"claude": 3, "codex": 1, "opencode": 0}, names,
+                                                         scores, strategy=strategy, preferred="claude", affinity_weight=0.65)
+                outcomes.add((choice, band, json.dumps(ranks, sort_keys=True), promoted))
+            self.assertEqual(len(outcomes), 1, (strategy, outcomes))
+
     def test_refresh_bumps_attempted_at_on_failure_without_losing_payload(self):
         cache = self._cache()
         cache.record("codex", {"windows": [["7d", 30, None]]}, now=100.0)
@@ -692,6 +775,60 @@ class CapacityPolicyTests(unittest.TestCase):
             {"primary": ["claude", "codex", "opencode"], "relief": [], "last_resort": []},
             states, counts, order, scores, strategy="balanced", harness_weights={"opencode": 0.3})
         self.assertNotEqual(name, "opencode")
+
+    # --- field weights: the product `harness_weights x field row` is just `harness_weights` here ---
+
+    FIELD_ROW = {"claude": 0.95, "codex": 0.85, "opencode": 1.0}
+    BAND = {"primary": ["claude", "codex", "opencode"], "relief": [], "last_resort": [],
+            "promote_relief_below": 0}
+
+    def _sequence(self, weights, *, picks=12, scores=None, states=None, policy=None):
+        names = ["claude", "codex", "opencode"]
+        states = states or {h: "ok" for h in names}
+        scores = scores or {h: 80.0 for h in names}
+        window, out = [], []
+        for _ in range(picks):
+            counts = {h: window[-30:].count(h) for h in names}
+            name, *_rest = C.select(policy or self.BAND, states, counts, names, scores,
+                                    strategy="balanced", usage_gate_used_percent=85,
+                                    headroom_exponent=2, harness_weights=weights)
+            window.append(name); out.append(name)
+        return out
+
+    def test_a_neutral_field_row_cycles_exactly_as_no_weights_do(self):
+        plain = self._sequence(None)
+        self.assertEqual(plain[:6], ["claude", "codex", "opencode", "claude", "codex", "opencode"])
+        for neutral in ({}, {"claude": 1.0, "codex": 1.0, "opencode": 1.0}):
+            self.assertEqual(self._sequence(neutral), plain)
+
+    def test_a_field_row_tilts_the_share_inside_the_band(self):
+        tilted = self._sequence(self.FIELD_ROW, picks=300)
+        flat = self._sequence(None, picks=300)
+        self.assertLess(tilted.count("codex"), flat.count("codex"))
+        self.assertGreater(tilted.count("opencode"), flat.count("opencode"))
+
+    def test_a_field_row_never_lifts_a_gated_harness_over_an_ungated_peer(self):
+        # claude is past the 85% gate: its class stays behind whatever the field row says
+        row = {"claude": 1.0, "codex": 0.2, "opencode": 0.2}
+        scores = {"claude": 10.0, "codex": 80.0, "opencode": 80.0}
+        ranked = C.rank_band(["claude", "codex", "opencode"], {h: "ok" for h in scores},
+            {"claude": 0, "codex": 9, "opencode": 9}, ["claude", "codex", "opencode"], scores,
+            strategy="balanced", usage_gate_used_percent=85, headroom_exponent=2, harness_weights=row)
+        self.assertEqual(ranked[-1], "claude")
+        for pick in self._sequence(row, picks=20, scores=scores):
+            self.assertNotEqual(pick, "claude")
+
+    def test_a_field_row_never_returns_a_limited_harness(self):
+        row = {"claude": 0.1, "codex": 0.1, "opencode": 1.0}
+        states = {"claude": "ok", "codex": "ok", "opencode": "limited(2026-11-28)"}
+        for pick in self._sequence(row, picks=20, states=states):
+            self.assertIn(pick, {"claude", "codex"})
+
+    def test_a_field_row_never_moves_a_harness_across_quality_bands(self):
+        policy = {"primary": ["claude"], "relief": [], "last_resort": ["codex", "opencode"],
+                  "promote_relief_below": 0}
+        row = {"claude": 0.05, "codex": 1.0, "opencode": 1.0}
+        self.assertEqual(set(self._sequence(row, picks=20, policy=policy)), {"claude"})
 
     def test_single_candidate_is_neutral_for_all_weights(self):
         for weight in (0, .5, 1.0):
