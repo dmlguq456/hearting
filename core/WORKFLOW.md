@@ -1319,16 +1319,21 @@ to the other things a finished attempt leaves behind: a merged worktree and
 branch, a spec `pipeline_state.yaml` still naming a live phase, and a memory
 handoff still `pending` after its obligation is met. Registered delivery
 reconciliation expires only the exact record whose original recipient has
-positive dead PID/start evidence; a closed identity-matched route settles its
-bound duty as not-required while retaining the record only when the registered
-parent runtime has no PID/start evidence or cannot be observed. With the record
-still open and that runtime live, as after a plain `/clear` that gave the
-session a new id, the duty stays open as undelivered (`completion-undelivered`),
-the next prompt of another session in the same pane and runtime shows one
-notice line that carries no task, and the record then expires as
-`recipient-session-replaced`; a dead runtime expires the record first. Unknown
-liveness and a live successor remain pending, and unchanged observations are
-not rewritten.
+positive dead PID/start evidence. A closed identity-matched route settles its
+bound duty as not-required while retaining the record, once a fresh presence
+read still finds the parent absent. The one exception is an owner's completion
+to a Claude parent whose record is still open: while the registered parent
+runtime is live, as after a plain `/clear` that gave the session a new id, the
+duty stays open as undelivered (`completion-undelivered`) without that fresh
+read; the next prompt of another Claude session in the same pane and runtime
+adds one informational line to the model's context (it asks for nothing and
+may be passed to the person in one line), and the record then expires as
+`recipient-session-replaced`, or is ACKed when that session's transcript
+already holds its exact receipt. A dead runtime expires that record first.
+Gate and supervision notices, Codex and OpenCode parents, and a runtime with
+no PID/start evidence or one this host cannot observe keep the not-required
+settlement. Unknown liveness and a live successor remain pending, and
+unchanged observations are not rewritten.
 Close what the attempt opened, or the next session pays for it in reconstruction.
 
 ### 0.6. Tracked-Workflow Lifecycle and Continuation
