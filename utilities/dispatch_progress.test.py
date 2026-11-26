@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("progress", ROOT / "utilities/dispatch-progress.py")
 P = importlib.util.module_from_spec(spec); spec.loader.exec_module(P)
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import dispatch_contract as D  # noqa: E402
 from tools.fleet import model
 from split_module_fixture import patch_split  # noqa: E402
@@ -34,7 +36,7 @@ class ProgressTest(unittest.TestCase):
         start = (Path("/proc") / str(self.proc.pid) / "stat").read_text().split()[21]
         self.proc_start = start
         self.pid_namespace = os.readlink("/proc/self/ns/pid")
-        self.attempt = "att-0123456789abcdef"
+        self.attempt = unique_attempt_id("att-0123456789abcdef")
         self.scope=self.base/"scope";self.scope.mkdir()
         pipe = (
             "attempt_schema_version=2,dispatch_depth=2,transport=headless,"

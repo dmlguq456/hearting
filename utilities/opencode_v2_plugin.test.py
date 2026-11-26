@@ -1528,6 +1528,7 @@ const otherLocation = { directory: `${process.env.TEMP_ROOT}/other` }
 fs.mkdirSync(otherLocation.directory)
 const identityDir = `${process.env.XDG_STATE_HOME}/hearting/tui-identity`
 const policyDir = `${process.env.XDG_STATE_HOME}/agent-fleet/context-policy/opencode`
+const inheritedAttempt = process.env.AGENT_DISPATCH_ATTEMPT_ID
 fs.mkdirSync(identityDir, { recursive: true })
 fs.mkdirSync(policyDir, { recursive: true })
 const file = tui => `${identityDir}/${tui.pid}-${tui.start}.json`
@@ -1593,7 +1594,7 @@ const primary = async (sessionID = "ses_a", ref = { providerID: "p", id: "m" }, 
 }
 try {
   select(tuis[0], "ses_a"); select(tuis[1], "ses_a"); select(tuis[2], "ses_b")
-  const inherited = `${policyDir}/attempt-att-inherited.json`
+  const inherited = `${policyDir}/attempt-${inheritedAttempt}.json`
   fs.writeFileSync(inherited, "inherited sentinel")
   await primary(); await primary("ses_b", { providerID: "p", id: "other" })
   await flush()
@@ -1852,8 +1853,8 @@ try {
   lookup = () => ({ location, data: [model()] })
   await primary("ses_worker"); await flush()
   const worker = JSON.parse(fs.readFileSync(inherited))
-  assert.equal(worker.attempt_id, "att-inherited")
-  assert.equal(worker.policy.attempt_id, "att-inherited")
+  assert.equal(worker.attempt_id, inheritedAttempt)
+  assert.equal(worker.policy.attempt_id, inheritedAttempt)
   assert.equal(worker.session_id, "ses_worker")
   select(tuis[0], "ses_a")
   lookup = () => ({ location, data: [model()] })
@@ -1877,7 +1878,8 @@ try {
             env = {**BASE_ENV, "HOME": tmp, "XDG_STATE_HOME": str(Path(tmp) / "state"),
                    "XDG_CONFIG_HOME": str(Path(tmp) / "config"),
                    "FLEET_SESSION_REGISTRY_DIR": str(Path(tmp) / "state/agent-fleet/sessions"),
-                   "AGENT_DISPATCH_ATTEMPT_ID": "att-inherited", "AGENT_DISPATCH_CHILD": "1",
+                   "AGENT_DISPATCH_ATTEMPT_ID": fixture_processes.unique_attempt_id("att-inherited"),
+                   "AGENT_DISPATCH_CHILD": "1",
                    "OPENCODE_VERSION": "1.19.0",  # inherited v1 version cannot prove a v2 trigger
                    "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
                    "TUI_FIXTURES": json.dumps(tuis), "TEMP_ROOT": tmp,
