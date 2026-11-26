@@ -383,6 +383,67 @@ def launch_input(jobs, aid, meta):
     return value
 
 
+_CARRY_CHAIN_LIMIT = 64
+
+
+def _sealed_claude_owner(jobs, rows, attempt):
+    """The sealed input of a Claude owner attempt, or ``None`` when it is not provably one."""
+    if attempt not in rows:
+        return None
+    _fields, meta = rows[attempt]
+    if meta.get('worker_type') != 'owner':
+        return None
+    try:
+        sealed = launch_input(jobs, attempt, meta)
+    except DC.DispatchContractError:
+        return None
+    return sealed if sealed.get('harness') == 'claude' else None
+
+
+def carried_allowed_tools(jobs, retry_of, *, harness, worker_type, agent_home, current_home=None):
+    """The sealed Claude allow list an owner replacement keeps after a release move.
+
+    A replacement owner of the same harness is held to the permissions its predecessor was
+    sealed with (``route_authority.require_recovery_work``). The launcher computes the Claude
+    allow list again from the release it runs on, so a release that grants more than the one
+    that sealed the lineage (task-branch publication, for example) would make every
+    replacement differ from its sealed predecessor. When the sealed Claude owner lineage ran
+    on another release than ``current_home`` (the predecessor's own input, or any earlier
+    link's), this returns the predecessor's sealed list with the spellings of its release
+    moved to ``agent_home``: no rule is added and none is removed, so nothing a release grants
+    later reaches the replacement. ``None`` leaves the ordinary launch computation in place:
+    no predecessor, a stage or other harness, a sealed input that does not prove itself, a
+    lineage that stayed on one release (a branch change there keeps being refused), or a list
+    that names no path in its release (one sealed while a Git operation was in progress),
+    which has nothing to move."""
+    if not retry_of or worker_type != 'owner' or harness != 'claude':
+        return None
+    current = os.path.realpath(str(ROOT if current_home is None else current_home))
+    rows = _rows(registry_text(jobs))
+    previous = _sealed_claude_owner(jobs, rows, retry_of)
+    if previous is None:
+        return None
+    claude = (previous.get('applied_permissions') or {}).get('claude')
+    tools = claude.get('allowed_tools') if isinstance(claude, dict) else None
+    sealed_home = previous.get('launch_home')
+    if (not isinstance(tools, list) or not all(isinstance(rule, str) for rule in tools)
+            or not isinstance(sealed_home, str) or not sealed_home):
+        return None
+    moved = False
+    attempt, seen, sealed = retry_of, set(), previous
+    while sealed is not None and attempt not in seen and len(seen) < _CARRY_CHAIN_LIMIT:
+        seen.add(attempt)
+        home = sealed.get('launch_home')
+        if isinstance(home, str) and home and os.path.realpath(home) != current:
+            moved = True
+            break
+        attempt = rows[attempt][1].get('automatic_retry_of')
+        sealed = _sealed_claude_owner(jobs, rows, attempt) if attempt else None
+    if not moved or not route_authority.release_root_aliases(json.dumps(tools), sealed_home):
+        return None
+    return route_authority.readdress_release_roots(tools, sealed_home, agent_home)
+
+
 def terminal_observation(fields, meta):
     from codex_dispatch_terminal import inspect_terminal_attempt
     return inspect_terminal_attempt(meta.get('log_file'), worktree=fields[3],

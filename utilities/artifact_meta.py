@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Campaign/cycle metadata and the project vocabulary: one read model, one write path, one command.
 
-Public files (Cairn reads them):
+Public files:
   campaigns/<locator>/meta.json                          contract `artifact-meta/v1`
   .runtime/artifact-producer/v1/project-meta.json        contract `artifact-project-meta/v1`
-Internal (never a Cairn input):
+Internal (not a public file):
   .runtime/artifact-producer/v1/artifact-meta-state.json   number high-water, issued IDs, project sources
   .runtime/artifact-producer/v1/artifact-meta-transactions/  at most one write-ahead intent per write
 
