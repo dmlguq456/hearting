@@ -42,6 +42,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -331,6 +332,26 @@ def refresh_observed_tag_metadata(agents) -> None:
                                 metadata[metadata.index("--display-agent") + 1])
             if prepared and prepared.group(1) == resolve_tag(harness, held or sid):
                 _send_projection(metadata, None)
+                _remember_header(observed, held, metadata)
+
+
+# The header this process last sent to (or found already on) each pane it refreshes:
+# ``{(pane, harness, sid): (held, display_agent, title)}``. Process-local, never stored, and
+# narrowed on every pass to the panes that pass looks at, so it does not grow.
+_HEADERS = {}
+_HEADERS_LOCK = threading.Lock()
+
+
+def _header_of(held, command):
+    display = command[command.index("--display-agent") + 1] if "--display-agent" in command else ""
+    title = command[command.index("--title") + 1] if "--title" in command else ""
+    return held, display, title
+
+
+def _remember_header(identity, held, command):
+    if command:
+        with _HEADERS_LOCK:
+            _HEADERS[identity] = _header_of(held, command)
 
 
 def _tag_metadata_targets(agents):
@@ -341,11 +362,21 @@ def _tag_metadata_targets(agents):
     (``session_tags.assign``), never judged again here. Such a pane keeps its number when the
     held session continues it, so its header is also refreshed when its title is not the one
     the held session's header has now (same text: no write). A pane whose herdr record carries
-    no title is judged by its number only, so an unknown title never repeats a write."""
-    for agent in list(agents or ()):
+    no title is judged by its number only, so an unknown title never repeats a write.
+
+    The title is also judged once when a link has just ended (this process last wrote the pane's
+    header for a held session): the header goes back to the window's own. A header this process
+    already sent to, or found on, the same pane is not sent again, even when herdr reports
+    another title (another source, a person's edit, a reshaped string)."""
+    agents = list(agents or ())
+    with _HEADERS_LOCK:
+        known = dict(_HEADERS)
+    found, present, settled = [], set(), {}
+    for agent in agents:
         identity = _tag_metadata_identity(agent)
         if identity is None:
             continue
+        present.add(identity)
         pane, harness, sid = identity
         held = agent.get("held_session") if harness == "claude" else None
         held = held if isinstance(held, str) and held and held != sid else None
@@ -354,12 +385,21 @@ def _tag_metadata_targets(agents):
         if not tag:
             continue
         stale = not shown or shown.group(1) != tag
-        if not stale and held and isinstance(agent.get("title"), str):
-            command = _metadata_command("herdr", harness, sid, pane, held=held)
-            wanted = command[command.index("--title") + 1] if "--title" in command else ""
-            stale = wanted != agent["title"]
+        last = known.get(identity)
+        if not stale and (held or (last and last[0])) and isinstance(agent.get("title"), str):
+            wanted = _header_of(held, _metadata_command("herdr", harness, sid, pane, held=held))
+            if wanted[2] == agent["title"]:
+                settled[identity] = wanted
+            else:
+                stale = last != wanted
         if stale:
-            yield identity, held
+            found.append((identity, held))
+    with _HEADERS_LOCK:
+        for identity in list(_HEADERS):
+            if identity not in present:
+                del _HEADERS[identity]
+        _HEADERS.update(settled)
+    return found
 
 
 def refresh_tag_metadata(agents) -> None:
@@ -369,7 +409,8 @@ def refresh_tag_metadata(agents) -> None:
     identity or lifecycle, and never prompts or wakes the pane's session.
     """
     for (pane, harness, sid), held in _tag_metadata_targets(agents):
-        _report(harness, sid, pane, False, **({"held": held} if held else {}))
+        sent = _report(harness, sid, pane, False, **({"held": held} if held else {}))
+        _remember_header((pane, harness, sid), held, sent)
 
 
 def compose(harness: str, session_id: str, *, tag=None, steward=None, title=None,
@@ -1049,7 +1090,8 @@ def project_panel(binding, values, questions, *, pane_id=None):
 
 def _report(harness: str, session_id: str, pane: str, report_session: bool,
             observation=None, session_seq=None, session_start_source=None, resume_argv=None,
-            _proof=None, display_relations: bool = False, held=None) -> None:
+            _proof=None, display_relations: bool = False, held=None):
+    """Report one pane; the metadata command it sent, else ``None``."""
     herdr = shutil.which("herdr")
     if not herdr:
         if observation is not None:
@@ -1096,6 +1138,7 @@ def _report(harness: str, session_id: str, pane: str, report_session: bool,
     _send_projection(metadata, observation)
     if observation is not None:
         observation["reason"] = "report-attempts-finished"
+    return metadata
 
 
 def main(argv=None) -> int:

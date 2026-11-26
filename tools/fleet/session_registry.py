@@ -347,9 +347,27 @@ def _links_table(records):
     return table
 
 
-# The links Fleet's last pass decided, in this process only (never stored).
+# The links Fleet's last pass decided, in this process only (never stored), and for each link
+# kept without a confirming read, how many passes in a row it has been kept so.
 _STEADY = {}
+_STEADY_UNCONFIRMED = {}
 _STEADY_LOCK = threading.Lock()
+# A link is kept through at most this many passes in a row that could not confirm it: Fleet asks
+# every 2 s by default, so about 10 s. A half-written record lasts a moment and a failed read a
+# pass or two; anything longer is not passing, and doubt draws two rows.
+STEADY_KEEP_PASSES = 5
+
+
+def _record_allows(pid, sid, start, *, home, bg, job):
+    """Whether a process's own record, read by its pid (no folder listing), leaves the link
+    standing: an unreadable or half-written record says nothing (True); a record that reads and
+    names another session, another process start, another job or the other kind says no."""
+    record = read("claude", pid, home=home, extra=("jobId",))
+    if record is None:
+        return True
+    return (_usable_sid(record.get("sessionId")) == sid and str(record.get("procStart") or "") == start
+            and (record.get("kind") == "bg") == bg
+            and record.get("jobId" if bg else "parkedJobId") == job)
 
 
 def steady_parked_links(harness="claude", *, home=None):
@@ -357,10 +375,12 @@ def steady_parked_links(harness="claude", *, home=None):
 
     A read that could not decide is not "no link": when the record folder was not read, or one
     of a link's two records exists but did not parse (half written), a link the previous pass
-    decided is kept as long as both of its processes are still the same live processes. A read
-    that does decide (the window's record holds no job, another job, a process ended) ends it at
-    once, and a link nobody decided before is never made from a failed read. Process-local; a
-    new process starts with no link kept."""
+    decided is kept, if both of its processes are still the same live processes and each one's
+    own record, read again by its pid, either still says so or cannot be read. A read that does
+    decide — the folder read, or that pid read (the window's record holds no job or another job,
+    a record names another session, a process ended or is another process) — ends it at once.
+    The keeping lasts at most ``STEADY_KEEP_PASSES`` passes in a row; a link nobody decided before
+    is never made from a failed read. Process-local; a new process starts with no link kept."""
     empty = {"successor": {}, "origin": {}}
     if harness != "claude":
         return empty
@@ -372,16 +392,27 @@ def steady_parked_links(harness="claude", *, home=None):
                      if kept or _a_record_holds_a_job(home) else empty)
         except Exception:
             table, failed = {"successor": {}, "origin": {}}, True
+        unconfirmed = {}
         for viewer_sid, link in kept.items():
             if (viewer_sid in table["successor"] or link["session_id"] in table["origin"]
                     or not (failed or {link["viewer_pid"], link["pid"]} & undecided)):
                 continue
-            if (_proc_start(link["viewer_pid"]) == link.get("viewer_start")
-                    and _proc_start(link["pid"]) == link["proc_start"]):
+            passes = _STEADY_UNCONFIRMED.get(viewer_sid, 0) + 1
+            if passes > STEADY_KEEP_PASSES:
+                continue
+            start = link.get("viewer_start")
+            if (_proc_start(link["viewer_pid"]) == start and _proc_start(link["pid"]) == link["proc_start"]
+                    and _record_allows(link["viewer_pid"], viewer_sid, start, home=home, bg=False,
+                                       job=link["job_id"])
+                    and _record_allows(link["pid"], link["session_id"], link["proc_start"], home=home,
+                                       bg=True, job=link["job_id"])):
                 table["successor"][viewer_sid] = link
                 table["origin"][link["session_id"]] = link
+                unconfirmed[viewer_sid] = passes
         _STEADY.clear()
         _STEADY.update(table["successor"])
+        _STEADY_UNCONFIRMED.clear()
+        _STEADY_UNCONFIRMED.update(unconfirmed)
         return table
 
 

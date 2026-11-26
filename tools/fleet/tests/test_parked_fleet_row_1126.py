@@ -61,9 +61,11 @@ class Split(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()
         self.addCleanup(patcher.stop)
-        # The judgment remembers the previous pass in this process only; each test starts fresh.
-        sr._STEADY.clear()
-        self.addCleanup(sr._STEADY.clear)
+        # The judgment and the header refresh remember the previous pass in this process only;
+        # each test starts fresh.
+        for memory in (sr._STEADY, sr._STEADY_UNCONFIRMED, herdr_projection._HEADERS):
+            memory.clear()
+            self.addCleanup(memory.clear)
         self.agents = []
         agents = mock.patch.object(herdr_collector, "list_agents", lambda *a, **k: copy.deepcopy(self.agents))
         agents.start()
@@ -124,6 +126,24 @@ class Split(unittest.TestCase):
 
     def snapshot(self):
         return session_tags._path().read_bytes()
+
+    @staticmethod
+    def unread(*_a, **_k):
+        raise OSError("the record folder was not read")
+
+    def record_path(self, key):
+        return self.config / "sessions" / ("%d.json" % self.children[key].pid)
+
+    def linked(self):
+        """The ordinary split, decided once: one row, the held session with the window's number."""
+        self.split(parked=False)
+        window_tag = session_tags.assign_observed("claude", OLD, pane_id=PANE, pid=self.children["viewer"].pid,
+                                                  proc_start=sr._proc_start(self.children["viewer"].pid))
+        session_tags.assign(self.rows())
+        self.park()
+        sessions, _ = self.number_pass(self.rows())
+        self.assertEqual([s.session_id for s in sessions], [NEW])
+        return window_tag
 
 
 class ParkedFleetRow(Split):
@@ -273,9 +293,58 @@ class ParkedFleetRow(Split):
                 self.assertEqual(self.snapshot(), settled)   # the number file is not rewritten
                 self.assertEqual(session_tags.assigned_tag("claude", NEW), window_tag)
                 self.assertEqual([agent.get("held_session") for agent in returned], [NEW])
+                self.assertEqual(list(herdr_projection._tag_metadata_targets(returned)), [])  # no header write
         # A read that decides (the window holds no job) ends the link at once.
         self.park(job=None)
         sessions, _ = self.number_pass(self.rows())
+        self.assertEqual([s.session_id for s in sessions], [OLD, NEW])
+
+    def test_a_link_the_window_ended_is_not_kept_while_reads_fail(self):
+        # Review RV-PR1849 round 2 K1: the window goes back to its own conversation (its record
+        # holds no job; the background session lives on) and the folder read keeps failing. The
+        # window's own record, read by its pid, decides: two rows on every pass.
+        self.linked()
+        self.park(job=None)
+        with mock.patch.object(sr, "_live_claude_records", self.unread):
+            for _ in range(3):
+                sessions, _ = self.number_pass(self.rows())
+                self.assertEqual([s.session_id for s in sessions], [OLD, NEW])
+
+    def test_a_deciding_window_record_ends_the_link_beside_a_half_written_one(self):
+        # Round 2 K3: the window's record says "no job" while the background record is half
+        # written at that moment. The window's record decides.
+        self.linked()
+        self.park(job=None)
+        path = self.record_path("held")
+        whole = path.read_text()
+        path.write_text(whole[:len(whole) // 2])
+        sessions, _ = self.number_pass(self.rows())
+        path.write_text(whole)
+        self.assertEqual([s.session_id for s in sessions], [OLD, NEW])
+
+    def test_a_kept_link_lasts_a_few_passes_only(self):
+        # A read that keeps failing is not passing: the link is kept for STEADY_KEEP_PASSES passes
+        # in a row at most, then doubt draws two rows. A read that confirms makes one row again.
+        self.linked()
+        with mock.patch.object(sr, "_live_claude_records", self.unread):
+            shown = [len(self.number_pass(self.rows())[0]) for _ in range(sr.STEADY_KEEP_PASSES + 2)]
+        self.assertEqual(shown, [1] * sr.STEADY_KEEP_PASSES + [2, 2])
+        sessions, _ = self.number_pass(self.rows())
+        self.assertEqual([s.session_id for s in sessions], [NEW])
+        # A confirming read starts the count again.
+        with mock.patch.object(sr, "_live_claude_records", self.unread):
+            self.assertEqual(len(self.number_pass(self.rows())[0]), 1)
+
+    def test_a_kept_link_needs_the_same_processes(self):
+        # Round 2 N2: while the read fails, the background pid answers with another process start
+        # (another process). The kept link ends even when the row itself carries no start.
+        self.linked()
+        held_pid, real = self.children["held"].pid, sr._proc_start
+        sessions = self.rows()
+        sessions[1].proc_start = None
+        with mock.patch.object(sr, "_live_claude_records", self.unread), \
+                mock.patch.object(sr, "_proc_start", lambda pid: "1" if int(pid) == held_pid else real(pid)):
+            self.number_pass(sessions)
         self.assertEqual([s.session_id for s in sessions], [OLD, NEW])
 
     def test_a_failed_first_read_makes_no_link(self):
@@ -330,6 +399,79 @@ class ParkedFleetRow(Split):
         own = session_tags.assigned_tag("claude", OLD)
         self.assertTrue(own and own != window_tag)
         self.assertEqual(list(herdr_projection._tag_metadata_targets(returned)), [((PANE, "claude", OLD), None)])
+
+    def herdr_sends(self):
+        """A stand-in `herdr` first on PATH that records the metadata Fleet sends."""
+        fake = self.root / "fakebin"
+        fake.mkdir(exist_ok=True)
+        log = self.root / "herdr-calls.jsonl"
+        (fake / "herdr").write_text("#!/bin/sh\n%s -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\" >> %s\n"
+                                    % (sys.executable, log))
+        (fake / "herdr").chmod(0o755)
+        patch = mock.patch.dict(os.environ, {"PATH": "%s:%s" % (fake, os.environ.get("PATH", ""))})
+        patch.start()
+        self.addCleanup(patch.stop)
+        return lambda: [call for call in (json.loads(line) for line in log.read_text().splitlines())
+                        if call[:2] == ["pane", "report-metadata"]] if log.exists() else []
+
+    def send_pass(self, sessions, sent, *, echo=True):
+        """One Fleet pass that ends with the product's own header send; herdr then holds what it was
+        sent (``echo``) or keeps reporting the title it had. The number of headers sent."""
+        _, returned = self.number_pass(sessions)
+        before = len(sent())
+        herdr_projection.refresh_observed_tag_metadata(returned)
+        calls = sent()[before:]
+        if calls and echo:
+            last = calls[-1]
+            self.agents[0].update(display_agent=last[last.index("--display-agent") + 1],
+                                  title=last[last.index("--title") + 1])
+        return len(calls)
+
+    def window_header(self):
+        own = herdr_projection._metadata_command("herdr", "claude", OLD, PANE)
+        return {"agent": "claude", "pane_id": PANE, "display_agent": own[own.index("--display-agent") + 1],
+                "title": own[own.index("--title") + 1], "agent_session": {"kind": "id", "value": OLD}}
+
+    def test_an_ended_link_gives_the_window_header_back_once(self):
+        # Round 2 N1: the background session ends while linked; the window gets its number back,
+        # the same number, and its header the window's own title again, once.
+        sent = self.herdr_sends()
+        self.split(parked=False)
+        titles.write(OLD, "before the split", now=time.time() - 60)
+        titles.write(NEW, "the conversation goes on", now=time.time())
+        window_tag = session_tags.assign_observed("claude", OLD, pane_id=PANE, pid=self.children["viewer"].pid,
+                                                  proc_start=sr._proc_start(self.children["viewer"].pid))
+        self.agents = [self.window_header()]
+        self.assertEqual(self.send_pass(self.rows(), sent), 0)
+        self.park()
+        self.assertEqual(self.send_pass(self.rows(), sent), 1)
+        self.assertIn("the conversation goes on", self.agents[0]["title"])
+        self.assertEqual(self.send_pass(self.rows(), sent), 0)
+        window = self.rows()[:1]
+        held = self.children.pop("held")                # the window's record still names the job
+        held.kill()
+        held.wait()
+        self.assertEqual(self.send_pass(window, sent), 1)
+        self.assertEqual(session_tags.assigned_tag("claude", OLD), window_tag)
+        self.assertIn("before the split", self.agents[0]["title"])
+        self.assertEqual([self.send_pass(window, sent) for _ in range(2)], [0, 0])
+
+    def test_the_same_header_is_sent_once_whatever_herdr_reports(self):
+        # Round 2 N3: herdr keeps reporting another title (another source, a person's edit): the
+        # linked window's header is sent once, not on every pass.
+        sent = self.herdr_sends()
+        self.split(parked=False)
+        titles.write(NEW, "the conversation goes on", now=time.time())
+        session_tags.assign_observed("claude", OLD, pane_id=PANE, pid=self.children["viewer"].pid,
+                                     proc_start=sr._proc_start(self.children["viewer"].pid))
+        self.agents = [self.window_header()]
+        self.park()
+        self.agents[0]["title"] = "a title from somewhere else"
+        sends = [self.send_pass(self.rows(), sent, echo=False) for _ in range(4)]
+        self.assertEqual(sends, [1, 0, 0, 0])
+        # A new title of the held session is a new header: sent once again.
+        titles.write(NEW, "the conversation, renamed", now=time.time() + 5)
+        self.assertEqual([self.send_pass(self.rows(), sent, echo=False) for _ in range(2)], [1, 0])
 
     # --- the pane proof reads the same module ----------------------------------------------
     def test_pane_proof_withdraws_on_one_fact(self):
@@ -395,6 +537,37 @@ class ParkedWaitInFleet(Split):
                     if any(obs.get("item_id") == "qw-made-up-1" for obs in s.interaction_observations or [])]
         self.assertEqual(carrying, [(NEW, "blocked")])
         self.assertEqual(sorted(s.session_id for s in sessions), sorted([NEW, OTHER]))
+
+    def test_an_id_two_rows_answer_to_carries_its_wait_on_neither(self):
+        # Round 2 N2: two live sessions both resumed a dead id X; X's open wait belongs to neither.
+        dead = "6b5a4c3d-2e1f-4a0b-9c8d-7e6f5a4b3c2d"
+        for key, sid in (("one", OLD), ("two", NEW2)):
+            self.spawn(key, "--session-id", sid, "--resume", "/h/p/%s.jsonl" % dead, executable=str(self.binary))
+            self.record(key, sid, kind="interactive")
+        self.spawn("viewer", "--resume", OTHER, executable=str(self.binary))   # an unrelated window
+        self.record("viewer", OTHER, kind="interactive")
+        item = {"id": "qw-made-up-2", "harness": "claude", "session_id": dead, "kind": "human gate",
+                "source": "human-gate", "since": time.time() - 60, "stale": "current", "answer": None}
+        view = {"items": [item], "by_session": {("claude", dead): ["qw-made-up-2"]}, "complete": True,
+                "total": 1, "older": 0, "health": []}
+        sessions = self.collect(view, ("one", "two", "viewer"))
+        answering = [s.session_id for s in sessions if ("claude", dead) in sr.session_join_keys(s)]
+        self.assertEqual(sorted(answering), sorted([OLD, NEW2]))
+        self.assertEqual([s.session_id for s in sessions
+                          if any(obs.get("item_id") == "qw-made-up-2" for obs in s.interaction_observations or [])], [])
+
+    def test_a_folder_over_its_size_does_not_keep_an_ended_link(self):
+        # Round 2 K2 through Fleet's own collection: the record folder grows past what is read
+        # (every folder read fails) after the window went back to its own conversation.
+        self.split(executable=str(self.binary))
+        view = {"items": [], "by_session": {}, "complete": True, "total": 0, "older": 0, "health": []}
+        self.assertEqual([s.session_id for s in self.collect(view, ("viewer", "held"))], [NEW])
+        self.park(job=None)
+        for index in range(sr._MAX_RECORDS + 8):
+            (self.config / "sessions" / ("stale-%03d" % index)).write_text("")
+        for _ in range(2):
+            self.assertEqual(sorted(s.session_id for s in self.collect(view, ("viewer", "held"))),
+                             sorted([OLD, NEW]))
 
 
 if __name__ == "__main__":
