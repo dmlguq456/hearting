@@ -15,7 +15,7 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 class WrappedDisplayTest(unittest.TestCase):
-    def statusline(self,wrapped,percentage,panel=None,record=None):
+    def statusline(self,wrapped,percentage,panel=None,record=None,columns=None,limits=None):
         with tempfile.TemporaryDirectory(prefix='shell-native-line-') as directory:
             root=Path(directory);home=root/'claude';home.mkdir()
             if panel is not None:(root/'claude-panel.json').write_text(json.dumps(panel))
@@ -24,10 +24,11 @@ class WrappedDisplayTest(unittest.TestCase):
             # turning its unknown `◑ ?` into a known zero between the two paints.
             env=dict(os.environ,HOME=str(root),CLAUDE_CONFIG_DIR=str(home),AGENT_HOME=str(root/'no-code'),
                      XDG_STATE_HOME=str(root/'state'),FLEET_TITLE_DISABLE='1',HARNESS_CAPACITY_REFRESH_DISABLE='1')
-            env.pop('HEARTING_SHELL_SOCKET',None)
+            env.pop('HEARTING_SHELL_SOCKET',None);env.pop('COLUMNS',None)
             if wrapped:env['HEARTING_SHELL_SOCKET']=str(root/'private.sock')
+            if columns:env['COLUMNS']=str(columns)
             payload={'session_id':'synthetic-native-session','cwd':str(root),'model':{'id':'claude-opus','display_name':'Opus'},
-                     'context_window':{'used_percentage':percentage},'rate_limits':{'seven_day':{'used_percentage':42}}}
+                     'context_window':{'used_percentage':percentage},'rate_limits':limits or {'seven_day':{'used_percentage':42}}}
             result=subprocess.run(['bash',str(ROOT/'adapters/claude/statusline.sh')],input=json.dumps(payload),
                                   env=env,text=True,capture_output=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr)
@@ -59,6 +60,20 @@ class WrappedDisplayTest(unittest.TestCase):
                 outside,inside=self.statusline(False,percentage),self.statusline(True,percentage)
                 self.assertEqual(folder(outside),folder(inside))
                 self.assertIn('Opus',outside);self.assertIn('7d 42%',outside);self.assertIn('◑',outside)
+
+    def test_the_row_outside_the_shell_keeps_its_width_when_none_is_given(self):
+        # Review RV-PR1849 4: the row outside the shell was never cut to a guessed width; only
+        # a width the caller gives shortens it (the shell's own row keeps its behaviour).
+        import time
+        folder=lambda text:re.sub(r'shell-native-line-[^ /]+','shell-native-line-*',text)
+        now=int(time.time())
+        limits={'five_hour':{'used_percentage':12,'resets_at':now+4980},
+                'seven_day':{'used_percentage':42,'resets_at':now+198000},
+                'seven_day_opus':{'used_percentage':57},'seven_day_sonnet':{'used_percentage':12}}
+        unknown=self.statusline(False,37,limits=limits)
+        self.assertGreater(len(unknown),100,unknown)
+        self.assertEqual(folder(unknown),folder(self.statusline(False,37,columns=10000,limits=limits)))
+        self.assertLessEqual(len(self.statusline(False,37,columns=80,limits=limits).splitlines()[0]),80)
 
     def test_the_native_row_stays_complete_even_beside_a_stale_panel_report(self):
         # A panel report left by an earlier host (painted=true) must not shrink
