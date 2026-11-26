@@ -22,7 +22,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import dispatch_contract as D
+LEG_ATTEMPT = unique_attempt_id("att-leg")
 import review_source_subject as SUBJECT
 from split_module_fixture import patch_split, split_patch
 spec = importlib.util.spec_from_file_location("route", ROOT / "utilities/capability-route.py")
@@ -3611,7 +3614,7 @@ class CompletionMarkerTest(unittest.TestCase):
         parent = subprocess.Popen(["sleep", "5"])
         leg = subprocess.Popen(
             ["sleep", "0.05"],
-            env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: "att-leg"},
+            env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: LEG_ATTEMPT},
             start_new_session=True,
         )
         try:
@@ -3638,13 +3641,13 @@ class CompletionMarkerTest(unittest.TestCase):
                 "parent_attempt_id=att-parent,"
                 f"log_file={self.base / 'missing.jsonl'}"
             )
-            self.write_row("open", "leg-slug", "att-leg", extra=leg_extra, node_id="plan")
+            self.write_row("open", "leg-slug", LEG_ATTEMPT, extra=leg_extra, node_id="plan")
 
             watcher = subprocess.Popen(
                 [
                     sys.executable, str(ROOT / "utilities/dispatch-reap-watch.py"),
                     "--jobs", str(self.jobs),
-                    "--attempt-id", "att-leg",
+                    "--attempt-id", LEG_ATTEMPT,
                     "--pid", str(leg.pid),
                     "--pid-start", leg_identity["pid_start"],
                     "--pgid", leg_identity["pgid"],
@@ -3657,7 +3660,7 @@ class CompletionMarkerTest(unittest.TestCase):
             deadline = time.time() + 3
             status, meta = None, None
             while time.time() < deadline:
-                status, meta = self.read_row("att-leg")
+                status, meta = self.read_row(LEG_ATTEMPT)
                 if meta and meta.get("reap_close_deferred") == "parent-live:process":
                     break
                 time.sleep(0.05)
@@ -3665,12 +3668,12 @@ class CompletionMarkerTest(unittest.TestCase):
             self.assertEqual(meta.get("reap_close_deferred"), "parent-live:process")
 
             result = self.complete(
-                route_path, "plan", evidence, jobs=self.jobs, attempt_id="att-leg",
+                route_path, "plan", evidence, jobs=self.jobs, attempt_id=LEG_ATTEMPT,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
             self.assertEqual(watcher.wait(timeout=5), 0)
-            status, meta = self.read_row("att-leg")
+            status, meta = self.read_row(LEG_ATTEMPT)
             self.assertEqual(status, "done")
             self.assertEqual(meta.get("note"), "completed-marker")
             self.assertNotEqual(meta.get("note"), "dead-missing-result")

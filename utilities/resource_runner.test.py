@@ -24,6 +24,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 CLEAN_ENV = {k: v for k, v in os.environ.items() if not (
     k in {"AGENT_HOME", "AGENT_DISPATCH_JOBS"}
     or k.startswith("AGENT_DISPATCH_") or k.startswith("AGENT_ROUTE_")
@@ -1596,7 +1598,7 @@ class TestRunner(unittest.TestCase):
                 route_state = base / "route-chains"
                 dispatch.mkdir(parents=True)
                 jobs = dispatch / "jobs.log"
-                metadata = ",".join(("attempt_id=att-route-owner", "worker_type=owner",
+                metadata = ",".join((f"attempt_id={unique_attempt_id('att-route-owner')}", "worker_type=owner",
                     "dispatch_depth=1", "owner_route_id=rt-resource-probe",
                     "owner_route_hash=sha256:resource-probe", "parent_sid=route-parent"))
                 jobs.write_text("\t".join(("2099-01-01T00:00:00Z", "done", "/work", "/work",
@@ -1614,7 +1616,7 @@ class TestRunner(unittest.TestCase):
                     "outputs": ["run.json"], "write_scope": ["run.json"],
                     "resource_transport": "detached-process"}]}), encoding="utf-8")
                 env = {**base_env, "AGENT_HOME": str(ROOT),
-                    "AGENT_DISPATCH_ATTEMPT_ID": "att-route-owner",
+                    "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-route-owner"),
                     "AGENT_DISPATCH_JOBS": str(jobs), "AGENT_DISPATCH_CALLER_HARNESS": "claude",
                     "CLAUDE_CODE_SESSION_ID": "worker-self-session",
                     "XDG_STATE_HOME": str(base / "state-home"),
@@ -1640,7 +1642,7 @@ class TestRunner(unittest.TestCase):
                     self.assertEqual(session_owner["evidence_pid"], result["row"]["pid"])
                     self.assertNotEqual(session_owner["id"], result["outer_claim"]["owner"]["id"])
                 self.assertEqual(result["process"]["owner"]["kind"], "job")
-                self.assertEqual(result["process"]["owner"]["id"], "att-route-owner")
+                self.assertEqual(result["process"]["owner"]["id"], unique_attempt_id("att-route-owner"))
 
     def test_verified_publication_cas_preserves_changed_or_missing_reservation(self):
         expected = {"run_id":"resume", "status":"launching", "command":["approved"], "token":"one"}

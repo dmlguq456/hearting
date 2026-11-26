@@ -1635,6 +1635,28 @@ def _answer_line(body: str, t) -> str:
     return first + (t("delivery_line.more_lines", count=len(lines) - 1) if len(lines) > 1 else "")
 
 
+SECRET_ANSWER_LINE = "•••"  # the panel's own one-line form of a secret value (questions.py)
+
+
+def _answered_question_secret(binding) -> bool:
+    """Whether the question this answer belongs to was asked as a secret one.
+
+    Read from the question's own recorded signal (its ``is_secret``, the same field the panel line
+    and the answer record follow). Anything not plainly ``False`` (the signal gone, unreadable, of
+    another request, or without the field) counts as secret: a doubtful answer is hidden."""
+    try:
+        import human_wait_state as waits
+        path = waits._signal_path(binding)
+        signal = waits._read(path) if path is not None else None
+        if (not signal or signal.get("id") != binding.get("request_id")
+                or signal.get("harness") != binding.get("harness")
+                or signal.get("session_id") != binding.get("session_id")):
+            return True
+        return signal["detail"]["questions"][0].get("is_secret") is not False
+    except Exception:  # noqa: BLE001 -- not readable: hide
+        return True
+
+
 def delivery_display_text(batches: list[tuple[Path, list[dict]]]) -> str | None:
     """What the person's window shows for the delivery ``delivery_context(batches)`` renders.
 
@@ -1664,8 +1686,11 @@ def delivery_display_text(batches: list[tuple[Path, list[dict]]]) -> str | None:
                     if receipt.get("kind") == "notice":
                         if "answer_binding" not in receipt:
                             return None
-                        body = waits.message_answer_body(receipt["answer_binding"])
-                        answers.append((ident, t("delivery_line.answered", answer=_answer_line(body, t))))
+                        binding = receipt["answer_binding"]
+                        # A secret question's answer never reaches the person's window line.
+                        shown = (SECRET_ANSWER_LINE if _answered_question_secret(binding)
+                                 else _answer_line(waits.message_answer_body(binding), t))
+                        answers.append((ident, t("delivery_line.answered", answer=shown)))
                         continue
                     lines = [work_intent.completion_line(summary, t)
                              for summary in work_intent.split_completion_summaries(_followup(root, record))]

@@ -21,6 +21,8 @@ from unittest import mock
 from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 
 
 def _load(name, path):
@@ -740,9 +742,9 @@ class DispatchNodePinRowTest(unittest.TestCase):
             f"2026-07-23T00:00:00Z\topen\t{self.repo}\t{self.repo}\towner\t"
             "attempt_schema_version=2,dispatch_depth=1,transport=headless,harness=claude,"
             "runtime_sandbox=adapter-default,execution_surface=registered-headless,registered_worker=1,"
-            "fallback_hop=same-harness-headless,worker_type=owner,attempt_id=att-pin-owner,"
-            f"pid={owner.pid},pid_start={started}\n", encoding="utf-8")
-        env = dict(self.env, AGENT_DISPATCH_SELF_SLUG="owner", AGENT_DISPATCH_ATTEMPT_ID="att-pin-owner",
+            "fallback_hop=same-harness-headless,worker_type=owner,"
+            f"attempt_id={unique_attempt_id('att-pin-owner')},pid={owner.pid},pid_start={started}\n", encoding="utf-8")
+        env = dict(self.env, AGENT_DISPATCH_SELF_SLUG="owner", AGENT_DISPATCH_ATTEMPT_ID=unique_attempt_id("att-pin-owner"),
                    AGENT_DISPATCH_CURRENT_HARNESS="claude", AGENT_DISPATCH_CURRENT_TRANSPORT="headless",
                    AGENT_DISPATCH_CURRENT_SANDBOX="adapter-default")
         result = subprocess.run(

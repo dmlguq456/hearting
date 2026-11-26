@@ -19,6 +19,8 @@ from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 _R_SPEC = importlib.util.spec_from_file_location("route", ROOT / "utilities/capability-route.py")
 ROUTE = importlib.util.module_from_spec(_R_SPEC)
 _R_SPEC.loader.exec_module(ROUTE)
@@ -60,7 +62,7 @@ class CodexNoCommitFixtureTest(unittest.TestCase):
             "execution_surface=registered-headless,registered_worker=1,"
             "fallback_hop=same-harness-headless,worker_type=owner,harness=codex,"
             "runtime_sandbox=workspace-write,"
-            f"attempt_id=att-nocommit-parent,pid={self.owner.pid},pid_start={owner_start}\n"
+            f"attempt_id={unique_attempt_id('att-nocommit-parent')},pid={self.owner.pid},pid_start={owner_start}\n"
         )
 
     def tearDown(self):
@@ -98,7 +100,7 @@ class CodexNoCommitFixtureTest(unittest.TestCase):
             "AGENT_HOME": str(self.primary),
             "HARNESS_STATE_ROOT": str(self.state_root),
             "AGENT_ARTIFACT_ROOT": str(self.artifact),
-            "AGENT_DISPATCH_ATTEMPT_ID": "att-nocommit-parent",
+            "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-nocommit-parent"),
         }
 
     def test_writable_roots_and_no_commit_encoding(self):

@@ -516,6 +516,23 @@ class ListTest(StatusTest):
     def test_the_marker_is_the_documents_own(self):
         self.assertEqual(session_status.CAMPAIGN_MARKER, campaign_document.MARKER)
 
+    def test_the_three_places_that_judge_a_marker_agree_on_the_rarer_line_ends(self):
+        """The panel, the status reader and the writer's overwrite guard take a first line that runs on past a lone CR,
+        U+2028 or FF as no marker (the writer ends its lines at ``\\n`` only); a ``\\n`` or CRLF end is the marker."""
+        marker = campaign_document.MARKER
+        for tail, expected in (("\n", True), ("\r\n", True), ("\r", False), ("\u2028", False), ("\x0c", False)):
+            body = marker + tail + "# 제목\n\n## 기다리는 것\n- 질문?\n"
+            with self.subTest(tail=tail):
+                folder = Path(tempfile.mkdtemp(prefix="ss-marker-", dir=self.cwd))
+                (folder / "campaign.md").write_bytes(body.encode("utf-8"))
+                lines, cut = session_status.read_text(str(folder / "campaign.md"))
+                self.assertFalse(cut)
+                panel = session_status.is_generated(lines)
+                reader = project_status.parse(body)["decisions"] == []       # a generated page counts no decision
+                writer = campaign_document._write_document(folder, marker + "\nnew\n")   # True: it is the generator's own page, overwritten
+                self.assertEqual((panel, reader, writer), (expected, expected, expected))
+                self.assertEqual((folder / "campaign.md").read_bytes() == body.encode("utf-8"), not expected)
+
     def test_the_screen_is_the_head_then_what_runs_then_the_folded_headings_then_the_full_document(self):
         entries, _ = self.listing()
         lines = shown(entries)

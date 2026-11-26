@@ -16,6 +16,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 
 PATH = Path(__file__).with_name("model-worker-governor.py")
 SPEC = importlib.util.spec_from_file_location("model_worker_governor", PATH)
@@ -36,7 +38,7 @@ class GovernorDirectReturnDrainTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="governor-direct-return-")
         base = Path(temporary.name)
         jobs, root = base / "jobs.log", base / "governor"
-        attempt = "att-direct-return-fixture"
+        attempt = unique_attempt_id("att-direct-return-fixture")
         processes, identities = [], []
 
         def until(predicate):
@@ -969,9 +971,9 @@ class GovernorTest(unittest.TestCase):
         marker_path.write_text(json.dumps({"attempt_id": members[1]["attempt_id"],
             "review_gate_closure": "owner-closure", "review_independence": "owner-overridden"}))
         current = json.loads(json.dumps(members))
-        current[0]["attempt_id"] = "att-new-primary"
+        current[0]["attempt_id"] = unique_attempt_id("att-new-primary")
         manifest, _, _ = build_manifest(parent_attempt_id="att-owner-new", members=current, **options)
-        return {"manifest": manifest, "selected_attempt_ids": ["att-new-primary"],
+        return {"manifest": manifest, "selected_attempt_ids": [unique_attempt_id("att-new-primary")],
                 "peers": [{"agent_home": str(root), "attempt_id": members[1]["attempt_id"],
                            "jobs": str(jobs), "route": str(route_path)}]}, jobs, marker_path
 
@@ -1000,7 +1002,7 @@ class GovernorTest(unittest.TestCase):
                     tokens = self.reserve_batch(td, 1, batch)
                 self.assertEqual(len(tokens), 1)
                 receipt = GOVERNOR.reservation_check(td, tokens[0])
-                self.assertEqual(receipt["batch_attempt_id"], "att-new-primary")
+                self.assertEqual(receipt["batch_attempt_id"], unique_attempt_id("att-new-primary"))
                 self.assertEqual(receipt["batch_parent_attempt_id"], "att-owner-new")
                 self.assertEqual(receipt["batch_admission_count"], 1)
                 self.assertEqual(receipt["batch_peer_set"][0]["state"], "completed")
