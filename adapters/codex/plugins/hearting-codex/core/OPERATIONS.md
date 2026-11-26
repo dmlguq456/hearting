@@ -1857,6 +1857,11 @@ and the workflow as CANCELLED, and records the route outcome. Repeated close
 and the existing execution observers resume this same cleanup after interruption.
 Unknown process evidence stays termination-pending; it grants no signal or
 false completion and requires no new caller recovery ritual.
+When the route's latest owner had already ended without a PASS (FAIL, BLOCKED,
+a format error), the same close records the unproven outcome and leaves the
+workflow CANCELLED and the open cycle sealed `abandoned`, as for a running owner;
+a proven close, an owner that ended PASS, and a route with no registered owner
+keep their cycle for its completion.
 Fleet's explicit user kill (`note=fleet-kill`, `failure_class=cancelled`)
 is likewise a committed cancellation. Once its process, owner and cleanup
 obligations settle, it no longer blocks pane completion or retirement as an

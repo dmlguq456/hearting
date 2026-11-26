@@ -1429,7 +1429,27 @@ class WorkStartTest(unittest.TestCase):
         self.assertIn('--attempt-id ' + owner, result['correction_command'])
         self.assertIn('correction_command', result['next_step'])
         self.assertIn('replacement owner', result['next_step'])
+        # (나) Accepting the result as it is is close_command; correction_command is for work the owner still has.
+        step = result['next_step']
+        self.assertIn('close_command', result)
+        self.assertIn('To accept the result as it is, or to stop the work, run close_command', step)
+        self.assertIn('Only when the owner has something to do', step)
+        self.assertLess(step.index('close_command'), step.index('correction_command'))
         self.assertEqual(len(self.calls), 3)
+
+    def test_a_replacement_refused_for_an_ended_workflow_says_why_and_what_to_do_once(self):
+        # (다) A definitive refusal is not "retry after the launch settles": the same start refuses the same way.
+        self._parked_owner_row()
+        step = "This route's workflow already ended (COMPLETE), so no replacement owner can continue it."
+        with mock.patch('dispatch_replacement.owner_parked_gate', return_value=None), \
+             mock.patch('dispatch_replacement.advance', return_value={
+                 'state': 'needs-attention', 'reason': 'replacement-workflow-not-open', 'next_step': step}):
+            result = self.start()
+        self.assertEqual((result['state'], result['reason']), ('needs-attention', 'replacement-workflow-not-open'), result)
+        self.assertEqual(result['next_step'], step)
+        self.assertNotIn('next_action', result)
+        self.assertNotIn('retry_when', result)
+        self.assertIn(' close --route ', result['close_command'])
 
     def test_released_parked_owner_continues_through_replacement(self):
         owner=self._parked_owner_row()

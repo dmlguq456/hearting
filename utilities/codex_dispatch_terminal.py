@@ -1125,13 +1125,21 @@ def _opens_on_negative_verdict(path) -> bool:
     line = _opening_line(path)
     if line is None:
         return False
-    line = line.replace("**", "").replace("__", "").strip()
-    if len(line) > 1 and line.startswith("`") and line.endswith("`"):
-        line = line[1:-1].strip()
-    line = line[:-1].rstrip() if line.endswith(".") else line
     import work_intent
-    match = work_intent._VERDICT_LINE.match(line)
-    return bool(match and _UNIT_NEGATIVE_VERDICT.fullmatch(match["verdict"].strip()))
+    parts = []
+    for part in _verdict_parts(line.replace("**", "").replace("__", "").strip()):
+        if len(part) > 1 and part.startswith("`") and part.endswith("`"):
+            part = part[1:-1].strip()
+        parts.append(work_intent._VERDICT_LINE.match(part))
+    return all(match and _UNIT_NEGATIVE_VERDICT.fullmatch(match["verdict"].strip()) for match in parts)
+
+
+def _verdict_parts(line):
+    """The verdict line's forms: one, or the same verdict written in both languages on one line joined by
+    ` · ` (`Final verdict: changes requested — head <sha> · 최종 판정: 수정 후 병합 — head <sha>`), each
+    without a closing period."""
+    return [part[:-1].rstrip() if part.endswith(".") else part
+            for part in (part.strip() for part in _VERDICT_JOINER.split(line))]
 
 
 def _sealed_route(binding):
@@ -1183,6 +1191,8 @@ _AUDIT_CLOSED = re.compile(
     + r")\s+—\s+head\s+`?(?P<head>[0-9a-f]{7,40})`?$", re.I)
 _AUDIT_KINDS = {re.sub(r"\s+", "", label).replace("：", ":").lower(): kind
                 for kind, label in _AUDIT_VERDICT_FORMS}
+# Two forms of one verdict on one line (English and Korean, as the unit's instruction names both).
+_VERDICT_JOINER = re.compile(r"\s+·\s+")
 
 
 # A unit leg's closed negative verdict, with or without the commit it reviewed: a read-only unit also
@@ -1229,13 +1239,14 @@ def closed_review_kind(path):
     line = _opening_line(path)
     if line is None:
         return None
-    line = line.replace("**", "").replace("__", "").strip()
-    line = line[:-1].rstrip() if line.endswith(".") else line
-    match = _AUDIT_CLOSED.fullmatch(line)
-    if not match:
-        return None
-    label = re.sub(r"\s+", "", match["label"]).replace("：", ":").lower()
-    return _AUDIT_KINDS[label]
+    kinds = set()
+    for part in _verdict_parts(line.replace("**", "").replace("__", "").strip()):
+        match = _AUDIT_CLOSED.fullmatch(part)
+        if not match:
+            return None
+        kinds.add(_AUDIT_KINDS[re.sub(r"\s+", "", match["label"]).replace("：", ":").lower()])
+    # The same verdict in both forms reads as that verdict; two different verdicts on one line read as none.
+    return kinds.pop() if len(kinds) == 1 else None
 
 
 def _completed_negative_audit_report(path):

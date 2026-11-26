@@ -1546,7 +1546,9 @@ continued the same way once: its PASS stays as recorded, and the replacement rec
 undone stages as observations. No gate, close, or recompose is needed. A replacement on the same
 harness wakes the earlier owner's session when it still exists and the runtime did not end it
 without a result, and starts fresh otherwise (`session: resumed | fresh:<reason>`, OPERATIONS §5.10c). The answer receipt names both actions a
-parent can take: `correction_command` with the answer, or `close_command` to stop the route.
+parent can take: `correction_command` with the answer when the owner has something to do, or `close_command`
+to accept the result as it is or stop the route (the closure stays unproven and the cycle is sealed
+`abandoned`). A later turn of a route closed PASS that ends without a PASS is answered the same way.
 
 A continuation route projects this contract onto its suffix. It drops a gate
 whose gated entry node was cut, never rebinds a retained raising continuation to

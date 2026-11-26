@@ -537,6 +537,36 @@ class CorrectUnitRouteTest(unittest.TestCase):
         self.assertEqual(UC.entries(self.jobs, "rt-abc"), [])
         self.assertNotIn("retained", receipt)
 
+    def test_a_review_that_ended_fail_on_an_unread_verdict_line_is_told_so_not_no_verdict(self):
+        # (라) The leg has a verdict (FAIL with its readable report) whose report did not open on the closed review
+        # verdict, so its end was not read as a finished review and the route did not close. The receipt says
+        # that instead of "ended without a verdict"; nothing is kept and the compose-again command is the way on.
+        self.rows = {FIRST: ("done", meta(note="completed-review-blocking", reconcile_reason="typed-review-blocking"))}
+        with mock.patch.object(self.W, "_compose_again", return_value="compose --unit x"):
+            (code, receipt), start = self.call("closure check")
+        start.assert_not_called()
+        self.assertEqual((code, receipt["state"], receipt["reason"]),
+                         (69, "not-admitted", "unit-continue-last-turn-unread-review"))
+        self.assertIn("ended FAIL", receipt["next_step"])
+        self.assertIn("closed review verdict", receipt["next_step"])
+        self.assertNotIn("without a verdict", receipt["next_step"])
+        self.assertEqual((receipt["required_action"], receipt["parent_next_command"]), ("compose-again", "compose --unit x"))
+        self.assertEqual(UC.entries(self.jobs, "rt-abc"), [])
+
+    def test_a_review_read_as_finished_takes_the_closure_check_as_a_mergeable_one_does(self):
+        # A changes-requested review read as finished work (a pass whose assessment is FAIL) and a mergeable one
+        # both take the next turn the same way.
+        for name, row in (("changes requested", meta(failure_class="pass", assessment_verdict="FAIL",
+                                                    reconcile_reason="completed-audit-with-findings")),
+                          ("mergeable", meta(failure_class="pass"))):
+            with self.subTest(name):
+                self.rows = {FIRST: ("done", row)}
+                (code, receipt), start = self.call(f"closure check {name}")
+                start.assert_called_once()
+                self.assertEqual((code, receipt["retained"]), (0, True))
+                self.assertNotIn(receipt.get("reason"), ("unit-continue-last-turn-no-verdict",
+                                                          "unit-continue-last-turn-unread-review"))
+
     def test_a_same_text_while_its_turn_still_runs_is_not_already_asked(self):
         self.call("fixed, look again")           # kept; nothing started yet
         turn2 = UC.attempt_id_for("rt-abc", NODE, UC.entries(self.jobs, "rt-abc")[0]["id"])

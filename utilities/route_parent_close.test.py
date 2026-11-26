@@ -2822,6 +2822,85 @@ class ParentCloseTest(unittest.TestCase):
         self.assertNotEqual(RR.classify_identity(run)[0], "working")
         self.assertIsNone(foreign.poll())
 
+    def ended_owner_close_fixture(self, **row):
+        import artifact_producer as AP
+        self.row("att-owner", status="done", **row)
+        begun = AP.begin(self.artifacts, route_file=self.path, capability="autopilot-code", intensity="standard")
+        output = Path(begun["cycle_dir"]) / "artifacts/plans/fixture/REPORT.md"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("fixture output")
+        command = [sys.executable, str(HERE / "capability-route.py"), "close", "--route", str(self.path)]
+        return AP, begun, output, command
+
+    def cycle_reading(self, AP, begun):
+        record = AP.read_cycle_record(self.artifacts, begun["cycle_id"])
+        return record["state"], (AP._published_cycle_state(self.artifacts, record)
+                                 if record["state"] == "sealed" else None)
+
+    def test_closing_a_failed_owners_route_seals_its_cycle_abandoned_and_records_the_ledger_cancelled(self):
+        # (가) The owner had already ended FAIL: the close found no running owner, so only the record closed and
+        # the cycle stayed open. Now the new unproven closure ends both as stopping a running owner does.
+        AP, begun, output, command = self.ended_owner_close_fixture(note="dead-worker-fail", failure_class="fail")
+        first = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        outcome = json.loads(first.stdout)
+        self.assertIs(outcome["terminal_gate_proven"], False)
+        self.assertIn("terminal-gate-unproven", first.stderr)
+        self.assertEqual(self.cycle_reading(AP, begun), ("sealed", "abandoned"))
+        self.assertEqual(output.read_text(), "fixture output")          # the files stay in the cycle folder
+        ledger = WS.WorkflowLedger(self.route["route_id"], self.route["route_hash"], jobs=self.jobs)
+        state = ledger.state()
+        self.assertEqual(state["workflow_state"], "CANCELLED")
+        self.assertEqual({row["state"] for row in state["nodes"].values()}, {"CANCELLED"})
+        self.assertIsNone(CLOSE.intent(self.route, self.jobs))           # no running owner's stop was requested
+        # What `start --route` reads before it says `route-closed-unproven` (the scenario runs that start).
+        from dispatch_notice_state import closed_outcome
+        self.assertIs(closed_outcome(self.path, self.route).get("terminal_gate_proven"), False)
+        # (3) The same close again changes nothing: same closure, same cycle, no new ledger entry.
+        entries = len(ledger.journal())
+        again = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(json.loads(again.stdout), outcome)
+        self.assertIn("route already closed", again.stderr)
+        self.assertEqual(self.cycle_reading(AP, begun), ("sealed", "abandoned"))
+        self.assertEqual(len(ledger.journal()), entries)
+
+    def test_closing_a_route_whose_owner_ended_pass_leaves_its_cycle_to_the_completion(self):
+        # (가-2) A PASS whose completion has not proven the gate yet (or a proven close) never seals the cycle
+        # abandoned: the completion that follows still consumes the unproven close and seals it completed.
+        AP, begun, _output, command = self.ended_owner_close_fixture(note="completed-supervisor",
+                                                                     failure_class="pass")
+        done = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.cycle_reading(AP, begun), ("open", None))
+        ledger = WS.WorkflowLedger(self.route["route_id"], self.route["route_hash"], jobs=self.jobs)
+        self.assertNotEqual(ledger.state()["workflow_state"], "CANCELLED")
+        self.assertFalse(CLOSE.finish_ended_owner_close(self.route, {"terminal_gate_proven": True}, jobs=self.jobs))
+
+    def test_a_route_with_no_registered_owner_keeps_its_cycle_for_a_later_completion(self):
+        # Inline or legacy work closed before its `complete`: its later exact completion may still consume the
+        # unproven close and finalize the cycle, so the close does not seal it abandoned.
+        import artifact_producer as AP
+        begun = AP.begin(self.artifacts, route_file=self.path, capability="autopilot-code", intensity="standard")
+        command = [sys.executable, str(HERE / "capability-route.py"), "close", "--route", str(self.path)]
+        done = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIs(json.loads(done.stdout)["terminal_gate_proven"], False)
+        self.assertEqual(self.cycle_reading(AP, begun), ("open", None))
+
+    def test_a_later_turns_failed_close_keeps_the_earlier_turns_complete_ledger(self):
+        # A route closed PASS took a later request whose turn ended FAIL: COMPLETE is the earlier turn's record and
+        # cannot move to CANCELLED, so it stays; the close still stands and the open cycle is sealed abandoned.
+        ledger = WS.WorkflowLedger(self.route["route_id"], self.route["route_hash"], jobs=self.jobs)
+        for state in WS.completion_transition_path("CREATED", "COMPLETE"):
+            ledger.set_workflow_state(state)
+        AP, begun, _output, command = self.ended_owner_close_fixture(note="dead-worker-fail", failure_class="fail")
+        done = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIs(json.loads(done.stdout)["terminal_gate_proven"], False)
+        self.assertEqual(ledger.state()["workflow_state"], "COMPLETE")
+        self.assertEqual(self.cycle_reading(AP, begun), ("sealed", "abandoned"))
+
     def test_close_finalizes_existing_cycle_and_deleted_output_is_replayable(self):
         import artifact_producer as AP
         owner = self.process("att-owner")

@@ -363,6 +363,10 @@ class BlockingReviewEndTest(UnitLegBase):
             "an en dash for the dash": "# R\n\nFinal verdict: changes requested – head abc1234\n\n- A: bad\n",
             "the whole line in backticks": "# R\n\n`Final verdict: changes requested — head abc1234`\n\n- A: bad\n",
             "the placeholder left as written": "# R\n\nFinal verdict: changes requested — head <sha>\n\n- A: bad\n",
+            # (라) The same verdict in both forms on one line, as the instruction names both (11-26, rt-28633adb).
+            "both forms on one line": ("## 📋 Code Review Results\n\nFinal verdict: changes requested — head "
+                                       "08937a052edef9ca9fbd9d67fb3b4e7a3e26c4a9 · 최종 판정: 수정 후 병합 — head 08937a0\n\n- A: bad\n"),
+            "both forms, no head": "# R\n\nFinal verdict: changes requested · 최종 판정: 수정 후 병합\n\n- A: bad\n",
         }
         for name, text in promoted.items():
             with self.subTest(name):
@@ -384,6 +388,9 @@ class BlockingReviewEndTest(UnitLegBase):
             "a mergeable verdict without a head": "# R\n\nFinal verdict: mergeable\n\n- fine\n",
             "a verdict with a note after it": "# R\n\nFinal verdict: changes requested (2 blocking)\n\n- A: bad\n",
             "a line that is not a verdict": "# R\n\nI think this needs changes requested.\n\n- A: bad\n",
+            "two different verdicts on one line":
+                "# R\n\nFinal verdict: mergeable — head abc1234 · 최종 판정: 수정 후 병합 — head abc1234\n\n- A: bad\n",
+            "a verdict joined to a note": "# R\n\nFinal verdict: changes requested — head abc1234 · 2 blocking\n\n- A\n",
         }
         for name, text in stays.items():
             with self.subTest(name):
@@ -399,6 +406,21 @@ class BlockingReviewEndTest(UnitLegBase):
         self.assertIsNone(TERMINAL.closed_review_kind(self.report))
         self.write("# R\n\nFinal verdict: changes requested — head abc1234\n\n- A: bad\n")
         self.assertEqual(TERMINAL.closed_review_kind(self.report), "fix")
+
+    def test_one_verdict_in_both_forms_reads_as_that_verdict_and_two_verdicts_as_none(self):
+        both = {"fix": "Final verdict: changes requested — head abc1234 · 최종 판정: 수정 후 병합 — head abc1234",
+                "merge": "최종 판정: 병합 가능 — head abc1234 · Final verdict: mergeable — head abc1234.",
+                "hold": "Final verdict: hold — head abc1234 · 최종 판정: 보류 — head abc1234"}
+        for kind, line in both.items():
+            with self.subTest(kind):
+                self.write(f"# R\n\n{line}\n\n- A\n")
+                self.assertEqual(TERMINAL.closed_review_kind(self.report), kind)
+        for line in ("Final verdict: mergeable — head abc1234 · 최종 판정: 수정 후 병합 — head abc1234",
+                     "Final verdict: changes requested — head abc1234 · see below",
+                     "Final verdict: changes requested — head abc1234 · 최종 판정: 수정 후 병합"):
+            with self.subTest(line):
+                self.write(f"# R\n\n{line}\n\n- A\n")
+                self.assertIsNone(TERMINAL.closed_review_kind(self.report))
 
     def test_the_verdict_conflict_check_still_runs_for_an_end_that_is_not_promoted(self):
         self.write("# Review\n\n## verdict: FAIL\n\n- A: bad\n")

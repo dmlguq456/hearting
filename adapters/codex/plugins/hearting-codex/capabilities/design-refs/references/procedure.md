@@ -45,6 +45,8 @@ For each result record thumbnail, URL, caption, and source.
 
 Use references only for analysis and style direction. Do not copy protected artwork or imply ownership.
 
+Keep what the fetching needs while it runs (scripts, original pages, large downloads) small, in this step's own private temporary folder, and delete it when the step ends; only what the brief cites goes to `01_refs/_internal/web_references/`, each with its source.
+
 ### Step 3: Review Existing Assets
 
 Read `00_init/asset_inventory.md`. Summarize the current token and component style, then identify which properties must remain compatible with the new work.

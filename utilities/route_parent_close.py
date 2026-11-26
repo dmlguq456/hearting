@@ -1314,13 +1314,7 @@ def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5):
         prior = settled_result(route, ledger)
         if prior:
             return prior
-        state = ledger.state()
-        for node in route.get("nodes", []):
-            previous = (state["nodes"].get(node["id"]) or {}).get("state")
-            if previous not in {"STAGE_SUCCEEDED", "CANCELLED", "FAILED_TERMINAL"}:
-                ledger.record(node["id"], "CANCELLED", evidence={"reason": NOTE}, actor="parent-close")
-        if ledger.state()["workflow_state"] != "CANCELLED":
-            ledger.set_workflow_state("CANCELLED", evidence={"reason": NOTE}, actor="parent-close")
+        _cancel_ledger(route, ledger)
         target = path.with_suffix(".outcome.json")
         if target.exists():
             existing = json.loads(target.read_text())
@@ -1346,20 +1340,75 @@ def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5):
     return outcome
 
 
-def _finish_existing_cycle(route, *, jobs=None):
+SETTLED_NODE_STATES = {"STAGE_SUCCEEDED", "CANCELLED", "FAILED_TERMINAL"}
+
+
+def _cancel_ledger(route, ledger, *, legal_only=False):
+    """The ledger a parent's close leaves: every node not settled and the workflow CANCELLED.
+
+    `legal_only`: a state the vocabulary does not let move to CANCELLED is left as it is (the COMPLETE an
+    earlier turn of the route reached stays that turn's record) instead of refusing the close."""
+    state = ledger.state()
+    for node in route.get("nodes", []):
+        previous = (state["nodes"].get(node["id"]) or {}).get("state")
+        if previous not in SETTLED_NODE_STATES and not (
+                legal_only and previous and not WS.can_transition(previous, "CANCELLED", ledger.registry_path)):
+            ledger.record(node["id"], "CANCELLED", evidence={"reason": NOTE}, actor="parent-close")
+    current = ledger.state()["workflow_state"]
+    if current != "CANCELLED" and not (
+            legal_only and not WS.can_transition(current, "CANCELLED", ledger.registry_path)):
+        ledger.set_workflow_state("CANCELLED", evidence={"reason": NOTE}, actor="parent-close")
+
+
+def finish_ended_owner_close(route, outcome, *, jobs=None):
+    """The rest of a `close` that found no running owner to stop and did not prove the route's gate.
+
+    The route's latest registered owner had already ended without a PASS (FAIL, BLOCKED, a format error, a
+    death): the ledger and the cycle end as the close of a running owner leaves them (`continue_close`): the
+    ledger CANCELLED and the open cycle sealed `abandoned`, never `completed`. A proven close is the route's
+    PASS and is not touched. Neither is a route whose latest owner ended PASS (its completion may still prove
+    the gate and seal the cycle) nor one with no registered owner (inline or legacy work, whose later exact
+    completion may still consume an unproven close). Nothing here waits or refuses: the closure stands."""
+    if outcome.get("terminal_gate_proven") is True:
+        return False
+    jobs = jobs_path(jobs)
+    try:
+        owners = [(fields, meta) for _aid, (fields, meta) in _rows(jobs).items()
+                  if meta.get("worker_type") == "owner" and str(meta.get("dispatch_depth")) == "1"
+                  and route["route_id"] in {meta.get("owner_route_id"), meta.get("route_id")}]
+    except (OSError, ValueError):
+        return False     # an unreadable registry decides nothing; the closure is the record
+    if not owners:
+        return False
+    status, latest = owners[-1][0][1], owners[-1][1]
+    if status in OPEN or DC.verdict_pass(latest) or DC.deferred_completion(latest) == "pending":
+        return False
+    if jobs.exists():
+        ledger = WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs)
+        try:
+            with ledger.lock():
+                _cancel_ledger(route, ledger, legal_only=True)
+        except (OSError, ValueError, WS.WorkflowStateError):
+            pass
+    return _finish_existing_cycle(route, jobs=jobs, lock_timeout=5.0)
+
+
+def _finish_existing_cycle(route, *, jobs=None, lock_timeout=0.5):
     # This is ordinary producer closure, never a dependency on retaining its
     # files. Absence/deletion leaves the cancellation result fully replayable.
     import artifact_producer as AP
     root = Path(route["artifact_root"])
     try:
         if verified_owner_pin_handoff_close(route, jobs=jobs):
-            return
+            return False
         cycle = AP.route_cycle_for(root, route)
         if cycle and cycle.get("state") == "open":
             AP.finalize(root, cycle_id=cycle["cycle_id"], state="abandoned",
-                        abandon_reason="operator-decision", lock_timeout=0.5)
+                        abandon_reason="operator-decision", lock_timeout=lock_timeout)
+            return True
     except (OSError, ValueError, AP.ProducerError):
         pass
+    return False
 
 
 def _file_version(path):
