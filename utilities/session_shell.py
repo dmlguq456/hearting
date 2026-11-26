@@ -1306,11 +1306,13 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     states = ("open", "submitted", "received", "applied", "expired", "cancelled", "unknown",
               "answer_below", "answer_there", "answer_parent", "answer_sending", "answer_closed")
     labels = {key: ui_text("fleet.session_block." + key) for key in (
-        *states, "choose", "choose_write", "writing_choices", "send", "navigate", "navigate_write",
+        *states, "choose", "choose_write", "writing", "writing_choices", "send", "navigate", "navigate_write",
         "text", "changed", "complete", "busy", "empty", "full", "more", "more_choose", "more_down",
         "more_page", "more_choices", "sent", "questions")}
     if editor < 64:
-        for key in states:
+        # 11-26: a narrow popup keeps the line-break key while an answer is written (Enter, which sends,
+        # was named before writing began).
+        for key in (*states, "writing", "writing_choices"):
             labels[key] = ui_text("fleet.session_block.compact_" + key)
     if pane_binding:
         try:

@@ -39,6 +39,19 @@ def resize(master,rows,cols):
     except OSError:pass  # A display-size failure does not close the I/O channel.
 
 
+def _pidfd_open(pid):
+    """os.pidfd_open, or the checked syscall fallback where the Python build lacks it.
+
+    Some builds (conda's Python, built against older kernel headers) have no
+    os.pidfd_open on a kernel that supports pidfds; the launcher runs whatever
+    `python3` the shell finds, so it must not depend on that attribute.
+    """
+    native=getattr(os,'pidfd_open',None)
+    if callable(native):return native(pid)
+    from dispatch_contract_process import pidfd_open
+    return pidfd_open(pid)
+
+
 def release_of(path):
     """The installed bundle behind a host path; None while an install is mid-switch."""
     try:return os.path.realpath(path,strict=True)
@@ -168,9 +181,10 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
             if gen.host.pid<=1:raise ValueError('unsafe display pid')
             try:
                 if birth(gen.host.pid)!=gen.start:return
-                # No pidfd (pidfd_open failed after Popen): the birth check above already proved the pid is ours.
-                if gen.fd is None:gen.host.terminate()
-                else:signal.pidfd_send_signal(gen.fd,signal.SIGTERM)
+                # No pidfd, or a build whose signal module cannot send through one: the birth check above already proved the pid is ours.
+                send=getattr(signal,'pidfd_send_signal',None)
+                if gen.fd is None or not callable(send):gen.host.terminate()
+                else:send(gen.fd,signal.SIGTERM)
                 gen.term_sent=True
             except (FileNotFoundError,ProcessLookupError):pass
     def spawn_display(number,successor,c):
@@ -190,7 +204,7 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
             gen.host=subprocess.Popen([node,str(host_path),harness,*wrapped],env=env,
                                       stderr=subprocess.DEVNULL if successor else None,
                                       pass_fds=(master,c.ready_w,c.status_r,c.display_control.fileno(),held_fd,c.succ_host.fileno()))
-            gen.start=birth(gen.host.pid);gen.fd=os.pidfd_open(gen.host.pid)
+            gen.start=birth(gen.host.pid);gen.fd=_pidfd_open(gen.host.pid)
         except OSError:
             if gen.host is not None and gen.host.poll() is None:
                 try:gen.host.terminate()
