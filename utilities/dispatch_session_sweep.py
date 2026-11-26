@@ -2111,7 +2111,7 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
     pending records arrive, a member is ACKed, or its displayed claim count advances.
     Historical counts are accepted only within the record's already-claimed range.
     """
-    from dispatch_recipient_receipt import OPENCODE_MARKER_LINE_RE, identity_binding
+    from dispatch_recipient_receipt import OPENCODE_MARKER_LINE_RE, identity_binding, without_answer_text
     from dispatch_seat_handover import record_for_session, storage_recipients
     from peer_read_context import PeerReadContext
     read_context = PeerReadContext()
@@ -2123,7 +2123,7 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
     native_rows = []
     for text in _opencode_native_user_texts(messages, session_id):
         markers = OPENCODE_MARKER_LINE_RE.findall(text)
-        if not markers or len({delivery_id for delivery_id, _digest in markers}) != len(markers):
+        if not markers:
             continue
         native_rows.append((text, markers))
         candidate_ids.update(delivery_id for delivery_id, _digest in markers)
@@ -2157,6 +2157,11 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
 
     expected, seen = [], set()
     for native_text, markers in native_rows:
+        # 11-26: a marker line inside an answer its records carry is the person's words, not a member.
+        named = [record for delivery_id, _digest in markers for _root, record in by_id.get(delivery_id, ())]
+        markers = OPENCODE_MARKER_LINE_RE.findall(without_answer_text(native_text, named))
+        if not markers or len({delivery_id for delivery_id, _digest in markers}) != len(markers):
+            continue
         selected, identities, valid = [], [], True
         for delivery_id, digest in markers:
             matches = []

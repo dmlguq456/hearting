@@ -91,6 +91,9 @@ class ReaderTest(unittest.TestCase):
         self.assertFalse(reader.has_buffered_input())
         # Outside the explorer a paste's markers stay inert as before.
         self.assertEqual(decode(b"\x1b[200~ab\x1b[201~", explorer=False), [(ord("a"), None), (ord("b"), None)])
+        # 11-26 follow-up: an escape sequence in a paste (a coloured log) is left out whole, not only its Esc.
+        self.assertEqual(decode(b"\x1b[200~a\x1b[31mb\x1b[0mc\x1b[201~"), [(KEY_PASTE, "abc")])
+        self.assertEqual(decode("\x1b[200~가\x1b[1;32m나\x1b[m\r\n다\x1b[201~".encode()), [(KEY_PASTE, "가나\n다")])
 
     def test_word_text_and_delete_keys(self):
         self.assertEqual(decode(b"\x1b[1;5D\x1b[1;3D"), [(KEY_WORD_LEFT, None)] * 2)
@@ -242,6 +245,36 @@ class AnswerTest(unittest.TestCase):
             state, _ = reduce(state, {"type": "key", "key": "up", "tabs": TABS}, frame)
         self.assertFalse(state.question_overlay["editing"])
         self.assertEqual(self.typed(state), text)
+
+    def test_up_and_down_stay_on_a_wrapped_row_at_its_end(self):
+        # A wrapped row's end is the next row's start: ↓ from a column past it stays on the row, before its last
+        # character (the shell's popup does the same), never on the next row's first cell.
+        from tools.fleet.explorer.state import _question_vertical
+        self.assertEqual(question_answer_rows("abcd\nabcdefgh", 4), ((0, 4), (5, 9), (9, 13)))
+        self.assertEqual(_question_vertical("abcd\nabcdefgh", 4, 4, 1, None), (8, 4))
+        self.assertEqual(_question_vertical("abcdefgh\nabcd", 8, 4, -1, None), (3, 4))
+        # Through the reducer at the width Fleet drew the answer.
+        state, _vm, frame, _ = self.keys(["click-write", "text:" + "0123456789" * 30], cols=60)
+        width = dict(frame.answer_layout)["q"]
+        text = "x" * width + "\n" + "y" * (width * 2)
+        state, _vm, frame, _ = self.keys(["click-write", "text:" + text, "text-start", "end"], cols=60)
+        self.assertEqual(state.question_overlay["caret"], ("q", width))
+        state, _ = reduce(state, {"type": "key", "key": "down", "tabs": TABS}, frame)
+        self.assertEqual(state.question_overlay["caret"], ("q", 2 * width), "the place stays on the wrapped row")
+
+    def test_a_secret_takes_a_line_break_key_as_enter_and_a_pasted_key_keeps_its_inner_lines(self):
+        # 11-26 follow-up: in a secret every line-break key sends, as Ctrl+J did before (the shell's popup alike).
+        _, _, _, effects = self.keys(self.text("pw") + ["newline"], is_secret=True)
+        submit = next(effect for effect in effects if effect[0] == "questions.submit")
+        self.assertEqual(submit[2]["answers"]["q"], ["pw"])
+        # A pasted key of several lines keeps them, but not the line breaks it ends with.
+        state, _, _, _ = self.keys(["click-write", "text:line1\nline2\n\n"], is_secret=True)
+        self.assertEqual(self.typed(state), "line1\nline2")
+        state, _, _, _ = self.keys(["click-write", "text:\n"], is_secret=True)
+        self.assertEqual(self.typed(state), "")
+        # Not a secret: the paste goes in whole, its last line breaks too.
+        state, _, _, _ = self.keys(["click-write", "text:line1\nline2\n"])
+        self.assertEqual(self.typed(state), "line1\nline2\n")
 
     def test_the_answer_grows_within_the_page_and_follows_the_place(self):
         lines = "\n".join(f"줄 {n}" for n in range(1, 31))

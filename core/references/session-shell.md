@@ -47,7 +47,10 @@ lost. That transport boundary never acknowledges peer consumption.
 The launcher retains the PTY master and original native process outside the
 display worker. VT, scratch-display, layout and display-host failures degrade
 to a plain relay of that same process; they never restart the CLI or request
-manual recovery. Normal key bytes still go directly from the display worker
+manual recovery. A draw failure's relay first gives the outer terminal back the
+native's own modes (11-26): what the host turned on for itself (bracketed paste
+while the question popup had the keys, the panel's mouse) goes off, and what the
+native asked for stays. Normal key bytes still go directly from the display worker
 to the same PTY, without an extra broker hop.
 A running window follows a new install without restarting its CLI. Each
 display host compares the installed link it was started from
@@ -889,24 +892,34 @@ provenance, and its draft. Enter's existing next-field behavior stays.
 Its one localized guidance row reads
 `↑↓ choose · type to write · Enter send · Tab next · Esc/Ctrl+] back` before writing,
 and `Enter send · Ctrl+J newline · ↑ choices · Tab next · Esc/Ctrl+] back` while writing
-(without `↑ choices` when no choices exist; in a popup narrower than 64 cells
-`Ctrl+J newline · ↑ choices · …`, Enter having been named before writing). The existing
-key packing shortens narrow rows.
+(without `↑ choices` when no choices exist). The existing key packing shortens narrow
+rows, leaving out `Tab next` first, then `↑ choices`: in a popup narrower than 64 cells the
+closing key reads `Esc/Ctrl+] 뒤로` in Korean, so a 50-cell popup (46 inside) keeps
+`Enter 보내기 · Ctrl+J 줄바꿈 · Esc/Ctrl+] 뒤로` on its one row while writing (11-26: Enter, which
+sends, stays named).
 A written answer takes lines (11-26, the person: "질문 답변에서 줄바꿈이 안되네.. 내가 자유도
 높이라고 했지 않나?"), alike in the shell's question popup and Fleet's question board. Enter
 alone still sends the whole answer. A line break goes in at the place with the keys the
 native input below takes for one: `Ctrl+J` (LF; the raw terminal sends Enter as CR, and
 Fleet turns curses' newline mode off so Enter arrives as CR there too), `Alt/Option+Enter`
 (`ESC CR` or `ESC LF`, also what a terminal set up for Shift+Enter often sends), `\` then
-Enter (the `\` before the place becomes the break; not in a secret), and a modified Enter
+Enter (the `\` before the place becomes the break), and a modified Enter
 the terminal reports (kitty `CSI 13;<mods>u`, xterm modifyOtherKeys `CSI 27;<mods>;13~`,
 kitty's `Ctrl+J` `CSI 106;5u`). On a question answered only by a choice `Ctrl+J` is Enter
-as before and the others do nothing. A paste goes in whole: its line breaks (CR, LF or
+as before and the others do nothing. In a secret every one of these keys is Enter, as
+`Ctrl+J` was before (11-26: a line break in a password is a slip; `\` then Enter sends the
+`\`), and a pasted secret keeps its inner line breaks (a key of several lines) but not the
+ones it ends with. A paste goes in whole: its line breaks (CR, LF or
 CR LF) are line breaks, never Enter, a tab stays, and any other control character (and an
-escape sequence) is left out, since the delivery to a Claude shell refuses them; the shell
+escape sequence, `ESC [` through its final byte, left out whole) is left out, since the
+delivery to a Claude shell refuses them; the two screens read the same pasted bytes to the
+same text (an Esc that starts no such sequence is left out alone). The shell
 keeps the outer terminal's bracketed paste on while the question popup has the keys, and
-Fleet asks for bracketed paste itself. In Fleet a paste that never ends goes in a second
-after its last byte; one past the limit goes in as far as it fits, with the limit's notice.
+Fleet asks for bracketed paste itself and gives it back (with its mouse reporting) when it
+ends, by `q` or by SIGTERM or SIGHUP. In both a paste whose end mark never comes is over a
+second after its last byte (Fleet puts it in then; 11-26: in the popup Esc and a press work
+again then, and a pressed `Ctrl+]` closes the popup even before that); one past the limit goes in as far
+as it fits, with the limit's notice.
 The answer grows a row per line (and per wrap) within the popup or the page while the
 question's first words (and their `more` line), its choices and the key line keep their
 rows; taller than that, the rows shown are one unbroken stretch following the place (only
@@ -1233,7 +1246,7 @@ reads the mouse included; whatever follows an Esc, in the same read or within it
 25 ms, other than `[` or `O` (an arrow or function key) is the popup's, neither closing
 it nor reaching the native: Alt/Option+Enter puts a line break in a written answer and
 Alt+B/F/D/Backspace are its word keys (11-26); any other Alt+letter and Esc then a control
-byte are dropped, and a second Esc closes it and is dropped; a paste enters a free-text answer row, its end mark `ESC[201~` read whole wherever it is split, and a paste that never ends is left by Esc, `Ctrl+]` or a press outside; the popup's input state, a paste under way, a key's front and the Esc waited on, ends with the popup, closed or opened again); a lone Escape,
+byte are dropped, and a second Esc closes it and is dropped; a paste enters a free-text answer row, its end mark `ESC[201~` read whole wherever it is split, and a paste that never ends is over a second after its last byte (then Esc or a press outside closes the popup), while a pressed `Ctrl+]` (a read of its own; one inside the pasted bytes is left out with them) closes it at once even mid paste; the popup's input state, a paste under way, a key's front and the Esc waited on, ends with the popup, closed or opened again); a lone Escape,
 `Ctrl+]`, its `✕` or a press outside it closes it
 and returns to the native input and cursor (the drag and release that follow that
 press are the popup's too; one lone Esc within a second of the Esc that closed it is

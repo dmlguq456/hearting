@@ -187,20 +187,24 @@ class AnswerMultilineTest(unittest.TestCase):
                 keys = ("choose", "choose_write", "writing", "writing_choices", "send", "navigate",
                         "navigate_write", "text")
                 wide = {k: ui_text("fleet.session_block." + k) for k in keys}
-                narrow = dict(wide, writing=ui_text("fleet.session_block.compact_writing"),
-                              writing_choices=ui_text("fleet.session_block.compact_writing_choices"))
+                # A popup narrower than 64 cells (session_shell: `editor < 64`) takes the compact closing key.
+                narrow = dict(wide, navigate_write=ui_text("fleet.session_block.compact_navigate_write"))
                 labels[lang] = {"wide": wide, "narrow": narrow}
         out = self.node(r"""
 (async()=>{
  const all=labels;
  for(const lang of ['en','ko'])for(const choices of [[],['one','two']])for(const cols of [54,60,68,100,140]){
-  const inner=Math.min(cols,view.popupWidth(cols,'question'))-4,set=all[lang][inner<64?'narrow':'wide'];
+  const popup=view.popupWidth(cols,'question'),inner=popup-4,set=all[lang][popup<64?'narrow':'wide'];
   let sent;const b=create({cellWidth:cells,changed(){},action(){},answer:async x=>(sent=x,{state:'submitted'})});
   b.update([{id:'x',revision:'r',answerable:true,questions:[{id:'q',question:'Q?',free_text:true,choices}]}],'',{labels:set});b.enter();
   b.input(Buffer.from('글'));const last=b.detail({columns:inner,budget:20}).at(-1).map(p=>p.text).join('');
-  assert(cells(last)<=inner,last);assert(last.includes('Ctrl+J'),lang+' '+cols+': '+last);
-  assert(last.endsWith(lang==='en'?'back':'돌아가기'),last);
-  if(choices.length&&inner>=46)assert(last.includes('↑'),'the way back to the choices stays: '+last);
+  // 11-26 follow-up: while writing the row names Enter (it sends) and the line-break key at every width.
+  assert(cells(last)<=inner,last);assert(last.startsWith('Enter'),lang+' '+cols+': '+last);assert(last.includes('Ctrl+J'),lang+' '+cols+': '+last);
+  assert(last.endsWith(lang==='en'?'back':popup<64?'뒤로':'돌아가기'),last);
+  // (In Korean a 64-cell popup is one cell short of it, as before: the packing leaves it out there.)
+  if(choices.length&&popup>=72)assert(last.includes('↑'),'the way back to the choices stays: '+last);
+  // A 50-cell popup (46 inside): the three keys, `Tab next` (and `↑ choices`) left out first.
+  if(cols===54)assert.equal(last,lang==='en'?'Enter send · Ctrl+J newline · Esc/Ctrl+] back':'Enter 보내기 · Ctrl+J 줄바꿈 · Esc/Ctrl+] 뒤로');
   console.log(JSON.stringify({lang,cols,choices:choices.length,keys:last}));
  }
 })().catch(e=>{console.error(e);process.exit(1)});
@@ -351,7 +355,8 @@ class PrivateTmuxScenesTest(unittest.TestCase):
                 rows = waitfor(lambda rows: any("끝" in row for row in rows), "the typed answer")
                 picture = popup(screen(cursor=True))
                 print("SCENE_KEYS=" + json.dumps(picture, ensure_ascii=False), flush=True)
-                self.assertTrue(any("Ctrl+J 줄바꿈" in row for row in picture), picture)
+                # 11-26 follow-up: a 50-cell popup names Enter while writing, in one row with the break key.
+                self.assertTrue(any("│ Enter 보내기 · Ctrl+J 줄바꿈 · Esc/Ctrl+] 뒤로 │" in row for row in picture), picture)
                 self.assertEqual(answers(), [], "no key sent it")
                 send("\r")
                 waitfor(lambda rows: any("synthetic recorded" in row for row in rows), "the recorded answer")
@@ -382,6 +387,25 @@ class PrivateTmuxScenesTest(unittest.TestCase):
                 self.assertEqual(len(sent[-1].split("\n")), 30)
                 self.assertIn("27. 줄 +27", sent[-1])
                 send("\x1d")
+                # Scene 3 (11-26 follow-up): a paste whose end mark never comes. A second after its last byte it is
+                # over: a typed key is typed and Esc closes the popup; Ctrl+] closes it at once, mid paste.
+                ask(2, "끝나지 않는 붙여넣기 질문입니다.")
+                send("\x1b[200~끝 표지가\r오지 않는다", delay=.3)
+                send("\x1b", delay=.1)
+                # The popup's own title row (the panel's question box below draws `╭` too).
+                shown = lambda rows: any("╭─ ›" in row for row in rows)  # noqa: E731
+                self.assertTrue(shown(screen()), "an Esc inside the paste is part of it")
+                time.sleep(1.2)
+                send("!", delay=.3)
+                rows = waitfor(lambda rows: any("오지 않는다!" in row for row in rows), "the key typed after the paste")
+                print("SCENE_UNENDED=" + json.dumps(popup(screen(cursor=True)), ensure_ascii=False), flush=True)
+                send("\x1b", delay=.5)
+                waitfor(lambda rows: not shown(rows), "the popup closed by Esc")
+                send("\x1d")
+                waitfor(shown, "the popup again")
+                send("\x1b[200~또 끝나지 않는", delay=.2)
+                send("\x1d", delay=.3)
+                waitfor(lambda rows: not shown(rows), "the popup closed by Ctrl+] mid paste")
                 send("\x04")
             finally:
                 try:

@@ -1310,9 +1310,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         "text", "changed", "complete", "busy", "empty", "full", "more", "more_choose", "more_down",
         "more_page", "more_choices", "sent", "questions")}
     if editor < 64:
-        # 11-26: a narrow popup keeps the line-break key while an answer is written (Enter, which sends,
-        # was named before writing began).
-        for key in (*states, "writing", "writing_choices"):
+        # 11-26: a narrow popup keeps `Enter send` and the line-break key while an answer is written: its
+        # closing key's word is short enough that the key packing leaves out `Tab next` (then `↑ choices`)
+        # first, so the three keys fit one row of a 50-cell popup (46 cells inside).
+        for key in (*states, "navigate_write"):
             labels[key] = ui_text("fleet.session_block.compact_" + key)
     if pane_binding:
         try:

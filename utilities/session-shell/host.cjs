@@ -1726,11 +1726,21 @@ function rawRelay() {
   table=null;heldStop();
   clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);frameTimer=projectionTimer=beatTimer=undefined;
   mouseInput?.flush();
+  // 11-26: the outer terminal goes back to the native's own modes. What the host turned on for itself (bracketed
+  // paste while the question popup had the keys, the panel's mouse) goes off; what the native asked for stays.
+  let own='';
+  try{
+    const m=terminal.modes,mouse=({x10:9,vt200:1000,drag:1002,any:1003})[m.mouseTrackingMode];
+    const modes=new Map([[2004,m.bracketedPasteMode],[1,m.applicationCursorKeysMode],
+      ...[9,1000,1002,1003].map(n=>[n,n===mouse]),[1006,!!mouse],[1004,m.sendFocusMode]]);
+    for(const enabled of [false,true])for(const [mode,value] of modes)
+      if(!!value===enabled&&paintedModes.has(mode)&&paintedModes.get(mode)!==enabled){own+=`\x1b[?${mode}${enabled?'h':'l'}`;paintedModes.set(mode,enabled);}
+  }catch{}
   try{terminal.dispose();}catch{}
   for(const vt of displayVTs)try{vt.dispose();}catch{}
   displayVTs.clear();
   for(const row of watchers.values())row.watch.close();watchers.clear();
-  try{emit('\x1b[0m\x1b[?25h\x1b[2J\x1b[H');}catch{}
+  try{emit('\x1b[0m'+own+'\x1b[?25h\x1b[2J\x1b[H');}catch{}
   try{child?.resize(cols,rows);}catch{}
 }
 // A display exception never owns the lifetime of the native terminal.

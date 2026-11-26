@@ -20,10 +20,15 @@ const NEWLINE_CSI=/^\x1b\[(?:13;(?:[2-9]|1\d)u|27;(?:[2-9]|1\d);13~|106;5u)$/;
 // and digits and what stands before it, as the native inputs do.
 const WORD_LEFT=['\x1b[1;3D','\x1b[1;5D'],WORD_RIGHT=['\x1b[1;3C','\x1b[1;5C'],WORD_DELETE=['\x1b[3;3~','\x1b[3;5~'];
 const TEXT_START=['\x1b[1;5H'],TEXT_END=['\x1b[1;5F'];
+// 11-26: a paste whose end mark never comes is over this long after its last byte (Fleet's `_PASTE_IDLE`).
+const PASTE_IDLE=1000;
 const wordChar=c=>/[\p{L}\p{N}\p{M}_]/u.test(c||'');
 module.exports=function({changed,answer,action,cellWidth}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false,pasteCR=false;
+  // 11-26: a paste whose end mark never comes ends a second after its last byte (Fleet's rule), and the line
+  // breaks a paste ends a secret with are held until more of it comes (a pasted key keeps its inner lines).
+  let pasteTimer,heldBreaks=0;
   // 11-26: the answer's rows are laid out at the popup's width when painted; ↑↓ move between those rows (the
   // cell column held while they repeat), and the rows shown follow the place when the answer is taller than its room.
   let answerColumns=60,goal=null,answerTop=0,answerSeat=null;
@@ -102,7 +107,9 @@ module.exports=function({changed,answer,action,cellWidth}) {
   }
   // ↑↓ choose only while this question takes a choice; otherwise they scroll as before.
   function choosing(row){return !!row&&focused&&active(row)&&!state(row.item).typing[row.question.id]&&choices(row).length>0;}
-  function resetParser(){clearTimeout(escapeTimer);escapeTimer=undefined;decoder=new StringDecoder('utf8');escape='';pasting=false;pasteCR=false;skipTail=false;goal=null;}
+  function resetParser(){clearTimeout(escapeTimer);escapeTimer=undefined;endPaste();decoder=new StringDecoder('utf8');escape='';skipTail=false;goal=null;}
+  function endPaste(){clearTimeout(pasteTimer);pasteTimer=undefined;pasting=false;pasteCR=false;heldBreaks=0;}
+  function pasteGoesOn(){clearTimeout(pasteTimer);pasteTimer=setTimeout(()=>{if(pasting){endPaste();escape='';changed();}},PASTE_IDLE);}
   // Correction 3 (11-13): a settled question (answered, expired, cancelled) is kept only while
   // the person reads its receipt in the focused editor; unfocused it is let go, so it is no
   // longer asked for as a retained reference and leaves the panel.
@@ -446,7 +453,25 @@ module.exports=function({changed,answer,action,cellWidth}) {
     const local=state(row.item),chars=[...local.drafts[row.question.id]],at=caretAt(local,row.question.id);
     if(dir<0)cut(row,lineStart(chars,at),at);else cut(row,at,lineEnd(chars,at));
   }
-  function newline(row){if(row&&active(row)&&writable(row))append(row,'\n');}
+  // 11-26: a line break goes in a written answer that is no secret; in a secret every line-break key is Enter,
+  // as Ctrl+J was before (a line break in a password is a slip). `\` then Enter follows the same rule.
+  function breaks(row){return !!row&&active(row)&&writable(row)&&!row.question.secret;}
+  function newline(row){if(breaks(row))append(row,'\n');else if(row&&active(row)&&writable(row))enterKey(row);}
+  function enterKey(row){
+    const local=state(row.item),id=row.question.id;
+    if(changeArmed){changeArmed=false;local.notice='';changed();return;}
+    // `\` then Enter (the native input's own way): the `\` before the place becomes a line break.
+    if(breaks(row)&&local.typing[id]){
+      const chars=[...(local.drafts[id]||'')],at=caretAt(local,id);
+      if(at>0&&chars[at-1]==='\\'){chars[at-1]='\n';local.drafts[id]=chars.join('');local.caret[id]=at;return;}
+    }
+    // Enter sends the highlighted choice, the same value its number key picks.
+    if(active(row)&&cursorOf(row)>=0){
+      local.answers[id]=[value(choices(row)[cursorOf(row)])];local.notice='';
+      if(!complete(row,formValues(row))&&(row.item.questions||[]).length>1){move(1);return;}
+    }
+    submit();
+  }
   // ↑↓ inside a written answer of several rows: the place goes to the row above or below, at the cell column
   // it stood in (held while ↑↓ repeat). False on the first or last row, where ↑↓ keep their meaning.
   function vertical(row,dir){
@@ -470,32 +495,22 @@ module.exports=function({changed,answer,action,cellWidth}) {
       if(row&&active(row)&&writable(row)){
         if(c==='\n'&&pasteCR){pasteCR=false;return;}
         pasteCR=c==='\r';
-        if(c==='\r'||c==='\n')append(row,'\n');
-        else if(c==='\t'||!/[\x00-\x1f\x7f-\x9f]/.test(c))append(row,c);
+        if(c==='\r'||c==='\n'){if(row.question.secret)heldBreaks++;else append(row,'\n');}
+        else if(c==='\t'||!/[\x00-\x1f\x7f-\x9f]/.test(c)){
+          // A secret's line breaks stay only between its characters: the ones it ends with are dropped.
+          if(heldBreaks){const held=heldBreaks;heldBreaks=0;append(row,'\n'.repeat(held));}
+          append(row,c);
+        }
       }
       return;
     }
     clearFullNotice(row);
     if(c==='\x1d'||c==='\x1b'){leave();return;}
     if(c==='\t'){move(1);return;}
-    // Ctrl+J (LF) puts a line break in a written answer; on a question answered only by a choice it is
-    // Enter, as before.
-    if(c==='\n'&&row&&active(row)&&writable(row)){newline(row);return;}
-    if(c==='\r'||c==='\n'){
-      if(!row)return;
-      if(changeArmed){changeArmed=false;local.notice='';changed();return;}
-      // `\` then Enter (the native input's own way): the `\` before the place becomes a line break.
-      if(active(row)&&writable(row)&&local.typing[id]&&!row.question.secret){
-        const chars=[...(local.drafts[id]||'')],at=caretAt(local,id);
-        if(at>0&&chars[at-1]==='\\'){chars[at-1]='\n';local.drafts[id]=chars.join('');local.caret[id]=at;return;}
-      }
-      // Enter sends the highlighted choice, the same value its number key picks.
-      if(active(row)&&cursorOf(row)>=0){
-        local.answers[id]=[value(choices(row)[cursorOf(row)])];local.notice='';
-        if(!complete(row,formValues(row))&&(row.item.questions||[]).length>1){move(1);return;}
-      }
-      submit();return;
-    }
+    // Ctrl+J (LF) puts a line break in a written answer; on a question answered only by a choice, and in a
+    // secret, it is Enter, as before.
+    if(c==='\n'&&breaks(row)){newline(row);return;}
+    if(c==='\r'||c==='\n'){if(row)enterKey(row);return;}
     if(!row){if('rwfp'.includes(c))action(c);return;}
     if(!active(row))return;
     if(c==='\x01'||c==='\x05'){if(placing(row))place(row,c==='\x01'?'home':'end');return;}
@@ -520,7 +535,9 @@ module.exports=function({changed,answer,action,cellWidth}) {
         clearTimeout(escapeTimer);escapeTimer=undefined;
         // An application-cursor terminal sends arrows as SS3 (`ESC O A`).
         if(escape==='\x1b'&&c!=='['&&!(c==='O'&&!pasting)){
-          if(pasting){escape='';character('\x1b');character(c);continue;}
+          // In a paste the Esc is left out and what follows is text (its bytes read whole, as Fleet reads them);
+          // another Esc may start a sequence.
+          if(pasting){pasteGoesOn();if(byte===0x1b){escape=c;continue;}escape='';for(const char of decoder.write(data.subarray(i,i+1)))character(char);continue;}
           const row=current();clearFullNotice(row);goal=null;
           // What follows an Esc in this read (or within the Esc window) other than `[` or `O` (an arrow or
           // function key) is an Alt combination. 11-26: Alt/Option+Enter (`ESC CR`, `ESC LF`) puts a line break
@@ -537,8 +554,9 @@ module.exports=function({changed,answer,action,cellWidth}) {
           continue;
         }
         escape+=c;
-        if(escape==='\x1b[200~'){if(!pasting)clearFullNotice(current());pasting=true;pasteCR=false;escape='';}
-        else if(escape==='\x1b[201~'){pasting=false;pasteCR=false;escape='';}
+        if(pasting)pasteGoesOn();
+        if(escape==='\x1b[200~'){if(!pasting){clearFullNotice(current());pasteCR=false;heldBreaks=0;}pasting=true;escape='';pasteGoesOn();}
+        else if(escape==='\x1b[201~'){endPaste();escape='';}
         else if(escape.length>2&&byte>=0x40&&byte<=0x7e||escape.length===3&&escape[1]==='O'){
           if(!pasting){
             const up=escape==='\x1b[A'||escape==='\x1bOA',down=escape==='\x1b[B'||escape==='\x1bOB',row=current();
@@ -568,9 +586,12 @@ module.exports=function({changed,answer,action,cellWidth}) {
           }
           escape='';
         }else if(escape.length>64)escape='';
-      }else if(byte===0x1b){escape=c;if(!pasting)escapeTimer=setTimeout(()=>{if(escape==='\x1b'){leave();escapedAt=Date.now();}},25);}
-      else if(byte===0x1d&&!pasting){leave();return data.subarray(i+1);}
-      else for(const char of decoder.write(data.subarray(i,i+1)))character(char);
+      }else if(byte===0x1b){escape=c;if(pasting)pasteGoesOn();else escapeTimer=setTimeout(()=>{if(escape==='\x1b'){leave();escapedAt=Date.now();}},25);}
+      // Ctrl+] leaves the popup; 11-26: also in a paste whose end mark has not come, when it is pressed (a read of
+      // its own). One inside the pasted bytes is their control character, left out: the rest of that paste never
+      // goes on to the native.
+      else if(byte===0x1d&&(!pasting||data.length===1)){leave();return data.subarray(i+1);}
+      else{if(pasting)pasteGoesOn();for(const char of decoder.write(data.subarray(i,i+1)))character(char);}
     }
     changed();return Buffer.alloc(0);
   }

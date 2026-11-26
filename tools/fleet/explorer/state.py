@@ -292,6 +292,16 @@ def _question_vertical(text, at, width, step, goal):
     return i, goal
 
 
+def _question_secret(overlay):
+    """Whether the question being answered (the one typed to, else the first) is a secret."""
+    if not isinstance(overlay, Mapping):
+        return False
+    questions = question_items(overlay.get("detail"))
+    question_id = overlay.get("editing_question_id") or (questions[0]["id"] if questions else None)
+    spec = next((item for item in questions if item["id"] == question_id), {})
+    return bool(spec.get("is_secret") or spec.get("isSecret"))
+
+
 def question_caret(overlay, question_id, text):
     """The place inside the typed text: a screen value only, the end unless set while typing (11-22)."""
     caret = overlay.get("caret") if isinstance(overlay, Mapping) else None
@@ -1418,6 +1428,9 @@ def _reduce(state, event, frame=None):
             overlay = dict(overlay)
             overlay.pop("answer_full")
             state = replace(state, question_overlay=overlay)
+        if key == "newline" and _question_secret(overlay):
+            # 11-26: in a secret every line-break key is Enter, as Ctrl+J was before (the shell's popup does the same).
+            key = "enter"
         # 11-26: the cell column ↑↓ hold while they repeat inside a written answer; any other key lets it go.
         goal = overlay.get("caret_goal") if key in ("up", "down") else None
         if "caret_goal" in overlay and key not in ("up", "down"):
@@ -1454,6 +1467,11 @@ def _reduce(state, event, frame=None):
                 # 11-26: a line break (Ctrl+J, Alt+Enter) is a character of the answer like any other.
                 addition = "\n" if key == "newline" else key[5:] if key.startswith("text:") else key
                 question = next(item for item in specs if item["id"] == qid)
+                if key.startswith("text:") and (question.get("is_secret") or question.get("isSecret")):
+                    # A pasted secret keeps its inner line breaks (a key of several lines) but not the ones it ends with.
+                    addition = addition.rstrip("\n")
+                    if not addition:
+                        return state, ()
                 choices = question.get("choices", question.get("options"))
                 if overlay.get("editing") or not choices or not (len(addition) == 1 and addition in "123456789"):
                     text = _question_text_draft(overlay, qid)
@@ -1556,10 +1574,9 @@ def _reduce(state, event, frame=None):
                 # 11-26: `\` then Enter (the native input's own way): the `\` before the place becomes a line break.
                 questions = question_items(overlay.get("detail"))
                 question_id = overlay.get("editing_question_id") or (questions[0]["id"] if questions else None)
-                spec = next((item for item in questions if item["id"] == question_id), {})
                 text = _question_text_draft(overlay, question_id) if question_id else ""
                 at = question_caret(overlay, question_id, text)
-                if at and text[at - 1] == "\\" and not (spec.get("is_secret") or spec.get("isSecret")):
+                if at and text[at - 1] == "\\" and not _question_secret(overlay):
                     return _question_with_caret(
                         _question_set_answer(state, question_id, text[:at - 1] + "\n" + text[at:]), question_id, at)
             if (unfolded and overlay.get("state") == "open"

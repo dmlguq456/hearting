@@ -31,6 +31,9 @@ _ALT_TEXT_KEYS = {ord("b"): KEY_WORD_LEFT, ord("f"): KEY_WORD_RIGHT, ord("d"): K
 _PASTE_START, _PASTE_END = b"\x1b[200~", b"\x1b[201~"
 _PASTE_LIMIT = 65536
 _PASTE_IDLE = 1.0
+# 11-26: an escape sequence inside a paste (a coloured log): `ESC [`, then anything up to its final byte, as
+# the shell's question popup reads one (it gives up after 62 bytes without a final one, those bytes dropped).
+_PASTED_CSI = re.compile(rb"\x1b\[(?:[^\x40-\x7e]{0,62}[\x40-\x7e]|[^\x40-\x7e]{63})")
 
 
 # The keys a written answer edits with besides its characters (the shell's question popup reads the same):
@@ -64,9 +67,11 @@ def answer_key(ch, payload=None, *, writable=False, editing=False, finding=False
 
 
 def paste_text(raw):
-    """A pasted text as an answer takes it: line breaks (CR, LF, CR LF) one LF, a tab kept, any other
-    control character left out (the delivery to a session refuses them)."""
-    text = bytes(raw).decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+    """A pasted text as an answer takes it: line breaks (CR, LF, CR LF) one LF, a tab kept, an escape
+    sequence (``ESC [`` … its final byte) left out whole and any other control character left out (the
+    delivery to a session refuses them). The shell's question popup reads the same bytes to the same text."""
+    raw = _PASTED_CSI.sub(b"", bytes(raw))
+    text = raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
     return "".join(char for char in text
                    if char in "\n\t" or not (ord(char) < 32 or 0x7f <= ord(char) < 0xa0))
 

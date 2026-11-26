@@ -53,6 +53,7 @@ import math
 import os
 import re
 import shlex
+import signal
 import sys
 import threading
 import time
@@ -7389,6 +7390,19 @@ class _StderrToLog:
         return False
 
 
+class _EndedBySignal(BaseException):
+    """SIGTERM or SIGHUP reached the live view (11-26): the screen is given back first."""
+
+    def __init__(self, signum):
+        super().__init__(signum)
+        self.signum = signum
+
+
+def _end_by_signal(signum, _frame):
+    signal.signal(signum, signal.SIG_DFL)   # a second one ends the process at once
+    raise _EndedBySignal(signum)
+
+
 def run_live(collect_all, hfilter, section, interval):
     if curses is None:
         sys.stderr.write("fleet: the live TUI needs curses (unavailable here; on native "
@@ -7398,6 +7412,15 @@ def run_live(collect_all, hfilter, section, interval):
     if not sys.stdout.isatty():
         sys.stderr.write("fleet: stdout is not a TTY — use --once (snapshot) or --json.\n")
         return 1
+    # 11-26: SIGTERM and SIGHUP end the view through its own way out, so bracketed paste and mouse
+    # reporting go off and curses gives the terminal back (ncurses' own SIGTERM handler restored only
+    # its part and left both on; a hangup restored nothing); then the process ends by that signal.
+    previous = {}
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            previous[signum] = signal.signal(signum, _end_by_signal)
+        except (ValueError, OSError):
+            pass
     try:
         _prepare_terminal()
         with _StderrToLog(_stderr_log_path()) as stderr_log:
@@ -7405,9 +7428,19 @@ def run_live(collect_all, hfilter, section, interval):
             return curses.wrapper(_loop, collect_all, hfilter, section, interval)
     except KeyboardInterrupt:
         return 0
+    except _EndedBySignal as ended:
+        signal.signal(ended.signum, signal.SIG_DFL)
+        os.kill(os.getpid(), ended.signum)
+        return 128 + ended.signum
     except Exception as e:  # pragma: no cover
         sys.stderr.write("fleet: curses failed: %s\n" % e)
         return 1
+    finally:
+        for signum, handler in previous.items():
+            try:
+                signal.signal(signum, handler)
+            except (ValueError, OSError, TypeError):
+                pass
 
 
 def _prepare_terminal():

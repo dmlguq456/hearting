@@ -133,8 +133,8 @@ def bound_delivery_ids(text: str, storage_recipient: str, roots) -> list[str]:
 
     The marker is the identity a receipt ACK proves (``settle_native_receipt``), but a
     person can paste it with words of their own, so the prompt as a whole must be what
-    Hearting sent: every marker line is complete (the Codex queue recovery's fullmatch),
-    one ends the prompt, each binds to a record stored for this recipient, and the text
+    Hearting sent: every marker line outside the answers its records carry (a person's words,
+    ``without_answer_text``) is complete (the Codex queue recovery's fullmatch), one ends the prompt, each binds to a record stored for this recipient, and the text
     above the last one opens with a fixed Hearting delivery heading or is exactly a session
     notice's native text (rendered from its stored receipt alone; other notices re-render
     from live registry state, so their fixed opening is the comparison). Anything else
@@ -144,10 +144,20 @@ def bound_delivery_ids(text: str, storage_recipient: str, roots) -> list[str]:
         return []
     body = text.strip()
     above, _newline, last = body.rpartition("\n")
-    matches = [MARKER_LINE_RE.fullmatch(line) for line in body.split("\n")
+    if not above or MARKER_LINE_RE.fullmatch(last) is None:
+        return []
+    # 11-26: an answer the delivery's own records carry is the person's words; a marker line copied into it
+    # (a piece of a session record) is neither one of the delivery's markers nor a break in it.
+    named = {}
+    for line in body.split("\n"):
+        found = MARKER_LINE_RE.fullmatch(line)
+        if found and found.group(1) not in named:
+            bound = _bound_record(found.group(1), found.group(2), storage_recipient, roots)
+            if bound is not None:
+                named[found.group(1)] = bound
+    matches = [MARKER_LINE_RE.fullmatch(line) for line in without_answer_text(body, named.values()).split("\n")
                if "HEARTING_RECEIPT_V1" in line]
-    if (not above or MARKER_LINE_RE.fullmatch(last) is None
-            or any(match is None for match in matches)):
+    if not matches or any(match is None for match in matches):
         return []
     ids = [match.group(1) for match in matches]
     if len(set(ids)) != len(ids):
@@ -164,6 +174,28 @@ def bound_delivery_ids(text: str, storage_recipient: str, roots) -> list[str]:
     except Exception:  # noqa: BLE001 - no heading to compare is no proof
         pass
     return ids if len(records) == 1 and above == _sent_notice_text(records[0]) else []
+
+
+def without_answer_text(text: str, records) -> str:
+    """``text`` less the answer each answer notice among ``records`` carries, as its delivery shows it.
+
+    A written answer may hold anything the person put in it, a line with a receipt marker copied from a
+    session record too (11-26). Only the exact answer a record is bound to is taken out, so the markers
+    the delivery itself carries, and anything outside its answers, are read as before. The delivered
+    text is never changed: this is what its readers look for markers in.
+    """
+    for record in records:
+        receipt = record.get("receipt") if isinstance(record, dict) else None
+        if not isinstance(receipt, dict) or "answer_binding" not in receipt:
+            continue
+        try:
+            import session_notice
+            answer = session_notice.consumer_text(receipt)
+        except Exception:  # noqa: BLE001 - an answer that cannot be read is not taken out
+            continue
+        if answer:
+            text = text.replace(answer, "")
+    return text
 
 
 def _text_content(value: Any) -> str:
