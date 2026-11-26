@@ -14,6 +14,13 @@ profile does not exist here on purpose. The only dependency exception is a
 symlink to PyYAML when it is installed in the enabled parent user site; no
 other parent user-site package or startup customization is exposed.
 
+A one-off command outside the suites (``python3 -I -B utilities/x.py``, ``node ...``)
+gets the same environment from ``run-tests.py --direct-run <command...>``: none of
+the caller's AGENT_*, HEARTING_*, HERDR_* or other state-path variables, and HOME,
+XDG_*_HOME and TMPDIR inside a private root removed afterwards. Start it from a
+scratch project directory, not from the checkout: the project root is still read
+from the working directory (utilities/artifact-root.sh).
+
 The post-run live-state leak sweep classifies each newly appeared path under
 the live-state root by *positive* evidence only, never by absence of it:
 

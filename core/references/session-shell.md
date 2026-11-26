@@ -877,8 +877,7 @@ Wrapped, the place is drawn on its row at its cell (the terminal cursor in the s
 the end of a row `→` goes to the first cell of the next), and a short budget that cuts rows
 keeps the row holding the place, as it kept the last. The place is a screen value only:
 the sent answer (`[value, text]`), the saved draft and the questions API are as before, and
-returning to a question starts it at the text's end. No word jumps, no line-up/down in the
-wrapped text, no selection, no undo. In the shell's question input `←` `→` move only the
+returning to a question starts it at the text's end. No selection, no undo. In the shell's question input `←` `→` move only the
 place in the text and do nothing with no text (11-22, the person: "구획을 안옮겨도 되는데.
 굳이"): they no longer change sections there, and its keys row no longer says `←→ section`;
 the other popups (STATUS, BACKLOG, ROUTE, MESSAGES, MEM, NOW) keep `←→` for the sections.
@@ -889,8 +888,41 @@ Tab and closing/reopening retain each question's mark, its default/explicit
 provenance, and its draft. Enter's existing next-field behavior stays.
 Its one localized guidance row reads
 `↑↓ choose · type to write · Enter send · Tab next · Esc/Ctrl+] back` before writing,
-and `Enter send · ↑ choices · Tab next · Esc/Ctrl+] back` while writing (without
-`↑ choices` when no choices exist). The existing key packing shortens narrow rows.
+and `Enter send · Ctrl+J newline · ↑ choices · Tab next · Esc/Ctrl+] back` while writing
+(without `↑ choices` when no choices exist; in a popup narrower than 64 cells
+`Ctrl+J newline · ↑ choices · …`, Enter having been named before writing). The existing
+key packing shortens narrow rows.
+A written answer takes lines (11-26, the person: "질문 답변에서 줄바꿈이 안되네.. 내가 자유도
+높이라고 했지 않나?"), alike in the shell's question popup and Fleet's question board. Enter
+alone still sends the whole answer. A line break goes in at the place with the keys the
+native input below takes for one: `Ctrl+J` (LF; the raw terminal sends Enter as CR, and
+Fleet turns curses' newline mode off so Enter arrives as CR there too), `Alt/Option+Enter`
+(`ESC CR` or `ESC LF`, also what a terminal set up for Shift+Enter often sends), `\` then
+Enter (the `\` before the place becomes the break; not in a secret), and a modified Enter
+the terminal reports (kitty `CSI 13;<mods>u`, xterm modifyOtherKeys `CSI 27;<mods>;13~`,
+kitty's `Ctrl+J` `CSI 106;5u`). On a question answered only by a choice `Ctrl+J` is Enter
+as before and the others do nothing. A paste goes in whole: its line breaks (CR, LF or
+CR LF) are line breaks, never Enter, a tab stays, and any other control character (and an
+escape sequence) is left out, since the delivery to a Claude shell refuses them; the shell
+keeps the outer terminal's bracketed paste on while the question popup has the keys, and
+Fleet asks for bracketed paste itself. In Fleet a paste that never ends goes in a second
+after its last byte; one past the limit goes in as far as it fits, with the limit's notice.
+The answer grows a row per line (and per wrap) within the popup or the page while the
+question's first words (and their `more` line), its choices and the key line keep their
+rows; taller than that, the rows shown are one unbroken stretch following the place (only
+the answer's first row leads with `› `). `↑` `↓` go between its rows at the width it was
+drawn, holding the cell column while they repeat; from its first row `↑` goes to the
+choices (Fleet: leaves the typing) and from its last `↓` keeps its meaning, as before.
+`Home` `End` (`Ctrl+A` `Ctrl+E`) go to the ends of the line holding the place,
+`Ctrl+Home` `Ctrl+End` to the ends of the text; `Alt+←` `Alt+→` (`Ctrl+←→`, `Alt+B`
+`Alt+F`) step over a run of letters and digits, `Ctrl+W` and `Alt+Backspace` delete the
+word before the place, `Alt+D` and `Ctrl/Alt+Delete` the one after it, `Ctrl+U` the line
+before it and `Ctrl+K` the line after it; Backspace and Delete join lines. Fleet decodes
+`Delete` (`ESC [ 3~`) itself now (it was inert with keypad off), and while an answer is
+written an Alt combination is the answer's (a word key, or dropped), not Esc and then a
+key. The line breaks stay characters of the answer: the stored answer, the draft and the
+questions API are unchanged; the one-line sent receipt joins the lines with spaces, and
+the person's window shows the first line with `(+N lines)`.
 Choice-only questions keep their selection behavior; their guidance omits the
 retired `t text` / `t 답 입력`. Fleet's question board shows recommendations as
 `(recommended)` and marks only choices picked by number or click. Repeating the
@@ -1202,9 +1234,10 @@ its own window or in Fleet. In free-text questions, `f`, `r`, `p` and `w` enter 
 In the question popup `←→` move the place in the typed text and do nothing otherwise (see the question input rules above); the other popups' `←→` switch sections, and a section's name pressed on the bottom line opens it. While the popup
 stands every key and press is its own (none reaches the native, a native that
 reads the mouse included; whatever follows an Esc, in the same read or within its
-25 ms, other than `[` or `O` (an arrow or function key) is dropped, neither closing
-it nor reaching the native: Alt+letter, Shift/Alt+Enter, Esc then a control byte, and a
-second Esc closes it and is dropped; a paste enters a free-text answer row, its end mark `ESC[201~` read whole wherever it is split, and a paste that never ends is left by Esc, `Ctrl+]` or a press outside; the popup's input state, a paste under way, a key's front and the Esc waited on, ends with the popup, closed or opened again); a lone Escape,
+25 ms, other than `[` or `O` (an arrow or function key) is the popup's, neither closing
+it nor reaching the native: Alt/Option+Enter puts a line break in a written answer and
+Alt+B/F/D/Backspace are its word keys (11-26); any other Alt+letter and Esc then a control
+byte are dropped, and a second Esc closes it and is dropped; a paste enters a free-text answer row, its end mark `ESC[201~` read whole wherever it is split, and a paste that never ends is left by Esc, `Ctrl+]` or a press outside; the popup's input state, a paste under way, a key's front and the Esc waited on, ends with the popup, closed or opened again); a lone Escape,
 `Ctrl+]`, its `✕` or a press outside it closes it
 and returns to the native input and cursor (the drag and release that follow that
 press are the popup's too; one lone Esc within a second of the Esc that closed it is

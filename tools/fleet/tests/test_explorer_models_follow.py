@@ -903,6 +903,90 @@ class TheKeyboardAndTheMouse(unittest.TestCase):
                 self.assertEqual(render._EXPLORER_STATE.status, f"model set: {status}")
 
 
+class LeftBehindAndLastCandidate(unittest.TestCase):
+    """A cell that followed and later left its list keeps its record and undo; ``_fit`` takes a last
+    candidate that is a ``(name, tail, keep)`` tuple."""
+
+    def test_a_followed_cell_whose_model_left_the_list_still_shows_its_record_and_undo(self):
+        answer = copy.deepcopy(ALL["followed"])
+        codex = next(item for item in answer if item["harness"] == "codex")
+        gone = next(c for c in codex["cells"] if c["target"] == "profile/deep")
+        gone.update(followable=False, reason="not-in-list")
+        plain = samples.unfollowable("profile/mini", "gpt-6-luna", "high")
+        codex["cells"] = [gone if c["target"] == "profile/deep" else c for c in codex["cells"]
+                          if c["target"] != "profile/mini"] + [plain]
+        found = follow.normalize(answer)["cells"]["codex"]
+        self.assertIn("profile/deep", [c["target"] for c in found])        # drawn for its record
+        self.assertNotIn("profile/mini", [c["target"] for c in found])     # nothing to show: not drawn
+        box = _box(_pic(answer=answer, select="deep/codex"))
+        self.assertTrue(box[2].startswith("│  │  followed 2026-11-22 · from gpt-6-astra · high"))
+        self.assertIn("[ undo ]", box[2])
+
+    def test_a_cell_that_left_the_list_with_a_refused_model_it_holds_is_drawn_too(self):
+        answer = copy.deepcopy(ALL["held"])
+        codex = next(item for item in answer if item["harness"] == "codex")
+        for found in codex["cells"]:
+            if found["target"] == "profile/deep":
+                found.update(followable=False, reason="not-in-list")
+        found = {c["target"]: c for c in follow.normalize(answer)["cells"]["codex"]}
+        self.assertEqual(found["profile/deep"]["held"], "gpt-6.2-astra")
+
+    def test_a_last_candidate_that_is_a_tuple_is_cut_from_its_name_and_tail(self):
+        from tools.fleet.explorer import models as drawing
+        for last in (("a-very-long-model-name", " tail", 8), ("a-very-long-model-name", " tail")):
+            with self.subTest(last=last):
+                cut = drawing._fit(["x" * 40, last], 6)
+                self.assertEqual((cell_width(cut) <= 6, cut.startswith("a-ver")), (True, True))
+        self.assertEqual(drawing._fit([("short", " tail", 8)], 40), "short tail")
+        self.assertEqual(drawing._fit(["text that is long"], 6), drawing.clip_cells("text that is long", 6))
+
+
+class SecondStepFailure(unittest.TestCase):
+    """The second step of a background read (asking the CLI again) only improves the first answer."""
+
+    def setUp(self):
+        focus._CLI_SEEN.clear()
+        self.addCleanup(focus._CLI_SEEN.clear)
+
+    def test_an_error_in_the_second_view_keeps_the_first_answer(self):
+        note = {"harness": "codex", "version": "0.171.0", "models": [], "kind": "list-from-another-cli",
+                "command": None, "list_version": "0.163.0"}
+        first = [samples.item("codex", samples.plain_codex(), cli=note)]
+
+        class Utility:
+            views = 0
+
+            def fleet_view(self, **_kw):
+                Utility.views += 1
+                if Utility.views == 2:
+                    raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+                return first
+
+            def installed_cli(self, _harness):
+                return (0, 171, 0), "/fake/codex"       # not what was remembered: a second view is asked for
+
+        with mock.patch.object(focus, "utility", return_value=Utility()):
+            answer = focus._read_follow({}, refresh=True)
+        self.assertEqual((Utility.views, answer), (2, first))
+
+
+class InputReadTakesNoList(unittest.TestCase):
+    def test_the_read_made_in_the_input_handling_reads_no_list_and_uses_the_background_ones(self):
+        from tools.fleet.explorer import model_catalog
+        focus._CATALOGS_SEEN.clear()
+        self.addCleanup(focus._CATALOGS_SEEN.clear)
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with _env(root):
+                background = focus.read_model_config()
+                with mock.patch.object(model_catalog, "read_catalogs",
+                                       side_effect=AssertionError("the input thread read the lists")):
+                    again = focus.read_model_config(refresh=False)
+                self.assertEqual(again["model_choices"], background["model_choices"])
+                self.assertEqual(again["catalog_sources"], background["catalog_sources"])
+                self.assertTrue(again["catalog_sources"])
+
+
 class NoProcessInTheInput(unittest.TestCase):
     """The read made inside the key and mouse handling starts no process: the CLI's answer is the
     last background read's."""
@@ -911,6 +995,8 @@ class NoProcessInTheInput(unittest.TestCase):
         seen = getattr(focus, "_CLI_SEEN", {})                 # (what the last background read was told)
         seen.clear()
         self.addCleanup(seen.clear)
+        focus._CATALOGS_SEEN.clear()                           # (and the lists it held)
+        self.addCleanup(focus._CATALOGS_SEEN.clear)
 
     def test_the_input_thread_asks_the_cli_nothing_and_the_note_stays(self):
         from tools.fleet.explorer.runtime import ExplorerRuntime

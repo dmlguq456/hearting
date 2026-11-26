@@ -170,18 +170,26 @@ class QuestionCaret(unittest.TestCase):
         state, _, _ = self.run_keys(self.type_text("private") + ["left", "left", "left", "backspace"], is_secret=True)
         self.assertEqual(self.typed(state), "priate")
 
-    def test_a_text_wider_than_the_row_slides_so_the_place_stays_in_sight(self):
+    def test_a_text_wider_than_the_row_wraps_so_the_place_stays_in_sight(self):
+        # 11-26: a written answer wider than its row wraps onto the next rows (it slid within one row before).
+        from tools.fleet.explorer.state import question_answer_rows
         text = "고쳐 쓰는 글이 한 줄보다 길어서 가운데에서 고치려면 자리가 보여야 합니다. " * 3
         for cols in (60, 100):
             with self.subTest(cols=cols):
                 state, vm, _ = self.run_keys(self.type_text(text) + ["home"] + ["right"] * 20)
-                row = self.row(vm, state)
-                self.assertIn("▏", row)
-                self.assertTrue(row.split("▏")[0].endswith(text[:20]) or "…" in row.split("▏")[0])
-                state, _, _ = self.run_keys(self.type_text(text) + ["end"])
-                row = self.row(vm, state)
-                self.assertTrue(row.rstrip().endswith("▏"), row)
-                self.assertIn(text[-10:].strip(), row)
+                frame = draw(vm, state, cols, 40, beat=1)
+                width = dict(frame.answer_layout)["q"]
+                rows = question_answer_rows(text, width)
+                self.assertGreater(len(rows), 1)
+                drawn = [line.replace("▏", "") for line in frame.text_rows()]
+                for start, end in rows:
+                    self.assertTrue(any(text[start:end].strip() in line for line in drawn), text[start:end])
+                caret = next(line for line in frame.text_rows() if "▏" in line)
+                home = max(i for i, (start, _end) in enumerate(rows) if start <= 20)
+                self.assertTrue(caret.split("▏")[0].endswith(text[rows[home][0]:20]), caret)
+                state, vm, _ = self.run_keys(self.type_text(text) + ["end"])
+                caret = next(line for line in draw(vm, state, cols, 40, beat=1).text_rows() if "▏" in line)
+                self.assertTrue(caret.rstrip().endswith("▏"), caret)
 
     def test_returning_to_a_question_puts_the_place_at_the_end(self):
         state, vm, ref = self.run_keys(self.type_text("abcd") + ["home"])
@@ -196,6 +204,7 @@ class QuestionCaret(unittest.TestCase):
         state, vm, _ = self.run_keys(self.type_text("abc"))
         legend = draw(vm, state, 140, 40, beat=1).text_rows()[-2]
         self.assertIn("←→·Home/End cursor", legend)
+        self.assertIn("⏎ send · Ctrl+J newline", legend)
         self.assertNotIn("←→ focus", legend)
         self.assertNotIn("Home/End·wheel", legend)
         self.assertIn("Tab view", legend)

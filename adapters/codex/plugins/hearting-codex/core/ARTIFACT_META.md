@@ -11,7 +11,7 @@ One writer path (`utilities/artifact_meta.py`) and one recorder
 (`utilities/artifact_history.py`) serve the background review, a person, and an agent,
 identically for Claude, Codex, and OpenCode.
 
-## Public files (Cairn reads these)
+## Public files
 
 ### `campaigns/<campaign-locator>/meta.json` — `artifact-meta/v1`
 
@@ -479,8 +479,8 @@ while versioned physical storage and its separate size metrics can change.
 - The ID changes when a person edits it, when the representative branch changes (the new
   branch's next number), or when a cycle's current campaign changes (the entry follows,
   with the new campaign's next number). The old ID goes to `aliases`. Only the newest 16
-  aliases stay public; every issued ID stays in the internal state, so ownership is kept
-  and Cairn can find an ID by `aliases` only within those 16.
+  aliases stay public; every issued ID stays in the internal state, so ownership is kept,
+  and a reader of the public file finds an old ID by `aliases` only within those 16.
 - The stable `camp_…`/`cyc_…` is the identity; links never use a short ID.
 - A missing state is rebuilt from the public files and from the history lines; a damaged
   state is a typed failure and is not replaced.
@@ -516,7 +516,7 @@ there). `publish_events(root, events)` is the thin wrapper for a caller outside 
 it takes the same lock, then calls the locked one. Every change to producer metadata
 records its meaning with these; lifecycle, file, and flow changes (the sealing-removal
 work, `cycle-flex-spec`) use the same functions. There is no second recorder and no
-second change signal: the same lines are what Cairn watches.
+second change signal: a reader that watches for changes watches these lines.
 
 Location: `.runtime/artifact-producer/v1/history/YYYY-MM/<event_id>.jsonl` (UTC month of
 `at`). One file holds exactly one LF-terminated JSON line. A published file is never
