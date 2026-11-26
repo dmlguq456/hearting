@@ -1977,6 +1977,23 @@ class FinalizeTest(ProducerTestBase):
         self.assertEqual(before[0], P.read_cycle_record(self.root, result["cycle_id"]))
         self.assertEqual(before[1], (Path(result["cycle_dir"]) / "manifest.json").read_bytes())
 
+    def test_a_drawing_of_a_campaign_writes_no_index_when_a_removed_record_is_read_back_from_its_manifest(self):
+        import campaign_document
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result)
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=result["cycle_id"])
+        import artifact_locator
+        folder = artifact_locator.locate(self.root, result["campaign_id"], heal=False)
+        P.cycle_record_path(self.root, result["cycle_id"]).unlink()      # the cache is gone: the admitted manifest answers
+        for index in (self.root / "campaigns").glob("INDEX.*"):
+            index.unlink()
+        files = lambda: {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}  # noqa: E731
+        before = files()
+        campaign_document.collect(self.root, folder, now=time.time(), persist=False, pages={})
+        self.assertEqual(files(), before)
+
     def test_finalize_requires_closed_route_unless_allowed(self):
         self.activate()
         route, route_file, result = self.begin()
