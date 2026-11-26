@@ -143,22 +143,28 @@ class ReadingTest(unittest.TestCase):
 
 class PanelRowsTest(unittest.TestCase):
     def test_the_newest_discuss_first_then_the_other_newest_and_the_four_values(self):
+        # 11-26 (panel B; the person: "백로그는 사용자가 말한 우선순위로 최대 3개 정도만 띄우고"): the panel's rows are the items with a `priority:` line
+        # alone (the order the person gave, 1 first; the same number in the document's order), three at most, each with its four values; with none
+        # ranked the panel has no row (no date or Discuss fills a place). (The test's name is the scheme-A order it replaced.)
         from fleet import session_status
-        items, total = session_status.panel_backlog_items(parse(SAMPLE), "")
+        self.assertEqual(session_status.panel_backlog_items(parse(SAMPLE), "")[0], [])
+        ranked = (SAMPLE.replace("  state: waiting\n", "  state: waiting\n  priority: 1\n")                       # Sample undated job
+                  .replace("  note: Sample note that says what was seen.\n", "  note: Sample note that says what was seen.\n  priority: 2\n")   # route resume
+                  .replace("  area:  ROUTING\n", "  area:  ROUTING\n  priority: 2\n")                              # routing note
+                  .replace("  area: Lab\n", "  area: Lab\n  priority: first\n")                                  # a wrong value: not ranked
+                  .replace("  date: 2026-11-20\n  kind: fix\n", "  date: 2026-11-20\n  kind: fix\n  priority: 7\n"))  # Sample same title
+        items, total = session_status.panel_backlog_items(parse(ranked), "")
         self.assertEqual(total, 8)
         self.assertEqual([(i["text"], i["kind"], i["state"], i["area"], i["date"]) for i in items], [
-            ("Sample worker leg runs twice", "task", "discuss", "Workers", "2026-11-26"),         # the newest in Discuss
-            ("Sample panel head hides the count", "task", "", "panel", "2026-11-26"),           # then the newest, the document's order on a date
-            ("Sample routing note to keep", "note", "", "Routing", "2026-11-26")])
-        # nothing in Discuss: the newest three, no date last
-        calm = SAMPLE.replace("  state: Discuss\n", "").replace("  state: discuss\n", "")
-        items, _ = session_status.panel_backlog_items(parse(calm), "")
-        self.assertEqual([i["text"] for i in items], ["Sample panel head hides the count", "Sample routing note to keep", "Sample worker leg runs twice"])
-        items, _ = session_status.panel_backlog_items(parse(calm), "", first=99)
-        self.assertEqual([i["date"] for i in items], ["2026-11-26", "2026-11-26", "2026-11-26", "2026-11-25", "2026-11-24", "2026-11-20", "", ""])
-        # the key of a panel row is the board's key of the same item
-        board = session_status.backlog_board(parse(SAMPLE))
+            ("Sample undated job", "task", "waiting", "panel", ""),                                   # (its area the first-written name: `panel`)
+            ("Sample route resume loses its stage", "fix", "ready", "Routing", "2026-11-24"),         # 2, first in the document
+            ("Sample routing note to keep", "note", "", "Routing", "2026-11-26")])                    # 2, later (its area the first-written name)
+        items, _ = session_status.panel_backlog_items(parse(ranked), "", first=99)
+        self.assertEqual([i["text"] for i in items], ["Sample undated job", "Sample route resume loses its stage", "Sample routing note to keep", "Sample same title"])
+        # the key of a panel row is the board's key of the same item; the board neither shows nor takes the priority
+        board = session_status.backlog_board(parse(ranked))
         self.assertTrue({i["key"] for i in items} <= {row[0] for row in board["items"]})
+        self.assertNotIn("priority", json.dumps(board))
 
     @unittest.skipUnless(NODE, "needs node")
     def test_the_host_hands_the_four_values_on_and_the_panel_says_task(self):
@@ -181,8 +187,10 @@ for(const width of [50,44,30]){
   const lines=v.rows.map(r=>r.map(p=>p.text).join(''));
   assert(lines.every(l=>cells(l)===width),lines.join('\n'));
   assert(!lines.some(l=>/IMPR/.test(l)),lines.join('\n'));
-  assert(lines.some(l=>/TASK Sample one/.test(l)),lines.join('\n'));
-  if(width>=44)assert(lines.some(l=>/BACKLOG FIX 4 · TASK 3/.test(l)),lines.join('\n'));
+  // (11-26, panel B: a row is state first, then the kind's word, the date, the title; the head `+N` the items not shown.)
+  assert(lines.some(l=>/· —       TASK —     Sa/.test(l))&&lines.some(l=>/· —       FIX  —     Sa/.test(l)),lines.join('\n'));
+  if(width>=44)assert(lines.some(l=>/TASK —     Sample one/.test(l)),lines.join('\n'));
+  assert(lines.some(l=>/^│  BACKLOG \+7 +› │$/.test(l)),lines.join('\n'));
 }
 """
         result = subprocess.run([NODE, "-e", script, str(SHELL)], capture_output=True, text=True, timeout=120)
@@ -239,6 +247,21 @@ assert.deepEqual(items(st),['FIX   2026-11-25  Questions  Discuss  Sample questi
   'FIX   2026-11-20  No area             Sample same title']);
 assert(/Sample question popup/.test(chosen(st)));
 """)
+
+    def test_a_priority_line_stands_in_the_detail_as_written_and_the_board_does_not_sort_by_it(self):
+        # 11-26 (fix 1 of #1863, the supervisor's decision): the board is drawn as before the panel read `priority:`: its list the same rows in the same
+        # order, and an opened item's detail the line as a line of text, `priority: 1` (a wrong value, `priority: 0`, the same way).
+        ranked = SAMPLE.replace("  kind: improve\n", "  kind: improve\n  priority: 1\n").replace("  kind: FIX\n", "  kind: FIX\n  priority: 0\n")
+        for text in (SAMPLE, ranked):
+            (self.root / "backlog.md").write_text(text, encoding="utf-8")
+            if text is SAMPLE:
+                plain = self.popup("list")["board"]
+        board = self.popup("list")["board"]
+        self.assertEqual(board, plain)
+        rows = {row[5]: row[0] for row in board["items"]}
+        for title, line in (("Sample panel head hides the count", "priority: 1"), ("Sample question popup forgets the answer", "priority: 0")):
+            detail = self.popup("detail", open=rows[title], indent=4)
+            self.assertIn("    " + line, ["".join(part[0] for part in row) for row in detail["rows"]], detail)
 
     def test_k_a_d_group_by_kind_area_and_date(self):
         self.node(r"""

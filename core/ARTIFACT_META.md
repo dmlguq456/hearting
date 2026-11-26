@@ -371,10 +371,11 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
 - **Form.** A title line, then `갱신 YYYY-MM-DD HH:MM`, then one `## <campaign folder name>`
   heading per campaign, with `## Unassigned` for work with no campaign. A job is one top-level
   `- ` bullet (a title line of at most 60 columns) with optional indented `date:`, `source:`,
-  `note:`, `kind:`, `area:` and `state:` lines (when it came up, where from, what the person said
-  then, what kind of work it is, where in the repo it mainly lands, how far it is).
-  The title line carries no tag, status or owner mark; the kind, area and state are those optional
-  lines alone.
+  `note:`, `kind:`, `area:`, `state:` and `priority:` lines (when it came up, where from, what the
+  person said then, what kind of work it is, where in the repo it mainly lands, how far it is, and
+  the order the person gave it).
+  The title line carries no tag, status or owner mark; the kind, area, state and priority are those
+  optional lines alone.
 
   ```text
   ## 2026-11-02_v4-open
@@ -408,8 +409,14 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   register it as a question, which stands on the question screens (the status document does not
   list it).
 - **`date:` line.** `YYYY-MM-DD`, the day the job came up; a date that does not exist or two
-  different dates is no date (shown `—`). A wrong value in any of these lines leaves only that
-  cell undecided; the document still opens.
+  different dates is no date (shown `—`).
+- **`priority:` line.** A session writes it only where the person said the order: a positive whole
+  number, 1 first (`priority: 1`); the same number again keeps the document's order. The panel's
+  BACKLOG part shows the ranked jobs alone, the first three; a job without one is not shown there
+  (it stays on the board, which neither sorts by nor changes the number). The value read is 1 to
+  999999; another value (`0`, a sign, a fraction, a word, seven digits or more) or two different
+  numbers is no priority.
+  A wrong value in any of these lines leaves only that cell undecided; the document still opens.
 - **Counting rule.** Lines are read by their shape, not by what Markdown makes of them (lines end
   as Python's `str.splitlines` ends them). A job is a line whose first two characters are `- `,
   below the first heading line and outside a code fence.

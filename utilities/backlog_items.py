@@ -1,19 +1,22 @@
 """The one reading of ``<artifact root>/backlog.md``: its jobs and their optional lines (core/ARTIFACT_META.md ``backlog.md``).
 
 The panel's BACKLOG part, its board (the popup) and the artifact entrance read the document through this module and no
-other way, so the three count the same jobs and see the same kind, state, area and date.  It reads lines it is given:
+other way, so the three count the same jobs and see the same kind, state, area, date and priority.  It reads lines it is given:
 it opens no file, writes nothing, warns of nothing and refuses nothing.  A value that is wrong leaves that one cell
-undecided (kind ``None``: drawn ``TBD``; state, area or date ``None``: drawn ``—`` or ``No area``); the document still opens.
+undecided (kind ``None``: drawn ``TBD``; state, area or date ``None``: drawn ``—`` or ``No area``; priority ``None``: the job is
+not among the panel's chosen ones); the document still opens.
 
 ``parse(lines, detail=True)`` is ``{"title", "updated", "updated_text", "groups"}``: ``groups`` is ``[{"line", "heading", "jobs"}]``
 in the document's order (``line`` the heading line, its blanks cut; ``heading`` the text after ``##``), and a job is::
 
     {"title": <the raw text after "- ">, "kind": "fix"|"task"|"note"|None, "state": "discuss"|"ready"|"waiting"|None,
      "area": <the area's name>|None, "area_key": <its folded name>|None, "date": "YYYY-MM-DD"|None,
+     "priority": <a positive whole number>|None,
      "source": <first source: value>, "note": <first note: value>, "lines": [(name, value)], "has_detail": bool, "at": <order>}
 
+``priority`` (11-26, panel B) is the order the person gave (1 first); a session writes it only where the person said the order.
 ``lines`` (kept only with ``detail``) are the job's indented lines in order, ``name`` the lower-case line name
-(``kind``, ``area``, ``state``, ``date``, ``source``, ``note``) or ``None`` for a line of other text.
+(``kind``, ``area``, ``state``, ``date``, ``source``, ``note``) or ``None`` for a line of other text (a ``priority:`` line is one: it stands as written).
 ``counts(parsed)`` is the number of jobs of each kind and state and in all.
 """
 import datetime
@@ -25,12 +28,13 @@ STATES = ("discuss", "ready", "waiting")
 # better is a task like any other).  Any other value is no kind.
 KIND_VALUES = {"fix": "fix", "task": "task", "note": "note", "improve": "task"}
 DETAIL_LINES = 12          # indented lines kept under one job
-_NAMED = re.compile(r"^(kind|area|state|date|source|note):(.*)$", re.IGNORECASE)
+_NAMED = re.compile(r"^(kind|area|state|date|priority|source|note):(.*)$", re.IGNORECASE)
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _HEADING = re.compile(r"^ {0,3}##(?:[ \t]|$)")
 _TITLE = re.compile(r"^#[ \t]+(.*?)[ \t]*#*[ \t]*$")
 _UPDATED = re.compile(r"^갱신 ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2})$")
 _DAY = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+_RANK = re.compile(r"^[0-9]{1,6}$")
 
 
 def area_key(value):
@@ -59,6 +63,11 @@ def _day(value):
     return value
 
 
+def _rank(value):
+    """A ``priority:`` value: a positive whole number of digits alone (``1``, ``12``), else None."""
+    return int(value) if _RANK.match(value) and int(value) > 0 else None
+
+
 def _one(values):
     """The one value a job's lines of a name gave, or None (none, or two different ones)."""
     return next(iter(values)) if len(values) == 1 else None
@@ -80,6 +89,7 @@ def parse(lines, detail=True):
         job["state"] = _one(states) if _one(states) in STATES else None
         dates = {_day(value) for value in values["date"]}
         job["date"] = _one(dates)
+        job["priority"] = _one({_rank(value) for value in values["priority"]})
         areas = {area_key(value): " ".join(value.split()) for value in values["area"]}
         key = _one(set(areas))
         if key:
@@ -117,12 +127,13 @@ def parse(lines, detail=True):
                 name, value = (named.group(1).lower(), named.group(2).strip()) if named else (None, stripped)
                 if name in ("kind", "state"):
                     job["_values"][name].add(value.lower())
-                elif name in ("area", "date"):
+                elif name in ("area", "date", "priority"):
                     job["_values"][name].add(value)
                 elif name in ("source", "note") and not job[name]:
                     job[name] = value
                 if detail and len(job["lines"]) < 4 * DETAIL_LINES:
-                    job["lines"].append((name, value))
+                    # (a `priority:` line stays a line of text, as written: the board shows it as it did before it was read, and neither sorts by it nor changes it)
+                    job["lines"].append((None, stripped) if name == "priority" else (name, value))
             continue
         close()
         job = None
@@ -132,9 +143,9 @@ def parse(lines, detail=True):
                 title = found.group(1)
             continue
         if raw.startswith("- "):
-            job = {"title": raw[2:], "kind": None, "state": None, "area": None, "area_key": None, "date": None,
+            job = {"title": raw[2:], "kind": None, "state": None, "area": None, "area_key": None, "date": None, "priority": None,
                    "source": "", "note": "", "lines": [], "has_detail": False, "at": count,
-                   "_values": {"kind": set(), "state": set(), "area": set(), "date": set()}}
+                   "_values": {"kind": set(), "state": set(), "area": set(), "date": set(), "priority": set()}}
             count += 1
             group["jobs"].append(job)
     close()

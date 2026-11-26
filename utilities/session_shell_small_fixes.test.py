@@ -216,6 +216,7 @@ for(const [extra,want] of [[{},true],[{answerable:false},false]]){
         # The default `rule motion` moves a light over the head rule; a session with no title (a new one, any
         # harness) had no rule, so nothing moved. 11-22: the rule is the SESSION head's, always there; the light passes over its cells
         # (not over the name), and no other rule stands between the metadata and the title.
+        # 11-26 (panel B): the head is the bare full-width rule (no `SESSION` word), the light runs over all 36 cells.
         self.node(r"""
 const p=(text,extra={})=>({text,...extra});
 const styles={dim:{foreground:-1,dim:true},loc_repo:{foreground:253}};
@@ -224,10 +225,10 @@ const paint=(harness,extra,o={})=>view.render({width:o.width||40,height:o.height
  frame:0,brief:()=>null,sent:()=>[],configuration:{},background:''});
 for(const harness of ['claude','codex','opencode'])for(const [name,extra] of [['title',{session_title:'제목'}],['none',{}],['now',{now:'그리는 중'}]]){
  const v=paint(harness,extra),lines=v.rows.map(str),tag=harness+' '+name+'\n'+lines.join('\n');
- const rule=lines.findIndex(r=>/^│ SESSION ─{28} │$/.test(r));
+ const rule=lines.findIndex(r=>/^│ ─{36} │$/.test(r));
  assert(rule>0,'the head rule stands\n'+tag);
- assert(!lines.some(r=>/^│ ─{36} │$/.test(r)),'no rule between the metadata and the title\n'+tag);
- assert(v.motion&&v.motion.cells.length===28&&v.motion.cells.every(c=>c.row===rule&&c.col>=10&&c.col<=37),'the default light moves over the rule alone\n'+tag);
+ assert(lines.filter(r=>/^│ ─{36} │$/.test(r)).length===1&&!lines.some(r=>r.includes('SESSION')),'the head rule alone, no word, no rule between the metadata and the title\n'+tag);
+ assert(v.motion&&v.motion.cells.length===36&&v.motion.cells.every(c=>c.row===rule&&c.col>=2&&c.col<=37),'the default light moves over the rule alone\n'+tag);
  assert(lines[rule+1].includes('MODEL'),tag);
  if(name!=='none')assert(lines.some(r=>r.includes('TITLE')||r.includes('NOW')),tag);
  // No title and no NOW: no separate empty row stands under CTX, the next thing (the question's box) stands right under it.
