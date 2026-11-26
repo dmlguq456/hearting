@@ -23,6 +23,8 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 
 
 def load_module(name, path):
@@ -56,7 +58,7 @@ class OwnerGrantReplacementStartTest(FIXTURE.OwnerGrantStartFixture):
                 external_read = self.root / (adapter + "-external-read")
                 external_read.mkdir()
                 request = self.request(adapter + "-lineage", read_roots=(external_read,))
-                origin = "att-" + hashlib.sha256((adapter + "-blocked-origin").encode()).hexdigest()[:32]
+                origin = unique_attempt_id("att-" + hashlib.sha256((adapter + "-blocked-origin").encode()).hexdigest()[:32])
                 corrections = {}
                 starts = []
 
@@ -212,7 +214,7 @@ class OwnerGrantReplacementStartTest(FIXTURE.OwnerGrantStartFixture):
         ) as reexec:
             for adapter in ("claude", "codex", "opencode"):
                 with self.subTest(adapter=adapter):
-                    attempt = "att-" + hashlib.sha256(("pin-" + adapter).encode()).hexdigest()[:32]
+                    attempt = unique_attempt_id("att-" + hashlib.sha256(("pin-" + adapter).encode()).hexdigest()[:32])
                     result, output = self.start(adapter, attempt, None, route=self.route(adapter))
                     self.assertEqual(0, result, output)
                     _, row = self.row(attempt)
@@ -283,7 +285,7 @@ class OwnerGrantReplacementStartTest(FIXTURE.OwnerGrantStartFixture):
         for adapter in ("claude", "codex", "opencode"):
             with self.subTest(adapter=adapter):
                 self.env["AGENT_HOME"] = str(release_a)
-                attempt = "att-" + hashlib.sha256(("installed-" + adapter).encode()).hexdigest()[:32]
+                attempt = unique_attempt_id("att-" + hashlib.sha256(("installed-" + adapter).encode()).hexdigest()[:32])
                 with mock.patch.object(peer_obligations, "installed_release",
                                        return_value=release_b.resolve()):
                     result, output = self.start(adapter, attempt, None, route=self.route(adapter),

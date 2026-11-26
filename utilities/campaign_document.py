@@ -48,6 +48,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import artifact_producer_store as store  # noqa: E402
+from artifact_campaign_documents import carries_marker  # noqa: E402
 
 MARKER = "<!-- hearting:campaign-document v1 -->"
 DOCUMENT = "campaign.md"
@@ -975,7 +976,7 @@ def _has_marker(path, marker):
             return False
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(fd, "rb") as handle:
-            return handle.readline(len(marker) + 16).decode("utf-8", "replace").strip() == marker
+            return carries_marker(handle.readline(len(marker) + 16).decode("utf-8", "replace"), marker)
     except OSError:
         return False
 
@@ -1246,7 +1247,7 @@ def _write_document(campaign_dir, text, *, name=DOCUMENT, marker=MARKER):
                 before = handle.read(65537).decode("utf-8", "replace")
         except OSError:
             return False
-        if before.split("\n", 1)[0].strip() != marker:
+        if not carries_marker(before, marker):
             return False
         if _body(before) == _body(text):
             return True

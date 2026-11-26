@@ -1520,6 +1520,21 @@ class RecordRoundTest(RecordFixture):
         for number in (1, 2, 3):
             self.assertIn(f"[{number}라운드", line)
 
+    def test_a_drawing_writes_nothing_with_other_campaigns_and_no_index(self):
+        self.campaign("2026-11-02_other", "camp_" + "2" * 32, "Other")
+        self.route("pr-1700-unit", closed=NOW - HOUR)
+        self.route("rv-1700-unit", closed=NOW - HOUR, capability="audit")
+        self.route("pr-1701-open")
+        self.route("pr-1702-other", campaign_id="camp_" + "2" * 32, closed=NOW - HOUR)
+        for index in (self.root / "campaigns").glob("INDEX.*"):
+            index.unlink()
+        before = tree_digest(self.root)
+        pages = {}
+        text, _cache = cd.collect(self.root, self.folder, now=NOW, persist=False, pages=pages)
+        self.assertIn("pr-1700", pages)
+        self.assertEqual(tree_digest(self.root), before)
+        self.assertEqual(list((self.root / "campaigns").glob("INDEX.*")), [])
+
     def test_a_review_with_one_cycle_is_read_once_and_then_marked_read(self):
         self.route("rv-1700-unit", closed=NOW - HOUR, capability="audit")
         self.catch_up()
