@@ -2935,6 +2935,22 @@ class ParentCloseTest(unittest.TestCase):
         self.assertEqual(self.cycle_reading(AP, begun), ("sealed", "abandoned"))
         self.assertEqual(len(ledger.journal()), entries)
 
+    def test_a_cycle_sealed_before_the_close_is_left_and_the_ledger_untouched(self):
+        # Once the cycle is sealed (by another close, or anything that finished it), a close adds nothing: no
+        # ledger entry and no second seal.
+        import artifact_producer as AP
+        self.row("att-owner", status="done", note="dead-worker-fail", failure_class="fail")
+        begun = AP.begin(self.artifacts, route_file=self.path, capability="autopilot-code", intensity="standard")
+        AP.finalize(self.artifacts, cycle_id=begun["cycle_id"], state="abandoned", abandon_reason="operator-decision")
+        self.assertEqual(AP.read_cycle_record(self.artifacts, begun["cycle_id"])["state"], "abandoned")
+        command = [sys.executable, str(HERE / "capability-route.py"), "close", "--route", str(self.path)]
+        ledger = WS.WorkflowLedger(self.route["route_id"], self.route["route_hash"], jobs=self.jobs)
+        before = ledger.state()["workflow_state"]
+        done = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(ledger.state()["workflow_state"], before)
+        self.assertNotEqual(before, "CANCELLED")
+
     def test_concurrent_closes_seal_once_and_write_the_ledger_once(self):
         AP, begun, _output, command = self.ended_owner_close_fixture(note="dead-worker-fail", failure_class="fail")
         procs = [subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(3)]

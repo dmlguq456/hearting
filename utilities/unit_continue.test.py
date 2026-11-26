@@ -555,13 +555,16 @@ class CorrectUnitRouteTest(unittest.TestCase):
 
     def test_a_unit_that_is_not_a_review_keeps_the_no_verdict_words(self):
         # 🟡4: the closed review verdict is a review's form; another unit's readable FAIL is told as before.
-        self.rows = {FIRST: ("done", meta(worker_type="support", note="dead-worker-fail", failure_class="fail"))}
-        with mock.patch.object(self.W, "_compose_again", return_value="compose --unit x"):
-            (code, receipt), start = self.call("look again")
-        start.assert_not_called()
-        self.assertEqual((code, receipt["reason"]), (69, "unit-continue-last-turn-no-verdict"))
-        self.assertIn("ended without a verdict", receipt["next_step"])
-        self.assertNotIn("closed review verdict", receipt["next_step"])
+        for row in (meta(worker_type="support", note="dead-worker-fail", failure_class="fail"),
+                    meta(worker_type="stage", note="completed-review-blocking")):
+            with self.subTest(row["worker_type"]):
+                self.rows = {FIRST: ("done", row)}
+                with mock.patch.object(self.W, "_compose_again", return_value="compose --unit x"):
+                    (code, receipt), start = self.call("look again " + row["worker_type"])
+                start.assert_not_called()
+                self.assertEqual((code, receipt["reason"]), (69, "unit-continue-last-turn-no-verdict"))
+                self.assertIn("ended without a verdict", receipt["next_step"])
+                self.assertNotIn("closed review verdict", receipt["next_step"])
 
     def test_a_review_read_as_finished_takes_the_closure_check_as_a_mergeable_one_does(self):
         # A changes-requested review read as finished work (a pass whose assessment is FAIL) and a mergeable one
