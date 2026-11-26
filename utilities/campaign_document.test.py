@@ -331,13 +331,13 @@ class Fixture(unittest.TestCase):
             "schema_version": 1, "campaign": {"title": "Demo campaign", "summary": summary}, "cycles": cycles}))
 
     def route(self, slug, *, started=NOW - 10 * HOUR, closed=None, proven=True, capability="autopilot-code",
-              evidence=None, campaign_id=None, state="sealed", rid=None, touched=None, record_dup=None):
+              evidence=None, campaign_id=None, state="sealed", rid=None, touched=None, record_dup=None, locator=None):
         self.serial += 1
         rid = rid or f"rt-{self.serial:016x}"
         cycle_id = f"cyc_{self.serial:032x}"
         record = {"campaign_id": campaign_id or self.campaign_id, "cycle_id": cycle_id, "route_id": rid, "slug": slug,
                   "route_capability": capability, "started_on": stamp(started), "state": state,
-                  "locator": f"2026-11-20_{slug}", "title": slug}
+                  "locator": locator or f"2026-11-20_{slug}", "title": slug}
         record_file = self.runtime / "artifact-producer/v1/cycles" / f"{cycle_id}.json"
         record_file.write_text(json.dumps(record))
         written = touched or closed or started   # the record is written at the begin, or again at the seal
@@ -1714,6 +1714,69 @@ class RecordRenamedPageTest(RecordFixture):
             self.assertNotIn("하는 중", self.page(f"2026-11-20_solo-{n}"))
         self.assertEqual(len(self.pages()), 7)   # four old, three shown; none made for what folded and was never a page
 
+    def test_a_folded_work_keeps_its_own_page_when_another_work_stood_on_the_same_folder(self):
+        self.route("same-a", started=NOW - 6 * HOUR, closed=NOW - 5 * HOUR, locator="shared-folder")
+        self.catch_up()
+        self.assertEqual(self.page_lines("shared-folder")[0].split(" · ")[2], "same-a")
+        self.route("other-c", started=NOW - 4 * HOUR, closed=NOW - 3 * HOUR)
+        self.route("same-b", started=NOW - 2 * HOUR, closed=NOW + 50, locator="shared-folder", evidence="PR: #1900\n")
+        with mock.patch.object(cd, "DONE_LINES", 1):   # only the newest work is a line: same-a folds
+            self.catch_up(now=NOW + 60)
+            self.assertEqual(self.page_lines("shared-folder")[0].split(" · ")[2], "same-a")   # its own, not same-b's
+            self.assertEqual(self.page("pr-1900").split("\n")[1], "# same-b")
+            self.route("tick", closed=NOW + 900)
+            self.catch_up(now=NOW + 1000)
+        self.assertEqual(self.page("shared-folder").split("\n")[1], "# same-a")
+
+    def test_the_page_of_a_line_is_not_taken_by_the_old_name_of_another_work(self):
+        self.route("alpha-1700", closed=NOW - HOUR)   # a line whose page is `pr-1700`
+        self.route("beta-build", started=NOW - 5 * HOUR, closed=NOW - 4 * HOUR, locator="pr-1700")   # stood on that name
+        self.catch_up()
+        self.assertEqual(self.pages(), ["pr-1700.md"])
+        self.assertEqual(self.page("pr-1700").split("\n")[1], "# alpha-1700")
+        now = self.bump(1)
+        with mock.patch.object(cd, "DONE_LINES", 2):   # beta-build folds; the page is held now
+            self.catch_up(now=now)
+        self.assertEqual(self.page("pr-1700").split("\n")[1], "# alpha-1700")   # still the line's, not beta-build's
+
+    def test_a_work_is_drawn_once_however_many_names_it_is_written_under(self):
+        rids = [self.route(f"w{n}", started=NOW - 2 * HOUR)[0] for n in range(3)]
+        self.catch_up()
+        self.assertEqual(len(self.pages()), 3)
+        for n, rid in enumerate(rids):
+            self.close(rid, NOW + 50 + n, evidence="PR: #1900\n")
+        with mock.patch.object(cd._Pages, "page", autospec=True, side_effect=cd._Pages.page) as drawn:
+            self.catch_up(now=NOW + 60)
+        self.assertEqual(len(self.pages()), 4)   # three old names and `pr-1900`
+        self.assertEqual(len({self.page(name[:-3]) for name in self.pages()}), 1)
+        self.assertEqual(drawn.call_count, 1)
+
+    def test_a_saved_list_with_a_broken_cycles_does_not_stop_the_pass(self):
+        rid, _c = self.route("solo-build", started=NOW - HOUR)
+        self.catch_up()
+        saved = self.runtime / "campaign-document" / f"{self.campaign_id}.json"
+        for index, broken in enumerate((5, "x", {"a": 1}, [7, None, {"loc": ["no"]}]), 1):
+            cache = json.loads(saved.read_text())
+            cache["members"][rid]["cycles"] = broken
+            saved.write_text(json.dumps(cache))
+            now = self.bump(index)
+            self.assertEqual(self.catch_up(now=now), ["2026-11-01_demo"])
+            self.assertEqual(self.err, "")
+        self.assertEqual(len(self.bullets(self.document(), "최근에 끝난 것")), 4)   # every tick reached the document
+
+    def test_a_close_that_was_not_proven_and_folded_is_drawn_again_and_the_document_is_the_same(self):
+        rids = [self.route(f"u{n}-build", started=NOW - 2 * HOUR)[0] for n in range(5)]
+        self.catch_up()
+        for n, rid in enumerate(rids):
+            self.close(rid, NOW + 50 + n, proven=False)
+        with mock.patch.object(cd, "DONE_LINES", 2):
+            self.catch_up(now=NOW + 100)
+        for n in range(5):   # the five closed by one pass: the three beyond the line limit too
+            self.assertTrue(self.head(f"2026-11-20_u{n}-build").startswith(cd.UNPROVEN_WORD), n)
+        self.assertEqual(self.settled_document(), [[], []])
+        self.assertNotIn("records/", self.document())
+        self.assertNotIn("하는 중", "".join(self.page(name[:-3]) for name in self.pages()))
+
     def test_a_later_cycle_of_the_same_route_draws_the_first_page_again(self):
         rid, _c = self.route("solo-build", started=NOW - 3 * HOUR)
         self.catch_up()
@@ -1753,7 +1816,7 @@ class RecordRenamedPageTest(RecordFixture):
         self.assertEqual({path.name: path.read_bytes() for path in paths}, before)
         self.assertEqual({path.stat().st_mtime for path in paths}, {1_700_000_000})
 
-    def test_a_pass_lists_records_once_and_reads_no_more_files_than_before(self):
+    def test_a_pass_lists_records_once_and_counts_no_closed_cycle_again(self):
         rid, _c = self.route("solo-build", started=NOW - 2 * HOUR)
         self.files("solo-build", **{"one.md": "1"})
         self.route("other-1701", closed=NOW - HOUR)
@@ -1777,6 +1840,8 @@ class RecordRenamedPageTest(RecordFixture):
         self.assertIn("the cycle its first route stands on", text)
         self.assertNotIn("the folder name of the work's first route", text)
         self.assertIn("draws again a page it already wrote", text)
+        self.assertIn("A work's own page name stays that work's", text)
+        self.assertNotIn("on a line or not", text)
         self.assertIn(cd.UNPROVEN_WORD, text)
 
 

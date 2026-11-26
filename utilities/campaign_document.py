@@ -8,7 +8,8 @@ a person's answer is a registered question and stands on the question screens on
 nothing about it. One piece of work is one line: routes that carry the same PR number are
 joined (`link_units`), a route with no number is its own line. A route that closed with code but no number is
 joined to its PR by git ancestry (`_GitPass`: read only, no fetch). Each line's tail `기록 N` links to the
-record page of that work, `records/<key>.md`, which the same pass writes for the lines on the page.
+record page of that work, `records/<key>.md`, which the same pass writes for the lines on the page and draws again
+for work it already wrote a page for (a line that folded, a close that was not proven).
 
 Three layers:
 
@@ -58,7 +59,7 @@ GIT_TIMEOUT = 5
 GIT_BUDGET = 40
 VERDICT_CHARS = 60
 RECORD_KEY_CHARS = 200
-UNPROVEN_WORD = "미증명"   # the head of a page of work whose close was not proven: it ended, and passing is not shown
+UNPROVEN_WORD = "미확인"   # the head of a page of work whose close was not proven: it ended, and passing is not shown
 ACTIVE_SECONDS = 6 * 3600
 DONE_LINES = 20
 READ_CAP = 400
@@ -1192,41 +1193,54 @@ def collect(root, campaign_dir, *, now, cache=None, persist=False, listing=None,
                     or _intent_title(root, rid) or member.get("slug") or rid)
         drawing = _Pages(root, campaign_dir, tz=tz, facts=facts, members=members, title_of=title_of,
                          active_ids={id(unit) for unit in units["active"]})
+        drawn = {}   # a work's page text, drawn once however many names it is written under
         for unit in shown:
             if unit.get("record"):
-                pages[unit["record"]] = drawing.page(unit)
-        _redraw_held_pages(campaign_dir, pages, drawing, units, shown, members, fact_rows, titles, now)
+                pages[unit["record"]] = drawn[id(unit)] = drawing.page(unit)
+        _redraw_held_pages(campaign_dir, pages, drawing, drawn, units, shown, members, fact_rows, titles, now)
     return text, cache
 
 
-def _redraw_held_pages(campaign_dir, pages, drawing, units, shown, members, fact_rows, titles, now):
-    """Add to `pages` the pages `records/` already holds for work, whether or not its line is on the document and
-    under every name the work has had (its PR number became known, a later round began in another folder):
-    the name of each cycle of its routes, and its own. A name `records/` does not hold is not made, and a name a
-    line already has its page for is left to that line. A close that was not proven is no line and no count,
-    and its page shows `UNPROVEN_WORD`."""
+def _redraw_held_pages(campaign_dir, pages, drawing, drawn, units, shown, members, fact_rows, titles, now):
+    """Add to `pages` the pages `records/` already holds for work, on the document or not, under every name the
+    work has had (its PR number became known, a later round began in another folder): the name of each cycle of
+    its routes. The work is a line, a line that folded after its close, or a close that was not proven (no line,
+    no count; its page shows `UNPROVEN_WORD`); one that went quiet while open is not drawn. A name `records/`
+    does not hold is not made. A work's own page name stays that work's: a line's page is drawn first, then each
+    folded work's own, and only then the old names, so no old name takes a page a work still owns. A work is
+    drawn once."""
     held = _page_names(campaign_dir)   # one listing of `records/` for the pass
     if not held:
         return
     unproven = [dict(row, ok=True) for row in fact_rows
                 if not row.get("ok") and row.get("kind") in ("work", "review")]
-    quiet = link_units(unproven, [], titles, now=now)["done"] if unproven else []
+    quiet = link_units(unproven, [], titles, now=now) if unproven else {}
+    quiet = quiet.get("done", []) + quiet.get("done_hidden", [])
     for unit in quiet:
         unit["unproven"] = True
     shown_ids = {id(unit) for unit in shown}
-    for unit in shown + units.get("done_hidden", []) + quiet:
+    candidates = shown + units.get("done_hidden", []) + quiet
+
+    def text(unit):
+        if id(unit) not in drawn:
+            drawn[id(unit)] = drawing.page(unit)
+        return drawn[id(unit)]
+
+    def free(name):
+        return isinstance(name, str) and name in held and name not in pages and bool(_RECORD_KEY.fullmatch(name))
+
+    for unit in candidates:   # the own name of a work that is not a line
+        if id(unit) not in shown_ids and free(unit.get("record")):
+            pages[unit["record"]] = text(unit)
+    for unit in candidates:   # then the names it had
         names = set()
         for member in unit["closed"] + unit["open"]:
             row = members.get(member["rid"]) or {}
-            names.add(row.get("loc") or "")
-            names |= {c.get("loc") or "" for c in row.get("cycles") or [] if isinstance(c, dict)}
-        if id(unit) not in shown_ids:
-            names.add(unit.get("record") or "")
-        names = {name for name in names if name in held and name not in pages and _RECORD_KEY.fullmatch(name)}
-        if names:
-            text = drawing.page(unit)
-            for name in sorted(names):
-                pages[name] = text
+            cycles = row.get("cycles")
+            found = [row.get("loc")] + [c.get("loc") for c in cycles if isinstance(c, dict)] if isinstance(cycles, list) else [row.get("loc")]
+            names |= {name for name in found if free(name)}
+        for name in sorted(names):
+            pages[name] = text(unit)
 
 
 def _page_names(campaign_dir):
