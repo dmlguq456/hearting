@@ -524,8 +524,14 @@ class RegistryRegistrationTest(unittest.TestCase):
         families.remove("analysis")
         parts = registry["part_catalog"]["parts"]
         self.assertEqual(parts.pop("analyze-project:analysis")["optional"]["node"]["unit"], "analysis/analyze")
-        for part in ("autopilot-draft:quality-review", "autopilot-draft:fact-verify", "audit:inspect"):
+        # Each borrowable review's summary gains one clause saying which text it fits.
+        summaries = {"autopilot-draft:quality-review": "Review the draft for structure and style.",
+                     "autopilot-draft:fact-verify": "Verify the draft's claims against the evidence map.",
+                     "audit:inspect": "Inspect the target artifact for drift, omissions and unsupported claims."}
+        for part, summary in summaries.items():
             self.assertIs(parts[part].pop("shareable"), True, part)
+            self.assertTrue(parts[part]["summary"].startswith(summary[:-1] + "; borrowed, it fits "), part)
+            parts[part]["summary"] = summary
         self.assertEqual(registry["completion_gate_contracts"].pop("analysis-answer"),
                          {"kind": "unit-io", "unit": "analysis/analyze"})
 

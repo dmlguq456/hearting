@@ -45,7 +45,7 @@ source for downstream `autopilot-{draft,code,research}` capabilities.
 (unit `analysis/analyze`) that answers one question about what is already at hand
 and writes only its `analysis.md`, never `analysis_project/`. Another kind borrows it
 in an explicit graph, for example `--capability autopilot-code --shape staged --graph
-analyze-project:analysis,autopilot-draft:fact-verify,report`, and it is written under
+analyze-project:analysis,autopilot-draft:quality-review,report`, and it is written under
 that host's `parts/analyze-project/analysis/`. It fetches no outside sources; that
 stays `autopilot-research`.
 

@@ -710,15 +710,17 @@ BORROW_RE = r"\(borrow from another kind as capability:stage: ([^)]*)\)"
 class BorrowReadPartsTest(CatalogBase):
     """Routing fragments 10-11: a named kind borrows another kind's read workers into its own graph."""
 
+    # The three examples: the review fits any written analysis, and the last stage is a report that writes
+    # only its own report, never the analysed target (docs reports through the audit kind, not draft's finalize).
+    GRAPH = "analyze-project:analysis,autopilot-draft:quality-review,report"
+    REVIEW = ["analyze-project-analysis", "autopilot-draft-quality-review", "report"]
+    QUALITY = "parts/autopilot-draft/quality-review/reviews/draft/quality/verdict.json"
     CASES = (
-        ("autopilot-code", "dev", "analyze-project:analysis,autopilot-draft:fact-verify,report", "code",
-         ["analyze-project-analysis", "autopilot-draft-fact-verify", "report"],
-         "_internal/parts/autopilot-draft/fact-verify/reviews/draft/facts/verdict.json"),
-        ("autopilot-draft", "doc", "analyze-project:analysis,quality-review,finalize", "docs",
-         ["analyze-project-analysis", "quality-review", "finalize"], "reviews/draft/quality/verdict.json"),
-        ("autopilot-lab", "eval", "analyze-project:analysis,autopilot-draft:quality-review,report", "lab",
-         ["analyze-project-analysis", "autopilot-draft-quality-review", "report"],
-         "reviews/parts/autopilot-draft/quality-review/reviews/draft/quality/verdict.json"),
+        ("autopilot-code", "dev", None, "code", "_internal/" + QUALITY,
+         ["pipeline_summary.md", "final_report.md", "analysis_project/code/**"]),
+        ("audit", "default", "docs", "docs", "reviews/" + QUALITY, ["reviews/audit-report.md"]),
+        ("autopilot-lab", "eval", None, "lab", "reviews/" + QUALITY,
+         ["report/REPORT.md", "report/index.html", "report/report_manifest.json"]),
     )
 
     def refusal(self, *args):
@@ -728,11 +730,12 @@ class BorrowReadPartsTest(CatalogBase):
 
     def test_each_kind_opens_analysis_review_report(self):
         import worker_bootstrap
-        for capability, mode, graph, field, ids, review_out in self.CASES:
+        for capability, mode, named_field, field, review_out, report_scope in self.CASES:
             with self.subTest(capability=capability):
-                route = self.compose(capability, mode, graph)
+                route = self.compose(capability, mode, self.GRAPH, field=named_field)
                 R.verify_route(route, R.ROOT)
                 self.assertEqual((route["capability"], route["field"]), (capability, field))
+                ids = self.REVIEW
                 self.assertEqual([n["id"] for n in route["nodes"]], ids)
                 self.assertEqual(route["human_gates"], [])
                 analysis = self.node(route, "analyze-project-analysis")
@@ -746,13 +749,17 @@ class BorrowReadPartsTest(CatalogBase):
                 self.assertEqual(analysis["part_io"], {"analysis.md": ANALYSIS_OUT})
                 self.assertFalse(analysis["commit_expected"])
                 self.assertNotIn("start_approval", analysis)
-                # The analysis reaches the review, and the review's verdict reaches the report.
+                # The analysis reaches the review, and the report gets both the verdict and what was reviewed.
                 review, report = self.node(route, ids[1]), self.node(route, ids[2])
-                self.assertIn(ANALYSIS_OUT, review["inputs"])
+                self.assertEqual(review["inputs"], ["evidence-map", ANALYSIS_OUT])
                 self.assertEqual(review["outputs"], [review_out])
                 self.assertEqual(review["kind"], "review-worker")
-                self.assertIn(review_out, report["inputs"])
+                self.assertEqual(report["inputs"], ["task", review_out, ANALYSIS_OUT])
+                self.assertEqual(report["write_scope"], report_scope)
+                self.assertNotIn("target-artifact", report["write_scope"])   # the report never rewrites the target
                 self.assertNotIn("part", report)       # the kind's own report, owned by the kind
+                text, _ = ADVANCE.render_stage_brief(route, report)
+                self.assertIn(ANALYSIS_OUT, text)
                 self.assertIn("빌린 부품 analyze-project:analysis", R.compose_card(route))
                 self.assertIn("analyze-project:analysis", route["composed_recipe"]["compose"]["parts"])
                 # The borrowed worker reads its own kind's contract, as every borrowed part does.
@@ -761,6 +768,30 @@ class BorrowReadPartsTest(CatalogBase):
                     completion_gate=analysis["completion_gate"], root=R.ROOT), "analyze-project")
                 text, _ = ADVANCE.render_stage_brief(route, analysis)
                 self.assertIn("part: analyze-project:analysis\n", text)
+
+    def test_a_review_hands_on_the_borrowed_result_it_read(self):
+        # Borrowed review or the host's own: the stage after it reads the reviewed result with the verdict.
+        cases = (
+            ("autopilot-code", "dev", "analyze-project:analysis,impl-review,report", "report",
+             ["task", ANALYSIS_OUT, "_internal/dev_reviews/phase_review.md"]),
+            ("autopilot-draft", "doc", "analyze-project:analysis,quality-review,finalize", "finalize",
+             ["reviews/draft/quality/verdict.json", ANALYSIS_OUT]),
+            # An existing borrowed chain (resource, then a borrowed review): the report gains the run record.
+            ("autopilot-code", "dev", "autopilot-lab:host-run,autopilot-lab:diagnose,report", "report",
+             ["task", "_internal/parts/autopilot-lab/diagnose/reviews/diagnosis.md",
+              "parts/autopilot-lab/host-run/run.json", "parts/autopilot-lab/host-run/logs/**"]),
+        )
+        for capability, mode, graph, last, inputs in cases:
+            with self.subTest(graph=graph):
+                route = self.compose(capability, mode, graph)
+                R.verify_route(route, R.ROOT)
+                self.assertEqual(self.node(route, last)["inputs"], inputs)
+        # A review that read no borrowed result hands on nothing new; neither does a non-review stage.
+        plain = self.compose(graph="execute,impl-review,test,report")
+        self.assertNotIn("_internal/dev_reviews/phase_review.md", self.node(plain, "test")["inputs"])
+        synthesis = self.compose("audit", "default", AUDIT_BORROW)
+        self.assertEqual(self.node(synthesis, "report")["inputs"],
+                         ["reviews/audit/**", *self.node(synthesis, "autopilot-research-synthesis")["outputs"]])
 
     def test_a_writer_or_an_approval_still_cannot_be_borrowed(self):
         for capability, mode, graph in (
@@ -784,6 +815,9 @@ class BorrowReadPartsTest(CatalogBase):
         docs = re.search(BORROW_RE, self.refusal("autopilot-draft", "doc", "analyze,finalize")).group(1)
         self.assertEqual(docs.split(","), ["autopilot-research:retrieval", "autopilot-research:synthesis",
                                            "audit:inspect", "autopilot-lab:diagnose", "analyze-project:analysis"])
+        lab = re.search(BORROW_RE, self.refusal("autopilot-lab", "eval", "analyze,report")).group(1).split(",")
+        self.assertFalse([part for part in lab if part.startswith("autopilot-lab:")], lab)   # not "another kind"
+        self.assertIn("analyze-project:analysis", lab)
         code = re.search(BORROW_RE, self.refusal("autopilot-code", "dev", "analyze,report")).group(1).split(",")
         for part in ("autopilot-lab:smoke", "autopilot-lab:full-run", "autopilot-lab:host-run",
                      "analyze-project:analysis", "autopilot-draft:fact-verify", "audit:inspect"):

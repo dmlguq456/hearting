@@ -697,9 +697,11 @@ inside the host's artifact scope, and seals the name mapping as `part_io`; the
 host capability still owns the artifacts, and a token that is not a registered
 shareable part is the same unknown-node refusal as any other. To borrow another kind's read
 worker, name the kind and write its part in `--graph`
-(`--capability autopilot-code --shape staged --graph analyze-project:analysis,autopilot-draft:fact-verify,report`);
-that refusal and `stages --capability <kind>` list what the kind can borrow. There is no new kind,
-flag or setting, and `--unit` stays one worker without `--graph`. A human gate a kept node
+(`--capability autopilot-code --shape staged --graph analyze-project:analysis,autopilot-draft:quality-review,report`);
+that refusal names what the kind can borrow, and `stages --capability <kind>` lists it with a
+summary that says which text each borrowable review fits. The stage after a review also receives
+the borrowed result that review read. There is no new kind, flag or setting, and `--unit` stays
+one worker without `--graph`. A human gate a kept node
 raises is rebound to the entry of the node that now follows it and dropped
 when nothing follows; a declared parallel group survives only when its anchor
 is kept and is not the new terminal. Composition changes route *shape* only —

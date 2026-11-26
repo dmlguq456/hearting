@@ -5015,11 +5015,11 @@
         "summary": "Write the draft from the approved strategy."
       },
       "autopilot-draft:quality-review": {
-        "summary": "Review the draft for structure and style.",
+        "summary": "Review the draft for structure and style; borrowed, it fits any written text (readability and terms, not whether the claims are right).",
         "shareable": true
       },
       "autopilot-draft:fact-verify": {
-        "summary": "Verify the draft's claims against the evidence map.",
+        "summary": "Verify the draft's claims against the evidence map; borrowed, it fits text whose factual claims outside sources can check (it searches the web), not code evidence at file:line.",
         "shareable": true
       },
       "autopilot-draft:finalize": {
@@ -5166,7 +5166,7 @@
         "summary": "Fact-check the profile against its evidence."
       },
       "audit:inspect": {
-        "summary": "Inspect the target artifact for drift, omissions and unsupported claims.",
+        "summary": "Inspect the target artifact for drift, omissions and unsupported claims; borrowed, it fits text whose claims cite local research cards (verbatim matching).",
         "shareable": true
       },
       "audit:report": {
