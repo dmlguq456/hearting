@@ -5,6 +5,7 @@ import contextlib
 import importlib.util
 import os
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -194,7 +195,11 @@ class MessageQuestionFixture:
                                  render_context=False)
 
     def consume(self, signal, text, *, sid=None):
-        """Exercise the original harness consumer; only native API/I/O is a fixture."""
+        """Exercise the original harness consumer; only native API/I/O is a fixture.
+
+        Returns what that consumer gives the agent beside the prompt: Claude's UserPromptSubmit
+        ``additionalContext``, Codex's guidance part of its own (its hook's peer check, guidance
+        call and context emitter), OpenCode's plugin guidance (the plugin's own Python call)."""
         sid = sid or signal["session_id"]
         root = Path(tidy.__file__).resolve().parents[1]
         if signal["harness"] == "claude":
@@ -206,6 +211,17 @@ class MessageQuestionFixture:
         else:
             if not self.node:
                 raise RuntimeError("Node is unavailable for the OpenCode callback fixture")
+            # `chat.message` first asks the guidance its system context carries, with the very
+            # Python call written in the plugin, then receives the text.
+            plugin = (root / "adapters/opencode/plugins/hearting-guards.js").read_text(encoding="utf-8")
+            call = json.loads(re.search(r'const guidance = spawnSync\(\s*"python3",\s*\["-c", ("(?:[^"\\]|\\.)*")\]',
+                                        plugin).group(1))
+            guidance = subprocess.run([sys.executable, "-B", "-c", call], cwd=root, text=True,
+                env=dict(os.environ, AGENT_HOME=str(root)), capture_output=True, timeout=15,
+                input=json.dumps({"prompt": text, "recipient": {"harness": "opencode", "session_id": sid},
+                                  "cwd": str(self.root)}))
+            if guidance.returncode:
+                raise AssertionError(guidance.stderr)
             # Run the unchanged plugin callback, substituting only its detached
             # process launch with a synchronous child bound to this fixture.
             script = r'''
@@ -228,15 +244,34 @@ if (calls !== 1) throw Error("native callback did not run exactly one helper");
                 text=True, capture_output=True, timeout=15)
             if child.returncode:
                 raise AssertionError(child.stderr)
-            return
+            return guidance.stdout.strip()
         spec = importlib.util.spec_from_file_location(name, path)
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
+        out = io.StringIO()
         try:
             spec.loader.exec_module(module)
-            if signal["harness"] == "claude":
-                module.handle_prompt({"session_id": sid, "cwd": str(self.root), "prompt": text})
-            else:
-                module.peer_notice({"session_id": sid}, text, str(self.root))
+            with contextlib.redirect_stdout(out):
+                if signal["harness"] == "claude":
+                    # The hook as Claude runs it: its `prompt` mode reads the payload from stdin.
+                    hook_payload = {"session_id": sid, "cwd": str(self.root), "prompt": text,
+                                    "hook_event_name": "UserPromptSubmit"}
+                    with mock.patch.object(sys, "argv", [str(path), "prompt"]), \
+                            mock.patch.object(sys, "stdin", io.StringIO(json.dumps(hook_payload))):
+                        module.main()
+                else:
+                    module.peer_notice({"session_id": sid}, text, str(self.root))
+                    if module.looks_like_peer_prompt(text):
+                        peer_spec = importlib.util.spec_from_file_location(
+                            "peer_receiver_guidance", root / "utilities/peer-message.py")
+                        peer = importlib.util.module_from_spec(peer_spec)
+                        peer_spec.loader.exec_module(peer)
+                        module.emit_context("UserPromptSubmit", [peer.receiver_guidance_once(
+                            text, {"harness": "codex", "session_id": sid}, cwd=str(self.root))])
         finally:
             sys.modules.pop(name, None)
+        contexts = []
+        for line in out.getvalue().splitlines():
+            with contextlib.suppress(ValueError, AttributeError):
+                contexts.append(json.loads(line)["hookSpecificOutput"]["additionalContext"])
+        return "\n\n".join(contexts)

@@ -4744,17 +4744,23 @@ _SIGNAL_NAME = re.compile(r"[0-9a-f]{64}\.json")
 
 def _own_open_signal(harness, session_id):
     """Whether this exact session has a question source of its own in the private store that
-    ``read_signals`` would list (a message question only while open). Read only while the
-    observation is incomplete and lists none of this session's waits: one directory listing and
-    the small signal files, never the projection."""
+    the producer would count: ``read_signals`` lists it (a message question only while open)
+    and it is not older than ``OLDER_AFTER`` (``wait_fold``), as a complete observation says.
+    Read only while the observation is incomplete and lists none of this session's waits: one
+    directory listing, and only the recent signal files are opened, never the projection."""
     try:
         entries = list(os.scandir(state_root()))
     except OSError:
         return False
+    now = time.time()
     needle = json.dumps(session_id, ensure_ascii=False).encode("utf-8")   # as `_write` stores it
     for entry in entries:
         try:
             if not _SIGNAL_NAME.fullmatch(entry.name) or not entry.is_file(follow_symlinks=False):
+                continue
+            # A source is written when its question is asked and its ``since`` never moves, so a
+            # file last written longer ago than ``OLDER_AFTER`` holds an older wait: not opened.
+            if now - entry.stat(follow_symlinks=False).st_mtime >= OLDER_AFTER:
                 continue
             fd = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             with os.fdopen(fd, "rb") as handle:
@@ -4766,7 +4772,8 @@ def _own_open_signal(harness, session_id):
         value = _read(path)
         if (value is None or value.get("harness") != harness or value.get("session_id") != session_id
                 or value.get("mode") == "message" and value.get("lifecycle") != "open"
-                or not isinstance(value.get("since"), (int, float))):
+                or not isinstance(value.get("since"), (int, float))
+                or wait_fold(value["since"], now) is not None):
             continue
         if path == _signal_path(value):
             return True

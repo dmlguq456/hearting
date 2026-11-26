@@ -182,8 +182,10 @@ def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=N
 #
 # The old form shows the whole text. A runtime body holding a secret question's answer
 # (`private_body`) that is not sealed in a display form shows a pointer instead: its body
-# is the transfer's private payload (`body_ref`, the one the receive checks already read),
-# and the window gets one header line, the payload's path and the receipt lines.
+# is the transfer's private payload (`body_ref` with `presentation_mode: private-answer`, the
+# one the receive checks already read), the window gets one header line, the payload's path
+# and the receipt lines, and the agent gets the body through the same hook/plugin context
+# (`_private_answer_guidance`).
 # ---------------------------------------------------------------------------
 _DISPLAY_FORM = 2
 _DISPLAY_AGENT_MAX_CHARS = 12000
@@ -502,7 +504,7 @@ def _display_agent_block(resolved):
     entry, transfer = resolved["entry"], resolved["transfer"]
     if entry["kind"] == "runtime":
         return ("Hearting delivery (the person sees only the one `↳` line above); the full text:\n"
-                + entry["agent"])
+                + entry["agent"] + ("\n\n" + _SECRET_ANSWER_NOTE if entry.get("private") is True else ""))
     return _sender_sentence(" (the person sees only `%s`)" % entry["tail"], entry["agent"],
                             transfer.get("from"), always=True)
 
@@ -967,12 +969,17 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
                 and include_trailer and body_ref is None and request is None and handoff is None):
             # No one-line form carries it (Codex, an unsigned window, the same line still waiting,
             # a delivery with no short form): the body goes to the private payload the existing
-            # checks read, and the window shows the pointer and receipt lines. A payload that
-            # cannot be published fails the seal, as a request's does; nothing is sent in full.
-            body_ref, payload_path = _write_body_payload(ref, raw_body, source_sha256)
+            # checks read, and the window shows the pointer and receipt lines. Each receiver's own
+            # callback gives the agent the body from that payload (`_private_answer_guidance`), so
+            # no file read is needed. A payload that cannot be published fails the seal, as a
+            # request's does; nothing is sent in full.
+            body_ref, payload_path = _write_body_payload(ref, raw_body, source_sha256,
+                                                         presentation_mode="private-answer")
             text = _private_body_envelope(body, payload_path) + "\n\n" + trailer
             record["body_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if display_entry is not None:
+            if private_body and display_entry["kind"] == "runtime":
+                display_entry["private"] = True   # its agent text holds a secret answer
             record["display"] = display_entry
         if handoff is not None:
             record["handoff"] = handoff
@@ -1106,7 +1113,11 @@ def _body_reference_envelope(body, payload_path, raw_size, sender, ref, *, comma
 
 
 _PRIVATE_BODY_HEADER = ("Hearting delivery holding a private answer: the person's window shows only "
-                        "this pointer. Read the complete text in the file below before acting on it:")
+                        "this pointer. Its full text comes to you as context with this message; the same "
+                        "text is in the file below.")
+# Said with a secret question's answer, in either agent-only text (the one-line form's, the pointer's).
+_SECRET_ANSWER_NOTE = ("It answers a question asked as secret: use it, but do not repeat it in your "
+                       "replies or reports.")
 
 
 def _private_body_envelope(body, payload_path):
@@ -1125,7 +1136,7 @@ def _body_reference_descriptor_valid(descriptor, ref):
         and all(isinstance(descriptor.get(key), str)
                 and re.fullmatch(r"[0-9a-f]{64}", descriptor[key])
                 for key in ("payload_sha256", "source_sha256"))
-        and descriptor.get("presentation_mode") in ("file-reference", "request-body")
+        and descriptor.get("presentation_mode") in ("file-reference", "request-body", "private-answer")
     )
 
 
@@ -4592,12 +4603,36 @@ def receiver_guidance(text="", recipient=None, *, cwd=None):
     return _plain_receiver_guidance(text, recipient, cwd=cwd, name_sender=True)
 
 
+def _private_answer_guidance(ref):
+    """The agent-only full text of a runtime delivery sealed as a private answer's pointer
+    (``private_body``), read from its verified payload; ``""`` for any other runtime text.
+
+    ``ref`` comes from ``parse_peer_trailer``, which has already bound the arrived text to its
+    sealed transfer and to this recipient. Claude's and Codex's prompt hooks and the OpenCode
+    plugin all add this guidance to the agent's context, so the answer needs no file read."""
+    try:
+        transfer = _read_transfer_record(ref) if isinstance(ref, str) else None
+        if ((transfer or {}).get("body_ref") or {}).get("presentation_mode") != "private-answer":
+            return ""   # any other runtime text keeps its empty guidance
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return ""
+    try:
+        payload = read_peer_payload(ref)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        payload = None
+    if not payload:
+        return ("The private answer this pointer stands for could not be verified or read by the "
+                "trusted receiver. Do not act on a guess; leave it for its existing continuation.")
+    return ("Hearting delivery (the person sees only the pointer above); the full text:\n"
+            + payload["body"] + "\n\n" + _SECRET_ANSWER_NOTE)
+
+
 def _plain_receiver_guidance(text, recipient, *, cwd=None, name_sender=False):
     """The guidance for a text that is not a display form; ``name_sender`` leads the ordinary
     guidance with the sealed sender's reply address when the text shows only a trailer tag."""
     current_origin = parse_peer_trailer(text, recipient, include_ref=True)
     if isinstance(current_origin, dict) and current_origin.get("source") == "runtime-completion":
-        return ""
+        return _private_answer_guidance(current_origin.get("transfer_ref"))
     requested = _request_receiver_guidance(text, recipient)
     if requested:
         return requested

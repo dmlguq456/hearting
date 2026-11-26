@@ -3300,7 +3300,12 @@ read-everywhere contract agree. The native queue checks the Codex contract again
 at submission. Unknown, stale, unresolved, contradictory, and other-runtime
 evidence keeps the complete body inline; SID-less panes remain inline until
 session binding. Helper file reads and model-readable access are separate
-observations.
+observations. One runtime delivery takes a payload on every harness: a body
+holding a secret question's answer that gets no one-line display form shows
+the window only a pointer to its private payload (`private-answer`), and each
+receiver's own callback (the Claude and Codex prompt hooks, the OpenCode
+plugin) gives the agent the verified full text as context, so no file read is
+needed.
 
 Queued and ambiguous envelopes retain their original wire body, digest, and
 identity. When queue submission or a receiver callback cannot establish current

@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import human_wait_state as state  # noqa: E402
 import work_intent  # noqa: E402
 
+SECRET_NOTE = "It answers a question asked as secret: use it, but do not repeat it in your replies or reports."
+
 
 class QuestionAnswerLine(unittest.TestCase):
     def setUp(self):
@@ -103,12 +105,17 @@ class QuestionAnswerLine(unittest.TestCase):
         self.assertEqual(calls, ["↳ 질문에 답함: •••"])
         self.assertNotIn("SECRET-SENTINEL-VALUE", calls[0])
         self.assertIn("SECRET-SENTINEL-VALUE", self.f.peer._read_transfer_record(ref)["display"]["agent"])
-        self.f.consume(signal, calls[0])
+        context = self.f.consume(signal, calls[0])
+        self.assertIn("SECRET-SENTINEL-VALUE", context)
+        self.assertIn(SECRET_NOTE, context)   # use it, do not repeat it
         self.assertEqual(self.source(signal)["completion"]["action_id"], "fixture-action")
         plain, plain_envelope = self.f.ask("claude", "line-plain", text="토큰?")
         self.f.submit(plain_envelope, "공개 답")
         calls, _ref, _row = self.f.courier(plain)
         self.assertEqual(calls, ["↳ 질문에 답함: 공개 답"])
+        context = self.f.consume(plain, calls[0])
+        self.assertIn("공개 답", context)
+        self.assertNotIn(SECRET_NOTE, context)
 
     def test_an_answer_whose_question_cannot_be_read_as_ordinary_is_hidden(self):
         import dispatch_session_sweep as sweep
@@ -153,9 +160,13 @@ class QuestionAnswerLine(unittest.TestCase):
     # Every way the window gets the full form: Codex (always), a window that never showed it reads the
     # line or showed it more than two days ago, a batch with a notice that has no line, a folded notice,
     # and the same line still waiting for an earlier answer (every secret answer's line is `•••`).
-    CASES = ("codex", "unsigned", "stale-sign", "mixed", "folded", "same-line-waiting")
+    # OpenCode hands an ordinary notice to its own plugin carrier, so it never shares a batch
+    # with an answer (no mixed or folded case there).
+    CASES = (("codex", "marked"), ("codex", "mixed"), ("claude", "unsigned"), ("claude", "stale-sign"),
+             ("claude", "mixed"), ("claude", "folded"), ("claude", "same-line-waiting"),
+             ("opencode", "unsigned"), ("opencode", "stale-sign"), ("opencode", "same-line-waiting"))
 
-    def deliver(self, case, answer, secret):
+    def deliver(self, harness, case, answer, secret, *, patches=()):
         import os
         import time
         import dispatch_notice_state
@@ -165,10 +176,11 @@ class QuestionAnswerLine(unittest.TestCase):
         # Each case is its own machine: one courier pass serves one recipient, and nothing an
         # earlier case left stands in its way.
         fixture = MessageQuestionFixture()
+        node = self.fixture.node          # found before the first fixture closed PATH
         self.f = fixture.__enter__()
+        self.f.node = node
         self.addCleanup(fixture.__exit__, None, None, None)
-        harness = {"codex": "codex"}.get(case, "claude")
-        sid = "full-" + case
+        sid = "full-" + harness + "-" + case
         recipient = {"harness": harness, "session_id": sid}
         self.f.display = case not in ("unsigned", "stale-sign")
         if case == "stale-sign":
@@ -191,7 +203,7 @@ class QuestionAnswerLine(unittest.TestCase):
         signal, envelope = self.f.ask(harness, sid, text="질문", secret=secret,
                                       **({"replace": True} if case == "same-line-waiting" else {}))
         self.f.submit(envelope, answer)
-        patches = []
+        patches = list(patches)
         if case in ("mixed", "folded"):
             self.assertIsNotNone(session_notice.notify(harness, sid, key="fixture-other-" + sid,
                 subject="fixture notice", text="an ordinary notice", jobs=self.f.jobs))
@@ -202,9 +214,9 @@ class QuestionAnswerLine(unittest.TestCase):
                 if "answer_binding" not in (claim.get("receipt") or {}):
                     return False
                 return keep(root, storage, delivery_id, claim, owner, **kwargs)
-            patches = [mock.patch.object(dispatch_notice_state, "keep_claim", side_effect=folding),
-                       mock.patch.object(session_notice, "fold_summary",
-                                         return_value="compute run summary: run r1 status=done exit=0")]
+            patches += [mock.patch.object(dispatch_notice_state, "keep_claim", side_effect=folding),
+                        mock.patch.object(session_notice, "fold_summary",
+                                          return_value="compute run summary: run r1 status=done exit=0")]
         for patch in patches:
             patch.start()
         try:
@@ -217,37 +229,82 @@ class QuestionAnswerLine(unittest.TestCase):
         self.assertNotIn("display", transfer)   # the full form's case: no one-line form was sealed
         return signal, calls[0], ref, transfer, self.f.bodies[-1]
 
-    def test_a_secret_answer_without_its_line_shows_the_window_only_a_pointer(self):
+    def assert_pointer(self, signal, window, ref, body, secret="SECRET-SENTINEL-VALUE"):
         # The window gets the header, the private copy's path, the receipt lines and the trailer;
-        # the receiving session reads the very body the courier rendered, and the answer settles.
-        for case in self.CASES:
-            with self.subTest(case=case):
-                signal, window, ref, transfer, body = self.deliver(case, "SECRET-SENTINEL-VALUE", True)
-                self.assertNotIn("SECRET-SENTINEL-VALUE", window)
-                self.assertIn("SECRET-SENTINEL-VALUE", body)
-                payload = self.f.peer.read_peer_payload(ref)
-                self.assertEqual(payload["body"], body)
-                self.assertEqual(payload["descriptor"]["presentation_mode"], "file-reference")
-                self.assertEqual(Path(payload["path"]).stat().st_mode & 0o777, 0o600)
-                markers = [line for line in body.splitlines() if line.startswith("HEARTING_RECEIPT_V1 ")]
-                self.assertTrue(markers)
-                self.assertEqual(window, "\n".join([
-                    "Hearting delivery holding a private answer: the person's window shows only this pointer. "
-                    "Read the complete text in the file below before acting on it:",
-                    "`" + payload["path"] + "`", *markers])
-                    + "\n\n(runtime-from: runtime [?] Hearting runtime ; ref=" + ref + ")")
-                self.f.consume(signal, window)
-                self.assertEqual(self.source(signal)["completion"]["action_id"], "fixture-action")
-                self.assertEqual(self.f.peer._read_pending(ref)["state"], "received")
+        # the agent gets the very body the courier rendered through its own harness's context
+        # (no file read), and the answer settles.
+        self.assertNotIn(secret, window)
+        self.assertIn(secret, body)
+        payload = self.f.peer.read_peer_payload(ref)
+        self.assertEqual(payload["body"], body)
+        self.assertEqual(payload["descriptor"]["presentation_mode"], "private-answer")
+        self.assertEqual(Path(payload["path"]).stat().st_mode & 0o777, 0o600)
+        markers = [line for line in body.splitlines() if line.startswith("HEARTING_RECEIPT_V1 ")]
+        self.assertTrue(markers)
+        self.assertEqual(window, "\n".join([
+            "Hearting delivery holding a private answer: the person's window shows only this pointer. "
+            "Its full text comes to you as context with this message; the same text is in the file below.",
+            "`" + payload["path"] + "`", *markers])
+            + "\n\n(runtime-from: runtime [?] Hearting runtime ; ref=" + ref + ")")
+        context = self.f.consume(signal, window)
+        self.assertIn("Hearting delivery (the person sees only the pointer above); the full text:\n"
+                      + body + "\n\n" + SECRET_NOTE, context)
+        # The panel's received-message line takes the payload's first line: the delivery header.
+        import session_tidy
+        line = session_tidy._received_prompt_line(window, {"transfer_ref": ref})
+        self.assertEqual(line, body.splitlines()[0])
+        self.assertNotIn(secret, line)
+        self.assertEqual(self.source(signal)["completion"]["action_id"], "fixture-action")
+        self.assertEqual(self.f.peer._read_pending(ref)["state"], "received")
+        return context
+
+    def test_a_secret_answer_without_its_line_shows_the_window_only_a_pointer(self):
+        for harness, case in self.CASES:
+            with self.subTest(harness=harness, case=case):
+                signal, window, ref, transfer, body = self.deliver(harness, case, "SECRET-SENTINEL-VALUE", True)
+                context = self.assert_pointer(signal, window, ref, body)
+                if case in ("mixed", "folded"):
+                    # the batch's other notice reaches the agent with it
+                    self.assertIn("an ordinary notice" if case == "mixed" else "compute run summary", context)
+
+    def test_a_secret_answer_of_any_shape_stays_out_of_the_window(self):
+        # Several lines, a long answer, control characters, a path-like answer.
+        for label, secret in (("lines", "SECRET-ML-1\nSECRET-ML-2\nSECRET-ML-3"),
+                              ("long", "SECRET-LONG-" + "x" * 3000),
+                              ("control", "SECRET-CTRL-\x1b[31m\tend"),
+                              ("path", "/home/someone/.ssh/SECRET-PATH-id")):
+            with self.subTest(label):
+                signal, window, ref, transfer, body = self.deliver("codex", "marked-" + label, secret, True)
+                for piece in secret.split("\n"):
+                    self.assertNotIn(piece, window)
+                self.assert_pointer(signal, window, ref, body, secret=secret.split("\n")[0])
+
+    def test_a_payload_that_cannot_be_written_sends_nothing_then_the_pointer(self):
+        import peer_steward_base
+        failing = mock.patch.object(peer_steward_base.peer_message, "_write_body_payload",
+                                    side_effect=OSError("fixture: payload directory unavailable"))
+        from fixtures.message_questions import MessageQuestionFixture
+        fixture = MessageQuestionFixture()
+        self.f = fixture.__enter__()
+        self.addCleanup(fixture.__exit__, None, None, None)
+        signal, envelope = self.f.ask("claude", "payload-fails", text="질문", secret=True)
+        self.f.submit(envelope, "SECRET-SENTINEL-VALUE")
+        with failing:
+            calls, ref, _row = self.f.courier(signal)
+        self.assertEqual(calls, [])       # nothing reaches the window in full
+        calls, ref, _row = self.f.courier(signal)
+        self.assertEqual(len(calls), 1)
+        self.assert_pointer(signal, calls[0], ref, self.f.bodies[-1])
 
     def test_an_ordinary_answers_full_form_is_unchanged(self):
-        for case in self.CASES:
-            with self.subTest(case=case):
-                signal, window, ref, transfer, body = self.deliver(case, "공개 답", False)
+        for harness, case in self.CASES:
+            with self.subTest(harness=harness, case=case):
+                signal, window, ref, transfer, body = self.deliver(harness, case, "공개 답", False)
                 self.assertNotIn("body_ref", transfer)
                 self.assertEqual(window, body + "\n\n(runtime-from: runtime [?] Hearting runtime ; ref=" + ref + ")")
                 self.assertIn("\n공개 답\n", window)
-                self.f.consume(signal, window)
+                context = self.f.consume(signal, window)
+                self.assertNotIn(SECRET_NOTE, context)
                 self.assertEqual(self.source(signal)["completion"]["action_id"], "fixture-action")
 
 

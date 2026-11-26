@@ -3482,6 +3482,61 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
                 self.assertNotIn(wait, statusline("sid-a"))
                 own.assert_not_called()
 
+    def test_the_own_question_read_keeps_the_producers_age_rule_and_opens_only_recent_files(self):
+        # 11-26 follow-up: a question older than OLDER_AFTER is not counted, as a complete
+        # observation would not count it; a source file last written longer ago than that is
+        # skipped by its stat alone: only the recent files are opened. Measured (one
+        # `cached_statusline`, incomplete, median of 20, other sessions' files four days old):
+        # 100 files 0.32 ms, 1,000 3.0 ms, 5,000 18 ms, none opened (before: 0.96, 10.6, 51 ms,
+        # every one opened); what is left is one stat per file.
+        import session_tidy as tidy
+
+        def publish():
+            now = time.time()
+            self.assertTrue(state.publish_cache({"items": [], "observed_at": now, "complete": False,
+                                                 "route_sessions": {"claude\0sid-a": now}}))
+
+        def old_source(index):
+            value = {"schema_version": 1, "mode": "message", "source": "S4", "id": "S4:%064x" % (index + 1),
+                     "harness": "claude", "session_id": "old-%d" % index, "seat_key": "pane:old-%d" % index,
+                     "sequence": 0, "question": "q?", "detail": {"questions": [{"id": "message-response",
+                     "question": "q?", "choices": [], "is_secret": False}]}, "since": then,
+                     "lifecycle": "open", "cwd": self.tmp.name, "incarnation": None}
+            path = state._session_signal_path(value)
+            state._write(path, value)
+            os.utime(path, (then, then))
+
+        with mock.patch.object(state, "_request_producer"):
+            publish()
+            # Bytes of this session's id in another harness's or another session's source count nothing.
+            state.register_message("codex", "sid-a", tidy.Seat("project", "seat-c"), "질문?",
+                                   sequence=0, cwd=self.tmp.name)
+            state.register_message("claude", "sid-b", tidy.Seat("project", "seat-b"), "sid-a",
+                                   sequence=0, cwd=self.tmp.name)
+            self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 0))
+            signal = state.register_message("claude", "sid-a", tidy.Seat("project", "seat-a"), "질문?",
+                                            sequence=0, cwd=self.tmp.name)
+            path = state._signal_path(signal)
+            self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 1))
+            state._write(path, {**state._read(path), "since": time.time() - state.OLDER_AFTER - 60})
+            self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 0))
+            # Thirty sources last written four days ago are never opened.
+            then = time.time() - 4 * 86400
+            for index in range(30):
+                old_source(index)
+            root = str(state.state_root())
+            opened = []
+            real_open = os.open
+
+            def counting(target, *args, **kwargs):
+                if str(target).startswith(root):
+                    opened.append(str(target))
+                return real_open(target, *args, **kwargs)
+
+            with mock.patch.object(state.os, "open", side_effect=counting):
+                self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 0))
+            self.assertEqual(len(opened), 3, opened)   # the three recent sources only
+
     def test_statusline_tidy_notice_is_a_third_line_only_when_asked(self):
         # PG-20: the OpenCode footer asks for the waiting session-tidy result the
         # Claude status line shows; Claude's two-line read stays unchanged.
