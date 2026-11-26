@@ -93,6 +93,39 @@ class QuestionAnswerLine(unittest.TestCase):
         self.assertEqual(self.source(second)["completion"]["action_id"], "fixture-action")
         self.assertEqual(self.f.peer._read_pending(ref2)["state"], "received")
 
+    def test_a_secret_question_answer_is_hidden_in_the_line_and_kept_for_the_agent(self):
+        # The line is the panel's own `•••`; the pending row's agent text still carries the answer,
+        # and the answer settles as before. An ordinary answer keeps its text.
+        self.f.display = True
+        signal, envelope = self.f.ask("claude", "line-secret", text="토큰?", secret=True)
+        self.f.submit(envelope, "SECRET-SENTINEL-VALUE")
+        calls, ref, _row = self.f.courier(signal)
+        self.assertEqual(calls, ["↳ 질문에 답함: •••"])
+        self.assertNotIn("SECRET-SENTINEL-VALUE", calls[0])
+        self.assertIn("SECRET-SENTINEL-VALUE", self.f.peer._read_transfer_record(ref)["display"]["agent"])
+        self.f.consume(signal, calls[0])
+        self.assertEqual(self.source(signal)["completion"]["action_id"], "fixture-action")
+        plain, plain_envelope = self.f.ask("claude", "line-plain", text="토큰?")
+        self.f.submit(plain_envelope, "공개 답")
+        calls, _ref, _row = self.f.courier(plain)
+        self.assertEqual(calls, ["↳ 질문에 답함: 공개 답"])
+
+    def test_an_answer_whose_question_cannot_be_read_as_ordinary_is_hidden(self):
+        import dispatch_session_sweep as sweep
+        signal, envelope = self.f.ask("claude", "line-unreadable", text="질문")
+        self.f.submit(envelope, "SECRET-SENTINEL-VALUE")
+        record = self.f.record(signal)
+        self.assertEqual(sweep.delivery_display_text([(self.f.root, [record])]), "↳ 질문에 답함: SECRET-SENTINEL-VALUE")
+        source = self.source(signal)
+        for label, change in (("source gone", lambda: None),
+                              ("flag missing", lambda: {**source, "detail": {**source["detail"], "questions": [
+                                  {k: v for k, v in source["detail"]["questions"][0].items() if k != "is_secret"}]}}),
+                              ("flag not a boolean false", lambda: {**source, "detail": {**source["detail"], "questions": [
+                                  {**source["detail"]["questions"][0], "is_secret": None}]}}),
+                              ("another request", lambda: {**source, "id": "S4:" + "0" * 64})):
+            with self.subTest(label), mock.patch.object(state, "_read", return_value=change()):
+                self.assertEqual(sweep.delivery_display_text([(self.f.root, [record])]), "↳ 질문에 답함: •••")
+
     def test_codex_keeps_the_full_text_and_settles_as_before(self):
         self.f.display = True
         signal, envelope = self.f.ask("codex", "line-codex")

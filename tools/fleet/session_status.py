@@ -378,6 +378,11 @@ def _fleet_lines(status, width):
     return _grid_rows(grid, pages.repo_status_lines(grid, 0, width, 0, status))
 
 
+class _Lines(list):
+    """A document's lines, with its first line as ``carries_marker`` reads it (``splitlines`` also cuts at CR, FF, U+2028)."""
+    head = None
+
+
 def read_text(path):
     """``(lines, cut)`` of the document's first 64 KiB: a cut leaves off its torn last line; None if unreadable."""
     import artifact_campaign_documents as documents
@@ -389,7 +394,9 @@ def read_text(path):
     cut = coverage != "complete"
     if cut:
         text = text[:text.rfind("\n") + 1] if "\n" in text else ""
-    return text.splitlines(), cut
+    lines = _Lines(text.splitlines())
+    lines.head = text.split("\n", 1)[0]    # `is_generated` judges the first line as the one rule does, not by splitlines
+    return lines, cut
 
 
 def popup_rows(view, status, width):
@@ -486,7 +493,9 @@ _SLOT = ("  ", None)          # the two cells in front of a chosen-able row: the
 
 def is_generated(lines):
     """Whether the document is the generated campaign page: its first line is the marker."""
-    return bool(lines) and str(lines[0]).strip() == CAMPAIGN_MARKER
+    import artifact_campaign_documents as documents
+    head = getattr(lines, "head", None)
+    return documents.carries_marker(head if head is not None else (lines[0] if lines else ""), CAMPAIGN_MARKER)
 
 
 def parse_listing(lines):

@@ -902,7 +902,7 @@ class RegistryTest(RegistryFixtureTestCase):
  # B-N2. The same row with one of its own tagged processes actually running
  # stays active. This is the "no regression on a healthy worker" control.
  def test_live_tagged_process_keeps_the_ghost_shaped_row_active(self):
-  attempt="att-ghost000002"
+  attempt=unique_attempt_id("att-ghost000002")
   child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],
                          env={**os.environ,"AGENT_DISPATCH_ATTEMPT_ID":attempt})
   try:
