@@ -15,6 +15,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import artifact_producer
 
 CLI = [sys.executable, str(ROOT / "utilities/capability-route.py")]
@@ -129,7 +131,7 @@ class LegacyRootDirectRouteTest(unittest.TestCase):
 
     def test_legacy_finish_preserves_registered_caller_and_route_refusals(self):
         command, route = self.finish_command()
-        self.env["AGENT_DISPATCH_ATTEMPT_ID"] = "att-" + "a" * 48
+        self.env["AGENT_DISPATCH_ATTEMPT_ID"] = unique_attempt_id("att-" + "a" * 48)
         denied = self.run_cli(command)
         self.assertEqual(denied.returncode, 64, denied.stderr)
         self.assertIn("finish-registered-caller-ineligible", denied.stderr)
