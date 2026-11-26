@@ -15,6 +15,7 @@ agent surfaces.
 
 | Family | Unit | Portable model role | Worker type | Floor | Catalog source |
 |---|---|---|---|---|---|
+| `analysis` | `analysis/analyze` | `deep maker` | `stage` | `high` | `roles/units/analysis/analyze.md` |
 | `design` | `design/critic` | `fast reviewer` | `review` | `high` | `roles/units/design/critic.md` |
 | `design` | `design/maker` | `deep maker` | `stage` | `highest` | `roles/units/design/maker.md` |
 | `design` | `design/verifier` | `fast reviewer` | `review` | `near-zero` | `roles/units/design/verifier.md` |

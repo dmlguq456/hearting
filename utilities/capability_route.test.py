@@ -8087,6 +8087,30 @@ class ComposeRouteTest(TestRoute):
   with self.assertRaisesRegex(ValueError,"compose-owner-close-differs"):
    R._validate_compose_owner_close(registry,route["composed_recipe"],"standard")
 
+ def test_auto_owner_close_of_a_literal_anchor_kind_writes_inside_its_anchors(self):
+  # 11-26: a staged design route at strong+ was refused with
+  # "write scope 'owner-close.md' matches no declared cycle_anchor".
+  cases=(("autopilot-design","default","build,visual-verify,critic-review",
+          ["designs/owner-close.md","spec/design/owner-close.md"],{"visual-verify","critic-review"}),
+         ("autopilot-design","default","refs",
+          ["designs/owner-close.md","spec/design/owner-close.md"],{"refs"}),
+         ("autopilot-spec","update","research,review",
+          ["spec/owner-close.md","spec/<component>/owner-close.md"],{"research","review"}))
+  for capability,mode,graph,scope,groups in cases:
+   for intensity in ("strong","thorough","adversarial"):
+    with self.subTest(capability=capability,graph=graph,intensity=intensity):
+     route=self.compose(capability=capability,capability_mode=mode,intensity=intensity,graph=graph)
+     owner=route["nodes"][-1]
+     self.assertEqual((owner["id"],owner["terminal_gate"]),("owner-close","compose-owner-close"))
+     self.assertEqual(owner["write_scope"],scope)
+     self.assertEqual(owner["outputs"],scope[:1])
+     self.assertEqual({group["id"] for group in route["parallel_groups"]},groups)
+     self.assertEqual(route["workflow_contract"]["terminal_nodes"],["owner-close"])
+     R.verify_route(route,R.ROOT)
+  # An implicit-anchor kind keeps the bare cycle-relative name.
+  route=self.compose(graph="plan,impl-review",intensity="strong")
+  self.assertEqual(route["nodes"][-1]["write_scope"],["owner-close.md"])
+
  def test_auto_owner_close_does_not_restore_a_dropped_approval(self):
   route=self.compose(capability="autopilot-refine",capability_mode="default",
                      graph="review",intensity="strong")
