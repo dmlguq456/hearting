@@ -2070,7 +2070,9 @@ input binding and diagnostic. Changed inputs use ordinary smoke verification
 and a distinct retry without locking another session's edits.
 The smoke attestation and the resource launch share a normalized execution
 identity for the selected cwd, interpreter, local environment selectors, and
-compute-host/environment plus explicit remote payload selectors. The launcher
+compute-host/environment plus explicit remote payload selectors. A local
+payload inherits the selected values the smoke captured (a value the smoke
+lacked is removed), and an explicit assignment must still match. The launcher
 rechecks that identity before reservation and again at queued controller
 release; a changed or unbound record cannot authorize a new payload. Only the
 small selected environment set is recorded, not ambient secrets. Legacy

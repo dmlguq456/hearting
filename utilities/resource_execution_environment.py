@@ -119,9 +119,6 @@ def smoke_payload_environment(argv, attestation, environ, *, pin_inherited=False
     unset, assigned = [], {}
     for name, state in attestation["execution_environment"]["environment"].items():
         inherits = _inherits(descriptor, name)
-        if state["state"] == "unset" and smoke_descriptor is not None:
-            if inherits != _inherits(smoke_descriptor, name):
-                raise ValueError("smoke-execution-environment-mismatch")
         if not inherits:
             continue
         if state["state"] == "inherit" and "value" in state:

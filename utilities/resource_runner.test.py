@@ -1442,21 +1442,54 @@ class TestRunner(unittest.TestCase):
                 self.assert_payload_exit_zero(run_id)
                 self.assertEqual(self.launch.read_text(), command[1] if len(command) > 1 else "ran")
 
-    def test_explicit_smoke_removal_does_not_match_inheritance(self):
-        smoke_env = {**CLEAN_ENV, "PYTHONPATH": str(self.base / "overlay")}
-        for label, prefix in (("unset", ["/usr/bin/env", "-u", "PYTHONPATH"]),
-                              ("clear", ["/usr/bin/env", "-i"])):
-            with self.subTest(smoke=label):
-                proof = self.base / f"{label}-environment-smoke.json"
-                subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
-                    str(self.repo / "config"), "--cwd", str(self.repo), "--output",
-                    str(proof), "--", *prefix, sys.executable, "-c", "pass"], check=True,
-                    capture_output=True, env=smoke_env)
-                result = self.cli(*self.start_args(smoke=proof, run_id=f"mismatch-{label}"),
-                                  extra_env={"PYTHONPATH": smoke_env["PYTHONPATH"]})
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("smoke-execution-environment-mismatch", result.stderr)
-                self.assertFalse(self.launch.exists())
+    def test_explicit_unset_and_inherited_absence_both_run_without_the_variable(self):
+        # A name the smoke removed with `env -u` (or never had) and the full run
+        # inherits or removes the other way round: either way the payload runs
+        # without it, as the smoke did, and is not refused.
+        names = ("PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CONDA_PREFIX",
+                 "LD_LIBRARY_PATH")
+        present = {"PATH": CLEAN_ENV.get("PATH", "/usr/bin:/bin"),
+                   "PYTHONHOME": sys.base_prefix}
+        probe = ("import json, os, sys; from pathlib import Path; "
+                 "Path(sys.argv[1]).write_text(json.dumps(sorted(set(sys.argv[2:]) & set(os.environ))))")
+        env_u = lambda name: ["/usr/bin/env", "-u", name]
+        cases = (("smoke-unsets", "has", "has"), ("smoke-unsets", "lacks", "lacks"),
+                 ("full-unsets", "lacks", "lacks"))
+        for name in names:
+            value = present.get(name, str(self.base / "ambient"))
+            for direction, smoke_state, runner_state in cases:
+                label = f"{name.lower()}-{direction}-{smoke_state}-{runner_state}"
+                with self.subTest(case=label):
+                    smoke_env = {**CLEAN_ENV, name: value if smoke_state == "has" else None}
+                    smoke_env = {k: v for k, v in smoke_env.items() if v is not None}
+                    smoke_prefix = env_u(name) if direction == "smoke-unsets" else []
+                    proof = self.base / f"{label}-smoke.json"
+                    subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+                        str(self.repo / "config"), "--cwd", str(self.repo), "--output",
+                        str(proof), "--", *smoke_prefix, sys.executable, "-c", "pass"],
+                        check=True, capture_output=True, env=smoke_env)
+                    args = self.start_args(smoke=proof, run_id=label)
+                    full_prefix = env_u(name) if direction == "full-unsets" else []
+                    effect = self.base / f"{label}.seen"
+                    result = self.cli(*args[:args.index("--") + 1], *full_prefix,
+                        sys.executable, "-c", probe, str(effect), name,
+                        extra_env={name: value if runner_state == "has" else None})
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assert_payload_exit_zero(label)
+                    self.assertEqual(json.loads(effect.read_text()), [])
+        # `env -i` in the smoke removes every selected name at once.
+        proof = self.base / "clear-smoke.json"
+        subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+            str(self.repo / "config"), "--cwd", str(self.repo), "--output",
+            str(proof), "--", "/usr/bin/env", "-i", sys.executable, "-c", "pass"],
+            check=True, capture_output=True, env=CLEAN_ENV)
+        args = self.start_args(smoke=proof, run_id="clear")
+        effect = self.base / "clear.seen"
+        result = self.cli(*args[:args.index("--") + 1], sys.executable, "-c", probe, str(effect), *names,
+            extra_env={name: present.get(name, str(self.base / "ambient")) for name in names})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_payload_exit_zero("clear")
+        self.assertEqual(json.loads(effect.read_text()), [])
 
     def unset_path_command(self):
         """`env -u PATH sh ...`, with a shim named `sh` that only a smoke session's PATH has."""
@@ -2096,7 +2129,7 @@ class TestRunner(unittest.TestCase):
             self.assertEqual(R.classify_identity(foreign)[0],"stale")
             self.assertEqual(R.classify_identity(foreign)[2],"process-namespace-mismatch")
 
-    def test_queued_controller_rechecks_smoke_environment_before_release(self):
+    def test_queued_controller_restores_smoke_environment_before_release(self):
         import artifact_producer
         import dispatch_resource_wait
         smoke_spec = importlib.util.spec_from_file_location("queued_environment_smoke", SMOKE)
@@ -2190,6 +2223,96 @@ class TestRunner(unittest.TestCase):
                     running = json.loads(registry.read_text())["runs"][label]
                     self.assertEqual(running["launch_state"], "started")
                     self.assertEqual(R.read_sentinel(running["sentinel"]), 0)
+
+    def test_queued_controller_refuses_an_interpreter_changed_after_the_wait(self):
+        import artifact_producer
+        jobs = self.base / "queued-interpreter-jobs.log"
+        jobs.write_text("")
+        route = json.loads(self.route.read_text())
+        run_id = "queued-interpreter"
+        effect = self.base / "queued-interpreter-payload"
+        link_directory = self.base / "interpreter-link"
+        link_directory.mkdir()
+        link = link_directory / "python"
+        link.symlink_to(sys.executable)
+        command = [str(link), "-c",
+                   f"from pathlib import Path; Path({str(effect)!r}).write_text('released')"]
+        smoke_path = self.base / "queued-interpreter-smoke.json"
+        smoke_spec = importlib.util.spec_from_file_location("queued_interpreter_smoke", SMOKE)
+        smoke_module = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke_module)
+        attestation = smoke_module.payload([self.repo / "config"], [str(link), "-c", "pass"], self.repo)
+        attestation.update(status="passed", exit_code=0)
+        attestation["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+            attestation, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        smoke_path.write_text(json.dumps(attestation, sort_keys=True))
+        args = SimpleNamespace(jobs=str(jobs), run_id=run_id, node="full-run",
+                               smoke_attestation=str(smoke_path), config_manifest=None)
+        body = {"run_id": run_id, "cwd": str(self.repo), "log": str(self.log),
+            "command": command, "route": str(self.route), "node": "full-run",
+            "status": "launching", "sentinel": str(self.log) + ".exit",
+            "jobs": str(jobs), "parent_attempt_id": "att-parent",
+            "owner_wait": {"session_id": "same-native", "launch_scope": "codex-owner-controller"}}
+        route_watch = mock.Mock(pid=os.getpid())
+        route_watch.poll.return_value = None
+        payloads = []
+        real_popen = subprocess.Popen
+        def capture_popen(*popen_args, **kwargs):
+            process = real_popen(*popen_args, **kwargs)
+            payloads.append(process)
+            return process
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}), \
+             mock.patch.object(artifact_producer, "prepare_route_artifact_env",
+                return_value={"AGENT_ARTIFACT_OUTPUT_DIR": str(self.base)}), \
+             mock.patch.object(R, "register_registry"), \
+             mock.patch.object(R.subprocess, "run"), \
+             mock.patch.object(R.gpu_leases, "resource_admission",
+                               return_value=(None, None, {"CUDA_VISIBLE_DEVICES": ""})), \
+             mock.patch.object(R, "start_watch", return_value=(route_watch, R.proc_identity(os.getpid()))), \
+             mock.patch.object(R.subprocess, "Popen", side_effect=capture_popen), \
+             mock.patch("sys.stdout"):
+            R.start_verified(self.registry, args, route, self.route, dict(body))
+            queued = json.loads(self.registry.read_text())["runs"][run_id]
+            self.assertEqual(queued["launch_state"], "queued")
+            before = self.registry.read_bytes()
+            controller = SimpleNamespace(expected=queued,
+                identity={**R.proc_identity(os.getpid()),
+                          "pid_namespace": os.readlink("/proc/self/ns/pid")},
+                command=command, sandbox={"mode": "workspace-write", "enforcement": "os-sandbox"},
+                guard=contextlib.nullcontext, registry=str(self.registry))
+            # While the row waited, the interpreter behind the smoke's command moved.
+            link.unlink()
+            link.symlink_to("/bin/sh")
+            with self.assertRaisesRegex(ValueError, "smoke-execution-environment-mismatch"):
+                R.start_verified(self.registry, args, route, self.route,
+                                 dict(queued), controller=controller)
+            self.assertEqual(payloads, [])
+            self.assertEqual(self.registry.read_bytes(), before)
+            self.assertFalse(effect.exists())
+            # The same row is released once the smoke's interpreter is back.
+            link.unlink()
+            link.symlink_to(sys.executable)
+            R.start_verified(self.registry, args, route, self.route,
+                             dict(queued), controller=controller)
+            self.assertEqual(len(payloads), 1)
+            self.assertEqual(payloads[0].wait(timeout=5), 0)
+            self.assertEqual(effect.read_text(), "released")
+
+    def test_smoke_attestation_changed_after_the_launch_request_is_refused(self):
+        smoke_path = self.base / "request-bound-smoke.json"
+        smoke_spec = importlib.util.spec_from_file_location("request_bound_smoke", SMOKE)
+        smoke_module = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke_module)
+        attestation = smoke_module.payload([self.repo / "config"], [sys.executable, "-c", "pass"], self.repo)
+        attestation.update(status="passed", exit_code=0)
+        smoke_path.write_text(json.dumps(attestation, sort_keys=True))
+        request = R.launch_request(SimpleNamespace(
+            smoke_attestation=str(smoke_path), config_manifest=None))
+        self.assertEqual(R.read_smoke_attestation(request), attestation)
+        # Still valid JSON with the same identity, but not the bytes the request bound.
+        smoke_path.write_text(json.dumps(attestation, sort_keys=True) + "\n")
+        with self.assertRaisesRegex(ValueError, "resource-launch-request-changed"):
+            R.read_smoke_attestation(request)
 
     def _host_route(self):
         """A real lab eval route that borrowed the GPU-free host part (the catalog is the only source)."""
@@ -2846,8 +2969,9 @@ class TestRunner(unittest.TestCase):
         return subprocess.run([
             sys.executable, str(RUNNER), "--registry", str(self.registry), *args,
         ], cwd=cwd, text=True, capture_output=True, pass_fds=pass_fds, input=input,
-           env={**CLEAN_ENV, "AGENT_HOME": str(ROOT),
-                "AGENT_RESOURCE_RUN_INDEX": str(self.index), **(extra_env or {})})
+           env={key: value for key, value in {**CLEAN_ENV, "AGENT_HOME": str(ROOT),
+                "AGENT_RESOURCE_RUN_INDEX": str(self.index), **(extra_env or {})}.items()
+                if value is not None})
 
     def start_args(self, route=None, node="full-run", smoke=None, run_id="case", config_manifest=None):
         return ("start", "--run-id", run_id, "--cwd", str(self.repo), "--log", str(self.log),

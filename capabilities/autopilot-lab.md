@@ -466,11 +466,11 @@ invalidates it. `_RUNLOG` and existing provenance manifests are append-only.
 Smoke and resource launch also bind the same normalized execution choices:
 cwd, interpreter, the selected local environment, and any compute-host and
 explicit remote environment selectors. Local payloads inherit the selected
-values captured by smoke, and explicit environment choices must still match.
-The launcher checks before reservation and before a queued controller releases
-the payload. Changed or unbound smoke input cannot authorize a launch. Legacy attestations remain
-inspectable, but cannot authorize a new payload; secrets and the full ambient
-environment are not copied into the attestation.
+values captured by smoke, and an explicit assignment must still match. The
+launcher checks before reservation and before a queued controller releases the
+payload. Changed or unbound smoke input cannot authorize a launch. Legacy
+attestations remain inspectable, but cannot authorize a new payload; secrets and
+the full ambient environment are not copied into the attestation.
 
 **Limits (by design):** attestation requires the source file to exist *at
 attest time* — a manifest whose source was later deleted stays
