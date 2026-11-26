@@ -133,8 +133,8 @@ const repoLabel=v.rows[1].find(p=>p.text.trim()==='REPO');assert(repoLabel&&repo
         self.node(r"""
 // 11-26 (panel B): narrower, the REPO row keeps its label first (`REPO` and one space, then the name).
 for(const width of [32,28,20]){const v=draw({status:doc(),width,height:70}),ls=lines(v);
-  // (fix 1 of #1863: at 20 cells the branch is cut to one letter, then the name: `REPO he… (b… ✓)`, the status whole)
-  assert((/^│  REPO +hearting/.test(ls[1])||width<=20&&/^│  REPO \S+… \(\S… ✓\) │$/.test(ls[1]))&&ls.every(l=>cells(l)===width),width+'\n'+ls.join('\n'));}
+  // (fixes 1 and 2 of #1863: narrower the longer of the name and the branch is cut first, each down to one letter, the status whole: `REPO he… (b… ✓)`)
+  assert((/^│  REPO +hearting/.test(ls[1])||width<=28&&/^│  REPO \S+… \((branch|\S+…) ✓\) │$/.test(ls[1]))&&ls.every(l=>cells(l)===width),width+'\n'+ls.join('\n'));}
 // 11-26 (panel B): the SESSION head is a plain rule that costs no row of the old plan; short of rows it stands over MODEL's own row and goes once no spare row is left; the REPO row never goes.
 const seen=[];
 for(let h=70;h>=12;h--){const ls=lines(draw({status:doc(),height:h,peers:true}));

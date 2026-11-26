@@ -29,7 +29,6 @@ const WAIT_BLINK=10;
 // messages at most, each its head row and its first line (spec rule 31). 11-20 (the person: "대신 MESSAGE도 최대 3개 정도로
 // 다시 줄이고"): three at most.
 const MESSAGES_MAX=3;
-const REPO_NAME_MIN=8;
 // 11-20 (the person: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" / "REPO ---- SESSION ----"): the panel beside the native area has two groups: REPO
 // (the repository's: its row, GIT, PEERS) and SESSION (this session's: MODEL, CTX, TITLE, NOW, QUESTIONS, the route box, MESSAGES, MEM). Each group's head
 // is one row `REPO ────` / `SESSION ────`. REPO's head is the REPO row itself (`REPO hearting · wt 12 ────`, no row more). SESSION's head stands
@@ -815,9 +814,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const listButton=(doc,stage)=>{const arrow=text('›','dim');if(stage>=2)return [arrow];
       const k=kindsOf(doc),n=k?k.fix+k.task:listTotalOf(doc),q=!!k&&n===0&&unsortedOnly(k);
       return [text(clean(doc.word).trim(),doc.has_doc===true?'loc_repo':'dim'),...(stage===0&&(n>0||q||doc.more===true)?[text(' '),text(q?'?':countWords(n,doc.more===true),'loc_repo')]:[]),text(' '),arrow];};
-    // The REPO row where the two heads do not stand: `REPO hearting · wt 12 ──── STATUS +N ›  BACKLOG +N ›`, the bottom layout's first row's buttons (the same words, the same
-    // order of giving way: the counts, then the words, then the name is cut). `offset` cells of the row stand left of `room`; a press on a button opens its popup, on the rest of the row the status popup.
-    // 11-22: `fit` is what the value and the buttons must fit in (the cells the row had when its label column stood: what is kept or dropped as the width falls is unchanged), `room` the row's cells.
     const buttonDocs=()=>[['STATUS',statusDoc],['BACKLOG',backlogDoc]].filter(([,d])=>d);
     // 11-26 (fix 1 of #1863): beside the native area a folded button says what its head says: `STATUS 5 ›` (the board's whole count, no `+`; none
     // for zero) and `BACKLOG +N ›` (the items not drawn: all of them, folded; a `+` after it where the file is longer than is read). The bottom
@@ -832,19 +828,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const buildButtons=(lead,made,room,offset)=>{const at=offset+room-made.used;
       return {parts:[...lead,pad(room-size(lead)-made.used),...made.parts],
         actions:made.spans.map((sp,i)=>({left:i?at+sp.left:0,right:i===made.spans.length-1?inner-1:at+made.spans[i+1].left-1,action:'popup:'+sp.name}))};};
-    const buttonsAt=(room,name,count,offset,fit=room)=>{
-      const docs=buttonDocs();
-      if(!docs.length)return null;
-      const place=stage=>placeButtons(docs,stage),build=(lead,made)=>buildButtons(lead,made,room,offset);
-      for(const stage of [0,1,2]){
-        const made=place(stage);
-        for(const lead of count.length?[[...name,...count],name]:[name])if(size(lead)+1+made.used<=fit)return build(lead,made);
-        const left=fit-made.used-1;
-        if(left>=Math.min(size(name),REPO_NAME_MIN))return build(cut(name,left),made);
-      }
-      const made=place(2);
-      return build(cut(name,Math.max(1,fit-made.used-1)),made);
-    };
     // Spec rule 46: the newest saved memory records (this repository's and the global ones, MEM_MAX at
     // most) stand in their own section under the messages, one row each (below). An older backend
     // sends the newest one as painted pieces only (`3m decision headline`): that one record,
@@ -880,40 +863,40 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
           if(size(parts)<=room)return parts;
         return null;
       };
-      // Short of cells (11-26, fix 1 of #1863: the arrows and the warning are what the person asked for, so they go last): the branch is cut, down to
-      // one letter and `…`, then the name, down to one letter and `…`; only where even that does not fit do the Git words give way, from their end
-      // (the warning's letters first, then the arrows). A branch the backend already cut (`feature/update-pane…`) is cut again without its `…`,
-      // so no `… …` stands.
-      const bare=part=>({...part,text:String(part.text).replace(/…$/,'')});
-      const cutWord=(part,room)=>size([part])<=room?[part]:cut([bare(part)],room);
+      // Short of cells (11-26, fixes 1 and 2 of #1863, the supervisor's one order; each gives way only once all before it have): 1. `wt N`; 2. the
+      // label column's blanks (`REPO trial (…)`); 3. where the folded buttons stand on this row, their counts, then their words (`›  ›` alone; the
+      // two change together: below); 4. the letters of the name and of the branch, the longer of the two first, each down to its first letter and
+      // `…` (a wide first letter whole, until only the Git words are left to give way: then it gives way to its `…` first); 5. the Git words, from
+      // their end (the warning's letters first, then the arrows). So the buttons fold before a
+      // letter of the name or the branch goes, and a wider window never shows a shorter name or branch. A branch the backend already cut
+      // (`bl-git-index-lock-1…`) is cut again as it is: the cut's own `…` takes its last cell, so its `…` never goes and no `… …` stands.
+      const floorOf=parts=>{const first=[...clean(String(parts[0]?.text??''))][0];return Math.min(size(parts),first?measure(first)+1:0);};
       const repoFit=room=>{
         const whole=repoWhole(room);if(whole)return whole;
-        const tight=repoLead(false),[branch,...flags]=wrapped?[]:sideGit;
-        if(!branch)return cut([...tight,...sideRepo,...repoGit],room);
-        const open=text(' (','dim'),tail=[...flags,text(')','dim')];
-        const left=room-size([...tight,...sideRepo,open,...tail]);
-        if(left>=2)return [...tight,...sideRepo,open,...cutWord(branch,left),...tail];
-        const stub=cutWord(branch,Math.min(2,size([branch]))),name=room-size([...tight,open,...stub,...tail]);
-        if(name>=Math.min(2,size(sideRepo)))return [...tight,...cut(sideRepo,name),open,...stub,...tail];
-        const lead=[...tight,...cut(sideRepo,Math.min(2,size(sideRepo))),open,...stub],gitRoom=room-size(lead)-1;
-        return gitRoom>=1?[...lead,...cut(flags,gitRoom),text(')','dim')]:cut([...lead,...tail],room);
+        const tight=repoLead(false),[branch,...flags]=wrapped?[]:sideGit,open=text(' (','dim'),close=text(')','dim');
+        let n=size(sideRepo),b=branch?size([branch]):0;
+        const lead=()=>[...tight,...cut(sideRepo,n),...(branch?[open,...cut([branch],b)]:[])];
+        const make=()=>branch?[...lead(),...flags,close]:[...lead(),...(wrapped?repoGit:[])];
+        const shrink=(nameMin,branchMin)=>{while(size(make())>room&&(n>nameMin||b>branchMin)){
+          if(b>branchMin&&(size(cut([branch],b))>=size(cut(sideRepo,n))||n<=nameMin))b--;else n--;}};
+        shrink(floorOf(sideRepo),branch?floorOf([branch]):0);
+        // (only where even that leaves the Git words no room does a wide first letter give way to its `…`, before a letter of the Git words goes)
+        shrink(Math.min(2,size(sideRepo)),branch?Math.min(2,size([branch])):0);
+        const fitted=make();if(size(fitted)<=room)return fitted;
+        const gitRoom=room-size(lead())-1;
+        return branch&&gitRoom>=1?[...lead(),...cut(flags,gitRoom),close]:cut(fitted,room);
       };
       if(sideRepo.length||sideGit.length){
         // Where the two heads under REPO do not stand the row ends in the two buttons, as the bottom layout's first row does (the same order of giving
-        // way: the counts, then the words, then `›` alone; 11-26, fix 1 of #1863: the numbers mean what the heads' do, `STATUS 5 ›` and `BACKLOG +N ›`,
-        // `listButtonB`). Beside the counted buttons, then beside the words alone, the value stands whole (with `wt`, then without), else with its
-        // branch cut as far as it must while the name, the arrows and the warning stand whole; failing that, beside `›` alone the value as `repoFit`
-        // cuts it. The arrows and the warning never go before the buttons' words or the branch's letters. A press on a button opens its popup, on
-        // the rest of the row the status popup.
-        const docs=buttonDocs(),[,...gitFlags]=wrapped?[]:sideGit;
-        const keeps=parts=>sideRepo.every(x=>parts.includes(x))&&gitFlags.every(x=>parts.includes(x));
+        // way: the counts, then the words, then `›` alone, the two together; 11-26, fix 1 of #1863: the numbers mean what the heads' do, `STATUS 5 ›`
+        // and `BACKLOG +N ›`, `listButtonB`). At each of the three the value is tried whole (`wt`, then the label column giving way first: steps 1 and
+        // 2 above); only beside `›` alone does `repoFit` cut its letters (steps 4 and 5). A press on a button opens its popup, on the rest of the row
+        // the status popup.
+        const docs=buttonDocs();
         if(docs.length){
           let made=null;
-          for(const stage of [0,1,2]){const placed=placeButtons(docs,stage,true),room=inner-placed.used-1;
-            for(const withWt of [true,false]){const whole=repoWhole(room,withWt);if(whole){made=buildButtons(whole,placed,inner,0);break;}}
-            if(!made&&stage<2&&sideGit.length&&!wrapped){const fitted=repoFit(room);if(size(fitted)<=room&&keeps(fitted))made=buildButtons(fitted,placed,inner,0);}
-            if(!made&&stage===2)made=buildButtons(repoFit(Math.max(1,room)),placed,inner,0);
-            if(made)break;}
+          for(const stage of [0,1,2]){const placed=placeButtons(docs,stage,true),room=inner-placed.used-1,whole=repoWhole(room);
+            if(whole||stage===2){made=buildButtons(whole||repoFit(Math.max(1,room)),placed,inner,0);break;}}
           repoButtons=made;
         }
         repoAt=top.length;

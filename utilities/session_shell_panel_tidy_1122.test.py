@@ -313,21 +313,25 @@ assert(short,JSON.stringify(seen));
 """)
 
     def test_the_repo_row_keeps_its_arrows_and_warning_and_the_buttons_their_words_where_they_fit(self):
-        # 11-26 (fix 1 of #1863): short of cells `wt` goes, then the label's column, then the branch is cut down to one letter and `…`, then the name;
-        # the arrows and the warning stand whole until even that does not fit (then the warning's letters go first). A branch the backend already cut is
-        # not cut into `… …`. Beside the folded buttons: the words with the Git status whole (the branch cut as it must), else `›  ›` with it.
+        # 11-26 (fixes 1 and 2 of #1863, the supervisor's one order; each gives way only once all before it have): `wt`, the label column's blanks,
+        # the folded buttons' counts and then their words (`›  ›`), the letters of the name and the branch (the longer first, each down to its first
+        # letter and `…`, a wide first letter whole), then the Git words from their end. A branch the backend already cut keeps a `…`.
         self.node(r"""
 const git=(branch,...flags)=>[t(branch),...flags.map(f=>t(f,f.includes('↑')?'lvl_g':f.includes('↓')?'lvl_r':'dim'))];
 const row=(width,height,name,parts,lists=true)=>{const v=view.render({width,height,side:true,model:{...model({messages:2,mem:2,routes:1,
   ...(lists?{status:status(),backlog:backlog()}:{})}),repo_side:[t(name,'loc_repo')],git_side:parts,worktrees:[t('wt 12')]},state:'working',harness:'claude',frame:1000,since:990,
   brief,sent:()=>[],cellWidth:cells,configuration:{side_width:width,rule_motion:'off',theme:'terminal',position:'right'}});return {line:lines(v)[1],hits:v.hits.filter(h=>h.row===1)};};
 const cases=[   // (the letters a cut leaves depend on the cells; what is pinned: which part is cut, the Git words whole, the buttons)
-  [40,24,'hearting',git('bl-git-index-lock-1…',' ↑2',' ↓5',' ⚠️merge'),/^│  REPO hear\S*… \(b… ↑2 ↓5 ⚠️merge\) ›  › │$/],
-  [36,52,'hearting',git('main',' ↑2',' ↓5',' ⚠️merge'),/^│  REPO hear\S*… \(m… ↑2 ↓5 ⚠️merge\) │$/],
-  [30,52,'hearting',git('main',' ↑2',' ↓5'),/^│  REPO hearting \(ma… ↑2 ↓5\) │$/],
-  [30,24,'trial',git('main',' ↑2',' ↓5'),/^│  REPO t\S*… \(m… ↑2 ↓5\) ›  › │$/],
+  [40,24,'hearting',git('bl-git-index-lock-1…',' ↑2',' ↓5',' ⚠️merge'),/^│  REPO hea\S*… \(bl\S*… ↑2 ↓5 ⚠️merge\) ›  › │$/],
+  [36,52,'hearting',git('main',' ↑2',' ↓5',' ⚠️merge'),/^│  REPO hear\S*… \(main ↑2 ↓5 ⚠️merge\) │$/],   // (the name is the longer: it goes first)
+  [30,52,'hearting',git('main',' ↑2',' ↓5'),/^│  REPO hear\S*… \(main ↑2 ↓5\) │$/],
+  [30,24,'trial',git('main',' ↑2',' ↓5'),/^│  REPO t\S*… \(m\S*… ↑2 ↓5\) ›  › │$/],
   [40,52,'trial',git('feature/update-pane…',' ↑12',' ↓345',' ⚠️rebase'),/^│  REPO trial \(fea\S*… ↑12 ↓345 ⚠️rebase\) │$/],
-  [50,24,'hearting',git('main',' ↑2',' ↓5'),/^│  REPO hearting \(ma… ↑2 ↓5\) STATUS ›  BACKLOG › │$/]];
+  // (the buttons fold to `›  ›` before a letter of the branch goes; `wt` stands again beside them where it fits)
+  [50,24,'hearting',git('main',' ↑2',' ↓5'),/^│  REPO   hearting \(main ↑2 ↓5\)  wt 12 +›  › │$/],
+  [50,24,'trial',git('main',' ↑2'),/^│  REPO   trial \(main ↑2\) +STATUS ›  BACKLOG › │$/],
+  [40,52,'hearting',git('bl-git-index-lock-1…'),/^│  REPO hearting \(bl-git-index-lock-…\) │$/],
+  [44,24,'hearting',git('기능/패널-정리',' ✓'),/^│  REPO   hearting \(기능\/패널-정리 ✓\) ›  › │$/]];
 for(const [w,h,name,parts,re] of cases){const r=row(w,h,name,parts);
   assert(re.test(r.line)&&!r.line.includes('… …')&&cells(r.line)===w,w+'x'+h+' '+r.line);
   if(h===24)assert(r.hits.length===2&&r.hits[0].action==='popup:STATUS'&&r.hits[1].action==='popup:BACKLOG'&&r.hits[1].right===w-3,JSON.stringify(r.hits));}
@@ -348,6 +352,40 @@ assert(/^│  REPO h… \(m… ↑2 ↓5 …\) ›  › │$/.test(row(30,24,'he
  assert(/ STATUS ›  BACKLOG › │$/.test(lines(v)[1]),lines(v)[1]);}
 // The bottom layout keeps its own buttons (`STATUS +5 ›  BACKLOG +14 ›`: the items not shown there are all of them).
 {const v=drawW({width:120,height:10,side:false,status:status(),backlog:backlog()});assert(lines(v).some(l=>/STATUS \+5 ›  BACKLOG \+14 ›/.test(l)),lines(v).join('\n'));}
+""")
+
+    def test_a_cut_branch_keeps_its_mark_and_a_wider_window_never_shows_less_of_the_name_or_the_branch(self):
+        # 11-26 (fix 2 of #1863): a branch the backend already cut (`bl-git-index-lock-1…`, nineteen letters and `…`) never stands without a `…`
+        # (one cell short it was drawn `(bl-git-index-lock-1)`, a branch that does not exist); widening the window by one cell never shortens the
+        # name or the branch (the buttons fold before their letters go); a wide first letter stands whole, giving way to its `…` only so the Git
+        # words keep standing whole where the other is one letter already.
+        self.node(r"""
+const git=(branch,...flags)=>[t(branch),...flags.map(f=>t(f,f.includes('↑')?'lvl_g':f.includes('↓')?'lvl_r':'dim'))];
+const row=(width,height,name,parts)=>lines(view.render({width,height,side:true,model:{...model({messages:2,mem:2,routes:1,status:status(),backlog:backlog()}),
+  repo_side:[t(name,'loc_repo')],git_side:parts,worktrees:[t('wt 12')]},state:'working',harness:'claude',frame:1000,since:990,brief,sent:()=>[],cellWidth:cells,
+  configuration:{side_width:width,rule_motion:'off',theme:'terminal',position:'right'}}))[1];
+const parse=line=>{const m=/REPO\s+(.*?) \(([^ )]*)/.exec(line);return m?{name:m[1],branch:m[2]}:null;};
+const flagsets=[[],[' ↑2'],[' ↑2',' ↓5',' ⚠️merge'],[' ✓'],[' ↑12',' ↓345',' ⚠️rebase']];
+let rows=0;
+for(const name of ['hearting','trial','hearting-maintenance-ws','저장소-하팅'])for(const branch of ['bl-git-index-lock-1…','main','panel-b-1126','기능/패널-정리'])for(const fl of flagsets)for(const h of [52,24]){
+  let last=null;
+  for(let w=32;w<=64;w++){const line=row(w,h,name,git(branch,...fl)),got=parse(line);rows++;
+    assert(got&&!line.includes('… …')&&cells(line)===w,w+'x'+h+' '+line);
+    if(got.branch!==branch)assert(got.branch.endsWith('…'),'a cut branch keeps its mark: '+w+'x'+h+' '+line);
+    const whole=fl.every(f=>line.includes(f.trim()));
+    // (a wide first letter gives way to its `…` only where the other is already one letter and `…` too, before a letter of the Git words goes;
+    // where the Git words are cut, a wide first letter has gone first)
+    const floor=x=>/^.…$/u.test(x)||x==='…';
+    if(/^[가-힣]/.test(branch)&&got.branch==='…')assert(floor(got.name),'a wide first letter stands whole: '+w+'x'+h+' '+line);
+    if(/^[가-힣]/.test(name)&&got.name==='…')assert(floor(got.branch),'a wide first letter stands whole: '+w+'x'+h+' '+line);
+    if(!whole&&/^[가-힣]/.test(branch))assert(got.branch==='…',w+'x'+h+' '+line);
+    if(!whole&&/^[가-힣]/.test(name))assert(got.name==='…',w+'x'+h+' '+line);
+    if(last){assert(cells(got.branch)>=cells(last.branch)&&cells(got.name)>=cells(last.name),'wider, yet shorter: '+(w-1)+' → '+w+' × '+h+'\n'+last.line+'\n'+line);}
+    last={...got,line};}
+}
+assert.equal(rows,5280);   // (4 names × 4 branches × 5 sets of Git words × 2 heights × 33 widths)
+// 40 × 52, the backend's cut branch and no upstream: one cell short of it, it is cut once more, keeping its mark.
+assert(/^│  REPO hearting \(bl-git-index-lock-…\) │$/.test(row(40,52,'hearting',git('bl-git-index-lock-1…'))),row(40,52,'hearting',git('bl-git-index-lock-1…')));
 """)
 
     def test_nothing_stands_where_it_did_not_and_every_row_is_as_wide_as_the_panel(self):

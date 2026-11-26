@@ -270,9 +270,10 @@ assert.deepEqual([seen[0].b,seen[0].s,seen[0].heads],[3,0,2]);
 const press=(v,a)=>v.hits.find(h=>h.row===1&&h.action===a);
 // 11-26 (panel B): the row's value is the repository row's, its Git words in parentheses; it stays whole (`wt` and the label's column go first; the
 // branch is cut only where the name and the Git status stay whole) and the buttons give way to `›` where both do not fit.
-// (fix 1 of #1863: the buttons' numbers mean what the heads' do, `STATUS 5` and `BACKLOG +14`; the branch is cut, not the status, down to one letter)
+// (fix 1 of #1863: the buttons' numbers mean what the heads' do, `STATUS 5` and `BACKLOG +14`; fix 2: the buttons fold before a letter of the
+// name or the branch goes, then the longer of the two goes first, the status last)
 for(const [w,want] of [[59,/^ REPO   hearting \(branch ✓\)   STATUS 5 ›  BACKLOG \+14 ›$/],[50,/^ REPO hearting \(branch ✓\)  STATUS ›  BACKLOG ›$/],[44,/^ REPO   hearting \(branch ✓\)  wt 12  ›  ›$/],
-  [40,/^ REPO   hearting \(branch ✓\) +›  ›$/],[30,/^ REPO hearting \(b… ✓\) ›  ›$/]]){
+  [40,/^ REPO   hearting \(branch ✓\) +›  ›$/],[30,/^ REPO hear… \(bran… ✓\) ›  ›$/]]){
   const v=drawN({width:w,height:14,question:true,routes:3,messages:7,mem:5,peers:true,status:status(),backlog:backlog()}),p=sort(v);
   assert(!p.rows.some(r=>r.k==='list'),w+'\n'+p.lines.join('\n'));
   assert.match(p.rows[0].t.trimEnd(),want,w+' '+p.rows[0].t);
@@ -285,7 +286,7 @@ for(const [w,want] of [[59,/^ REPO   hearting \(branch ✓\)   STATUS 5 ›  BAC
 }
 // The counts give way first, then the words, as the bottom layout's first row: the same pieces at widths that cut them.
 {const at=(w,s,b)=>sort(drawN({width:w,height:14,question:true,routes:3,messages:7,mem:5,peers:true,status:status(3,s),backlog:backlog(3,b)})).rows[0].t.trimEnd();
- assert.match(at(59,5,14),/STATUS 5 ›  BACKLOG \+14 ›$/);assert.match(at(54,5,14),/\(bran… ✓\) STATUS 5 ›  BACKLOG \+14 ›$/);assert.match(at(50,5,14),/\(branch ✓\)  STATUS ›  BACKLOG ›$/);
+ assert.match(at(59,5,14),/STATUS 5 ›  BACKLOG \+14 ›$/);assert.match(at(54,5,14),/\(branch ✓\) +STATUS ›  BACKLOG ›$/);assert.match(at(50,5,14),/\(branch ✓\)  STATUS ›  BACKLOG ›$/);
  assert.match(at(44,5,14),/\(branch ✓\)  wt 12  ›  ›$/);assert.match(at(59,0,0),/ STATUS ›  BACKLOG › *$/);
  // Only the STATUS value (no backlog value): one button, the whole row is its press.
  const v=drawN({width:44,height:14,question:true,routes:3,messages:7,mem:5,peers:true,status:status(3,5)}),h=v.hits.filter(x=>x.row===1);

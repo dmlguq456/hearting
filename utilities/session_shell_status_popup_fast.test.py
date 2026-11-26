@@ -320,7 +320,8 @@ const rename=async title=>{const cache=JSON.parse(fs.readFileSync(cfg.cache,'utf
   cache.route_panels[cfg.key][0].title=title;write(cfg.cache,JSON.stringify(cache));};
 // 11-21: the press that opens the popup stands on the STATUS head under the REPO group.
 const opened=async()=>{const spot=await at('STATUS');await press(spot.x+2,spot.y,0);};
-const close=async()=>{await key('\x1b',300);await until(s=>!box(s),'closed');};
+// (closed: the popup's top line is gone; a box whose bottom line went first is not closed yet)
+const close=async()=>{await key('\x1b',300);await until(s=>!s.some(l=>l.includes('╭─')&&l.includes('✕ ─╮')),'closed');};
 const edit=(from,to)=>fs.writeFileSync(cfg.doc,fs.readFileSync(cfg.doc,'utf8').replace(from,to));
 const checks={};
 (async()=>{try{

@@ -1579,7 +1579,8 @@ for(const [width,height,side,focused] of [[80,14,false,false],[80,14,false,true]
  if(width===35&&height===26)assert(branch>=0,'a roomy side panel keeps the Git words\n'+rows.join('\n'));
  // The Git row sits right below the repo row and never shares it (the bottom layout); 11-26 (panel B): beside the native area the Git words
  // stand in the repo row's parentheses. Spec rule 29: the number moves to the top border; the repo row keeps `project/`.
- if(branch>=0)assert(rows[side?branch:branch-1].includes('project/')&&!rows.slice(1).some(s=>s.includes('[cb]')),rows.join('\n'));
+ // (11-26, fix 2 of #1863: this backend's Git words are one piece, so beside the native area the name's letters go before them)
+ if(branch>=0)assert((side?/^│  REPO \S/.test(rows[branch]):rows[branch-1].includes('project/'))&&!rows.slice(1).some(s=>s.includes('[cb]')),rows.join('\n'));
  assert(rows.length<=height);
 }
 // A long title is shortened with an ellipsis; the answer wait (the QUESTIONS head's count) keeps its place.
@@ -1922,7 +1923,8 @@ for(const [config,background,extra,number] of [[{theme:'terminal'},'dark',{},[21
 // (b) The metadata's two groups: with Git, and without it (the row parts the repository from the model). 11-20: that row is the SESSION group's head.
 // (11-26, panel B: the Git words stand in the REPO row's parentheses; the SESSION head is a rule without a word.)
 const r50=draw([oneShot,staged],40,50);
-assert(r50[1].includes('hearting/ (fix/fleet')&&/^│ ─+ │$/.test(r50[2])&&r50[3].includes('claude-fable-5-2 high')&&r50[4].startsWith('│  CTX    ━━━━'),r50.join('\n'));
+// (an older backend's Git words are one piece: the name's letters go before them, fix 2 of #1863)
+assert(/^│  REPO \S+… \(fix\/fleet/.test(r50[1])&&/^│ ─+ │$/.test(r50[2])&&r50[3].includes('claude-fable-5-2 high')&&r50[4].startsWith('│  CTX    ━━━━'),r50.join('\n'));
 const noGit=view.render({width:40,height:50,side:true,fill:true,model:{...head,git:[],routes:[oneShot],route_count:1},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
 assert(/^│  REPO   hearting\/ +│$/.test(noGit[1])&&/^│ ─+ │$/.test(noGit[2])&&noGit[3].includes('claude-fable-5-2 high'),noGit.join('\n'));
 // (c) Six routes and eight messages at 40×58: the question's head, then the route box (every route
@@ -1992,7 +1994,7 @@ assert(label&&label.dim===true&&label.role!=='title'&&label.bold!==true,JSON.str
 assert(v50.rows[1].find(p=>p.text==='hearting').dim!==true&&v50.rows[1].filter(p=>/^ \($|^\)$|^wt 12$|✓/.test(p.text)).every(p=>p.dim===true),JSON.stringify(v50.rows[1]));
 // Short of cells the branch gives way; the status and a warning stay whole (spec rule 30 (d)).
 const tight=text(paint([oneShot],40,50,{model:{git_side:[D('fix/fleet-opencode-…'),D(' ↓3'),D(' ⚠️rebase')]}}));
-assert(/^│  REPO hearting \(fix\/.*… ↓3 ⚠️rebase\) +│$/.test(tight[1]),tight.join('\n'));
+assert(/^│  REPO hear\S*… \(fix\/\S*… ↓3 ⚠️rebase\) +│$/.test(tight[1]),tight.join('\n'));   // (fix 2 of #1863: the longer of the name and the branch goes first)
 // Narrower than 30 cells inside the other labels go (as TITLE's and NOW's); the REPO row keeps its word, `REPO ` and one cell.
 const narrow=text(paint([oneShot],32,50));
 assert(/^│  REPO hearting \(fix\/\S*… ✓\) │$/.test(narrow[1])&&!narrow.slice(2).some(s=>/^│  (PEERS|MODEL|CTX) /.test(s)),narrow.join('\n'));
