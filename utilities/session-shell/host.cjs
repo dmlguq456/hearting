@@ -1425,7 +1425,9 @@ function render() {
     else if(target!==paintedCursor)text=target;
     paintedCursor=target;
     const mouse=!fleetView&&height()>0?1002:({x10:9,vt200:1000,drag:1002,any:1003})[m.mouseTrackingMode];
-    const modes=new Map([[2004,m.bracketedPasteMode],[1,m.applicationCursorKeysMode],
+    // 11-26: while the question popup takes the keys a paste comes marked even if the native has not asked
+    // for it, so a pasted line break is a line break of the answer and never its Enter.
+    const modes=new Map([[2004,m.bracketedPasteMode||owning&&block.focused],[1,m.applicationCursorKeysMode],
       ...[9,1000,1002,1003].map(n=>[n,n===mouse]),[1006,!!mouse],
       [1004,m.sendFocusMode],[25,owning?!!blockCursor:cursorVisible]]);
     // Disable an old mouse mode before enabling its replacement. Reasserting focus/paste
@@ -1818,7 +1820,8 @@ function observeInput(data) {
       // observation epoch above, including split reports; pasted bytes count.
       if(!paste&&(keyTail==='\x1b[I'||keyTail==='\x1b[O')){nativeEpoch-=keyTail.length;keyTail='';}
       else if(keyTail==='\x1b[200~'){paste=true;keyTail='';}else if(keyTail==='\x1b[201~'){paste=false;keyTail='';typed=nativeEpoch;}
-      else if(string?c==='\x07'||keyTail.endsWith('\x1b\\'):keyTail.length>2&&/[\x40-\x7e]/.test(c)){if(!QUIET_KEY.test(keyTail))typed=nativeEpoch;keyTail='';}
+      // Escape then one letter that opens no CSI, SS3 or string (`[`, `O`, `]`, `P`, `_`) is a whole key (Alt+letter).
+      else if(string?c==='\x07'||keyTail.endsWith('\x1b\\'):keyTail.length>2&&/[\x40-\x7e]/.test(c)||keyTail.length===2&&!/[\x1b\[O\]P_]/.test(c)){if(!QUIET_KEY.test(keyTail))typed=nativeEpoch;keyTail='';}
       else if(keyTail.length>(string?512:64)){typed=nativeEpoch;keyTail='';}
     }
     else if(c==='\x1b')keyTail=c;
@@ -1927,7 +1930,8 @@ function displayReporter(req){
     &&row.pid===native?.pid&&row.start===native?.start&&descends(req.pid,root.pid)&&sameTerminal(req.pid,root.pid);
 }
 mouseInput=require('./panel-mouse.cjs')({
-  suppressed:()=>paste||block.pasting||settingsPaste||relay||!!fleetView,
+  suppressed:()=>relay||!!fleetView,
+  pasting:()=>paste||block.pasting||settingsPaste,
   bytes:inputBytes,
   mouse:(code,x,y,release,raw)=>{
     if(popupMouse(code,x,y,release))return;
