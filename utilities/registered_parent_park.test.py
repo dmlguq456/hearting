@@ -19,11 +19,14 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks" / "registered-parent-park.py"
-PARENT = "att-claude-owner"
+sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
+
+PARENT = unique_attempt_id("att-claude-owner")
 CHILD = "att-claude-child-a"
 SLUG = "owner"
 
-sys.path.insert(0, str(ROOT / "utilities"))
 _JOIN_SPEC = importlib.util.spec_from_file_location(
     "dispatch_completion_join_park_parity", ROOT / "utilities" / "dispatch_completion_join.py"
 )
