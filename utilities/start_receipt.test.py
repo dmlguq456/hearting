@@ -205,21 +205,32 @@ class NextLineTest(unittest.TestCase):
               'required_action': 'wait-for-auto-resume', 'auto_resume': {'resume_at': '2026-11-02T00:53:37Z'}},
              'next: end this turn; nothing to run - the runtime starts this route again at '
              '2026-11-02T00:53:37Z and leaves one notice'),
-            # (나) A failed owner: close first (accept as it is, or stop), the correction only for work left.
-            ({'state': 'needs-attention', 'required_action': 'answer-failed-owner',
+            # (나) A failed owner: the person decides; close first (accept as it is, or stop), then the correction.
+            ({'state': 'needs-attention', 'required_action': 'answer-failed-owner', 'owner_report': '/r/report.md',
               'correction_command': 'py capability-route.py correct --attempt-id att-o',
               'close_command': 'env AGENT_DISPATCH_JOBS=/j py capability-route.py close --route /r/rt-x.json'},
-             'next: to accept the result as it is, or to stop the work, run: '
-             'env AGENT_DISPATCH_JOBS=/j py capability-route.py close --route /r/rt-x.json; '
-             "only if the owner has something to do, get the person's answer to owner_report, then run: "
+             'next: the owner ended FAIL; the person decides (owner_report says what it needs): to accept the result '
+             'as it is or stop the work, run: env AGENT_DISPATCH_JOBS=/j py capability-route.py close --route '
+             '/r/rt-x.json; to give the owner a fix or an answer, put it in a file and run: '
              'py capability-route.py correct --attempt-id att-o --message-file <answer file>'),
-            # A BLOCKED stop has no result to accept: only the work to stop, otherwise the answer.
+            # No readable report: the line names what the receipt names instead (its log), or nothing.
+            ({'state': 'needs-attention', 'required_action': 'answer-failed-owner', 'owner_log_file': '/l/o.jsonl',
+              'correction_command': 'py correct --attempt-id att-o', 'close_command': 'py close --route rt-x'},
+             'next: the owner ended FAIL; the person decides (its result is in owner_log_file /l/o.jsonl): to '
+             'accept the result as it is or stop the work, run: py close --route rt-x; to give the owner a fix or '
+             'an answer, put it in a file and run: py correct --attempt-id att-o --message-file <answer file>'),
+            ({'state': 'needs-attention', 'required_action': 'answer-failed-owner',
+              'correction_command': 'py correct --attempt-id att-o', 'close_command': 'py close --route rt-x'},
+             'next: the owner ended FAIL; the person decides: to accept the result as it is or stop the work, run: '
+             'py close --route rt-x; to give the owner a fix or an answer, put it in a file and run: '
+             'py correct --attempt-id att-o --message-file <answer file>'),
+            # A BLOCKED owner waits for an answer: the answer first, the stop after.
             ({'state': 'needs-attention', 'required_action': 'answer-blocked-owner',
               'correction_command': 'py capability-route.py correct --attempt-id att-o',
               'close_command': 'env AGENT_DISPATCH_JOBS=/j py capability-route.py close --route /r/rt-x.json'},
-             'next: to stop the work, run: env AGENT_DISPATCH_JOBS=/j py capability-route.py close --route '
-             "/r/rt-x.json; otherwise get the person's answer to owner_report, then run: "
-             'py capability-route.py correct --attempt-id att-o --message-file <answer file>'),
+             "next: the owner is waiting for an answer; get the person's answer to owner_report, then run: "
+             'py capability-route.py correct --attempt-id att-o --message-file <answer file>; to stop the work '
+             'instead, run: env AGENT_DISPATCH_JOBS=/j py capability-route.py close --route /r/rt-x.json'),
             # A receipt that carries no close_command keeps the answer alone.
             ({'state': 'needs-attention', 'required_action': 'answer-blocked-owner',
               'correction_command': 'py capability-route.py correct --attempt-id att-o'},

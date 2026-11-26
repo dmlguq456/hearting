@@ -2992,6 +2992,88 @@ class ParentCloseTest(unittest.TestCase):
         self.assertEqual(self.settled_case("killed", note="fleet-kill", failure_class="cancelled"),
                          ("sealed", "abandoned"))
 
+    def continuation_sharing_the_cycle(self, b_owner):
+        """A continuation B of this route A writes into A's open cycle; B's owner ended as `b_owner` says and B's
+        closure landed unproven (B's own close)."""
+        first = self.route["nodes"][0]["id"]
+        cont = ROUTE.build_continuation_route(self.route, resume_from_node=first, requested_boundary=first,
+                                              reason="fixture", artifact_root=self.artifacts)
+        cpath = ROUTE.canonical_route_path(self.artifacts, cont["route_id"])
+        ROUTE.publish_continuation_route(cont, self.route, cpath)
+        self.row("att-owner-b", status="done", owner_route_file=str(cpath), owner_route_id=cont["route_id"],
+                 owner_route_hash=cont["route_hash"], **b_owner)
+        b_close = subprocess.run([sys.executable, str(HERE / "capability-route.py"), "close", "--route", str(cpath)],
+                                 capture_output=True, text=True, timeout=120)
+        self.assertEqual(b_close.returncode, 0, b_close.stderr)
+        self.assertIs(json.loads(b_close.stdout)["terminal_gate_proven"], False)
+        return cont
+
+    def test_a_cycle_a_passing_continuation_shares_is_left_to_that_continuation(self):
+        # 🟡1 (review round 2): B's owner ended PASS and its completion has not proven B's closure yet. A is not the
+        # leaf of the cycle, so neither A's first close nor A's close run again seals it.
+        AP, begun, output, command = self.ended_owner_close_fixture(note="dead-worker-fail", failure_class="fail")
+        cont = self.continuation_sharing_the_cycle(dict(note="completed-supervisor", failure_class="pass"))
+        self.assertEqual(AP.route_cycle_for(self.artifacts, cont)["cycle_id"], begun["cycle_id"])
+        self.assertEqual(self.cycle_reading(AP, begun), ("open", None))     # B's own close left it, as before
+        for _ in range(2):
+            done = subprocess.run(command, capture_output=True, text=True, timeout=120)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(self.cycle_reading(AP, begun), ("open", None))
+        self.assertEqual(output.read_text(), "fixture output")
+
+    def test_a_close_run_again_after_a_busy_lock_leaves_a_cycle_a_passing_continuation_shares(self):
+        AP, begun, _output, command = self.ended_owner_close_fixture(note="dead-worker-fail", failure_class="fail")
+        release = self.base / "release-lock"
+        holder = subprocess.Popen([sys.executable, "-c",
+            "import sys,time; sys.path.insert(0,%r); import artifact_admission as A; from pathlib import Path; "
+            "fd=A._acquire_lock(Path(%r), 5); print('held',flush=True)\n"
+            "while not Path(%r).exists(): time.sleep(0.05)" % (str(HERE), str(self.artifacts), str(release))],
+            stdout=subprocess.PIPE, text=True, start_new_session=True)
+        self.processes.append(holder)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        busy = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        self.assertEqual(busy.returncode, 0, busy.stderr)
+        release.write_text("")
+        holder.wait(timeout=30)
+        self.assertEqual(self.cycle_reading(AP, begun), ("open", None))
+        self.continuation_sharing_the_cycle(dict(note="completed-supervisor", failure_class="pass"))
+        again = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(self.cycle_reading(AP, begun), ("open", None))
+
+    def test_a_failed_continuation_seals_the_cycle_it_shares_with_its_own_close(self):
+        # B is the leaf and its owner ended FAIL: B's close seals the shared cycle as before; A's close adds nothing.
+        AP, begun, _output, command = self.ended_owner_close_fixture(note="dead-worker-fail", failure_class="fail")
+        self.continuation_sharing_the_cycle(dict(note="dead-worker-fail", failure_class="fail"))
+        self.assertEqual(self.cycle_reading(AP, begun), ("sealed", "abandoned"))
+        done = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.cycle_reading(AP, begun), ("sealed", "abandoned"))
+
+    def owners_in_order(self, first, last):
+        import artifact_producer as AP
+        self.row("att-owner-a", status="done", **first)
+        self.row("att-owner-b", status="done", **last)
+        begun = AP.begin(self.artifacts, route_file=self.path, capability="autopilot-code", intensity="standard")
+        output = Path(begun["cycle_dir"]) / "artifacts/plans/fixture/REPORT.md"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("fixture output")
+        done = subprocess.run([sys.executable, str(HERE / "capability-route.py"), "close", "--route", str(self.path)],
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return self.cycle_reading(AP, begun)
+
+    def test_the_latest_owner_decides_an_earlier_fail_then_a_pass_keeps_the_cycle(self):
+        # 🟡4: a FAIL answered by a replacement owner that ended PASS (its completion still settling).
+        self.assertEqual(self.owners_in_order(dict(note="dead-worker-fail", failure_class="fail"),
+                                              dict(note="completed-supervisor", failure_class="pass")), ("open", None))
+
+    def test_the_latest_owner_decides_an_earlier_pass_then_a_fail_is_sealed(self):
+        # A later turn (or replacement) ended FAIL after an earlier PASS: the latest end is the route's.
+        self.assertEqual(self.owners_in_order(dict(note="completed-supervisor", failure_class="pass"),
+                                              dict(note="dead-worker-fail", failure_class="fail")),
+                         ("sealed", "abandoned"))
+
     def test_close_finalizes_existing_cycle_and_deleted_output_is_replayable(self):
         import artifact_producer as AP
         owner = self.process("att-owner")

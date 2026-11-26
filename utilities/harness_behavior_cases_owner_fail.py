@@ -282,7 +282,8 @@ class OwnerFailCloseScenario(HeadlessParent, OwnerContinueScenario):
               and "accept" in (offered.get("next_step") or "") and "close_command" in (offered.get("next_step") or "")
               # The one-line directive says the same, in the same order, with the receipt's own close command.
               and offered.get("next_line", "").startswith(
-                  "next: to accept the result as it is, or to stop the work, run: " + offered["close_command"] + ";")
+                  "next: the owner ended FAIL; the person decides (owner_report says what it needs): to accept the "
+                  "result as it is or stop the work, run: " + offered["close_command"] + ";")
               and closed["after"]["closure"].get("terminal_gate_proven") is False
               and "abandoned" in (cycle.get("state"), cycle.get("cycle_state"))
               and closed["after"]["ledger"].get("workflow_state") == "CANCELLED"

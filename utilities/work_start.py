@@ -2355,6 +2355,15 @@ def _exited_owner_response(route, result, jobs, aid, **extra):
 PIN_HANDOFF_SUMMARY = "owner-pin-handoff"
 
 
+# The two actions a failed or BLOCKED owner's receipt names (its `next_step`).
+_OWNER_CLOSE_STEP = ("To accept the result as it is, or to stop the work, run close_command: the route closes with "
+                     "the owner's result on record (its gate unproven, the cycle sealed abandoned, its files kept) "
+                     "and no owner runs again.")
+_OWNER_ANSWER_STEP = ("{lead} (or fix what it names), then run correction_command with --message-file <answer file>: "
+                      "that continues this route at once in a replacement owner that receives the answer (in the "
+                      "same session when it can be woken).")
+
+
 def _close_command(path, jobs, *summary) -> str:
     """The parent's `close` for this route: it stops the route as it ended (an unproven closure).
     close already owns cancellation and resource preservation on every harness. It reads the registry
@@ -2527,8 +2536,7 @@ def _advance_open(route, path, jobs, result, request, resume, *, wait, interview
         if closed.get("terminal_gate_proven") is not True:
             return {**result, "state": "needs-attention", "reason": "route-closed-unproven",
                     "required_action": "inspect-closed-route", "outcome": closed,
-                    "next_step": "This route is closed and its result is on record (outcome: the closure, its gate "
-                                 "unproven); starting it again changes nothing and is answered the same way. Read the "
+                    "next_step": "This route is closed with its gate unproven (outcome: the closure). Read the "
                                  "closure and the owner's report; for more work, compose it as a new route."}
         if RP.is_framed_route(route):
             return _framed_settle(route, path, jobs, result, closed=closed, wait=wait, run=run,
@@ -2958,7 +2966,8 @@ def _advance_open(route, path, jobs, result, request, resume, *, wait, interview
         # (an answered stop is a pause, so a spent replacement budget does not end it).
         report = _owner_report(route, metadata)
         if owner_stop == "FAIL":
-            opening = "The owner ended FAIL and waits for a fix a person approves."
+            opening = ("The owner ended FAIL; the person decides whether to accept the result as it is or to give "
+                       "the owner a fix or an answer.")
         else:
             # A first BLOCKED/format-error end is continued by the runtime on its own report
             # (`observed`); only a second stop, a held gate or an unreadable result reaches here.
@@ -2975,17 +2984,15 @@ def _advance_open(route, path, jobs, result, request, resume, *, wait, interview
                 **({"owner_report": report} if report else {}),
                 **({"owner_log_file": str(metadata["log_file"])} if not report and metadata.get("log_file") else {}),
                 "close_command": _close_command(path, jobs),
-                # A FAIL has a result to accept as it is; a BLOCKED stop has none, only the work to stop.
+                # A FAIL has a result the person may accept as it is (close first); a BLOCKED owner waits for an
+                # answer (the answer first, the stop after). `start_receipt.next_line` says the same in one line.
                 "next_step": f"{opening} {report_context} "
-                    + ("To accept the result as it is, or to stop the work, run close_command: the route closes with "
-                       "the owner's result on record" if owner_stop == "FAIL" else
-                       "To stop the work, run close_command: the route closes as it stopped")
-                    + " (its gate unproven, the cycle sealed abandoned, its files kept) and no owner runs again. "
-                    + ("Only when the owner has something to do (a fix the person approves, an answer, a choice), get "
-                       if owner_stop == "FAIL" else "Otherwise get ")
-                    + "the person's answer (or fix what it names), then run correction_command with --message-file "
-                    "<answer file>: that continues this route at once in a replacement owner that receives the answer "
-                    "(in the same session when it can be woken). Do not recompose the route."}
+                    + (_OWNER_CLOSE_STEP + " " + _OWNER_ANSWER_STEP.format(lead="To give the owner a fix or an "
+                       "answer, get the person's answer") if owner_stop == "FAIL" else
+                       _OWNER_ANSWER_STEP.format(lead="Get the person's answer") + " Or, to stop the work, run "
+                       "close_command: the route closes as it stopped (its gate unproven, the cycle sealed abandoned, "
+                       "its files kept) and no owner runs again.")
+                    + " Do not recompose the route."}
     if replacement.get("state") == "needs-attention":
         result["replacement_attention"] = [replacement]
         if replacement["reason"] == "replacement-capacity-wait":

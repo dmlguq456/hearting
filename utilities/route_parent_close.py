@@ -1364,15 +1364,17 @@ def finish_ended_owner_close(route, outcome, *, jobs=None):
     """The rest of a `close` that found no running owner to stop and does not prove the route's gate.
 
     The route's latest registered owner had already ended, and its end is a committed failure or
-    cancellation (FAIL, BLOCKED, a format error, a death, a stop): the ledger and the cycle end as the close
+    cancellation (FAIL, BLOCKED, a format error, a death the runtime committed as `dead-*`, a stop): the ledger
+    and the cycle end as the close
     of a running owner leaves them (`continue_close`): the ledger CANCELLED and the open cycle sealed
     `abandoned`, never `completed`. A proven close is the route's PASS and is not touched. Neither is a route
     whose latest owner ended PASS or whose end is not settled yet (a deferred completion, a terminal conflict
     under review, a row no outcome reads from), whose completion may still prove the gate and seal the cycle,
     nor one with no registered owner (inline or legacy work, whose later exact completion may still consume
-    an unproven close). The same close run again finishes what a busy lock left (only while the cycle is
-    still open; a sealed cycle is left as it is, and the ledger takes no second entry). Nothing here waits
-    or refuses: the closure stands."""
+    an unproven close), nor a cycle a continuation of this route writes into (its leaf route, `_finalize_route`,
+    is not this one): that route's own close or completion finishes it. The same close run again finishes what
+    a busy lock left (only while the cycle is still open; a sealed cycle is left as it is, and the ledger takes
+    no second entry). Nothing here waits or refuses: the closure stands."""
     if outcome.get("terminal_gate_proven") is True:
         return False
     jobs = jobs_path(jobs)
@@ -1388,8 +1390,11 @@ def finish_ended_owner_close(route, outcome, *, jobs=None):
     if (status in OPEN or DC.committed_outcome(status, latest) not in ENDED_WITHOUT_PASS
             or DC.terminal_conflict_pending(latest)):
         return False
-    if _open_cycle(route) is None:
+    cycle = _open_cycle(route)
+    if cycle is None:
         return False     # already sealed (an earlier or concurrent close), or no cycle: nothing to finish
+    if not _leaf_of(route, cycle):
+        return False     # a continuation shares this cycle; its own end decides it
     if jobs.exists():
         ledger = WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs)
         try:
@@ -1411,6 +1416,15 @@ def _open_cycle(route):
     except (OSError, ValueError, AP.ProducerError):
         return None
     return cycle if cycle and cycle.get("state") == "open" else None
+
+
+def _leaf_of(route, cycle):
+    """Whether `route` is the route that finishes `cycle` (D-120's leaf: no continuation writes into it after it)."""
+    import artifact_producer as AP
+    try:
+        return AP._finalize_route(Path(route["artifact_root"]), cycle)["route_id"] == route["route_id"]
+    except (OSError, ValueError, KeyError, TypeError, AP.ProducerError):
+        return False     # an unreadable lineage decides nothing; the cycle stays for the next close
 
 
 def _finish_existing_cycle(route, *, jobs=None, lock_timeout=0.5):

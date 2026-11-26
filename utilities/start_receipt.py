@@ -115,16 +115,21 @@ def next_line(receipt):
                     f"{_finish_command(receipt)}")
         return f"next: do the work in this session, then run: {_finish_command(receipt)}"
     if action in _ANSWER_ACTIONS and receipt.get("correction_command"):
-        answer = ("get the person's answer to owner_report, then run: "
-                  f"{receipt['correction_command']} --message-file <answer file>")
+        correct = f"{receipt['correction_command']} --message-file <answer file>"
         close = receipt.get("close_command")
         if not close or close == "-":
-            return "next: " + answer
-        # The same order as the receipt's next_step: close first, the correction only for work the owner has left.
+            return f"next: get the person's answer to owner_report, then run: {correct}"
+        # The receipt's next_step in one line, in its order: who decides first, then the two commands.
         if action == "answer-failed-owner":
-            return (f"next: to accept the result as it is, or to stop the work, run: {close}; "
-                    f"only if the owner has something to do, {answer}")
-        return f"next: to stop the work, run: {close}; otherwise {answer}"
+            # Where the result is, as the receipt itself says it (its owner_report, else its owner log).
+            where = (" (owner_report says what it needs)" if receipt.get("owner_report") else
+                     f" (its result is in owner_log_file {receipt['owner_log_file']})"
+                     if receipt.get("owner_log_file") else "")
+            return (f"next: the owner ended FAIL; the person decides{where}: to accept the result as it is or stop "
+                    f"the work, run: {close}; to give the owner a fix or an answer, put it in a file and run: "
+                    f"{correct}")
+        return ("next: the owner is waiting for an answer; get the person's answer to owner_report, then run: "
+                f"{correct}; to stop the work instead, run: {close}")
     if state == "completed" and action in {None, "advance-completed"}:
         return "next: the route is complete; report its result"
     step = " ".join(str(receipt.get("next_step") or "").split())
