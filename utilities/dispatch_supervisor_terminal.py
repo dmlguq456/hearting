@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 import opencode_server_log
 from dispatch_contract import reconcile_attempt_terminal
+from model_outcome_record import REJECTED_REASON
 from route_authority import HANDOFF_RE, handoff_search, pass_blocker_violation
 
 
@@ -47,6 +48,38 @@ _EDGE_BLOCK_RE = re.compile(
     re.I,
 )
 EDGE_BLOCK_REASON = "runtime-edge-block-envelope"
+# A runtime end whose envelope confirms the provider refused the requested
+# model itself ("this account cannot call this model" / "no such model"). It
+# stays `dead-runtime-error` / `runtime` -- every reader that treats that note
+# alike keeps doing so -- and only the reason column names it, followed by the
+# rejected model when the envelope states one (`runtime-model-rejected:<model>`).
+# Evidence (checked 2026-11-21):
+#   codex  -- typed `CodexErrorInfo::ModelNotFound` (wire `model_not_found`,
+#             app-server `modelNotFound`), openai/codex codex-rs/protocol/src/
+#             codex_error_info.rs and app-server-protocol schema, first released
+#             in rust-v0.166.0.
+#   claude -- the CLI's documented runtime error "There's an issue with the
+#             selected model (<model>)" (code.claude.com/docs/en/errors.md), and
+#             the API's 404 `not_found_error` whose message is `model: <model>`
+#             (platform.claude.com/docs/en/api/errors.md for the 404 type;
+#             message form seen in public anthropics/claude-code issues 6169
+#             and 16387).
+# Capacity, usage limit, overload, auth, 5xx and edge-block envelopes never
+# reach this check: it only refines the final `runtime-error-envelope` fall-through.
+MODEL_REJECTED_REASON = REJECTED_REASON  # the record reads this same prefix
+_MODEL_REJECTION_RUNTIMES = frozenset({"claude", "codex"})
+_MODEL_REJECTION_CODES = frozenset({"modelNotFound", "model_not_found"})
+_MODEL_NAME = r"[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,79}"
+_CLAUDE_SELECTED_MODEL_RE = re.compile(
+    r"There's an issue with the selected model \((" + _MODEL_NAME + r")\)")
+# The 404 envelope's `type` and `message` are read as one object whatever order
+# the keys are written in (the span between two braces is one flat object).
+_CLAUDE_NOT_FOUND_TYPE_RE = re.compile(r'"type"\s*:\s*"not_found_error"')
+_CLAUDE_NOT_FOUND_MESSAGE_RE = re.compile(
+    r'"message"\s*:\s*"model:\s*(' + _MODEL_NAME + r')"')
+# A typed Codex refusal code only stands when the envelope's status does not
+# contradict it: the code is raised with no status, 400, 403 or 404, never 5xx/429.
+_MODEL_REJECTION_STATUSES = frozenset({"", "400", "403", "404"})
 _PROTOCOL_REASON_RE = re.compile(
     r"missing|protocol|schema|shape|json|eof|request-failed|result-invalid|"
     r"thread-start|turn-start-response|join-receipt|contract",
@@ -257,14 +290,58 @@ def classify_runtime_failure(
             str(process_exit),
             status,
         )
+    rejected = model_rejection(runtime, status=status, text=text, structured_code=structured_code)
     return SupervisorTerminal(
         "dead-runtime-error",
         "runtime",
         event,
-        "runtime-error-envelope",
+        "runtime-error-envelope" if rejected is None else (
+            MODEL_REJECTED_REASON + (f":{rejected}" if rejected else "")),
         str(process_exit),
         status,
     )
+
+
+def model_rejection(
+    runtime: str, *, status: str = "", text: str = "", structured_code: str = ""
+) -> str | None:
+    """The rejected model's name ("" when the envelope names none), or None.
+
+    Only a confirmed refusal of the model counts: a typed Codex code first (with
+    no status, or 400/403/404); then, for Claude, a 404 `not_found_error` naming
+    `model: <id>` or the CLI's own selected-model message (no status, or 404).
+    Any other status, or the word "model" alone, is not evidence. The
+    selected-model sentence is read wherever it stands in the text: an envelope
+    gives no ground to tell it from a quotation inside another error's text.
+    """
+    if runtime not in _MODEL_REJECTION_RUNTIMES:
+        return None
+    if structured_code:
+        return ("" if runtime == "codex" and structured_code in _MODEL_REJECTION_CODES
+                and status in _MODEL_REJECTION_STATUSES else None)
+    if runtime != "claude":
+        return None
+    if status == "404":
+        found = _claude_not_found_model(text) or _claude_selected_model(text)
+    elif status == "":
+        found = _claude_selected_model(text)
+    else:
+        found = None
+    return found or None
+
+
+def _claude_not_found_model(text: str) -> str | None:
+    for segment in re.split(r"[{}]", text):
+        if _CLAUDE_NOT_FOUND_TYPE_RE.search(segment):
+            named = _CLAUDE_NOT_FOUND_MESSAGE_RE.search(segment)
+            if named:
+                return named.group(1)
+    return None
+
+
+def _claude_selected_model(text: str) -> str | None:
+    named = _CLAUDE_SELECTED_MODEL_RE.search(text)
+    return named.group(1) if named else None
 
 
 def classify_session_result(

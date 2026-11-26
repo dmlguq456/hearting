@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from parent_next_directive import entrypoint
-from route_form import one_shot_owner, one_shot_review_node, one_shot_review_route
+from route_form import one_shot_owner, one_shot_review_node_ids, one_shot_review_nodes, one_shot_review_route
 
 WORKER_TYPES = ("owner", "stage", "review", "support", "frame")
 UNIT_REF_RE = re.compile(r"^[a-z-]+/[a-z-]+$")
@@ -167,13 +167,118 @@ def unit_persona_path(root: Path, unit: str | None) -> Path | None:
     return path
 
 
-def unit_persona_body(root: Path, unit: str | None) -> str | None:
-    """Return the unit BODY as plain markdown (frontmatter stripped), or None."""
+def unit_persona_body(root: Path, unit: str | None, field: str | None = None) -> str | None:
+    """Return the unit BODY as plain markdown (frontmatter stripped), or None.
+
+    A unit whose ``## 참고`` keys some sections by field (``### 참고 — <field>``) gets
+    ``unit_field_reference``: the field's fundamentals and only that field's sections.
+    Any other body is returned as written."""
     path = unit_persona_path(root, unit)
     if path is None:
         return None
     text = path.read_text(encoding="utf-8")
-    return _FRONTMATTER_RE.sub("", text, count=1).strip()
+    return unit_field_reference(root, _FRONTMATTER_RE.sub("", text, count=1).strip(), field)
+
+
+_FIELD_NAME = r"[a-z][a-z0-9_-]{0,31}"
+# One section may name several fields (``### 참고 — code, lab``): it is carried for each, written once.
+_FIELD_SECTION_RE = re.compile(rf"^### 참고 — ({_FIELD_NAME}(?:, {_FIELD_NAME})*)[ \t]*$")
+_REFERENCE_LAYER = "## 참고"
+
+
+def field_fundamentals(root: Path, field: str | None) -> list[str]:
+    """The lines of ``roles/fields/<field>.md``'s ``## Fundamentals`` list, each without its gloss
+    and source numbers; ``[]`` for no field, ``other``, a missing page or any read failure.
+
+    An item is ``- head sentence — gloss [source]``; an indented line after it continues it, so
+    a wrapped item is joined before it is cut."""
+    if not isinstance(field, str) or not _FIELD_LABEL_RE.match(field):
+        return []
+    try:
+        text = (Path(root) / "roles" / "fields" / f"{field}.md").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return []
+    items, inside = [], False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            inside = line.startswith("## Fundamentals")
+        elif inside and line.startswith("- "):
+            items.append(line[2:].strip())
+        elif inside and items and line[:1] in (" ", "\t") and line.strip():
+            items[-1] += " " + line.strip()
+    lines = []
+    for item in items:
+        head = item.split(" — ", 1)[0]
+        lines.append(re.sub(r"\s*\[[^\]]*\]\s*$", "", head).strip())
+    return [line for line in lines if line]
+
+
+def unit_field_reference(root: Path, body: str, field: str | None) -> str:
+    """Select a common unit's reference for the route's field (R31).
+
+    Only a body whose ``## 참고`` holds ``### 참고 — <field>`` sections changes: sections of
+    other fields are left out, and the field's fundamentals (``roles/fields/<field>.md``) are
+    carried just before ``## 참고``. A route whose field is unknown (None) gets the body as
+    written, every field's section and no fundamentals, as before this selection existed.
+    ``other`` or a field with no section here carries the common reference only. A missing page
+    drops only the fundamentals; the field's own sections stay. ``## 지킬 것`` and everything
+    outside those sections stay as written."""
+    fence, layer_at, keep, kept, found = None, None, True, [], False
+    for line in body.split("\n"):
+        if line.startswith(("```", "~~~")):
+            fence = None if fence == line[:3] else (fence or line[:3])
+        heading = not fence and line.startswith(("## ", "### "))
+        if heading and line.rstrip() == _REFERENCE_LAYER and layer_at is None:
+            layer_at = len(kept)
+        if heading and layer_at is not None:
+            match = _FIELD_SECTION_RE.match(line)
+            found = found or bool(match)
+            keep = match is None or field in match.group(1).split(", ")
+        if keep:
+            kept.append(line)
+    if not found or field is None:
+        return body
+    fundamentals = field_fundamentals(root, field)
+    if fundamentals:
+        block = [f"## 갈래의 기본 — {field}", "",
+                 f"From `roles/fields/{field}.md`, which gives the reasons and sources. Hold these in view; "
+                 "they set no order, tool or depth.", ""]
+        block += [f"- {line}" for line in fundamentals] + [""]
+        kept[layer_at:layer_at] = block
+    return "\n".join(kept).strip()
+
+
+def unit_route_field(args) -> str | None:
+    """The field sealed on this worker's route, read only, for its unit text; None when unknown.
+
+    A route sealed before fields existed reads its recipe's default field through
+    ``capability_topology.route_field``. An unreadable route or any failure is None, so the
+    unit text is carried as written and the launch goes on."""
+    try:
+        route_file = getattr(args, "route_file", None) or getattr(
+            getattr(args, "owner_route_binding", None), "route_file", None)
+        if not route_file or not getattr(args, "unit", None):
+            return None
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+        if not isinstance(route, dict):
+            return None
+        field = route.get("field")
+        if "field" not in route:
+            field, _source = _route_topology().route_field(route)
+        return field if isinstance(field, str) and _FIELD_LABEL_RE.match(field) else None
+    except Exception:
+        return None
+
+
+@functools.lru_cache(maxsize=1)
+def _route_topology():
+    """``tools/capability_topology.py``, loaded once by path (an old route's recipe field)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "worker_field_topology", _REPO_ROOT / "tools" / "capability_topology.py")
+    topology = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(topology)
+    return topology
 
 
 _STANCE_LINE_RE = re.compile(r"^stance:[ \t]*(.*?)[ \t]*(?:#.*)?$", re.MULTILINE)
@@ -984,12 +1089,30 @@ def _review_rounds(route) -> int:
 
 
 def one_shot_review_prompt(route, route_file, jobs=None) -> str:
-    """The middle cell's paragraph for its owner: make the work, then start the declared review with this
-    one command and wait for it. Text only; the runtime still decides every start and every verdict."""
-    node = one_shot_review_node(route)
-    if node is None:
+    """The middle cell's paragraph for its owner: make the work, then start the declared review (from `strong`,
+    the review group) with this one command and wait for it. Text only; the runtime still decides every start
+    and every verdict."""
+    nodes = one_shot_review_nodes(route)
+    if not nodes:
         return ""
-    command = route_start_command(route_file, node["id"], jobs=jobs)
+    node = nodes[0]
+    command = route_start_command(route_file, node.get("parallel_anchor") or node["id"], jobs=jobs)
+    if len(nodes) > 1:
+        legs = ", ".join(f"{n['id']} ({n.get('unit')}, {n.get('perspective')})" for n in nodes)
+        return (f"This route is one session that makes the work and {len(nodes)} independent reviews of it, one review "
+                f"group ({legs}) that a single start command runs together. Make the work, run your own checks, and "
+                f"commit it in this worktree. Once those checks pass, start the review group with exactly this "
+                f"command: `{command}`. When the receipt shows the children started, end the turn with the standalone "
+                "line `runtime_wait: registered-children`; the runtime waits for every review and brings the verdicts "
+                "back to this same session. (A receipt that prints `parent_next=bounded-wait` instead names its own "
+                "wait command: run that printed command once, then read each review's result.) If any verdict "
+                "blocks, fix every blocking finding of every blocking report in this worktree in one pass, run the "
+                "same checks, commit, and start the closure checks with the same command, then wait again. Each "
+                f"review gets {_review_rounds(route)} rounds in all: when its last round still blocks, correct no "
+                "further, write the remaining findings in your report, and end with `verdict: FAIL`. If no review "
+                "blocks, return your final handoff. You cannot review your own work or close any of these reviews "
+                "yourself: do not run `complete --inline` for them, and do not report PASS without every review. "
+                "Do not start the reviews before your work is committed.\n\n")
     return (f"This route is one session that makes the work and one independent review ({node['id']}, "
             f"{node.get('unit')}) of it. Make the work, run your own checks, and commit it in this worktree. "
             f"Once those checks pass, start the independent review with exactly this command: `{command}`. "
@@ -1130,13 +1253,16 @@ def continuation_followup_fields(route, node, metadata, jobs, route_file):
             producers = [n for n in _route_nodes(route) if n.get("kind") == "pipeline-stage"
                          and node["id"] in {n2["id"] for n2 in judging_stages(route, n["id"])}]
             source_review = bool(subject and subject.get("family") == "source")
-            if one_shot_review_node(route) is not None and node["id"] == one_shot_review_node(route)["id"]:
-                # The middle cell: the owner made the work this review blocked, so the owner corrects it.
+            if node["id"] in one_shot_review_node_ids(route):
+                # The middle cell: the owner made the work this review blocked, so the owner corrects it. Every
+                # leg of a review group counts its own rounds, so one leg's spent rounds spend the correction.
                 verdicts = sum(1 for st, m in _lineage_rows(route, jobs).get(node["id"], ())
                                if ROUND.classify_round_row(st, m, worker_type="review") == "verdict")
+                cap = ROUND.max_review_rounds(route["effective_intensity"])
                 return {"kind": "review", "attempt": attempt, "artifact": str(artifact), "target": "",
                         "source": True, "command": command, "producer_command": "", "owner_fixes": True,
-                        "closure_spent": verdicts >= ROUND.max_review_rounds(route["effective_intensity"])}
+                        "closure_spent": verdicts >= cap, "corrections": cap - 1,
+                        **({"group": True} if node.get("parallel_group") else {})}
             targets = [reviewed["path"]] if reviewed else []
             if (reviewed and subject and any(item.get("path") == "checklist.md"
                     for item in subject.get("manifest", ()) if isinstance(item, dict))):
@@ -1186,6 +1312,21 @@ def continuation_followup_text(fields):
             return ""
         if len(fields) == 1:
             return continuation_followup_text(fields[0])
+        if all(item.get("kind") == "review" and item.get("owner_fixes") for item in fields):
+            # A review group of the owner's own work: several legs blocked. Name every report, give one command.
+            attempts = ", ".join(dict.fromkeys(str(item["attempt"]) for item in fields))
+            artifacts = ", ".join(dict.fromkeys(bounded(item.get("artifact")) for item in fields))
+            commands = "; ".join(dict.fromkeys(command(item.get("command")) for item in fields if item.get("command")))
+            if any(item.get("closure_spent") for item in fields):
+                n = min(item.get("corrections", 1) for item in fields)
+                allowed = "the correction allowed is" if n == 1 else f"the {n} corrections allowed are"
+                return (f"Review FAIL {attempts}: a review still blocks, and {allowed} spent. "
+                        f"Do not correct further. Write the remaining findings from {artifacts} in your report and "
+                        "end with `verdict: FAIL`.")
+            return (f"Review FAIL {attempts}: the independent reviews of your work block. Fix every blocking finding "
+                    f"in {artifacts} in this worktree in one pass, run the same checks you ran before, commit, then "
+                    f"start the closure checks with the same command: {commands}. "
+                    "Do not review it yourself and do not close any of them inline.")
         if all(item.get("kind") == "review" for item in fields):
             artifacts = list(dict.fromkeys(bounded(item.get("artifact")) for item in fields))
             targets = list(dict.fromkeys(bounded(item.get("target")) for item in fields if item.get("target")))
@@ -1199,8 +1340,12 @@ def continuation_followup_text(fields):
         return "\n".join(dict.fromkeys(filter(None, (continuation_followup_text(item) for item in fields))))
     if fields.get("kind") == "review" and fields.get("owner_fixes"):
         if fields.get("closure_spent"):
-            return (f"Review FAIL {fields['attempt']}: the closure check still blocks, and the one correction "
-                    f"allowed is spent. Do not correct further. Write the remaining findings from "
+            allowed = ("the one correction allowed is" if fields.get("corrections", 1) == 1
+                       else f"the {fields['corrections']} corrections allowed are")
+            # A leg of a review group may have its last round as the first judgment of changed work, not a closure check.
+            blocks = "a review still blocks" if fields.get("group") else "the closure check still blocks"
+            return (f"Review FAIL {fields['attempt']}: {blocks}, and {allowed} "
+                    f"spent. Do not correct further. Write the remaining findings from "
                     f"{bounded(fields['artifact'])} in your report and end with `verdict: FAIL`.")
         return (f"Review FAIL {fields['attempt']}: the independent review of your work blocks. Fix every blocking "
                 f"finding in {bounded(fields['artifact'])} in this worktree in one pass, run the same checks you "
@@ -2084,6 +2229,21 @@ def _child_scope_environment(args, route, environ, source_worktree=None):
     return child
 
 
+def declared_scope_prompt(args, environ) -> str:
+    """This node's declared scope (`node_scope_prompt`), resolved as `assignment_prompt` resolves it; '' without
+    a route file."""
+    route_file = getattr(args, "route_file", None)
+    if not route_file:
+        return ""
+    route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+    source_worktree = _linked_slice_source_worktree(args, route)
+    scope = resolve_node_scope(
+        route, getattr(args, "route_node", None), _child_scope_environment(args, route, environ, source_worktree),
+        parent_attempt_id=getattr(args, "parent_attempt_id", None), route_file=route_file,
+        source_worktree=source_worktree, source_worktree_verified=source_worktree is not None)
+    return node_scope_prompt(scope)
+
+
 def assignment_prompt(args, task: str, environ) -> str:
     """Project the route's input/output boundary, rather than ask a caller to copy it.
 
@@ -2285,13 +2445,16 @@ def worker_terminal_contract(root: Path) -> str:
     return kernel.split(_TERMINAL_CONTRACT_START, 1)[1].split(_TERMINAL_CONTRACT_END, 1)[0].strip()
 
 
-def render_worker_bootstrap(root: Path, worker_type: str, unit: str | None = None) -> str:
+def render_worker_bootstrap(root: Path, worker_type: str, unit: str | None = None,
+                            field: str | None = None) -> str:
     """Return exactly one canonical kernel plus one type fragment.
 
     When the assigned route node carries a catalog ``unit``, the unit BODY from
     ``roles/units/<unit>.md`` is appended as the worker persona (kernel +
     worker-type overlay + [review stance] + unit body); a unit whose ``stance:``
-    resolves under ``roles/units/`` gets that text just before its body. Kernel
+    resolves under ``roles/units/`` gets that text just before its body. ``field``
+    is the route's sealed field (``unit_route_field``): a unit with field-keyed
+    reference sections carries that field's only (``unit_field_reference``). Kernel
     and overlay mechanics are unchanged.
     """
     if worker_type not in WORKER_TYPES:
@@ -2307,7 +2470,7 @@ def render_worker_bootstrap(root: Path, worker_type: str, unit: str | None = Non
     fragments[0] = "\n".join(
         line for line in fragments[0].splitlines()
         if line not in {_TERMINAL_CONTRACT_START, _TERMINAL_CONTRACT_END})
-    persona = unit_persona_body(root, unit)
+    persona = unit_persona_body(root, unit, field)
     if persona:
         stance = unit_stance_text(root, unit)
         if stance and stance not in persona:
@@ -2623,10 +2786,12 @@ def unit_bootstrap_prompt(args, task: str, environ, *, root: Path | None = None)
                                          root=root, environ=environ, labels=labels)
         if memory:
             if labels and decl:
-                head = ("Your user's working style and saved preferences from memory (those tagged for this "
-                        "unit or field come first; ")
+                head = ("Your user's working style and saved preferences from memory (after this turn's "
+                        "instruction and the project's conventions, before the unit's defaults; those tagged "
+                        "for this unit or field come first; ")
             elif labels:
-                head = "Your user's working style for this work, from records tagged with its unit or field ("
+                head = ("Your user's working style for this work, from records tagged with its unit or field "
+                        "(after this turn's instruction and the project's conventions, before the unit's defaults; ")
             else:
                 head = "Saved preferences from memory ("
             lines.append(f"- {head}reference only; apply only what fits your assignment; "

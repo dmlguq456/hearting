@@ -98,8 +98,11 @@ check to accept a projection tree.
 Portable model profiles belong to core, while each adapter owns its shipped
 concrete model mapping. Installation seeds that mapping once as
 `<runtime-home>/agent-config/models.conf`. The seeded file is user-owned: it is
-never symlinked, refreshed, reapplied, or removed by a harness update or
-uninstall. Runtime consumers select a valid, complete user file as one unit and
+never symlinked, replaced as a whole, reapplied, or removed by a harness update or
+uninstall. An update (and a refresh) changes only the cells that are not held: each
+is moved, through the table's own edit path, to the newer same-family model the user's
+own harness model list shows, and every such edit leaves a `.bak` and an end-of-line
+record (`# auto-follow ...`) on that line. An update handles the harnesses it is run for; a cell goes to no model the outcome record shows refused; a table that is read-only, or whose lock is held past a second, is left for the next run with one line; a cell that goes back takes back the lines its own follow moved. Every other line stays byte for byte. Runtime consumers select a valid, complete user file as one unit and
 otherwise fall back to the shipped adapter default as one unit; they never merge
 the two. INST-D-20 permits one narrow, memory-only normalization: when only
 the new balanced profile and its optional granularity are absent, retain the
@@ -215,6 +218,7 @@ never orders a move or a delete.
 | `.git/`, `.agents/`, `.codex/`, `.probe-*/` | runtime residue that lives beside artifacts without being one | `C-LEG(runtime-residue)` |
 | `_scratch/` | the sole exact census exclusion | `C-SCR` |
 | `README.md`, `index.html`, `all-campaigns.md`, `all-campaigns.html`, `all-spec.md`, `all-spec.html`, `recent-route-reports.md`, `recent-route-reports.html` (files) | derived read entrance that Hearting rewrites (not canonical; not an admission, census or residue input; a same-named file without the generator's `<!-- hearting:artifact-entrance v1 -->` marker stays with its owner: the generator leaves it unchanged and in place) | `C-RT` |
+| `backlog.md` (file) | a root document that a person or a session writes (what was put off, `core/ARTIFACT_META.md` `backlog.md`); Hearting only reads it. Not canonical; not an admission, census or residue input, and not an entrance file (Hearting does not rewrite it) | `C-RT` |
 
 The following paths are a sealed-evidence exception set. These exact prefixes
 (and their descendants) or exact files take precedence over their parent
@@ -365,8 +369,8 @@ is support material that is kept but not listed. When `finalize` picks a
 primary artifact itself, it skips any path through a top-level `C-INT` name
 that is not a cycle bucket (`_internal/`, `shards/`) while the cycle holds
 another file, then takes a project status document (`현황.md`, then `STATUS.md`)
-directly under `artifacts/`, so Cairn's status row and Fleet's project line read
-the same file, then the first `PRIMARY_CANDIDATES` name (including nested
+directly under `artifacts/`, the file Fleet's project line reads, then the
+first `PRIMARY_CANDIDATES` name (including nested
 `report.html`; a copy under `dev_logs/`, `test_logs/` or `evidence/` comes after
 the same name elsewhere), then a Markdown or HTML document, then the first
 remaining file; an explicit `--primary` is kept as given. A non-support row for a

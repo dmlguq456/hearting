@@ -24,8 +24,6 @@ shared-utility-deferred	artifact_spec_storage.py
 shared-utility-deferred	artifact_viewer.py
 shared-utility-deferred	artifact_workflow_group_review.py
 shared-utility-deferred	atomic_publish.py
-shared-utility-deferred	cairn-artifact-read.sh
-shared-utility-deferred	cairn-artifact-read.ts
 shared-utility-deferred	campaign_title_repair.py
 shared-utility-deferred	claude_process_identity.py
 shared-utility-deferred	detached_lifetime.py
@@ -78,6 +76,8 @@ shared-utility-deferred	harness_behavior_cases_solo_review.py
 shared-utility-deferred	harness_behavior_cases_unit_route.py
 shared-utility-deferred	harness_behavior_cases_unit_nested.py
 shared-utility-deferred	harness_behavior_cases_unit_continue.py
+shared-utility-deferred	harness_behavior_cases_owner_continue.py
+shared-utility-deferred	harness_behavior_cases_unit_explore.py
 shared-utility-deferred	harness_behavior_cases_request.py
 shared-utility-deferred	harness_behavior_cases_parked.py
 shared-utility-deferred	harness_behavior_scenarios.py
@@ -111,6 +111,7 @@ shared-utility-deferred	review_watchdog.py
 shared-utility-deferred	session_resume.py
 shared-utility-deferred	session_route_resume.py
 shared-utility-deferred	session_shell.py
+shared-utility-deferred	status_popup_picture.py
 shared-utility-deferred	session_tidy_idle.py
 shared-utility-deferred	session_tidy_policy.py
 shared-utility-deferred	session_card_format.py
@@ -134,7 +135,6 @@ shared-utility-deferred	frame_repository.py
 shared-utility-deferred	work_intent.py
 shared-utility-deferred	unit_continue.py
 shared-utility-deferred	unit_ephemeral.py
-shared-utility-deferred	status_board.py
 shared-utility-deferred	start_receipt.py
 shared-utility-deferred	recipient_lifetime.py
 shared-utility-deferred	verification_runtime.py
@@ -149,6 +149,8 @@ utility-deferred	artifact_cutover.py
 utility-deferred	artifact_cross_root_move.py
 utility-deferred	artifact_entrance.py
 utility-deferred	artifact_entrance.test.py
+utility-deferred	campaign_document.py
+utility-deferred	campaign_document.test.py
 utility-deferred	artifact_history.py
 utility-deferred	artifact_identity.py
 utility-deferred	artifact_index.py
@@ -315,6 +317,9 @@ utility-deferred	launch_receipt.py
 utility-deferred	model-config.sh
 utility-deferred	model-worker-governor.py
 utility-deferred	model_config.py
+utility-deferred	model_follow.py
+utility-deferred	model_follow_mark.py
+utility-deferred	model_outcome_record.py
 utility-deferred	model_profile.py
 utility-deferred	native_agents.py
 utility-deferred	model_worker_governor.test.py
@@ -448,6 +453,8 @@ tool-deferred	dispatch-refusal-census.py
 tool-deferred	dispatch_refusal_census.test.py
 tool-deferred	e2e_latency
 tool-deferred	entry-skill-layer.test.py
+tool-deferred	field-weights-table.py
+tool-deferred	field_weights_table.test.py
 tool-deferred	figure-semantic-verify.test.py
 tool-deferred	fixture_processes.py
 tool-deferred	fixture_processes.test.py

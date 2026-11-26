@@ -2363,8 +2363,10 @@ class UnitBootstrapDeclarationTest(unittest.TestCase):
             self.assertNotIn("--query", cmds[0])
             self.assertIn("short review comments", section)
             self.assertIn("Your user's working style for this work, from records tagged with its unit or field ("
+                          "after this turn's instruction and the project's conventions, before the unit's defaults; "
                           "reference only; apply only what fits your assignment; "
                           "do not write, curate, or sync memory):\n", section)
+            self.assertEqual(section.count("working style"), 1)
             self.assertNotIn("come first", section)
             self.assertNotIn("format follows", section)
 
@@ -2419,8 +2421,9 @@ class UnitBootstrapDeclarationTest(unittest.TestCase):
         self.assertEqual(cmds[0].count("--query"), 2)
         self.assertEqual(section.count("## [durable/preference] i"), 1)
         self.assertIn("format follows", section)
-        self.assertIn("Your user's working style and saved preferences from memory (those tagged for this unit "
-                      "or field come first; reference only; apply only what fits your assignment; "
+        self.assertIn("Your user's working style and saved preferences from memory (after this turn's "
+                      "instruction and the project's conventions, before the unit's defaults; those tagged for "
+                      "this unit or field come first; reference only; apply only what fits your assignment; "
                       "do not write, curate, or sync memory):\n", section)
 
     def test_failures_and_no_records_leave_the_prompt_unchanged(self):

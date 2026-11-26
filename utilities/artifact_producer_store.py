@@ -100,6 +100,10 @@ RUNTIME_OWNED_EXACT = ("_scratch",)          # `.`-prefix is a separate predicat
 ENTRANCE_NAMES = ("README.md", "index.html", "all-campaigns.md", "all-campaigns.html",
                   "recent-route-reports.md", "recent-route-reports.html",
                   "all-spec.md", "all-spec.html")
+# CORE §3 root documents that a person or a session writes (`backlog.md`). Not canonical records:
+# admission, census and residue never take them as input, and Hearting only reads them. They are
+# not entrance files (Hearting does not rewrite them), so they stay out of ENTRANCE_NAMES.
+ROOT_DOCUMENT_NAMES = ("backlog.md",)
 COMPAT_OVERRIDE_FIELDS = ("schema_version", "contract", "canonical_root",
                           "reason", "issuer", "created_at", "expires_at")
 WAIVER_FIELDS = ("reason", "issuer", "created_at", "expires_at")
@@ -177,8 +181,8 @@ PRIMARY_CANDIDATES = (
     "final_report.md", "report.md", "report.html", "prd.md", "plan.md", "handoff.md", "verdict.json",
 )
 # A project status document (one page: a `**한 줄**:` line, `## 결정 필요`, `## 다음`).
-# Directly under a cycle's `artifacts/` it is that cycle's automatic primary, so Cairn
-# pins it as the project's status row and Fleet's project line reads the same file.
+# Directly under a cycle's `artifacts/` it is that cycle's automatic primary, and Fleet's
+# project line reads the same file.
 STATUS_DOCUMENT_NAMES = ("현황.md", "STATUS.md")
 # What a person opens the artifact store for: reports, summaries, the canonical PRD and
 # the status document. Their manifest rows carry `audience: "user"`; other rows carry no
@@ -561,6 +565,17 @@ def _is_runtime_owned_top_level(name: str) -> bool:
     return name.startswith(".") or name in RUNTIME_OWNED_EXACT or name in ENTRANCE_NAMES
 
 
+def is_root_document(entry: Path) -> bool:
+    """A root document by name that is a regular file (CORE §3 "(file)").  A link, broken or not,
+    or a folder of that name is ordinary legacy content, as everywhere else."""
+    entry = Path(entry)
+    return entry.name in ROOT_DOCUMENT_NAMES and entry.is_file() and not entry.is_symlink()
+
+
+def _is_runtime_owned_entry(entry: Path) -> bool:
+    return _is_runtime_owned_top_level(entry.name) or is_root_document(entry)
+
+
 def _legacy_content_names(root: Path, *, exhaustive: bool = False) -> List[str]:
     """Top-level names holding non-runtime content.
 
@@ -574,7 +589,7 @@ def _legacy_content_names(root: Path, *, exhaustive: bool = False) -> List[str]:
     found: List[str] = []
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
         name = entry.name
-        if _is_runtime_owned_top_level(name):
+        if _is_runtime_owned_entry(entry):
             continue
         has_content = False
         if entry.is_symlink():
@@ -772,7 +787,8 @@ def read_cycle_record(root: Path, cycle_id: str) -> Optional[Dict[str, Any]]:
     routes = document.get("routes") or []
     if not routes or cycle.get("cycle_id") != cycle_id:
         return None
-    campaign_path = artifact_locator.locate(root, cycle.get("campaign_id"))
+    # a reader: it finds the campaign to check membership and must not rewrite the index (a drawing reads through here)
+    campaign_path = artifact_locator.locate(root, cycle.get("campaign_id"), heal=False)
     campaign = _read_json(campaign_path / "campaign.json") if campaign_path is not None else None
     if campaign is not None and cycle_id not in (campaign.get("cycles") or []):
         return None  # an explicit removal from membership is not a missing cache

@@ -2,7 +2,8 @@
 
 A route's *form* says who makes it -- `direct` (this session, inline), `unit` (one depth-0 leg of a
 read-only unit, no owner), `solo` (one owner process, the `one-shot` node) or `staged`/`framed`
-(stage nodes at depth 2). Its *intensity* says how many independent checks follow. The two are not the
+(stage nodes at depth 2). Its *intensity* says how many independent checks follow; a `unit` route has none
+(one unit does one job and nothing checks it; its record keeps `quick` as `UNIT_RECORDED_INTENSITY`). The two are not the
 same axis, so code that needs "does one owner run this route by itself" asks `one_shot_owner(route)`
 here instead of reading the intensity.
 
@@ -17,12 +18,12 @@ the recorded shape (a `solo` shape with a signal still seals a team route, so th
   `max_dispatch_depth 2` and the owner's wait on its children hang on it.
 
 In today's routes the two answers move together (quick: A only; team: B only). The middle cell
-`solo·standard` -- one owner that makes the work and starts its kind's one declared review node -- is
-the route where both are true.
+`solo·standard` and above -- one owner that makes the work and starts its kind's declared review nodes
+(one review at `standard`; the kind's review legs from `strong`) -- is the route where both are true.
 
 `form_of` / `route_form` (the recorded capability, shape and intensity) say what to *build* at the
-compile entrance and name a record for display; the middle cell is the one `solo` intensity a kind
-must declare (`one_shot_review` in `capabilities/topologies.json`). `FORM_INTENSITIES` is the one table
+compile entrance and name a record for display; the middle cell is the `solo` intensities (`standard`
+and up) a kind must declare (`one_shot_review` in `capabilities/topologies.json`). `FORM_INTENSITIES` is the one table
 of what a form may carry; compose, the frame proposal normalizer and the compiler all read it. Stdlib
 only, so every module can import it.
 """
@@ -32,15 +33,21 @@ INTENSITY_ORDER = ("direct", "quick", "standard", "strong", "thorough", "adversa
 INTENSITIES = frozenset(INTENSITY_ORDER)
 UNIT_CAPABILITY = "unit"
 DECISION_KIND = "runtime-terminal"  # the framed route's decision terminal (`capability_topology.ROUTE_DECISION_KIND`)
+# A unit route has no intensity: one unit does one job and nothing checks it, so nobody picks a value for it.
+# Its record still carries `quick` (`requested_intensity`, `effective_intensity`) as a compatibility value, because
+# the review-round cap, the continuation budget, the worker's row and Fleet read that field and an old record has it.
+# This is the name of that recorded value; it is what the route is recognized by, never something a person chooses.
+UNIT_RECORDED_INTENSITY = "quick"
 # The one table of "which intensities may a route form carry". The first value is the form's default
-# intensity. `unit` is the kind-`unit` route (one depth-0 leg, no owner); its recorded shape is `solo`.
+# intensity. `unit` is the kind-`unit` route (one depth-0 leg, no owner); its recorded shape is `solo` and it is
+# listed here only for the value its record carries (`UNIT_RECORDED_INTENSITY`), not as an intensity to choose.
 # `framed` is the internal frame route: compose checks no intensity for it, so it reads like `staged`.
-# `solo` carries `standard` only where its kind declares a one-shot review (`allowed_intensities`).
+# `solo` carries `standard` and up only where its kind declares a one-shot review (`allowed_intensities`).
 _STAGED = ("standard", "strong", "thorough", "adversarial")
 FORM_INTENSITIES = {
     "direct": ("direct",),
-    "unit": ("quick",),
-    "solo": ("quick", "standard"),
+    "unit": (UNIT_RECORDED_INTENSITY,),
+    "solo": ("quick", *_STAGED),
     "staged": _STAGED,
     "framed": _STAGED,
 }
@@ -54,10 +61,10 @@ def shape_for_intensity(effective):
 
 
 def allowed_intensities(form, review_declared=False):
-    """The intensities `form` may carry; `solo` carries `standard` only for a kind that declares a one-shot review."""
+    """The intensities `form` may carry; `solo` carries `standard` and up only for a kind that declares a one-shot review."""
     values = FORM_INTENSITIES[form]
     if form == "solo" and not review_declared:
-        return tuple(value for value in values if value != "standard")
+        return tuple(value for value in values if value == "quick")
     return values
 
 
@@ -80,11 +87,11 @@ def form_of(capability, effective, shape=None, review_declared=False):
     """The route form (`direct`, `unit`, `solo`, `staged`, `framed`) a capability, intensity and shape make.
 
     This names what the compile entrance builds. A declared shape counts when its intensity is one that
-    form allows (`solo` + `standard` only where the kind declares the one-shot review); otherwise (an
+    form allows (`solo` + `standard` and up only where the kind declares the one-shot review); otherwise (an
     older record with no shape, or one whose shape and intensity disagree) the form follows the
     intensity as it always did. A *sealed* route is read by its nodes (`one_shot_owner`,
     `starts_depth2_nodes`), not by this."""
-    if capability == UNIT_CAPABILITY and effective in FORM_INTENSITIES["unit"]:
+    if capability == UNIT_CAPABILITY and effective == UNIT_RECORDED_INTENSITY:
         return "unit"
     if shape in FORM_INTENSITIES and shape != "unit" and effective in allowed_intensities(shape, review_declared):
         return shape
@@ -114,7 +121,7 @@ def _record_form(route):
 def route_form(route):
     """A route record's form label, from its capability, `selection.shape` and nodes.
 
-    A recorded `solo` at `standard` is the middle cell only when its nodes say one owner makes it; the
+    A recorded `solo` above `quick` is the middle cell only when its nodes say one owner makes it; the
     team route that `compose --shape solo --signal ...` seals (shape `solo`, team nodes) reads `staged`."""
     if not isinstance(route, dict):
         return None
@@ -141,7 +148,7 @@ def one_shot_owner(route):
     """A: whether one owner process (the `one-shot` node) makes this route's work itself.
 
     Read from the nodes: a depth-1 `_kernel/owner` node `one-shot`. True for solo·quick, a preset quick's
-    frame pair, a resource resume and the middle cell `solo·standard`; false for a unit route, direct, and
+    frame pair, a resource resume and the middle cell (`solo` at `standard` and up); false for a unit route, direct, and
     every team route (including the one `solo` + a signal seals). A record with no node list falls back to
     the form its capability, shape and intensity name."""
     if not isinstance(route, dict):
@@ -155,7 +162,7 @@ def one_shot_owner(route):
 def unit_route(route):
     """Whether this is the unit route: one depth-0 read-only leg and no owner."""
     return (isinstance(route, dict) and route.get("capability") == UNIT_CAPABILITY
-            and route.get("effective_intensity") in FORM_INTENSITIES["unit"])
+            and route.get("effective_intensity") == UNIT_RECORDED_INTENSITY)
 
 
 def serial_attempt_route(route):
@@ -186,12 +193,24 @@ def alone_without_stages(route):
 
 
 def one_shot_review_route(route):
-    """The middle cell `solo·standard`: one owner makes the work (A) and starts its declared review (B)."""
+    """The middle cell (`solo` at `standard` and up): one owner makes the work (A) and starts the
+    verification nodes its kind declares (B)."""
     return one_shot_owner(route) and starts_depth2_nodes(route)
 
 
-def one_shot_review_node(route):
-    """The middle cell's review node (the depth-2 node the `one-shot` end node depends on), or None."""
+def one_shot_review_nodes(route):
+    """The middle cell's verification nodes (every depth-2 node the `one-shot` end node waits on): one review
+    at `standard`, the review group's legs from `strong`. An empty list for any other route."""
     if not one_shot_review_route(route):
-        return None
-    return next((node for node in _node_list(route) if isinstance(node, dict) and node.get("dispatch_depth") == 2), None)
+        return []
+    return [node for node in _node_list(route) if isinstance(node, dict) and node.get("dispatch_depth") == 2]
+
+
+def one_shot_review_node(route):
+    """The middle cell's first verification node (the review's anchor leg), or None."""
+    return next(iter(one_shot_review_nodes(route)), None)
+
+
+def one_shot_review_node_ids(route):
+    """The ids of every verification node of the middle cell."""
+    return [node.get("id") for node in one_shot_review_nodes(route)]

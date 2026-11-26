@@ -38,12 +38,14 @@ let cols = process.stdout.columns, rows = process.stdout.rows;
 if (cols < 20 || rows < 8) bypass();
 const nativeDisplay=require('./native-display.cjs');
 const succession=require('./succession.cjs');
+const picking=require('./selection.cjs');
 const {serialize}=succession;
 // A broker that offers hand-over names its channel; without it this host never asks for or takes one.
 const SUCCESSION=process.env.HEARTING_SHELL_SUCCESSION==='1'&&Number(process.env.HEARTING_SHELL_SUCCESSION_FD)>=3;
 const SUCCESSOR=SUCCESSION&&process.env.HEARTING_SHELL_SUCCESSOR==='1';
 const GENERATION=Number(process.env.HEARTING_SHELL_GENERATION)||0;
 const panelView=require('./panel-view.cjs');
+const statusList=require('./status-list.cjs');
 let displayConfiguration={...panelView.defaults};
 try{displayConfiguration=JSON.parse(process.env.HEARTING_SHELL_LAYOUT||'{}');}catch{}
 // Spec rule 49 (d): a window too narrow for the open panel starts with it folded.
@@ -150,6 +152,8 @@ function observeForm(){
 let nativeEpoch = 0, lastEnter = -1, submitted = -1, unselected = null, currentDelivery, releasing, heldBytes = 0;
 let expanded = !initialFold.folded, relay = false, paste = false, keyTail = '', cursorVisible = true;
 let screenRevision = 0;
+// The mouse selection in the native area (see `nativePick`) and the last press that began one.
+let pick = null, pressed = null;
 // The screen revision the native had painted when its last native-bound byte arrived, and when
 // (monotonic ms) it arrived. A successor counts from its own start: it knows no earlier key's time.
 let keyRevision = -1, keyAt = performance.now();
@@ -333,7 +337,7 @@ function readAction(extra,operation='action',own=false) {
     worker.stdout.setEncoding('utf8');
     worker.stdout.on('data',bytes=>{
       if(settled)return;
-      raw+=bytes;if(Buffer.byteLength(raw)>65536){finish({ok:false,reason:'action-unavailable'});return;}
+      raw+=bytes;if(Buffer.byteLength(raw)>262144){finish({ok:false,reason:'action-unavailable'});return;}   // (256 KiB: the backlog's list of titles is up to 200 KiB; every other answer is kept to 60 KiB by the backend)
       if(raw.includes('\n'))try{finish(JSON.parse(raw.split('\n')[0]));}catch{finish({ok:false,reason:'action-unavailable'});}
     });
     worker.stdin.end(JSON.stringify({op:operation,binding:binding(),...extra})+'\n');
@@ -646,8 +650,12 @@ let table=null,tableAsking=false,tableAgain=false;
 // own route box laid at the popup's width (`panelView.routesBody`); a reading follows either way and replaces it.
 let routePopup=null;
 // 11-15 (design 2): the status popup first, as its button stands at the panel's head (the REPO row).
-const SECTIONS=['STATUS','NOW','QUESTIONS','ROUTE','MESSAGES'];
-const POPUP_KIND={ROUTE:'routes',STATUS:'status',NOW:'now'};
+// 11-20 (the person: "메모리 ... 메시지 처럼 팝업이 가능하게"): MEM opens a popup of the same frame and keys as MESSAGES', its rows drawn from the
+// records the panel already holds (`panelView.memoryBody`): no reading, no new kind of popup.
+const SECTIONS=['STATUS','BACKLOG','NOW','QUESTIONS','ROUTE','MESSAGES','MEM'];
+const POPUP_KIND={ROUTE:'routes',STATUS:'status',BACKLOG:'backlog',NOW:'now'};
+// 11-21: the status popup and the backlog popup are one list screen (`status-list.cjs`): the same state, keys and drawing; the backlog has no Fleet lines.
+const listed=kind=>kind==='STATUS'||kind==='BACKLOG';
 // 11-18: the width kind of a table popup: the routes popup stands wider (`panelView.popupWidth`), the others as a table; the question popup is `question`.
 const tableKind=name=>name==='ROUTE'?'route':'table';
 // 11-15 (design 2): the panel's status button value (Fleet's `session_status.read`: the status document of
@@ -658,17 +666,40 @@ const tableKind=name=>name==='ROUTE'?'route':'table';
 // rows are kept the same way (`statusPopup`: read again only at such an event, or at another width).
 let statusValue=null,statusAsking=false,statusAgain=false,statusAgainDirty=false,statusKey='',statusDirty=false,statusGeneration=0,
   statusTargets=new Set(),statusPopup=null,lastWatch=[];
+// 11-21: the two short lists the panel shows under REPO (the first items and the count of the status document's and of `backlog.md`), read with the
+// button's value in that same worker and only when the document changed (`sign`: sent back with the next ask, so an unchanged document is
+// neither read nor parsed again). The panel draws from these; the drawing reads no file.
+let panelLists={status:null,backlog:null};
 const STATUS_ROUTE=/^[A-Za-z0-9_.-]{1,80}$/;
 function statusRoutes(panel=panelModel){return [...new Set((Array.isArray(panel.routes)?panel.routes:[]).map(r=>r&&r.id).filter(id=>typeof id==='string'&&STATUS_ROUTE.test(id)))].slice(0,8);}
 // The button's value as the popup's read takes it (so the popup does not read again what the button read).
 function statusHeld(){const v=statusValue;
   return v&&typeof v==='object'?{word:String(v.word||''),title:String(v.title||''),has_doc:v.has_doc===true,path:String(v.path||''),slot:String(v.slot||'')}:null;}
-function statusDoc(){return statusValue&&typeof statusValue.word==='string'?{word:statusValue.word,has_doc:statusValue.has_doc===true}:null;}
+// 11-20: the panel draws the button alone (the word, and whether a document stands: dim when none); the document's lists are the popup's.
+// The name of the folder this window's status document is in: the backlog puts the group of that name first.
+function ownFolder(){const p=statusValue&&typeof statusValue.path==='string'?statusValue.path:'';return p?path.basename(path.dirname(p)):'';}
+const BACKLOG_KINDS=['fix','improve','note','tbd'];
+function listItems(v){return (Array.isArray(v?.items)?v.items:[]).filter(i=>i&&typeof i.text==='string').slice(0,3).map(i=>({mark:i.mark==='!'?'!':'',text:i.text,key:typeof i.key==='string'?i.key:'',
+  ...(BACKLOG_KINDS.includes(i.kind)?{kind:i.kind}:{})}));}
+// 11-22: the backlog's count of each sort (`fix`, `improve`, `note`, `tbd`), as the document was read; a backend that does not send them has none and the part is drawn as it was.
+function listCounts(v){const c=v?.counts;if(!c||typeof c!=='object')return null;const out={};
+  for(const name of BACKLOG_KINDS){if(!Number.isInteger(c[name])||c[name]<0)return null;out[name]=c[name];}return out;}
+function listTotal(v,items){return Math.max(items.length,Number.isInteger(v?.total)&&v.total>=0?v.total:0);}
+function statusDoc(){
+  if(!(statusValue&&typeof statusValue.word==='string'))return null;
+  const items=listItems(panelLists.status);
+  return {word:statusValue.word,has_doc:statusValue.has_doc===true,items,total:listTotal(panelLists.status,items)};}
+// The backlog part stands wherever the status one does (an artifact root): its word dim when the document is not there or cannot be read.
+function backlogDoc(){
+  if(!(statusValue&&typeof statusValue.word==='string'))return null;
+  const items=listItems(panelLists.backlog);
+  return {word:'BACKLOG',has_doc:panelLists.backlog?.has_doc===true,items,total:listTotal(panelLists.backlog,items),more:panelLists.backlog?.more===true,...(listCounts(panelLists.backlog)?{counts:listCounts(panelLists.backlog)}:{})};}
 function askStatus(dirty=false,routes=statusRoutes()){
   if(statusAsking){statusAgain=true;statusAgainDirty=statusAgainDirty||dirty;return;}
   statusAsking=true;statusAgain=false;statusAgainDirty=false;
   const selected=selection;
-  readAction({cwd:process.cwd(),routes},'status',true).then(result=>{
+  const have={};for(const name of ['status','backlog'])if(typeof panelLists[name]?.sign==='string')have[name]=panelLists[name].sign;
+  readAction({cwd:process.cwd(),routes,have},'status',true).then(result=>{
     if(selected!==selection)return;
     // A read that failed or ran out its time is asked again at the next projection event (the key it stood for is
     // forgotten), never by a timer; one asks at a time, so a failure that goes on stacks no worker.
@@ -676,11 +707,14 @@ function askStatus(dirty=false,routes=statusRoutes()){
     const value=result.status&&typeof result.status==='object'?result.status:null;
     const changed=JSON.stringify(value)!==JSON.stringify(statusValue);
     statusValue=value;
-    statusTargets=new Set((Array.isArray(value?.watch)?value.watch:[]).filter(t=>typeof t==='string'&&path.isAbsolute(t)).slice(0,9));
+    // (a list the answer says is the same document stays as it is; no artifact root: no lists)
+    if(!value)panelLists={status:null,backlog:null};
+    else for(const name of ['status','backlog']){const got=result.lists&&typeof result.lists==='object'?result.lists[name]:null;if(got&&typeof got==='object'&&got.same!==true)panelLists[name]=got;}
+    statusTargets=new Set((Array.isArray(value?.watch)?value.watch:[]).filter(t=>typeof t==='string'&&path.isAbsolute(t)).slice(0,10));
     if(changed||dirty)statusGeneration++;
     if(observeFiles([...lastWatch,...statusTargets]))queueProjection();
-    panelModel={...panelModel,status_doc:statusDoc()};
-    if(table?.kind==='STATUS'&&(changed||dirty))askTable();
+    panelModel={...panelModel,status_doc:statusDoc(),backlog_doc:backlogDoc()};
+    if(listed(table?.kind)&&(changed||dirty))askTable();
     queueDisplay();
   }).finally(()=>{statusAsking=false;if(statusAgain)askStatus(statusAgainDirty);});
 }
@@ -689,14 +723,12 @@ function observeStatus(panel){
   const key=JSON.stringify([process.cwd(),statusRoutes(panel)]);
   if(key!==statusKey||statusDirty){const dirty=statusDirty;statusKey=key;statusDirty=false;askStatus(dirty,statusRoutes(panel));}
 }
-// The name a section has on a popup's bottom line: STATUS goes by its button's word (`현황`).
-function sectionLabel(name){return name==='STATUS'?String(statusValue?.word||'STATUS'):name;}
 function popupShown(){return (block.focused||!!table)&&activated&&!relay&&!ended&&!fleetView&&!settings&&!succeeding;}
 // The sections with something in them, in the panel's order (the one standing always).
 function sections(){
   const m=panelModel,list=v=>Array.isArray(v)&&v.length>0;
-  const has={STATUS:!!statusDoc(),NOW:!!m.now,QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
-    MESSAGES:list(m.messages)||list(m.requests)};
+  const has={STATUS:!!statusDoc(),BACKLOG:!!backlogDoc(),NOW:!!m.now,QUESTIONS:!!block.summary()||!!m.wait||!!m.wait_guide,ROUTE:list(m.routes)||!!m.route_label,
+    MESSAGES:list(m.messages)||list(m.requests),MEM:list(m.memory_items)};
   const current=table?table.kind:'QUESTIONS';
   return SECTIONS.filter(name=>has[name]||name===current);
 }
@@ -704,7 +736,10 @@ function label(name,fallback){return panelModel.labels?.[name]||fallback;}
 // The popup's own words: its keys, for this kind (the panel fold key says which way it goes).
 function tableGuide(kind){
   const own=kind==='ROUTE'?label(table?.page?'popup_route_page':'popup_route','↑↓ route · Enter open')
-    :kind==='NOW'?label(table?.page?'popup_now_page':'popup_now',table?.page?'Enter back to the list':'↑↓ · Enter read that part'):'';
+    :kind==='NOW'?label(table?.page?'popup_now_page':'popup_now',table?.page?'Enter back to the list':'↑↓ · Enter read that part')
+    // 11-21: the status popup with a list screen names its keys; one without (a hand-written page, none) keeps the keys it had.
+    // (the document read whole has the keys every popup has: its Esc goes back to the list, and Enter does too)
+    :listed(kind)&&table?.listing&&table.screen!=='full'?label('popup_status','↑↓ · Enter open'):'';
   const fold=label(expanded?'popup_fold':'popup_unfold',expanded?'p fold panel':'p open panel');
   return [own,label('popup_keys','←→ section · PgUp/PgDn').replace('{panel}',fold)].filter(Boolean);
 }
@@ -719,11 +754,12 @@ function tableTitle(kind){
   if(kind==='ROUTE'){const r=/^route (\d+)(.*)$/.exec(String(m.route_label||'').trim()),head=r?[{text:r[1]},dim(' ROUTE'+r[2])]:[dim('ROUTE')];
     // A first screen that is not this reading's says so at the end of the title, which stands whatever the scroll.
     return table?.kind==='ROUTE'&&table.loaded&&table.stale?[...head,dim(' · '+staleWords(table.stale))]:head;}
-  // `현황 <campaign> · <age>` (the word as the button's, dim; `현황` alone without a document).
-  if(kind==='STATUS'){const word=sectionLabel('STATUS'),whole=String(table?.title||statusValue?.title||word);
+  // `STATUS <campaign> · <age>` (the word as the button's, dim; `STATUS` alone without a document).
+  if(listed(kind)){const word=kind,whole=String(table?.title||(kind==='STATUS'?statusValue?.title:'')||word);
     return whole.startsWith(word)&&whole.length>word.length?[dim(word),{text:whole.slice(word.length)}]:[dim(whole)];}
   // `NOW · <counts>` for the list; `NOW · <time> <kind>` for the part being read.
   if(kind==='NOW'){const v=table?.page?table.read:table?.list,more=String(v?.title||'');return more?[dim('NOW · '),{text:more}]:[dim('NOW')];}
+  if(kind==='MEM')return [dim('MEM')];
   return [dim('MESSAGES')];
 }
 // `as read at 14:05 · reading again` (the words are the panel's; no time known: what follows the ` · `).
@@ -739,10 +775,27 @@ function staleWords(stale){
 function tableRows(inner){
   const t=table;
   if(t.kind==='MESSAGES')return [...panelView.messagesBody({model:panelModel,columns:inner,cellWidth}),...actionLines];
+  if(t.kind==='MEM')return panelView.memoryBody({model:panelModel,columns:inner,cellWidth});
   if(t.kind==='NOW')return nowRows(t);
   if(!t.loaded)return [[{text:t.error?label('popup_unread','could not read'):'⠏',dim:true}]];
+  if(listed(t.kind))t.hits=[];
+  if(statusListing(t)){
+    // 11-21: the list screen, laid out by the popup's own state. A line chosen that the document no longer has (read again,
+    // or its group closed) falls to the first one, at the top.
+    const view=statusList.layout(t.listing,t,{width:inner,measure:cellWidth});
+    if(view.fellBack&&t.sel!==view.sel){t.sel=view.sel;t.scroll=0;}
+    t.listView=view;t.hits=statusList.hits(view);
+    return view.rows;
+  }
+  // The document read whole of a page that has a list screen: its own answer (`part: 'doc'`), Fleet's lines above it.
+  if(listed(t.kind)&&t.listing){
+    if(!Array.isArray(t.doc))return [[{text:t.docError?label('popup_unread','could not read'):'⠏',dim:true}]];
+    return [...(t.head||[]),...t.doc];
+  }
   return t.rows;
 }
+// The status popup is on its list screen (a generated campaign page; the document read whole is `full document ›`).
+function statusListing(t){return !!t&&listed(t.kind)&&!!t.listing&&t.screen==='list';}
 // The NOW popup's rows: the list with the row stood on shown as a chosen row (the frame's `tint`, reversed
 // where there is no color), or the part being read. Until the first answer, the NOW the panel already holds
 // stands on its own row, so the popup is never empty.
@@ -780,11 +833,18 @@ function popupNow(){
       const at=table.list.meta.findIndex(m=>m.key===table.sel);
       if(at>=0){for(let pass=0;pass<2;pass++){if(at<table.scroll)table.scroll=at;else if(at>=table.scroll+space)table.scroll=at-space+1;clamp();lay();}table.reveal=false;}
     }
+    // The list screen's chosen row comes into view (the head above it too while it is within the first screen).
+    if(statusListing(table)&&table.reveal&&table.listView){
+      // (an item opened in place has several rows: all of them come into view when they fit, else its first stands at the top)
+      const at=table.listView.at,span=table.listView.span||1;
+      for(let pass=0;pass<2;pass++){if(at<table.scroll)table.scroll=at<space?0:at;else if(at+span>table.scroll+space)table.scroll=Math.min(at,at+span-space);clamp();lay();}
+      table.reveal=false;
+    }
     clamp();lay();clamp();
     table.space=space;
     title=tableTitle(table.kind);
     body=[...all.slice(table.scroll,table.scroll+space),...guide];
-    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,labels:names.map(sectionLabel),current,model:panelModel,configuration:displayConfiguration,cellWidth,background:terminalBackground});
+    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,current,model:panelModel,configuration:displayConfiguration,cellWidth,background:terminalBackground});
     // The table's own press targets, moved to where its rows stand on the screen.
     const first=view.frame.top+1,left=view.frame.left+2;
     view.tableHits=(table.hits||[]).filter(h=>h.row>=table.scroll&&h.row<table.scroll+space)
@@ -796,7 +856,7 @@ function popupNow(){
     if(actionLines.length)body=actionLines.slice(0,room);
     else if(block.question){const all=block.detail({budget:room+1,columns:inner});title=all[0]||label;body=all.slice(1);}
     else body=block.detail({budget:room,columns:inner});
-    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,labels:names.map(sectionLabel),current,model:panelModel,
+    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,current,model:panelModel,
       configuration:displayConfiguration,cellWidth,background:terminalBackground});
   }
   // OpenCode paints its own background: every popup row starts from the terminal's own look. The cell
@@ -805,8 +865,9 @@ function popupNow(){
   // (11-15: no control character reaches the terminal from a popup row: C0, DEL and C1 alike.)
   view.strings=view.rows.map(row=>'\x1b[0m'+row.map(part=>(part.margin?'\x1b[0m \x1b[D':'')+`\x1b[${cellAttr(part)}m${String(part.text).replace(/[\x00-\x1f\x7f-\x9f]/g,' ')}`).join('')+'\x1b[0m');
   if(table)return view;
-  // The caret stands after the answer being typed (its row starts `› `), as it did in the panel.
-  const edit=part=>String(part.text).startsWith('› ')&&String(part.text).length>2;
+  // The editor identifies the live draft, including its empty first cell.
+  // Question text and a picked answer can also start with `› `; neither is an editor.
+  const edit=block.typing?part=>part.caret===true:part=>String(part.text).startsWith('› ')&&String(part.text).length>2;
   const at=body.slice(0,view.body).findIndex(row=>Array.isArray(row)&&row.some(edit));
   if(at>=0){const parts=body[at],upto=parts.slice(0,parts.findIndex(edit)+1).map(part=>part.text).join('');
     view.cursor={row:view.frame.top+at+2,col:view.frame.left+3+Math.min(inner-1,cellWidth(upto))};}
@@ -815,11 +876,9 @@ function popupNow(){
 // The table's rows as painted parts: the backend sends runs `[text, style index]` and the styles; a run
 // may carry its cells as Fleet measured them (`[text, style, cells]`, the status popup), which the popup
 // lays the row out by.
-function tableParts(result){
-  const styles=Array.isArray(result.styles)?result.styles:[];
-  return (Array.isArray(result.rows)?result.rows:[]).map(row=>(Array.isArray(row)?row:[]).map(run=>({text:String(run?.[0]??''),...(styles[run?.[1]]||{}),
-    ...(Number.isInteger(run?.[2])&&run[2]>=0&&run[2]<=400?{cells:run[2]}:{})})));
-}
+function tableParts(result){return statusList.rowsOf(result);}
+// 11-21: the status popup's list screen as entries of painted parts (`status-list.cjs` lays them out), or null.
+function statusEntries(result){return statusList.entriesOf(result);}
 // One reading at a time for the table standing; a reason to read again while one is under way is
 // taken up when it ends (the content as it is then). The status popup's Fleet part is a reading of its
 // own: the document lets the table's place go when it ends, so a popup opened again while Fleet is out
@@ -837,7 +896,7 @@ function askTable(){
   const now=t.kind==='NOW';
   // The NOW list folds to the lines the popup has: its rows less the key line and the place (3).
   const room=now?Math.max(3,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-3)):Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
-  const status=t.kind==='STATUS';
+  const status=listed(t.kind);
   const routeTable=t.kind==='ROUTE',pageAsked=!!t.page;
   // The routes popup's held backend draws a route unfolded or its page from the collection it already made while the
   // panel's route rows are the ones that collection was read for (`reuse`); else it collects (a first read, a changed key).
@@ -845,7 +904,7 @@ function askTable(){
   const reuse=routeTable&&!collect&&t.readKey!==undefined&&t.readKey===(popupKeys.ROUTE??null);
   const ask=extra=>{
     const asked={kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,
-      ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),...extra}:{}),...(reuse?{reuse:true}:{})};
+      ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),own:ownFolder(),...extra}:{}),...(reuse?{reuse:true}:{})};
     if(!(now||routeTable)||t.noWorker)return readAction(asked,'popup',true);
     // The popup's own backend answers. A read it did not answer is made the one-shot way (and the popup reads
     // that way from then on); a popup that is gone by then starts nothing.
@@ -856,11 +915,12 @@ function askTable(){
     });
   };
   const stale=()=>table!==t||selected!==selection;
+  const generation=statusGeneration;
   let loaded=false;
   const openAsked=t.open||'',keyAsked=popupKeys.ROUTE,atAsked=Date.now()/1000;
   // A first screen that said `could not read again` is being read again now.
   if(t.kind==='ROUTE'&&t.stale?.failed)t.stale={...t.stale,failed:false};
-  ask(status?{part:'doc'}:{}).then(result=>{
+  ask(status?{part:'list'}:{}).then(result=>{
     if(stale())return;
     // Read at a width the popup no longer has: its rows are not this popup's; the read made for the new width stands.
     if(t.width!==width){tableAgain=true;return;}
@@ -892,8 +952,24 @@ function askTable(){
       if(reuse&&Date.now()/1000-t.readAt>=HELD_READ_AGE){t.stale={at:t.readAt,failed:false};t.collect=true;tableAgain=true;}
     }
     if(status){
-      // The document first (it waits on nothing of Fleet's); Fleet's lines come after and stand above it.
-      t.title=typeof result.title==='string'?result.title:'';t.doc=tableParts(result);t.rows=[...(t.head||[]),...t.doc];
+      // The first screen is `part: 'list'`: for a generated campaign page the page's list screen (what was chosen and opened is kept by
+      // the lines' own ids; a line the page no longer has falls to the top) and none of its rows, the document read whole being the
+      // other answer (`askDoc`); for any other document the rows as they always came, with Fleet's lines after.
+      t.title=typeof result.title==='string'?result.title:'';
+      t.listing=statusEntries(result);
+      if(t.listing){
+        t.rows=[];
+        if(!t.screen)t.screen='list';
+        // What the document read whole had was of an older page or width: it goes while the list is on screen (nothing draws it), and
+        // while the whole document is on screen it stays until the new one comes (`askDoc`, below).
+        if(t.screen==='list'&&(t.docGeneration!==generation||t.docWidth!==width))t.doc=null;
+        t.docError=false;
+        // (what was asked of the list's items belongs to the list that was read: an item still open asks again)
+        t.more={};t.moreAsking=new Set();for(const key of t.items||[])askDetail(t,key);
+        keepStatus(t,generation);
+      }else{
+        t.screen='';t.doc=tableParts(result);t.rows=[...(t.head||[]),...t.doc];
+      }
     }else{
       t.rows=tableParts(result);
       // The pressed or tabbed route comes into view (when no scroll of the person's came after); else the route at the
@@ -913,11 +989,53 @@ function askTable(){
   }).finally(()=>{
     tableAsking=false;
     if(tableAgain)askTable();
-    else if(status&&loaded)askFleet();
+    // Fleet's lines stand above the document read whole: on a list screen neither are asked for until `full document ›` is opened
+    // (and a page read again while that is on screen asks for its document and Fleet's lines again, as the popup always did).
+    else if(t.kind==='STATUS'&&loaded&&!t.listing)askFleet();
+    else if(status&&loaded&&t.screen==='full')askDoc();
   });
 }
+// What the status popup has read, kept for the next opening (the same width and page): its first screen at once, and what the document
+// read whole and Fleet's lines already brought.
+function keepStatus(t,generation){
+  if(t.kind!=='STATUS')return;
+  statusPopup={rows:t.rows,head:t.head,doc:t.doc,title:t.title,listing:t.listing,docGeneration:t.docGeneration,docWidth:t.docWidth,
+    fleetGeneration:t.fleetGeneration,fleetWidth:t.fleetWidth,width:t.width,generation};
+}
+// The document read whole of a page with a list screen: the document's own answer (`part: 'doc'`, the rows and budget it always had),
+// asked for when `full document ›` is opened and again when the page is read again while that is on screen; Fleet's lines follow it.
+// One at a time like Fleet's; an answer for another width or page, a gone popup or another session is not kept.
+let docAsking=false,docAgain=false,docWidth=0,docGeneration=0;
+function askDoc(){
+  const t=table;if(!t||!listed(t.kind)||!t.loaded||!t.listing)return;
+  const width=t.width,generation=statusGeneration,selected=selection,kind=t.kind;
+  if(docAsking){
+    if(docWidth!==width||docGeneration!==generation)docAgain=true;
+    return;
+  }
+  docAsking=true;docAgain=false;docWidth=width;docGeneration=generation;t.docError=false;
+  const columns=Math.max(20,Math.min(200,width-4));
+  const room=Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
+  readAction({kind:POPUP_KIND[kind],columns,open:'',page:false,rows:room,cwd:process.cwd(),
+    routes:statusRoutes(),status:statusHeld(),own:ownFolder(),part:'doc'},'popup',true).then(result=>{
+    const cur=table;
+    if(selected!==selection||!cur||cur.kind!==kind||!cur.listing)return;
+    if(cur.width!==width||statusGeneration!==generation)return;
+    if(!result?.ok){cur.docError=true;queueDisplay();return;}
+    cur.doc=tableParts(result);cur.docGeneration=generation;cur.docWidth=width;cur.docError=false;
+    keepStatus(cur,generation);
+    queueDisplay();
+  }).finally(()=>{
+    docAsking=false;
+    if(docAgain){docAgain=false;askDoc();return;}
+    const cur=table;
+    if(cur&&listed(cur.kind)&&cur.listing&&cur.screen==='full'&&docFresh(cur)&&!headFresh(cur))askFleet();
+  });
+}
+function docFresh(t){return Array.isArray(t.doc)&&t.docGeneration===statusGeneration&&t.docWidth===t.width;}
+function headFresh(t){return t.kind!=='STATUS'||t.head!==undefined&&t.fleetGeneration===statusGeneration&&t.fleetWidth===t.width;}
 function askFleet(){
-  const t=table;if(!t||t.kind!=='STATUS'||!t.loaded||!Array.isArray(t.doc))return;
+  const t=table;if(!t||t.kind!=='STATUS'||!t.loaded||!(t.listing||Array.isArray(t.doc)))return;   // (the backlog has no Fleet lines)
   const width=t.width,generation=statusGeneration;
   if(fleetAsking){
     // The one under way answers this popup too when it was asked at its width and generation; else once more after it.
@@ -931,14 +1049,15 @@ function askFleet(){
     routes:statusRoutes(),status:statusHeld(),part:'fleet'},'popup',true).then(more=>{
     const cur=table;
     // A failed or late Fleet part leaves the document as it stands; it is not kept, so the next opening reads again.
-    if(!more?.ok||!cur||cur.kind!=='STATUS'||!cur.loaded||!Array.isArray(cur.doc))return;
+    if(!more?.ok||!cur||cur.kind!=='STATUS'||!cur.loaded||!(cur.listing||Array.isArray(cur.doc)))return;
     // Rows laid out at another width, or read before the value changed, are not this popup's.
     if(cur.width!==width||statusGeneration!==generation)return;
     const head=tableParts(more),before=(cur.head||[]).length;
-    cur.head=head;cur.rows=[...head,...cur.doc];
+    cur.head=head;cur.fleetGeneration=generation;cur.fleetWidth=width;
+    if(!cur.listing)cur.rows=[...head,...cur.doc];
     // What the person was reading stays where it is when lines come in above it.
-    if(cur.scroll>0)cur.scroll=Math.max(0,cur.scroll+head.length-before);
-    statusPopup={rows:cur.rows,head:cur.head,doc:cur.doc,title:cur.title,width,generation};
+    if(cur.scroll>0&&!statusListing(cur))cur.scroll=Math.max(0,cur.scroll+head.length-before);
+    keepStatus(cur,generation);
     queueDisplay();
   }).finally(()=>{fleetAsking=false;if(fleetAgain){fleetAgain=false;askFleet();}});
 }
@@ -1009,15 +1128,28 @@ function openPopup(name,open='',page=false){
   if(name==='ROUTE'&&!open)open=String((rankedRoutes()[0]||{}).id||'');
   // A routes first screen (`stale`) is not carried over: the reopened popup picks its first screen again, so the
   // rows that are not a reading's own keep saying so. A route's page is not carried either (its rows are not a table's).
-  const carry=was?.kind===name&&!(name==='ROUTE'&&(was.stale||was.page||pageFirst));
+  const carry=was?.kind===name&&!(name==='ROUTE'&&(was.stale||was.page||pageFirst))&&!(listed(name)&&was.listing);
   table={kind:name,rows:carry?was.rows:[],hits:[],scroll:0,open,follow:!!open&&!pageFirst,page:pageFirst,pageTop:pageFirst,routes:[],loaded:carry&&was.loaded,width:panelView.popupWidth(cols,tableKind(name)),
-    ...(name==='NOW'?{sel:'',list:null,read:null,reveal:true,listScroll:0,loaded:false}:{})};
+    ...(name==='NOW'?{sel:'',list:null,read:null,reveal:true,listScroll:0,loaded:false}:{}),
+    // 11-21: the status popup's list screen state: the line chosen, the groups and items opened (by their own words).
+    // (a press on one of the panel's items opens it standing on that item: `open` is the item's key, taken if the list has it)
+    ...(listed(name)?{listing:null,screen:'',sel:open,fold:new Set(),items:new Set(),more:{},moreAsking:new Set(),reveal:true,listScroll:0}:{})};
+  // An item of another campaign's group (`i:<group id>:…`) pressed on the backlog panel stands in a folded group of the popup: that group opens with it,
+  // else its line is not on the screen and the popup would fall back to the first line.
+  if(name==='BACKLOG'&&table.fold&&/^i:[^:]+:/.test(open))table.fold.add(open.split(':')[1]);
   // The status popup's rows as read last, while no watch event came and the width is the same.
   const kept=name==='STATUS'&&statusPopup&&statusPopup.width===table.width&&statusPopup.generation===statusGeneration;
-  if(kept)Object.assign(table,{rows:statusPopup.rows,head:statusPopup.head,doc:statusPopup.doc,title:statusPopup.title,loaded:true});
+  if(kept)Object.assign(table,{rows:statusPopup.rows,head:statusPopup.head,doc:statusPopup.doc,title:statusPopup.title,loaded:true,
+    listing:statusPopup.listing||null,screen:statusPopup.listing?'list':'',docGeneration:statusPopup.docGeneration,docWidth:statusPopup.docWidth,
+    fleetGeneration:statusPopup.fleetGeneration,fleetWidth:statusPopup.fleetWidth});
   if(name==='ROUTE'&&!table.loaded)Object.assign(table,routeFirst(table)||{});
   if(block.focused)block.leave();
   if(name==='MESSAGES')blockAction('r');
+  else if(name==='MEM'){
+    // The popup opens on the record pressed (`popup:MEM:<n>`): its head is the first row on screen.
+    const at=Number(open),starts=panelView.memoryBody({model:panelModel,columns:Math.max(1,table.width-4),cellWidth}).starts||[];
+    if(Number.isInteger(at)&&at>0&&at<starts.length)table.scroll=starts[at];
+  }
   else if(!kept)askTable();
   queueDisplay();
 }
@@ -1053,6 +1185,12 @@ function moveSection(delta){
 // ↑↓ Tab: the routes popup unfolds the next route (Fleet's `▶`); the others read on a row at a time.
 function moveRow(delta){
   const t=table;if(!t)return;
+  // 11-21: on the status popup's list screen the keys move the chosen line (the document read whole scrolls as before).
+  if(statusListing(t)){
+    const to=statusList.neighbour(statusList.layout(t.listing,t),delta);
+    if(to&&to!==t.sel){t.sel=to;t.reveal=true;queueDisplay();}
+    return;
+  }
   if(t.kind==='NOW'&&!t.page){moveSel(delta);return;}
   if(t.kind==='ROUTE'&&!t.page&&t.routes.length){
     const at=t.routes.indexOf(t.open),next=at<0?(delta>0?0:t.routes.length-1):Math.max(0,Math.min(t.routes.length-1,at+delta));
@@ -1064,8 +1202,53 @@ function moveRow(delta){
 function enterRow(){
   const t=table;if(!t)return;
   if(t.kind==='NOW'){enterNow(t);return;}
+  if(listed(t.kind)&&t.listing){if(t.screen==='full')statusBack(t);else statusActivate(t,statusList.layout(t.listing,t).sel);return;}
   // (A popup opened on a route's page has not followed the unfolded row yet: back at the table it does.)
   if(t.kind==='ROUTE'&&t.open){t.page=!t.page;t.scroll=0;t.pageTop=t.page;if(!t.page)t.follow=true;askTable();}
+}
+// 11-21: Enter or a press on a line of the status popup's list screen. A heading or `all N ›` opens or closes its group, an item
+// its whole text, and `full document ›` the document read whole (Fleet's lines are asked for then, not before); Esc or Enter there
+// goes back to the list, on the line it left.
+function statusActivate(t,key){
+  const did=statusList.press(t,statusList.layout(t.listing,t),key);
+  if(did==='full')statusFull(t);
+  else if(did){t.reveal=true;if(did==='item')askDetail(t,key);queueDisplay();}
+}
+// 11-21: an item of the backlog whose indented lines are not in the list answer (`lazy`, the titles being all the answer carries) has them asked for
+// when it is opened (`part: 'detail'`, one small read), and kept in `t.more` for the as long as the list stands. One ask per item at a time; an answer
+// that cannot be read leaves the item as it was (nothing under it).
+function askDetail(t,key){
+  if(t.kind!=='BACKLOG'||!t.listing||!t.items.has(key))return;
+  const entry=t.listing.find(e=>e.key===key);
+  if(!entry||!entry.lazy||(t.more&&t.more[key])||(t.moreAsking&&t.moreAsking.has(key)))return;
+  t.more=t.more||{};t.moreAsking=t.moreAsking||new Set();t.moreAsking.add(key);
+  const columns=Math.max(20,Math.min(200,t.width-4)),selected=selection,listing=t.listing;
+  readAction({kind:POPUP_KIND.BACKLOG,columns,open:key,page:false,rows:6,cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),own:ownFolder(),part:'detail'},'popup',true).then(result=>{
+    if(t.moreAsking)t.moreAsking.delete(key);
+    if(selected!==selection||table!==t||t.listing!==listing)return;
+    t.more[key]=result?.ok?tableParts(result):[];
+    queueDisplay();
+  });
+}
+// PgUp/PgDn on the list screen move the chosen line a screen on (the window follows it), so the line Enter opens is the one in view.
+function moveLines(t,delta){
+  const to=statusList.jump(statusList.layout(t.listing,t),delta);
+  if(to&&to!==t.sel){t.sel=to;t.reveal=true;queueDisplay();}
+}
+// The document read whole: its own answer, unless the one the popup has is of this page and width (asked for when the popup was here
+// before, and kept), then Fleet's lines, unless those are the page's and width's too.
+function statusFull(t){
+  t.listScroll=t.scroll;t.screen='full';t.scroll=0;
+  if(!docFresh(t))askDoc();
+  else if(!headFresh(t))askFleet();
+  queueDisplay();
+}
+function statusBack(t){t.screen='list';t.scroll=t.listScroll||0;t.reveal=true;queueDisplay();}
+// Esc on the document read whole goes back to the list; true when that is all it did (else the popup closes).
+function popupBack(){
+  const t=table;
+  if(!t||!listed(t.kind)||!t.listing||t.screen!=='full')return false;
+  statusBack(t);return true;
 }
 // Enter in the NOW popup: a prompt or NOW row reads its part of the conversation here (Enter again is back at
 // the list, on that row); a route, question or message row opens that section's popup. No key goes to the window.
@@ -1154,6 +1337,9 @@ function observeSelectedModel(lines){
     }
   }).finally(()=>{modelReading=false;});
 }
+let paintedCursor='',paintedModes=new Map();
+// A whole repaint also repairs terminal state lost outside the host.
+function repaintWhole(){last=[];paintedModes.clear();paintedCursor='';}
 function render() {
   frameTimer=undefined;if(ended||!activated||relay||succeeding)return;
   try {
@@ -1183,9 +1369,9 @@ function render() {
     if(selectedChanged)return;
     // Laying or lifting the veil writes every row whole (the cells the beat would swap included).
     const tone=veilTone();
-    if(tone!==veiledFrame){veiledFrame=tone;last=[];written=[];motionShown.clear();}
+    if(tone!==veiledFrame){veiledFrame=tone;repaintWhole();written=[];motionShown.clear();}
     popupBefore();const wrote=new Set();
-    let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
+    let text='';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
       // The rest of a Codex footer row whose ID cells are concealed keeps the
@@ -1193,7 +1379,7 @@ function render() {
       const masked=fleetView?0:footerMask.cells.get(y)||0,indent=masked?Math.min(masked,nativeLines[y].match(/^ */)[0].length):0;
       let line=y===notice||y===ownLine?footerLine(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):masked?
         '\x1b[0m'+' '.repeat(indent)+serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,masked)+' '.repeat(masked-indent):
-        serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
+        serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,0,pickMark(y));
       let motion=false;
       if(!fleetView&&geometry().side){
         // The two cells between the native and the panel take the native's own background at
@@ -1233,13 +1419,22 @@ function render() {
     if(!fleetView)text+=popupOver(wrote);
     const b=view.buffer.active,m=view.modes;
     const owning=!!popupLayer&&!fleetView,cursor=owning?blockCursor:null;
-    text+=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)+(fleetView?0:geometry().nativeColumn)}H`;
-    text+=`\x1b[?2004${m.bracketedPasteMode?'h':'l'}\x1b[?1${m.applicationCursorKeysMode?'h':'l'}`;
-    text+='\x1b[?1000l\x1b[?1002l\x1b[?1003l';
-    if(!fleetView&&height()>0)text+='\x1b[?1002h\x1b[?1006h';
-    else if(m.mouseTrackingMode!=='none')text+=`\x1b[?${({x10:9,vt200:1000,drag:1002,any:1003})[m.mouseTrackingMode]}h\x1b[?1006h`;
-    text+=`\x1b[?1004${m.sendFocusMode?'h':'l'}\x1b[?7h${(owning?!!blockCursor:cursorVisible)?'\x1b[?25h':''}\x1b[?2026l`;
-    emit(text);armBeat();checkRelease();
+    const target=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)+(fleetView?0:geometry().nativeColumn)}H`;
+    // A paint moves the cursor temporarily; an unchanged frame need not move it at all.
+    if(text)text='\x1b[?7l'+text+target+'\x1b[?7h';
+    else if(target!==paintedCursor)text=target;
+    paintedCursor=target;
+    const mouse=!fleetView&&height()>0?1002:({x10:9,vt200:1000,drag:1002,any:1003})[m.mouseTrackingMode];
+    const modes=new Map([[2004,m.bracketedPasteMode],[1,m.applicationCursorKeysMode],
+      ...[9,1000,1002,1003].map(n=>[n,n===mouse]),[1006,!!mouse],
+      [1004,m.sendFocusMode],[25,owning?!!blockCursor:cursorVisible]]);
+    // Disable an old mouse mode before enabling its replacement. Reasserting focus/paste
+    // or toggling visibility on every native keystroke can disturb terminal IME composition.
+    for(const enabled of [false,true])for(const [mode,value] of modes){
+      if(!!value===enabled&&paintedModes.get(mode)!==enabled){text+=`\x1b[?${mode}${enabled?'h':'l'}`;paintedModes.set(mode,enabled);}
+    }
+    if(text)emit('\x1b[?2026h'+text+'\x1b[?2026l');
+    armBeat();checkRelease();
   } catch { rawRelay(); }
 }
 function lineLength(line){
@@ -1278,9 +1473,7 @@ function queueLayout(){
 }
 const block=require('./block-input.cjs')({changed:queueDisplay,cellWidth,
   answer:async fields=>{const result=await source('answer',fields);queueProjection();return result;},
-  action:key=>blockAction(key),
-  // ←→ in the question popup move to the next section's popup, as in every other popup.
-  section:delta=>setImmediate(()=>moveSection(delta))});
+  action:key=>blockAction(key)});
 let actionLines=[];
 function rebuildDisplay() {
   // The popup layer first: Fleet's screen or the plain relay closes it with the rest.
@@ -1337,7 +1530,7 @@ function openFleet() {
     const session=pty.spawn(process.env.HEARTING_SHELL_PYTHON,[exe,'--explorer'],
       {cols,rows,cwd:process.cwd(),env:{...process.env}});
     const view={terminal:vt,child:session,closing:false,inputTail:'',paste:false};
-    fleetView=view;table=null;heldStop();block.leave();last=[];emit('\x1b[2J');
+    fleetView=view;table=null;heldStop();block.leave();repaintWhole();emit('\x1b[2J');
     vt.onData(data=>session.write(data));vt.onWriteParsed(schedule);
     session.onData(data=>{try{vt.write(data);}catch{session.write('q');rawRelay();}});
     session.onExit(()=>{
@@ -1352,14 +1545,14 @@ let displayFooter='';
 function applyLayout() {
   if(relay)return;
   if(succeeding){layoutDeferred=true;return;}
-  if(fleetView){fleetView.child.resize(cols,rows);fleetView.terminal.resize(cols,rows);last=[];schedule();return;}
+  if(fleetView){fleetView.child.resize(cols,rows);fleetView.terminal.resize(cols,rows);repaintWhole();schedule();return;}
   refold();wasPinned=pinned();
-  child.resize(nativeColumns(),nativeRows());terminal.resize(nativeColumns(),nativeRows());last=[];footerLast='\0';
+  pick=null;child.resize(nativeColumns(),nativeRows());terminal.resize(nativeColumns(),nativeRows());repaintWhole();footerLast='\0';
   // A table popup is Fleet's table at the popup's width: read again at the new one. Rows laid out at the
   // old width (Fleet's lines above the status document) are not drawn at the new one: the document stands
   // alone until the new read.
   if(table&&POPUP_KIND[table.kind]&&table.width!==panelView.popupWidth(cols,tableKind(table.kind))){table.width=panelView.popupWidth(cols,tableKind(table.kind));
-    if(table.kind==='STATUS'&&table.loaded&&Array.isArray(table.doc)){table.head=[];table.rows=[...table.doc];}
+    if(listed(table.kind)&&table.loaded&&Array.isArray(table.doc)){table.head=[];if(!table.listing)table.rows=[...table.doc];}
     askTable();}
   emit('\x1b[0m\x1b[2J');rebuildDisplay();schedule();queueProjection();
 }
@@ -1472,7 +1665,7 @@ async function projection() {
     const freshDisplay=Object.fromEntries(Object.entries(data.native_display||{}).filter(([,value])=>value!=null));
     if(bootstrapModel&&freshDisplay.model){nativeSelected={};bootstrapModel=false;}
     displayValues={...displayValues,...freshDisplay,...nativeSelected};publishNativeDisplay();
-    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;panelModel={...data.panel,status_doc:statusDoc(),answerable:data.questions?.some(item=>item.answerable===true&&(item.request_state||'open')==='open')};block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
+    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;panelModel={...data.panel,status_doc:statusDoc(),backlog_doc:backlogDoc(),answerable:data.questions?.some(item=>item.answerable===true&&(item.request_state||'open')==='open')};block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
 // Claude's statusline row may be blanked only while this visible panel paints
@@ -1738,6 +1931,7 @@ mouseInput=require('./panel-mouse.cjs')({
   bytes:inputBytes,
   mouse:(code,x,y,release,raw)=>{
     if(popupMouse(code,x,y,release))return;
+    if(nativePick(code,x,y,release))return;
     if(panelMouse(code,x,y,release))return;
     if(terminal.modes.mouseTrackingMode==='none')return;
     // A left panel moves the native area right; native sees its own columns.
@@ -1764,13 +1958,59 @@ function popupMouse(code,x,y,release){
   const hit=inside&&l.hits.find(h=>h.row===row&&col>=h.left&&col<=h.right);
   if(!inside||hit&&hit.action==='popup-close'){epoch++;closePopup();return true;}
   // A section's name on the bottom line opens its popup.
+  if(hit&&hit.action==='answer-write'){block.write();return true;}
+  if(hit&&hit.action.startsWith('answer-choice:')){block.choose(Number(hit.action.slice(14)));return true;}
   if(hit&&hit.action.startsWith('popup:')){openPopup(hit.action.slice(6));return true;}
   // A table's row: a route unfolds (pressed again, its page).
   const target=table&&(l.tableHits||[]).find(h=>h.row===row&&col>=h.left&&col<=h.right);
   if(target){
     const [verb,second]=target.action;
     if(table.kind==='ROUTE'&&verb==='route'&&second){if(table.open===second)enterRow();else{table.open=second;table.page=false;table.follow=true;askTable();}}
+    else if(verb==='status'&&second&&statusListing(table))statusActivate(table,second);
   }
+  return true;
+}
+// 11-20: a native that does not read the mouse (`none`) leaves a drag over its area to the shell, which
+// is what keeps the panel's presses reported to it: the drag selects text, drawn flipped while it goes,
+// and the release copies it to the outer terminal's clipboard (OSC 52) from the shell's own copy of the
+// native screen. Two presses on a cell select its word, three its line. A press that does not drag
+// does what it did before (nothing). A native that reads the mouse gets every report, as before.
+function nativeCell(x,y,clamp){
+  const cx=x-1-geometry().nativeColumn,cy=y-1;
+  if(clamp)return {x:Math.max(0,Math.min(terminal.cols-1,cx)),y:Math.max(0,Math.min(terminal.rows-1,cy))};
+  return cx>=0&&cx<terminal.cols&&cy>=0&&cy<terminal.rows?{x:cx,y:cy}:null;
+}
+function clearPick(){if(pick){pick=null;queueDisplay();}}
+function pickMark(y){return pick?.dragged&&!fleetView?picking.rowSpan(terminal,pick,y):null;}
+function finishPick(cell){
+  if(cell)pick.b=cell;
+  pick.live=false;
+  const single=pick.mode==='cell'&&pick.a.x===pick.b.x&&pick.a.y===pick.b.y;
+  const sequence=pick.dragged&&!single?picking.copySequence(picking.textOf(terminal,pick)):'';
+  if(!sequence)pick=null;else emit(sequence);
+  queueDisplay();
+}
+function nativePick(code,x,y,release){
+  if(fleetView||paste||relay||settings)return false;
+  if(terminal.modes.mouseTrackingMode!=='none'){clearPick();return false;}
+  if((code&0xc0)===64)return false;
+  if(pick?.live){
+    const cell=nativeCell(x,y,true);
+    // A word or a line chosen by presses stays as chosen: the release copies it, motion changes nothing.
+    if(pick.mode!=='cell'&&(release||code>=32)){if(release)finishPick(null);return true;}
+    if(release){finishPick(cell);return true;}
+    if(code>=32){if(cell.x!==pick.b.x||cell.y!==pick.b.y){pick.b=cell;pick.dragged=true;queueDisplay();}return true;}
+    // A press while one is held: its release was lost, so that selection ends here and this one begins.
+    finishPick(null);
+  }
+  if(release||code>=32||(code&3)!==0)return false;
+  const cell=nativeCell(x,y,false);
+  if(!cell)return false;
+  const now=Date.now(),count=picking.clicks(pressed,cell.x,cell.y,now);
+  pressed={...cell,time:now,count};
+  const span=count===2?picking.wordAt(terminal,cell.x,cell.y):count===3?picking.lineAt(terminal,cell.y):null;
+  pick={a:span?span.a:cell,b:span?span.b:cell,mode:span?(count===2?'word':'line'):'cell',live:true,dragged:!!span};
+  if(span)queueDisplay();
   return true;
 }
 function nativePointer(code,release,raw){
@@ -1784,7 +2024,9 @@ function nativePointer(code,release,raw){
   if(currentDelivery){inputOwner.hold(raw);observe(raw);heldBytes+=raw.length;return;}
   observe(raw);child.write(raw);
 }
-function userInput(data){if(data.length){epoch+=data.length;empty=false;mouseInput.feed(data);}}
+// The next input of any kind takes the selection's flipped cells back (a press that starts another
+// makes its own); a key typed while one is being dragged ends it.
+function userInput(data){if(data.length){epoch+=data.length;empty=false;if(pick&&(!pick.live||data[0]!==27||data[1]!==91||data[2]!==60))clearPick();mouseInput.feed(data);}}
 function inputBytes(data) {
   if(!data.length)return;
   while(data.length){
@@ -1872,13 +2114,13 @@ function tableInput(data){
       let keep=0;for(let k=5;k>0&&!keep;k--)if(text.endsWith('\x1b[201~'.slice(0,k)))keep=k;
       if(keep){tableTail=text.slice(-keep);
         // A lone Esc left at the end of a paste is the person's Esc if no rest of the end mark follows it.
-        if(keep===1)tableEscape=setTimeout(()=>{if(tableTail==='\x1b'){closePopup();block.escaped();}},PASTE_ESCAPE_MS);}
+        if(keep===1)tableEscape=setTimeout(()=>{if(tableTail==='\x1b'){tableTail='';if(!popupBack()){closePopup();block.escaped();}}},PASTE_ESCAPE_MS);}
       text='';break;
     }
     if(text.startsWith('\x1b[200~')){tablePaste=true;text=text.slice(6);continue;}
     if(text[0]==='\x1d'){closePopup();return Buffer.from(text.slice(1),'latin1');}
     if(text[0]==='\x1b'){
-      if(text.length===1){tableTail=text;tableEscape=setTimeout(()=>{if(tableTail==='\x1b'){tableTail='';closePopup();block.escaped();}},25);return Buffer.alloc(0);}
+      if(text.length===1){tableTail=text;tableEscape=setTimeout(()=>{if(tableTail==='\x1b'){tableTail='';if(!popupBack()){closePopup();block.escaped();}}},25);return Buffer.alloc(0);}
       // A key is `ESC [ … final` or `ESC O x` (an application-cursor arrow or keypad key: any byte after
       // the `O`, as the question popup reads it); a key split across reads waits for its rest.
       const csi=/^\x1b(?:\[[0-9;]*[\x40-\x7e]|O[\s\S])/.exec(text);
@@ -1888,7 +2130,8 @@ function tableInput(data){
         // question popup: Alt+letter, Shift/Alt+Enter, Esc then a control byte are dropped and it stands
         // (an Enter reaching the native would submit its text, a ^C interrupt its turn). Only a second Esc
         // closes it, and is dropped too. (A UTF-8 letter's further bytes are no key either.)
-        if(text[1]==='\x1b'){closePopup();block.escaped();return Buffer.from(text.slice(2),'latin1');}
+        // (11-21: a first Esc on the status popup's document read whole is the way back to its list; the second closes.)
+        if(text[1]==='\x1b'){if(popupBack()){text=text.slice(1);continue;}closePopup();block.escaped();return Buffer.from(text.slice(2),'latin1');}
         text=text.slice(2);continue;
       }
       const key=csi[0].replace('\x1bO','\x1b[');text=text.slice(csi[0].length);
@@ -1896,6 +2139,7 @@ function tableInput(data){
       else if(key==='\x1b[C')moveSection(1);else if(key==='\x1b[D')moveSection(-1);
       else if(key==='\x1b[Z')moveRow(-1);
       else if((key==='\x1b[5~'||key==='\x1b[6~')&&table.kind==='NOW'&&!table.page&&table.list)moveSel((key==='\x1b[5~'?-1:1)*Math.max(1,(table.space||2)-1),true);
+      else if((key==='\x1b[5~'||key==='\x1b[6~')&&statusListing(table))moveLines(table,(key==='\x1b[5~'?-1:1)*Math.max(1,(table.space||2)-1));
       else if(key==='\x1b[5~'||key==='\x1b[6~'){table.scroll=Math.max(0,table.scroll+(key==='\x1b[5~'?-1:1)*Math.max(1,(table.space||2)-1));if(table.kind==='ROUTE')table.follow=false;}
       continue;
     }
@@ -2054,6 +2298,13 @@ terminal.parser.registerCsiHandler({prefix:'?',final:'l'},p=>{if(p.includes(25))
 for(const [code,rgb] of [[10,'dddd/dddd/dddd'],[11,'1111/1111/1111']])terminal.parser.registerOscHandler(code,text=>{
   if(text==='?'){child.write(`\x1b]${code};rgb:${rgb}\x1b\\`);return true;}return false;
 });
+// 11-20: a clipboard write the native asks for goes on to the outer terminal (the shell holds the
+// native's output, which would otherwise end it here); a read of the clipboard is never passed on.
+terminal.parser.registerOscHandler(52,data=>{
+  const sequence=picking.nativeCopy(data);
+  if(sequence&&!relay&&!ended)emit(sequence);
+  return true;
+});
 
 // ---- the native, the input owner and the backend: the same for a first host and a successor ----
 function adoptNative(paused) {
@@ -2078,12 +2329,16 @@ function startBackend() {
   });
 }
 function wireDisplay() {
-  terminal.onData(data=>child.write(data));terminal.onWriteParsed(()=>{screenRevision++;schedule();});
+  terminal.onData(data=>child.write(data));terminal.onWriteParsed(()=>{screenRevision++;if(pick&&!pick.live)pick=null;schedule();});
   terminal.onTitleChange(title=>{
     try{if(!ended&&!relay)emit(nativeDisplay.titleSequence(title));}catch{rawRelay();}
   });
   child.onData(data=>{if(relay)emit(data);else try{terminal.write(data);}catch{rawRelay();emit(data);}});
   process.stdin.on('data',userInput);
+  process.on('SIGCONT',()=>{
+    if(ended||relay||!switched)return;
+    repaintWhole();schedule();
+  });
   process.stdout.on('resize',()=>{
     cols=process.stdout.columns;rows=process.stdout.rows;
     try{if(relay)child.resize(cols,rows);else applyLayout();}catch{rawRelay();}
@@ -2095,7 +2350,8 @@ function wireDisplay() {
     for(const row of watchers.values())row.watch.close();watchers.clear();
     for(const watch of releaseWatchers)try{watch.close();}catch{}
     server.close();await source('unregister');backend?.stdin.end();
-    emit('\x1b[0m\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?25h\x1b[?1049l');
+    const remaining=[1,9].filter(mode=>paintedModes.get(mode)).map(mode=>`\x1b[?${mode}l`).join('');
+    emit('\x1b[0m'+remaining+'\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?25h\x1b[?1049l');
     fs.rmSync(socketPath,{force:true});fs.rmSync(nextPath,{force:true});if(seedFile)fs.rmSync(seedFile,{force:true});process.exit(event.exitCode);
   });
 }
@@ -2255,7 +2511,7 @@ async function resumeHost(failed=true) {
   // another end (not safe after all) waits a second so a persistent condition cannot spin.
   if(upgrade)upgrade.retryAfter=failed?0:Date.now()+1000;
   // A host that only asked also paints the whole screen once: whatever a dying successor wrote is overwritten.
-  if(!succeeding){if(upgrade)upgrade.requested=false;last=[];footerLast='\0';if(!relay&&!ended)schedule();checkRelease();return;}
+  if(!succeeding){if(upgrade)upgrade.requested=false;repaintWhole();footerLast='\0';if(!relay&&!ended)schedule();checkRelease();return;}
   let listenFailed=false;
   try{
     let ino=-1;try{ino=fs.statSync(socketPath).ino;}catch{}
@@ -2276,7 +2532,7 @@ async function resumeHost(failed=true) {
   if(upgrade)upgrade.requested=false;
   await source('register');
   child.resume();process.stdin.resume();
-  last=[];footerLast='\0';
+  repaintWhole();footerLast='\0';
   if(layoutDeferred){layoutDeferred=false;applyLayout();}
   schedule();queueProjection();
   for(const entry of bound.splice(0))if(!entry.conn.destroyed)serve(entry.conn,entry.line.subarray(0,entry.line.length-1));

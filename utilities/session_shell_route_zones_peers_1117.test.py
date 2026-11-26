@@ -106,7 +106,7 @@ assert.deepEqual(none.slice(none.indexOf(zr('dispatch'))+1,none.indexOf(zr('requ
 ],none.join('\n'));
 // The title counts the routes alone: the requests are a zone, not a tab.
 const top=draw([direct,dispatch],requests,44,60).find(s=>/ROUTE/.test(s));
-assert(/╭─ 2 ROUTE ─+╮/.test(top)&&!/REQUEST/.test(top),top);
+assert(/╭─ 2 ROUTE ─+ ›─╮/.test(top)&&!/REQUEST/.test(top),top);
 // The same box beside the requests' order: they are listed after the routes whatever the order they came in.
 const mixed=box(draw([dispatch,direct,bare],requests,44,80));
 assert.deepEqual(rules(mixed).map(s=>s.split(' ')[1]),['direct','dispatch','request']);
@@ -121,7 +121,7 @@ assert.equal(one.length,3,one.join('\n'));      // (11-18: the time stands on th
 const disp=box(draw([dispatch],[],44,60));
 assert.deepEqual(rules(disp).map(s=>s.split(' ')[1]),['dispatch']);
 const reqs=draw([],requests,44,60);
-assert(reqs.some(s=>/╭─ ROUTE ─+╮/.test(s)),reqs.join('\n'));     // requests and no route: `ROUTE`, no tab text
+assert(reqs.some(s=>/╭─ ROUTE ─+ ›─╮/.test(s)),reqs.join('\n'));     // requests and no route: `ROUTE`, no tab text
 assert.deepEqual(rules(box(reqs)).map(s=>s.split(' ')[1]),['request']);
 assert(!reqs.some(s=>/PEER REQUEST|REQUEST/.test(s)));
 const none=draw([],[],44,60);
@@ -236,12 +236,12 @@ const supervising={me:'c7',groups:[{steward:end('c7','hb_claude',true),members:[
 const supervised={me:'d4',groups:[{steward:end('c7','hb_claude'),members:[end('d4','hb_claude',true)]}]};
 const both={me:'3b',groups:[{steward:end('c7','hb_claude'),members:[end('3b','hb_codex',true)]},{steward:end('3b','hb_codex',true),members:[end('a1','hb_claude'),end('a2','hb_opencode')]}]};
 const rowsOf=(peers,w=60)=>draw([],[],w,30,{peers});
-const line=(peers,w=60)=>rowsOf(peers,w).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trimEnd()).find(s=>/^PEERS/.test(s));
+const line=(peers,w=60)=>rowsOf(peers,w).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trim()).find(s=>/^PEERS/.test(s));
 assert.equal(line(supervising),'PEERS  [c7] ⚑  ─ [d4] [3b]');
 assert.equal(line(supervised),'PEERS  [c7] ⚑  ─ [d4]');
 assert.equal(line(both),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ [a1] [a2]');
 // The row stands right under GIT, with the labels' column; none for a window with no relation (and no empty row).
-const all=rowsOf(supervising).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trimEnd());
+const all=rowsOf(supervising).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trim());
 const at=all.findIndex(s=>/^PEERS/.test(s));
 assert(/^GIT /.test(all[at-1])&&/^REPO /.test(all[at-2]),all.join('\n'));
 assert.equal(all[at].indexOf('[c7]'),all[at-1].indexOf('main'));
@@ -257,7 +257,7 @@ assert.equal(same.length,withLine.length);     // (the panel's height is its win
 const end=(tag,key,me)=>({tag,key,...(me?{me:true}:{})});
 const both={me:'3b',groups:[{steward:end('c7','hb_claude'),members:[end('3b','hb_codex',true)]},{steward:end('3b','hb_codex',true),members:[end('a1','hb_claude'),end('a2','hb_opencode')]}]};
 const v=render([],[],70,30,{peers:both});
-const row=v.rows.find(r=>/^│ PEERS/.test(text(r)));
+const row=v.rows.find(r=>/^│  PEERS/.test(text(r)));
 const num=t=>row.filter(p=>p.text==='['+t+']');
 // 11-18 (the person: "나머지는 컬러도 조금 어둡게"): this window's own number is its harness color, bold; every other session's is its
 // harness's one step back (`harnessName`, the USAGE names'; the light face's `peerOther`), plain; both resolved by the face as fixed colors.
@@ -278,7 +278,7 @@ assert.equal(lit('light',num('a1')[0]).foreground,view.FACES.light.peerOther.cla
 const REAL={...STYLES,hb_claude:{foreground:173},hb_codex:{foreground:147},hb_opencode:{foreground:153}};
 for(const h of ['claude','codex','opencode']){
   const grp={me:'3b',groups:[{steward:end('3b','hb_'+h,true),members:[end('a1','hb_'+h)]}]};
-  const r=render([],[],70,30,{peers:grp,styles:REAL}).rows.find(x=>/^│ PEERS/.test(text(x)));
+  const r=render([],[],70,30,{peers:grp,styles:REAL}).rows.find(x=>/^│  PEERS/.test(text(x)));
   const mine=r.find(x=>x.text==='[3b]'),other=r.find(x=>x.text==='[a1]');
   for(const [cfg,bg] of [[{theme:'terminal'},'dark'],[{theme:'light'},'light'],[{theme:'terminal'},''],[{theme:'terminal',shade:'medium'},'dark'],[{theme:'light',shade:'light'},'light']]){
     const f=x=>view.appearance([[x]],cfg,{colors:256,background:bg})[0][0];
@@ -300,7 +300,7 @@ assert(row.find(p=>/^PEERS/.test(p.text)).dim===true);
 const end=(tag,key,me)=>({tag,key,...(me?{me:true}:{})});
 const many=['a1','a2','a3','a4','a5'].map(t=>end(t,'hb_claude'));
 const peers={me:'3b',groups:[{steward:end('c7','hb_claude'),members:[end('3b','hb_codex',true)]},{steward:end('3b','hb_codex',true),members:many}]};
-const line=(w,p=peers)=>draw([],[],w,30,{peers:p}).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trimEnd()).find(s=>/^PEERS/.test(s));
+const line=(w,p=peers)=>draw([],[],w,30,{peers:p}).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trim()).find(s=>/^PEERS/.test(s));
 assert.equal(line(80),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ [a1] [a2] [a3] [a4] [a5]');
 assert.equal(line(56),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ [a1] [a2] [a3] +2');
 // The count stands inside the group whose numbers went (never after [3b] of the first group, which would read as that group's).
@@ -325,7 +325,7 @@ for(const p of [peers,two,one])for(let w=34;w<=90;w++){
  if(/ \+\d+$/.test(l))assert(/─( \[[0-9a-f]{2}\])* \+\d+$/.test(l)&&!/\] · \[[0-9a-f]{2}\] \+\d+$/.test(l),w+' '+l);
 }
 // Narrower than the labelled layout the row has no label, as REPO and GIT have none.
-const bareRow=draw([],[],30,30,{peers}).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trimEnd()).find(s=>/^\[c7\] ⚑/.test(s));
+const bareRow=draw([],[],30,30,{peers}).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trim()).find(s=>/^\[c7\] ⚑/.test(s));
 assert(bareRow&&!/PEERS/.test(bareRow),bareRow);
 """)
 

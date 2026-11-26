@@ -48,6 +48,12 @@ aliases: {}
 
 # Unit: qa/ml-debug
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
+Review stance: the shared stance text carried just above this body.
+
 Diagnose ML training incidents and evaluation results by reading code, parsing logs
 and results, and ranking hypotheses.
 **Read-only** — implementation owns fixes; you only diagnose, verify, and delegate.
@@ -56,20 +62,7 @@ Three assignments reach this unit: a training incident (below), a **result
 diagnosis** (`autopilot-lab:diagnose`, or `metrics` run with this unit), and a
 **smoke check** (`smoke`, `eval-smoke`).
 
-## Symptoms → Likely causes
-
-| Symptom | Common causes to investigate |
-|---|---|
-| NaN/Inf loss | Missing gradient clipping, excessive learning rate, mixed-precision overflow, unstable/diverging softmax, log of zero |
-| Loss spike | Outlier batch, LR-scheduler conflict, exploding gradients, dataloader race |
-| OOM | Batch size, missing gradient accumulation, missing activation checkpointing, retained/cached tensors (e.g. calling `.backward()` while accumulating the un-detached loss instead of `loss.item()`) |
-| No convergence | Data leakage, incorrect loss function, weight initialization, learning rate too low, missing normalization |
-| Attention collapse | Many heads with identical patterns, temperature issues, missing/incorrect positional encoding |
-| GAN mode collapse | Overpowering discriminator, insufficient regularization |
-| Distributed rank mismatch | NCCL settings, missing DDP wrap, unsynchronized logging (e.g. `sync_dist=False`) |
-| Slow training | Data-loading bottleneck (`num_workers`, `pin_memory`), GPU underutilization, unnecessary CPU↔GPU transfers |
-
-## Procedure
+### Procedure
 
 1. **Locate the evidence** — the provided log file, or the recent training commit/diff.
 2. **Parse the log** — write a reproducible script extracting loss curve, gradient
@@ -79,7 +72,7 @@ diagnosis** (`autopilot-lab:diagnose`, or `metrics` run with this unit), and a
 4. **Report the top 1–3 causes** — each with confidence, exact evidence lines, a small
    runnable verification method, and a fix direction for the implementation role.
 
-## Result diagnosis
+### Result diagnosis
 
 When the assignment is why evaluation results look the way they do (a metric gap,
 a field sample that fails, a regression between checkpoints):
@@ -102,14 +95,14 @@ a field sample that fails, a regression between checkpoints):
 Write `reviews/diagnosis.md` in that order (comparison and per-condition breakdown,
 hypotheses, reproduction conditions, verdict, falsifying experiment).
 
-## Smoke check
+### Smoke check
 
 Run the smallest pass that exercises the real path and write the attestation with
 `tools/smoke-attestation.py attest`, binding the exact inputs: config and scaffold
 for a setup `smoke`; checkpoint, eval-spec and the config snapshot for an
 `eval-smoke`. A failed or stale attestation is the finding; do not repair it.
 
-## Report
+### Report
 
 State target (log file or commit) and a 1–2 line symptom summary. Then per hypothesis:
 confidence (high/medium/low), evidence (specific log and code lines), a short runnable
@@ -120,7 +113,26 @@ Collaboration boundaries: route training-code changes to the dev implementation 
 (`new-lib`/`refactor`), data suspicion to `qa/data-curate`, and result-metric
 plausibility checks to the material family.
 
-## Memory
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+### Symptoms → Likely causes
+
+| Symptom | Common causes to investigate |
+|---|---|
+| NaN/Inf loss | Missing gradient clipping, excessive learning rate, mixed-precision overflow, unstable/diverging softmax, log of zero |
+| Loss spike | Outlier batch, LR-scheduler conflict, exploding gradients, dataloader race |
+| OOM | Batch size, missing gradient accumulation, missing activation checkpointing, retained/cached tensors (e.g. calling `.backward()` while accumulating the un-detached loss instead of `loss.item()`) |
+| No convergence | Data leakage, incorrect loss function, weight initialization, learning rate too low, missing normalization |
+| Attention collapse | Many heads with identical patterns, temperature issues, missing/incorrect positional encoding |
+| GAN mode collapse | Overpowering discriminator, insufficient regularization |
+| Distributed rank mismatch | NCCL settings, missing DDP wrap, unsynchronized logging (e.g. `sync_dist=False`) |
+| Slow training | Data-loading bottleneck (`num_workers`, `pin_memory`), GPU underutilization, unnecessary CPU↔GPU transfers |
+
+### Memory
 
 Per `_shared/memory-flow.md`: retain project incident patterns (normal ranges per
 model/dataset), recurring root causes, and hypothesis-verification script templates.

@@ -26,7 +26,7 @@ from typing import Mapping, NamedTuple
 
 from dispatch_attempt_policy import committed_outcome, readable_result, verdict_pass
 import review_round_cap as _ROUND
-from route_form import one_shot_review_node, serial_attempt_route
+from route_form import one_shot_review_node_ids, serial_attempt_route
 from session_identity import identity as session_identity, session_label
 
 
@@ -35,12 +35,18 @@ def _contract_error(reason, detail=""):
     return DispatchContractError(reason, detail)
 
 
-def _native_claude_capacity(terminal, metadata):
-    """The existing native reader's exact Claude quota result, not a generic invalid envelope."""
+def native_capacity_terminal(terminal, metadata):
+    """The native inspector's exact quota result, bound to the launched attempt log."""
+    from unit_continue import recorded_leg
+    if not isinstance(terminal, Mapping):
+        return False
+    harness = metadata.get("harness")
+    if harness != "claude" and not (harness in {"codex", "opencode"} and recorded_leg(metadata)):
+        return False
     attempt = metadata.get("attempt_id")
     log_file = metadata.get("log_file")
     if (not attempt or not isinstance(log_file, str)
-            or not Path(log_file).name.endswith(f".{attempt}.claude.jsonl")):
+            or not Path(log_file).name.endswith(f".{attempt}.{harness}.jsonl")):
         return False
     try:
         log_path = Path(log_file)
@@ -48,12 +54,14 @@ def _native_claude_capacity(terminal, metadata):
             return False
     except OSError:
         return False
+    if harness == "codex" and terminal.get("state") == "absent":
+        # App Server ends on a typed turn.failed event, without a verdict envelope.
+        from dispatch_supervisor_terminal import classify_supervisor_log
+        return classify_supervisor_log(log_path, harness).failure_class == "capacity"
     return (
-        isinstance(terminal, Mapping)
-        and metadata.get("harness") == "claude"
-        and terminal.get("state") == "invalid"
-        and terminal.get("source") == "exact-claude-result"
-        and terminal.get("reason") == "claude-result-capacity"
+        terminal.get("state") == "invalid"
+        and terminal.get("source") == f"exact-{harness}-result"
+        and terminal.get("reason") == f"{harness}-result-capacity"
         and terminal.get("failure_class") == "capacity"
         and terminal.get("failure_note") == "dead-capacity"
     )
@@ -83,7 +91,7 @@ def _closed_native_capacity(status, metadata, *, jobs=None, lines=None):
                 or current.get("route_hash") != metadata.get("route_hash")
                 or current.get("route_node") != metadata.get("route_node")):
             return False
-        return _native_claude_capacity(DR.terminal_observation(fields, current), current)
+        return native_capacity_terminal(DR.terminal_observation(fields, current), current)
     except Exception:
         # Registry or classifier uncertainty is a refusal; this read-only
         # eligibility branch never turns it into replacement authority.
@@ -163,6 +171,16 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
         # stopped alone (close or Fleet) is relaunched only by that person's next `start`.
         return (DR.STOPPED if meta.get('worker_type') == 'frame' and meta.get('launch_started') == '1'
                 and meta.get('note') == route_parent_close.STOP_NOTE else None)
+    if meta.get('capability') == 'unit':
+        # A recorded unit can resume a launched turn at a usage limit. Its other ends keep
+        # their ordinary unit result, including a finished review with blocking findings.
+        from unit_continue import recorded_leg
+        if (status == 'done' and meta.get('launch_started') == '1' and recorded_leg(meta)
+                and not verdict_pass(meta) and not readable_result(meta)
+                and (meta.get('note') == 'dead-capacity' or meta.get('failure_class') == 'capacity'
+                     or _closed_native_capacity(status, meta, jobs=jobs, lines=lines))):
+            return 'capacity'
+        return None
     if meta.get('worker_type') == 'owner' and DR.never_started(status, meta):
         # The launch fence is the execution boundary. A reservation may carry a
         # claim, but its absence of launch_started means it has no worker result.
@@ -527,7 +545,7 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         terminal = facts["terminal"]
         state, verdict = str(terminal.get("state") or "absent"), str(terminal.get("verdict") or "")
         if state != "valid":
-            if _native_claude_capacity(terminal, metadata or {}):
+            if native_capacity_terminal(terminal, metadata or {}):
                 return ContinuationDecision(False, "typed", "typed-capacity", "typed-close",
                     detail="dead-capacity", census={key: terminal[key] for key in (
                         "reason", "failure_note", "failure_class", "quota_window",
@@ -883,7 +901,7 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
                     raise _contract_error("owner-closure-intensity-unknown", "owner-closure-intensity-unknown:" + route["effective_intensity"])
                 raise
         worker_type = node.get("worker_type") or ("review" if node.get("kind") == "review-worker" else "test")
-        # The middle cell's review (`solo·standard`): the owner both makes the work and starts this review,
+        # The middle cell's review (`solo` at `standard` and up): the owner both makes the work and starts this review,
         # so the review's rounds are counted on its lineage, not once per reviewed content.
         review_cell = _is_one_shot_review(route, node)
         same_content_rows = None
@@ -1042,9 +1060,9 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
 
 
 def _is_one_shot_review(route, node) -> bool:
-    """Whether `node` is the middle cell's review node (the owner makes the work and starts this review)."""
-    declared = one_shot_review_node(route)
-    return (declared is not None and isinstance(node, dict) and node.get("id") == declared.get("id")
+    """Whether `node` is one of the middle cell's review nodes (the owner makes the work and starts this
+    review; from `strong` the review is a group of legs, and every leg counts its rounds on its own lineage)."""
+    return (isinstance(node, dict) and node.get("id") in one_shot_review_node_ids(route)
             and node.get("kind") == "review-worker")
 
 
@@ -1216,7 +1234,17 @@ def require_replacement_parent(jobs, rows, meta, *, current_session) -> None:
     only on that second path, where an unreadable lineage is the recipient
     judgment's wait for the same command, never a verdict on the caller.
     """
-    if meta.get('dispatch_depth') == '2':
+    if meta.get('capability') == 'unit' and meta.get('caller_attempt_id'):
+        import dispatch_contract as DC
+        from route_parent_close import row_requested
+        caller = meta['caller_attempt_id']
+        if caller != os.environ.get('AGENT_DISPATCH_ATTEMPT_ID') or caller not in rows:
+            raise _contract_error('replacement-parent-identity-unproven')
+        fields, caller_meta = rows[caller]
+        if (fields[1] not in {'open', 'running'} or row_requested(caller_meta, jobs)
+                or not DC._parent_liveness_evidence(Path(jobs), caller_meta)[0]):
+            raise _contract_error('replacement-parent-not-live')
+    elif meta.get('dispatch_depth') == '2':
         import dispatch_contract as DC
         parent = meta.get('parent_attempt_id')
         caller = os.environ.get('AGENT_DISPATCH_ATTEMPT_ID')
@@ -1238,6 +1266,8 @@ def replacement_parent_matches(source, candidate, jobs, *, lineage=False) -> boo
     When that depends on a seat lineage that cannot be read, the answer is neither:
     the recipient judgment's wait is raised (``require_known``).
     """
+    if source.get('caller_attempt_id') != candidate.get('caller_attempt_id'):
+        return False
     if not parent_attempt_succeeded(jobs, source.get('parent_attempt_id'), candidate.get('parent_attempt_id')):
         return False
     if candidate.get('parent_sid') == source.get('parent_sid'):
@@ -1711,7 +1741,7 @@ REPLACEMENT_FIXED_KEYS = ("harness", "jobs", "worktree")
 # The task and scope survive recovery. Parent/owner/pin/model are current
 # execution choices; the ordinary launcher validates their realization.
 RECOVERY_SCOPE_KEYS = (
-    "route_node", "worker_type", "dispatch_depth", "session_chain_id",
+    "route_node", "worker_type", "dispatch_depth", "session_chain_id", "caller_attempt_id",
     "subsession_id", "subsession_index", "subsession_count", "subsession_mode",
     "stage_authority", "fixed_inputs_sha256", "narrow_verify_sha256", "phase_brief_sha256",
 )
@@ -1943,7 +1973,7 @@ def recovery_node_task(record, source, history, *, attempt_id, route, node, harn
     return recovery_task(record, source, history)
 
 
-def _work_options(argv, *, harness=None):
+def _work_options(argv, *, harness=None, ignore=()):
     """Read stored semantic options, without synthesizing a new original argv."""
     values = []; index = 0
     while index < len(argv):
@@ -1951,7 +1981,7 @@ def _work_options(argv, *, harness=None):
         group = token.split("=", 1) if "=" in token else [token]
         if "=" not in token and index + 1 < len(argv) and not argv[index + 1].startswith("--"):
             index += 1; group.append(argv[index])
-        if (key not in RECOVERY_SELECTION_OPTIONS
+        if (key not in RECOVERY_SELECTION_OPTIONS and key not in ignore
                 and not (harness == "opencode" and key == "--agent")):
             values.append(group)
         index += 1
@@ -1969,7 +1999,8 @@ def require_recovery_work(candidate, history, *, route=None, worker_type=None,
     pinned = sealed_pin_harness(route, worker_type=worker_type) if route else None
     frame_peer = bool(route and worker_type == "frame"
                       and _frame_peer_recovery_harness(candidate, history, route))
-    keys = ("jobs", "worktree") if owner or pinned or frame_peer else REPLACEMENT_FIXED_KEYS
+    unit = bool(route and route.get("capability") == "unit")
+    keys = ("jobs", "worktree") if owner or pinned or frame_peer or unit else REPLACEMENT_FIXED_KEYS
     for key in keys:
         if candidate.get(key) != history.get(key):
             raise _contract_error("replacement-input-tuple-mismatch", key)
@@ -1984,11 +2015,13 @@ def require_recovery_work(candidate, history, *, route=None, worker_type=None,
         if (not node or new.get("model_profile") != expected_profile
                 or new.get("model_role") != node.get("role")):
             raise _contract_error("replacement-input-tuple-mismatch", "frame-model-role-profile")
+    if unit and new.get("model_role") != old.get("model_role"):
+        raise _contract_error("replacement-input-tuple-mismatch", "unit-model-role")
     if transition and new.get("model_profile") != transition["to"]:
         raise _contract_error("replacement-input-tuple-mismatch", "resolved")
     ignored = RECOVERY_SELECTION_VALUES if route else frozenset()
     cross_runtime = (bool(route) and candidate.get("harness") != history.get("harness")
-                     and (owner or frame_peer))
+                     and (owner or frame_peer or unit))
     if cross_runtime:
         ignored = ignored | {"sandbox", "permission_mode", "parent_sandbox", "parent_transport"}
     for key in sorted(set(old) | set(new)):
@@ -2057,9 +2090,13 @@ def require_recovery_work(candidate, history, *, route=None, worker_type=None,
             if key not in added}}
         detail = permission_mismatch_detail(history, shown)
         raise _contract_error("replacement-input-tuple-mismatch", detail or "applied_permissions")
-    if (not owner and _work_options(candidate.get("argv", []), harness=candidate.get("harness"))
-            != _work_options(history.get("argv", []), harness=history.get("harness"))):
-        raise _contract_error("replacement-argv-mismatch")
+    if not owner:
+        ignored_options = {"--continues-attempt-id", "--turn", "--continuation-text"} if unit else set()
+        if unit and cross_runtime:
+            ignored_options.update({"--sandbox", "--permission-mode", "--parent-sandbox", "--parent-transport"})
+        if (_work_options(candidate.get("argv", []), harness=candidate.get("harness"), ignore=ignored_options)
+                != _work_options(history.get("argv", []), harness=history.get("harness"), ignore=ignored_options)):
+            raise _contract_error("replacement-argv-mismatch")
 
 
 def _opencode_permission_view(applied):

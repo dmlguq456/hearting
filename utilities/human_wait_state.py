@@ -566,7 +566,8 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
                      recommended=None, secret=False, cwd=None, incarnation=None, replace=True):
     """Register one explicit question on the caller's current prompt, without waiting.
 
-    A new question replaces this session's earlier waiting one. `replace=False` leaves a
+    A new question replaces this session's earlier waiting one; the returned value then carries
+    `replaced` (that question's id and text) so the caller can say so. `replace=False` leaves a
     different open question in place and refuses instead (`question-open-elsewhere`)."""
     import session_tidy as tidy
     if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
@@ -650,6 +651,10 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
     if prior:
         _queue_message_decision(prior)
     _request_producer()
+    if (prior and prior.get("id") != item_id and prior.get("mode") == "message"
+            and prior.get("lifecycle") == "open"):
+        # The earlier unanswered question of this session was just closed as replaced.
+        return {**value, "replaced": {"id": prior["id"], "question": str(prior.get("question") or "")}}
     return value
 
 
@@ -683,15 +688,34 @@ def _message_incarnation_current(signal):
 def _message_answer_error(text):
     if not isinstance(text, str) or not text.strip():
         return "message-answer-empty"
-    if len(text) > 600 or len(text.encode("utf-8")) > _SELECTED_DRAFT_MAX:
+    if len(text.encode("utf-8")) > 16_384:
         return "message-answer-too-large-use-original-session"
     return None
 
 
-def _message_body(portable):
+def _message_answer_values(portable):
     answers = portable.get("answers") if isinstance(portable, dict) else None
     values = answers.get("message-response") if isinstance(answers, dict) else None
-    return values[0] if isinstance(values, list) and len(values) == 1 else None
+    if not isinstance(values, list) or not 1 <= len(values) <= 2 or any(not isinstance(v, str) for v in values):
+        return None
+    return values
+
+
+def _message_body(portable, *, bound_bytes=None):
+    values = _message_answer_values(portable)
+    if values is None:
+        return None
+    if len(values) == 1:
+        value = values[0]
+        # Older claims may bind the unwrapped bytes. The caller still verifies their digest.
+        if not value.lstrip().startswith("[") or len(value.encode("utf-8")) == bound_bytes:
+            return value
+        try:
+            if not isinstance(json.loads(value), list):
+                return value
+        except (ValueError, RecursionError):
+            return value
+    return json.dumps(values, ensure_ascii=False)
 
 
 def message_binding_valid(binding):
@@ -705,7 +729,7 @@ def message_binding_valid(binding):
             and binding["question_id"] == "message-response"
             and isinstance(binding["seat_key"], str) and bool(binding["seat_key"])
             and type(binding["sequence"]) is int and binding["sequence"] >= 0
-            and type(binding["body_bytes"]) is int and 0 < binding["body_bytes"] <= 4096
+            and type(binding["body_bytes"]) is int and 0 < binding["body_bytes"] <= 16_384
             and isinstance(binding["action_id"], str) and bool(_SAFE.fullmatch(binding["action_id"]))
             and all(isinstance(binding[key], str) and re.fullmatch(r"[0-9a-f]{64}", binding[key])
                     for key in ("body_id", "body_sha256")))
@@ -721,7 +745,7 @@ def message_answer_body(binding, *, current=False):
         raise ValueError("message-answer-storage-invalid")
     entry = overlay.get(binding["body_id"]) or {}
     identity = entry.get("identity") or {}
-    text = _message_body(entry.get("response"))
+    text = _message_body(entry.get("response"), bound_bytes=binding["body_bytes"])
     if (entry.get("message_binding") != binding or entry.get("action_id") != binding["action_id"]
             or any(identity.get(key) != binding[key]
                    for key in ("harness", "session_id", "request_id", "question_id"))
@@ -814,7 +838,7 @@ def _settle_published_wait(wait_id):
         pass
 
 
-def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, verified=False):
+def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, verified=False, answer_values=()):
     """Source seat lock held; completion is independent of the transport claim."""
     if (not isinstance(text, str) or not text.strip() or signal.get("lifecycle") != "open"
             or sequence < signal["sequence"]
@@ -829,7 +853,9 @@ def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, v
     completion = {"actor": actor, "action_id": action_id, "at": time.time(),
                   "answer_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
     if not signal["detail"]["questions"][0].get("is_secret"):
-        completion["answer"] = text
+        completion["answer"] = answer_values[0] if answer_values else text
+        if len(answer_values) == 2:
+            completion["note"] = answer_values[1]
     signal.update(lifecycle="answered", completion=completion)
     _write_signal_source(signal)
     _settle_published_wait(signal["id"])
@@ -883,7 +909,8 @@ def complete_message_answer(receipt, recipient):
                 verified = True
             if verified:
                 _complete_message_locked(signal, text, "fleet", sequence=binding["sequence"],
-                                         action_id=binding["action_id"], verified=True)
+                                         action_id=binding["action_id"], verified=True,
+                                         answer_values=_message_answer_values(entry["response"]))
                 entry = _selected_entry(envelope) or entry
         won = bool(exact and (signal.get("completion") or {}).get("action_id") == binding["action_id"])
         status = "applied" if won else (
@@ -908,7 +935,8 @@ def _queue_message_decision(signal):
         question = signal["detail"]["questions"][0]
         saved = decisions.save_pending(decisions.make_payload(
             question["question"], [completion["answer"]], options=question["choices"],
-            cwd=signal.get("cwd"), origin={"kind": "message-question", "harness": signal["harness"],
+            note=completion.get("note", ""), cwd=signal.get("cwd"),
+            origin={"kind": "message-question", "harness": signal["harness"],
                                          "session_id": signal["session_id"], "request_id": signal["id"]}))
         if saved:
             import session_tidy as tidy
@@ -1632,8 +1660,8 @@ def cached_fleet_view(*, now=None, request=True):
     return value
 
 
-def cached_view(*, now=None, request=True):
-    value = _read_cache(now=now)
+def cached_view(*, now=None, request=True, max_age=_DISPLAY_TTL):
+    value = _read_cache(now=now, max_age=max_age)
     if request:
         observed = value.get("observed_at") if value else None
         if observed is None or (time.time() if now is None else float(now)) - float(observed) > _REQUEST_TTL:
@@ -4180,11 +4208,14 @@ def _native_response_error(envelope, portable):
             if not isinstance(question, dict):
                 return "workflow-gate-question-invalid"
             values = answers.get(question.get("id"))
-            if not isinstance(values, list) or len(values) != 1:
+            mixed = detail.get("response_mode") == "frame-interview" and question.get("is_other") is True
+            if not isinstance(values, list) or len(values) not in ({1, 2} if mixed else {1}):
                 return "workflow-gate-answer-count-invalid"
             choices = question.get("choices")
             allowed = {choice.get("value", choice.get("label")) for choice in choices
                        if isinstance(choice, dict)} if isinstance(choices, list) else set()
+            if len(values) == 2 and values[0] not in allowed:
+                return "workflow-gate-answer-not-current-option"
             if values[0] not in allowed and question.get("is_other") is not True:
                 return "workflow-gate-answer-not-current-option"
         return None
@@ -4230,6 +4261,21 @@ def _native_response_error(envelope, portable):
     return None
 
 
+def _frame_interview_answers(detail, interview, answers):
+    """Keep the selected value and its note in the frame's existing answer fields."""
+    import frame_interview as FI
+    asked = []
+    for question in detail.get("questions", ()):
+        values = answers.get(question.get("id"))
+        if not isinstance(values, list) or len(values) not in {1, 2}:
+            return None
+        options = [choice.get("label", choice.get("value"))
+                   for choice in question.get("choices", ()) if isinstance(choice, dict)]
+        asked.append({"question": question.get("question"), "options": options,
+                      "answer": values[0], **({"note": values[1]} if len(values) == 2 else {})})
+    return FI.answers_from_native(interview, asked)
+
+
 def _workflow_gate_submit(envelope, portable, action_id):
     """Submit a current person's explicit S2 decision through the normal release CLI."""
     base, error = _selected_base(envelope)
@@ -4268,16 +4314,7 @@ def _workflow_gate_submit(envelope, portable, action_id):
     elif mode == "frame-interview":
         import frame_interview as FI
 
-        asked = []
-        for question in current["detail"].get("questions", ()):
-            values = answers.get(question.get("id"))
-            if not isinstance(values, list) or len(values) != 1:
-                return "unknown", {"reason": "workflow-interview-answer-incomplete"}
-            options = [choice.get("label", choice.get("value"))
-                       for choice in question.get("choices", ()) if isinstance(choice, dict)]
-            asked.append({"question": question.get("question"), "options": options,
-                          "answer": values[0]})
-        answers_file_value = FI.answers_from_native(current["interview"], asked)
+        answers_file_value = _frame_interview_answers(current["detail"], current["interview"], answers)
         if (not isinstance(answers_file_value, dict)
                 or FI.validate_answers(current["interview"], answers_file_value)):
             return "unknown", {"reason": "workflow-interview-answer-invalid"}

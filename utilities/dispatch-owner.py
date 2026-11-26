@@ -73,7 +73,7 @@ _REQUIRED = {
 # against that same derivation, both through resolve_qa (the single qa/intensity
 # SoT).
 _CAPTURED = _REQUIRED | {"--unit", "--review-output", "--model-role", "--qa",
-                         "--attempt-id", "--continues-attempt-id"}
+                         "--attempt-id", "--continues-attempt-id", "--automatic-retry-of"}
 # SD-OPEN-40: the depth-1 tuples this selector may launch. `review` exists so an
 # independent reviewer can be a *registered review worker* instead of an owner
 # wearing a reviewer's prompt. Before it, every ad-hoc independent review landed
@@ -84,6 +84,9 @@ _CAPTURED = _REQUIRED | {"--unit", "--review-output", "--model-role", "--qa",
 # direct owner selection use this selector; the adapter's atomic attempt claim
 # remains the single registration authority.
 _LAUNCHABLE_WORKER_TYPES = {"owner", "review", "frame"}
+# A `support` unit (a lookup: `general/explore`) is launched only as the leg of a route that names it: the unit
+# route's one node. Route-free, it stays refused, as it was.
+_ROUTE_NODE_WORKER_TYPES = {"support"}
 # Legacy route-free frame calls must supply their own scope. Route-bound calls
 # derive it from the producer, so inherited/partial environment is not authority.
 _FRAME_ARTIFACT_ENV = (
@@ -129,7 +132,7 @@ _HINTS = {
     "no-eligible-candidate": "no configured owner harness is usable: usage-limited, gated, or no positive capacity score "
                              "(see eligibility.* and capacity_headroom.* above; utilities/usage-check.sh --harness all)",
     "exactly-one-action-required": "pass exactly one of --dry-run | --register | --start",
-    "owner-tuple-required": "the launchable tuple is --dispatch-depth 1 --worker-type owner|review|frame",
+    "owner-tuple-required": "the launchable tuple is --dispatch-depth 1 --worker-type owner|review|frame (support only as a route node)",
     "invalid-model-profile": "--model-profile deep|balanced-deep|balanced|light (top only from a route that seals it)",
     "profile-top-route-required": "drop --model-profile top: the top exception profile is sealed by a route "
                                   "(compose/compile --profile-demands '{\"__owner__\": …}' --explicit-profiles "
@@ -140,7 +143,7 @@ _HINTS = {
     "frame-artifact-scope-missing": "launch frames through their route: compose --start (or the receipt's resume_command) "
                                     "binds each leg's cycle itself (OPERATIONS §5.10b)",
     "route-node-unknown": "--route-node must name an id present in the sealed route's nodes list",
-    "route-node-worker-type-forbidden": "--route-node selects a frame node's own profile and role; only --worker-type frame may use it",
+    "route-node-worker-type-forbidden": "--route-node selects a route leg's own profile and role; only --worker-type frame, review or support may use it",
     "forbidden-flag": "model, reasoning, effort, variant and completion-delivery are sealed by the profile and route; remove the flag. "
                       "To choose a tool or model, seal it once at compose time: capability-route.py compose --pin <owner|frame|worker>=<harness>[:<model>[@<effort>]]",
     "explicit-jobs-outside-parent-registry": "drop --jobs: an interactive Claude parent's completion hook trusts only the inherited "
@@ -285,6 +288,7 @@ def _sealed_owner_context(path, *, worker_type="owner", route_node=None):
         "harnesses": harnesses,
         "policy": policy,
         "allocation": route.get("dispatch_allocation"),
+        "field": route.get("field"),
     }
 
 
@@ -525,7 +529,9 @@ def _parse(argv):
     if len(actions) != 1:
         raise OwnerError("exactly-one-action-required")
     worker_type = values["--worker-type"]
-    if values["--dispatch-depth"] != "1" or worker_type not in _LAUNCHABLE_WORKER_TYPES:
+    if values["--dispatch-depth"] != "1" or not (
+            worker_type in _LAUNCHABLE_WORKER_TYPES
+            or (worker_type in _ROUTE_NODE_WORKER_TYPES and route_node and route_evidence)):
         raise OwnerError("owner-tuple-required")
     if route_node and worker_type == "owner":
         raise OwnerError("route-node-worker-type-forbidden")
@@ -638,6 +644,20 @@ def _usage(jobs, profile=None, recheck=False):
     return states
 
 
+def _unread_gauges(states, explicit):
+    """Harnesses whose capacity gauge this start does not read, with why.
+
+    A harness the usage state already reads as limited is never a candidate, so its headroom never
+    ranks or gates anything; and when the harness is named and eligible, it is the one used, so no
+    other is ranked. The receipt shows such a gauge as `skipped:<why>` instead of a reading. A gauge
+    whose read refreshes the shared usage cache (codex, opencode) is still read: the next start's
+    limit judgment depends on that refresh."""
+    skip = {harness: "limited" for harness, state in states.items() if not _eligible(state)}
+    if explicit is not None and _eligible(states.get(explicit, "unknown")):
+        skip.update({harness: "not-needed" for harness in states if harness != explicit})
+    return {harness: why for harness, why in skip.items() if harness not in _capacity.CACHE_WRITING_GAUGES}
+
+
 def _resolved_path(value):
     return Path(value).expanduser().resolve(strict=False)
 
@@ -720,7 +740,7 @@ def _audit(
     status, adapter, source, configured, explicit, states, *, allocation=None,
     counts=None, rejected=(), fallback=None, reason="none", capacity=None,
     quality_band=None, relief_promoted=False, capacity_sources=None,
-    capacity_freshness=None, top_excluded=(),
+    capacity_freshness=None, top_excluded=(), field=None,
 ):
     lines = [
         f"status={status}", f"adapter={adapter or '-'}", f"selection_source={source}",
@@ -739,6 +759,13 @@ def _audit(
         if "owner_order" in allocation:
             lines.append("owner_order=" + ",".join(allocation["owner_order"]))
         lines.append(f"usage_headroom_exponent={allocation.get('usage_headroom_exponent', 1)}")
+        # Why this harness: the user's flat weights, the route's field, and the field's
+        # applied row the selection multiplied them by (`none` / `-` when there is none).
+        flat = allocation.get("harness_weights") or {}
+        row = allocation.get("field_weights") or {}
+        lines.append("harness_weights=" + (",".join(f"{key}:{flat[key]}" for key in sorted(flat)) or "none"))
+        lines.append(f"field={field or '-'}")
+        lines.append("field_weights=" + (",".join(f"{key}:{row[key]}" for key in sorted(row)) or "none"))
     for harness in _allocation.HARNESSES:
         if counts is not None:
             lines.append(f"attempt_count.{harness}={counts.get(harness, 0)}")
@@ -964,7 +991,7 @@ def main(argv):
             )
 
         rejected = [h for h in sorted(states) if not _eligible(states[h])]
-        capacity_report = _capacity.capacity_report()
+        capacity_report = _capacity.capacity_report(skip=_unread_gauges(states, explicit))
         capacity = capacity_report["scores"]
         capacity_sources = capacity_report["sources"]
         capacity_freshness = capacity_report.get("freshness") or {}
@@ -990,7 +1017,7 @@ def main(argv):
                 preferred=_capacity.preferred_for_depth(allocation, 1),
                 affinity_weight=allocation.get("depth_affinity_weight", 0.5),
                 headroom_exponent=allocation.get("usage_headroom_exponent", 1),
-                harness_weights=allocation.get("harness_weights"),
+                harness_weights=_allocation.effective_harness_weights(allocation),
                 preference_order=(allocation.get("owner_order")
                                   if values["--worker-type"] in {"owner", "frame"} else None),
             )
@@ -1031,6 +1058,7 @@ def main(argv):
                 capacity=capacity, capacity_sources=capacity_sources,
                 capacity_freshness=capacity_freshness,
                 relief_promoted=relief_promoted, top_excluded=top_excluded,
+                field=(sealed_context or {}).get("field"),
             )))
             if dropped and not configured:
                 # Every candidate was left out for not declaring `top`; say that
@@ -1145,7 +1173,8 @@ def main(argv):
                                       reason=reason, capacity=capacity, capacity_sources=capacity_sources,
                                       capacity_freshness=capacity_freshness,
                                       quality_band=quality_band,
-                                      relief_promoted=relief_promoted, top_excluded=top_excluded)))
+                                      relief_promoted=relief_promoted, top_excluded=top_excluded,
+                                      field=(sealed_context or {}).get("field"))))
             print("check=failed\nreason=wrapper-unavailable\nchild_spawned=0")
             return 65
         print("\n".join(_audit("eligible", selected, source, configured, requested, states,
@@ -1155,7 +1184,8 @@ def main(argv):
                                   reason=reason, capacity=capacity, capacity_sources=capacity_sources,
                                   capacity_freshness=capacity_freshness,
                                   quality_band=quality_band,
-                                  relief_promoted=relief_promoted, top_excluded=top_excluded)), flush=True)
+                                  relief_promoted=relief_promoted, top_excluded=top_excluded,
+                                  field=(sealed_context or {}).get("field"))), flush=True)
         if pair_model_reason != "not-applicable":
             print(f"model_diversity_proposal={pair_model_reason}", flush=True)
             print(f"model_diversity_proposal_profile={pair_model_profile or values.get('--model-profile', '-')}", flush=True)
@@ -1168,10 +1198,12 @@ def main(argv):
         child_env = {
             key: value for key, value in os.environ.items() if not _MODEL_ENV.fullmatch(key)
         }
-        if values["--worker-type"] in {"review", "frame"}:
-            # A direct reviewer is deliberately route-free.  The selector may
-            # itself run inside a route-owned owner, so inherited route
-            # variables must not silently bind the child to that owner/node.
+        if values["--worker-type"] in {"review", "frame"} | _ROUTE_NODE_WORKER_TYPES:
+            # A direct reviewer is deliberately route-free, and a route leg that is
+            # not the owner (a frame, a unit's support leg) never carries its
+            # caller's route binding.  The selector may itself run inside a
+            # route-owned owner, so inherited route variables must not silently
+            # bind the child to that owner/node.
             for key in (
                 "AGENT_OWNER_ROUTE_FILE", "AGENT_OWNER_ROUTE_ID",
                 "AGENT_OWNER_ROUTE_HASH", "AGENT_ROUTE_FILE",
@@ -1215,9 +1247,9 @@ def main(argv):
                             child_env.update(prepare_route_artifact_env(
                                 Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs),
                                 sibling_looked=bool(first) and first.get("_status") in {"open", "running"},
-                                # A unit route's next turn begins its own cycle (the earlier one stays sealed).
+                                # A new request begins its own cycle. A capacity retry finishes the open turn.
                                 fresh_cycle=(values.get("--attempt-id") if values.get("--continues-attempt-id")
-                                             else None)))
+                                             and not values.get("--automatic-retry-of") else None)))
                     except ProducerError as exc:
                         raise OwnerError(f"{exc.code}:{exc.detail}") from exc
                 # Deliberately NOT export_owner_route_env() here. The adapters
@@ -1242,7 +1274,10 @@ def main(argv):
                 try:
                     child_env.pop("AGENT_ARTIFACT_PARENT_OUTPUT_DIR", None)  # SD-163: no stale source
                     child_env.update(prepare_route_artifact_env(
-                        Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs)))
+                        Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs),
+                        # A later request on a closed route begins its own cycle, as a unit turn does.
+                        fresh_cycle=(values.get("--attempt-id") if values.get("--continues-attempt-id")
+                                     and not values.get("--automatic-retry-of") else None)))
                 except ProducerError as exc:
                     raise OwnerError(f"{exc.code}:{exc.detail}") from exc
         if overridden:

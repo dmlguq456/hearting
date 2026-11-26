@@ -79,6 +79,7 @@ MAX_FLOOR_DOUBLINGS = (MAX_SLEEP_SECONDS // LATER_SECONDS).bit_length()
 RECHECK_SECONDS = 600
 LATER_REASONS = ("owner-launch-not-admitted", "owner-launch-not-started")
 LAUNCH_CAPACITY_REASON = "launch-capacity-wait"
+UNIT_CAPACITY_PAUSE = "unit-capacity-wait"
 ANSWER_REASON = "answer-awaiting-parent"
 NO_PROGRESS_REASON = "no-progress"
 CHAIN_ENV = "AGENT_CAPACITY_RESUME_CHAIN"
@@ -118,7 +119,8 @@ def replacement_record_path(jobs: Path, route_id: str, route_hash: str, source_a
 
 def _pause(result: dict, now, *, automatic: bool = False) -> tuple[str | None, str] | None:
     """`(retry_at, cause)` for a pause this module resumes, else None."""
-    if (result.get("state") == "waiting-capacity" and result.get("reason") == "owner-capacity-wait"
+    if (result.get("state") == "waiting-capacity"
+            and result.get("reason") in {"owner-capacity-wait", UNIT_CAPACITY_PAUSE}
             and result.get("required_action") == "resume-after-capacity"):
         return result.get("retry_at"), "capacity"
     if (result.get("state") == "waiting-capacity" and result.get("reason") == LAUNCH_CAPACITY_REASON
@@ -137,7 +139,22 @@ def arm(result: dict, route_file, jobs, *, environ=None, spawn=subprocess.Popen,
     env = dict(os.environ if environ is None else environ)
     reason = result.get("reason")
     eligibility = None
-    if reason in {NO_PROGRESS_REASON, ANSWER_REASON} and result.get("source_attempt_id"):
+    if reason == UNIT_CAPACITY_PAUSE:
+        from dispatch_replacement import unit_capacity_pause
+        from route_authority import owns
+        from session_identity import identity
+
+        session = identity(env)
+        offered = result.get("state") is None
+        eligibility = unit_capacity_pause(Path(jobs), result.get("source_attempt_id"), read_reset=offered)
+        if (not eligibility or eligibility["route_id"] != result.get("route_id")
+                or Path(eligibility["route_file"]) != Path(route_file).resolve()
+                or not session.known or owns(eligibility["source"], session.session_id, jobs) is not True):
+            return None
+        if offered and eligibility.get("usage_state"):
+            result = {**result, "state": "waiting-capacity", "required_action": "resume-after-capacity",
+                      **{key: eligibility[key] for key in ("harness", "retry_at", "usage_state") if key in eligibility}}
+    elif reason in {NO_PROGRESS_REASON, ANSWER_REASON} and result.get("source_attempt_id"):
         try:
             from dispatch_replacement import parent_resume_eligibility
             eligibility = parent_resume_eligibility(
@@ -145,7 +162,10 @@ def arm(result: dict, route_file, jobs, *, environ=None, spawn=subprocess.Popen,
                 require_parent=True)
         except (OSError, ValueError):
             eligibility = None
-    if reason == NO_PROGRESS_REASON:
+    if reason == UNIT_CAPACITY_PAUSE and result.get("state") is None:
+        # Once per exact interrupted attempt, let the normal selector try its admitted alternatives.
+        pause = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now())), "replacement")
+    elif reason == NO_PROGRESS_REASON:
         if eligibility is None:
             return None
         pause = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now())), "replacement")
@@ -199,6 +219,8 @@ def arm(result: dict, route_file, jobs, *, environ=None, spawn=subprocess.Popen,
               "harness": result.get("harness") or "", "source_attempt_id": result.get("source_attempt_id") or "",
               "usage_state": result.get("usage_state") or "",
               "armed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    if reason == UNIT_CAPACITY_PAUSE:
+        record["unit_route_hash"] = eligibility["route_hash"]
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("x", encoding="utf-8") as handle:
@@ -231,7 +253,12 @@ def _cleared(record: dict) -> bool:
         return False
     try:
         from dispatch_capacity_evidence import attempt_model, usage_states
-        model = attempt_model(record["jobs"], record.get("source_attempt_id") or "")
+        if record.get("unit_route_hash"):
+            from dispatch_completion_join import exact_attempt_row
+            source = exact_attempt_row(Path(record["jobs"]), record["source_attempt_id"]).metadata
+            model = source.get("model") if source.get("harness") == harness else None
+        else:
+            model = attempt_model(record["jobs"], record.get("source_attempt_id") or "")
         if not model:
             # A model-free reader omits family/exact-model holds. Older or
             # incomplete records keep their reset deadline instead of treating
@@ -283,6 +310,29 @@ def _route_finished(record: dict) -> bool:
                 and not route_plan.is_framed_route(route))
 
 
+def _handoff_unit_completion(record: dict, receipt: dict) -> bool:
+    """Keep a running unit's carrier or recognize an exact delivered final result."""
+    try:
+        from dispatch_completion_join import exact_attempt_row
+        from peer_obligations import _registered_terminal_state, retain_registered_completion
+        jobs = Path(record["jobs"])
+        aid = receipt["unit_attempt_id"]
+        meta = exact_attempt_row(jobs, aid).metadata
+        if (meta.get("route_hash") != record["unit_route_hash"]
+                or meta.get("replacement_original_attempt_id") != record["source_attempt_id"]
+                or meta.get("caller_attempt_id")):
+            return False
+        carrier = meta.get("parent_completion_delivery", "")
+        if receipt.get("state") == "completed" and receipt.get("summary"):
+            # A foreground retry can finish inside this start. Give its sealed result to
+            # the timer's ordinary result notice unless the carrier already delivered it.
+            return _registered_terminal_state(jobs.parent, meta["parent_sid"], meta.get("delivery_id"),
+                                              aid, meta, carrier) == "acked"
+        return bool(retain_registered_completion(jobs, aid, meta["parent_sid"], carrier))
+    except (OSError, ValueError, KeyError, RuntimeError):
+        return False
+
+
 def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cleared=_cleared,
         follow=follow_installed_release) -> int:
     record = json.loads(path.read_text(encoding="utf-8"))
@@ -312,6 +362,13 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
     record = json.loads(path.read_text(encoding="utf-8"))
     if record.get("state") != "armed":
         return 0
+    if record.get("unit_route_hash"):
+        from dispatch_replacement import unit_capacity_pause
+        pending = unit_capacity_pause(Path(record["jobs"]), record["source_attempt_id"])
+        if (not pending or pending["route_hash"] != record["unit_route_hash"]
+                or pending["route_file"] != record["route_file"]):
+            _write(path, {**record, "state": "resumed", "notice": "skipped-unit-no-longer-pending"})
+            return 0
     capped = (record.get("cause") in {"capacity", "launch-capacity"}
               and path != record_path(Path(record["jobs"]), record.get("route_id") or "", record["retry_at"]))
     if early or capped:
@@ -337,12 +394,19 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
     # shared-spec publication and reports what is left. Only a plain
     # `completed` of a route that finished as proven work while this wait
     # slept has nothing to tell its session.
+    unit_advanced = bool(record.get("unit_route_hash") and receipt.get("unit_attempt_id")
+                         and receipt.get("continues_attempt_id") == record["source_attempt_id"]
+                         and receipt.get("state") in {"running", "completed"})
+    handed_off = unit_advanced and _handoff_unit_completion(record, receipt)
     quiet = (done.returncode == 0 and receipt.get("state") == "completed"
-             and not receipt.get("next_leg") and _route_finished(record))
+             and not receipt.get("next_leg") and _route_finished(record)
+             and (not unit_advanced or handed_off))
     record.update(state="resumed", resumed_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                   exit_code=done.returncode, result_state=receipt.get("state"),
                   owner_attempt_id=receipt.get("owner_attempt_id"), **({"early": True} if early else {}),
                   **({"notice": "skipped-route-completed"} if quiet else {}))
+    if receipt.get("unit_attempt_id"):
+        record["unit_attempt_id"] = receipt["unit_attempt_id"]
     _write(path, record)
     if not quiet:
         _notify(record, receipt, capped=capped and not early)
@@ -384,6 +448,10 @@ def _notify(record: dict, receipt: dict, capped: bool = False) -> None:
                 + (f"; paused again until {receipt.get('retry_at', 'an unknown time')}" if again else "")
                 + (f"; start exited {record.get('exit_code')}, run it again: "
                    f"{resume_command(record['route_file'], record['jobs'], agent_home=ROOT)}" if failed else ""))
+        if state == "completed" and receipt.get("unit_attempt_id") and receipt.get("summary"):
+            summary = receipt["summary"]
+            report = next((line for line in summary.splitlines() if line.startswith("Artifact: ")), "")
+            text = f"{text}. {report} {summary}"
         action = "report-pause" if again else "run-resume-command" if failed else "report-to-user"
         notify(caller.harness, caller.session_id, key=f"capacity-resume:{record['route_id']}:{record['retry_at']}",
                subject="capacity resume", text=text, route_id=record["route_id"], jobs=record["jobs"],

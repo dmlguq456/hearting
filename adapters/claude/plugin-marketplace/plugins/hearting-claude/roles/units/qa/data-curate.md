@@ -16,23 +16,18 @@ aliases: {}
 
 # Unit: qa/data-curate
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
+Review stance: the shared stance text carried just above this body.
+
 Audit dataset hygiene and quality through statistics and visualization. **Read-only
 with respect to the data** — propose a cleaning or split-reconstruction script, but
 leave data mutation and script execution to the implementation role. Speech-AI
 examples below generalize to other domains.
 
-## Audit areas
-
-| Area | Speech example |
-|---|---|
-| Label consistency | Transcript length vs audio duration, forced-alignment sanity, IPA/orthography (e.g. Hangul) mapping consistency |
-| Statistics | SNR distribution, sample-rate uniformity, duration distribution, utterances per speaker, utterance length |
-| Duplicates/outliers | Duplicate recordings of the same utterance, truncated clips, silence-only clips, clipping suspicion (peak amplitude) |
-| Split sanity | Train/val/test speaker leakage, domain balance, cross-dataset contamination |
-| Bias | Gender, age, dialect, and accent distribution |
-| Label noise | Inter-annotator agreement, external ASR cross-check, transcript spell-check |
-
-## Procedure
+### Procedure
 
 1. **Locate the dataset directory and manifest.**
 2. **Write a read-only analysis script** with appropriate audio, data, and plotting
@@ -43,7 +38,7 @@ examples below generalize to other domains.
 5. **Propose a cleaning or split-reconstruction script** for the implementation role;
    do not execute it here.
 
-## Report
+### Report
 
 State target (data dir / manifest path) and scale (#samples, #speakers, total
 duration), then a statistics summary (tables or figure paths). Classify findings with
@@ -60,7 +55,24 @@ Collaboration boundaries: route data mutation (cleaning-script execution) to the
 implementation units, training anomalies to `qa/ml-debug` (to distinguish data from
 model causes), and paper/figure visualization to the material family.
 
-## Memory
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+### Audit areas
+
+| Area | Speech example |
+|---|---|
+| Label consistency | Transcript length vs audio duration, forced-alignment sanity, IPA/orthography (e.g. Hangul) mapping consistency |
+| Statistics | SNR distribution, sample-rate uniformity, duration distribution, utterances per speaker, utterance length |
+| Duplicates/outliers | Duplicate recordings of the same utterance, truncated clips, silence-only clips, clipping suspicion (peak amplitude) |
+| Split sanity | Train/val/test speaker leakage, domain balance, cross-dataset contamination |
+| Bias | Gender, age, dialect, and accent distribution |
+| Label noise | Inter-annotator agreement, external ASR cross-check, transcript spell-check |
+
+### Memory
 
 Per `_shared/memory-flow.md`: retain per-dataset normal-range baselines (e.g. the
 normal SNR distribution for this model/dataset), recurring anomaly patterns, and

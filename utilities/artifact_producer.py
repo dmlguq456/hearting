@@ -134,7 +134,7 @@ from artifact_producer_store import (  # noqa: F401
     _CLOSED_RECORD_STATES, _copy_tree_files, _cycle_rel, _digest, _disposition_value,
     _earlier_documents, _ensure_dir, _excluded_by_roots, _fallback_blocks, _folder_cycle_id,
     _fsync_dir, _HASH_CHUNK_BYTES, _HISTORICAL_OBSERVATIONS, _HISTORICAL_PROJECTIONS,
-    _is_payload_directory, _is_runtime_owned_top_level, _json_bytes, _KEY_RE, _LayoutScan,
+    _is_payload_directory, _is_runtime_owned_entry, _is_runtime_owned_top_level, _json_bytes, _KEY_RE, _LayoutScan,
     _legacy_content_names, _published_cycle_state, _QUIET_HISTORY, _read_json,
     _record_content_digest, _record_cycle_manifest_path, _reference_path, _rfc3339,
     _rfc3339_precise, _rfc3339_to_epoch, _SEALED_CYCLE_STATES, _stream_file_facts,
@@ -147,13 +147,13 @@ from artifact_producer_store import (  # noqa: F401
     classify_root, CLOSED_BINDABLE_STATES, COMPAT_OVERRIDE_FIELDS, COMPAT_OVERRIDE_NAME,
     compat_override_path, CONTRACT, cutover_path, cycle_dir, cycle_disposition,
     cycle_record_closed, cycle_record_path, default_bucket, ENTRANCE_NAMES, ENTRY_CAPABILITIES,
-    find_campaign_by_key, INACTIVE_FALLBACK_ENV, inactive_fallback_level, INTENSITIES,    INTERNAL_CAPABILITIES, is_active, journal_path, legacy_fallback_state, LEGACY_TOP_LEVEL,
+    find_campaign_by_key, INACTIVE_FALLBACK_ENV, inactive_fallback_level, INTENSITIES,    INTERNAL_CAPABILITIES, is_active, is_root_document, journal_path, legacy_fallback_state, LEGACY_TOP_LEVEL,
     LEGACY_WRITE_HINT, list_cycle_records, MEDIA_TYPES, OK, PRIMARY_CANDIDATES, producer_dir,
     PRODUCER_REL, ProducerError, PROVISIONAL_SEAL_WARNING, read_campaign,
     read_campaign_tombstone, read_compat_override, read_cutover, read_cycle_record,
     read_relayout_state, RECORD_SEGMENTS, RELATED_KINDS, RELAYOUT_STATE_NAME,
     relayout_state_path, REVIEW_LEASE_REL, REVISION_RECORD_NAME, ROOT_CLASSES,
-    RUNTIME_OWNED_EXACT, shared_journal_path, SHARED_KINDS, STAGE_CAPABILITIES,
+    ROOT_DOCUMENT_NAMES, RUNTIME_OWNED_EXACT, shared_journal_path, SHARED_KINDS, STAGE_CAPABILITIES,
     STATUS_DOCUMENT_NAMES, SUPPORT_SEGMENTS, transition_window_closed, USAGE,
     USER_DOCUMENT_NAMES, validate_time_bounded_grant, WAIVER_FIELDS,
 )
@@ -1668,6 +1668,12 @@ def _observe_after_begin(root: Path, result: Mapping[str, Any]) -> None:
                                                artifact_root=str(root), cycle_id=observed)
     except Exception:  # noqa: BLE001 -- observing other cycles never fails a begin
         pass
+    try:
+        import artifact_entrance  # the new cycle's campaign document is kept by the entrance worker
+
+        artifact_entrance.request_refresh(root, result.get("cycle_id"))
+    except Exception:  # noqa: BLE001 -- a derived document never fails a begin
+        pass
 
 
 def begin(root: Path, *, _reconcile: bool = True, _deliver_history: bool = True, **kwargs: Any) -> Dict[str, Any]:
@@ -1959,6 +1965,10 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
     top = parts[0]
     if top.startswith(".") or top == "_scratch":
         return {**base, "verdict": "allow", "reason": "runtime-owned", "layout": "runtime"}
+    if len(parts) == 1 and top in ROOT_DOCUMENT_NAMES and (
+            not os.path.lexists(str(root / top)) or is_root_document(root / top)):
+        # a person's or a session's root document, not a record; a link or a folder of that name is not one
+        return {**base, "verdict": "allow", "reason": "root-document", "layout": "runtime"}
     if top == "shared":
         return {**base, "verdict": "deny", "reason": "shared-revision-immutable", "layout": "shared"}
     if top == "campaigns":
@@ -2276,12 +2286,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--apply", action="store_true", help="write recovered_started_on into records (default: dry run)")
 
     p = sub.add_parser("cycle-display-titles-backfill",
-                       help="declare cycle display titles for Cairn from sealed cycles (default: dry run)")
+                       help="declare cycle display titles from sealed cycles (default: dry run)")
     p.add_argument("--artifact-root", required=True)
     p.add_argument("--apply", action="store_true", help="write the declaration (default: dry run)")
     p.add_argument("--report", help="write a markdown report to this path")
     p.add_argument("--out", help="write the candidate declaration bytes to this path (outside the artifact root)")
-    p.add_argument("--reader-dir", help="Cairn app_dir to gate --apply against (default: ~/.config/cairn-sync/config.json)")
     p.add_argument("--expect-post-digest", help="refuse --apply unless the computed post-digest matches")
     p.add_argument("--restore-journal", help="restore the declaration from a prior --apply's journal")
 
@@ -2477,7 +2486,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     root, apply=args.apply,
                     report_path=Path(args.report) if args.report else None,
                     out_path=Path(args.out) if args.out else None,
-                    reader_dir=Path(args.reader_dir) if args.reader_dir else None,
                     expect_post_digest=args.expect_post_digest,
                 )
             _print(result)

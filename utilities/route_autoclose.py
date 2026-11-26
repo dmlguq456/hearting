@@ -181,16 +181,47 @@ def _current_identity():
     return (harness, sid) if harness and sid else None
 
 
-def _registries(api) -> list[Path]:
+def registries_at(home) -> list[Path]:
+    """The global registry of ``home`` (none when ``home`` is None) and the explicit one, if set."""
     import dispatch_contract as dispatch
     paths = []
-    try:
-        paths.append(Path(dispatch.resolve_global_registry(api.ROOT, None, 0, "read").path))
-    except Exception:
-        pass
+    if home is not None:
+        try:
+            paths.append(Path(dispatch.resolve_global_registry(home, None, 0, "read").path))
+        except Exception:
+            pass
     if os.environ.get("AGENT_DISPATCH_JOBS"):
         paths.append(Path(os.environ["AGENT_DISPATCH_JOBS"]))
     return list(dict.fromkeys(paths))
+
+
+def _registries(api) -> list[Path]:
+    # An `api` without `ROOT` (a caller passing another module) reads only the explicit
+    # registry, as the guarded read always did; it never raises out of the sweep.
+    return registries_at(getattr(api, "ROOT", None))
+
+
+def _row_liveness(row) -> tuple[str, bool]:
+    """The runtime's own verdict on one registry row: (observed state, supervisor lease held)."""
+    import codex_dispatch_terminal as terminal
+    import dispatch_contract as dispatch
+    metadata = row["metadata"]
+    try:
+        observed = dispatch.observed_attempt_liveness(
+            row["status"], metadata, terminal_envelope=terminal.terminal_envelope_observed(metadata.get("log_file")))
+        lease = bool(metadata.get("supervisor_lease_file")) and dispatch.supervisor_lease_is_held(row["jobs"], metadata)
+        return observed.state, lease
+    except Exception:
+        return "unverifiable", False
+
+
+def _current_route(attempt_id: str, row) -> str | None:
+    """The verified route an owner attempt has moved on to, if any."""
+    import artifact_cutover
+    try:
+        return artifact_cutover._current_owner_route_id(attempt_id, row["metadata"], row["jobs"])[0]
+    except Exception:
+        return None
 
 
 def _attempts(registries: list[Path]) -> tuple[set[str], dict]:
@@ -200,8 +231,6 @@ def _attempts(registries: list[Path]) -> tuple[set[str], dict]:
     if not any(path.is_file() for path in registries):
         return set(), {}
     import artifact_cutover
-    import codex_dispatch_terminal as terminal
-    import dispatch_contract as dispatch
     held: set[str] = set()
     owners: dict[str, list] = {}
     now = time.time()
@@ -220,20 +249,87 @@ def _attempts(registries: list[Path]) -> tuple[set[str], dict]:
                 stamp = now
             if now - stamp >= _RECENT_TERMINAL_SECONDS:
                 continue
-        try:
-            observed = dispatch.observed_attempt_liveness(
-                status, metadata, terminal_envelope=terminal.terminal_envelope_observed(metadata.get("log_file")))
-            state = observed.state
-            lease = bool(metadata.get("supervisor_lease_file")) and dispatch.supervisor_lease_is_held(row["jobs"], metadata)
-        except Exception:
-            state, lease = "unverifiable", False
+        state, lease = _row_liveness(row)
         if state in {"alive", "unverifiable"} or lease:
-            try:
-                current, _conflict = artifact_cutover._current_owner_route_id(attempt_id, metadata, row["jobs"])
-            except Exception:
-                current = None
-            held |= ids | ({current} if current else set())
+            held |= ids | ({_current_route(attempt_id, row)} - {None})
     return held, owners
+
+
+_ATTEMPT_KEY = b"attempt_id="
+
+
+def _attempt_key(metadata: bytes, ordinal: int) -> bytes:
+    """The row's own id: the `attempt_id=` field of its metadata, else its line number.
+
+    Lineage fields such as `parent_attempt_id=` and `caller_attempt_id=` end in the same text and
+    come first, so a hit counts only at the start of the column or right after a `,`.  A plain
+    byte search, not a scan of every byte before the field (the registry is tens of megabytes)."""
+    at = metadata.find(_ATTEMPT_KEY)
+    while at >= 0:
+        if at == 0 or metadata[at - 1] == 0x2C:   # ","
+            start = at + len(_ATTEMPT_KEY)
+            end = metadata.find(b",", start)
+            return metadata[start:] if end < 0 else metadata[start:end]
+        at = metadata.find(_ATTEMPT_KEY, at + 1)
+    return b"#%d" % ordinal
+
+
+def live_routes(registries: list[Path], route_ids) -> dict[str, float]:
+    """route id -> when its newest live attempt last moved, for the given open routes only.
+
+    Reads the registry in one pass without parsing a row it does not need: the latest row of each
+    attempt is found from its status and id alone, and only an attempt whose latest row is
+    open/running and that names one of `route_ids` (or the route its owner moved on to) is judged
+    with the runtime's own liveness (`_row_liveness`: alive, or a held supervisor lease).  An attempt
+    that ended, or whose process is gone, holds nothing.  Movement is the newest of the attempt's
+    log, its summary-state and lease files, else its row time.  Nothing is written."""
+    wanted = {str(rid) for rid in route_ids}
+    found: dict[str, float] = {}
+    if not wanted:
+        return found
+    import dispatch_contract as dispatch
+    for jobs in registries:
+        try:
+            data = Path(jobs).read_bytes()
+        except OSError:
+            continue
+        latest: dict[bytes, bytes] = {}
+        lines = data.split(b"\n")
+        if not data.endswith(b"\n"):
+            lines = lines[:-1]   # a last row still being written is read on the next pass
+        for ordinal, line in enumerate(lines):
+            fields = line.split(b"\t", 5)
+            if len(fields) != 6:
+                continue
+            # The row's own id is the `attempt_id` field of its metadata; lineage fields such as
+            # `parent_attempt_id=` and `caller_attempt_id=` come before it and are not the key.
+            latest[_attempt_key(fields[5], ordinal)] = line   # later rows replace earlier ones; a done row retires an open one
+        for line in latest.values():
+            parts = line.decode("utf-8", "replace").split("\t", 5)
+            if len(parts) != 6 or parts[1] not in {"open", "running"}:
+                continue
+            metadata = dispatch.parse_registry_metadata(parts[5])
+            ids = {metadata.get(key, "") for key in ("route_id", "owner_route_id", "batch_route_id")} - {""}
+            attempt_id = metadata.get("attempt_id") or ""
+            row = {"status": parts[1], "metadata": metadata, "jobs": str(jobs)}
+            if not (ids & wanted) and metadata.get("worker_type") != "owner":
+                continue   # only an owner can have moved on to one of the routes
+            state, lease = _row_liveness(row)
+            if state != "alive" and not lease:
+                continue
+            ids = ids | ({_current_route(attempt_id, row)} - {None})
+            hit = ids & wanted
+            if not hit:
+                continue
+            try:
+                began = datetime.fromisoformat(parts[0].replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                began = 0.0
+            moved = max([began] + [_mtime(Path(metadata[key])) for key in
+                                   ("log_file", "summary_state_file", "supervisor_lease_file") if metadata.get(key)])
+            for rid in hit:
+                found[rid] = max(found.get(rid, 0.0), moved)
+    return found
 
 
 def _settlement_pending(route_id: str, owners: dict) -> bool:

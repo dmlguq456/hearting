@@ -27,6 +27,11 @@ artifact characteristics by default; an explicit user scope overrides it.
 Report only—never modify the artifact. This complements autopilot-refine:
 refine edits, while audit inspects.
 
+Several sections of the same artifact folder are one request: the brief names
+each section and what to check, rather than a route per section. A different
+version, or a request that needs a result independent of this one, opens
+separately.
+
 A completed audit can find blocking defects. Its task completion and its
 judgment about the inspected subject are separate: "changes required" or
 "do not merge" belongs in the report and does not make the audit execution a

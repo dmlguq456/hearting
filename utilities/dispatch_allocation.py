@@ -25,19 +25,39 @@ _STRATEGY_READS = {
     "balanced": frozenset({
         "usage_gate_used_percent", "depth_affinity",
         "depth_affinity_weight", "usage_headroom_exponent",
-        "harness_weights",
+        "harness_weights", "field_weights",
     }),
 }
 _OPTIONAL_ALLOCATION_KEYS = (
     "usage_gate_used_percent", "depth_affinity",
     "depth_affinity_weight", "usage_headroom_exponent",
-    "harness_weights",
+    "harness_weights", "field_weights",
 )
 _DEGRADED_UNDER = {
     # capacity-aware only hoists the preferred harness inside a headroom
     # margin of (weight-0.5)*200 points; it never changes a target share.
     ("capacity-aware", "depth_affinity_weight"): "headroom-margin tie-break only (no share weighting)",
 }
+
+
+def effective_harness_weights(allocation):
+    """The one product of the user's `harness_weights` and the route's sealed
+    `field_weights` (the applied per-field row), per harness.
+
+    Every caller that hands weights to `harness-capacity.select` goes through
+    here. A route sealed without `field_weights` (no field, a neutral row, or
+    sealed before the key existed) returns `harness_weights` untouched, so its
+    ordering is exactly what it was.
+    """
+    if not isinstance(allocation, dict):
+        return None
+    base = allocation.get("harness_weights")
+    row = allocation.get("field_weights")
+    if not isinstance(row, dict) or not row:
+        return base
+    base = base if isinstance(base, dict) else {}
+    return {name: float(base.get(name, 1.0)) * float(row.get(name, 1.0))
+            for name in [*base, *(n for n in row if n not in base)]}
 
 
 def inert_allocation_keys(allocation) -> dict[str, str]:

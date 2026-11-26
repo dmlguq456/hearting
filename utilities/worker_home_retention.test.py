@@ -6497,6 +6497,66 @@ class SharedCodexHomes(Fixture):
         self.assertEqual(result["codex"]["removed"], 1, result)
         self.assertFalse((self.root / "homes/worker-retention/views" / home.name).exists())
 
+    def rollout(self, home, thread, *, age_windows):
+        path = home / "sessions" / "2026" / "11" / "26" / f"rollout-2026-11-26T00-00-00-{thread}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"type":"session_meta"}\n')
+        stamp = (self.now - int(age_windows * RETENTION_NS)) / 1e9
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def owner_log(self, attempt, thread):
+        log = self.root / "logs" / f"{attempt}.codex.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(json.dumps({"type": "dispatch.supervisor.turn.started", "thread_id": thread,
+                                   "turn_id": "t1"}) + "\n")
+        return log
+
+    def test_a_kept_home_drops_the_session_files_no_owner_holds_after_the_wake_window(self):
+        # The home stays for its running owner. A thread the running owner names stays however old (it may be
+        # idle while it waits for a resource); a recent write stays; an ended owner's old thread goes.
+        home = self.codex_home()
+        running, ended = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+        recent = "33333333-3333-4333-8333-333333333333"
+        self.claim("att-codex-owner", home)
+        self.row("att-codex-running", "running", harness="codex", worker_type="owner", runtime_home=str(home),
+                 log_file=str(self.owner_log("att-codex-running", running)))
+        held = self.rollout(home, running, age_windows=30)
+        gone = self.rollout(home, ended, age_windows=2)
+        fresh = self.rollout(home, recent, age_windows=0.5)
+        other = home / "sessions" / "2026" / "11" / "26" / "notes.jsonl"
+        other.write_text("x")
+        os.utime(other, (0, 0))
+        result = self.sweep(0)
+        self.assertEqual((result["codex"]["removed"], result["codex"]["rollouts_removed"]), (0, 1), result)
+        self.assertTrue(home.is_dir())
+        self.assertFalse(gone.exists())
+        self.assertTrue(held.is_file() and fresh.is_file() and other.is_file())
+
+    def test_a_session_file_a_process_holds_open_stays(self):
+        home = self.codex_home()
+        self.claim("att-codex-owner", home)
+        old = self.rollout(home, "22222222-2222-4222-8222-222222222222", age_windows=2)
+        holder = subprocess.Popen([sys.executable, "-c", "import sys, time; handle = open(sys.argv[1]); "
+                                   "print('ready', flush=True); time.sleep(120)", str(old)],
+                                  stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (holder.kill(), holder.wait(timeout=10), holder.stdout.close()))
+        self.assertEqual(holder.stdout.readline().strip(), "ready")
+        self.row("att-codex-running", "running", harness="codex", worker_type="owner", runtime_home=str(home),
+                 log_file=str(self.owner_log("att-codex-running", "11111111-1111-4111-8111-111111111111")))
+        result = self.sweep(0)
+        self.assertEqual(result["codex"]["rollouts_removed"], 0, result)
+        self.assertTrue(old.is_file())
+
+    def test_a_running_owner_whose_thread_cannot_be_read_yet_keeps_every_session_file(self):
+        home = self.codex_home()
+        self.claim("att-codex-owner", home)
+        self.claim("att-codex-running", home, status="running")      # no log yet: its thread is unknown
+        old = self.rollout(home, "22222222-2222-4222-8222-222222222222", age_windows=2)
+        result = self.sweep(0)
+        self.assertEqual(result["codex"]["rollouts_removed"], 0, result)
+        self.assertTrue(old.is_file())
+
     def test_replacement_reserved_after_observation_keeps_the_home(self):
         # A normal recovery reservation can land between the examine pass and
         # the final admission; the detach re-decides every claimant like a

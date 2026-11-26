@@ -23,6 +23,7 @@ from pathlib import Path
 import shutil
 import stat
 import tempfile
+import time
 from typing import Iterable, Mapping, Sequence
 
 try:  # POSIX is the primary installer runtime.
@@ -412,11 +413,14 @@ class TargetLock:
     waiter retain an old locked inode while another process locks a new inode.
     """
 
-    def __init__(self, target: Path | str):
+    def __init__(self, target: Path | str, *, wait: float | None = None):
         self.target = _canonical_leaf(target, reject_leaf_symlink=False)
         _assert_fixture_boundary(self.target)
         self.path: Path | None = None
         self._handle = None
+        # None waits as long as it takes (every existing caller); a number gives up after
+        # that many seconds with SafetyError("lock-timeout") and takes nothing.
+        self._wait = wait
 
     def __enter__(self) -> "TargetLock":
         self.path = lock_path(self.target)
@@ -431,8 +435,19 @@ class TargetLock:
             raise SafetyError("ownership-unproved", self.path, "cannot open target lock") from exc
         self._handle = os.fdopen(descriptor, "r+b", buffering=0)
         try:
-            if fcntl is not None:
+            if fcntl is not None and self._wait is None:
                 fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+            elif fcntl is not None:
+                give_up = time.monotonic() + max(self._wait, 0.0)
+                while True:
+                    try:
+                        fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        left = give_up - time.monotonic()
+                        if left <= 0:
+                            raise SafetyError("lock-timeout", self.path, "target lock is held")
+                        time.sleep(min(0.005, left))
             opened = os.fstat(self._handle.fileno())
             current = os.lstat(self.path)
             if (

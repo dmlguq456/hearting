@@ -37,11 +37,15 @@ assert SPEC.loader is not None
 sys.modules[SPEC.name] = JOIN
 SPEC.loader.exec_module(JOIN)
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import dispatch_contract as D  # noqa: E402
 import dispatch_observation_log as OBS  # noqa: E402
 import dispatch_terminal_commit as TERMINAL  # noqa: E402
 import dispatch_supervision  # noqa: E402
 from split_module_fixture import patch_split, split_patch  # noqa: E402
+
+MISSING_WATCHER_ATTEMPT = unique_attempt_id("att-missing-watcher")
 
 # D-42 hermeticity: `classify_supervised_shell_command` and the supervisor
 # state readers consult the LIVE session's dispatch environment on purpose, so
@@ -661,7 +665,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.assertEqual(saved.metadata["attempt_descendant_proof"], D.ATTEMPT_DESCENDANT_PROOF)
 
     def missing_watcher_row(self):
-        fields = self.residue_row(attempt="att-missing-watcher", with_envelope=True).strip().split("\t")
+        fields = self.residue_row(attempt=MISSING_WATCHER_ATTEMPT, with_envelope=True).strip().split("\t")
         metadata = D.parse_registry_metadata(fields[5])
         for key in tuple(metadata):
             if key.startswith(("group_reap_", "attempt_descendant_")) or key == "launch_outcome":
@@ -674,7 +678,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         # A real harmless process stays alive until its watcher has exited.
         worker = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
                                   stdin=subprocess.PIPE, start_new_session=True,
-                                  env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": "att-missing-watcher"})
+                                  env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": MISSING_WATCHER_ATTEMPT})
         try:
             start = D.process_start_ticks(worker.pid)
             watcher = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
@@ -693,7 +697,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
                 worker.wait(timeout=3)
             if worker.stdin and not worker.stdin.closed:
                 worker.stdin.close()
-        child = JOIN.current_attempt_row(self.jobs, "att-missing-watcher")
+        child = JOIN.current_attempt_row(self.jobs, MISSING_WATCHER_ATTEMPT)
         stalled = D.attempt_process_quiescence(child.metadata, terminal_receipt=True)
         self.assertEqual(stalled.reason, "post-exit-receipt-incomplete")
         with mock.patch.object(JOIN.subprocess, "run") as run:
@@ -732,7 +736,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         for name, helper, result in cases:
             self.jobs.write_bytes(original)
             with self.subTest(case=name), patch_split(D, helper, return_value=result):
-                recovery = D.resolve_residue_drain(self.jobs, "att-missing-watcher", apply=True)
+                recovery = D.resolve_residue_drain(self.jobs, MISSING_WATCHER_ATTEMPT, apply=True)
                 self.assertFalse(recovery.get("changed"), recovery)
                 self.assertEqual(self.jobs.read_bytes(), original)
 
@@ -1411,7 +1415,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
 
     def test_committed_marker_waits_for_live_descendant_cleanup_then_delivers_success(self):
         """A real live descendant is a cleanup obligation, never a failed PASS."""
-        attempt = "att-residue-marker"
+        attempt = unique_attempt_id("att-residue-marker")
         self.marker_delivery_fixture(attempt)
         residue = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"],

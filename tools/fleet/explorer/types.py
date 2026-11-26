@@ -27,6 +27,10 @@ class ModelCatalog:
     models: Tuple[str, ...] = ()
     variants: Mapping[str, Tuple[str, ...]] = field(default_factory=dict)
     observed_at: Optional[float] = None
+    # Chosen-shape rows for the model-follow rule: one plain dict per listed model
+    # (id, family, version, visible, deprecated, efforts, cost, upgrade, min_cli).
+    rows: Tuple[Mapping[str, object], ...] = field(default=(), compare=False)
+    client_version: Optional[str] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

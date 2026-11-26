@@ -127,7 +127,11 @@ A manually invoked tidy writes its handoff card and queues memory work in one
 tool call (`utilities/session_tidy.py tidy`), followed by the command's short
 `say=` reply. `card`, `enqueue`, `--no-clear`, `--no-continue` and peer handoff
 keep their existing meaning. Manual memory-tidy results retain their undo and
-partial-coverage details.
+partial-coverage details. A tidy the session runs on any turn where no automatic
+request of this booking arrived (a person's turn, another session's message, a
+runtime notice or a completion wake) is a manually invoked tidy, whoever woke
+it: it schedules the compaction and takes the booking's place, and the unspent
+idle booking sends nothing afterwards.
 
 Automatic idle work needs no main-session Skill, tool or model turn. Its existing
 booking and memory queue bind the helper output to the unchanged session,
@@ -153,8 +157,19 @@ The compaction counts as confirmed only from that session's own native history
 after the claim (Claude's `compact_boundary` row, Codex's `compacted` row, or the
 session's PostCompact/compaction ledger row); a screen label or transport ACK is
 not evidence. The PostCompact of a booked compaction writes no card and queues
-no second memory tidy. After a confirmed compaction a manual booking asks
-`utilities/peer-steward.py continue` once for the same session. It preserves the
+no second memory tidy. A panel host that gives no answer to the screen request
+(`shell-no-answer`, as while it is replaced) is asked again for about a minute (12 looks, 5 seconds
+apart) before the booking ends with that reason; a host that is gone for good answers the same, so the
+two are not told apart, and this also covers the `/compact` step of a rest-time booking. After a confirmed compaction a manual booking asks
+`utilities/peer-steward.py continue` for the same session inside a window as long as
+the compaction wait (900 seconds from the confirmation). Every ask passes the same checks
+again and sends at most once; nothing already handed to the receiver is asked twice. A
+session still on a turn of its own holds the continue back, and the helper, the one process
+that lives through the window on every harness, asks again inside it (a hook process, Claude's
+Stop or UserPromptSubmit or a peer receive, asks once and ends; OpenCode has no end-of-turn
+callback that asks again). A Claude continue is typed only into an empty prompt; a Codex or
+OpenCode continue starts its turn only over an empty input box, read before and after the claim
+(15 seconds between asks while a draft or an open form holds the input box). It preserves the
 booking, claim, card generation, seat, unchanged prompt count and expiry. An
 exact-native seat with a supported attachment keeps that bounded path: it
 rechecks the booked process, idle state, form and empty input, then writes the

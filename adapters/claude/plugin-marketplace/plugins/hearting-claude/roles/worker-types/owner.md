@@ -27,7 +27,7 @@ those actions are part of the actual request; request wording is not an addition
 `$AGENT_ARTIFACT_OUTPUT_DIR/dev_logs/pr-description.md`; it is the `--body-file` for
 create/update. Read the branch's PR before creating one. Keep any CI correction within the approved scope and send it
 through the existing review, test, and commit path. Integration pushes, main merges,
-releases, installations, worktree cleanup, and dispatch depth 3 remain supervisor responsibilities.
+releases, installations, and worktree cleanup remain supervisor responsibilities.
 
 With `start_approval`, carry the user's complete or report choice into the intent, decision
 record, and work request, and complete the selected scope without asking again. Report stops
@@ -61,9 +61,11 @@ ceiling; detached processes end too), or register it as a dispatch-depth-2 attem
 end a turn with such work running. Raise `--memory-budget` only to a value the task or
 receipt names.
 
-Leave wide reading, searching, and copying into a given template to the harness's light-tier
-subagents; compare, design, judge, and verify yourself. What a subagent gathers is evidence,
-not a passed check. Wait for outside CI or a release with one blocking command (for example
+Hand wide reading, searching, and copying into a given template to a record-free lookup worker
+(`utilities/capability-route.py compose --start --unit general/explore --ephemeral --prompt-file
+<brief>`, then the wait its receipt prints; `capabilities/unit.md`), or to the harness's light-tier
+subagents where that start is refused; compare, design, judge, and verify yourself. What a helper
+gathers is evidence, not a passed check. Wait for outside CI or a release with one blocking command (for example
 `gh pr checks <n> --watch` under the lease above), not a repeated sleep.
 
 Consume the receipt's `required_action` literally: complete an open PASS row, inspect a

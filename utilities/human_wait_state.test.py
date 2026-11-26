@@ -908,6 +908,23 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertTrue(state.publish_cache({"items": [], "observed_at": time.time(), "complete": True}))
         self.assertEqual(counts(), (0, 0, (0, 0)))
 
+    def test_a_changed_set_of_open_questions_asks_no_artifact_root_for_a_refresh(self):
+        """11-22: a question stands on the question screens only; the campaign document does not follow the question list."""
+        import artifact_entrance
+        folder = Path(self.tmp.name) / "mine"
+        (folder / ".agent_reports").mkdir(parents=True)
+        now = time.time()
+
+        def row(name):
+            return {"id": f"S1:{name}", "source": "S1", "kind": "decision", "since": now,
+                    "owner": {"harness": "claude", "session_id": "s-" + name}, "cwd": str(folder)}
+        with mock.patch.object(artifact_entrance, "request_refresh", side_effect=AssertionError("asked")) as refresh:
+            for items in ([row("a")], [row("a"), row("b")], [row("b")], []):    # asked, asked again, answered, all answered
+                self.assertTrue(state.publish_cache({"items": items, "complete": True, "observed_at": time.time()}))
+            refresh.assert_not_called()
+        self.assertEqual(state._read_cache()["items"], [])
+        self.assertFalse(hasattr(state, "_request_documents_for_changed_waits"))
+
 
 class _StrictOpenCodeTransport:
     def __init__(self, session_id):
@@ -3525,6 +3542,78 @@ class MessageCompletionTests(unittest.TestCase):
         self.f = self.fixture.__enter__()
         self.addCleanup(self.fixture.__exit__, None, None, None)
 
+    def test_choice_and_note_use_the_private_answer_delivery(self):
+        for harness in ("claude", "codex", "opencode"):
+            signal, envelope = self.f.ask(harness, "mixed-"+harness, "Synthetic choice?", choices=["original-value", "other"])
+            values = ["original-value", "A separate note"]
+            response = {"answers": {"message-response": values}}
+            result = state.submit_selected_response(envelope, response, action_id="mixed-"+harness)
+            self.assertEqual(result["state"], "submitted", result)
+            wire, _, _ = self.f.prepare(signal)
+            self.assertIn(json.dumps(values), wire)
+            self.assertEqual(state._message_answer_error(state._message_body(response)), None)
+        self.assertIsNone(state._message_answer_error("a" * 4096))
+
+    def test_array_shaped_single_answers_are_distinct_from_two_values_in_the_prompt(self):
+        import session_notice
+        pair = ["original-value", "A separate note"]
+        cases = [pair, [json.dumps(pair)], ["[1,2]"], ["[]"], ['["x"]'], ["[plain"]]
+        bodies = []
+        for index, values in enumerate(cases):
+            with self.subTest(values=values):
+                signal, envelope = self.f.ask("claude", f"array-shape-{index}", choices=[pair[0], "other"])
+                result = state.submit_selected_response(envelope, {"answers": {"message-response": values}},
+                                                       action_id="fixture-array")
+                self.assertEqual(result["state"], "submitted")
+                header, body = session_notice.consumer_text(self.f.record(signal)["receipt"]).split("\n", 1)
+                self.assertEqual(header, f"Question answer (request={signal['id']}):")
+                try:
+                    decoded = json.loads(body)
+                except ValueError:
+                    decoded = None
+                self.assertEqual(decoded if isinstance(decoded, list) else [body], values)
+                bodies.append(body)
+        self.assertNotEqual(bodies[0], bodies[1])
+
+    def test_a_preexisting_unwrapped_answer_keeps_its_bound_bytes(self):
+        import session_notice
+        value = '["a","b"]'
+        signal, envelope = self.f.ask()
+        # The receipt was bound before single array-shaped text began to be wrapped.
+        with mock.patch.object(state, "_message_body", return_value=value):
+            self.assertEqual(self.f.submit(envelope, value)["state"], "submitted")
+        receipt = self.f.record(signal)["receipt"]
+        self.assertEqual(session_notice.consumer_text(receipt).split("\n", 1)[1], value)
+        wire, _, recipient = self.f.prepare(signal)
+        self.f.peer.receive_peer_message(wire, recipient)
+        self.assertEqual(self.source(signal)["completion"]["answer"], value)
+
+    def test_choice_and_note_use_separate_decision_fields_and_secret_answers_are_omitted(self):
+        import tidy_decisions
+        choice, note = "original-value", "A separate note"
+        for secret in (False, True):
+            with self.subTest(secret=secret):
+                signal, envelope = self.f.ask("claude", f"split-memory-{secret}",
+                                              choices=[choice, "other"], secret=secret)
+                result = state.submit_selected_response(envelope, {"answers": {"message-response": [choice, note]}},
+                                                       action_id="fixture-note")
+                self.assertEqual(result["state"], "submitted")
+                wire, _, recipient = self.f.prepare(signal)
+                self.f.peer.receive_peer_message(wire, recipient)
+                self.assertEqual(self.source(signal)["lifecycle"], "answered")
+                state.flush_message_decisions()
+                decisions = tidy_decisions.list_pending()
+                self.assertEqual(len(decisions), 1)
+                entry = decisions[0][1]
+                self.assertEqual((entry["answers"], entry["note"]), ([choice], note))
+                body = tidy_decisions.decision_body(entry)
+                self.assertIn("고른 답: " + choice, body)
+                self.assertIn("사용자 메모: " + note, body)
+                if secret:
+                    completion = self.source(signal)["completion"]
+                    self.assertNotIn("answer", completion)
+                    self.assertNotIn("note", completion)
+
     def test_shared_project_questions_remain_open_for_each_exact_session(self):
         import session_tidy as tidy
         for harness in ("claude", "codex", "opencode"):
@@ -4031,6 +4120,19 @@ class MessageCompletionTests(unittest.TestCase):
             tidy.run_hook(signal["harness"], "prompt", signal["session_id"], cwd=str(self.f.root),
                           prompt_text=text, env=os.environ, render_context=True, emit=lines.append)
         return "\n".join(lines)
+
+    def test_a_question_asked_replaced_or_answered_never_asks_the_entrance_for_a_refresh(self):
+        """The prompt hook holds the seat lock and asks for nothing (11-22: the campaign document does not follow the question list)."""
+        import artifact_entrance
+        (self.f.root / ".agent_reports").mkdir()
+        with mock.patch.object(artifact_entrance, "request_refresh", side_effect=AssertionError("asked")) as refresh:
+            signal, envelope = self.f.ask(text="Which one?", choices=["Alpha", "Beta"])
+            self.prompt(signal, "2")                                    # answered at the prompt
+            self.assertEqual(self.source(signal)["lifecycle"], "answered")
+            self.f.ask(text="First?")
+            self.f.ask(text="Second?")                                  # the first is replaced
+            refresh.assert_not_called()
+        self.assertFalse(hasattr(state, "_refresh_campaign_documents"))
 
     def test_choice_question_closes_only_on_one_exact_choice_prompt(self):
         choices = ["Alpha plan", "Beta plan", "Gamma plan"]

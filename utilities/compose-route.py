@@ -441,7 +441,7 @@ def _parse_units(args) -> list:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile-demands", help="JSON file mapping realized nodes and __owner__ to SD-88 demands")
-    parser.add_argument("--explicit-profiles", help="JSON file mapping demanded node ids to explicit profiles")
+    parser.add_argument("--explicit-profiles", help="JSON file mapping node ids to explicit profiles; keys: __owner__ (the owner) or a node id (a parallel-group leg by its realized id, e.g. impl-review-alternative); a value of top is for the owner at any intensity, or for a depth-2 stage worker or review/verification leg you name at strong or higher (set --intensity; one top leg per parallel group; a route-wide worker pin's model still wins; never route-wide)")
     parser.add_argument("--capability", required=True)
     parser.add_argument("--capability-mode", required=True)
     parser.add_argument("--slug", required=True)
@@ -513,10 +513,11 @@ def main() -> int:
     route_json = run_compile(args, recipe, evidence)
 
     route = json.loads(route_json)
+    # 11-20: a unit route has no intensity, so its summary does not tell one (the record keeps it).
+    tail = "" if route.get("capability") == "unit" else f", effective={route['effective_intensity']}"
     summary = (
         f"compose-route: sealed {route['route_id']} "
-        f"({args.capability}/{args.capability_mode}, {len(recipe['standard_plus']['nodes'])} nodes, "
-        f"effective={route['effective_intensity']})"
+        f"({args.capability}/{args.capability_mode}, {len(recipe['standard_plus']['nodes'])} nodes{tail})"
     )
     if args.output:
         summary += f" -> {args.output}"

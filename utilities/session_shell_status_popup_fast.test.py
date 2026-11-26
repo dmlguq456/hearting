@@ -288,10 +288,12 @@ const flush=()=>new Promise(r=>term.write('',r));
 const cellsOf=y=>{const line=term.buffer.active.getLine(y),out=[];for(let x=0;x<cols;x++){const c=line?.getCell(x);out.push(!c?' ':c.getWidth()===0?'':c.getChars()||' ');}return out;};
 const screen=async()=>{await flush();return Array.from({length:rows},(_,y)=>cellsOf(y).join('').trimEnd());};
 const at=async needle=>{await flush();for(let y=0;y<rows;y++){const c=cellsOf(y),where=[];let text='';
-  c.forEach((ch,x)=>{for(const _ of ch)where.push(x);text+=ch;});const i=text.indexOf(needle);if(i>=0)return {x:where[i],y};}return null;};
+  c.forEach((ch,x)=>{for(const _ of ch)where.push(x);text+=ch;});const m=needle instanceof RegExp?needle.exec(text):null,i=needle instanceof RegExp?(m?m.index:-1):text.indexOf(needle);if(i>=0)return {x:where[i],y};}return null;};
 const until=async(test,what,ms=20000)=>{const began=Date.now();while(Date.now()-began<ms){const s=await screen();if(test(s))return {s,ms:Date.now()-began};await sleep(25);}
   throw Error('never '+what+'\n'+(await screen()).join('\n'));};
-const has=word=>s=>s.some(line=>line.includes(word));
+const has=word=>s=>s.some(line=>word instanceof RegExp?word.test(line):line.includes(word));
+// 11-21: the STATUS head stands under the REPO group (` STATUS +N        ›`), the panel's only drawing of the status.
+const hasButton=s=>s.some(line=>/STATUS( \+\d+)? +›/.test(line));
 const press=async(x,y,ms=100)=>{child.write(`\x1b[<0;${x+1};${y+1}M\x1b[<0;${x+1};${y+1}m`);await sleep(ms);};
 const key=async(bytes,ms=250)=>{child.write(bytes);await sleep(ms);};
 const box=s=>{const top=s.findIndex(l=>l.includes('╭─')&&l.includes('✕ ─╮'));if(top<0)return null;
@@ -307,7 +309,8 @@ const drop=name=>{try{fs.unlinkSync(cfg.control+'/'+name);}catch{}};
 const write=(file,value)=>{fs.writeFileSync(file+'.new',value,{mode:0o600});fs.renameSync(file+'.new',file);};
 const rename=async title=>{const cache=JSON.parse(fs.readFileSync(cfg.cache,'utf8'));cache.observed_at=Date.now()/1000;
   cache.route_panels[cfg.key][0].title=title;write(cfg.cache,JSON.stringify(cache));};
-const opened=async()=>{const repo=await at('REPO');await press(repo.x+2,repo.y,0);};
+// 11-21: the press that opens the popup stands on the STATUS head under the REPO group.
+const opened=async()=>{const spot=await at('STATUS');await press(spot.x+2,spot.y,0);};
 const close=async()=>{await key('\x1b',300);await until(s=>!box(s),'closed');};
 const edit=(from,to)=>fs.writeFileSync(cfg.doc,fs.readFileSync(cfg.doc,'utf8').replace(from,to));
 const checks={};
@@ -315,7 +318,7 @@ const checks={};
   if(cfg.scenario==='open'){
     // The button's read is slow (a scan of a slow disk); Fleet's collection is slower still.
     control('read-delay',1.5);control('vm-delay',4);
-    await until(has('현황 ›'),'the button');await sleep(500);
+    await until(hasButton,'the button');await sleep(500);
     const r0=count('read-start'),v0=count('vm');
     // 100 paints: no read.
     for(let i=0;i<100;i++){child.write('a');await sleep(10);}
@@ -372,7 +375,7 @@ const checks={};
     await until(has('READY_'+cfg.harness),'the panel');
     // The first read's own end in the log (its worker exits right after it), not a fixed wait.
     await until(()=>count('read-end')>=1,'the first read ended');
-    checks.button_after_crash=has('현황 ›')(await screen());checks.reads_failed=count('read-end');
+    checks.button_after_crash=hasButton(await screen());checks.reads_failed=count('read-end');
     // Events while a read is under way: it asks again once it ends, never beside it.
     const started=count('read-start'),ended=count('read-end');
     for(const title of ['표 하나','표 둘','표 셋']){await rename(title);await until(has(title),'the route renamed '+title);await sleep(250);}
@@ -385,7 +388,7 @@ const checks={};
     checks.most_at_once=most;
     // The disk answers again: the next event gives the button.
     drop('read-crash');drop('read-delay');await rename('表 넷');
-    await until(has('현황 ›'),'the button after the read works again');checks.button_after=true;
+    await until(hasButton,'the button after the read works again');checks.button_after=true;
     // That read's end is in the log before the quiet stretch is counted (no read is left under way).
     await until(()=>count('read-end')>=count('read-start'),'the button read ended');
     const r0=count('read-start');await sleep(800);checks.reads_when_quiet=count('read-start')-r0;
@@ -394,7 +397,7 @@ const checks={};
     // Fleet's lines are slow and the window narrows while they are out: rows laid out at the old width are
     // not kept as the new width's; the popup opened again stands with its document, then the new width's lines.
     control('read-delay',0);control('vm-delay',3);
-    await until(has('현황 ›'),'the button');await sleep(300);
+    await until(hasButton,'the button');await sleep(300);
     await opened();await until(popupHas('NEWEST_DOC_LINE'),'the document');
     const v0=count('vm');
     cols=110;term.resize(cols,rows);child.resize(cols,rows);await sleep(300);
@@ -409,6 +412,51 @@ const checks={};
     const v1=count('vm');await close();await opened();
     await until(popupHas('W01'),'the rows read last at this width');
     checks.width_reopen_vm=count('vm')-v1;
+    await close();
+  }
+  if(cfg.scenario==='backlog'){
+    // 11-21: the BACKLOG part under the REPO group (its head and its first three items, `+N` for the rest); a press on an item opens the BACKLOG popup
+    // standing on it; the group of this window's campaign is open on top and the others are folded; an item with detail opens under its row.
+    await until(s=>s.some(l=>/BACKLOG FIX \d+ · IMPR \d+ · \+\d+ +\/\d+ +›/.test(l)),'the BACKLOG head');
+    const panel=await screen();
+    checks.head=panel.find(l=>/BACKLOG FIX/.test(l));checks.items=panel.filter(l=>/BL_ITEM/.test(l)).length;
+    checks.status_head=panel.some(l=>/STATUS( \+\d+)? +›/.test(l));
+    const spot=await at('BL_ITEM_TWO');await press(spot.x,spot.y,0);
+    let r=await until(popupHas('BL_ITEM_ONE'),'the BACKLOG popup');
+    const b=box(r.s);checks.title=b.rows[0];checks.band=b.rows.at(-1);
+    checks.stands=body(r.s).some(l=>l.startsWith('> ')&&l.includes('BL_ITEM_TWO'));
+    checks.other_folded=body(r.s).some(l=>l.includes('›')&&l.includes('TBD 2'));
+    checks.other_hidden=!popupHas('BL_OTHER_ITEM')(r.s);
+    await key('\x1b[A',250);await key('\r',400);r=await screen();
+    checks.detail=popupHas('BL_DETAIL_NOTE')(r);
+    await key('\r',300);r=await screen();checks.detail_closed=!popupHas('BL_DETAIL_NOTE')(r);
+    for(let i=0;i<4;i++)await key('\x1b[B',200);await key('\r',400);r=await screen();
+    checks.group_opened=popupHas('BL_OTHER_ITEM')(r);
+    // PgDn/PgUp move the chosen line (the window follows): to the end of what there is, and back to the first line.
+    await key('\x1b[6~',300);r=await screen();checks.pgdn_end=body(r).some(l=>l.startsWith('> ')&&l.includes('full document'));
+    await key('\x1b[5~',300);r=await screen();checks.pgup_top=body(r).some(l=>l.startsWith('> ')&&l.includes('BL_ITEM_ONE'));
+    await key('\x1b[C',400);r=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('ROUTE');},'the next section after BACKLOG');checks.next_section=true;
+    await key('\x1b[D',400);r=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('BACKLOG');},'BACKLOG again by ←');checks.back=true;
+    await close();
+  }
+  if(cfg.scenario==='mem'){
+    // 11-20: the MEM section's records are one row each; a press on a record opens the MEM popup (the MESSAGES popup's frame and keys) on it.
+    await until(has(/│ MEM +› │/),'the MEM section');
+    const panel=await screen();
+    checks.rows=panel.filter(l=>l.includes('MEMREC')).length;
+    checks.row_cut=panel.some(l=>l.includes('MEMREC_ONE')&&l.includes('…'))&&!panel.some(l=>l.includes('MEMREC_ONE_END'));
+    const spot=await at('MEMREC_TWO');await press(spot.x,spot.y,0);
+    let r=await until(popupHas('MEM'),'the MEM popup');
+    const b=box(r.s);checks.title=b.rows[0];checks.foot=b.rows.at(-1);
+    checks.whole=popupHas('MEMREC_ONE_END')(r.s);checks.second=popupHas('MEMREC_TWO second record')(r.s);
+    // (Both records fit the popup, so it stands at its top: the first row is the newest record's head.)
+    checks.first_row=body(r.s)[0];
+    await close();
+    // The head opens it too; ←→ walk the sections (MEM is the last).
+    const head=await at(/MEM +› │/);await press(head.x+2,head.y,0);
+    r=await until(popupHas('MEMREC_ONE_END'),'the MEM popup from its head');checks.head_first=body(r.s)[0];
+    await key('\x1b[D',300);r=await until(s=>{const b=box(s);return !!b&&b.rows[0].includes('MESSAGES')||!!b&&!b.rows[0].includes('MEM');},'a section before MEM');
+    await key('\x1b[C',300);r=await until(popupHas('MEMREC_ONE_END'),'MEM again by →');checks.walk=true;
     await close();
   }
   fs.writeFileSync(cfg.result,JSON.stringify({checks}));
@@ -482,6 +530,22 @@ class PtyTest(unittest.TestCase):
             'routes': 1, 'questions': 0, 'campaigns': [{'campaign': 'camp-000', 'line': line}], 'next': '다음 일'}}],
             'system': {}, 'routes': [], 'sessions': [{'tag': 'e1', 'repo_id': 'proj', 'harness': 'claude', 'state': 'idle',
                                                       'title': '이 창'}]}, ensure_ascii=False))
+        if scenario == 'mem':
+            # 11-20: two saved memory records (global, so any folder reads them) in the case's own journal; the MEM section stands
+            # from them, and its popup reads each whole (the snippet is the body the journal keeps).
+            journal = Path(self.env['XDG_STATE_HOME']) / 'agent-memory/write-events.jsonl'
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(time.time() - 300))
+            journal.write_text('\n'.join(json.dumps({'ts': stamp, 'action': 'add', 'type': 'decision', 'tier': 'durable', 'scope': 'global',
+                                                    'id': 'mem-%d' % n, 'snippet': snippet}) for n, snippet in enumerate((
+                'MEMREC_ONE first record body line, which goes on and on so that the one row cuts it short of its end MEMREC_ONE_END',
+                'MEMREC_TWO second record')) ) + '\n')
+        if scenario == 'backlog':
+            # 11-21: a backlog document in the artifact root: this window's campaign group (the newest document's folder) first, another group folded.
+            (case / 'tree' / '.agent_reports' / 'backlog.md').write_text(
+                '# 시험용 백로그\n갱신 2026-11-21 11:02\n\n## 2026-02-11_camp-001\n- BL_OTHER_ITEM 다른 캠페인의 일\n\n'
+                '## 2026-01-10_camp-000\n- BL_ITEM_ONE 첫째 일\n  kind: fix\n  date: 2026-11-20\n  note: BL_DETAIL_NOTE 맥락\n- BL_ITEM_TWO 둘째 일\n  kind: Fix\n- BL_ITEM_THREE 셋째 일\n  kind: fix\n- BL_ITEM_FOUR 넷째 일\n  kind: fix\n\n'
+                '## Unassigned\n- BL_LOOSE 캠페인 없는 일\n', encoding='utf-8')
         backend = case / 'backend'
         backend.write_text(BACKEND.format(python=sys.executable, utilities=str(ROOT / 'utilities'), tools=str(ROOT / 'tools'),
                                           sid=SID, vm=str(vm), control=str(control)))
@@ -532,6 +596,30 @@ class PtyTest(unittest.TestCase):
         # The document's read failed: Fleet's word, dim, in the popup; the next opening reads it.
         self.assertTrue(any(self.unreadable in row for row in checks['unread_frame']), checks['unread_frame'])
         self.assertTrue(checks['after_unread'])
+
+    def test_a_memory_record_is_one_row_and_a_press_opens_the_mem_popup_on_it(self):
+        checks = self.run_case('mem')
+        self.assertEqual(checks['rows'], 2, checks)                      # one row a record
+        self.assertTrue(checks['row_cut'], checks)                        # the long record's row ends in `…`, its end is not there
+        self.assertIn('MEM', checks['title'], checks)
+        self.assertTrue(checks['whole'] and checks['second'], checks)     # the popup reads the record whole
+        self.assertIn('◆ global · decision', checks['first_row'], checks)  # each record's head: the mark, its scope, its kind and its age
+        self.assertIn('◆ global · decision', checks['head_first'], checks)
+        self.assertTrue(checks['walk'], checks)
+
+    def test_the_backlog_part_lists_three_items_and_its_popup_opens_on_the_one_pressed(self):
+        checks = self.run_case('backlog')
+        self.assertEqual(checks['items'], 3, checks)                                     # the first three; the others are `+N`
+        self.assertRegex(checks['head'], r'BACKLOG FIX 4 · IMPR 0 · \+1 +/6 +›', checks)  # six items in the document, four of them FIX, three shown
+        self.assertTrue(checks['status_head'], checks)
+        self.assertIn('BACKLOG', checks['title'], checks)
+        self.assertIn('╰─ STATUS · BACKLOG · ', checks['band'], checks)
+        self.assertTrue(checks['stands'], checks)                                         # the popup stands on the item pressed
+        self.assertTrue(checks['other_folded'] and checks['other_hidden'], checks)        # the FIX sort is open, the unsorted one folded
+        self.assertTrue(checks['detail'] and checks['detail_closed'], checks)             # the indented lines under an item
+        self.assertTrue(checks['group_opened'], checks)
+        self.assertTrue(checks['pgdn_end'] and checks['pgup_top'], checks)                # PgDn/PgUp move the chosen line, not only the window
+        self.assertTrue(checks['next_section'] and checks['back'], checks)
 
     def test_a_late_fleet_part_of_another_width_is_not_kept(self):
         checks = self.run_case('width')

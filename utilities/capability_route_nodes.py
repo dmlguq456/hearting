@@ -17,6 +17,8 @@ import route_form as ROUTE_FORM
 from capability_route_base import (
     DEFAULTS, ROOT, TOPO,
 )
+from capability_route_dispatch import _expand_parallel_groups
+from replica_batch_contract import MAX_TOP_LEGS
 
 
 def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=None, owner_default=None):
@@ -152,6 +154,27 @@ def one_shot_review_node(recipe):
     node.update({"depends_on": [], "inputs": list(declared["inputs"]),
                  "fallback_hops": list(declared["fallback_hops"]), "model_profile": declared["model_profile"]})
     return node
+
+
+def one_shot_review_nodes(recipe, effective="standard", registry=None, persona_policy=True):
+    """The middle cell's verification nodes at `effective`: the borrowed review node, widened from `strong`
+    into the kind's own declared review group.
+
+    ONE function for the compiler and `verify_route`. The group is the one the team route expands
+    (`parallel_groups`, `_expand_parallel_groups`): the same legs, perspectives and widths. Only the anchor
+    leg differs: it takes the cell's review model (`one_shot_review.model_profile`), so `strong` never
+    reviews more shallowly than `standard` does. The other legs keep the model the group declares."""
+    anchor = one_shot_review_node(recipe)
+    declared = recipe["one_shot_review"]["node"]
+    groups = [g for g in recipe["standard_plus"].get("parallel_groups") or [] if g.get("node") == declared]
+    if not groups:
+        return [anchor]
+    registry = registry or TOPO.load_registry()
+    nodes = _expand_parallel_groups([anchor], groups, effective, recipe["capability"],
+                                    auxiliary_check_units=registry.get("auxiliary_check_units"),
+                                    persona_policy=persona_policy)
+    nodes[0]["model_profile"] = recipe["one_shot_review"]["model_profile"]
+    return nodes
 
 
 def _quick_frame_diversity(candidates):
@@ -317,7 +340,11 @@ def _seal_profile_demands(nodes, profile_demands=None, explicit_profiles=None, *
     return nodes
 
 
-def _profile_input_maps(nodes, demands, explicit):
+def _profile_input_maps(nodes, demands, explicit, intensity=None):
+    """Validate the demand and explicit-profile maps a route is composed (or verified) with.
+
+    `intensity` is the route's effective intensity: it decides whether a person-named stage node or
+    review leg may hold `top` (strong and above). A caller that has none refuses such a name."""
     valid = {n["id"] for n in nodes if not _no_model_node(n)} | {"__owner__"}
     normalized = {}
     for label, values in (("profile_demands", demands), ("explicit_profiles", explicit)):
@@ -326,16 +353,44 @@ def _profile_input_maps(nodes, demands, explicit):
     for key, value in (demands or {}).items():
         normalized[key] = PROFILE.normalize_profile_demand(value)
     frame_ids = {n["id"] for n in nodes if _frame_node(n)}
+    by_id = {n["id"]: n for n in nodes}
     for key, value in (explicit or {}).items():
         if value not in PROFILE.KNOWN_PROFILES:
             raise ValueError("profile-explicit-input-invalid:" + key)
         if value == PROFILE.TOP_PROFILE and key != "__owner__" and key not in frame_ids:
-            # The top exception profile is a dispatch-depth-1 decision: a
-            # depth-2 stage node or parallel leg never spends the main-session
-            # model. A depth-1 frame leg is the one added exception -- it is an
-            # anchor for the whole route's direction, launched by the depth-0
-            # session itself.
-            raise ValueError("profile-explicit-top-owner-only:" + key)
+            # The top exception profile is the owner's, and a depth-1 frame leg's (the anchor for the
+            # whole route's direction, launched by the depth-0 session itself). A depth-2 stage node or
+            # review/verification leg holds it only when the person named that node (this map is the
+            # person's) and the route's intensity is strong or higher: never a default, never a
+            # route-wide choice, never an automatic promotion.
+            node = by_id.get(key, {})
+            if not PROFILE.top_stage_node(node):
+                depth, kind = node.get("dispatch_depth"), node.get("kind")
+                if depth == 2:
+                    why = (f"`{key}` is a depth-2 {kind} node that launches as a "
+                           f"{PROFILE.top_stage_node_type(node) or 'non-model'} worker, not a stage worker or "
+                           f"review/verification leg")
+                else:
+                    why = (f"`{key}` is a step the owner runs itself (depth {depth}); to give the owner `top` "
+                           f"name `__owner__`")
+                raise ValueError(f"profile-explicit-top-owner-only:{key}: {why} "
+                                 f"(top: the owner at any intensity, a depth-2 stage worker or "
+                                 f"review/verification leg at {PROFILE.TOP_STAGE_MIN_INTENSITY} or higher)")
+            if not PROFILE.top_stage_intensity(intensity):
+                raise ValueError(
+                    f"profile-explicit-top-owner-only:{key}: this route is {intensity or 'of unknown intensity'}, "
+                    f"below {PROFILE.TOP_STAGE_MIN_INTENSITY}: `top` for a depth-2 stage worker or "
+                    f"review/verification leg needs {PROFILE.TOP_STAGE_MIN_INTENSITY} or higher "
+                    f"(the owner, `__owner__`, can take `top` at any intensity)")
+    top_legs = {}
+    for key, value in (explicit or {}).items():
+        group = by_id.get(key, {}).get("parallel_group")
+        if value == PROFILE.TOP_PROFILE and group and key not in frame_ids:
+            top_legs.setdefault(group, []).append(key)
+    for group, keys in top_legs.items():
+        if len(keys) > MAX_TOP_LEGS:
+            raise ValueError(f"profile-explicit-top-group-width:{group}: at most {MAX_TOP_LEGS} leg of a "
+                             f"parallel group may be top, named {len(keys)} ({', '.join(sorted(keys))})")
     return normalized, dict(explicit or {})
 
 
@@ -346,10 +401,16 @@ def _verify_profile_contract(route):
         if route.get("owner_profile_selection") is not None or any(
             "profile_selection" in n or "profile_demand" in n for n in route.get("nodes", [])):
             raise ValueError("profile-selection-contract-missing")
+        # A route with no profile-selection contract predates a stage `top`: none of its depth-2
+        # nodes may hold one.
+        for node in route.get("nodes", []):
+            if node.get("dispatch_depth") == 2 and node.get("model_profile") == PROFILE.TOP_PROFILE:
+                raise ValueError("profile-top-needs-selection-contract:" + str(node.get("id")))
         return
     if type(version) is not int or version != 1:
         raise ValueError("profile-selection-version-unsupported")
-    demands, explicit = _profile_input_maps(route.get("nodes", []), route.get("profile_demands"), route.get("explicit_profiles"))
+    demands, explicit = _profile_input_maps(route.get("nodes", []), route.get("profile_demands"),
+                                            route.get("explicit_profiles"), route.get("effective_intensity"))
     if route.get("owner_profile_demand") != demands.get("__owner__"):
         raise ValueError("owner-profile-demand-map-mismatch")
     owner_profile = route.get("owner_model_profile") or "light"

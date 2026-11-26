@@ -56,19 +56,6 @@
     ]
    }
   },
-  "artifact-projection-read": {
-   "group": "support",
-   "family": "support",
-   "modes": [],
-   "summary": "Read-only lookup of Cairn artifact projections through the canonical W3a contract.",
-   "invocation": {
-    "class": "model-support",
-    "use_when": "Use when an agent or operator needs to browse or query an existing Cairn artifact projection without changing artifacts or runtime state.",
-    "not_for": "Not for primary task routing, ingest, mutation, activation, deactivation, apply, migration, namespace switching, or flat-browse fallback ownership."
-   },
-   "argument_shape": "one JSON read request on stdin",
-   "requires": {"capabilities": [], "units": []}
-  },
   "audit": {
    "group": "ops",
    "family": "ops",
@@ -692,6 +679,12 @@
    "worker_type": "stage",
    "floor": "low"
   },
+  "general/explore": {
+   "family": "general",
+   "role": "fast tool worker",
+   "worker_type": "support",
+   "floor": "low"
+  },
   "material/browser-fetch": {
    "family": "material",
    "role": "fast tool worker",
@@ -878,6 +871,10 @@
   },
   "editorial/translate": {
    "unit": "editorial/translate",
+   "status": "portable-persona"
+  },
+  "general/explore": {
+   "unit": "general/explore",
    "status": "portable-persona"
   },
   "material/browser-fetch": {

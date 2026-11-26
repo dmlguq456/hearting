@@ -707,6 +707,18 @@ def _memory_values(row, now=None):
     return text, age, sanitize_title(str(row.get("type") or "")).strip()[:32]
 
 
+MEMORY_BODY = 600      # characters of a record's snippet the MEM popup shows under its headline
+
+
+def _memory_body(row, text):
+    """The record's own snippet (what the journal keeps of its body, never anything else) for the MEM popup, ``MEMORY_BODY`` characters at
+    most; empty where it is the headline itself, a ``superseded_by=`` pointer or nothing."""
+    snippet = " ".join(str(row.get("snippet") or "").split())
+    if not snippet or snippet.startswith("superseded_by=") or snippet == text:
+        return ""
+    return "".join(ch for ch in snippet if ch.isprintable())[:MEMORY_BODY]
+
+
 def session_memory(values, now=None):
     """``3m decision <headline>`` (spec E9 rule 37 (b)): this repo's newest saved memory row,
     its age and type dim and its headline (else the start of its snippet) in the body color.
@@ -746,8 +758,8 @@ MEMORY_ITEMS = 3
 def session_memory_items(values, now=None):
     """Spec E9 rule 46: the MEM section's records, ``MEMORY_ITEMS`` at most, newest first: each its short type
     word, its age and its headline (else the start of its snippet), and (11-15) its tier and scope
-    as the record carries them (none where it carries neither name). Nothing without a record or a
-    text; a body is never carried."""
+    as the record carries them (none where it carries neither name) and (11-20, the MEM popup) its body: the
+    snippet the journal keeps, ``MEMORY_BODY`` characters at most. Nothing without a record or a text."""
     items = []
     for row in values.get("memory_recent") or ():
         if not isinstance(row, dict):
@@ -756,7 +768,8 @@ def session_memory_items(values, now=None):
         if text:
             items.append({"kind": memory_kind(kind), "age": age, "text": text,
                           "tier": row.get("tier") if row.get("tier") in MEMORY_TIERS else "",
-                          "scope": row.get("scope") if row.get("scope") in MEMORY_SCOPES else ""})
+                          "scope": row.get("scope") if row.get("scope") in MEMORY_SCOPES else "",
+                          "body": _memory_body(row, text)})
         if len(items) >= MEMORY_ITEMS:
             break
     return items
@@ -949,6 +962,8 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         "popup_keys", "popup_unfold", "popup_fold", "popup_route", "popup_route_page",
         # 11-17: the NOW popup's keys.
         "popup_now", "popup_now_page",
+        # 11-21: the status popup's keys on its list screen (the document read whole has the keys every popup has).
+        "popup_status",
         # 11-15 (panel polish 1): the action under a question to answer here.
         "answer_action",
         # 11-17 (route row 5): a frame route whose two legs are done waits for the person's direction.

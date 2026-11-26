@@ -40,7 +40,7 @@ from capability_route_nodes import (
     _expected_nodes_under_frame_policy, _frame_node, _frameless_recipe, _load_sd160_snapshots,
     _no_model_node, _one_leg_frame_recipe, _owner_node, _quick_frame_diversity,
     _quick_gate_bindings, _recipe_has_frame, _resolve_owner_profile, _verify_profile_contract,
-    one_shot_owner_default, one_shot_review_declared, one_shot_review_node, unit_leg_node, SD160_REGISTRY_DIGEST, SD160_UNIT_CATALOG_DIGEST, unit_catalog_digest,
+    one_shot_owner_default, one_shot_review_declared, one_shot_review_nodes, unit_leg_node, SD160_REGISTRY_DIGEST, SD160_UNIT_CATALOG_DIGEST, unit_catalog_digest,
 )
 
 from capability_route_compose import (
@@ -539,7 +539,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     if allocation is not None:
         required = {"strategy", "window", "harness_order"}
         optional = {"usage_gate_used_percent", "depth_affinity", "depth_affinity_weight", "usage_headroom_exponent",
-                    "harness_weights", "owner_order"}
+                    "harness_weights", "field_weights", "owner_order"}
         if not isinstance(allocation, dict) or not required <= set(allocation) or set(allocation) - required - optional:
             raise ValueError("invalid dispatch_allocation shape")
         if allocation.get("strategy") not in {
@@ -580,6 +580,16 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
                 for name, value in weights.items()
             ):
                 raise ValueError("invalid dispatch_allocation harness weights")
+        if "field_weights" in allocation:
+            # The applied row of the route's field (same value rule as harness_weights).
+            row = allocation["field_weights"]
+            if not isinstance(row, dict) or not row or any(
+                name not in DEFAULTS.DISPATCHABLE_HARNESSES
+                or isinstance(value, bool) or not isinstance(value, (int, float))
+                or not 0.0 < value <= 1.0
+                for name, value in row.items()
+            ):
+                raise ValueError("invalid dispatch_allocation field weights")
         order = allocation.get("harness_order")
         if (
             not isinstance(order, list)
@@ -656,10 +666,14 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             profile = node.get("model_profile")
             row = registry["model_profiles"].get(profile)
             # The `top` exception profile is unregistered on purpose, so only
-            # the two node classes allowed to hold it skip the registered check:
-            # the owner, and a depth-1 frame anchor leg.
+            # the three node classes allowed to hold it skip the registered check:
+            # the owner, a depth-1 frame anchor leg, and a depth-2 stage worker or review leg (`top_stage_node`) the
+            # person named in `explicit_profiles` on a strong-or-higher route.
             top_owner_node = profile == PROFILE.TOP_PROFILE and (
                 _owner_node(node, effective, form) or _frame_node(node)
+                or (PROFILE.top_stage_node(node)
+                    and (route.get("explicit_profiles") or {}).get(node.get("id")) == PROFILE.TOP_PROFILE
+                    and PROFILE.top_stage_intensity(effective))
             )
             if not top_owner_node and (
                 not isinstance(row, dict) or row.get("registered_topology") is not True
@@ -776,12 +790,14 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             raise ValueError("unit node axes mismatch")
     elif form=="solo":
         resume_recipe = RESOURCE_RESUME.route_selected(route)
-        # The middle cell `solo·standard`: one owner (A) that starts its kind's declared review (B). A
-        # `solo` form above quick is accepted only as exactly that.
+        # The middle cell (`solo` at `standard` and up): one owner (A) that starts its kind's declared
+        # verification nodes (B). A `solo` form above quick is accepted only as exactly that.
         review_cell = effective != "quick"
         if review_cell and not (one_shot_review_declared(route_recipe) and one_shot_review_route(route)
                                 and selection.get("shape") == "solo"):
             raise ValueError("quick route shape mismatch")
+        expected_reviews = (one_shot_review_nodes(route_recipe, effective, registry, persona_version == 1)
+                            if review_cell else [])
         if (
             route.get("owner_dispatch_depth") != 1
             or route.get("max_dispatch_depth") != (2 if review_cell else 1)
@@ -791,7 +807,8 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             # so it stays true unchanged with three nodes. `max_dispatch_depth`
             # stays 1 because the frame legs are depth 1 as well.
             or route.get("registered_headless_policy") != "serial-attempt"
-            or len(route.get("nodes",[])) != (2 if resume_recipe or review_cell
+            or len(route.get("nodes",[])) != (2 if resume_recipe
+                                               else len(expected_reviews) + 1 if review_cell
                                                else 3 if _recipe_has_frame(route_recipe) else 1)
         ):
             raise ValueError("quick route shape mismatch")
@@ -825,22 +842,28 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             or node.get("fallback_hops")
             or sorted(node.get("depends_on") or []) !=
                (["resume-run"] if resume_recipe
-                else [one_shot_review_node(route_recipe)["id"]] if review_cell
+                else sorted(n["id"] for n in expected_reviews) if review_cell
                 else ["frame","frame-alternative"] if _recipe_has_frame(route_recipe) else [])
         ):
             raise ValueError("quick node axes mismatch")
         if review_cell:
-            # The review node is the recipe's borrowed node; only the sealed profile choice and the harness
-            # policy are the route's own, and its chain is the checked evidence's (checked below).
-            review=next((n for n in route["nodes"] if n.get("id")!="one-shot"), None)
-            expected_review=one_shot_review_node(route_recipe)
+            # The verification nodes are the recipe's borrowed review node and its declared group legs; only the
+            # sealed profile choice and the harness policy are the route's own, and their chain is the checked
+            # evidence's (checked below). They stand first, in the declared order, and the owner's end node last.
             own=("model_profile","profile_demand","profile_selection","profile_explicit",
                  "harness_policy","harness_affinity","fallback_hops")
-            if (review is None
-                    or {k: v for k, v in review.items() if k not in own}
-                    != {k: v for k, v in expected_review.items() if k not in own}
-                    or route["nodes"][0] is not review):
+            reviews=route["nodes"][:len(expected_reviews)]
+            if (len(reviews) != len(expected_reviews) or route["nodes"][len(expected_reviews):] != [node]
+                    or any({k: v for k, v in review.items() if k not in own}
+                           != {k: v for k, v in expected.items() if k not in own}
+                           for review, expected in zip(reviews, expected_reviews))):
                 raise ValueError("one-shot review node differs from the declared recipe")
+            # A leg the route chose no profile for runs the model its kind declares; a profile the person
+            # chose (`--profile`, `--explicit-profiles`) is checked against the sealed choice instead.
+            if any((review.get("profile_selection") or {}).get("source") == "legacy"
+                   and review.get("model_profile") != expected.get("model_profile")
+                   for review, expected in zip(reviews, expected_reviews)):
+                raise ValueError("one-shot review model differs from the declared recipe")
         frame_legs=[n for n in route["nodes"] if _frame_node(n)]
         if sorted(n.get("id") for n in frame_legs) != (
                 ["frame","frame-alternative"] if _recipe_has_frame(route_recipe) else []):

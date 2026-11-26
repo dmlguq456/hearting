@@ -36,6 +36,7 @@ F = _load("framed_route_for_unit_launch", "framed_route.test.py")
 T, R, L = F.T, F.R, F.L
 import dispatch_contract as DC  # noqa: E402
 import dispatch_completion_join as JOIN  # noqa: E402
+import dispatch_replacement as REPLACEMENT  # noqa: E402
 import dispatch_terminal_commit as DTC  # noqa: E402
 import codex_dispatch_terminal as TERMINAL  # noqa: E402
 import owner_route_binding as BINDING  # noqa: E402
@@ -148,6 +149,36 @@ class UnitStartTest(UnitLegBase):
         self.assertEqual(self.commands, [])
 
 
+    def test_cancelled_unit_receipts_offer_inspection_and_no_restart(self):
+        import route_parent_close
+        from start_receipt import next_line
+
+        cancelled = JOIN.CurrentDeliveryState(
+            None, "", "", "", "done", "CANCELLED", True, 0, False,
+            cancelled=True, cancellation_requested=True)
+        stopped = JOIN.CurrentDeliveryState(None, "", "", "", "done", "", True, 0, False)
+        for end, state, row_metadata in (
+            ("parent cancellation", cancelled, {"note": "cancelled-by-parent"}),
+            ("Fleet stop", stopped, {"note": route_parent_close.STOP_NOTE, **route_parent_close.STOP_EVIDENCE}),
+        ):
+            with self.subTest(end=end):
+                self.jobs.write_text(self.leg_row(self.route, self.path, status="done",
+                                                  launch_started="1", **row_metadata))
+                with mock.patch.object(W, "join_selected_attempts", return_value={"state": "ready"}), \
+                        mock.patch.object(W, "current_delivery_state", return_value=state):
+                    receipt = W.start_work(self.route, self.path, self.jobs, run=self.run_launch)
+                self.assertEqual(receipt["state"], "cancelled", receipt)
+                self.assertEqual(receipt["result"].get("cancellation_requested", False), state.cancellation_requested)
+                self.assertEqual(receipt["result"].get("stopped", False), not state.cancellation_requested)
+                self.assertEqual(receipt["result"]["required_action"], "")
+                self.assertEqual(receipt["result"]["recovery_command"], "")
+                self.assertEqual(receipt["resume_command"], "")
+                self.assertEqual((receipt["parent_next"], receipt["parent_next_command"]), ("inspect-receipt", ""))
+                self.assertIn("Inspect the unit cancellation receipt.", next_line(receipt))
+                self.assertNotIn("start --route", next_line(receipt))
+                self.assertEqual(self.commands, [])
+
+
 class UnitAgainTest(UnitLegBase):
     def test_the_compose_again_command_of_an_autoclosed_unit_route_names_its_unit(self):
         route, _ = self.unit_route()
@@ -175,6 +206,67 @@ class UnitFailedLegTest(UnitLegBase):
         self.assertEqual((result["state"], result["required_action"]), ("needs-attention", "compose-again"))
         self.assertIn("--unit qa/code-review", result["parent_next_command"])
         self.assertNotIn("start --route", result["parent_next_command"])
+
+
+    def test_silent_unit_exit_has_no_automatic_replacement_and_can_compose_again(self):
+        route, path = self.unit_route()
+        jobs = Path(self.root) / "jobs.log"
+        original = self.leg_row(route, path, status="done", note="dead-worker-silent-exit",
+                                launch_started="1", failure_class="protocol", artifact_root=route["artifact_root"])
+        jobs.write_text(original)
+        aid = W.attempt_id(route, "unit")
+
+        def unexpected_launch(*args, **kwargs):
+            self.fail("a resultless unit must not start an automatic replacement")
+
+        self.assertIsNone(REPLACEMENT.accept_terminal_delivery_duty(jobs, aid))
+        self.assertEqual(REPLACEMENT.advance_batch(jobs, {aid}, run=unexpected_launch), ({aid}, [], []))
+        with mock.patch.object(W, "default_parent_session_id", return_value="parent"), \
+                mock.patch.object(W, "join_selected_attempts", return_value={"state": "ready"}):
+            receipt = W.start_work(route, path, jobs, run=unexpected_launch)
+        self.assertEqual((receipt["state"], receipt["required_action"]), ("needs-attention", "compose-again"))
+        self.assertIn("--unit qa/code-review", receipt["parent_next_command"])
+        self.assertEqual(jobs.read_text(), original)
+        self.assertIsNone(REPLACEMENT.source_reservation(jobs, aid))
+
+
+class UnitCapacityStartTest(UnitLegBase):
+    def test_governor_refusal_before_registration_keeps_the_original_slot(self):
+        route, path = self.unit_route()
+        jobs = Path(self.root) / "jobs.log"
+        jobs.touch()
+
+        def refuse(command, **kwargs):
+            self.assertIn(W.attempt_id(route, "unit"), command)
+            return subprocess.CompletedProcess(command, 75,
+                "check=failed\nreason=model-worker-governor-denied\nretryable=1\nrefusal=rolling-start-budget\n"
+                "worker_class=dispatch\nretry_after_seconds=30\nchild_spawned=0\n", "")
+
+        with mock.patch.object(W, "prepare_task_request", return_value=None):
+            receipt = W.start_work(route, path, jobs, run=refuse)
+        self.assertEqual((receipt["state"], receipt["reason"]), ("waiting-capacity", "launch-capacity-wait"))
+        self.assertFalse(receipt["spawned"])
+        self.assertEqual(jobs.read_text(), "")
+
+    def test_registered_capacity_pause_is_not_a_compose_again(self):
+        route, path = self.unit_route()
+        jobs = Path(self.root) / "jobs.log"
+        aid = W.attempt_id(route, "unit")
+        jobs.write_text(self.leg_row(route, path, status="done", launch_started="1",
+                                    artifact_root=route["artifact_root"], failure_class="capacity",
+                                    note="dead-capacity"))
+        hold = {"state": "needs-attention", "reason": "replacement-capacity-wait",
+                "harness": "claude", "source_attempt_id": aid, "retry_at": "2099-01-01T00:00:00Z"}
+        with mock.patch.object(W, "default_parent_session_id", return_value="parent"), \
+                mock.patch.object(W, "join_selected_attempts", return_value={"state": "ready", "children": []}), \
+                mock.patch.object(W, "_outcome", return_value={"classification": "failure"}), \
+                mock.patch("dispatch_replacement.advance", return_value=hold) as advance, \
+                mock.patch("capacity_auto_resume.arm", return_value=None):
+            receipt = W.start_work(route, path, jobs)
+        self.assertEqual((receipt["state"], receipt["reason"]), ("waiting-capacity", "unit-capacity-wait"))
+        self.assertEqual(receipt["source_attempt_id"], aid)
+        self.assertEqual(receipt["retry_at"], hold["retry_at"])
+        advance.assert_called_once()
 
 
 class UnitTupleTest(UnitLegBase):
@@ -596,6 +688,36 @@ class UnitPromptTest(UnitLegBase):
         self.assertEqual(carried.replace(carried[carried.index("Unit bootstrap material"):
                                                 carried.index("Assignment:\n")], ""), empty)
 
+    def test_the_unit_worker_is_told_no_qa_and_no_intensity_while_the_row_keeps_them(self):
+        # 11-20: a unit route has no intensity, so its worker reads `- qa: -` / `- intensity: -` (an Opus review is not
+        # handed the word `quick`). The args (and so the row, the environment and the budget) keep `quick`; every other
+        # capability's metadata reads as it did.
+        route, path = self.unit_route()
+        adapter = self.adapter()
+        args = argparse.Namespace(
+            capability="unit", capability_mode="default", worker_mode="qa/code-review", qa="quick",
+            intensity="quick", dispatch_depth=1, worker_type="review", attempt_id="att-x", assigned_contract="unit",
+            route_node="unit", route_file=str(path), route_id=route["route_id"], owner_route_binding=None,
+            model_role="fast reviewer", model_profile="light", resolved_model_settings={}, parent_slug=None,
+            parent_session_id=None, capability_owner="unit", owner_harness="claude", worktree=route["cwd"],
+            artifact_root=route["artifact_root"], unit="qa/code-review", runtime_dir="", raw_data_dir="",
+            parent_attempt_id=None, route_hash=route["route_hash"], launch_head="0" * 40, diff_attribution=None)
+        jobs = Path(self.root) / "jobs.log"
+        jobs.write_text("")
+        env = dict(T.P.prepare_route_artifact_env(path, start=True, jobs=jobs))
+        with mock.patch.dict(os.environ, env):
+            prompt = adapter.DISPATCH_MAIN.unit_leg_prompt(adapter._ADAPTER, args, BRIEF)
+            metadata = adapter.DISPATCH_MAIN.dispatch_metadata_prompt(adapter._ADAPTER, args)
+            staged = adapter.DISPATCH_MAIN.dispatch_metadata_prompt(
+                adapter._ADAPTER, argparse.Namespace(**{**vars(args), "capability": "autopilot-code", "intensity": "standard",
+                                                        "qa": "standard"}))
+        for text in (prompt, metadata):
+            self.assertIn("\n- qa: -\n- intensity: -\n", text)
+            self.assertNotIn("- qa: quick", text)
+            self.assertNotIn("- intensity: quick", text)
+        self.assertIn("\n- qa: standard\n- intensity: standard\n", staged)
+        self.assertEqual((args.qa, args.intensity), ("quick", "quick"))
+
     def test_the_first_instruction_is_the_unit_the_brief_and_how_to_end(self):
         route, path = self.unit_route()
         adapter = self.adapter()
@@ -639,6 +761,37 @@ class UnitPromptTest(UnitLegBase):
         import worker_bootstrap
         self.assertLess(len(worker_bootstrap.unit_safety_prompt("review").encode()), 2048)
         self.assertLess(len(prompt), 15_000)   # the unit's own text grew on main; the first instruction stays one short block
+
+    def test_a_lookup_leg_is_not_told_how_to_start_another_worker_and_other_legs_are_unchanged(self):
+        # `general/explore` says "no further workers" and `roles/worker-types/support.md` says a support worker
+        # dispatches none, so its first instruction omits the paragraph that teaches a unit worker how; the
+        # others' instruction keeps it exactly where it was (right after the safety lines).
+        import worker_bootstrap as wb
+        call = wb.unit_call_prompt(R.ROOT) + "\n"
+        prompts = {}
+        for unit, worker_type, role in (("general/explore", "support", "fast tool worker"),
+                                        ("qa/code-review", "review", "fast reviewer")):
+            route, path = self.unit_route(unit=unit)
+            adapter = self.adapter()
+            args = argparse.Namespace(
+                capability="unit", capability_mode="default", worker_mode=unit, qa="quick",
+                intensity="quick", dispatch_depth=1, worker_type=worker_type, attempt_id="att-x",
+                assigned_contract="unit", route_node="unit", route_file=str(path), route_id=route["route_id"],
+                owner_route_binding=None, model_role=role, model_profile="light", resolved_model_settings={},
+                parent_slug=None, parent_session_id=None, capability_owner="unit", owner_harness="claude",
+                worktree=route["cwd"], artifact_root=route["artifact_root"], unit=unit, runtime_dir="",
+                raw_data_dir="", parent_attempt_id=None, route_hash=route["route_hash"], launch_head="0" * 40,
+                diff_attribution=None)
+            jobs = Path(self.root) / "jobs.log"
+            jobs.write_text("")
+            env = dict(T.P.prepare_route_artifact_env(path, start=True, jobs=jobs))
+            with mock.patch.dict(os.environ, env), mock.patch.object(
+                    adapter.DISPATCH_MAIN, "dispatch_metadata_prompt", return_value="Dispatch metadata:\n- unit: x\n"):
+                prompts[unit] = adapter.DISPATCH_MAIN.unit_leg_prompt(adapter._ADAPTER, args, BRIEF)
+        self.assertNotIn("Starting another worker", prompts["general/explore"])
+        self.assertNotIn("--ephemeral", prompts["general/explore"])
+        self.assertIn("No further workers", prompts["general/explore"])
+        self.assertIn(wb.unit_safety_prompt("review") + call, prompts["qa/code-review"])
 
 
 if __name__ == "__main__":

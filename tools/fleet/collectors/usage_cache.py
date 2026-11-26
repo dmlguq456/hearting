@@ -359,6 +359,27 @@ def provider_records(harness, account_scopes=None):
     return sorted(rows, key=lambda row: (row["provider"], row["model"], row["observed_at"] or 0))[-32:]
 
 
+def unavailable_provider_rows(harness):
+    """Every provider line the usage cache holds as `unavailable`, not cut to a count.
+
+    Read only, for a reader that must see all the refusals (`provider_records` keeps the last
+    32 lines by name, for a view). Each row is `{provider, model, reason}`; a cache that is
+    absent or unreadable gives no rows.
+    """
+    try:
+        with open(_path(harness), encoding="utf-8") as fh:
+            item = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return []
+    if (not isinstance(item, dict) or item.get("schema_version") != SCHEMA_VERSION
+            or item.get("harness") != harness or not isinstance(item.get("providers"), dict)):
+        return []
+    return [{"provider": row["provider"], "model": row["model"], "reason": row.get("reason")}
+            for row in item["providers"].values()
+            if isinstance(row, dict) and row.get("state") == "unavailable"
+            and isinstance(row.get("provider"), str) and isinstance(row.get("model"), str)]
+
+
 @contextmanager
 def _claude_mutex():
     """Serialize only Claude lease/publication changes across threads/processes.

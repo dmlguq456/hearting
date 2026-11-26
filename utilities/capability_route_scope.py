@@ -438,7 +438,9 @@ def compose_observations(route, t=None):
     answers = [
         (t("route.q.main_capability"), route["capability"]),
         (t("route.q.new_measurement"), t("route.a.lab_declared") if lab_run else t("route.a.depends_on_work")),
-        ("standard+", t("route.a.yes") if route["effective_intensity"] in {"standard", "strong", "thorough", "adversarial"} else t("route.a.no")),
+        # 11-20: a unit route has no intensity, so "is it standard+" has no answer (the record keeps `quick`).
+        ("standard+", t("route.a.not_applicable") if route.get("capability") == TOPO.UNIT_CAPABILITY
+         else t("route.a.yes") if route["effective_intensity"] in {"standard", "strong", "thorough", "adversarial"} else t("route.a.no")),
         (t("route.q.split_stages"), t("route.a.stages_declared", count=len(nodes)) if shape == "staged" else t("route.frame.pending") if shape == "framed" else t("route.a.single_run")),
         (t("route.q.inline_exception"), str(selection.get("inline_reason") or selection.get("selection_basis") or unknown) if shape == "direct" else t("route.a.not_applicable")),
         (t("route.q.delegation_surface"), t("route.a.surface", native=native_label, headless=seen if headless else unknown)),
@@ -524,10 +526,15 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
         profile = (t("route.tier.inline") if node.get("execution_surface") == "inline"
                    else node.get("model_profile") or "unknown")
         profiles.setdefault(anchor, []).append(profile)
-    lines.append("  tiers: " + (" ".join(f"{node}={'+'.join(values)}" for node, values in profiles.items()) or t("route.none")))
     workers = sum(n.get("dispatch_depth") == 2 or _frame_node(n) or (unit_route and RP.is_depth0_leg(n))
                   for n in nodes)
     owners = int(shape != "framed" and route["effective_intensity"] != "direct" and not unit_route)
+    owner_tier = route.get("owner_model_profile")
+    if owners and owner_tier and "one-shot" not in profiles:
+        # The owner's own tier is a sealed choice too (`top` is allowed for it at any intensity); a
+        # one-shot route's owner is already its `one-shot` node, listed below.
+        profiles = {"owner": [owner_tier], **profiles}
+    lines.append("  tiers: " + (" ".join(f"{node}={'+'.join(values)}" for node, values in profiles.items()) or t("route.none")))
     resources = [n["id"] for n in nodes if n.get("kind") == "resource-runner"]
     size = "  " + t("route.size", nodes=len(nodes), workers=workers, owners=owners,
                       resources=",".join(resources) or t("route.none"))
