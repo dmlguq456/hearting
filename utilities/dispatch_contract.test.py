@@ -5,6 +5,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import contextlib, errno, fcntl, hashlib, importlib.util, io, json, os, stat, subprocess, sys, tempfile, time, threading, types, unittest
 from unittest import mock
 from pathlib import Path
+import select
 from types import SimpleNamespace
 
 P=Path(__file__).with_name("dispatch_contract.py")
@@ -5406,6 +5407,24 @@ class ResidueDrainRefreshTest(ControlledConsumerTestCase):
                    ("drained",False,"residue-row-changed"))
 
 
+@contextlib.contextmanager
+def ready_tagged_process(test, attempt):
+    """Hold a fixture child after the exec that installed its attempt tag."""
+    hold = "import os; os.write(1, b'R'); os.read(0, 1)"
+    child = subprocess.Popen([sys.executable, "-c", hold],
+                             env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: attempt},
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        with child.stdout:
+            test.assertTrue(select.select([child.stdout], [], [], 10)[0], "tagged child did not start")
+            test.assertEqual(child.stdout.read(1), b"R", "tagged child exited before it was ready")
+        yield child
+    finally:
+        child.stdin.close()
+        child.terminate()
+        child.wait(timeout=5)
+
+
 class DrainReceiptDeniedEnvironTest(unittest.TestCase):
  """A same-UID process born after a drained attempt whose environment cannot be read
  (one exiting, an sshd session) is outside that attempt once the watcher sealed it
@@ -5494,14 +5513,9 @@ class DrainReceiptDeniedEnvironTest(unittest.TestCase):
                     "attempt-descendant-unverifiable")
 
  def test_a_readable_tag_is_live_and_another_error_stays_unverifiable(self):
-  tagged=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],
-                          env=dict(os.environ,**{D.ATTEMPT_DESCENDANT_ENV:self.sealed["attempt_id"]}))
-  try:
-   with self.denied():
-    verdict=D.attempt_process_quiescence(self.sealed,terminal_receipt=True)
-    self.assertEqual((verdict.state,verdict.reason,verdict.pid),("live","attempt-descendant-live",tagged.pid))
-  finally:
-   tagged.terminate();tagged.wait(timeout=5)
+  with ready_tagged_process(self,self.sealed["attempt_id"]) as tagged, self.denied():
+   verdict=D.attempt_process_quiescence(self.sealed,terminal_receipt=True)
+   self.assertEqual((verdict.state,verdict.reason,verdict.pid),("live","attempt-descendant-live",tagged.pid))
   with self.denied(errno.EIO):
    probe=D.attempt_tagged_descendants(self.sealed)
    self.assertEqual((probe.state,probe.reason),
@@ -5599,14 +5613,10 @@ class LaunchCgroupDeniedEnvironTest(unittest.TestCase):
     self.unverifiable(dict(self.recorded,launch_cgroup_ns=""))
 
  def test_a_readable_tag_still_wins_over_a_service_cgroup(self):
-  tagged=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],
-                          env=dict(os.environ,**{D.ATTEMPT_DESCENDANT_ENV:self.recorded["attempt_id"]}))
-  try:
-   with self.denied(),self.cgroup(self.DBUS),self.same_ns():
-    verdict=D.attempt_process_quiescence(self.recorded,terminal_receipt=True)
-    self.assertEqual((verdict.state,verdict.reason,verdict.pid),("live","attempt-descendant-live",tagged.pid))
-  finally:
-   tagged.terminate();tagged.wait(timeout=5)
+  with ready_tagged_process(self,self.recorded["attempt_id"]) as tagged, \
+       self.denied(),self.cgroup(self.DBUS),self.same_ns():
+   verdict=D.attempt_process_quiescence(self.recorded,terminal_receipt=True)
+   self.assertEqual((verdict.state,verdict.reason,verdict.pid),("live","attempt-descendant-live",tagged.pid))
 
  def test_a_changed_start_between_reads_is_not_excluded(self):
   real=Path.read_text

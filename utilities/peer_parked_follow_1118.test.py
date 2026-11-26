@@ -12,6 +12,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import importlib.util
 import io
 import json
+import select
 import subprocess
 import tempfile
 import time
@@ -33,7 +34,7 @@ OLD = "92d7cdcd-3cef-4583-80e6-f9a4561ac629"
 NEW = "e675a253-0561-410f-aa04-c12345cabf70"
 OTHER = "11111111-2222-4333-8444-555555555555"
 SENDER = "66666666-7777-4888-8999-000000000000"
-SLEEP = "import time; time.sleep(60)"
+HOLD = "import os; os.write(1, b'R'); os.read(0, 1)"
 
 
 class Parked(unittest.TestCase):
@@ -60,13 +61,20 @@ class Parked(unittest.TestCase):
 
     def _reap(self):
         for child in self.children:
+            child.stdin.close()
             child.kill()
-            child.wait()
+            child.wait(timeout=10)
+        self.children.clear()
         peer_message._PARKED_MEMO.clear()
 
     def spawn(self, *argv):
-        child = subprocess.Popen([sys.executable, "-c", SLEEP, *argv], stdin=subprocess.DEVNULL)
+        child = subprocess.Popen([sys.executable, "-c", HOLD, *argv],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         self.children.append(child)
+        # A returned PID can precede readable resume arguments in procfs.
+        with child.stdout:
+            self.assertTrue(select.select([child.stdout], [], [], 10)[0], "fixture child did not start")
+            self.assertEqual(child.stdout.read(1), b"R", "fixture child exited before it was ready")
         return child
 
     def record(self, child, **fields):
@@ -202,10 +210,7 @@ class Parked(unittest.TestCase):
         judged.assert_not_called()                                    # nothing holds a job: nothing to judge
 
     def tearDown_children(self):
-        for child in self.children:
-            child.kill()
-            child.wait()
-        self.children.clear()
+        self._reap()
         for path in (self.config / "sessions").iterdir():
             path.unlink()
 

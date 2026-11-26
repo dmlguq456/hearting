@@ -10,6 +10,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import json
+import select
 import subprocess
 import tempfile
 import unittest
@@ -25,7 +26,7 @@ OLD = "3f1c0a7e-5b2d-4c6e-9a8f-1d2e3f4a5b6c"
 NEW = "7a9b8c6d-2e4f-4a1b-8c3d-5e6f7a8b9c0d"
 OTHER = "11111111-2222-4333-8444-555555555555"
 THIRD = "66666666-7777-4888-8999-000000000000"
-SLEEP = "import time; time.sleep(60)"
+HOLD = "import os; os.write(1, b'R'); os.read(0, 1)"
 
 
 class ParkedSuccessor(unittest.TestCase):
@@ -54,12 +55,18 @@ class ParkedSuccessor(unittest.TestCase):
 
     def _reap(self):
         for child in self.children:
+            child.stdin.close()
             child.kill()
-            child.wait()
+            child.wait(timeout=10)
 
     def spawn(self, *argv):
-        child = subprocess.Popen([sys.executable, "-c", SLEEP, *argv], stdin=subprocess.DEVNULL)
+        child = subprocess.Popen([sys.executable, "-c", HOLD, *argv],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         self.children.append(child)
+        # Record the child once its own exec has made the resume argv readable.
+        with child.stdout:
+            self.assertTrue(select.select([child.stdout], [], [], 10)[0], "fixture child did not start")
+            self.assertEqual(child.stdout.read(1), b"R", "fixture child exited before it was ready")
         return child
 
     def record(self, child, **fields):

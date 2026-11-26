@@ -18,6 +18,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 
 import copy
 import json
+import select
 import shutil
 import subprocess
 import tempfile
@@ -41,7 +42,7 @@ NEW2 = "5c4b3a29-8f7e-4d6c-9b5a-4f3e2d1c0b9a"
 OTHER = "0e1d2c3b-4a59-4687-a5b4-c3d2e1f0a9b8"
 JOB, JOB2 = "7a9b8c6d", "5c4b3a29"
 PANE = "w1:p1"
-SLEEP = "import time; time.sleep(120)"
+HOLD = "import os; os.write(1, b'R'); os.read(0, 1)"
 
 
 class Split(unittest.TestCase):
@@ -75,14 +76,22 @@ class Split(unittest.TestCase):
 
     def _reap(self):
         for child in self.children.values():
+            child.stdin.close()
             child.kill()
-            child.wait()
+            child.wait(timeout=10)
         self.children = {}
 
     def spawn(self, key, *argv, executable=None):
-        child = subprocess.Popen([executable or sys.executable, "-c", SLEEP, *argv], stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # The copied interpreter has the fixture's name but still uses its own stdlib.
+        env = dict(os.environ, PYTHONHOME=sys.base_prefix) if executable else None
+        child = subprocess.Popen([executable or sys.executable, "-c", HOLD, *argv],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 env=env)
         self.children[key] = child
+        # Fleet reads the new image's executable and argv for the split.
+        with child.stdout:
+            self.assertTrue(select.select([child.stdout], [], [], 10)[0], "fixture child did not start")
+            self.assertEqual(child.stdout.read(1), b"R", "fixture child exited before it was ready")
         return child
 
     def record(self, key, sid, **fields):
@@ -459,6 +468,7 @@ class ParkedFleetRow(Split):
         self.assertEqual(self.send_pass(self.rows(), sent), 0)
         window = self.rows()[:1]
         held = self.children.pop("held")                # the window's record still names the job
+        held.stdin.close()
         held.kill()
         held.wait()
         self.assertEqual(self.send_pass(window, sent), 1)
