@@ -12,6 +12,20 @@ WH_S=importlib.util.spec_from_file_location("claude_dispatch_headless",Path(__fi
 from dispatch_contract import ROUTE_IDENTITY_METADATA_KEYS
 sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
 from split_module_fixture import patch_split  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "tools"))
+import fixture_processes  # noqa: E402
+
+
+class ReapedTemporaryDirectory(tempfile.TemporaryDirectory):
+    """A temporary directory that first ends every process still carrying its path.
+
+    A real ``--start`` launches the fence child in its own session and the tests mock the wait, so the
+    child can still be writing into the folder when it is removed (``Directory not empty``).
+    """
+
+    def cleanup(self):
+        fixture_processes.reap(self.name)
+        super().cleanup()
 
 
 def isolated_dispatch_env(**updates):
@@ -577,7 +591,7 @@ class ForegroundReviewStartPathTest(unittest.TestCase):
         return path, route
 
     def test_real_start_waits_seals_then_launches_reaper(self):
-        with tempfile.TemporaryDirectory() as td:
+        with ReapedTemporaryDirectory() as td:
             root = Path(td); worktree = root / "worktree"; worktree.mkdir()
             subprocess.run(["git", "init", "-q", str(worktree)], check=True)
             subprocess.run(["git", "-C", str(worktree), "config", "user.email", "test@example.com"], check=True)
@@ -652,7 +666,7 @@ class ForegroundReviewStartPathTest(unittest.TestCase):
             self.assertIn("reap_watch=post-exit,reap_watch_pid=4242", row)
 
     def test_commit_failure_preserves_common_outcome_and_closes_exact_row(self):
-        with tempfile.TemporaryDirectory() as td:
+        with ReapedTemporaryDirectory() as td:
             root = Path(td); worktree = root / "worktree"; worktree.mkdir()
             subprocess.run(["git", "init", "-q", str(worktree)], check=True)
             subprocess.run(["git", "-C", str(worktree), "config", "user.email", "test@example.com"], check=True)

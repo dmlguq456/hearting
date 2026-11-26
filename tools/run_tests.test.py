@@ -266,33 +266,88 @@ class XPassFixture(RunTestsFixtureBase):
 
 
 class SkippedSuiteFixture(RunTestsFixtureBase):
-    """A file whose every test was skipped is not a PASS; a partly skipped one still is."""
+    """A file that ran no assertion because everything was skipped is not a PASS; any real work keeps PASS."""
 
-    BODY = """
-        import unittest
-        class T(unittest.TestCase):
-            def test_a(self):
-                self.skipTest('no node')
-            def test_b(self):
-                {second}
-        unittest.main()
-    """
+    HEAD = "import unittest\n"
+    CASES = {
+        # (a) every test method skips
+        "methods_skipped.test.py": ("SKIPPED", """
+            class T(unittest.TestCase):
+                def test_a(self): self.skipTest('no node')
+                def test_b(self): self.skipTest('no node')
+            unittest.main()
+        """),
+        # (a') one skip, one pass
+        "skip_and_pass.test.py": ("PASS", """
+            class T(unittest.TestCase):
+                def test_a(self): self.skipTest('no node')
+                def test_b(self): pass
+            unittest.main()
+        """),
+        # setUpClass skips: `Ran 0 tests` / `OK (skipped=1)`, the shape of a PTY file without node/npm
+        "setup_class_skip.test.py": ("SKIPPED", """
+            class T(unittest.TestCase):
+                @classmethod
+                def setUpClass(cls): raise unittest.SkipTest('needs node/npm')
+                def test_a(self): pass
+            unittest.main()
+        """),
+        # setUpModule skips
+        "setup_module_skip.test.py": ("SKIPPED", """
+            def setUpModule(): raise unittest.SkipTest('needs node/npm')
+            class T(unittest.TestCase):
+                def test_a(self): pass
+            unittest.main()
+        """),
+        # one skipped class beside one passed test in another class: the two counts are equal (1 and 1)
+        "skipped_class_and_pass.test.py": ("PASS", """
+            class A(unittest.TestCase):
+                @classmethod
+                def setUpClass(cls): raise unittest.SkipTest('needs node/npm')
+                def test_a(self): pass
+            class B(unittest.TestCase):
+                def test_b(self): pass
+            unittest.main()
+        """),
+        # (c) a test whose subTests skip twice and assert once: three skip events, two tests, real work
+        "subtest_mixed.test.py": ("PASS", """
+            class T(unittest.TestCase):
+                def test_a(self):
+                    for i in range(3):
+                        with self.subTest(i=i):
+                            if i < 2: self.skipTest('no node')
+                            self.assertEqual(i, 2)
+                def test_b(self): self.skipTest('no node')
+            unittest.main()
+        """),
+        # (d) skips beside an expected failure
+        "expected_failure_mixed.test.py": ("PASS", """
+            class T(unittest.TestCase):
+                def test_a(self):
+                    for i in range(3):
+                        with self.subTest(i=i): self.skipTest('no node')
+                @unittest.expectedFailure
+                def test_b(self): self.fail('known')
+            unittest.main()
+        """),
+    }
 
-    def test_whole_file_skip_is_a_skipped_verdict_and_the_run_still_passes(self):
-        write_suite(self.root, "all_skipped.test.py", self.BODY.format(second="self.skipTest('no node')"))
+    def test_each_shape_gets_the_verdict_of_what_it_ran(self):
+        for name, (_expected, body) in self.CASES.items():
+            write_suite(self.root, name, self.HEAD + textwrap.dedent(body))
         result, rows = self.run_fixture([])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual({r["verdict"] for r in rows}, {"SKIPPED"})
+        got = {r["suite_path"]: r["verdict"] for r in rows}
+        self.assertEqual(got, {name: expected for name, (expected, _body) in self.CASES.items()}, result.stdout)
+
+    def test_summary_names_the_skipped_files_and_counts_skip_events(self):
+        write_suite(self.root, "all_skipped.test.py", self.HEAD + textwrap.dedent(self.CASES["methods_skipped.test.py"][1]))
+        write_suite(self.root, "part_skipped.test.py", self.HEAD + textwrap.dedent(self.CASES["skip_and_pass.test.py"][1]))
+        result, rows = self.run_fixture([])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertRegex(result.stdout, r"(?m)^SKIPPED=1$")
-        self.assertNotRegex(result.stdout, r"(?m)^PASS=")
-        self.assertRegex(result.stdout, r"(?m)^skipped-tests=2$")
-
-    def test_a_partly_skipped_file_stays_a_pass_and_its_skips_are_counted(self):
-        write_suite(self.root, "part_skipped.test.py", self.BODY.format(second="pass"))
-        result, rows = self.run_fixture([])
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual({r["verdict"] for r in rows}, {"PASS"})
-        self.assertRegex(result.stdout, r"(?m)^skipped-tests=1$")
+        self.assertRegex(result.stdout, r"(?m)^PASS=1$")
+        self.assertRegex(result.stdout, r"(?m)^skip-events=3$")
 
 
 class UnlistedFailFixture(RunTestsFixtureBase):
@@ -872,6 +927,14 @@ class CompareBaselineFixture(RunTestsFixtureBase):
     def test_known_fail_to_flaky_known_fail_is_not_regression(self):
         base = self._write_report("base-flaky.tsv", [("a.test.py", "-", "KNOWN-FAIL")])
         head = self._write_report("head-flaky.tsv", [("a.test.py", "-", "FLAKY-KNOWN-FAIL")])
+        result = run_runner(["--compare-baseline", "--base-report", str(base), "--head-report", str(head)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["regression"], [])
+
+    def test_pass_to_skipped_is_not_a_regression(self):
+        # A file that skips where it passed before (no node/npm here) is not a failure.
+        base = self._write_report("base-skip.tsv", [("a.test.py", "-", "PASS")])
+        head = self._write_report("head-skip.tsv", [("a.test.py", "-", "SKIPPED")])
         result = run_runner(["--compare-baseline", "--base-report", str(base), "--head-report", str(head)])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["regression"], [])

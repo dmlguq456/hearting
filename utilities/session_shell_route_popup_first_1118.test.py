@@ -519,12 +519,15 @@ const measure=async(label,press_=opened)=>{
     if(sc==='page_scroll'){
       // Enter pressed on a route while the collection is still under way (the window is lower than the page): the page opens at its top.
       await resize(120,16);
-      // The collection is held under way (not a delay the keys must beat): the Enter lands while it is out, on any machine.
+      // The collection is held under way by `.hang` (not by a 2 s delay the keys must beat), so the keys below are written while it is out.
       fs.writeFileSync(cfg.vm+'.hang','');
       await opened();await until(either,'a first content');
       for(let i=0;i<8;i++)await key('\x1b[B',60);await key('\r',100);
       const pageRead=s=>paged(s)&&!staleWords(s)&&plain(s).some(l=>/\d+\/\d+ ·/.test(l));
-      await until(s=>plain(s).some(l=>/\d+\/\d+ ·/.test(l)),'the page while the collection is under way');
+      // While the collection is out, Enter changes nothing on screen (the first screen already carries a `1/N ·` place mark), so there is no
+      // mark to wait for: this only checks that a place mark stands. What is guaranteed is the order: the hold is let go after the keys
+      // were written, and the backend looks for `.hang` every 0.2 s, so the collection ends after them.
+      await until(s=>plain(s).some(l=>/\d+\/\d+ ·/.test(l)),'a place mark on the first screen');
       fs.unlinkSync(cfg.vm+'.hang');
       // A frame is taken once the page has stopped changing (a frame drawn between two steps of the redraw is not the page).
       const quiet=async s0=>{let last=JSON.stringify(plain(s0)),same=0,cur=s0;const began=Date.now();

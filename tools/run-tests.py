@@ -777,6 +777,7 @@ class SuiteResult:
         "failing_test_ids",
         "tests_run",
         "tests_skipped",
+        "tests_progress",
         "child_stderr",
         "run_deadline",
     )
@@ -790,7 +791,7 @@ class SuiteResult:
         self.duration_s = duration_s
         self.profile = profile
         self.failing_test_ids = extract_failing_test_ids(stdout, stderr)
-        self.tests_run, self.tests_skipped = extract_unittest_counts(stdout, stderr)
+        self.tests_run, self.tests_skipped, self.tests_progress = extract_unittest_counts(stdout, stderr)
         self.child_stderr = ""
         # "not-started" or "stopped" when the --deadline run budget, not this
         # suite's own --timeout, ended the attempt; "" otherwise.
@@ -803,14 +804,41 @@ class SuiteResult:
 
 _UNITTEST_RAN_RE = re.compile(r"^Ran (\d+) tests? in ", re.MULTILINE)
 _UNITTEST_SKIPPED_RE = re.compile(r"^OK \(.*?\bskipped=(\d+)", re.MULTILINE)
+# unittest's one-character-per-result line just above the dashes ("s." = one skip, one pass).
+_UNITTEST_PROGRESS_RE = re.compile(r"^([.sxuFE]+)\n-{70}\nRan \d+ tests? in ", re.MULTILINE)
 
 
-def extract_unittest_counts(stdout: str, stderr: str) -> tuple[int, int]:
-    """``(tests run, tests skipped)`` read from a unittest summary; ``(0, 0)`` when absent."""
+def extract_unittest_counts(stdout: str, stderr: str) -> tuple[int, int, str | None]:
+    """``(tests run, skip events, progress line)`` read from a unittest summary.
+
+    ``(0, 0, None)`` when absent. Skip events are what ``OK (skipped=K)`` counts: one per skipped
+    test, per skipped ``subTest`` and per ``setUpClass``/``setUpModule`` skip, so it is not a count
+    of tests. The progress line is ``None`` when the run was verbose or not unittest's.
+    """
     text = "\n".join((stderr or "", stdout or ""))
     ran = _UNITTEST_RAN_RE.findall(text)
     skipped = _UNITTEST_SKIPPED_RE.findall(text)
-    return (int(ran[-1]) if ran else 0, int(skipped[-1]) if skipped else 0)
+    progress = _UNITTEST_PROGRESS_RE.findall(text)
+    return (int(ran[-1]) if ran else 0, int(skipped[-1]) if skipped else 0,
+            progress[-1] if progress else None)
+
+
+def whole_file_skipped(result: "SuiteResult") -> bool:
+    """True when a passing unittest file ran no assertion because everything was skipped.
+
+    ``Ran 0`` with a skip is a ``setUpClass``/``setUpModule`` skip (a missing node/npm); equal counts
+    are a file whose every test skipped. Unequal counts mean a ``subTest`` skipped beside real work,
+    so the file is a PASS. When unittest's progress line is there, any result other than ``s`` in it
+    (a pass, an expected failure) also means work ran, which separates a skipped class from a passed
+    test in another class even when the two counts happen to be equal. Limit: with no progress line
+    (verbose output) that coincidence reads as a skip, and a ``subTest`` that passes inside a test
+    that never fails leaves no mark in the line, so the counts alone decide.
+    """
+    if not result.tests_skipped:
+        return False
+    if result.tests_progress is not None and set(result.tests_progress) != {"s"}:
+        return False
+    return result.tests_run == 0 or result.tests_skipped == result.tests_run
 
 
 _UNITTEST_FAIL_RE = re.compile(r"^(FAIL|ERROR):\s+(\S+)\s+\(([\w.]+)\)", re.MULTILINE)
@@ -1824,9 +1852,9 @@ def classify_result(
         if not verdicts:
             # A file whose every test was skipped (a missing node/npm, say) ran
             # nothing: it is not a PASS, though it does not fail the run.
-            if result.tests_run and result.tests_skipped >= result.tests_run:
+            if whole_file_skipped(result):
                 verdicts.append(Verdict(suite_path, "-", "SKIPPED",
-                                        detail=f"skipped={result.tests_skipped}/{result.tests_run}"))
+                                        detail=f"skip-events={result.tests_skipped} tests-run={result.tests_run}"))
             else:
                 verdicts.append(Verdict(suite_path, "-", "PASS"))
         return verdicts
@@ -2106,7 +2134,7 @@ def compare_baseline(base_report: Path, head_report: Path) -> int:
     def failing_keys(rows):
         keys = set()
         for row in rows:
-            if row["verdict"] not in ("PASS", "KNOWN-FAIL", "FLAKY-KNOWN-FAIL"):
+            if row["verdict"] not in ("PASS", "SKIPPED", "KNOWN-FAIL", "FLAKY-KNOWN-FAIL"):
                 keys.add((row["suite_path"], row["test_id"]))
             elif row["verdict"] in ("KNOWN-FAIL", "FLAKY-KNOWN-FAIL"):
                 # A known-fail in a --report-only run still represents an
@@ -2907,7 +2935,7 @@ def _run_main(argv: list[str]) -> int:
     xpass_nonfatal: list[str] = []
     report_rows: list[dict[str, str]] = []
     verdict_counts: dict[str, int] = {}
-    skipped_tests = 0
+    skip_events = 0  # skip events of each passing first attempt (see extract_unittest_counts), not tests
     # One summary line per test name that failed and then passed, so a log grep
     # across CI runs counts how often each test flakes (a suite row keeps only
     # the names, folded into one detail field).
@@ -3062,7 +3090,7 @@ def _run_main(argv: list[str]) -> int:
                 verdicts = classify_result(retries[-1], baseline, today, run_fingerprint)
         else:
             verdicts = classify_result(result, baseline, today, run_fingerprint)
-        skipped_tests += result.tests_skipped
+        skip_events += result.tests_skipped
         for v in verdicts:
             verdict_counts[v.verdict] = verdict_counts.get(v.verdict, 0) + 1
             result_kind = v.kind if v.kind is not None else (
@@ -3247,8 +3275,8 @@ def _run_main(argv: list[str]) -> int:
                 "UNDECLARED-ISOLATION-OPTOUT", "ISOLATION-OPTOUT-UNNEEDED"):
         if key in verdict_counts:
             print(f"{key}={verdict_counts[key]}")
-    if skipped_tests:
-        print(f"skipped-tests={skipped_tests}")
+    if skip_events:
+        print(f"skip-events={skip_events}")
     unclassified = sum(1 for row in report_rows if row["verdict"] == "KNOWN-FAIL")
     for profile in ISOLATION_PROFILES:
         print(f"profile[{profile}]={len(suites_by_profile[profile])}")
