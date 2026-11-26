@@ -934,12 +934,13 @@ Esc an escape sequence's start). After such a key only the paste's bulk is dropp
 more than one key, up to and with its end mark), never typed and never the native's; a read
 holding one key and a new paste go on their way (to the popup, the native, the panel's mouse).
 The dropping ends at the paste's end mark, at a new paste, or a second after the last read it
-dropped (only those count the second again), so it ends however the person types; an input
-method that puts several characters in one read is the bulk then, within that second. A paste
-that never ends holds nothing. Two gaps remain: a paste that stalls and brings its next CR
-alone with more than 0.15 s before the rest sends what came (the rest is then dropped), and a
-rest that comes one key per read goes on as keys. One past the limit goes in as far as it fits,
-with the limit's notice.
+dropped (only those count the second again). A read of the person's that holds several keys
+(an input method's word, keys a slow link brings together, two wheel reports) is the bulk too:
+it is dropped and counts the second again. A paste that never ends holds nothing. Two gaps
+remain: a paste that stalls and brings its next CR alone with more than 0.15 s before the rest
+sends what came (the rest is then dropped), and a rest that comes one key per read goes on as
+keys (its CR an Enter there: the native's, or a second sending of an answer not confirmed). One
+past the limit goes in as far as it fits, with the limit's notice.
 The answer grows a row per line (and per wrap) within the popup or the page while the
 question's first words (and their `more` line), its choices and the key line keep their
 rows; taller than that, the rows shown are one unbroken stretch following the place (only

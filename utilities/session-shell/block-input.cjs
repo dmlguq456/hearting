@@ -23,7 +23,7 @@ const TEXT_START=['\x1b[1;5H'],TEXT_END=['\x1b[1;5F'];
 // 11-26: a paste whose bytes stop this long has stalled (Fleet's `_PASTE_IDLE`); review 1861: it is not over then.
 const PASTE_IDLE=1000;
 // Review 1861: while a paste is open the person's key is a read holding one key with nothing after it for this long
-// (Fleet's `_PASTE_KEY_WAIT`); a paste resumed after a stall can bring its next byte, a CR, alone, its rest tens of ms on.
+// (Fleet's `_PASTE_KEY_WAIT`); a paste resumed after a stall can bring its next byte, a CR, alone, its rest after a gap not measured on a real link.
 const PASTE_KEY_WAIT=150;
 // A read holding one key as a person types it: one byte, one character, or one whole escape sequence (an arrow, a
 // modified key, a mouse or focus report, a terminal's reply). A paste's bulk holds more. Fleet's reader tells keys from
@@ -139,7 +139,7 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
   // The rest of a paste a pressed key ended. Only its bulk (a read of more than one key) is dropped, up to and with its
   // end mark (split across reads too); a read holding one key and a new paste are the person's and go on, and what
   // follows the end mark is given back. The dropping ends at that end mark, at a new paste, or a second after the last
-  // read it dropped (only those count the second again), so it ends however the person types.
+  // read it dropped (only those count the second again); a read of the person's holding several keys is the bulk too.
   function swallow(data){
     if(!discarding)return data;
     const text=data.toString('latin1');

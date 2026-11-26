@@ -34,7 +34,7 @@ _PASTE_LIMIT = 65536
 # A paste whose bytes stop this long has stalled; review 1861: it is not over then (``_CursesInput._expire``).
 _PASTE_IDLE = 1.0
 # Review 1861: while a paste is open the person's key is a read holding one key with nothing after it for this long (the
-# shell popup's `PASTE_KEY_WAIT`); a paste resumed after a stall can bring its next byte, a CR, alone, its rest tens of ms on.
+# shell popup's `PASTE_KEY_WAIT`); a paste resumed after a stall can bring its next byte, a CR, alone, its rest after a gap not measured on a real link.
 _PASTE_KEY_WAIT = 0.15
 # A read holding one key as a person types it: one byte, one character, or one whole escape sequence (an arrow, a modified
 # key, a mouse or focus report, a terminal's reply). A paste's bulk holds more. The shell's question popup tells keys from
