@@ -335,6 +335,16 @@ class ParkedFleetRow(Split):
         with mock.patch.object(sr, "_live_claude_records", self.unread):
             self.assertEqual(len(self.number_pass(self.rows())[0]), 1)
 
+    def test_a_deciding_folder_read_ends_the_link_at_once(self):
+        # What only the folder read can tell: a second window now holds the same job. The link is
+        # no longer one window and one background session, so it ends, even though each of the
+        # two records, read by its own pid, still says what it said.
+        self.linked()
+        self.spawn("second", "--resume", OTHER)
+        self.record("second", OTHER, kind="interactive", parkedJobId=JOB)
+        sessions, _ = self.number_pass(self.rows())
+        self.assertEqual([s.session_id for s in sessions], [OLD, NEW])
+
     def test_a_kept_link_needs_the_same_processes(self):
         # Round 2 N2: while the read fails, the background pid answers with another process start
         # (another process). The kept link ends even when the row itself carries no start.
