@@ -347,8 +347,8 @@ class QuestionAnswerLine(unittest.TestCase):
                     self.settled(signal, ref)
 
     def test_an_opencode_tool_boundary_gives_the_tool_result_the_pointer_and_the_agent_the_text(self):
-        # The tool result, which OpenCode's TUI may draw, gets the pointer alone; the full text goes
-        # to the plugin's system context for the tool loop's next model call; then the row settles.
+        # The tool result, which OpenCode's TUI draws, gets the pointer alone; the full text goes to
+        # the plugin's system context (held until a model call reads it); then the row settles.
         signal, ref, row, body = self.waiting("opencode", "tool-result", "SECRET-SENTINEL-VALUE", display=True)
         self.assertNotIn("display", self.f.peer._read_transfer_record(ref))   # OpenCode: pointer form
         appended, system = self.f.opencode_tool_boundary("tool-result")
@@ -463,6 +463,132 @@ class QuestionAnswerLine(unittest.TestCase):
         self.assert_model_calls(result, body, row["text"])
         image = next(call["system"] for call in result["systems"] if call["for"] == "person-image")
         self.assertNotIn("SECRET-SENTINEL-VALUE", image)
+        # Nor the sender guidance an ordinary row's resume held (that guidance keeps its old life).
+        self.f.peer.prepare_peer_message("an ordinary peer message", {
+            "harness": "codex", "session_id": "0100000a-0000-7000-8000-000000000012", "name": "fixture-peer"},
+            {"harness": "opencode", "session_id": "image-after-ordinary"}, defer=True)
+        result = self.f.opencode_plugin_session("image-after-ordinary", {"idles": 2, "imageOnly": True})
+        saved = next(m["id"] for m in result["history"] if m["text"].startswith("an ordinary peer message"))
+        self.assertIn("Sender of the message above", self.call(result, saved))
+        self.assertNotIn("Sender of the message above", self.call(result, "person-image"))
+
+    def block(self, body):
+        return "the full text:\n" + body + "\n\n" + SECRET_NOTE
+
+    def call(self, result, name):
+        return next(call["system"] for call in result["systems"] if call["for"] == name)
+
+    def test_an_opencode_tool_boundary_answer_stays_until_a_model_call_reads_it(self):
+        # The tool boundary settles the row once the plugin holds its text. A message that lands
+        # before the next model call (typed in the busy turn, an image alone) does not take it
+        # away, and every later call of that turn still carries it. OpenCode 1 and 2 alike.
+        for host in ("v1", "v2"):
+            for index, between in enumerate((["text:typed"], ["image:typed"], ["call:first", "text:typed"])):
+                with self.subTest(host=host, between=between):
+                    sid = "tool-%s-%d" % (host, index)
+                    signal, ref, row, body, _other = self.idle(sid)
+                    result = self.f.opencode_plugin_session(sid, {"v2": host == "v2", "steps": [
+                        "tool", *between, "call:next"]}, origin=False)
+                    self.assertEqual(result["tools"], ["tool-ok\n" + row["text"]])
+                    for name in ["first", "next"] if len(between) > 1 else ["next"]:
+                        self.assertIn(self.block(body), self.call(result, name))
+                    self.settled(signal, ref)
+
+    def test_an_unread_opencode_answer_waits_for_the_next_turn_and_ends_with_it(self):
+        # The turn ends before any model call read the held text: the next turn's first call carries
+        # it. Once read, the end of that turn drops it, so the turn after has none of it.
+        for host in ("v1", "v2"):
+            with self.subTest(host=host):
+                sid = "next-turn-" + host
+                signal, ref, row, body, _other = self.idle(sid)
+                result = self.f.opencode_plugin_session(sid, {"v2": host == "v2", "steps": [
+                    "tool", "idle", "text:next", "answer:next", "idle", "text:later", "answer:later"]},
+                    origin=False)
+                self.assertIn(self.block(body), self.call(result, "next"))
+                self.assertNotIn("SECRET-SENTINEL-VALUE", self.call(result, "later"))
+                self.settled(signal, ref)
+
+    def test_an_opencode_tool_boundary_puts_nothing_in_system_when_its_write_cannot_begin(self):
+        # A row whose write cannot begin is released: neither its pointer nor its text goes out.
+        import io
+        signal, ref, row, body, _other = self.idle("write-refused")
+        out = io.StringIO()
+        with mock.patch.object(self.f.peer, "begin_pending_write", return_value=None):
+            self.f.peer.emit_peer_context({"harness": "opencode", "session_id": "write-refused"}, "PostToolUse",
+                                          extra_context="an owed record", native_delivery=True, stream=out)
+        printed = json.loads(out.getvalue())
+        self.assertEqual(printed["hookSpecificOutput"]["additionalContext"], "an owed record")
+        self.assertNotIn("system", printed)
+        self.assertNotIn("SECRET-SENTINEL-VALUE", out.getvalue())
+        self.assertNotEqual(self.f.peer._read_pending(ref)["state"], "received")
+
+    def test_a_carrier_timer_pass_after_a_resume_takes_no_other_row(self):
+        # A resume is accepted (204) but its turn has not started when the plugin's own carrier timer
+        # fires: no second pass opens beside it, and the next idle takes the other row.
+        signal, ref, row, body, other = self.idle("timer-pass", second=True)
+        result = self.f.opencode_plugin_session("timer-pass", {"pre": 300, "delay": 300, "steps": [
+            "arm", "idle:now", "tick", "idle", "idle", "idle"]})
+        tick = result["log"][2]
+        self.assertEqual((tick["step"], tick["prompt"], tick["promptAsync"]), ("tick", 1, 1))
+        self.assert_model_calls(result, body, row["text"], other="an ordinary peer message")
+        self.settled(signal, ref)
+        self.assertEqual(self.f.peer._read_pending(other)["state"], "received")
+
+    def test_a_resume_that_opens_no_turn_holds_the_timer_only_until_the_next_event(self):
+        # The resume is accepted but no turn ever starts: the timer opens no pass until the next
+        # status event, and then the next row goes on.
+        signal, ref, row, body, other = self.idle("dead-resume", second=True)
+        result = self.f.opencode_plugin_session("dead-resume", {"deadResume": True, "steps": [
+            "arm", "idle:now", "tick", "wait:500", "status:idle", "tick", "wait:2500"]})
+        counts = [(entry["step"], entry["prompt"], entry["promptAsync"]) for entry in result["log"]]
+        self.assertEqual(counts[2], ("tick", 1, 1))            # held: the resume was sent
+        self.assertEqual(counts[4], ("status:idle", 1, 1))
+        self.assertEqual(counts[-1], ("wait:2500", 2, 2))      # the next status event let it go on
+
+    def test_the_opencode_2_delivery_keeps_the_answer_through_a_person_message(self):
+        # OpenCode 2 sends the pointer as a prompt; a person's message lands before that turn's model
+        # call, and the call still carries the full text.
+        signal, ref, row, body, _other = self.idle("v2-person")
+        result = self.f.opencode_plugin_session("v2-person", {"v2": True, "idles": 4, "delay": 30,
+                                                              "personBetween": "the person's message"})
+        self.assert_model_calls(result, body, row["text"])
+        self.settled(signal, ref)
+
+    def test_a_failed_guidance_read_keeps_the_saved_guidance_and_holds_a_recovery_resume(self):
+        # The reader fails right before a resume. A row the pass just saved keeps the guidance its
+        # save set; a recovery resume, which has no saved guidance, waits for the next pass.
+        _text, ordinary = self.f.peer.prepare_peer_message("an ordinary peer message", {
+            "harness": "codex", "session_id": "0100000a-0000-7000-8000-000000000012", "name": "fixture-peer"},
+            {"harness": "opencode", "session_id": "read-fails"}, defer=True)
+        result = self.f.opencode_plugin_session("read-fails", {"idles": 2, "failGuidance": [2]})
+        saved = next(m["id"] for m in result["history"] if m["text"].startswith("an ordinary peer message"))
+        self.assertIn("Sender of the message above", self.call(result, saved))
+        self.assertEqual(self.f.peer._read_pending(ordinary)["state"], "received")
+        import dispatch_contract
+        import subprocess
+        import time
+        signal, ref, row, body, _other = self.idle("recovery-read-fails")
+        tool = Path(self.f.peer.__file__)
+        me = [str(os.getpid()), str(dispatch_contract.process_start_ticks(os.getpid()))]
+
+        def cli(*args):
+            done = subprocess.run([sys.executable, "-B", str(tool), "pending", "--to-harness", "opencode",
+                                   "--to-session-id", "recovery-read-fails", *args], capture_output=True,
+                                  text=True, timeout=60, env=dict(os.environ, AGENT_HOME=str(tool.parents[1])))
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return json.loads(done.stdout) if done.stdout.strip() else None
+        reserved = cli("--reserve", ref, "--claim-pid", me[0], "--claim-start", me[1])
+        claimed = cli("--begin-write", ref, "--claim-token", reserved["rpc_claim"]["token"],
+                      "--claim-pid", me[0], "--claim-start", me[1])
+        cli("--queued", ref, "--message-id", "native-msg-saved")
+        history = [{"info": {"id": "native-msg-saved", "role": "user", "sessionID": "recovery-read-fails",
+                             "time": {"created": int(time.time() * 1000)}},
+                    "parts": [{"type": "text", "text": claimed["text"]}]}]
+        result = self.f.opencode_plugin_session("recovery-read-fails", {"history": history, "failGuidance": [1],
+                                                                        "steps": ["idle", "idle", "idle"]})
+        self.assertEqual([entry["promptAsync"] for entry in result["log"]], [0, 1, 1])
+        self.assertIn(self.block(body), self.call(result, "native-msg-saved"))
+        self.settled(signal, ref)
 
     def test_a_claude_secret_row_that_fits_alone_waits_for_room_then_goes_whole(self):
         # Beside a large other text a pointer that fits a context alone is not cut to "read the

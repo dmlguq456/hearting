@@ -575,7 +575,7 @@ process.stdout.write(JSON.stringify(result));
         # the plugin's own system-context command (copied from its prompt callback)
         command = ("import importlib.util, json, sys; s=importlib.util.spec_from_file_location('peer', 'utilities/peer-message.py'); "
                    "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); d=json.load(sys.stdin); "
-                   "print(m.receiver_guidance_once(d.get('prompt', ''), d.get('recipient'), cwd=d.get('cwd')))")
+                   "print(json.dumps(m.receiver_guidance_parts(d.get('prompt', ''), d.get('recipient'), cwd=d.get('cwd'))))")
         guidance = subprocess.run([sys.executable, "-c", command], cwd=str(ROOT), env=dict(self.hook_env(), AGENT_HOME=str(ROOT)),
                                   input=json.dumps({"prompt": shown, "recipient": recipient, "cwd": str(self.state)}),
                                   text=True, capture_output=True, timeout=30)

@@ -3309,8 +3309,10 @@ agent-only place before the row settles: the Claude and Codex prompt hooks and
 the OpenCode plugin's system context for the pointer as a prompt (an idle
 resume sets that message's own guidance first, one resume an idle), Claude's
 hook context at a tool or prompt boundary, and at an OpenCode tool boundary
-the plugin's system context for the tool loop's next model call, while the
-tool result, which its TUI may draw, gets the pointer alone. A row that fits
+the plugin's system context, while the tool result, which its TUI draws, gets
+the pointer alone. The OpenCode plugin holds that text, whatever message comes,
+until a model call of the session has carried it, and drops it when that turn
+ends; one no call carried waits for the next turn. A row that fits
 one Claude hook context alone but not beside other text waits for a boundary
 with room. No file read is needed, except for a delivery too long for one
 Claude hook context even alone, whose context says so and names the file.

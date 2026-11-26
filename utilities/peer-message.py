@@ -4799,6 +4799,27 @@ def receiver_guidance_once(text="", recipient=None, *, cwd=None, deferred=None):
         return guidance
 
 
+def receiver_guidance_parts(text="", recipient=None, *, cwd=None):
+    """``receiver_guidance_once`` split for a carrier that keeps a secret answer apart (the OpenCode
+    plugin): ``{"guidance": ..., "secret": ...}``. ``secret`` is the guidance when it is the agent-only
+    text of a secret answer's row (``_secret_answer_agent_text``: a pointer's full text, or a one-line
+    form's whole old text), which that carrier holds until a model call has read it; ``guidance`` is
+    any other guidance, kept as before. One of the two is always empty."""
+    guidance = receiver_guidance_once(text, recipient, cwd=cwd)
+    try:
+        resolved = _display_resolve(text, recipient)
+        if resolved is not None:
+            ref = resolved["ref"]
+        else:
+            trailer = parse_peer_trailer(text, recipient, include_ref=True)
+            ref = trailer.get("transfer_ref") if isinstance(trailer, dict) else None
+        secret = (bool(guidance) and isinstance(ref, str) and _secret_answer_form(ref) is not None
+                  and _SECRET_ANSWER_NOTE in guidance)
+    except Exception:  # noqa: BLE001 - unreadable: the guidance keeps its ordinary life
+        secret = False
+    return {"guidance": "" if secret else guidance, "secret": guidance if secret else ""}
+
+
 def commit_receiver_guidance(entries):
     """Record the fixed guidance as delivered, after the context carrying it was flushed."""
     try:

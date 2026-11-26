@@ -245,7 +245,13 @@ if (calls !== 1) throw Error("native callback did not run exactly one helper");
                 text=True, capture_output=True, timeout=15)
             if child.returncode:
                 raise AssertionError(child.stderr)
-            return guidance.stdout.strip()
+            # The plugin keeps the ordinary guidance and a secret answer's text apart; its
+            # system context carries both. (An older plugin, measured against, prints one text.)
+            try:
+                parts = json.loads(guidance.stdout)
+            except ValueError:
+                return guidance.stdout.strip()
+            return "\n\n".join(part.strip() for part in (parts["guidance"], parts["secret"]) if part.strip())
         spec = importlib.util.spec_from_file_location(name, path)
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
@@ -310,9 +316,17 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { spawnSync as realSpawnSync, spawn as realSpawn } from "node:child_process";
 const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+const sleep = (ms) => new Promise(r => realSetTimeout(r, ms));
 globalThis.setTimeout = (cb, ms, ...a) => ms === 0 ? {cancelled: true} : realSetTimeout(cb, ms, ...a);
-globalThis.setInterval = () => ({unref() {}});
-globalThis.__fixtureSpawnSync = realSpawnSync;   // every python CLI call and the guidance call are real
+const intervals = [];   // the plugin's own timers (the carrier's 5 s pass) run only on a "tick" step
+globalThis.setInterval = (cb) => { intervals.push(cb); return {unref() {}} };
+const cfg = JSON.parse(process.env.FIX_CFG);
+let guidanceReads = 0;   // every python CLI call and the guidance call are real; `failGuidance` fails listed reads
+globalThis.__fixtureSpawnSync = (exe, args, options) => {
+  if (args?.[0] === "-c" && String(args[1]).includes("receiver_guidance")
+      && (cfg.failGuidance || []).includes(++guidanceReads)) return {status: 1, stdout: "", stderr: "fixture"};
+  return realSpawnSync(exe, args, options);
+};
 globalThis.__fixtureSpawn = (exe, args, options) => {
   if (Array.from(args || []).some(a => String(a).endsWith("peer-message.py"))) return realSpawn(exe, args, options);
   const child = new EventEmitter(); child.pid = 4242; child.stdout = new PassThrough();
@@ -320,13 +334,14 @@ globalThis.__fixtureSpawn = (exe, args, options) => {
   setImmediate(() => { child.stdout.end("null"); child.emit("close", 0); child.emit("exit", 0) });
   return child;
 };
-const cfg = JSON.parse(process.env.FIX_CFG);
 const {AgentHarnessGuards} = await import(pathToFileURL(process.env.FIX_GUARDS).href);
-const sid = cfg.sid, dir = process.cwd(), messages = cfg.history || [], systems = [], tools = [];
-let hooks, n = 0, turns = 0;
+const sid = cfg.sid, dir = process.cwd(), messages = cfg.history || [], systems = [], tools = [], log = [];
+const calls = {prompt: 0, promptAsync: 0};
+let hooks, n = 0, turns = 0, k = 0;
 const sdk = (data, status = 200) => ({data, error: undefined, response: {ok: true, status}});
 const root = {id: sid, projectID: "project_fixture", directory: dir, slug: "fixture-root", title: "fixture",
   version: "1.19.0", time: {created: 1, updated: 1}};
+if (cfg.v2) { delete root.directory; delete root.slug; delete root.version; root.location = {directory: dir} }
 // A model call reads the system context of that moment; one answering a user message completes it.
 const modelCall = async (mid, answering = true) => {
   const o = {system: []};
@@ -335,50 +350,83 @@ const modelCall = async (mid, answering = true) => {
   if (answering) messages.push({info: {id: "assistant-" + mid, sessionID: sid, role: "assistant", parentID: mid,
     time: {completed: Date.now()}}, parts: []});
 };
+const person = async (id, parts, call = true) => {
+  await hooks["chat.message"]({sessionID: sid, messageID: id}, {parts});
+  messages.push({info: {id, role: "user", sessionID: sid, time: {created: Date.now()}}, parts});
+  if (call) await modelCall(id);
+};
+// One started turn: the person's message (`personBetween`) may land before its model call.
+const turn = async (mid, parts) => {
+  if (cfg.pre > 0) await sleep(cfg.pre);   // a resume accepted (204) before OpenCode starts its loop
+  turns++;
+  try {
+    await hooks["chat.message"]({sessionID: sid, messageID: mid}, {message: {id: mid, role: "user", sessionID: sid}, parts});
+    if (cfg.personBetween) await person("person-between-" + mid, [{type: "text", text: cfg.personBetween}], false);
+    if (cfg.delay > 0) await sleep(cfg.delay);
+    await modelCall(mid);
+  } finally { turns--; }
+};
 const session = {
   status: async () => sdk(turns > 0 ? {[sid]: {type: "busy"}} : {}),   // busy while a started turn runs
+  wait: async () => sdk({}),
   get: async () => sdk(root),
   messages: async () => sdk(messages),
   prompt: async (args) => {   // the noReply save: OpenCode runs the plugin's chat.message for it
+    calls.prompt++;
     const id = "native-msg-" + (++n);
     const row = {info: {id, role: "user", sessionID: sid, time: {created: Date.now()}}, parts: args.body.parts};
     await hooks["chat.message"]({sessionID: sid, messageID: id}, {message: row.info, parts: args.body.parts});
     messages.push(row);
     return sdk(row);
   },
-  promptAsync: async (args) => {   // the resume: chat.message for that message id, then its model call
-    const mid = args.body.messageID;
-    turns++;
-    const run = async () => {
-      try {
-        await hooks["chat.message"]({sessionID: sid, messageID: mid}, {message: {id: mid, role: "user", sessionID: sid}, parts: args.body.parts});
-        if (cfg.delay > 0) await new Promise(r => realSetTimeout(r, cfg.delay));
-        await modelCall(mid);
-      } finally { turns--; }
-    };
-    if (cfg.delay > 0) { run(); } else { await run(); }
-    return sdk(undefined, 204);
+  promptAsync: async (args) => {
+    calls.promptAsync++;
+    let mid = args.body.messageID;
+    if (!mid) {   // OpenCode 2: the text prompt itself is saved and starts the turn
+      mid = "native-msg-" + (++n);
+      messages.push({info: {id: mid, role: "user", sessionID: sid, time: {created: Date.now()}}, parts: args.body.parts});
+    }
+    if (cfg.deadResume) return sdk(undefined, 204);   // accepted, and no turn ever starts
+    const run = turn(mid, args.body.parts);
+    if (!(cfg.delay > 0 || cfg.pre > 0)) await run;
+    return args.body.messageID ? sdk(undefined, 204) : sdk({});
   },
 };
-hooks = await AgentHarnessGuards({directory: dir, worktree: dir, client: {session, app: {log: async () => {}}}});
-const person = async (id, parts) => {
-  await hooks["chat.message"]({sessionID: sid, messageID: id}, {parts});
-  await modelCall(id);
+hooks = await AgentHarnessGuards({directory: dir, worktree: dir, client: {session, app: {log: async () => {}}},
+  ...(cfg.v2 ? {nativeHost: "v2"} : {})});
+const settle = () => sleep((cfg.delay || 0) * 4 + (cfg.pre || 0) * 3 + 50);
+const idle = async () => { await hooks.event({event: {type: "session.idle", properties: {sessionID: sid}}}); await settle() };
+const tool = async () => {   // one finished tool of a working turn
+  const o = {output: "tool-ok", title: "", metadata: {}};
+  await hooks["tool.execute.after"]({sessionID: sid, tool: "bash", callID: "c" + tools.length}, o);
+  tools.push(o.output);
 };
 if (cfg.personFirst) await person("person-1", [{type: "text", text: cfg.personFirst}]);
-for (let i = 0; i < (cfg.idles || 0); i++) {
-  await hooks.event({event: {type: "session.idle", properties: {sessionID: sid}}});
-  await new Promise(r => realSetTimeout(r, (cfg.delay || 0) * 4 + 50));
-}
+for (let i = 0; i < (cfg.idles || 0); i++) await idle();
 for (let i = 0; i < (cfg.tools || 0); i++) {   // a working turn: each finished tool, then the loop's next call
-  const o = {output: "tool-ok", title: "", metadata: {}};
-  await hooks["tool.execute.after"]({sessionID: sid, tool: "bash", callID: "c" + i}, o);
-  tools.push(o.output);
+  await tool();
   await modelCall("tool-" + i, false);
 }
 if (cfg.imageOnly) await person("person-image", [{type: "file", mime: "image/png", url: "data:,"}]);
+// `steps`: an explicit order of what reaches the plugin (each a string, `kind:name`).
+for (const step of cfg.steps || []) {
+  const [kind, name] = step.split(":");
+  if (kind === "arm") await hooks["shell.env"]({sessionID: sid}, {env: {}});
+  else if (kind === "idle" && name === "now") await hooks.event({event: {type: "session.idle", properties: {sessionID: sid}}});
+  else if (kind === "idle") await idle();
+  else if (kind === "wait") await sleep(Number(name));
+  else if (kind === "status") { await hooks.event({event: {type: "session.status", properties: {sessionID: sid, status: {type: name}}}}); await settle() }
+  else if (kind === "tick") { for (const cb of intervals) cb(); await settle() }
+  else if (kind === "tool") await tool();
+  else if (kind === "call") await modelCall(name || "call-" + (++k), false);   // a tool loop's next call
+  else if (kind === "text") await person(name, [{type: "text", text: "the person's message " + name}], false);
+  else if (kind === "image") await person(name, [{type: "file", mime: "image/png", url: "data:,"}], false);
+  else if (kind === "answer") await modelCall(name);   // the call answering message `name`
+  else throw new Error("unknown step " + step);
+  log.push({step, prompt: calls.prompt, promptAsync: calls.promptAsync});
+}
 hooks.dispose?.({silent: true});
-process.stdout.write(JSON.stringify({systems, tools, history: messages.map(m => ({id: m.info.id, role: m.info.role,
+process.stdout.write(JSON.stringify({systems, tools, calls, log, history: messages.map(m => ({id: m.info.id, role: m.info.role,
   text: (m.parts || []).map(p => p.text || "").join("")}))}));
 realSetTimeout(() => process.exit(0), 30);
 """
@@ -388,8 +436,13 @@ realSetTimeout(() => process.exit(0), 30);
         `session.idle` delivery (`pendingPeerDelivery`), tool boundaries (`tool.execute.after`) and the
         model calls after them, a person's prompts. Only the window-origin proof (``origin``: this
         session's own, or none as for `opencode -c`) and detached children are replaced; every
-        python CLI call and the guidance call are real. Returns the system context of every model
-        call, the tool results and the session history."""
+        python CLI call and the guidance call are real. ``cfg`` may give ``steps``, an explicit order
+        (``idle``, ``idle:now``, ``status:<type>``, ``tick`` for the plugin's own carrier timer,
+        ``tool``, ``call:<name>``, ``text:<id>``, ``image:<id>``, ``answer:<id>``, ``wait:<ms>``,
+        ``arm``), ``v2`` (the OpenCode 2 host), ``pre`` / ``delay`` (a resume's turn start and its
+        model call, late), ``personBetween``, ``deadResume`` and ``failGuidance``. Returns the system
+        context of every model call, the tool results, the session history and the count after
+        each step."""
         if not self.node:
             raise RuntimeError("Node is unavailable for the OpenCode plugin fixture")
         root = Path(tidy.__file__).resolve().parents[1]

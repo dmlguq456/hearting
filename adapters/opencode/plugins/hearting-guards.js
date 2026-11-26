@@ -163,6 +163,24 @@ const historyNoticeSettledBySession = new Set()
 const peerGuidanceBySession = new Map()
 // The message a held guidance was set for: the idle delivery's resume of the peer prompt it saved.
 const peerGuidanceMessage = new Map()
+// A secret answer's agent-only full text, from every carrier that takes its row (a tool boundary's
+// `system`, a peer prompt's or an idle resume's `secret` guidance). Its row is already settled, so
+// the text stays, whatever message comes, until a model call of the session has carried it, and goes
+// when that turn ends (the next `session.idle`); one no call carried waits for the next turn.
+const peerSecretBySession = new Map()   // sid -> [{ text, read }]
+
+function holdPeerSecret(sid, text) {
+  if (!sid || !text) return
+  const held = peerSecretBySession.get(sid) || []
+  if (!held.some((entry) => entry.text === text)) held.push({ text, read: false })
+  peerSecretBySession.set(sid, held)
+}
+
+function endPeerSecretTurn(sid) {
+  const unread = (peerSecretBySession.get(sid) || []).filter((entry) => !entry.read)
+  if (unread.length) peerSecretBySession.set(sid, unread)
+  else peerSecretBySession.delete(sid)
+}
 // One threshold notice per native session, retained for the triggering turn so
 // an auxiliary title call cannot consume the answering model's system context.
 const contextAlertBySession = new Map()
@@ -2690,15 +2708,30 @@ function appendContext(output, text) {
   output.system.push(text)
 }
 
-// What only the recipient's agent reads beside a peer prompt (a secret answer pointer's full text
-// included): the one shared reader every harness calls (`peer-message.py receiver_guidance_once`).
+// What only the recipient's agent reads beside a peer prompt: the one shared reader every harness
+// calls (`peer-message.py receiver_guidance_once`), split as `receiver_guidance_parts` into the
+// ordinary `guidance` and a secret answer's full text (`secret`, see `peerSecretBySession`).
+// `null` when the reader failed, so a caller keeps what it already holds.
 function peerGuidanceFor(sid, prompt, cwd) {
   const guidance = spawnSync(
     "python3",
-    ["-c", "import importlib.util, json, sys; s=importlib.util.spec_from_file_location('peer', 'utilities/peer-message.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); d=json.load(sys.stdin); print(m.receiver_guidance_once(d.get('prompt', ''), d.get('recipient'), cwd=d.get('cwd')))"],
+    ["-c", "import importlib.util, json, sys; s=importlib.util.spec_from_file_location('peer', 'utilities/peer-message.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); d=json.load(sys.stdin); print(json.dumps(m.receiver_guidance_parts(d.get('prompt', ''), d.get('recipient'), cwd=d.get('cwd'))))"],
     { cwd: root, env: { ...process.env, AGENT_HOME: root }, encoding: "utf8", timeout: 4000,
       input: JSON.stringify({ prompt, recipient: { harness: "opencode", session_id: sid }, cwd }) })
-  return guidance.status === 0 ? (guidance.stdout || "").trim() : ""
+  if (guidance.status !== 0) return null
+  try {
+    const parts = JSON.parse(guidance.stdout || "null")
+    return { guidance: String(parts?.guidance || "").trim(), secret: String(parts?.secret || "").trim() }
+  } catch { return null }
+}
+
+// A resume's or a peer prompt's guidance: the ordinary part replaces the held one, a secret answer's
+// full text is added to the session's held secrets. An empty or failed read keeps what is held.
+function setPeerGuidance(sid, parts) {
+  if (!parts || !(parts.guidance || parts.secret)) return false
+  peerGuidanceBySession.set(sid, parts.guidance)
+  holdPeerSecret(sid, parts.secret)
+  return true
 }
 
 // F-100c -- receive side of a herdr steer, harness-neutral: a steward appends
@@ -3027,7 +3060,10 @@ async function pendingPeerDelivery(ctx, sid) {
     }
     return "root-or-status-blocked"
   }
-  if (pendingPeerStatus.get(sid) === "blocked" || pendingPeerStatus.get(sid) === "working") {
+  // A sent resume ("submitted") holds further passes until the next status or idle event, so the
+  // carrier timer cannot open a pass beside the turn that resume starts. A cached "busy" is rechecked
+  // with the native status below (a compaction is a new observation).
+  if (["blocked", "working", "submitted"].includes(pendingPeerStatus.get(sid))) {
     if (paneNativeOrigin?.sid === sid) pendingPeerTrace(ctx, sid, "guard", "locally-blocked", {
       local_status: pendingPeerStatus.get(sid),
     })
@@ -3179,10 +3215,13 @@ async function pendingPeerDelivery(ctx, sid) {
           })
           continue
         }
-        if (!pendingPeerTransition(sid, ["--resuming", row.ref, "--message-id", mid])) continue
         // The resumed model call reads this message's own guidance, whatever came between
         // (a new plugin process, a person's prompt); the saving `chat.message` is not relied on.
-        peerGuidanceBySession.set(sid, peerGuidanceFor(sid, row.text, baseDir(ctx)))
+        // Without it (the reader failed) this pass resumes nothing: a row is resumed once.
+        const parts = peerGuidanceFor(sid, row.text, baseDir(ctx))
+        if (!parts || !(parts.guidance || parts.secret)) continue
+        if (!pendingPeerTransition(sid, ["--resuming", row.ref, "--message-id", mid])) continue
+        setPeerGuidance(sid, parts)
         peerGuidanceMessage.set(sid, mid)
         const resumed = await bounded(client.promptAsync({ path: { id: sid }, query: { directory },
           body: { messageID: mid, parts: [] } }))
@@ -3193,7 +3232,7 @@ async function pendingPeerDelivery(ctx, sid) {
         if (acceptedResume) {
           pendingPeerStatus.set(sid, "submitted")
           // One resume per idle, as the OpenCode 2 host sends one: a later save in this pass
-          // would replace the guidance before this resume's model call reads it.
+          // would replace the ordinary guidance before this resume's model call reads it.
           return "processed"
         }
         continue
@@ -3283,7 +3322,8 @@ async function pendingPeerDelivery(ctx, sid) {
       if (pendingPeerTransition(sid, ["--queued", row.ref, "--message-id", mid])) {
         if (pendingPeerTransition(sid, ["--resuming", row.ref, "--message-id", mid])) {
           if (!pendingPeerRoot(ctx, sid)) return "native-origin-changed"
-          peerGuidanceBySession.set(sid, peerGuidanceFor(sid, row.text, baseDir(ctx)))
+          // A failed read keeps the guidance the saving `chat.message` set for this text.
+          setPeerGuidance(sid, peerGuidanceFor(sid, row.text, baseDir(ctx)))
           peerGuidanceMessage.set(sid, mid)
           const resumed = await bounded(client.promptAsync({ path: { id: sid }, query: { directory },
             body: { messageID: mid, parts: [] } }))
@@ -3761,6 +3801,8 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     if (event && event.type === "session.idle") {
       const eventSid = (event.properties && event.properties.sessionID) || ""
       if (eventSid) pendingPeerStatus.set(eventSid, "idle")
+      // The turn ended: a secret answer's text a model call carried goes before this idle's delivery.
+      if (eventSid) endPeerSecretTurn(eventSid)
       observeCompactRuntimeStatus(ctx, eventSid, "idle")
       observePaneCallback(ctx, "session.idle", eventSid)
       const exactCurrentRoot = eventSid && pendingPeerRoot(ctx, eventSid)
@@ -3811,6 +3853,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
         historyNoticeSettledBySession.delete(sid)
         peerGuidanceBySession.delete(sid)
         peerGuidanceMessage.delete(sid)
+        peerSecretBySession.delete(sid)
         contextAlertBySession.delete(sid)
         modelWindowBySession.delete(sid)
         paneProjectionRetryAt.delete(sid)
@@ -3833,7 +3876,8 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     const turn = input.messageID || output?.message?.id || ""
     if (prompt) promptBySession.set(sid, prompt)
     // A held guidance outlives only the message it was set for (the idle delivery's resume of
-    // the peer prompt it saved: no text, that message's id); any other message drops it.
+    // the peer prompt it saved: no text, that message's id); any other message drops it. A secret
+    // answer's held text is not dropped here (`peerSecretBySession`).
     const guidedMessage = peerGuidanceMessage.get(sid)
     if (prompt || !guidedMessage || input.messageID !== guidedMessage) {
       peerGuidanceBySession.delete(sid)
@@ -3841,7 +3885,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     }
     // Actual peer receipt is observed after persistence, not callback rendering.
     if (prompt && eventSid && looksLikePeerPrompt(prompt)) {
-      peerGuidanceBySession.set(sid, peerGuidanceFor(eventSid, prompt, baseDir(ctx)))
+      setPeerGuidance(sid, peerGuidanceFor(eventSid, prompt, baseDir(ctx)))
       // Ordinary manual sends retain their existing notice path. Pending refs
       // are acknowledged by the persisted-context observation at normal idle.
       const rows = pendingPeerCommand(eventSid)
@@ -3913,6 +3957,11 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
 
     appendContext(output, cardBySession.get(sid)?.text)
     appendContext(output, peerGuidanceBySession.get(sid))
+    const secrets = peerSecretBySession.get(sid)
+    if (secrets?.length) {
+      appendContext(output, secrets.map((entry) => entry.text).join("\n\n"))
+      for (const entry of secrets) entry.read = true
+    }
     appendContext(output, contextAlertBySession.get(sid)?.text)
     appendContext(output, contextAlertBySession.get(sid)?.budget)
 
@@ -4081,11 +4130,8 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       // recorded received that the model never saw. The child runs asynchronously
       // so the shared service keeps serving every other window meanwhile.
       const { text, system } = await peerToolContextAsync(input.sessionID)
-      if (system) {
-        // The transform runs for every tool-loop continuation (measured, see the maps above).
-        const held = peerGuidanceBySession.get(input.sessionID)
-        peerGuidanceBySession.set(input.sessionID, held ? held + "\n\n" + system : system)
-      }
+      // The row is settled now; its full text waits for a model call (`peerSecretBySession`).
+      if (system) holdPeerSecret(input.sessionID, system)
       if (text && typeof output.output === "string") output.output += "\n" + text
       // A completion record the idle courier stopped re-sending rides this result too.
       const carried = await completionCarrier.inTurn(input.sessionID)
