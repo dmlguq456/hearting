@@ -8,6 +8,7 @@ The real retained courier builds the delivery, the producer's own builders make 
 harness's own consumer (Claude hook, Codex hook, OpenCode plugin callback) reads what the window was
 given. Fixtures and private roots only; no session, ledger or window of a real project is touched."""
 import hashlib
+import json
 import re
 import unittest
 from pathlib import Path
@@ -345,30 +346,140 @@ class QuestionAnswerLine(unittest.TestCase):
                         self.assertIn("SECRET-SENTINEL-VALUE", row["text"])
                     self.settled(signal, ref)
 
-    def test_an_opencode_tool_result_never_carries_a_secret_answer(self):
-        # OpenCode appends the tool-boundary context to the finished tool result, which its TUI may
-        # draw: the secret answer stays pending there and reaches the agent through its prompt path.
+    def test_an_opencode_tool_boundary_gives_the_tool_result_the_pointer_and_the_agent_the_text(self):
+        # The tool result, which OpenCode's TUI may draw, gets the pointer alone; the full text goes
+        # to the plugin's system context for the tool loop's next model call; then the row settles.
         signal, ref, row, body = self.waiting("opencode", "tool-result", "SECRET-SENTINEL-VALUE", display=True)
         self.assertNotIn("display", self.f.peer._read_transfer_record(ref))   # OpenCode: pointer form
-        appended = self.f.opencode_tool_boundary("tool-result")
+        appended, system = self.f.opencode_tool_boundary("tool-result")
+        self.assertEqual(appended, row["text"])
         self.assertNotIn("SECRET-SENTINEL-VALUE", appended)
-        self.assertNotIn(row["text"], appended)
+        self.assertIn("the full text:\n" + body + "\n\n" + SECRET_NOTE, system)
+        self.settled(signal, ref)
+
+    def idle(self, sid, *, second=False):
+        signal, ref, row, body = self.waiting("opencode", sid, "SECRET-SENTINEL-VALUE")
+        other = None
+        if second:   # an ordinary peer message waits behind it
+            _text, other = self.f.peer.prepare_peer_message("an ordinary peer message", {
+                "harness": "codex", "session_id": "0100000a-0000-7000-8000-000000000012", "name": "fixture-peer"},
+                {"harness": "opencode", "session_id": sid}, defer=True)
+        return signal, ref, row, body, other
+
+    def assert_model_calls(self, result, body, pointer, *, other=None):
+        """Every model call that answers the pointer's message carries its full text; one that
+        answers the other (ordinary) message carries that message's own guidance and no secret,
+        whichever of the two the plugin took first."""
+        block = "the full text:\n" + body + "\n\n" + SECRET_NOTE
+        pointer_ids = {m["id"] for m in result["history"] if m["role"] == "user" and m["text"] == pointer}
+        self.assertTrue(pointer_ids, result["history"])
+        calls = [call for call in result["systems"] if call["for"] in pointer_ids]
+        self.assertTrue(calls, result["systems"])
+        for call in calls:
+            self.assertIn(block, call["system"])
+        if other is not None:
+            other_ids = {m["id"] for m in result["history"] if m["role"] == "user" and m["text"].startswith(other)}
+            other_calls = [call for call in result["systems"] if call["for"] in other_ids]
+            self.assertTrue(other_calls, result["systems"])
+            for call in other_calls:
+                self.assertIn("Sender of the message above", call["system"])
+                self.assertNotIn("SECRET-SENTINEL-VALUE", call["system"])
+        self.assertFalse(any("SECRET-SENTINEL-VALUE" in m["text"] for m in result["history"]))
+
+    def test_the_opencode_idle_delivery_resumes_each_saved_answer_with_its_own_full_text(self):
+        # The plugin's own `session.idle` delivery (`pendingPeerDelivery`) saves the pointer and resumes
+        # it: that resume's model call carries the full text, even when it reads the system context
+        # late (one resume per idle, so no later save replaces it), and only then the row settles.
+        for case, second, delay in (("single", False, 0), ("two-late", True, 30)):
+            with self.subTest(case):
+                signal, ref, row, body, other = self.idle("idle-" + case, second=second)
+                result = self.f.opencode_plugin_session("idle-" + case, {"idles": 3, "delay": delay})
+                self.assert_model_calls(result, body, row["text"],
+                                        other="an ordinary peer message" if second else None)
+                self.settled(signal, ref)
+                if other:
+                    self.assertEqual(self.f.peer._read_pending(other)["state"], "received")
+
+    def test_the_opencode_recovery_resume_sets_the_full_text_itself(self):
+        # Saved and queued by an earlier plugin process; a fresh process, after a prompt of the
+        # person, resumes it: the guidance comes from the row itself, not from the save.
+        import dispatch_contract
+        import subprocess
+        import sys
+        import time
+        signal, ref, row, body, other = self.idle("idle-restart", second=True)
+        tool = Path(self.f.peer.__file__)
+        me = [str(os.getpid()), str(dispatch_contract.process_start_ticks(os.getpid()))]
+
+        def cli(*args):
+            done = subprocess.run([sys.executable, "-B", str(tool), "pending", "--to-harness", "opencode",
+                                   "--to-session-id", "idle-restart", *args], capture_output=True, text=True,
+                                  timeout=60, env=dict(os.environ, AGENT_HOME=str(tool.parents[1])))
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return json.loads(done.stdout) if done.stdout.strip() else None
+        history = []
+        for index, saved_ref in enumerate((ref, other)):   # both saved and queued by the earlier process
+            reserved = cli("--reserve", saved_ref, "--claim-pid", me[0], "--claim-start", me[1])
+            claimed = cli("--begin-write", saved_ref, "--claim-token", reserved["rpc_claim"]["token"],
+                          "--claim-pid", me[0], "--claim-start", me[1])
+            cli("--queued", saved_ref, "--message-id", "native-msg-saved-%d" % index)
+            history.append({"info": {"id": "native-msg-saved-%d" % index, "role": "user", "sessionID": "idle-restart",
+                                     "time": {"created": int(time.time() * 1000) + index}},
+                            "parts": [{"type": "text", "text": claimed["text"]}]})
+        # Each resume's model call reads its system context late; one resume an idle keeps each its own.
+        result = self.f.opencode_plugin_session("idle-restart", {"history": history, "idles": 6, "delay": 30,
+                                                                 "personFirst": "the person's own prompt"})
+        self.assert_model_calls(result, body, row["text"], other="an ordinary peer message")
+        self.settled(signal, ref)
+        self.assertEqual(self.f.peer._read_pending(other)["state"], "received")
+
+    def test_an_opencode_session_without_a_window_origin_gets_the_answer_at_its_tool_boundary(self):
+        # `opencode -c` proves no window origin, so the idle delivery does not run: the working
+        # turn's tool boundary takes the row (pointer on the tool result, text in the system context).
+        signal, ref, row, body, _other = self.idle("no-origin")
+        result = self.f.opencode_plugin_session("no-origin", {"idles": 2, "tools": 2}, origin=False)
+        self.assertFalse(any("SECRET-SENTINEL-VALUE" in out for out in result["tools"]))
+        self.assertIn(row["text"], result["tools"][0])
+        self.assertIn("the full text:\n" + body + "\n\n" + SECRET_NOTE,
+                      next(call["system"] for call in result["systems"] if call["for"] == "tool-0"))
+        self.settled(signal, ref)
+
+    def test_an_opencode_tool_boundary_leaves_a_one_line_form_secret_row_alone(self):
+        # A one-line form row's own text is the whole old text: it never rides a tool result.
+        import io
+        signal, ref, row, body, _other = self.idle("one-line-row")
+        out = io.StringIO()
+        with mock.patch.object(self.f.peer, "_secret_answer_form", return_value="sealed"):
+            self.f.peer.emit_peer_context({"harness": "opencode", "session_id": "one-line-row"}, "PostToolUse",
+                                          native_delivery=True, stream=out)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(self.f.peer._read_pending(ref)["state"], "pending")
+
+    def test_an_opencode_message_without_text_keeps_no_earlier_answer(self):
+        # A held guidance belongs to the resume it was set for: a later message with no text (an
+        # image alone) gets none of an earlier secret answer.
+        signal, ref, row, body, _other = self.idle("image-after")
+        result = self.f.opencode_plugin_session("image-after", {"idles": 2, "imageOnly": True})
+        self.assert_model_calls(result, body, row["text"])
+        image = next(call["system"] for call in result["systems"] if call["for"] == "person-image")
+        self.assertNotIn("SECRET-SENTINEL-VALUE", image)
+
+    def test_a_claude_secret_row_that_fits_alone_waits_for_room_then_goes_whole(self):
+        # Beside a large other text a pointer that fits a context alone is not cut to "read the
+        # file": it waits, and the next boundary with room gives it whole.
+        import io
+        signal, ref, row, body = self.waiting("claude", "fits-alone", "SECRET-SENTINEL-VALUE")
+        recipient = {"harness": "claude", "session_id": "fits-alone"}
+        crowded = io.StringIO()
+        self.f.peer.emit_peer_context(recipient, "PostToolUse", extra_context="O" * 9000,
+                                      native_delivery=True, stream=crowded)
+        self.assertNotIn("SECRET-SENTINEL-VALUE", crowded.getvalue())
+        self.assertNotIn("read it from the file", crowded.getvalue())
         self.assertEqual(self.f.peer._read_pending(ref)["state"], "pending")
         self.assertEqual(self.source(signal)["lifecycle"], "open")
-        # The idle plugin delivery pastes the row's text as the prompt; its guidance carries the body.
-        self.assertNotIn("SECRET-SENTINEL-VALUE", row["text"])
-        self.assert_pointer(signal, row["text"], ref, body)
-
-    def test_the_opencode_idle_resume_keeps_the_guidance_its_saved_prompt_left(self):
-        # The idle delivery saves the pointer as a prompt, then resumes with no text: the model call
-        # after the resume still carries the full text in its system context.
-        signal, ref, row, body = self.waiting("opencode", "idle-resume", "SECRET-SENTINEL-VALUE", display=True)
-        saved, resumed, person = self.f.opencode_plugin_turns(
-            "idle-resume", [row["text"], None, "the person's next prompt"])
-        block = "the full text:\n" + body + "\n\n" + SECRET_NOTE
-        self.assertIn(block, saved)
-        self.assertIn(block, resumed)
-        self.assertNotIn("SECRET-SENTINEL-VALUE", person)   # a new prompt drops it
+        context = self.f.claude_boundary("fits-alone")
+        self.assertIn("the full text:\n" + body + "\n\n" + SECRET_NOTE, context)
+        self.settled(signal, ref)
 
     def test_an_answer_too_long_for_one_claude_context_names_its_file_and_makes_no_copy(self):
         # One answer is at most 4,096 characters a value and two values; two questions of one
@@ -433,12 +544,27 @@ class QuestionAnswerLine(unittest.TestCase):
         other = {"ref": "2" * 32, "text": "O" * 6000}
         with mock.patch.object(peer, "release_pending_herdr_claim", side_effect=released.append), \
                 mock.patch.object(sweep, "overflow_pointer", side_effect=AssertionError("no overflow copy")):
+            # an ordinary claim goes back before a secret answer, wherever it stands
             claims, context = [other, secret], [other["text"], secret["shown_text"]]
             peer._fit_claude_context(claims, context)
-            self.assertEqual((claims, context, released), ([other], [other["text"]], [secret]))
-            # alone and still too long: a sealed one waits, a pointer names its file
+            self.assertEqual((claims, context, released), ([secret], [secret["shown_text"]], [other]))
+            # two secret answers: the later one goes back, found by the text it showed
+            released.clear()
+            second = dict(secret, ref="3" * 32, shown_text="POINTER-2\n\n" + "T" * 6000)
+            claims, context = [secret, second], [secret["shown_text"], second["shown_text"]]
+            peer._fit_claude_context(claims, context)
+            self.assertEqual((claims, context, released), ([secret], [secret["shown_text"]], [second]))
+            # fits alone, not beside other text: it waits (either form), never the file line
+            for form in ("sealed", "pointer"):
+                with self.subTest(form=form, alone="fits"):
+                    released.clear()
+                    claims, context = [secret], [secret["shown_text"], "X" * 6000]
+                    with mock.patch.object(peer, "_secret_answer_form", return_value=form):
+                        peer._fit_claude_context(claims, context)
+                    self.assertEqual((claims, context, released), ([], ["X" * 6000], [secret]))
+            # too long even alone: a sealed one waits, a pointer names its file
             for form, expect in (("sealed", None), ("pointer", "POINTER\n\n" + peer._PRIVATE_ANSWER_TOO_LONG)):
-                with self.subTest(form=form):
+                with self.subTest(form=form, alone="too long"):
                     released.clear()
                     row = dict(secret, shown_text="POINTER\n\n" + "S" * 12000)
                     claims, context = [row], [row["shown_text"]]

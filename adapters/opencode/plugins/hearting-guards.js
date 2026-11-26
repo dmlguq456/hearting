@@ -161,6 +161,8 @@ const cardBySession = new Map()
 const carriedCompletionBySession = new Map()
 const historyNoticeSettledBySession = new Set()
 const peerGuidanceBySession = new Map()
+// The message a held guidance was set for: the idle delivery's resume of the peer prompt it saved.
+const peerGuidanceMessage = new Map()
 // One threshold notice per native session, retained for the triggering turn so
 // an auxiliary title call cannot consume the answering model's system context.
 const contextAlertBySession = new Map()
@@ -2688,6 +2690,17 @@ function appendContext(output, text) {
   output.system.push(text)
 }
 
+// What only the recipient's agent reads beside a peer prompt (a secret answer pointer's full text
+// included): the one shared reader every harness calls (`peer-message.py receiver_guidance_once`).
+function peerGuidanceFor(sid, prompt, cwd) {
+  const guidance = spawnSync(
+    "python3",
+    ["-c", "import importlib.util, json, sys; s=importlib.util.spec_from_file_location('peer', 'utilities/peer-message.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); d=json.load(sys.stdin); print(m.receiver_guidance_once(d.get('prompt', ''), d.get('recipient'), cwd=d.get('cwd')))"],
+    { cwd: root, env: { ...process.env, AGENT_HOME: root }, encoding: "utf8", timeout: 4000,
+      input: JSON.stringify({ prompt, recipient: { harness: "opencode", session_id: sid }, cwd }) })
+  return guidance.status === 0 ? (guidance.stdout || "").trim() : ""
+}
+
 // F-100c -- receive side of a herdr steer, harness-neutral: a steward appends
 // `(peer-from: <harness> <sid> <name>)` to the prompt body; the receiver writes its
 // own `notice` peer_message_v1 under its exact session id (same record the Claude
@@ -2798,14 +2811,17 @@ function peerToolContextAsync(sid, timeoutMs = 2500, drainMs = 1000) {
     let child
     let finished = false
     let drain
+    // `text` rides the tool result; `system` (a secret answer's full text) goes to the system
+    // context of the tool loop's next model call, which the person's TUI does not draw.
     const parse = () => {
       const line = out.split("\n").find((value) => value.trim())
-      if (!line) return ""
+      if (!line) return { text: "", system: "" }
       try {
         const printed = JSON.parse(line)
         const text = printed?.hookSpecificOutput?.additionalContext ?? printed?.context
-        return typeof text === "string" ? text : ""
-      } catch { return "" }
+        return { text: typeof text === "string" ? text : "",
+          system: typeof printed?.system === "string" ? printed.system : "" }
+      } catch { return { text: "", system: "" } }
     }
     const finish = () => {
       if (finished) return
@@ -3164,6 +3180,10 @@ async function pendingPeerDelivery(ctx, sid) {
           continue
         }
         if (!pendingPeerTransition(sid, ["--resuming", row.ref, "--message-id", mid])) continue
+        // The resumed model call reads this message's own guidance, whatever came between
+        // (a new plugin process, a person's prompt); the saving `chat.message` is not relied on.
+        peerGuidanceBySession.set(sid, peerGuidanceFor(sid, row.text, baseDir(ctx)))
+        peerGuidanceMessage.set(sid, mid)
         const resumed = await bounded(client.promptAsync({ path: { id: sid }, query: { directory },
           body: { messageID: mid, parts: [] } }))
         const acceptedResume = pendingPeerSdkNoContent(resumed)
@@ -3172,6 +3192,9 @@ async function pendingPeerDelivery(ctx, sid) {
         })
         if (acceptedResume) {
           pendingPeerStatus.set(sid, "submitted")
+          // One resume per idle, as the OpenCode 2 host sends one: a later save in this pass
+          // would replace the guidance before this resume's model call reads it.
+          return "processed"
         }
         continue
       }
@@ -3260,6 +3283,8 @@ async function pendingPeerDelivery(ctx, sid) {
       if (pendingPeerTransition(sid, ["--queued", row.ref, "--message-id", mid])) {
         if (pendingPeerTransition(sid, ["--resuming", row.ref, "--message-id", mid])) {
           if (!pendingPeerRoot(ctx, sid)) return "native-origin-changed"
+          peerGuidanceBySession.set(sid, peerGuidanceFor(sid, row.text, baseDir(ctx)))
+          peerGuidanceMessage.set(sid, mid)
           const resumed = await bounded(client.promptAsync({ path: { id: sid }, query: { directory },
             body: { messageID: mid, parts: [] } }))
           const acceptedResume = pendingPeerSdkNoContent(resumed)
@@ -3268,6 +3293,7 @@ async function pendingPeerDelivery(ctx, sid) {
           })
           if (acceptedResume) {
             pendingPeerStatus.set(sid, "submitted")
+            return "processed"   // one resume per idle (above)
           }
         }
       }
@@ -3784,6 +3810,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
         cardBySession.delete(sid)
         historyNoticeSettledBySession.delete(sid)
         peerGuidanceBySession.delete(sid)
+        peerGuidanceMessage.delete(sid)
         contextAlertBySession.delete(sid)
         modelWindowBySession.delete(sid)
         paneProjectionRetryAt.delete(sid)
@@ -3805,17 +3832,16 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     const prompt = promptText(output)
     const turn = input.messageID || output?.message?.id || ""
     if (prompt) promptBySession.set(sid, prompt)
-    // A message with no text (the idle delivery resuming the peer prompt it saved) keeps the
-    // guidance that prompt left: the resumed model call is the one that needs it.
-    if (prompt) peerGuidanceBySession.delete(sid)
+    // A held guidance outlives only the message it was set for (the idle delivery's resume of
+    // the peer prompt it saved: no text, that message's id); any other message drops it.
+    const guidedMessage = peerGuidanceMessage.get(sid)
+    if (prompt || !guidedMessage || input.messageID !== guidedMessage) {
+      peerGuidanceBySession.delete(sid)
+      peerGuidanceMessage.delete(sid)
+    }
     // Actual peer receipt is observed after persistence, not callback rendering.
     if (prompt && eventSid && looksLikePeerPrompt(prompt)) {
-      const guidance = spawnSync(
-        "python3",
-        ["-c", "import importlib.util, json, sys; s=importlib.util.spec_from_file_location('peer', 'utilities/peer-message.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); d=json.load(sys.stdin); print(m.receiver_guidance_once(d.get('prompt', ''), d.get('recipient'), cwd=d.get('cwd')))"],
-        { cwd: root, env: { ...process.env, AGENT_HOME: root }, encoding: "utf8", timeout: 4000,
-          input: JSON.stringify({ prompt, recipient: { harness: "opencode", session_id: eventSid }, cwd: baseDir(ctx) }) })
-      if (guidance.status === 0) peerGuidanceBySession.set(sid, (guidance.stdout || "").trim())
+      peerGuidanceBySession.set(sid, peerGuidanceFor(eventSid, prompt, baseDir(ctx)))
       // Ordinary manual sends retain their existing notice path. Pending refs
       // are acknowledged by the persisted-context observation at normal idle.
       const rows = pendingPeerCommand(eventSid)
@@ -4054,7 +4080,12 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       // so with `peerContext: false`, and the helper is not asked: nothing is
       // recorded received that the model never saw. The child runs asynchronously
       // so the shared service keeps serving every other window meanwhile.
-      const text = await peerToolContextAsync(input.sessionID)
+      const { text, system } = await peerToolContextAsync(input.sessionID)
+      if (system) {
+        // The transform runs for every tool-loop continuation (measured, see the maps above).
+        const held = peerGuidanceBySession.get(input.sessionID)
+        peerGuidanceBySession.set(input.sessionID, held ? held + "\n\n" + system : system)
+      }
       if (text && typeof output.output === "string") output.output += "\n" + text
       // A completion record the idle courier stopped re-sending rides this result too.
       const carried = await completionCarrier.inTurn(input.sessionID)

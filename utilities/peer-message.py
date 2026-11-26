@@ -185,9 +185,10 @@ def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=N
 # is the transfer's private payload (`body_ref` with `presentation_mode: private-answer`, the
 # one the receive checks already read), the window gets one header line, the payload's path
 # and the receipt lines, and the agent gets the body through the same hook/plugin context
-# (`_private_answer_guidance`). Claude's hook context adds the same text when it carries the row
-# at a tool or prompt boundary; an OpenCode tool result never carries a secret answer (its TUI
-# may draw it), and a secret answer to OpenCode always takes the pointer form.
+# (`_private_answer_guidance`). Every carrier that takes the row puts that text in an agent-only
+# place before the row settles (`_secret_answer_agent_text`): Claude's hook context beside the
+# pointer, OpenCode's system context while its tool result (which its TUI may draw) keeps the
+# pointer alone; a secret answer to OpenCode always takes the pointer form.
 # ---------------------------------------------------------------------------
 _DISPLAY_FORM = 2
 _DISPLAY_AGENT_MAX_CHARS = 12000
@@ -4633,6 +4634,16 @@ def _secret_answer_form(ref):
     return "sealed" if isinstance(display, dict) and display.get("private") is True else None
 
 
+def _secret_answer_agent_text(form, ref):
+    """What only the recipient's agent may read for a secret answer's row, at every carrier that
+    takes the row (prompt hooks, Claude's hook context, OpenCode's system context): a pointer's
+    full text (``_private_answer_guidance``), or for a one-line form row, whose own text is the
+    whole old text, the sentence that comes with every secret answer."""
+    if form == "pointer":
+        return _private_answer_guidance(ref)
+    return _SECRET_ANSWER_NOTE if form == "sealed" else ""
+
+
 def _private_answer_guidance(ref):
     """The agent-only full text of a runtime delivery sealed as a private answer's pointer
     (``private_body``), read from its verified payload; ``""`` for any other runtime text.
@@ -5111,7 +5122,9 @@ def _fit_claude_context(claims, context):
         return
     from dispatch_session_sweep import CLAUDE_CONTEXT_CHARS, overflow_pointer
     while len(claims) > 1 and len("\n\n".join(context)) > CLAUDE_CONTEXT_CHARS:
-        row = claims.pop()
+        ordinary = [claim for claim in claims if not claim.get("secret_answer")]
+        row = ordinary[-1] if ordinary else claims[-1]   # a secret answer is the last to wait
+        claims.remove(row)
         release_pending_herdr_claim(row)
         try:
             context.remove(row.get("shown_text", row["text"]))
@@ -5125,10 +5138,13 @@ def _fit_claude_context(claims, context):
             return
         others = sum(len(part) + 2 for i, part in enumerate(context) if i != index)
         if row.get("secret_answer"):
-            # A secret answer gets no overflow copy. A pointer too long for one context whole
-            # names its own private payload instead; anything else waits for the next boundary.
+            # A secret answer gets no overflow copy. One that fits a context alone waits for a
+            # boundary with room, where it goes whole; only a pointer too long even alone names
+            # its own private payload instead.
             shown = row["text"] + "\n\n" + _PRIVATE_ANSWER_TOO_LONG
-            if _secret_answer_form(row["ref"]) == "pointer" and others + len(shown) <= CLAUDE_CONTEXT_CHARS:
+            alone = len(row.get("shown_text", row["text"])) <= CLAUDE_CONTEXT_CHARS
+            if (not alone and _secret_answer_form(row["ref"]) == "pointer"
+                    and others + len(shown) <= CLAUDE_CONTEXT_CHARS):
                 context[index] = row["shown_text"] = shown
                 return
             claims.pop()
@@ -5204,6 +5220,7 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
         note_display_ready(recipient)  # this code reads the display forms (once a day per session)
     stream = sys.stdout if stream is None else stream
     claims, warnings, context = [], [], []
+    system = []   # the agent-only part a carrier puts outside what it shows (OpenCode: system context)
 
     def expired():
         return deadline is not None and time.monotonic() >= deadline
@@ -5240,10 +5257,9 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                 if not parsed or parsed.get("transfer_ref") != row["ref"]:
                     continue
             secret = None if row.get("no_trailer") else _secret_answer_form(row["ref"])
-            if secret and recipient["harness"] != "claude":
+            if secret == "sealed" and recipient["harness"] != "claude":
                 # OpenCode appends this context to the finished tool result, which its TUI may draw
-                # for the person: a secret answer stays pending for its prompt path (the courier's
-                # or the idle plugin's prompt), whose guidance rides the plugin's system context.
+                # for the person, and a one-line form row's text is the whole old text.
                 continue
             native_boundary = bool(native_delivery and event in _NATIVE_BOUNDARY_EVENTS)
             try:
@@ -5254,12 +5270,15 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                 continue
             if claimed:
                 shown = claimed["text"]
-                if secret == "pointer":
-                    # Claude's hook context is the agent's alone: the pointer and its full text,
-                    # as the prompt path gives it. The receipt still records the pointer.
-                    shown += "\n\n" + _private_answer_guidance(claimed["ref"])
-                elif secret == "sealed":
-                    shown += "\n\n" + _SECRET_ANSWER_NOTE
+                agent = _secret_answer_agent_text(secret, claimed["ref"]) if secret else ""
+                if agent and recipient["harness"] == "claude":
+                    # Claude's hook context is the agent's alone: the pointer and its full text.
+                    shown += "\n\n" + agent
+                elif agent:
+                    # OpenCode: the tool result (which its TUI may draw) keeps the pointer; the full
+                    # text goes to the plugin's system context for the tool loop's next model call.
+                    claimed["system_text"] = agent
+                    system.append(agent)
                 if secret:
                     claimed["shown_text"], claimed["secret_answer"] = shown, True
                 claims.append(claimed)
@@ -5316,6 +5335,8 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
             release_pending_herdr_claim(row)
             try:
                 context.remove(row.get("shown_text", row["text"]))
+                if row.get("system_text"):
+                    system.remove(row["system_text"])
             except ValueError:
                 pass
     claims = begun
@@ -5324,6 +5345,8 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
     text = "\n\n".join(context)
     output = ({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}
               if event else {"context": text})
+    if system:
+        output["system"] = "\n\n".join(system)
     print(json.dumps(output, ensure_ascii=False), file=stream)
     stream.flush()
     for row in claims:

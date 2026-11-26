@@ -304,45 +304,128 @@ if (calls !== 1) throw Error("native callback did not run exactly one helper");
                 contexts.append(json.loads(line)["hookSpecificOutput"]["additionalContext"])
         return "\n\n".join(contexts)
 
-    _PLUGIN_TURN = r"""
+    _IDLE_DRIVER = r"""
 import { pathToFileURL } from "node:url";
-const { AgentHarnessGuards } = await import(pathToFileURL(process.env.PLUGIN_PATH));
-const hooks = await AgentHarnessGuards({directory: process.env.FIX_ROOT, worktree: process.env.FIX_ROOT,
-  client: {}}, {initialize: false});
-const sid = process.env.FIX_SID, systems = [];
-for (const text of JSON.parse(process.env.FIX_PROMPTS)) {
-  await hooks["chat.message"]({sessionID: sid, messageID: "m-1"}, {parts: text === null ? [] : [{type: "text", text}]});
-  const out = {system: []};
-  await hooks["experimental.chat.system.transform"]({sessionID: sid, model: {}}, out);
-  systems.push(out.system.join("\\n\\n"));
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { spawnSync as realSpawnSync, spawn as realSpawn } from "node:child_process";
+const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+globalThis.setTimeout = (cb, ms, ...a) => ms === 0 ? {cancelled: true} : realSetTimeout(cb, ms, ...a);
+globalThis.setInterval = () => ({unref() {}});
+globalThis.__fixtureSpawnSync = realSpawnSync;   // every python CLI call and the guidance call are real
+globalThis.__fixtureSpawn = (exe, args, options) => {
+  if (Array.from(args || []).some(a => String(a).endsWith("peer-message.py"))) return realSpawn(exe, args, options);
+  const child = new EventEmitter(); child.pid = 4242; child.stdout = new PassThrough();
+  child.stdin = new PassThrough(); child.unref = () => {}; child.kill = () => {};
+  setImmediate(() => { child.stdout.end("null"); child.emit("close", 0); child.emit("exit", 0) });
+  return child;
+};
+const cfg = JSON.parse(process.env.FIX_CFG);
+const {AgentHarnessGuards} = await import(pathToFileURL(process.env.FIX_GUARDS).href);
+const sid = cfg.sid, dir = process.cwd(), messages = cfg.history || [], systems = [], tools = [];
+let hooks, n = 0, turns = 0;
+const sdk = (data, status = 200) => ({data, error: undefined, response: {ok: true, status}});
+const root = {id: sid, projectID: "project_fixture", directory: dir, slug: "fixture-root", title: "fixture",
+  version: "1.19.0", time: {created: 1, updated: 1}};
+// A model call reads the system context of that moment; one answering a user message completes it.
+const modelCall = async (mid, answering = true) => {
+  const o = {system: []};
+  await hooks["experimental.chat.system.transform"]({sessionID: sid, model: {}}, o);
+  systems.push({for: mid, system: o.system.join("\n\n")});
+  if (answering) messages.push({info: {id: "assistant-" + mid, sessionID: sid, role: "assistant", parentID: mid,
+    time: {completed: Date.now()}}, parts: []});
+};
+const session = {
+  status: async () => sdk(turns > 0 ? {[sid]: {type: "busy"}} : {}),   // busy while a started turn runs
+  get: async () => sdk(root),
+  messages: async () => sdk(messages),
+  prompt: async (args) => {   // the noReply save: OpenCode runs the plugin's chat.message for it
+    const id = "native-msg-" + (++n);
+    const row = {info: {id, role: "user", sessionID: sid, time: {created: Date.now()}}, parts: args.body.parts};
+    await hooks["chat.message"]({sessionID: sid, messageID: id}, {message: row.info, parts: args.body.parts});
+    messages.push(row);
+    return sdk(row);
+  },
+  promptAsync: async (args) => {   // the resume: chat.message for that message id, then its model call
+    const mid = args.body.messageID;
+    turns++;
+    const run = async () => {
+      try {
+        await hooks["chat.message"]({sessionID: sid, messageID: mid}, {message: {id: mid, role: "user", sessionID: sid}, parts: args.body.parts});
+        if (cfg.delay > 0) await new Promise(r => realSetTimeout(r, cfg.delay));
+        await modelCall(mid);
+      } finally { turns--; }
+    };
+    if (cfg.delay > 0) { run(); } else { await run(); }
+    return sdk(undefined, 204);
+  },
+};
+hooks = await AgentHarnessGuards({directory: dir, worktree: dir, client: {session, app: {log: async () => {}}}});
+const person = async (id, parts) => {
+  await hooks["chat.message"]({sessionID: sid, messageID: id}, {parts});
+  await modelCall(id);
+};
+if (cfg.personFirst) await person("person-1", [{type: "text", text: cfg.personFirst}]);
+for (let i = 0; i < (cfg.idles || 0); i++) {
+  await hooks.event({event: {type: "session.idle", properties: {sessionID: sid}}});
+  await new Promise(r => realSetTimeout(r, (cfg.delay || 0) * 4 + 50));
 }
-process.stdout.write(JSON.stringify(systems));
+for (let i = 0; i < (cfg.tools || 0); i++) {   // a working turn: each finished tool, then the loop's next call
+  const o = {output: "tool-ok", title: "", metadata: {}};
+  await hooks["tool.execute.after"]({sessionID: sid, tool: "bash", callID: "c" + i}, o);
+  tools.push(o.output);
+  await modelCall("tool-" + i, false);
+}
+if (cfg.imageOnly) await person("person-image", [{type: "file", mime: "image/png", url: "data:,"}]);
 hooks.dispose?.({silent: true});
-setTimeout(() => process.exit(0), 50);
+process.stdout.write(JSON.stringify({systems, tools, history: messages.map(m => ({id: m.info.id, role: m.info.role,
+  text: (m.parts || []).map(p => p.text || "").join("")}))}));
+realSetTimeout(() => process.exit(0), 30);
 """
 
-    def opencode_plugin_turns(self, sid, prompts):
-        """The OpenCode plugin itself under node: each prompt (``None``: a message with no text, as
-        the idle delivery's resume sends) through `chat.message`, then the system transform of the
-        model call after it. Returns those system texts."""
+    def opencode_plugin_session(self, sid, cfg, *, origin=True):
+        """The OpenCode plugin itself under node, with a stand-in OpenCode server client: its own
+        `session.idle` delivery (`pendingPeerDelivery`), tool boundaries (`tool.execute.after`) and the
+        model calls after them, a person's prompts. Only the window-origin proof (``origin``: this
+        session's own, or none as for `opencode -c`) and detached children are replaced; every
+        python CLI call and the guidance call are real. Returns the system context of every model
+        call, the tool results and the session history."""
         if not self.node:
             raise RuntimeError("Node is unavailable for the OpenCode plugin fixture")
         root = Path(tidy.__file__).resolve().parents[1]
-        env = dict(os.environ, PATH=os.path.dirname(self.node) + os.pathsep + os.path.dirname(sys.executable),
-                   AGENT_HOME=str(root), PLUGIN_PATH=str(root / "adapters/opencode/plugins/hearting-guards.js"),
-                   FIX_ROOT=str(self.root), FIX_SID=sid, FIX_PROMPTS=json.dumps(prompts))
-        for key in ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
-                    "OPENCODE_DISPATCH_SLUG", "HERDR_PANE_ID"):
-            env.pop(key, None)
-        child = subprocess.run([self.node, "--input-type=module", "-e", self._PLUGIN_TURN], cwd=str(self.root),
-                               env=env, text=True, capture_output=True, timeout=120, start_new_session=True)
+        source = (root / "adapters/opencode/plugins/hearting-guards.js").read_text(encoding="utf-8")
+        start = source.index("function ownNativePaneOrigin() {")
+        end = source.index("\n}\n\nfunction sameNativePaneContext", start) + 2
+        proof = ('function ownNativePaneOrigin() {\n  const stat = readFileSync("/proc/self/stat", "utf8")\n'
+                 '  const start = stat.slice(stat.lastIndexOf(") ") + 2).trim().split(/\\s+/)[19]\n'
+                 '  return {pid: process.pid, start, sid: %s, bare: false, directory: realpathSync(process.cwd()), '
+                 'state: "pending"}\n}' % json.dumps(sid)) if origin else "function ownNativePaneOrigin() {\n  return null\n}"
+        source = source[:start] + proof + source[end:]
+        for old, new in (('import { spawnSync, spawn } from "node:child_process"',
+                          "const spawnSync = globalThis.__fixtureSpawnSync; const spawn = globalThis.__fixtureSpawn"),
+                         ("markPluginLoaded(dispatchSlug())", "// fixture: marker off")):
+            source = source.replace(old, new)
+        source = source.replace("reconnectPeerObligations()\n", "void 0\n")
+        with tempfile.TemporaryDirectory(dir=str(self.root)) as tmp:
+            guards = Path(tmp) / "hearting-guards-fixture.mjs"
+            guards.write_text(source, encoding="utf-8")
+            env = dict(os.environ, PATH=os.pathsep.join([os.path.dirname(self.node), os.path.dirname(sys.executable),
+                                                         "/usr/bin", "/bin"]),
+                       AGENT_HOME=str(root), FIX_GUARDS=str(guards), FIX_CFG=json.dumps(dict(cfg, sid=sid)),
+                       PYTHONDONTWRITEBYTECODE="1")
+            for key in ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
+                        "OPENCODE_DISPATCH_SLUG", "HERDR_PANE_ID", "FLEET_TITLE_REFRESH"):
+                env.pop(key, None)
+            child = subprocess.run([self.node, "--input-type=module", "-e", self._IDLE_DRIVER], cwd=str(self.root),
+                                   env=env, text=True, capture_output=True, timeout=180, start_new_session=True)
         if child.returncode:
-            raise AssertionError(child.stderr[-800:])
+            raise AssertionError(child.stderr[-1500:])
         return json.loads(child.stdout)
 
     def opencode_tool_boundary(self, sid):
         """The OpenCode plugin's post-tool call (`tool.execute.after`), as its source spells it;
-        returns the context it would append to the finished tool result."""
+        returns the context it appends to the finished tool result and the part it puts in the
+        plugin's system context."""
         root = Path(tidy.__file__).resolve().parents[1]
         child = subprocess.run([sys.executable, "-B", str(root / "utilities/peer-message.py"), "context",
                                 "--to-harness", "opencode", "--to-session-id", sid,
@@ -351,10 +434,11 @@ setTimeout(() => process.exit(0), 50);
                                capture_output=True, text=True, timeout=30)
         if child.returncode:
             raise AssertionError(child.stderr)
-        contexts = []
+        contexts, system = [], []
         for line in child.stdout.splitlines():
             with contextlib.suppress(ValueError, AttributeError):
                 printed = json.loads(line)
                 contexts.append((printed.get("hookSpecificOutput") or {}).get("additionalContext")
                                 or printed.get("context") or "")
-        return "\n\n".join(contexts)
+                system.append(printed.get("system") or "")
+        return "\n\n".join(contexts), "\n\n".join(part for part in system if part)
