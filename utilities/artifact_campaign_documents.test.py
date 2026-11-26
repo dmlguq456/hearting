@@ -160,15 +160,53 @@ class CampaignDocumentsTest(unittest.TestCase):
         rows = [r for r in entrance.scan(self.root)['recent'] if r.get('kind') == 'campaign-document']
         self.assertEqual({Path(r['doc_path']).name for r in rows}, {'현황.md', 'HANDOFF-seat.md'})
 
+    def snapshot_rows(self):
+        (self.campaign / '현황.md').write_text(PAGE)
+        snapshot = documents.entrance_snapshot(self.root)
+        return snapshot, [r for r in snapshot['rows'] if r['doc_path'].endswith('현황.md')]
+
+    def test_a_campaign_record_over_64_kib_still_gives_its_documents_the_campaign_id(self):
+        record = json.loads((self.campaign / 'campaign.json').read_text())
+        record['cycles'] = ['cyc_%032x' % n for n in range(1650)]  # 1,650 members, as the backlog line says
+        (self.campaign / 'campaign.json').write_text(json.dumps(record))
+        self.assertGreater((self.campaign / 'campaign.json').stat().st_size, documents.READ_LIMIT)
+        snapshot, rows = self.snapshot_rows()
+        self.assertEqual([r['campaign_id'] for r in rows], [self.campaign_id])
+        self.assertEqual((snapshot['errors'], snapshot['coverage']), ([], 'complete'))
+
+    def test_a_campaign_record_over_the_record_limit_is_named_in_the_errors_not_silently_dropped(self):
+        import artifact_campaign
+        record = json.loads((self.campaign / 'campaign.json').read_text())
+        record['cycles'] = ['cyc_%032x' % n for n in range(100)]
+        (self.campaign / 'campaign.json').write_text(json.dumps(record))
+        with mock.patch.object(artifact_campaign, 'MAX_JSON', 1000):
+            snapshot, rows = self.snapshot_rows()
+        self.assertEqual([r['campaign_id'] for r in rows], [None])
+        self.assertEqual(snapshot['errors'], ['campaigns/2026-11-01_demo:campaign-metadata-bounded'])
+        self.assertEqual(snapshot['coverage'], 'partial')
+
+    def test_a_page_over_64_kib_is_still_read_to_64_kib(self):
+        (self.campaign / '현황.md').write_text('# Big\n' + 'x' * (documents.READ_LIMIT + 10))
+        snapshot = documents.entrance_snapshot(self.root)
+        self.assertIn('campaigns/2026-11-01_demo/현황.md:document-bounded', snapshot['errors'])
+
+    def test_one_rule_names_the_first_line_of_a_generated_page_and_ends_it_at_a_newline_only(self):
+        marker = '<!-- hearting:campaign-document v1 -->'
+        for tail in ('\n# T\n', '\r\n# T\n', '  \n# T\n', '\n'):
+            self.assertTrue(documents.carries_marker(marker + tail, marker), repr(tail))
+        for sep in ('\r', '\u2028', '\x0c', '\x0b', '\x85'):  # lines end there only for `str.splitlines`
+            self.assertFalse(documents.carries_marker(marker + sep + '# T\n', marker), repr(sep))
+        self.assertFalse(documents.carries_marker('# T\n' + marker, marker))
+
     def test_a_document_replaced_while_it_is_read_is_read_once_more(self):
         (self.campaign / 'campaign.md').write_text(CAMPAIGN_PAGE)
         real, calls = documents._read_once, []
 
-        def once(folder, name):
+        def once(folder, name, limit):
             calls.append(name)
             if len(calls) == 1:
                 raise ValueError('document-changed')
-            return real(folder, name)
+            return real(folder, name, limit)
         with mock.patch.object(documents, '_read_once', once):
             raw, _info, coverage = documents.read_document(self.campaign, 'campaign.md')
         self.assertEqual((len(calls), coverage, raw.decode()), (2, 'complete', CAMPAIGN_PAGE))
