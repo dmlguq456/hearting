@@ -1977,6 +1977,23 @@ class FinalizeTest(ProducerTestBase):
         self.assertEqual(before[0], P.read_cycle_record(self.root, result["cycle_id"]))
         self.assertEqual(before[1], (Path(result["cycle_dir"]) / "manifest.json").read_bytes())
 
+    def test_a_drawing_of_a_campaign_writes_no_index_when_a_removed_record_is_read_back_from_its_manifest(self):
+        import campaign_document
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result)
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=result["cycle_id"])
+        import artifact_locator
+        folder = artifact_locator.locate(self.root, result["campaign_id"], heal=False)
+        P.cycle_record_path(self.root, result["cycle_id"]).unlink()      # the cache is gone: the admitted manifest answers
+        for index in (self.root / "campaigns").glob("INDEX.*"):
+            index.unlink()
+        files = lambda: {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}  # noqa: E731
+        before = files()
+        campaign_document.collect(self.root, folder, now=time.time(), persist=False, pages={})
+        self.assertEqual(files(), before)
+
     def test_finalize_requires_closed_route_unless_allowed(self):
         self.activate()
         route, route_file, result = self.begin()
@@ -6840,7 +6857,7 @@ class OwnerLaunchBindingTest(ProducerTestBase):
         self.activate()
         route, route_file = self.route("quick")
         launch_env = P.prepare_route_artifact_env(route_file, start=True, jobs=self.jobs)
-        owner = "att-launch-binding"
+        owner = fixture_processes.unique_attempt_id("att-launch-binding")
         node = route["nodes"][0]
         metadata = dict(attempt_id=owner, worker_type="owner", dispatch_depth="1",
             registered_worker="1", harness="codex", capability="autopilot-code",
@@ -6993,7 +7010,7 @@ class OwnerLaunchBindingTest(ProducerTestBase):
     def test_resume_only_owner_launch_publishes_and_replays_binding(self):
         route, route_file, launch_env, owner, args = self._prepared_owner()
         self.assertFalse(P.dispatch_terminal_commit.producer_binding_path(
-            self.root, route["route_id"], "att-launch-binding").exists())
+            self.root, route["route_id"], fixture_processes.unique_attempt_id("att-launch-binding")).exists())
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(self.jobs)}):
             result = P.bind_owner_launch(args, self.jobs, environ=launch_env)
             binding_path = P.dispatch_terminal_commit.producer_binding_path(self.root, route["route_id"], owner)

@@ -10,6 +10,9 @@ from split_module_fixture import patch_split
 os.environ.setdefault("HEARTING_CAPACITY_PROBE_CLI", os.devnull)  # never ask a real Claude login
 
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/"tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
+FALLBACK_PARENT=unique_attempt_id("att-fallback-parent")
 
 _STATE_TMP = None
 _STATE_OLD = None
@@ -945,7 +948,7 @@ class FallbackTest(unittest.TestCase):
     f"harness={harness},runtime_sandbox={sandbox},"
     "execution_surface=registered-headless,registered_worker=1,"
     "fallback_hop=same-harness-headless,worker_type=owner,"
-    f"attempt_id=att-fallback-parent,pid={self.owner.pid},pid_start={start}\n")
+    f"attempt_id={FALLBACK_PARENT},pid={self.owner.pid},pid_start={start}\n")
  def fixture_subprocess_env(self):
   """Build child CLI context from this fixture, not the invoking owner session."""
   return {k:v for k,v in os.environ.items()
@@ -1119,7 +1122,7 @@ class FallbackTest(unittest.TestCase):
   cmd=[sys.executable,str(ROOT/"utilities/stage-dispatch-fallback.py"),"--route",str(path),"--node","plan","--slug","fallback-plan","--parent","owner","--capability-mode","dev","--worker-mode","plan/plan-author","--model-role","deep maker","--jobs",str(self.jobs),"--dry-run",*extra]
   clean={k:v for k,v in self.fixture_subprocess_env().items()
          if not k.startswith("AGENT_DISPATCH_CURRENT_")}
-  env={**clean,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),"AGENT_MODEL_GOVERNOR_ROOT":str(self.art/".runtime/model-worker-governor"),"AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent",**envkw}
+  env={**clean,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),"AGENT_MODEL_GOVERNOR_ROOT":str(self.art/".runtime/model-worker-governor"),"AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":FALLBACK_PARENT,**envkw}
   return subprocess.run(cmd,text=True,capture_output=True,env=env)
  @contextlib.contextmanager
  def prior_process_observation(self,attempts,*,state="quiescent"):
@@ -1171,7 +1174,7 @@ class FallbackTest(unittest.TestCase):
   )
   removed={k:os.environ.pop(k) for k in list(os.environ) if inherited_context(k)}
   env={**self.launch_roots_env(),
-       "AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent",**envkw}
+       "AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":FALLBACK_PARENT,**envkw}
   try:
    with mock.patch.dict(os.environ,env):
     yield
@@ -1213,7 +1216,7 @@ class FallbackTest(unittest.TestCase):
  def run_register(self,path):
   self.seed_parent()
   cmd=[sys.executable,str(ROOT/"utilities/stage-dispatch-fallback.py"),"--route",str(path),"--node","plan","--slug","fallback-plan","--parent","owner","--capability-mode","dev","--worker-mode","plan/plan-author","--model-role","deep maker","--jobs",str(self.jobs),"--register"]
-  env={**self.fixture_subprocess_env(),"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),"AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent"}
+  env={**self.fixture_subprocess_env(),"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),"AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":FALLBACK_PARENT}
   return subprocess.run(cmd,text=True,capture_output=True,env=env)
  def run_review_inline(self,path,node_id="plan-check",worker_mode="qa/plan-review",model_role="fast reviewer",seed=True):
   """`run_inline` for a capped review node (C-14). In-process like run_inline:
@@ -1521,7 +1524,7 @@ class FallbackTest(unittest.TestCase):
    dry,_=act("dry-run")
    registered,command=act("register")
    # What the adapter's --register leaves behind: one open row it never claimed for launch.
-   parent=command[command.index("--parent-attempt-id")+1] if "--parent-attempt-id" in command else "att-fallback-parent"
+   parent=command[command.index("--parent-attempt-id")+1] if "--parent-attempt-id" in command else FALLBACK_PARENT
    with self.jobs.open("a",encoding="utf-8") as fh:
     fh.write(f"2026-08-29T00:01:00Z\topen\t{self.repo}\t{self.repo}\tfallback-plan-check\t"
              "attempt_schema_version=2,dispatch_depth=2,registered_worker=1,"
@@ -1550,7 +1553,7 @@ class FallbackTest(unittest.TestCase):
     "fallback_hop":"same-harness-headless","worker_type":"test","harness":harness,
     "route_id":route["route_id"],"route_hash":route["route_hash"],"route_node":"test",
     "route_file":str(self.current_route_file),"completion_gate":node.get("completion_gate", ""),
-    "parent_attempt_id":"att-fallback-parent","parent_sid":"fixture-native-parent",
+    "parent_attempt_id":FALLBACK_PARENT,"parent_sid":"fixture-native-parent",
     "launch_head":"old-source-head","launch_claimed":"1","launch_started":"1",
     "terminal_event":"result","process_exit":"0","attempt_id":aid,
     "note":note,"failure_class":failure,
@@ -1604,7 +1607,7 @@ class FallbackTest(unittest.TestCase):
      "execution_surface":"registered-headless","registered_worker":"1","fallback_hop":"same-harness-headless",
      "worker_type":"stage","unit":"qa/test","harness":"codex","attempt_id":aid,
      "route_id":route["route_id"],"route_hash":route["route_hash"],"route_node":"test",
-     "parent_attempt_id":"att-fallback-parent","parent_sid":"fixture-native-parent","launch_head":new_head}
+     "parent_attempt_id":FALLBACK_PARENT,"parent_sid":"fixture-native-parent","launch_head":new_head}
     retry=self.arg(command,"--automatic-retry-of")
     if retry:metadata["automatic_retry_of"]=retry
     # Exercise the production admission and atomic register/claim fences;
@@ -1621,7 +1624,7 @@ class FallbackTest(unittest.TestCase):
     code,output=self.closure_action(path,action,patches=(patch,),prompt=prompt)
     self.assertEqual(code,0,output)
    ids=[self.arg(command,"--attempt-id") for command in commands]
-   expected=F.attempt_identity(SimpleNamespace(slug="fallback-test",parent="owner",parent_attempt_id="att-fallback-parent"),
+   expected=F.attempt_identity(SimpleNamespace(slug="fallback-test",parent="owner",parent_attempt_id=FALLBACK_PARENT),
                                route,node,{"child_harness":"codex"},1,3)
    self.assertEqual(ids,[expected]*3)
    self.assertTrue(all("--automatic-retry-of" not in command for command in commands))
@@ -1665,7 +1668,7 @@ class FallbackTest(unittest.TestCase):
    old={"attempt_schema_version":"2","dispatch_depth":"2","worker_type":"stage",
     "attempt_id":"att-old-never-launched","route_id":route["route_id"],
     "route_hash":route["route_hash"],"route_node":"test","harness":"codex",
-    "parent_attempt_id":"att-fallback-parent","launch_claimed":"0",
+    "parent_attempt_id":FALLBACK_PARENT,"launch_claimed":"0",
     "launch_outcome":"never-launched","note":"dead-parent-exited",
     "failure_class":"cancelled","reconcile_reason":"post-exit-child-cascade"}
    with self.jobs.open("a") as handle:
@@ -1675,7 +1678,7 @@ class FallbackTest(unittest.TestCase):
    prior=F.registry_rows(self.jobs,route["route_id"],"test")[-1]
    self.assertTrue(prior["_terminal_never_started"])
    budget=F.DISPATCH_NODE.admit_round(route,node,self.jobs,
-      owner_attempt_id="att-fallback-parent",record_auto_revisions=False).budget
+      owner_attempt_id=FALLBACK_PARENT,record_auto_revisions=False).budget
    self.assertEqual(budget.next_round,1)
    commands=[];claims=[]
    def wrapper(_args,command,**_policy):
@@ -1684,7 +1687,7 @@ class FallbackTest(unittest.TestCase):
      "transport":"headless","execution_surface":"registered-headless","registered_worker":"1",
      "fallback_hop":"same-harness-headless","unit":"qa/test",
      "attempt_id":aid,"route_id":route["route_id"],"route_hash":route["route_hash"],
-     "route_node":"test","parent_attempt_id":"att-fallback-parent","harness":"codex",
+     "route_node":"test","parent_attempt_id":FALLBACK_PARENT,"harness":"codex",
      "parent_sid":"fixture-native-parent","launch_head":subprocess.check_output(
        ["git","-C",str(self.repo),"rev-parse","HEAD"],text=True).strip()}
     retry=self.arg(command,"--automatic-retry-of")
@@ -1702,7 +1705,7 @@ class FallbackTest(unittest.TestCase):
    self.assertEqual(code,0,output)
    self.assertTrue(commands)
    self.assertTrue(all("--automatic-retry-of" not in command for command in commands))
-   expected=F.attempt_identity(SimpleNamespace(slug="fallback-test",parent="owner",parent_attempt_id="att-fallback-parent"),
+   expected=F.attempt_identity(SimpleNamespace(slug="fallback-test",parent="owner",parent_attempt_id=FALLBACK_PARENT),
                              route,node,{"child_harness":"codex"},1,1)
    self.assertEqual(claims,[expected])
    self.assertTrue(self.jobs.read_bytes().startswith(original))
@@ -2005,7 +2008,7 @@ class FallbackTest(unittest.TestCase):
    self.seed_parent()
    self.seed_predecessor_markers(path,"execute")
    old_id=F.attempt_identity(
-    SimpleNamespace(slug="gap-two",parent="owner",parent_attempt_id="att-fallback-parent"),
+    SimpleNamespace(slug="gap-two",parent="owner",parent_attempt_id=FALLBACK_PARENT),
     route,{"id":"execute"},{"child_harness":harness},1)
    args=SimpleNamespace(attempt_id=old_id,jobs_path=self.jobs,
                         worktree=self.repo,replacement_input_argv=["--slug","gap-two"])
@@ -2014,7 +2017,7 @@ class FallbackTest(unittest.TestCase):
          "execution_surface":"registered-headless","registered_worker":"1",
          "fallback_hop":"same-harness-headless","worker_type":"stage","harness":harness,
          "attempt_id":args.attempt_id,"route_id":route["route_id"],"route_hash":route["route_hash"],
-         "route_node":"execute","parent_attempt_id":"att-fallback-parent",
+         "route_node":"execute","parent_attempt_id":FALLBACK_PARENT,
          "parent_sid":"fixture-native-parent","launch_outcome":"never-launched"}
    if outcome=="succeeded":
     meta.update(note="completed-marker",failure_class="pass")
@@ -2178,7 +2181,7 @@ class FallbackTest(unittest.TestCase):
    round_rows=F.DISPATCH_NODE.prior_round_attempts(
     self.jobs,route["route_id"],"plan-check",
     route=route if node.get("kind")=="review-worker" else None)
-   admission=F.DISPATCH_NODE.admit_round(route,node,self.jobs,owner_attempt_id="att-fallback-parent")
+   admission=F.DISPATCH_NODE.admit_round(route,node,self.jobs,owner_attempt_id=FALLBACK_PARENT)
    expected_block=F.DISPATCH_NODE.round_protocol_block(
     admission.budget,round_rows,F.worker_type_for_kind(node["kind"]),node["id"],jobs=self.jobs,
     current_manifest=admission.source_subject_manifest if admission.source_subject_digest else None)
@@ -2418,7 +2421,7 @@ class FallbackTest(unittest.TestCase):
   self.assertNotIn("parent-identity-mismatch",result.stdout+result.stderr)
   verdict=self.cli_verdict(result.stdout)
   expected=F.attempt_identity(
-   SimpleNamespace(slug="fallback-plan",parent="owner",parent_attempt_id="att-fallback-parent"),
+   SimpleNamespace(slug="fallback-plan",parent="owner",parent_attempt_id=FALLBACK_PARENT),
    route,node,{"child_harness":verdict["child_harness"]},int(verdict["fallback_ordinal"]))
   self.assertEqual(verdict["attempt_id"],expected)
  def test_parent_without_a_session_name_keeps_the_missing_identity_refusal(self):
@@ -2755,7 +2758,7 @@ class FallbackTest(unittest.TestCase):
    for attempt in (selected,"att-stale-other"):
     metadata=(f"{metadata_base}route_id={route['route_id']},route_hash={route['route_hash']},"
               f"route_node={node['id']},attempt_id={attempt},launch_claimed=0,"
-              "parent_attempt_id=att-fallback-parent")
+              f"parent_attempt_id={FALLBACK_PARENT}")
     rows.append(f"now\topen\t{self.repo}\t{self.repo}\tfallback-plan\t{metadata}")
    self.jobs.write_text("\n".join(rows)+"\n",encoding="utf-8")
    hop={"ordinal":1,"fallback_hop":"same-harness-headless",
@@ -2784,7 +2787,7 @@ class FallbackTest(unittest.TestCase):
               "execution_surface=registered-headless,registered_worker=1,"
               f"fallback_hop=same-harness-headless,route_id={route['route_id']},"
               f"route_hash={route['route_hash']},route_node={node['id']},"
-              f"attempt_id={attempt},launch_claimed=0,parent_attempt_id=att-fallback-parent")
+              f"attempt_id={attempt},launch_claimed=0,parent_attempt_id={FALLBACK_PARENT}")
     with self.jobs.open("a",encoding="utf-8") as handle:
      handle.write(f"now\topen\t{self.repo}\t{self.repo}\tfallback-plan\t{metadata}\n")
     raise subprocess.TimeoutExpired(command,1)
@@ -2823,7 +2826,7 @@ class FallbackTest(unittest.TestCase):
       "fallback_hop":"same-harness-headless","worker_type":"test","unit":"qa/test",
       "route_id":route["route_id"],"route_hash":route["route_hash"],"route_node":"test",
       "route_file":str(path),"completion_gate":node.get("completion_gate",""),
-      "parent_attempt_id":"att-fallback-parent","attempt_id":attempt,"launch_claimed":"0",
+      "parent_attempt_id":FALLBACK_PARENT,"attempt_id":attempt,"launch_claimed":"0",
       "launch_outcome":"never-launched",
      }
      metadata.update(SUBJECT.seal_attempt(self.jobs,route,node,attempt,worktree=self.repo))
@@ -2837,7 +2840,7 @@ class FallbackTest(unittest.TestCase):
      "fallback_hop":"same-harness-headless","worker_type":"test","unit":"qa/test",
      "route_id":route["route_id"],"route_hash":route["route_hash"],"route_node":"test",
      "route_file":str(path),"completion_gate":node.get("completion_gate",""),
-     "parent_attempt_id":"att-fallback-parent","attempt_id":attempt,"launch_claimed":"0",
+     "parent_attempt_id":FALLBACK_PARENT,"attempt_id":attempt,"launch_claimed":"0",
      "launch_outcome":"never-launched",
     }
     metadata.update(SUBJECT.seal_attempt(self.jobs,route,node,attempt,worktree=self.repo))
@@ -2898,7 +2901,7 @@ class FallbackTest(unittest.TestCase):
          if not k.startswith("AGENT_DISPATCH_CURRENT_")}
   env={**clean,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),
        "AGENT_MODEL_GOVERNOR_ROOT":str(self.art/".runtime/model-worker-governor"),"AGENT_DISPATCH_JOBS":str(self.jobs),
-       "AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent","AGENT_OWNER_ROUTE_FILE":str(path)}
+       "AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":FALLBACK_PARENT,"AGENT_OWNER_ROUTE_FILE":str(path)}
   implied=subprocess.run(cmd,text=True,capture_output=True,env=env)
   self.assertEqual((implied.returncode,explicit.returncode),(0,0),implied.stdout+implied.stderr)
   self.assertIn("selected_hop=",implied.stdout)
@@ -2924,7 +2927,7 @@ class FallbackTest(unittest.TestCase):
   self.assertEqual(second.returncode,65,second.stdout+second.stderr)
   self.assertIn("reason=parallel-group-batch-required",first.stdout)
   self.assertEqual(len(self.jobs.read_text().splitlines()),1)
-  self.assertIn("att-fallback-parent",self.jobs.read_text())
+  self.assertIn(FALLBACK_PARENT,self.jobs.read_text())
  def test_registry_prevents_explicitly_classified_tuple_retry(self):
   path=self.route(same_status="supported"); route=json.loads(path.read_text())
   pipe=f"capability=autopilot-code,route_id={route['route_id']},route_node=plan,parent=owner,attempt_id=att-prior000000,parent_harness=codex,parent_transport=headless,parent_sandbox=workspace-write,child_harness=codex,launch_authority=conductor,note=dead-launch-error,failure_class=launch-tuple"
@@ -2981,7 +2984,7 @@ class FallbackTest(unittest.TestCase):
   cmd=[sys.executable,str(ROOT/"utilities/stage-dispatch-fallback.py"),"--route",str(path),"--node",node,"--slug","fallback-"+node,"--parent","owner","--capability-mode","dev","--jobs",str(self.jobs),"--"+action,*extra]
   clean={k:v for k,v in self.fixture_subprocess_env().items()
          if not k.startswith("AGENT_DISPATCH_CURRENT_")}
-  env={**clean,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),"AGENT_MODEL_GOVERNOR_ROOT":str(self.art/".runtime/model-worker-governor"),"AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent",**envkw}
+  env={**clean,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),"AGENT_MODEL_GOVERNOR_ROOT":str(self.art/".runtime/model-worker-governor"),"AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner","AGENT_DISPATCH_ATTEMPT_ID":FALLBACK_PARENT,**envkw}
   return subprocess.run(cmd,text=True,capture_output=True,env=env)
  def hop(self,result):
   return next((line.split("=",1)[1] for line in result.stdout.splitlines()
@@ -3943,7 +3946,7 @@ class FallbackTest(unittest.TestCase):
   env={**self.fixture_subprocess_env(),"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),
        "AGENT_MODEL_GOVERNOR_ROOT":str(self.art/".runtime/model-worker-governor"),
        "AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner",
-       "AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent",
+       "AGENT_DISPATCH_ATTEMPT_ID":FALLBACK_PARENT,
        "AGENT_DISPATCH_CURRENT_HARNESS":"codex",
        "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless",
        "AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write"}
@@ -3987,7 +3990,7 @@ class FallbackTest(unittest.TestCase):
   env={**self.fixture_subprocess_env(),"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(self.art),
        "AGENT_MODEL_GOVERNOR_ROOT":str(self.art/".runtime/model-worker-governor"),
        "AGENT_DISPATCH_JOBS":str(self.jobs),"AGENT_DISPATCH_SELF_SLUG":"owner",
-       "AGENT_DISPATCH_ATTEMPT_ID":"att-fallback-parent",
+       "AGENT_DISPATCH_ATTEMPT_ID":FALLBACK_PARENT,
        "AGENT_DISPATCH_CURRENT_HARNESS":"codex",
        "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless",
        "AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write"}
@@ -4269,7 +4272,7 @@ class FallbackTest(unittest.TestCase):
  # --- 5th Codex run fixes (items 3/1/7), on the `plan` stage of a standard route.
  # The wrapper launch is replaced at its one seam: `subprocess.run` for a
  # detached start, `run_forwarding_termination` for a foreground-scoped one.
- PARENT=SimpleNamespace(slug="fallback-plan",parent="owner",parent_attempt_id="att-fallback-parent")
+ PARENT=SimpleNamespace(slug="fallback-plan",parent="owner",parent_attempt_id=FALLBACK_PARENT)
  def standard_route(self):
   path=self.route(same_status="supported",intensity="standard")
   route=json.loads(path.read_text())
@@ -4531,7 +4534,7 @@ class FallbackTest(unittest.TestCase):
   with self.jobs.open("a",encoding="utf-8") as fh:
    fh.write(f"2026-10-02T00:00:00Z\topen\t{self.repo}\t{self.repo}\tfallback-plan\t"
             "attempt_schema_version=2,dispatch_depth=2,registered_worker=1,"
-            f"route_id={route['route_id']},route_node=plan,parent_attempt_id=att-fallback-parent,"
+            f"route_id={route['route_id']},route_node=plan,parent_attempt_id={FALLBACK_PARENT},"
             f"pid_scope=namespace-local,launch_claimed=1,attempt_id={old}\n")
   return old
  def test_a_dead_claimed_row_is_closed_and_the_same_tuple_starts_a_new_attempt(self):
@@ -4606,7 +4609,7 @@ class FallbackTest(unittest.TestCase):
    with self.jobs.open("a",encoding="utf-8") as fh:
     fh.write(f"2026-10-02T00:00:00Z\tdone\t{self.repo}\t{self.repo}\tfallback-plan\t"
              "attempt_schema_version=2,dispatch_depth=2,registered_worker=1,"
-             f"route_id={route['route_id']},route_node=plan,parent_attempt_id=att-fallback-parent,"
+             f"route_id={route['route_id']},route_node=plan,parent_attempt_id={FALLBACK_PARENT},"
              "parent_harness=codex,parent_transport=headless,parent_sandbox=workspace-write,"
              "child_harness=codex,launch_authority=conductor,"
              f"launch_claimed=1,attempt_id={old},note=dead-timeout,failure_class=runtime,"
@@ -4626,7 +4629,7 @@ class FallbackTest(unittest.TestCase):
    with self.jobs.open("a",encoding="utf-8") as fh:
     fh.write(f"2026-10-02T00:00:01Z\topen\t{self.repo}\t{self.repo}\tfallback-plan\t"
              "attempt_schema_version=2,dispatch_depth=2,registered_worker=1,"
-             f"route_id={route['route_id']},route_node=plan,parent_attempt_id=att-fallback-parent,"
+             f"route_id={route['route_id']},route_node=plan,parent_attempt_id={FALLBACK_PARENT},"
              f"automatic_retry_of={old},launch_claimed=0,attempt_id={successor}\n")
    calls=[]
    code,out,err=self.start(path,patches=(
@@ -4916,7 +4919,7 @@ class LaunchTupleReportOnlyTest(unittest.TestCase):
   root.mkdir(parents=True)
   garbage = {"schema_version": 1, "route_id": route_id, "route_node": "plan",
              "route_hash": json.loads(path.read_text())["route_hash"],
-             "owner_attempt_id": "att-fallback-parent",
+             "owner_attempt_id": FALLBACK_PARENT,
              "tuple_key": "codex/headless/workspace-write/codex/conductor",
              "rejection_class": "totally-unknown-value",
              "evidence_ref": "garbage", "observed_at": time.time(),
