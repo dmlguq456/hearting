@@ -333,34 +333,32 @@ def refresh_observed_tag_metadata(agents) -> None:
                 _send_projection(metadata, None)
 
 
-def _held_sessions(agents):
-    """``{viewer id: held id}`` for the Claude panes among ``agents``: a window whose conversation
-    was sent to the background still names its old id, and its header names the held session
-    (``session_registry.parked_links``, the one judgment, read once for the pass)."""
-    if not any(agent.get("agent") == "claude" for agent in agents or ()):
-        return {}
-    try:
-        from fleet import session_registry
-        links = session_registry.parked_links("claude")
-    except Exception:
-        return {}
-    return {viewer: link["session_id"] for viewer, link in (links.get("successor") or {}).items()}
-
-
 def _tag_metadata_targets(agents):
-    """``((pane, harness, sid), held)`` for each pane whose header number is not the current one;
-    ``held`` is the session a viewer pane shows, else ``None``."""
-    agents = list(agents or ())
-    holding = _held_sessions(agents)
-    for agent in agents:
+    """``((pane, harness, sid), held)`` for each pane whose header is not the current one.
+
+    ``held`` is the session a window pane shows when its conversation was sent to the
+    background: the pass's decision, carried by the pane as ``held_session``
+    (``session_tags.assign``), never judged again here. Such a pane keeps its number when the
+    held session continues it, so its header is also refreshed when its title is not the one
+    the held session's header has now (same text: no write). A pane whose herdr record carries
+    no title is judged by its number only, so an unknown title never repeats a write."""
+    for agent in list(agents or ()):
         identity = _tag_metadata_identity(agent)
         if identity is None:
             continue
-        _, harness, sid = identity
-        held = holding.get(sid) if harness == "claude" else None
+        pane, harness, sid = identity
+        held = agent.get("held_session") if harness == "claude" else None
+        held = held if isinstance(held, str) and held and held != sid else None
         tag = resolve_tag(harness, held or sid)
         shown = re.match(r"^\[([0-9a-f]{2})\]", str(agent.get("display_agent") or ""))
-        if tag and (not shown or shown.group(1) != tag):
+        if not tag:
+            continue
+        stale = not shown or shown.group(1) != tag
+        if not stale and held and isinstance(agent.get("title"), str):
+            command = _metadata_command("herdr", harness, sid, pane, held=held)
+            wanted = command[command.index("--title") + 1] if "--title" in command else ""
+            stale = wanted != agent["title"]
+        if stale:
             yield identity, held
 
 

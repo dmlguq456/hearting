@@ -104,17 +104,16 @@ def _started(harness, sid, started=None):
     return time.time()
 
 
-def _parked(session_registry):
-    """``{viewer key: held key}`` for every window whose conversation was sent to the background.
+def _parked(sessions):
+    """``{viewer key: held key}`` for every window Fleet's rows show merged into the session it holds.
 
-    The one judgment (``session_registry.parked_links``, read live): while it holds, the window's
-    old id is not an observation of a session, and the held session continues its number."""
-    try:
-        links = session_registry.parked_links("claude")
-    except Exception:
-        return {}
-    return {("claude", viewer): ("claude", link["session_id"])
-            for viewer, link in (links.get("successor") or {}).items()}
+    The pass's one decision, carried by the merged row (``collectors.merge_parked_viewers`` sets
+    ``_parked_viewer``): while it holds, the window's old id is not an observation of a session,
+    and the held session continues its number. A link the merge refused (a second row, a row of
+    another process start) is no decision here either, so the window keeps its own number."""
+    return {(sess.harness, viewer): (sess.harness, sess.session_id) for sess in sessions
+            for viewer in (getattr(sess, "_parked_viewer", None),)
+            if viewer and getattr(sess, "session_id", None) and sess.harness == "claude"}
 
 
 def _inventory(sessions):
@@ -123,7 +122,7 @@ def _inventory(sessions):
     from . import session_registry
     from .collectors.procscan import read_proc_start
     live = {}
-    viewers = _parked(session_registry)
+    viewers = _parked(sessions)
     for sess in sessions:
         harness, sid = sess.harness, getattr(sess, "session_id", None)
         if harness not in {"claude", "codex", "opencode"} or not isinstance(sid, str) or not sid:
@@ -166,8 +165,13 @@ def _inventory(sessions):
         if not isinstance(identity, dict) or identity.get("kind") != "id":
             continue
         harness, sid = agent.get("agent"), identity.get("value")
-        if (harness not in {"claude", "codex", "opencode"} or not isinstance(sid, str) or not sid
-                or (harness, sid) in viewers):
+        if (harness, sid) in viewers:
+            # The window's pane shows the held session now: its number lives on that pane.
+            held = live.get(viewers[(harness, sid)])
+            if held is not None and agent.get("pane_id"):
+                held["pane_id"] = agent.get("pane_id")
+            continue
+        if harness not in {"claude", "codex", "opencode"} or not isinstance(sid, str) or not sid:
             continue
         row = live.setdefault((harness, sid), {"harness": harness, "session_id": sid,
                               "started_at": _started(harness, sid)})
@@ -214,10 +218,7 @@ def assign(sessions):
         except FileNotFoundError:
             baseline, stamp = {}, None
         live, agents = _inventory(sessions)
-        # Read again here, not passed through: a link that changed in between only keeps a
-        # number where it was (the edge needs the old id unobserved), never moves a wrong one.
-        from . import session_registry
-        viewers = _parked(session_registry)
+        viewers = _parked(sessions)
         return _assign(live, agents, baseline=baseline, baseline_stamp=stamp,
                        lineage={held: viewer for viewer, held in viewers.items()}, viewers=viewers)
     except (OSError, ValueError, TypeError, ImportError):
@@ -299,7 +300,8 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
     """Reserve against the latest snapshot and persist atomically under one lock.
 
     The agents returned are the panes whose header shows an assigned number: a pane
-    of a window in ``viewers`` ({viewer key: held key}) shows the held session's."""
+    of a window in ``viewers`` ({viewer key: held key}) shows the held session's, and
+    is returned with ``held_session`` naming it (the pane header reads that)."""
     from .session_handle import minted_tag
     observed = set(live)
     path = _path()
@@ -415,10 +417,13 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
         assigned = {(row["harness"], row["session_id"]) for row in rows}
         viewers = viewers or {}
 
-        def shown(agent):
+        returned = []
+        for agent in agents or []:
             key = (agent.get("agent"), (agent.get("agent_session") or {}).get("value"))
-            return viewers.get(key, key)
-        return [agent for agent in agents or [] if shown(agent) in assigned]
+            held = viewers.get(key)
+            if (held or key) in assigned:
+                returned.append(dict(agent, held_session=held[1]) if held else agent)
+        return returned
     except (OSError, ValueError, TypeError, ImportError):
         return []  # observation must not block any session or consumer
 

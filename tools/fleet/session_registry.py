@@ -186,7 +186,8 @@ def session_aliases(harness, pid, *, argv=None):
 # an official signal when Claude Code offers one. The link is never stored: every call
 # decides it again from the live processes, so it ends the moment either one does.
 # Every reader asks here: the shell panel and peer delivery (:func:`parked_successor`), Fleet's
-# row, number and pane header (:func:`parked_links`), and a pane proof (:func:`holds_parked_job`).
+# row, number and pane header (one decision per pass, :func:`steady_parked_links`), and a pane
+# proof (:func:`holds_parked_job`).
 _MAX_RECORDS = 512
 
 
@@ -202,10 +203,12 @@ def _proc_start(pid):
     return tail[19].decode("ascii", "replace")
 
 
-def _live_claude_records(home):
+def _live_claude_records(home, undecided=None):
     """Every live Claude process record, or raise ``OSError`` when the folder was not read.
 
-    A record whose process is gone or reused (``procStart`` differs) is not live."""
+    A record whose process is gone or reused (``procStart`` differs) is not live. ``undecided``
+    (a set) collects the pids of live processes whose record exists but did not parse (half
+    written, or not a record): such a read says nothing about that process either way."""
     directory = _dir_for("claude", home=home)
     try:
         names = os.listdir(directory)
@@ -224,6 +227,8 @@ def _live_claude_records(home):
                 and record.get("pid") in (None, pid, str(pid))):
             record["pid"] = pid
             found.append(record)
+        elif record is None and undecided is not None and _proc_start(pid) is not None:
+            undecided.add(pid)
     return found
 
 
@@ -264,7 +269,8 @@ def _parked_from_viewer(records, viewer_sid, viewer_pid, viewer_start):
     started = _ms_to_sec(other.get("startedAt"))
     return {"harness": "claude", "session_id": sid, "pid": other["pid"],
             "proc_start": str(other["procStart"]), "started_at": started,
-            "viewer_sid": viewer_sid, "viewer_pid": viewer["pid"], "job_id": job}
+            "viewer_sid": viewer_sid, "viewer_pid": viewer["pid"],
+            "viewer_start": str(viewer["procStart"]), "job_id": job}
 
 
 def parked_successor(harness, sid, *, viewer_pid=None, viewer_start=None, home=None):
@@ -314,28 +320,69 @@ def parked_links(harness="claude", *, home=None):
     record folder once and looks each session up. Nothing is held and nothing is stored: the
     table is as live as the read, and it is empty (so a lookup costs nothing more) unless some
     live viewer holds a job. Any doubt or read failure gives an empty table."""
-    table = {"successor": {}, "origin": {}}
     try:
         if harness != "claude" or not _a_record_holds_a_job(home):
-            return table
-        records = _live_claude_records(home)
-        for item in records:
-            job = item.get("parkedJobId")
-            viewer_sid = _usable_sid(item.get("sessionId"))
-            if viewer_sid is None or item.get("kind") == "bg" or not isinstance(job, str) or not job:
-                continue
-            found = _parked_from_viewer(records, viewer_sid, None, None)
-            if found is None:
-                continue
-            held = found["session_id"]
-            if sum(1 for other in records if other.get("kind") == "bg"
-                   and _usable_sid(other.get("sessionId")) == held) != 1:
-                continue
-            table["successor"][viewer_sid] = found
-            table["origin"][held] = found
+            return {"successor": {}, "origin": {}}
+        return _links_table(_live_claude_records(home))
     except Exception:
         return {"successor": {}, "origin": {}}
+
+
+def _links_table(records):
+    table = {"successor": {}, "origin": {}}
+    for item in records:
+        job = item.get("parkedJobId")
+        viewer_sid = _usable_sid(item.get("sessionId"))
+        if viewer_sid is None or item.get("kind") == "bg" or not isinstance(job, str) or not job:
+            continue
+        found = _parked_from_viewer(records, viewer_sid, None, None)
+        if found is None:
+            continue
+        held = found["session_id"]
+        if sum(1 for other in records if other.get("kind") == "bg"
+               and _usable_sid(other.get("sessionId")) == held) != 1:
+            continue
+        table["successor"][viewer_sid] = found
+        table["origin"][held] = found
     return table
+
+
+# The links Fleet's last pass decided, in this process only (never stored).
+_STEADY = {}
+_STEADY_LOCK = threading.Lock()
+
+
+def steady_parked_links(harness="claude", *, home=None):
+    """:func:`parked_links` for a caller that asks again on every pass (Fleet's rows and numbers).
+
+    A read that could not decide is not "no link": when the record folder was not read, or one
+    of a link's two records exists but did not parse (half written), a link the previous pass
+    decided is kept as long as both of its processes are still the same live processes. A read
+    that does decide (the window's record holds no job, another job, a process ended) ends it at
+    once, and a link nobody decided before is never made from a failed read. Process-local; a
+    new process starts with no link kept."""
+    empty = {"successor": {}, "origin": {}}
+    if harness != "claude":
+        return empty
+    with _STEADY_LOCK:
+        kept = dict(_STEADY)
+        undecided, failed = set(), False
+        try:
+            table = (_links_table(_live_claude_records(home, undecided))
+                     if kept or _a_record_holds_a_job(home) else empty)
+        except Exception:
+            table, failed = {"successor": {}, "origin": {}}, True
+        for viewer_sid, link in kept.items():
+            if (viewer_sid in table["successor"] or link["session_id"] in table["origin"]
+                    or not (failed or {link["viewer_pid"], link["pid"]} & undecided)):
+                continue
+            if (_proc_start(link["viewer_pid"]) == link.get("viewer_start")
+                    and _proc_start(link["pid"]) == link["proc_start"]):
+                table["successor"][viewer_sid] = link
+                table["origin"][link["session_id"]] = link
+        _STEADY.clear()
+        _STEADY.update(table["successor"])
+        return table
 
 
 def parked_origin(harness, sid, *, home=None):

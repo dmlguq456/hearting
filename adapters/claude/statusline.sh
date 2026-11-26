@@ -445,7 +445,9 @@ print(claude_native_statusline(callback, os.environ))
 elif [ -f "$line_helper" ] && [ -n "$S_SID" ]; then
   # Outside the shell the running jobs keep their own `>_ running:` row below the common line.
   # A callback without a session id reads no session badges (as before), so it keeps the fallback.
-  common_line=$(printf '%s' "$input" | git_jobs= HEARTING_STATUS_DISPLAY_PID="$display_pid" python3 -c '
+  # An unknown width is not narrowed (the row was never cut here before): only a width the
+  # caller gives (`COLUMNS`) shortens it.
+  common_line=$(printf '%s' "$input" | COLUMNS="${COLUMNS:-10000}" git_jobs= HEARTING_STATUS_DISPLAY_PID="$display_pid" python3 -c '
 import json, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]).resolve().parents[1]))
