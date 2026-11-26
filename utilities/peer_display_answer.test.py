@@ -165,6 +165,8 @@ class QuestionAnswerLine(unittest.TestCase):
     CASES = (("codex", "marked"), ("codex", "mixed"), ("claude", "unsigned"), ("claude", "stale-sign"),
              ("claude", "mixed"), ("claude", "folded"), ("claude", "same-line-waiting"),
              ("opencode", "unsigned"), ("opencode", "stale-sign"), ("opencode", "same-line-waiting"))
+    # OpenCode, even when its window reads the one-line form: a secret answer takes the pointer.
+    SECRET_ONLY_CASES = (("opencode", "marked"),)
 
     def deliver(self, harness, case, answer, secret, *, patches=()):
         import os
@@ -194,7 +196,12 @@ class QuestionAnswerLine(unittest.TestCase):
             first, first_envelope = self.f.ask(harness, sid, text="첫 질문", secret=secret)
             self.f.submit(first_envelope, answer)
             calls, first_ref, _row = self.f.courier(first)
-            self.assertEqual(calls, ["↳ 질문에 답함: " + ("•••" if secret else answer)])
+            if secret and harness == "opencode":
+                # OpenCode never gets a secret answer's one-line form: the earlier one is a pointer too.
+                self.assertEqual(len(calls), 1)
+                self.assertNotIn(answer, calls[0])
+            else:
+                self.assertEqual(calls, ["↳ 질문에 답함: " + ("•••" if secret else answer)])
             self.assertEqual(self.f.peer._read_pending(first_ref)["state"], "queued")
             store = peer_obligations.ObligationStore(self.f.root)
             for duty in store.list(kinds={"run-notice"}):
@@ -259,7 +266,7 @@ class QuestionAnswerLine(unittest.TestCase):
         return context
 
     def test_a_secret_answer_without_its_line_shows_the_window_only_a_pointer(self):
-        for harness, case in self.CASES:
+        for harness, case in self.CASES + self.SECRET_ONLY_CASES:
             with self.subTest(harness=harness, case=case):
                 signal, window, ref, transfer, body = self.deliver(harness, case, "SECRET-SENTINEL-VALUE", True)
                 context = self.assert_pointer(signal, window, ref, body)
@@ -295,6 +302,180 @@ class QuestionAnswerLine(unittest.TestCase):
         calls, ref, _row = self.f.courier(signal)
         self.assertEqual(len(calls), 1)
         self.assert_pointer(signal, calls[0], ref, self.f.bodies[-1])
+
+    # ---- the hook and plugin boundaries that take a waiting row (11-26, second follow-up) ----
+    def waiting(self, harness, sid, answer, *, display=False):
+        """A secret answer for a session with no shell host: it waits for that session's own
+        callbacks (nothing reaches any window)."""
+        from fixtures.message_questions import MessageQuestionFixture
+        fixture = MessageQuestionFixture()
+        node = self.fixture.node
+        self.f = fixture.__enter__()
+        self.f.node = node
+        self.addCleanup(fixture.__exit__, None, None, None)
+        self.f.display, self.f.shell = display, False
+        signal, envelope = self.f.ask(harness, sid, text="질문", secret=True)
+        self.f.submit(envelope, answer)
+        calls, ref, row = self.f.courier(signal)
+        self.assertEqual(calls, [])
+        self.assertEqual(row["state"], "pending")
+        return signal, ref, row, self.f.bodies[-1]
+
+    def settled(self, signal, ref):
+        self.assertEqual(self.source(signal)["completion"]["action_id"], "fixture-action")
+        self.assertEqual(self.f.peer._read_pending(ref)["state"], "received")
+
+    def test_a_claude_boundary_that_takes_a_waiting_secret_answer_gives_its_full_text(self):
+        # A tool boundary, or a prompt of the person that is not the delivery: the hook context
+        # (the agent's alone) carries the full text beside the pointer; the receipt records the row.
+        for mode in ("post-tool", "prompt"):
+            for form in ("pointer", "sealed"):
+                with self.subTest(mode=mode, form=form):
+                    sid = "boundary-%s-%s" % (mode, form)
+                    signal, ref, row, body = self.waiting("claude", sid, "SECRET-SENTINEL-VALUE",
+                                                          display=form == "sealed")
+                    transfer = self.f.peer._read_transfer_record(ref)
+                    self.assertEqual("display" in transfer, form == "sealed")
+                    context = self.f.claude_boundary(sid, mode=mode)
+                    if form == "pointer":
+                        self.assertIn(row["text"] + "\n\nHearting delivery (the person sees only the pointer "
+                                      "above); the full text:\n" + body + "\n\n" + SECRET_NOTE, context)
+                    else:
+                        self.assertIn(row["text"] + "\n\n" + SECRET_NOTE, context)
+                        self.assertIn("SECRET-SENTINEL-VALUE", row["text"])
+                    self.settled(signal, ref)
+
+    def test_an_opencode_tool_result_never_carries_a_secret_answer(self):
+        # OpenCode appends the tool-boundary context to the finished tool result, which its TUI may
+        # draw: the secret answer stays pending there and reaches the agent through its prompt path.
+        signal, ref, row, body = self.waiting("opencode", "tool-result", "SECRET-SENTINEL-VALUE", display=True)
+        self.assertNotIn("display", self.f.peer._read_transfer_record(ref))   # OpenCode: pointer form
+        appended = self.f.opencode_tool_boundary("tool-result")
+        self.assertNotIn("SECRET-SENTINEL-VALUE", appended)
+        self.assertNotIn(row["text"], appended)
+        self.assertEqual(self.f.peer._read_pending(ref)["state"], "pending")
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        # The idle plugin delivery pastes the row's text as the prompt; its guidance carries the body.
+        self.assertNotIn("SECRET-SENTINEL-VALUE", row["text"])
+        self.assert_pointer(signal, row["text"], ref, body)
+
+    def test_the_opencode_idle_resume_keeps_the_guidance_its_saved_prompt_left(self):
+        # The idle delivery saves the pointer as a prompt, then resumes with no text: the model call
+        # after the resume still carries the full text in its system context.
+        signal, ref, row, body = self.waiting("opencode", "idle-resume", "SECRET-SENTINEL-VALUE", display=True)
+        saved, resumed, person = self.f.opencode_plugin_turns(
+            "idle-resume", [row["text"], None, "the person's next prompt"])
+        block = "the full text:\n" + body + "\n\n" + SECRET_NOTE
+        self.assertIn(block, saved)
+        self.assertIn(block, resumed)
+        self.assertNotIn("SECRET-SENTINEL-VALUE", person)   # a new prompt drops it
+
+    def test_an_answer_too_long_for_one_claude_context_names_its_file_and_makes_no_copy(self):
+        # One answer is at most 4,096 characters a value and two values; two questions of one
+        # session (two seats) answered together are one delivery, past one Claude hook context.
+        import session_tidy as tidy
+        from fixtures.message_questions import MessageQuestionFixture
+        fixture = MessageQuestionFixture()
+        node = self.fixture.node
+        self.f = fixture.__enter__()
+        self.f.node = node
+        self.addCleanup(fixture.__exit__, None, None, None)
+        self.f.display, self.f.shell = True, False
+        sid = "too-long"
+        signal, envelope = self.f.ask("claude", sid, text="질문", secret=True)
+        state.submit_selected_response(envelope, {"answers": {"message-response": [
+            "SECRET-LONG-A" + "a" * 4080, "SECRET-LONG-B" + "b" * 4080]}}, action_id="fixture-action")
+        seat2 = tidy.session_seat(tidy.Seat("pane", "question-seat-2", pane="fixture:p2", harness="claude"),
+                                  "claude", sid)
+        second = state.register_message("claude", sid, seat2, "둘째", secret=True,
+                                        sequence=tidy.read_prompt_seq(seat2), cwd=str(self.f.root))
+        state.submit_selected_response(state.read_selected_request(
+            {"id": second["id"], "harness": "claude", "session_id": sid}), {"answers": {"message-response": [
+                "SECRET-LONG-C" + "c" * 4080, "SECRET-LONG-D" + "d" * 4080]}}, action_id="fixture-action")
+        calls, ref, row = self.f.courier(signal)
+        self.assertEqual((calls, row["state"]), ([], "pending"))
+        self.assertNotIn("display", self.f.peer._read_transfer_record(ref))   # too long for the line
+        self.assertGreater(len(self.f.peer.read_peer_payload(ref)["body"]), 9500)
+        context = self.f.claude_boundary(sid)
+        self.assertIn(row["text"] + "\n\n" + self.f.peer._PRIVATE_ANSWER_TOO_LONG, context)
+        self.assertNotIn("SECRET-LONG-", context)
+        overflow = list(self.f.root.rglob("delivery-text/*"))
+        self.assertFalse(any("SECRET-LONG-" in path.read_text() for path in overflow), overflow)
+        self.settled(signal, ref)
+
+    def test_a_secret_answer_too_long_for_one_hook_context_whole_is_not_sealed_in_the_line(self):
+        # Between 8,000 characters (one Claude hook context with room) and the line's own limit of
+        # 12,000, a secret answer still takes the pointer: its one-line form's agent text would not
+        # fit one hook context whole, and a secret answer gets no overflow copy.
+        from fixtures.message_questions import MessageQuestionFixture
+        fixture = MessageQuestionFixture()
+        node = self.fixture.node
+        self.f = fixture.__enter__()
+        self.f.node = node
+        self.addCleanup(fixture.__exit__, None, None, None)
+        self.f.display = True
+        signal, envelope = self.f.ask("claude", "line-too-long", text="질문", secret=True)
+        state.submit_selected_response(envelope, {"answers": {"message-response": [
+            "SECRET-MID-A" + "a" * 4080, "SECRET-MID-B" + "b" * 4080]}}, action_id="fixture-action")
+        calls, ref, _row = self.f.courier(signal)
+        body = self.f.bodies[-1]
+        self.assertTrue(8000 < len(body) < self.f.peer._DISPLAY_AGENT_MAX_CHARS, len(body))
+        self.assertNotIn("display", self.f.peer._read_transfer_record(ref))
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("SECRET-MID-A", calls[0])
+
+    def test_a_secret_row_over_the_claude_limit_waits_and_is_never_cut(self):
+        import dispatch_session_sweep as sweep
+        peer = self.f.peer
+        released = []
+        secret = {"ref": "1" * 32, "text": "POINTER", "shown_text": "POINTER\n\n" + "S" * 6000,
+                  "secret_answer": True}
+        other = {"ref": "2" * 32, "text": "O" * 6000}
+        with mock.patch.object(peer, "release_pending_herdr_claim", side_effect=released.append), \
+                mock.patch.object(sweep, "overflow_pointer", side_effect=AssertionError("no overflow copy")):
+            claims, context = [other, secret], [other["text"], secret["shown_text"]]
+            peer._fit_claude_context(claims, context)
+            self.assertEqual((claims, context, released), ([other], [other["text"]], [secret]))
+            # alone and still too long: a sealed one waits, a pointer names its file
+            for form, expect in (("sealed", None), ("pointer", "POINTER\n\n" + peer._PRIVATE_ANSWER_TOO_LONG)):
+                with self.subTest(form=form):
+                    released.clear()
+                    row = dict(secret, shown_text="POINTER\n\n" + "S" * 12000)
+                    claims, context = [row], [row["shown_text"]]
+                    with mock.patch.object(peer, "_secret_answer_form", return_value=form):
+                        peer._fit_claude_context(claims, context)
+                    if expect is None:
+                        self.assertEqual((claims, context, released), ([], [], [row]))
+                    else:
+                        self.assertEqual((context, released), ([expect], []))
+
+    def test_another_session_given_the_pointer_gets_no_secret(self):
+        # Pasted into another session, the pointer stands for nothing there: no recovery copy.
+        for harness, case in (("claude", "unsigned"), ("codex", "marked"), ("opencode", "unsigned")):
+            with self.subTest(harness=harness):
+                signal, window, ref, transfer, body = self.deliver(harness, case, "SECRET-SENTINEL-VALUE", True)
+                context = self.f.consume(signal, window, sid="another-session-" + harness)
+                self.assertNotIn("SECRET-SENTINEL-VALUE", context)
+                self.assertNotEqual(self.f.peer._read_pending(ref)["state"], "received")
+                self.assert_pointer(signal, window, ref, body)   # its recipient still gets it
+
+    def test_a_file_reference_runtime_delivery_keeps_its_empty_guidance(self):
+        # Only a private answer's payload becomes the agent's context; a Codex reference body of a
+        # long runtime completion (`file-reference`) keeps the empty runtime guidance.
+        signal, window, ref, transfer, body = self.deliver("codex", "marked", "SECRET-SENTINEL-VALUE", True)
+        peer = self.f.peer
+        real = peer._read_transfer_record
+
+        def as_file_reference(found_ref, *args, **kwargs):
+            record = real(found_ref, *args, **kwargs)
+            if isinstance(record, dict) and record.get("body_ref"):
+                record = {**record, "body_ref": {**record["body_ref"], "presentation_mode": "file-reference"}}
+            return record
+        recipient = {"harness": "codex", "session_id": signal["session_id"]}
+        with mock.patch.object(peer, "_read_transfer_record", side_effect=as_file_reference):
+            self.assertEqual(peer._private_answer_guidance(ref), "")
+        self.assertIn("SECRET-SENTINEL-VALUE", peer._private_answer_guidance(ref))
+        self.assertIn("SECRET-SENTINEL-VALUE", peer.receiver_guidance(window, recipient))
 
     def test_an_ordinary_answers_full_form_is_unchanged(self):
         for harness, case in self.CASES:

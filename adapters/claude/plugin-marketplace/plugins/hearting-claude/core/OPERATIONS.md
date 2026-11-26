@@ -3301,11 +3301,17 @@ at submission. Unknown, stale, unresolved, contradictory, and other-runtime
 evidence keeps the complete body inline; SID-less panes remain inline until
 session binding. Helper file reads and model-readable access are separate
 observations. One runtime delivery takes a payload on every harness: a body
-holding a secret question's answer that gets no one-line display form shows
-the window only a pointer to its private payload (`private-answer`), and each
-receiver's own callback (the Claude and Codex prompt hooks, the OpenCode
-plugin) gives the agent the verified full text as context, so no file read is
-needed.
+holding a secret question's answer that gets no one-line display form (to
+OpenCode none at all, since its idle plugin delivery pastes a row's sealed text)
+shows the window only a pointer to its private payload (`private-answer`).
+Each receiver's own callback gives the agent the verified full text as
+context: the Claude and Codex prompt hooks and the OpenCode plugin for the
+pointer as a prompt, and Claude's hook context when it carries the row at a
+tool or prompt boundary. OpenCode's tool results, which its TUI may draw,
+carry no secret answer; it waits for its prompt. No file read is needed,
+except for an answer too long for one Claude hook context, whose context says
+so and names the file. Only the recipient gets the text: another session given
+the same pointer gets no recovery copy.
 
 Queued and ambiguous envelopes retain their original wire body, digest, and
 identity. When queue submission or a receiver callback cannot establish current

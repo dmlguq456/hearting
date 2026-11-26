@@ -3805,7 +3805,9 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     const prompt = promptText(output)
     const turn = input.messageID || output?.message?.id || ""
     if (prompt) promptBySession.set(sid, prompt)
-    peerGuidanceBySession.delete(sid)
+    // A message with no text (the idle delivery resuming the peer prompt it saved) keeps the
+    // guidance that prompt left: the resumed model call is the one that needs it.
+    if (prompt) peerGuidanceBySession.delete(sid)
     // Actual peer receipt is observed after persistence, not callback rendering.
     if (prompt && eventSid && looksLikePeerPrompt(prompt)) {
       const guidance = spawnSync(
