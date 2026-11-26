@@ -4665,11 +4665,21 @@ def _closed_terminal_projection(route, route_file, gates, node_states, claims):
     )
 
 
-def _status_owner(route, jobs):
+def _status_registry(jobs):
+    """The registry status reads once: `(path, rows)`, or `(None, None)` when it cannot be read."""
+    try:
+        path = jobs or default_jobs_path()
+        return path, _registry_rows(path)
+    except (OSError, ValueError, SupervisorError):
+        return None, None
+
+
+def _status_owner(route, jobs, rows=None):
     """Read-only owner projection from the actual registry, including initial execution."""
     try:
         # A status caller can itself be an older owner; newest registered owner wins.
-        rows = _registry_rows(jobs or default_jobs_path())
+        if rows is None:
+            rows = _registry_rows(jobs or default_jobs_path())
         owners = [row for row in rows if row["meta"].get("dispatch_depth") == "1"
                   and row["meta"].get("worker_type") != "frame"
                   and route["route_id"] in (row["meta"].get("owner_route_id"),
@@ -4696,21 +4706,24 @@ def _status_owner(route, jobs):
         return {"attempt_id": None, "liveness": "unknown", "reason": type(exc).__name__}
 
 
-def owner_completion_delivery(route, route_file, jobs_path):
+def owner_completion_delivery(route, route_file, jobs_path, rows=None):
     """Where each owner completion record of this route stands, read only.
 
     One entry per latest depth-1 owner row that asked for delivery: its record's state, why it is
     not delivered (`undelivered` while the record is open and the route is closed; the expiry
     reason once expired) and the recipient session's first eight characters. None when the
-    registry or a record cannot be read; status never fails for it."""
+    registry or a record cannot be read; status never fails for it. ``rows`` are the registry rows
+    the caller already read from ``jobs_path``."""
     try:
         latest = {}
-        for row in _registry_rows(jobs_path):
+        for row in (_registry_rows(jobs_path) if rows is None else rows):
             meta = row["meta"]
             if (meta.get("attempt_id") and meta.get("dispatch_depth") == "1"
                     and meta.get("worker_type") == "owner" and meta.get("delivery_intent") == "1"
                     and route["route_id"] in (meta.get("owner_route_id"), meta.get("route_id"))):
                 latest[meta["attempt_id"]] = meta
+        if not latest:
+            return []
         closed = route_module().outcome_path(route_file).is_file()
         result = []
         for attempt_id, meta in latest.items():
@@ -4757,7 +4770,8 @@ def cmd_status(args):
     if closed_complete:
         derived = "COMPLETE"
         running, next_stage = [], []
-    owner = _status_owner(route, jobs)
+    registry_path, registry_rows = _status_registry(jobs)
+    owner = _status_owner(route, jobs, rows=registry_rows)
     displayed_state = "COMPLETE" if closed_complete else state["workflow_state"]
     if (not closed_complete and not failed and owner.get("liveness") == "live"
             and owner.get("registry_status") in {"open", "running"}
@@ -4803,9 +4817,10 @@ def cmd_status(args):
         "resource_children": resource_children(route, ledger),
         **ledger_metadata(jobs, ledger),
     }
+    # The registry `owner` was read from (`--jobs`, else the default one), read once for both.
     payload["owner_completion_delivery"] = (
-        owner_completion_delivery(route, route_file, payload["jobs_path"])
-        if payload["jobs_path"] else None)
+        owner_completion_delivery(route, route_file, registry_path, rows=registry_rows)
+        if registry_rows is not None else None)
     if args.json:
         print(json.dumps(payload, sort_keys=True, indent=2))
     else:
