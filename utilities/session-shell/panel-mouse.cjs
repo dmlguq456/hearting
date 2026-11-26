@@ -1,14 +1,25 @@
 'use strict';
 // Decode only SGR mouse packets claimed by our visible panel. Ordinary bytes
 // pass through; a fragmented Escape prefix waits at most one display frame.
-module.exports=function({bytes,mouse,suppressed}){
-  let pending=Buffer.alloc(0),timer;
+// `suppressed()`: the bytes are another owner's whole (relay, Fleet): pass the read through as it is. `pasting()`: a paste
+// stands; its bytes are literal up to and including its end mark (`ESC [ 201 ~`, which may be split across reads), and
+// what follows the mark in the same read is read as usual (a mouse report there is still the panel's).
+const PASTE_END='\x1b[201~';
+module.exports=function({bytes,mouse,suppressed,pasting=()=>false}){
+  let pending=Buffer.alloc(0),timer,tail='';
   function flush(){clearTimeout(timer);timer=undefined;if(pending.length){const data=pending;pending=Buffer.alloc(0);bytes(data);}}
   function feed(data){
     clearTimeout(timer);timer=undefined;
     data=Buffer.concat([pending,data]);pending=Buffer.alloc(0);
     while(data.length){
-      if(suppressed()){bytes(data);return;}
+      if(suppressed()){tail='';bytes(data);return;}
+      if(pasting()){
+        const joined=tail+data.toString('latin1'),end=joined.indexOf(PASTE_END);
+        if(end<0){tail=joined.slice(-(PASTE_END.length-1));bytes(data);return;}
+        tail='';const upto=end+PASTE_END.length-(joined.length-data.length);
+        bytes(data.subarray(0,upto));data=data.subarray(upto);continue;
+      }
+      tail='';
       const esc=data.indexOf(27);
       if(esc<0){bytes(data);return;}
       if(esc){bytes(data.subarray(0,esc));data=data.subarray(esc);continue;}
