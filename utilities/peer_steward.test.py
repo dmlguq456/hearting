@@ -4115,6 +4115,12 @@ class ReviewRoundOneTest(_WatchMixin, unittest.TestCase):
 
 class NativeResultRunnerWakeTest(_WatchMixin, unittest.TestCase):
     def test_native_result_over_a_pending_cached_projection_wakes_the_runner(self):
+        self._check_pending_result_wake(reattach=False)
+
+    def test_recovered_native_result_wakes_the_runner_only_once(self):
+        self._check_pending_result_wake(reattach=True)
+
+    def _check_pending_result_wake(self, *, reattach):
         """A projection cached before the native result cannot reflect it.
 
         The watcher requests a refresh only when the cache reads ready or
@@ -4133,9 +4139,20 @@ class NativeResultRunnerWakeTest(_WatchMixin, unittest.TestCase):
         self.addCleanup(os.close, wake_fd)
 
         env = self._env("held")
-        fields = self._fields(self._run("watch", self.target, env=env).stdout)
-        self._wait_for_lock(fields["watch_id"])
-        arm = json.loads((self.watch_root / f"{fields['watch_id']}.json").read_text())
+        proc = self._run("watch", self.target, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        watch_id = self._fields(proc.stdout)["watch_id"]
+        paths = peer_steward._watch_paths(watch_id, self.watch_root)
+        # The spawner's flock reaches the observer before its event loop does.
+        # Wait for its armed checkpoint so the new result takes the signal path.
+        armed = self._wait_for_observation(watch_id)
+        self.assertEqual(armed["native_wait"]["state"], "armed", armed)
+        arm = json.loads(paths.arm.read_text())
+        if reattach:
+            watcher = arm["watcher"]
+            self.assertTrue(peer_steward._pid_identity_ok(watcher["pid"], watcher["pid_start"]))
+            os.kill(watcher["pid"], signal.SIGKILL)
+            self._wait_for_watcher_exit(watch_id)
         start = str(peer_steward.process_start_ticks(os.getpid()))
         peer_steward.shared_readiness.publish_runner_incarnation(
             store.root, os.getpid(), start, "fixture-runner")
@@ -4145,12 +4162,16 @@ class NativeResultRunnerWakeTest(_WatchMixin, unittest.TestCase):
 
         # The runner pass reads the changed native state and caches a pending projection.
         self.seat.set("idle")
-        snapshot = {"watch_root": self.watch_root, "watches": [(fields["watch_id"], arm)]}
+        snapshot = {"watch_root": self.watch_root, "watches": [(watch_id, arm)]}
         with mock.patch.object(peer_steward, "_pane_readiness", return_value=SimpleNamespace(
                 state="pending", reason="fixture-cached-pending")):
             self.assertTrue(peer_steward._publish_watch_readiness(
                 store, snapshot, read_context=None, incarnation="fixture-runner"))
-        observation_path = self.watch_root / f"{fields['watch_id']}.observation.json"
+        if reattach:
+            self.assertTrue(peer_steward._spawn_watch_observer(watch_id, arm))
+            arm = json.loads(paths.arm.read_text())
+            self.assertEqual(arm["observer_generation"], 2)
+        observation_path = paths.observation
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and (peer_steward._read_json(
                 observation_path) or {}).get("reason") != "fixture-cached-pending":
@@ -4159,12 +4180,10 @@ class NativeResultRunnerWakeTest(_WatchMixin, unittest.TestCase):
                          "fixture-cached-pending")
         ready, _, _ = select.select([wake_fd], [], [], 10)
         self.assertEqual(ready, [wake_fd], "the runner was not woken for the native result")
+        self.assertEqual(os.read(wake_fd, 4096), b"\0", "the runner was woken more than once")
 
         # At most once per observer: later wake-ups re-read the same cached
         # projection without waking the runner again.
-        with contextlib.suppress(BlockingIOError):
-            while os.read(wake_fd, 4096):
-                pass
         watcher = arm["watcher"]
         for _attempt in range(3):
             before = observation_path.stat().st_mtime_ns
