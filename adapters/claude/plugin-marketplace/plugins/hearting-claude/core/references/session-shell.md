@@ -361,7 +361,8 @@ known to be 0, else `↑N` in Fleet's green (`lvl_g`) and `↓N` in its red (`lv
 existing merge warnings and `💀merged`, all else dim; `(no-git)` outside a repository; no parentheses when Git has nothing to say; no folder or branch
 glyph. Then, two cells on, the worktree count `wt 12`, dim (none for zero or an unknown count). Nothing new is read: these are the parts the GIT
 row drew. Short of cells `wt` goes first, then the label's column (`REPO trial (main ↑2 ↓5)`), then the branch is cut so the arrows and the warning
-stay whole, then the name (to 8 cells). There is no GIT row (its place is still counted where rows are allotted: *Two groups*, below). (11-21: the
+stay whole (down to one letter and `…`; a branch the backend already cut is cut again without its `…`, so no `… …`), then the name (down to one
+letter and `…`); only where even that leaves no room do the Git words give way, from their end (the warning's letters first, then the arrows). There is no GIT row (its place is still counted where rows are allotted: *Two groups*, below). (11-21: the
 row has no status button where the STATUS and BACKLOG parts stand under the REPO group, below; short of rows, where their heads go, it ends in the
 two buttons, 11-22; and the bottom layout's first row ends in two buttons.) The bottom layout keeps its own Git row as before. Directly under the REPO
 row stands `PEERS` (11-17, the person's PEERS sketch; the label column of
@@ -450,11 +451,12 @@ BACKLOG items the person ranked (the last go first short of rows), then the rule
 as the rule above the last row always did); what is left stands empty above MESSAGES, where the panel's free rows stand. So NOW, QUESTIONS, the
 route box, PEERS, MODEL, CTX, TITLE, MEM, RESOURCES, USAGE, the notices and the last row have the rows, the places and the form they have without
 B, and none has more; a message that had folded stays folded. Where the two heads do not stand the REPO row ends in the two buttons,
-`STATUS +N ›  BACKLOG +N ›` (the bottom layout's first row's pieces and order of giving way: the counts, then the words, then `›` alone; BACKLOG's
-`N` its FIX and TASK together, `?` for an old document with none sorted): the row's value stands whole beside them (with `wt`, then without, then
-without the label's column), else with its branch cut where the name and the Git status stay whole; only beside `›` alone is it cut further (so at
-40 cells, the panel's default, a short window reads `REPO   trial (main ↑2 ↓5)      ›  ›`: the Git status before the buttons' words); a press on a
-button opens that popup, on the rest of the row the status popup. (The layout is made once, then the parts are fitted in that order; there is no
+`STATUS 5 ›  BACKLOG +139 ›` (11-26, fix 1 of #1863: the numbers mean what the heads' do, STATUS the board's whole count without `+`, none for zero,
+BACKLOG `+N` every item of the document, none drawn; the bottom layout's order of giving way: the counts, then the words, then `›` alone): beside
+the counted buttons, then beside the words, the row's value stands whole (with `wt`, then without, then without the label's column), else with its
+branch cut as far as it must while the name and the Git status stay whole; failing that, beside `›` alone the value as above (so at 40 cells, the
+panel's default, a short window reads `REPO   trial (main ↑2 ↓5)      ›  ›`: the arrows and the warning never go before the buttons' words or the
+branch's letters); a press on a button opens that popup, on the rest of the row the status popup. (The layout is made once, then the parts are fitted in that order; there is no
 second budget and nothing is drawn twice.) The bottom layout has no list and no more rows: its first row ends in `STATUS +N ›  BACKLOG +N ›` (`N`
 the whole count, for BACKLOG its FIX and TASK together, nothing for zero; short of cells the counts go, then the words, then the row is cut; the
 rest of the row opens the status popup). The two parts' items come with the status button's value, in the same read and the same worker, only
