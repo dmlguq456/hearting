@@ -1580,7 +1580,7 @@ for(const [width,height,side,focused] of [[80,14,false,false],[80,14,false,true]
  // The Git row sits right below the repo row and never shares it (the bottom layout); 11-26 (panel B): beside the native area the Git words
  // stand in the repo row's parentheses. Spec rule 29: the number moves to the top border; the repo row keeps `project/`.
  // (11-26, fix 2 of #1863: this backend's Git words are one piece, so beside the native area the name's letters go before them)
- if(branch>=0)assert((side?/^│  REPO \S/.test(rows[branch]):rows[branch-1].includes('project/'))&&!rows.slice(1).some(s=>s.includes('[cb]')),rows.join('\n'));
+ if(branch>=0)assert((side?/^│  REPO p\S*/.test(rows[branch]):rows[branch-1].includes('project/'))&&!rows.slice(1).some(s=>s.includes('[cb]')),rows.join('\n'));
  assert(rows.length<=height);
 }
 // A long title is shortened with an ellipsis; the answer wait (the QUESTIONS head's count) keeps its place.

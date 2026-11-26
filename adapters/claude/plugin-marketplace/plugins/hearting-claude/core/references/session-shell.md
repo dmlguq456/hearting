@@ -360,14 +360,14 @@ had them, in their order and colors: the branch and dirty mark cut at 20 cells (
 known to be 0, else `↑N` in Fleet's green (`lvl_g`) and `↓N` in its red (`lvl_r`) (nothing when unknown: no upstream to compare with), then the
 existing merge warnings and `💀merged`, all else dim; `(no-git)` outside a repository; no parentheses when Git has nothing to say; no folder or branch
 glyph. Then, two cells on, the worktree count `wt 12`, dim (none for zero or an unknown count). Nothing new is read: these are the parts the GIT
-row drew. **Short of cells the row gives way in one order (11-26, fix 2 of #1863), each step only once all before it have:**
+row drew. **Short of cells the row gives way in one order (11-26, fixes 2 and 3 of #1863).** `wt` and the label column's blanks stand again
+where the narrower buttons leave room.
 1. `wt N`;
 2. the label column's blanks (`REPO trial (main ↑2 ↓5)`);
 3. where the two folded buttons stand on this row (*Two groups*, below), their counts, then their words, leaving `›  ›` (the two change together);
 4. the letters of the name and of the branch, the longer of the two first, each down to its first letter and `…` (a wide first letter, as Hangul,
-   stands whole with its `…`; only where even then the Git words would have to give way does it give way to its `…` alone, the other already one
-   letter); a branch the backend already cut (`bl-git-index-lock-1…`) is cut as it is, the cut's own `…` taking its last cell, so its mark never goes
-   and no `… …` stands;
+   stands whole with its `…`); a branch the backend already cut (`bl-git-index-lock-1…`) is cut as it is, the cut's own `…` taking its last
+   cell, so its mark never goes and no `… …` stands;
 5. the Git words, from their end: the warning's letters first, then the arrows.
 
 So the buttons fold before a letter of the name or the branch goes, and a wider window never shows a shorter name or branch. There is no GIT row (its place is still counted where rows are allotted: *Two groups*, below). (11-21: the

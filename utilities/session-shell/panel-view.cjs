@@ -850,8 +850,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // 단어 자체를 날리고 괄호로 써두자" / "크 변경 사항은 화살표를 위 아래로 녹색 빨간색을 표시하던데? 원래 fleet을 봐봐" / "REPO라는 단어 대신에 적절한
       // 아이콘이 있으면 더 좋고. 애매하면 그냥 REPO를 남겨"): the repository is one row, `REPO   trial (main ↑2 ↓5)  wt 12`: the dim label in the
       // labels' column (PEERS', MODEL's), the name, then in parentheses the GIT row's words in their order and colours (the branch, `✓` or `↑N`
-      // `↓N` in Fleet's green and red, the warning; `no-git` outside a repository), then the worktree count. Nothing new is read. Short of cells
-      // `wt` goes first, then the label's column (`REPO trial (…)`), then the branch is cut so the arrows and the warning stay, then the name.
+      // `↓N` in Fleet's green and red, the warning; `no-git` outside a repository), then the worktree count. Nothing new is read.
+      // Short of cells the row gives way in one order (`repoFit`, below).
       // The rows are still allotted as they were before B (`held`, below): the GIT row's place is kept and stands empty or holds a BACKLOG item.
       const repoLead=wide=>[pad(IND),text(wide?'REPO'.padEnd(7):'REPO ','dim')];
       // (an older backend's Git words, sent without `git_side`, carry their own parentheses: they stand as they are, cut where they do not fit)
@@ -866,8 +866,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // Short of cells (11-26, fixes 1 and 2 of #1863, the supervisor's one order; each gives way only once all before it have): 1. `wt N`; 2. the
       // label column's blanks (`REPO trial (…)`); 3. where the folded buttons stand on this row, their counts, then their words (`›  ›` alone; the
       // two change together: below); 4. the letters of the name and of the branch, the longer of the two first, each down to its first letter and
-      // `…` (a wide first letter whole, until only the Git words are left to give way: then it gives way to its `…` first); 5. the Git words, from
-      // their end (the warning's letters first, then the arrows). So the buttons fold before a
+      // `…` (a wide first letter whole); 5. the Git words, from their end (the warning's letters first, then the arrows). So the buttons fold before a
       // letter of the name or the branch goes, and a wider window never shows a shorter name or branch. A branch the backend already cut
       // (`bl-git-index-lock-1…`) is cut again as it is: the cut's own `…` takes its last cell, so its `…` never goes and no `… …` stands.
       const floorOf=parts=>{const first=[...clean(String(parts[0]?.text??''))][0];return Math.min(size(parts),first?measure(first)+1:0);};
@@ -880,8 +879,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const shrink=(nameMin,branchMin)=>{while(size(make())>room&&(n>nameMin||b>branchMin)){
           if(b>branchMin&&(size(cut([branch],b))>=size(cut(sideRepo,n))||n<=nameMin))b--;else n--;}};
         shrink(floorOf(sideRepo),branch?floorOf([branch]):0);
-        // (only where even that leaves the Git words no room does a wide first letter give way to its `…`, before a letter of the Git words goes)
-        shrink(Math.min(2,size(sideRepo)),branch?Math.min(2,size([branch])):0);
         const fitted=make();if(size(fitted)<=room)return fitted;
         const gitRoom=room-size(lead())-1;
         return branch&&gitRoom>=1?[...lead(),...cut(flags,gitRoom),close]:cut(fitted,room);

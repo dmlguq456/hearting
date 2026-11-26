@@ -357,8 +357,7 @@ assert(/^│  REPO h… \(m… ↑2 ↓5 …\) ›  › │$/.test(row(30,24,'he
     def test_a_cut_branch_keeps_its_mark_and_a_wider_window_never_shows_less_of_the_name_or_the_branch(self):
         # 11-26 (fix 2 of #1863): a branch the backend already cut (`bl-git-index-lock-1…`, nineteen letters and `…`) never stands without a `…`
         # (one cell short it was drawn `(bl-git-index-lock-1)`, a branch that does not exist); widening the window by one cell never shortens the
-        # name or the branch (the buttons fold before their letters go); a wide first letter stands whole, giving way to its `…` only so the Git
-        # words keep standing whole where the other is one letter already.
+        # name or the branch (the buttons fold before their letters go); a wide first letter stands whole with its `…`.
         self.node(r"""
 const git=(branch,...flags)=>[t(branch),...flags.map(f=>t(f,f.includes('↑')?'lvl_g':f.includes('↓')?'lvl_r':'dim'))];
 const row=(width,height,name,parts)=>lines(view.render({width,height,side:true,model:{...model({messages:2,mem:2,routes:1,status:status(),backlog:backlog()}),
@@ -372,14 +371,8 @@ for(const name of ['hearting','trial','hearting-maintenance-ws','저장소-하�
   for(let w=32;w<=64;w++){const line=row(w,h,name,git(branch,...fl)),got=parse(line);rows++;
     assert(got&&!line.includes('… …')&&cells(line)===w,w+'x'+h+' '+line);
     if(got.branch!==branch)assert(got.branch.endsWith('…'),'a cut branch keeps its mark: '+w+'x'+h+' '+line);
-    const whole=fl.every(f=>line.includes(f.trim()));
-    // (a wide first letter gives way to its `…` only where the other is already one letter and `…` too, before a letter of the Git words goes;
-    // where the Git words are cut, a wide first letter has gone first)
-    const floor=x=>/^.…$/u.test(x)||x==='…';
-    if(/^[가-힣]/.test(branch)&&got.branch==='…')assert(floor(got.name),'a wide first letter stands whole: '+w+'x'+h+' '+line);
-    if(/^[가-힣]/.test(name)&&got.name==='…')assert(floor(got.branch),'a wide first letter stands whole: '+w+'x'+h+' '+line);
-    if(!whole&&/^[가-힣]/.test(branch))assert(got.branch==='…',w+'x'+h+' '+line);
-    if(!whole&&/^[가-힣]/.test(name))assert(got.name==='…',w+'x'+h+' '+line);
+    if(/^[가-힣]/.test(branch))assert.notEqual(got.branch,'…','a wide first letter stands whole: '+w+'x'+h+' '+line);
+    if(/^[가-힣]/.test(name))assert.notEqual(got.name,'…','a wide first letter stands whole: '+w+'x'+h+' '+line);
     if(last){assert(cells(got.branch)>=cells(last.branch)&&cells(got.name)>=cells(last.name),'wider, yet shorter: '+(w-1)+' → '+w+' × '+h+'\n'+last.line+'\n'+line);}
     last={...got,line};}
 }
