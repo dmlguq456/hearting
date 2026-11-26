@@ -998,6 +998,10 @@ def _cli_probe(refresh, asked):
     return probe
 
 
+_CATALOGS_SEEN = {}                  # harness -> catalog: the lists the last background read held
+_CATALOGS_SEEN_LOCK = threading.Lock()
+
+
 def _read_follow(catalogs, refresh=True):
     """What ``model_follow.fleet_view()`` says about the tables, reading the lists this read already
     holds (no list is asked for again); None when it cannot say.
@@ -1013,15 +1017,18 @@ def _read_follow(catalogs, refresh=True):
         probe = _cli_probe(refresh, asked)
         answer = view(probe)
         if refresh:
-            changed = False
-            for item in answer:
-                harness = item.get("harness")
-                if item.get("cli") and harness not in asked:
-                    with _CLI_SEEN_LOCK:
-                        before = _CLI_SEEN.get(harness)
-                    changed = probe.ask(harness) != before or changed
-            if changed:
-                answer = view(probe)
+            try:  # the second step only improves the first answer: if it fails, the first answer stands
+                changed = False
+                for item in answer:
+                    harness = item.get("harness")
+                    if item.get("cli") and harness not in asked:
+                        with _CLI_SEEN_LOCK:
+                            before = _CLI_SEEN.get(harness)
+                        changed = probe.ask(harness) != before or changed
+                if changed:
+                    answer = view(probe)
+            except Exception:
+                pass
         return answer
     except Exception:
         return None
@@ -1215,7 +1222,8 @@ def read_model_config(refresh=True):
     """MODELS view data from the harnesses' models.conf and the dispatch defaults (read once, cached).
 
     ``refresh=False`` is the read made inside the input handling after a write: it asks no harness
-    CLI anything and uses the remembered answers until the next background read. A background read asks
+    CLI anything, reads no model list (it takes the lists the last background read held) and uses
+    the remembered answers until the next background read. A background read asks
     a harness's CLI the first time and while its version is not known, and asks again for each harness
     that has a CLI line in the answer the remembered versions give (see ``_read_follow``); otherwise
     it uses the remembered answer."""
@@ -1250,8 +1258,15 @@ def read_model_config(refresh=True):
             context[adapter] = int(window)
     catalog_sources = {}
     try:
-        from .model_catalog import read_catalogs
-        catalogs = read_catalogs()
+        if refresh:
+            from .model_catalog import read_catalogs
+            catalogs = read_catalogs()
+            with _CATALOGS_SEEN_LOCK:
+                _CATALOGS_SEEN.clear()
+                _CATALOGS_SEEN.update(catalogs)
+        else:  # the input handling reads no list: it uses what the last background read held
+            with _CATALOGS_SEEN_LOCK:
+                catalogs = dict(_CATALOGS_SEEN)
         for adapter, catalog in catalogs.items():
             catalog_sources[adapter] = {"state": catalog.state, "source": catalog.source,
                                         "observed_at": catalog.observed_at}

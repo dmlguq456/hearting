@@ -1657,30 +1657,6 @@ def _clip(text, width):
     return clip_cells(text, int(width))
 
 
-def _caret_window(text, place, room):
-    """``(before, after)`` of the place, together within ``room`` cells (the place's mark is one more).
-
-    What does not fit is cut with ``…`` from the far side of the place: the text before it keeps its end
-    (two thirds of the room at most while text follows), the text after it its start.
-    """
-    from .grid import cell_width
-    text, room = str(text), max(1, int(room))
-    front, back = text[:place], text[place:]
-    if cell_width(front) + cell_width(back) <= room:
-        return front, back
-    left_room = room if not back else max(1, room - max(1, min(cell_width(back), room // 3)))
-    if cell_width(front) > left_room:
-        kept, used = [], 1
-        for char in reversed(front):
-            cells = cell_width(char)
-            if used + cells > left_room:
-                break
-            kept.append(char)
-            used += cells
-        front = "…" + "".join(reversed(kept))
-    return front, _clip(back, max(1, room - cell_width(front))) if back else ""
-
-
 def _clip_cut(text, width):
     """Cut to ``width`` cells with ``…`` even when the text exactly fills the cell."""
     from .grid import cell_width
@@ -2326,12 +2302,38 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
     for index, spec in enumerate(asked):
         qid, values, choices, words, own = shapes[index]
         secret = bool(spec.get("is_secret") or spec.get("isSecret"))
+        free = question_free_text_available(envelope, qid, values)
+        editing = bool(private.get("editing") and (private.get("editing_question_id") or qid) == qid)
+        answer, answer_rows, place = "", (), 0
+        if free:
+            from .state import question_answer_rows, question_caret, question_shown_text
+            choice_values = {value for value, _label in choices}
+            typed = (_question_text_draft(private, qid) if editing or question_mark(private, spec) is not None else
+                     " · ".join(str(value) for value in values if value not in choice_values))
+            place = question_caret(private, qid, typed) if editing else len(typed)
+            if secret:
+                answer = "•" * min(len(typed), 32)
+                place = min(place, len(answer))
+                answer_rows = ((0, len(answer)),)
+            else:
+                # 11-26: a written answer takes rows: one per line, and a line wider than the row wraps (the
+                # place's mark is one cell more). ↑↓ move between these rows at this width.
+                answer = question_shown_text(typed)
+                text_room = max(1, right - indent - 3)
+                answer_rows = question_answer_rows(answer, text_room)
+                grid.answer_layout = (*getattr(grid, "answer_layout", ()), (qid, text_room))
         # 11-22: the choices (and the answer row and the action line) are never pushed out by a long question:
         # only the words give way, ending in `… +N more lines` (the shell's popup pages them instead). Short of
         # rows the empty row goes first, then the thin line, then the words down to one row and that line.
         # With several questions in one item every one's choices and answer row, and the action line, are kept
         # first (each later question's words keep their first row and the `more` line); this one's words get the rest.
         later = sum(shape[4] + min(len(shape[3]), 2) for shape in shapes[index + 1:])
+        # 11-26: the answer grows within what is left once the question's first words (and their `more` line),
+        # its choices, the later questions and the action line have their rows; taller than that, the rows
+        # shown follow the place.
+        answer_shown = min(len(answer_rows), max(1, bottom - y - len(choices) - 1 - later - min(len(words), 2)
+                                                 - (1 if len(words) > 2 else 0))) if free else 0
+        own = len(choices) + answer_shown
         gap = 2 if choices else 0
         room = bottom - y - own - 1 - later
         while gap and room - gap < min(len(words), 2):
@@ -2372,35 +2374,29 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
             y += 1
         if not question_values_valid(envelope, qid, values):
             complete = False
-        free = question_free_text_available(envelope, qid, values)
         if free and y < bottom:
-            editing = private.get("editing") and (private.get("editing_question_id") or qid) == qid
-            choice_values = {value for value, _label in choices}
-            typed = (_question_text_draft(private, qid) if editing or question_mark(private, spec) is not None else
-                     " · ".join(str(value) for value in values if value not in choice_values))
-            from .state import question_caret
-            place = question_caret(private, qid, typed) if editing else len(typed)
-            if secret:
-                typed = "•" * min(len(typed), 32)
-                place = min(place, len(typed))
-            cursor = grid.put(indent, y, "> ", "hearting" if can_draft else "dim", limit=right)
-            if editing and typed:
-                # 11-22: the place stands between the characters; a text wider than the row slides so the
-                # place stays in sight (the text's end, as before, when the place is there).
-                front, back = _caret_window(typed, place, max(1, right - cursor - 1))
-                cursor = grid.put(cursor, y, front, "soft", limit=right)
-                cursor = grid.put(cursor, y, "▏", "hearting", limit=right)
-                grid.put(cursor, y, back, "soft", limit=right)
-            elif typed:
-                cursor = grid.put(cursor, y, _clip(typed, max(1, right - cursor - 1)), "soft",
+            from .state import question_answer_row
+            # 11-22: the place stands between the characters. The rows shown are one unbroken stretch holding
+            # it (only the first row leads with `> `).
+            home = question_answer_row(answer_rows, place)
+            top = max(0, min(home - answer_shown + 1, len(answer_rows) - answer_shown)) if editing else 0
+            for row in range(top, top + answer_shown):
+                if y >= bottom:
+                    break
+                start, end = answer_rows[row]
+                cursor = grid.put(indent, y, "> " if row == 0 else "  ", "hearting" if can_draft else "dim",
                                   limit=right)
-            elif not editing:
-                cursor = grid.put(cursor, y, "…", "dim", limit=right)
-            if editing and not typed:
-                grid.put(cursor, y, "▏", "hearting", limit=right)
-            if can_draft:
-                grid.add_hit(y, x, right, ("question.edit", qid))
-            y += 1
+                if editing and row == home:
+                    cursor = grid.put(cursor, y, answer[start:place], "soft", limit=right)
+                    cursor = grid.put(cursor, y, "▏", "hearting", limit=right)
+                    grid.put(cursor, y, answer[place:end], "soft", limit=right)
+                elif end > start:
+                    grid.put(cursor, y, answer[start:end], "soft", limit=right)
+                elif not answer and not editing:
+                    grid.put(cursor, y, "…", "dim", limit=right)
+                if can_draft:
+                    grid.add_hit(y, x, right, ("question.edit", qid))
+                y += 1
         elif not choices:
             native_only = True
     if note:

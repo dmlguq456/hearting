@@ -423,10 +423,11 @@ REPO row, which is the group's head (`REPO hearting · wt 12 ────`: the 
 no button while the two heads below stand, the two buttons where they do not; the same in every width), and under
 it GIT, PEERS, then (11-21, the person: "버튼을 REPO의 아래에 각각을 두고 +? 숫자 띄우고 백로그랑 현황을 나열하자" / "각각 3줄 정도씩 목록으로 만들고 추가분을 +? 형식으로")
 the **STATUS part** and the **BACKLOG part**: each a section head (` STATUS +2                  ›`, indented one cell like GIT, no rule, the word in the title role, `+N` in the MESSAGES head's
-color and place, `›` at the row's right end; a press opens that popup) and its first three items, one row each, indented two cells, cut with `…` within the cells left (`· ` dim before each; no item of the status list is a question, 11-22); a press on an item opens the popup standing on that item; a BACKLOG item stands behind its sort's word instead, in four cells and one blank more: `FIX ` yellow, `IMPR` green, `NOTE` and `TBD ` dim, so the sort is told by the letters as well as the color). The STATUS items are the status list screen's own: what is in progress (`session_status.panel_items`, from `parse_listing`, the one reading the list screen uses; the recent and the folded count nothing); the BACKLOG items
-are `<artifact root>/backlog.md`'s, by sort (`FIX`, `IMPR`, `TBD`, `NOTE`; an item with no valid `kind:` line is `TBD`, core/ARTIFACT_META.md `backlog.md`), and inside a sort this window's campaign group (the `##` heading that is, letter for letter, the name of the folder this window's status document is in) first,
-then the document's order. **The BACKLOG head (11-22) tells the sorts**: `BACKLOG FIX 14 · IMPR 26 · +37 /125` (the count of each of FIX and IMPR; `+N` the FIX and IMPR items not shown, left out for zero; `/N` every line of the document, a `+` after it where the file is longer than is read;
-`?` for FIX and IMPR where no item of the document is sorted yet, an old document: `FIX ? · IMPR ? /125`; a document with nothing in it `FIX 0 · IMPR 0 /0`). Short of cells it gives way in this order: `/N`, then the ` · ` between the parts (`FIX 14 IMPR 26 +37`), then `+N` (`FIX 14 IMPR 26`), then the sorts' words (`14 26`), then all of it: the words outlast the numbers (the person asked for a word of three or four letters, not one), and a width one cell wider never tells less. The old document's `FIX ? · IMPR ?` and the zeros give way in the same order.
+color and place, `›` at the row's right end; a press opens that popup) and its first three items, one row each, indented two cells, cut with `…` within the cells left (`· ` dim before each; no item of the status list is a question, 11-22); a press on an item opens the popup standing on that item; a BACKLOG item stands behind its kind's word instead, in four cells and one blank more: `FIX ` yellow, `TASK` green, `NOTE` and `TBD ` dim, so the kind is told by the letters as well as the color). The STATUS items are the status list screen's own: what is in progress (`session_status.panel_items`, from `parse_listing`, the one reading the list screen uses; the recent and the folded count nothing); the BACKLOG items
+are `<artifact root>/backlog.md`'s (11-26, scheme A; read by the one rule of core/ARTIFACT_META.md `backlog.md`, `utilities/backlog_items.py`: kinds `FIX`, `TASK` (the earlier `improve` too), `NOTE`, and `TBD` for an item with no valid `kind:` line): the newest item in Discuss first, then the other newest
+ones (the latest `date:` first, the same date in the document's order, no date last); with nothing in Discuss the newest three, whichever this window's campaign is. Each item the panel is handed carries its kind, state, area and date (`session_status.panel_backlog_items`; the host passes the four values on as they are), which the
+row's drawing may take; the row's shape is the one above. **The BACKLOG head (11-22) tells the kinds**: `BACKLOG FIX 14 · TASK 26 · +37 /125` (the count of each of FIX and TASK; `+N` the FIX and TASK items not shown, left out for zero; `/N` every line of the document, a `+` after it where the file is longer than is read;
+`?` for FIX and TASK where no item of the document is sorted yet, an old document: `FIX ? · TASK ? /125`; a document with nothing in it `FIX 0 · TASK 0 /0`). Short of cells it gives way in this order: `/N`, then the ` · ` between the parts (`FIX 14 TASK 26 +37`), then `+N` (`FIX 14 TASK 26`), then the kinds' words (`14 26`), then all of it: the words outlast the numbers (the person asked for a word of three or four letters, not one), and a width one cell wider never tells less. The old document's `FIX ? · TASK ?` and the zeros give way in the same order.
 For the STATUS head `+N` is the count of the in-progress items not shown (nothing for zero). The BACKLOG head of a backend that sends no sorts is the same (`BACKLOG +N`). The `+` after the number is the BACKLOG head's alone: `+2997+` (and `+37+` in the sorted head), where the file is longer than is read (the first 1 MiB is read and what was read is counted), and `+` alone where nothing is hidden by the rows and there is more. No item: the head alone; no document, or one that
 cannot be read: the word plain dim, no item, a press still opens the popup; no artifact root: neither part. **One rule (11-22, the person's STATUS and BACKLOG lists are the first to give way): the
 two parts never take a row from anything else.** The panel is laid out as it is without them (the same layout, the same `give` order, byte for byte what a window with no list value draws; the
@@ -437,15 +438,14 @@ items (they may stand on what was folded), then the two heads together. **At no 
 rows at once leaves empty ones, and the BACKLOG items stand on those again (up to three, as many as the empty rows; the STATUS items stand before them, never a BACKLOG item with a STATUS
 item short). So as the height falls the BACKLOG items may be more again at a height; the layout without the parts is not monotonic in the height either. Nothing else gives way for the parts: NOW, QUESTIONS and the route box (their rows and their shape, folded or
 open), Git, PEERS, the SESSION head, MODEL, CTX, TITLE, RESOURCES, the notices and the last row have the rows and the form they have without the parts, and none
-has more. Where the two heads do not stand the REPO row ends in the two buttons, `STATUS +N ›  BACKLOG +N ›` (BACKLOG's `N` is its FIX and IMPR together, `?` for an old document with none sorted, nothing for zero; the bottom layout's first row's pieces, the same order of giving way: the counts
+has more. Where the two heads do not stand the REPO row ends in the two buttons, `STATUS +N ›  BACKLOG +N ›` (BACKLOG's `N` is its FIX and TASK together, `?` for an old document with none sorted, nothing for zero; the bottom layout's first row's pieces, the same order of giving way: the counts
 go the way the bottom row's go, but the repository's own `· wt N` goes first: `· wt N`, then the name is cut (to eight cells), then the buttons' counts, then their words; at the `›  ›` stage
 `· wt N` stands again where it fits; a press on a button opens that popup, on the rest of the row the status popup), and everything
 but that row is what the panel without the parts draws, byte for byte (MESSAGES and MEM unfolded as without them); where the heads stand the row has no button. (The layout is made once, then the
 parts are fitted in that order; there is no second budget and nothing is drawn twice.) The bottom layout has no list and no more rows:
-its first row ends in `STATUS +N ›  BACKLOG +N ›` (`N` the whole count, for BACKLOG its FIX and IMPR together, nothing for zero; short of cells the counts go, then the words, then the row is cut; the rest of the row opens the
+its first row ends in `STATUS +N ›  BACKLOG +N ›` (`N` the whole count, for BACKLOG its FIX and TASK together, nothing for zero; short of cells the counts go, then the words, then the row is cut; the rest of the row opens the
 status popup). The two parts' items come with the status button's value, in the same read and the same worker, only where a document changed (the host sends the documents' path,
-modification time, size, inode and change time back as `have` and, for the backlog, the folder its order was made for (this window's campaign group stands first, so another folder is another
-order); an unchanged one is neither read nor parsed again); the panel's drawing reads no file. SESSION is this session's: its head `SESSION ────` stands where the empty row between the two groups of
+modification time, size, inode and change time back as `have` and, for the backlog, the folder it was read for; an unchanged one is neither read nor parsed again); the panel's drawing reads no file. SESSION is this session's: its head `SESSION ────` stands where the empty row between the two groups of
 metadata stood, then MODEL, CTX, TITLE, NOW (indented one cell like GIT), QUESTIONS, the route box, MESSAGES, MEM. Short of rows the head row does not go: it takes MODEL's value and
 MODEL's row (`SESSION Opus 5.5 xhigh ────`, the value after one cell, the rule after it where three cells are left), so the group keeps its name at every height and the
 row count is what it was when the head went; where MODEL's value does not stand whole on that row, the head does not take it: the head row goes and the MODEL row stands in its own width, as before the head was a group's. **The line forms (11-22, the person chose the one-cell indent over the two-cell draft):**
@@ -877,8 +877,7 @@ Wrapped, the place is drawn on its row at its cell (the terminal cursor in the s
 the end of a row `→` goes to the first cell of the next), and a short budget that cuts rows
 keeps the row holding the place, as it kept the last. The place is a screen value only:
 the sent answer (`[value, text]`), the saved draft and the questions API are as before, and
-returning to a question starts it at the text's end. No word jumps, no line-up/down in the
-wrapped text, no selection, no undo. In the shell's question input `←` `→` move only the
+returning to a question starts it at the text's end. No selection, no undo. In the shell's question input `←` `→` move only the
 place in the text and do nothing with no text (11-22, the person: "구획을 안옮겨도 되는데.
 굳이"): they no longer change sections there, and its keys row no longer says `←→ section`;
 the other popups (STATUS, BACKLOG, ROUTE, MESSAGES, MEM, NOW) keep `←→` for the sections.
@@ -889,8 +888,41 @@ Tab and closing/reopening retain each question's mark, its default/explicit
 provenance, and its draft. Enter's existing next-field behavior stays.
 Its one localized guidance row reads
 `↑↓ choose · type to write · Enter send · Tab next · Esc/Ctrl+] back` before writing,
-and `Enter send · ↑ choices · Tab next · Esc/Ctrl+] back` while writing (without
-`↑ choices` when no choices exist). The existing key packing shortens narrow rows.
+and `Enter send · Ctrl+J newline · ↑ choices · Tab next · Esc/Ctrl+] back` while writing
+(without `↑ choices` when no choices exist; in a popup narrower than 64 cells
+`Ctrl+J newline · ↑ choices · …`, Enter having been named before writing). The existing
+key packing shortens narrow rows.
+A written answer takes lines (11-26, the person: "질문 답변에서 줄바꿈이 안되네.. 내가 자유도
+높이라고 했지 않나?"), alike in the shell's question popup and Fleet's question board. Enter
+alone still sends the whole answer. A line break goes in at the place with the keys the
+native input below takes for one: `Ctrl+J` (LF; the raw terminal sends Enter as CR, and
+Fleet turns curses' newline mode off so Enter arrives as CR there too), `Alt/Option+Enter`
+(`ESC CR` or `ESC LF`, also what a terminal set up for Shift+Enter often sends), `\` then
+Enter (the `\` before the place becomes the break; not in a secret), and a modified Enter
+the terminal reports (kitty `CSI 13;<mods>u`, xterm modifyOtherKeys `CSI 27;<mods>;13~`,
+kitty's `Ctrl+J` `CSI 106;5u`). On a question answered only by a choice `Ctrl+J` is Enter
+as before and the others do nothing. A paste goes in whole: its line breaks (CR, LF or
+CR LF) are line breaks, never Enter, a tab stays, and any other control character (and an
+escape sequence) is left out, since the delivery to a Claude shell refuses them; the shell
+keeps the outer terminal's bracketed paste on while the question popup has the keys, and
+Fleet asks for bracketed paste itself. In Fleet a paste that never ends goes in a second
+after its last byte; one past the limit goes in as far as it fits, with the limit's notice.
+The answer grows a row per line (and per wrap) within the popup or the page while the
+question's first words (and their `more` line), its choices and the key line keep their
+rows; taller than that, the rows shown are one unbroken stretch following the place (only
+the answer's first row leads with `› `). `↑` `↓` go between its rows at the width it was
+drawn, holding the cell column while they repeat; from its first row `↑` goes to the
+choices (Fleet: leaves the typing) and from its last `↓` keeps its meaning, as before.
+`Home` `End` (`Ctrl+A` `Ctrl+E`) go to the ends of the line holding the place,
+`Ctrl+Home` `Ctrl+End` to the ends of the text; `Alt+←` `Alt+→` (`Ctrl+←→`, `Alt+B`
+`Alt+F`) step over a run of letters and digits, `Ctrl+W` and `Alt+Backspace` delete the
+word before the place, `Alt+D` and `Ctrl/Alt+Delete` the one after it, `Ctrl+U` the line
+before it and `Ctrl+K` the line after it; Backspace and Delete join lines. Fleet decodes
+`Delete` (`ESC [ 3~`) itself now (it was inert with keypad off), and while an answer is
+written an Alt combination is the answer's (a word key, or dropped), not Esc and then a
+key. The line breaks stay characters of the answer: the stored answer, the draft and the
+questions API are unchanged; the one-line sent receipt joins the lines with spaces, and
+the person's window shows the first line with `(+N lines)`.
 Choice-only questions keep their selection behavior; their guidance omits the
 retired `t text` / `t 답 입력`. Fleet's question board shows recommendations as
 `(recommended)` and marks only choices picked by number or click. Repeating the
@@ -1114,21 +1146,25 @@ alone and the document's rows are asked for apart, when `full document ›` is o
 they arrive (for a page with a list screen, after the document read whole is asked for); a popup read that failed shows Fleet's `fleet.output.unreadable`, dim, and is read again at the next opening (a document it
 cannot read is that same failure, not a `?`), and the Fleet part holds no place of the document's: a popup opened again while it is out
 stands at once, and its lines are kept only for the width and value they were asked at), BACKLOG (11-21: the status popup's list screen over
-`<artifact root>/backlog.md`, drawn by the same `status-list.cjs` with the same keys and the same frame; its answer is the status popup's own (`part: list` / `doc`, no Fleet part;
+`<artifact root>/backlog.md`, drawn by the same `status-list.cjs` with the same frame; 11-26, scheme A: the **board**, `session_status.backlog_board` laid out by `backlog-board.cjs`; its answer is the status popup's own (`part: list` / `doc` / `detail`, no Fleet part;
 `session_status.backlog_view`, `session_shell._status_popup(kind="backlog")`). The document's form (written by another task, only read here): a title, `갱신 YYYY-MM-DD HH:MM`, then `##` headings, each a campaign folder name or `Unassigned`, and under
-each the top-level `- ` bullets, one item each (the artifact entrance's own counting rule, `parse_backlog`, checked against `artifact_entrance._backlog` on the same texts, not the status page's looser reading: a heading is `##`, after at most three spaces,
-followed by a blank or the end of the line (` ## C` is one; four spaces, a tab before it and `###` are none; the count, the group split of this popup and the `갱신` boundary all use that one judgement); a `- ` before the first `##` is none; `*`, `+`, `-<tab>` and numbered lists are none; an indented line and a sub-bullet are none;
+each the top-level `- ` bullets, one item each, read by the one rule the entrance reads them by (core/ARTIFACT_META.md `backlog.md`, `utilities/backlog_items.py`; `parse_backlog` and `artifact_entrance._backlog` both call it, and are checked against each other on the same random documents: a heading is `##`, after at most three spaces,
+followed by a blank or the end of the line; a `- ` before the first `##` is none; `*`, `+`, `-<tab>` and numbered lists are none; an indented line and a sub-bullet are none;
 `- - -` and a `- ` inside an HTML comment are counted; a code fence (up to three spaces in, whatever follows) is not read, closes on the same character and the same or a longer length only, and one never closed runs to
-the end; `갱신 YYYY-MM-DD HH:MM` (ASCII digits, one blank, the line's own surrounding blanks cut) is read before the first `##` only, and only where the date and the time are real, shown as `updated MM-DD HH:MM`, with `! … old document` after three days). The indented lines under an item
-(`date:`, `source:`, `note:`) are its detail, and its optional `kind:` line (`fix`, `improve` or `note`, in any case; none, another value or two different values is unsorted, `TBD`) is its sort: `parse_backlog` and `artifact_entrance._backlog` read it by one rule and count each sort the same
-(checked against each other on the same random documents). **The list screen (11-22) is by sort, not by campaign**: the title, `updated …`, one line with the count of each sort and the whole count (`FIX 14 · IMPR 26 · TBD 7 · NOTE 78 · 125 total`; `?` for the sorts of an old document with no item sorted),
-the first sort that has an item open on top (`FIX`, else `IMPR`, `TBD`, `NOTE`: its heading and its items, this window's campaign first, then the document's order), every other sort one folded line
-`› IMPR 26` in that order, then `full document ›` (the document read whole, its first 64 KiB, `… 64 KiB` after a longer one). **The list answer carries titles only** (and the groups and
-counts): every item is `lazy`, and opening it (Enter or a press; again closes) asks for its lines (`part: detail`, `open` the item's key; one `⠏` stands under it until they come; the first is `kind: FIX` and the like, `kind: TBD` for an unsorted one, whose own `kind:` lines stay among the rest), so a
-backlog of 256 KiB and 500 items stands as a list. The list's answer may weigh 200 KiB (`BACKLOG_ANSWER_BYTES`; the host reads 256 KiB of an answer); a document whose titles alone pass it draws
-the most that fit, then one line `… N more in backlog.md`; a file longer than the 1 MiB read limit adds `… the file is longer than is read here: more items follow`. PgUp/PgDn on a list screen (the status
-popup's too) move the chosen line a screen on, the window following it. An item's key is `i:<sort id>:<digest of its campaign heading and title>` (`:N` for the Nth of the same title there), the same in the panel's item row and in the list, whichever sort stands open: a press on a panel item stands the popup on it and opens its sort. The campaign headings are the document's words as written, never invented. The words Hearting puts there (`BACKLOG`, `FIX`, `IMPR`, `NOTE`, `TBD`, `total`, `updated`, `old document`, `full document`,
-`No backlog document yet.`) are English whatever the language. No document, a folder or link of that name, one that cannot be read: the popup's one dim line, no list.
+the end; `갱신 YYYY-MM-DD HH:MM` (ASCII digits, one blank, the line's own surrounding blanks cut) is read before the first `##` only, and only where the date and the time are real, shown as `updated MM-DD HH:MM`, with `! … old document` after three days). An item's optional indented lines are its kind
+(`kind:` `fix`, `task`, `note`, the earlier `improve` read as `task`; none, another value or two different values is `TBD`), its state (`state:` `discuss`, `ready`, `waiting`; else none), its one area (`area:`, case and runs of blanks folded, the first spelling the group's name; none or two
+different is `No area`) and its date (`date:` `YYYY-MM-DD`, a real one; else none); a wrong value leaves only that cell undecided and the board still opens. **The board's answer carries one short row per item** (`[key, kind, date, area, state, title, campaign]`, newest first: the latest date first,
+the same date in the document's order, no date last), the counts and the head, never the lines under an item, so a backlog of 1,000 items stands as one answer. **The board, top to bottom**: the title, `updated …`, the counts (`146 total · FIX 65 · TASK 43 · TBD 0 · NOTE 38`), what it shows
+(`group [Kind] Area Date · showing 146 · Discuss 18`; filtered, `showing 18 of 146 · … · state Discuss` and `find Title "…"`), then the groups: by kind (`FIX`, `TASK`, `TBD`, `NOTE`), by area (by name, `No area` last) or by date (the newest first, `No date` last), each a head with its count (`▾ FIX 65`,
+the first open, the others folded `› TASK 43`), and under it its items, the newest first, each a row of fixed cells: the kind's word (colored as on the panel), the date `YYYY-MM-DD` (`—` none), the area (`No area`), `Discuss` or `Waiting` before the title (Ready and no state leave the cell blank), the title (cut with `…`;
+opened, it stands whole). Short of cells the area cell goes first, then the date. Then `full document ›` (the document read whole, its first 64 KiB, `… 64 KiB` after a longer one). **Its keys** (on top of the list screen's ↑↓, PgUp/PgDn, Enter, ←→): `k`, `a`, `d` group by kind, area or date (a new
+grouping opens its first group and stands on its first item); `t` shows All, Discuss, Ready, Waiting, No state in turn; `/` finds a title (Tab first: an area's name; case and blanks folded; the words typed stand in one row above the keys, `/ Title: …▏`, and every key typed is the finder's until Enter or Esc);
+a filtered or found view stands with every group open; `Home`/`End` stand on the first or the last item, opening its group; Enter on an item opens its lines (`part: detail`, `open` the item's key, `indent` the cells under the date: one item read; one `⠏` stands under it until they come): `2026-11-16 · FIX · Panel · Waiting`,
+`campaign <heading>`, then its own lines as written (`source …`, `note …`, the note wrapping to eight rows); Enter again closes it. Esc undoes the board's own state one step at a time (what is being typed, the opened items, what was found, the state shown), then closes the popup. The grouping,
+the filter and what was found belong to the open board alone: the popup opened again starts grouped by kind, everything shown. A press on a panel item stands the board on it and opens its group. An item's key is `i:<digest of its campaign heading and title>` (`:N` for the Nth of the same title there), the same in the panel's
+item row and on the board whatever it is grouped by. **The read limits** stand on the board: a file longer than the 1 MiB read limit counts what was read (`146+ total`) and says `read 146 · more in backlog.md (the file is longer than is read)`; an answer whose rows pass 200 KiB (`BACKLOG_ANSWER_BYTES`; the host reads 256 KiB
+of an answer) holds the newest that fit and says `showing the newest 600 of 1,000 · 400 more in backlog.md`. The campaign headings are the document's words as written, never invented. The words Hearting puts there (`BACKLOG`, `FIX`, `TASK`, `NOTE`, `TBD`, `Discuss`, `Ready`, `Waiting`, `No area`, `No date`,
+`total`, `updated`, `old document`, `full document`, `No backlog document yet.`) are English whatever the language. No document, a folder or link of that name, one that cannot be read: the popup's one dim line, no board.
 A document of another form (no headings, no `- ` bullets) shows as much as is read and no item is none. The title is `BACKLOG · <age>`.),
 QUESTIONS (the question editor),
 ROUTE (Fleet's own table: the backend's `popup` reading draws
@@ -1198,9 +1234,10 @@ its own window or in Fleet. In free-text questions, `f`, `r`, `p` and `w` enter 
 In the question popup `←→` move the place in the typed text and do nothing otherwise (see the question input rules above); the other popups' `←→` switch sections, and a section's name pressed on the bottom line opens it. While the popup
 stands every key and press is its own (none reaches the native, a native that
 reads the mouse included; whatever follows an Esc, in the same read or within its
-25 ms, other than `[` or `O` (an arrow or function key) is dropped, neither closing
-it nor reaching the native: Alt+letter, Shift/Alt+Enter, Esc then a control byte, and a
-second Esc closes it and is dropped; a paste enters a free-text answer row, its end mark `ESC[201~` read whole wherever it is split, and a paste that never ends is left by Esc, `Ctrl+]` or a press outside; the popup's input state, a paste under way, a key's front and the Esc waited on, ends with the popup, closed or opened again); a lone Escape,
+25 ms, other than `[` or `O` (an arrow or function key) is the popup's, neither closing
+it nor reaching the native: Alt/Option+Enter puts a line break in a written answer and
+Alt+B/F/D/Backspace are its word keys (11-26); any other Alt+letter and Esc then a control
+byte are dropped, and a second Esc closes it and is dropped; a paste enters a free-text answer row, its end mark `ESC[201~` read whole wherever it is split, and a paste that never ends is left by Esc, `Ctrl+]` or a press outside; the popup's input state, a paste under way, a key's front and the Esc waited on, ends with the popup, closed or opened again); a lone Escape,
 `Ctrl+]`, its `✕` or a press outside it closes it
 and returns to the native input and cursor (the drag and release that follow that
 press are the popup's too; one lone Esc within a second of the Esc that closed it is
