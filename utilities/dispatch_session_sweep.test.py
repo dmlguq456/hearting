@@ -4979,15 +4979,105 @@ class ReplacedSessionNoticeTest(IsolatedRootMixin, unittest.TestCase):
 
     def test_a_completion_a_carrier_holds_now_is_left_to_that_carrier(self):
         # A live claim is a carrier sending right now: no line and no expiry until its lease lapses.
+        # The lapse is written into the record (no wait), as other lease tests here do.
         _meta, record = self._completion()
-        self._carried(record, sent=False, lease_seconds=1)
+        self._carried(record, sent=False, lease_seconds=600)
         self._start("sess-A", "startup")
         self._start("sess-B", "clear")
         self.assertEqual(self._prompt("sess-B"), "")
         self.assertEqual(self._state(record), ("claimed", None))
-        time.sleep(1.1)
+        path = PD.record_path(self.root, "sess-A", record["delivery_id"])
+        value = json.loads(path.read_text())
+        value["claim_deadline_ns"] = 0
+        path.write_text(json.dumps(value))
         context = self._prompt("sess-B")
-        self.assertIn("neither adds to nor cancels that receipt", context)
+        # Nothing recorded a send, so the line says the reach is unknown, not "already carried".
+        self.assertIn("(a carrier took it once and whether it reached any session is unknown; "
+                      "this line neither adds to nor cancels it; you may tell the person in one line)",
+                      context)
+        self.assertNotIn("already carried once", context)
+        self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
+
+    def _back_and_received(self, record, sid="sess-A", source="resume"):
+        """`sid` comes back in the same process and its own prompt takes its completion."""
+        self._start(sid, source)
+        context = self._prompt(sid)
+        self.assertIn(record["delivery_id"], context)
+        self.assertFalse(any(line.startswith(SWEEP.REPLACED_NOTICE_PREFIX) for line in context.splitlines()))
+        self.assertEqual(self._state(record)[0], "acked")
+
+    def test_only_a_plain_clear_start_reads_the_earlier_session_completion(self):
+        # 🔴 1 (RV-PR1857): a session reached in the same process by resume, select, fork, a startup
+        # start or a start with no source is not a replacement. Its prompt shows nothing and expires
+        # nothing; the original session comes back and takes its completion through its own prompt.
+        for moved, back in (("resume", "resume"), ("select", "select"), ("fork", "resume"),
+                            ("startup", "resume"), ("", "resume")):
+            with self.subTest(moved=moved or "none", back=back):
+                attempt = "att-moved-" + (moved or "none")
+                _meta, record = self._completion(attempt)
+                self._start("sess-A", "startup")
+                self._start("sess-X-" + (moved or "none"), moved)
+                self.assertEqual(self._prompt("sess-X-" + (moved or "none")), "")
+                self.assertEqual(self._state(record), ("pending", None))
+                self._back_and_received(record, source=back)
+
+    def test_a_same_session_compact_neither_replaces_nor_breaks_a_clear(self):
+        # A `/compact` keeps the session id: the session itself still receives its completion, and a
+        # session a plain `/clear` started keeps reading the one it replaced after it compacts.
+        _meta, own = self._completion("att-compact-own")
+        self._start("sess-A", "startup")
+        self._start("sess-A", "compact")
+        self._back_and_received(own, source="compact")
+        _meta, record = self._completion("att-compact-cleared")
+        self._start("sess-B", "clear")
+        self._start("sess-B", "compact")
+        context = self._prompt("sess-B")
+        self.assertEqual(sum(line.startswith(SWEEP.REPLACED_NOTICE_PREFIX) for line in context.splitlines()), 1)
+        self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
+
+    def test_a_chain_of_plain_clears_reaches_back_until_another_start_source(self):
+        # A ->clear-> B ->clear-> C: C's prompt reads A's completion.
+        _meta, record = self._completion()
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        self._start("sess-C", "clear")
+        context = self._prompt("sess-C")
+        notices = [line for line in context.splitlines() if line.startswith(SWEEP.REPLACED_NOTICE_PREFIX)]
+        self.assertEqual(len(notices), 1, context)
+        self.assertIn("previous_session=sess-A", notices[0])
+        self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
+        # C ->resume-> D ->clear-> E: E replaced D only. C was left by a resume and may come back,
+        # so E's prompt reads D's completion and leaves C's alone.
+        _meta, left = self._completion("att-chain-left", "sess-C")
+        _meta, replaced = self._completion("att-chain-replaced", "sess-D")
+        self._start("sess-D", "resume")
+        self._start("sess-E", "clear")
+        context = self._prompt("sess-E")
+        notices = [line for line in context.splitlines() if line.startswith(SWEEP.REPLACED_NOTICE_PREFIX)]
+        self.assertEqual([("previous_session=sess-D" in line) for line in notices], [True], context)
+        self.assertEqual(PD.read(self.root, "sess-C", left["delivery_id"])["state"], "pending")
+        self.assertEqual(PD.read(self.root, "sess-D", replaced["delivery_id"])["expiry_reason"],
+                         "recipient-session-replaced")
+
+    def test_a_resume_after_a_clear_breaks_the_chain(self):
+        # A ->clear-> B ->resume-> X: X does not read A's completion.
+        _meta, record = self._completion()
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        self._start("sess-X", "resume")
+        self.assertEqual(self._prompt("sess-X"), "")
+        self.assertEqual(self._state(record), ("pending", None))
+
+    def test_a_clear_then_a_same_process_resume_of_the_earlier_session_finds_the_line_stood_in(self):
+        # 🟡 3 (a), kept on purpose: after a plain `/clear` the line stands in for the receipt. When the
+        # earlier session is resumed in the same process afterwards, its completion is already settled.
+        _meta, record = self._completion()
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        self.assertIn(SWEEP.REPLACED_NOTICE_PREFIX, self._prompt("sess-B"))
+        self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
+        self._start("sess-A", "resume")
+        self.assertNotIn(record["delivery_id"], self._prompt("sess-A"))
         self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
 
     def test_a_never_sent_completion_keeps_the_no_task_line(self):

@@ -2312,11 +2312,23 @@ def ack_delivered(root: Path, session_id: str, records: list[dict], *, acked_by:
 # one its recipient. This notice tells the new session once that such a completion exists; it grants
 # no task, and the record then expires as `recipient-session-replaced`. A record the earlier
 # session's wake already carried gets a neutral line instead, and when that wake's exact receipt is
-# in this session's own transcript the record is ACKed as received here, with no line at all.
+# in this session's own transcript the record is ACKed as received here, with no line at all. Only
+# a session a plain `/clear` started in the earlier one's place reads it: after a `/resume`, select
+# or fork the earlier session may come back, and its own prompt then takes the completion.
 REPLACED_NOTICE_PREFIX = "previous_session_completion:"
 REPLACED_SESSION_LOOKBACK = 8
 REPLACED_SCOPE_ENTRIES = 64
 _REPLACED_NOTICE_TAIL = "you may tell the person in one line"
+# What the line says about the record depends on what is known of its send: never sent (`pending`),
+# sent by a carrier (`sent-ambiguous`), or taken by a carrier whose lease lapsed before it recorded a
+# send (`claimed`), where whether it reached any session is unknown.
+_REPLACED_NOTICE_ENDINGS = {
+    "pending": f"(notice only; this session holds no task from it; {_REPLACED_NOTICE_TAIL})",
+    "sent-ambiguous": ("(already carried once to an earlier session; this line neither adds to nor "
+                       f"cancels that receipt; {_REPLACED_NOTICE_TAIL})"),
+    "claimed": ("(a carrier took it once and whether it reached any session is unknown; this line "
+                f"neither adds to nor cancels it; {_REPLACED_NOTICE_TAIL})"),
+}
 
 
 class ReplacedSessionNotice(NamedTuple):
@@ -2334,7 +2346,7 @@ def _notice_value(value, limit: int = 96) -> str:
     return text[:limit]
 
 
-def _replaced_notice_line(record: dict, row, previous_sid: str, *, carried: bool = False) -> str:
+def _replaced_notice_line(record: dict, row, previous_sid: str) -> str:
     receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
     classification = receipt.get("delivery_classification")
     if not classification:
@@ -2346,9 +2358,7 @@ def _replaced_notice_line(record: dict, row, previous_sid: str, *, carried: bool
             f"attempt_id={_notice_value(row.attempt_id)} status={_notice_value(row.status)} "
             f"classification={_notice_value(classification)} "
             f"previous_session={_notice_value(previous_sid, 8)} "
-            + ("(already carried once to an earlier session; this line neither adds to nor cancels "
-               f"that receipt; {_REPLACED_NOTICE_TAIL})" if carried else
-               f"(notice only; this session holds no task from it; {_REPLACED_NOTICE_TAIL})"))
+            + _REPLACED_NOTICE_ENDINGS.get(record.get("state"), _REPLACED_NOTICE_ENDINGS["claimed"]))
 
 
 def _receipt_shown_here(evidence, session_id: str, record: dict, storage_recipient: str) -> bool:
@@ -2363,10 +2373,14 @@ def _receipt_shown_here(evidence, session_id: str, record: dict, storage_recipie
 
 def replaced_session_notices(roots, session_id: str, *, env=None, deadline_ns: int | None = None,
                              limit: int = 3, evidence=None) -> list[ReplacedSessionNotice]:
-    """Completions of an earlier session of this pane that this runtime can no longer deliver.
+    """Completions of the sessions a plain `/clear` replaced in this pane, which this runtime can no
+    longer deliver.
 
-    Read-only. The earlier sessions are the other Claude sessions the pane's seat ledger lists;
-    nothing is written to the ledger or to any lineage. A record qualifies only when it is still
+    Read-only. The earlier sessions are the ones `session_tidy.plain_clear_predecessors` reads from
+    the pane's seat ledger: this session must have started with `source == "clear"`, and the walk
+    goes back while each replaced session started with `clear` too; a `resume`, `select`, `fork` or
+    `startup` start (or anything else) ends it, because that session may come back and take its own
+    completions. Nothing is written to the ledger or to any lineage. A record qualifies only when it is still
     open, addressed to such a session, and exactly the completion its owner row names (digest,
     delivery id and intent), the row records this very runtime (`runtime_ancestry_binding` of this
     process), and no handover moved the recipient. Anything else, including a pane-less terminal,
@@ -2386,15 +2400,12 @@ def replaced_session_notices(roots, session_id: str, *, env=None, deadline_ns: i
     if seat is None:
         return []
     with session_tidy.seat_ledger_readonly_scope():
-        summary = session_tidy.session_summary(session_tidy.physical_seat(seat))
-    earlier = sorted((row for (name, sid), row in summary.items()
-                      if name == "claude" and sid and sid != session_id),
-                     key=lambda row: row.get("last_seen", 0), reverse=True)[:REPLACED_SESSION_LOOKBACK]
+        earlier = session_tidy.plain_clear_predecessors(
+            session_tidy.physical_seat(seat), "claude", session_id, limit=REPLACED_SESSION_LOOKBACK)
     binding = None
     found: list[ReplacedSessionNotice] = []
     unique_roots = tuple(dict.fromkeys(Path(root) for root in roots if Path(root).is_dir()))
-    for earlier_row in earlier:
-        previous_sid = str(earlier_row["sid"])
+    for previous_sid in earlier:
         for root in unique_roots:
             for _key, delivery_id in _scope_entries_newest_first(Path(root), previous_sid)[:REPLACED_SCOPE_ENTRIES]:
                 if spent() or len(found) >= limit:
@@ -2431,7 +2442,7 @@ def replaced_session_notices(roots, session_id: str, *, env=None, deadline_ns: i
                     received = carried and _receipt_shown_here(evidence, session_id, record, previous_sid)
                     found.append(ReplacedSessionNotice(
                         Path(root), jobs, dict(meta), record,
-                        "" if received else _replaced_notice_line(record, row, previous_sid, carried=carried),
+                        "" if received else _replaced_notice_line(record, row, previous_sid),
                         tuple(binding), received))
                 except Exception:  # noqa: BLE001 - one unreadable record never blocks the prompt
                     continue

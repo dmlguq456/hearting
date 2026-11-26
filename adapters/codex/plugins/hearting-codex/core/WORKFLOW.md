@@ -1325,11 +1325,17 @@ read still finds the parent absent. The one exception is an owner's completion
 to a Claude parent whose record is still open: while the registered parent
 runtime is live, as after a plain `/clear` that gave the session a new id, the
 duty stays open as undelivered (`completion-undelivered`) without that fresh
-read; the next prompt of another Claude session in the same pane and runtime
-adds one informational line to the model's context (it asks for nothing and
-may be passed to the person in one line), and the record then expires as
-`recipient-session-replaced`, or is ACKed when that session's transcript
-already holds its exact receipt. A dead runtime expires that record first.
+read; the next prompt of the session a plain `/clear` started in its place, in
+the same pane and runtime, adds one informational line to the model's context
+(it asks for nothing and may be passed to the person in one line), and the
+record then expires as `recipient-session-replaced`, or is ACKed when that
+session's transcript already holds its exact receipt. Only a session whose own
+start in the pane's seat ledger is `clear` reads it, reaching back through
+earlier plain clears; a resume, select, fork or startup start does not, so a
+session left that way keeps its completion for its own next prompt. The line
+stands in for the receipt: if the cleared session is resumed afterwards, even
+in the same process, its completion is already settled. A dead runtime expires
+that record first.
 Gate and supervision notices, Codex and OpenCode parents, and a runtime with
 no PID/start evidence or one this host cannot observe keep the not-required
 settlement. Unknown liveness and a live successor remain pending, and

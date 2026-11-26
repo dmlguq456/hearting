@@ -1877,6 +1877,35 @@ def _previous_distinct_start(rows: list[dict], index: int, seat: Seat, harness: 
     return winners[0] if len(winners) == 1 else ""
 
 
+def plain_clear_predecessors(seat: Seat, harness: str, sid: str, *, limit: int = 8,
+                             rows: Optional[list[dict]] = None) -> list[str]:
+    """Sessions a plain ``/clear`` chain left behind in this seat, newest first; read only.
+
+    ``sid``'s own last start (a same-session ``compact`` start changes no session and is skipped)
+    must have ``source == "clear"``: the session that started right before it is the one it
+    replaced, and the walk goes on while that session's own last start is ``clear`` too. Any other
+    start source (``startup``, ``resume``, ``select``, ``fork``, another value or none), a start no
+    longer in the raw rows, or a repeated session ends the walk. This is not a lineage edge:
+    nothing is written and no handover, wake or delivery authority follows from it."""
+    rows = _read_ledger_lines(seat) if rows is None else rows
+    chain: list[str] = []
+    current, end = sid, len(rows)
+    while len(chain) < limit:
+        index = next((at for at in range(end - 1, -1, -1)
+                      if rows[at].get("event") == "start" and rows[at].get("harness") == harness
+                      and rows[at].get("sid") == current and rows[at].get("source") != "compact"
+                      and _lineage_row_matches_seat(rows[at], seat)), None)
+        if index is None or rows[index].get("source") != "clear":
+            break
+        # No repository map: a predecessor only a folded summary row remembers is not followed.
+        previous = _previous_distinct_start(rows, index, seat, harness, current, {}, "")
+        if not previous or previous == sid or previous in chain:
+            break
+        chain.append(previous)
+        current, end = previous, index
+    return chain
+
+
 def _confirmed_clear_start_edges(seat: Seat, rows: list[dict], repositories: dict,
                                  harness: str, repository: str, resolve_gitdir) -> set[tuple[str, str]]:
     starts = [(index, row) for index, row in enumerate(rows)
