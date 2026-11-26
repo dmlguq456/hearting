@@ -2346,6 +2346,8 @@ def main():
     if a.command=="correct":
         from dispatch_owner_input import submit, inspect, InputError
         jobs=Path(a.jobs or _compose_default_jobs())
+        # Read once: the message may be a pipe (`--message-file /dev/stdin`) that every path below shares.
+        message=a.message_file.read_text() if a.message_file else None
         given=a.attempt_id or a.correct_route
         if given is None:
             found,source,rows=caller_open_route(os.getcwd())
@@ -2363,11 +2365,27 @@ def main():
             # A unit route has no owner to answer: the text is the route's next turn (work_start.correct_unit_route).
             from work_start import correct_unit_route
             code,result=correct_unit_route(verify_route(frame_raw),frame_path,jobs,
-                                           a.message_file.read_text() if a.message_file else None,a.request_id)
+                                           message,a.request_id)
             print(json.dumps(result,ensure_ascii=False))
             from start_receipt import print_next_line
             print_next_line(result)
             return code
+        if isinstance(frame_raw,dict) and a.message_file and not ROUTE_PLAN.is_framed_route(frame_raw):
+            # A closed one-shot route its owner finished PASS takes the text as its next owner turn
+            # (work_start.correct_owner_route); any other state keeps the owner input path below.
+            from work_start import correct_owner_route
+            try:
+                verified=verify_route(frame_raw)
+            except (ValueError, KeyError, TypeError, OSError):
+                verified=None   # an unverifiable record keeps the owner input path, which reports it
+            taken=(correct_owner_route(verified,frame_path,jobs,message,a.request_id)
+                   if verified is not None else None)
+            if taken is not None:
+                code,result=taken
+                print(json.dumps(result,ensure_ascii=False))
+                from start_receipt import print_next_line
+                print_next_line(result)
+                return code
         if ROUTE_PLAN.is_framed_route(frame_raw):
             from work_start import _framed_cycle
             _first = {}
@@ -2383,7 +2401,7 @@ def main():
                 given = _leg_owner
             else:
                 from dispatch_owner_input import frame_input
-                result = frame_input(verify_route(frame_raw), a.message_file.read_text() if a.message_file else None,
+                result = frame_input(verify_route(frame_raw), message,
                                      a.request_id, jobs=jobs)
                 if result.get("redirect_owner"):
                     given = result["redirect_owner"]
@@ -2408,7 +2426,7 @@ def main():
         except Exception:
             stage_unit=None  # a label that cannot be read is no label
         try:
-            result=(submit(jobs,attempt,a.message_file.read_text(),a.request_id,unit=stage_unit)
+            result=(submit(jobs,attempt,message,a.request_id,unit=stage_unit)
                     if a.message_file else inspect(jobs,attempt))
         except InputError as exc:
             refusal={"state":"not-admitted","reason":str(exc),

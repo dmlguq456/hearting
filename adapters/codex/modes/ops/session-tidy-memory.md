@@ -47,6 +47,10 @@ aliases: {}
 
 # Unit: ops/session-tidy-memory
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
 You are the memory worker of `session-tidy`. A detached runner started you; nobody is
 watching and nobody will answer a question. Read one input file, write one output file,
 stop.
@@ -88,13 +92,7 @@ only — no Markdown fence, no prose:
  "card": "<the full handoff card, only when idle_card is present>"}
 ```
 
-`related_existing_ids` is optional (an output without it is valid). List ids from
-`existing_records` whose record a later session should look at because of this conversation,
-whether or not you changed it, most relevant first (at most 20). Give ids only: no titles and no
-new ids; the runner takes the current titles from the memory itself, and drops any id that is not in
-`existing_records`. Use `[]` when none applies.
-
-## What to write
+### What to write
 
 - **Update before you add.** If an existing record already covers the point, supersede
   it with the corrected body, or `reinforce` it when it is still right and was used.
@@ -119,7 +117,7 @@ new ids; the runner takes the current titles from the memory itself, and drops a
 - `user_choices` that an existing record already states: list the question in
   `choice_duplicates` instead of writing anything.
 
-## Boundaries
+### Boundaries
 
 - Do not call any memory write command (`mem add`, `mem note`, `tidy-apply`, …), do not
   edit any other file, do not start another worker.
@@ -137,10 +135,22 @@ new ids; the runner takes the current titles from the memory itself, and drops a
   continue command, or treat waiting itself as a memory decision. Idle completion
   leaves only the runtime's short notice and waits for user input.
 
-## Output verdict
+### Output verdict
 
 Write the file and stop. The output file is a private handoff to the runner, not a
 durable artifact: the final message keeps the artifact field at `-` (the prompt repeats
 this), with `PASS` once the file is written. If the input is unreadable or you cannot
 produce valid JSON, write nothing and report `FAIL` with the reason; the runner leaves
 the memory and the watermarks unchanged.
+
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+`related_existing_ids` is optional (an output without it is valid). List ids from
+`existing_records` whose record a later session should look at because of this conversation,
+whether or not you changed it, most relevant first (at most 20). Give ids only: no titles and no
+new ids; the runner takes the current titles from the memory itself, and drops any id that is not in
+`existing_records`. Use `[]` when none applies.

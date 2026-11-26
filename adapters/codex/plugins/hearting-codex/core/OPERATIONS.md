@@ -1731,6 +1731,23 @@ by where its parent is: a leg a worker started, while that worker runs; a main-s
 lives, in both cases at most `route_autoclose.IDLE_SECONDS` (seven days); then `route_autoclose.QUIET_SECONDS` (one hour) once it is gone, or `route_autoclose.IDLE_SECONDS` when it cannot be told. Details:
 `capabilities/unit.md`.
 
+An owner that takes over from an earlier owner of its route (the replacement an answer, the runtime's one
+`observed` continuation or a usage-limit resume starts, and the later turn below) uses the same session decision:
+the same harness with the earlier owner's session file in its worker home wakes that session (Claude and OpenCode
+through the session supervisor's `--resume-session`, Codex through `thread/resume`; a supervised Codex owner keeps
+its thread) and is told only this attempt's dispatch facts, its commit policy and declared scope, and the new
+context, with this launch's own permissions; otherwise, and after an attempt the runtime ended without a result
+(`fresh:resume-refused`), it starts fresh with the whole assignment, the recovery context and the reason. The owner
+row and its end notice carry `session: resumed | fresh:<reason>`; an observation stays an observation, not an
+approval. A route one owner makes alone (`solo` at quick: no review, frame or resource node, not a plan leg, no
+parent cycle) that its owner closed PASS takes a later request the same way: `correct --route <id> --message-file
+<text>` from the session that opened it sets the closure aside and starts the next owner turn in a new cycle
+(`turn`, `continues_attempt_id`; a turn that is not admitted puts the closure back); the earlier turn, its report
+and records stay as they are and read as settled, the text is kept once (`already-asked` when it already ran), and
+another caller is refused. A stopped route takes no later request; a BLOCKED or FAIL route keeps its answer through
+the owner input path above. A route with review nodes keeps its review records and takes the new request as a new
+route. A shared Codex owner home drops session files no owner holds an hour after their last write.
+
 ### §5.11. Commit and Push Policy for `<agent-home>`
 
 Fleet's two-hex session numbers have one shared resolver,

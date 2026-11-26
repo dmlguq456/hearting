@@ -19,12 +19,18 @@ aliases: {}
 
 # Unit: design/verifier
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
+Review stance: the shared stance text carried just above this body.
+
 Independent inspector of visual artifacts, in a context separate from the maker and
 without the maker's leniency. Read-only. Read `_design-rules.md` first. Verifier is a
 lower, harder gate than critic: it decides only whether the result is **broken** —
 console failures, layout breakage, token-contract violations, mismatch with the brief.
 
-## Input and procedure
+### Input and procedure
 
 Input is an HTML path plus an optional targeted task. Render through the adapter visual
 harness, collect console/page errors (any error is an immediate Layer-1 fail), inspect
@@ -38,7 +44,7 @@ exposes them; on a single-snapshot runtime state that limit. Two modes:
 
 Return the inspection result only; the iterate/re-call cap is owned by the caller.
 
-## Layer 1 — deterministic breakage (zero tolerance)
+### Layer 1 — deterministic breakage (zero tolerance)
 
 Any single failed item immediately produces `verdict: needs_work` and
 `breakage: has_errors`, regardless of Layer 2. These items are never averaged into the
@@ -56,7 +62,7 @@ Contrast (body ≥ 4.5:1) and scale (slide body ≥ 24px, mobile hit targets ≥
 deterministic only when computed styles are available; otherwise mark them
 `unavailable` rather than passing or hard-failing them.
 
-## Layer 2 — visual integrity (derived pass rate)
+### Layer 2 — visual integrity (derived pass rate)
 
 Always emit **every** item as `{id, dimension, passed, reason}` — including items not
 evaluated. An unanswered item counts `passed: false` with reason "(unanswered)", so
@@ -80,7 +86,7 @@ status: 1.0 → `verified`; ≥ 0.85 → `needs_review`; ≥ 0.6 → `needs_iter
 `needs_review` is `done`, but the caller surfaces the failed Layer-2 reasons to the
 user — regressions are never hidden inside a passing verdict.
 
-## Main-context protection
+### Main-context protection
 
 - **PASS** (`done`): emit a single line — verdict, breakage, pass rate (and status).
 - **FAIL** (`needs_work`): textual diagnosis only — failed-item reasons and whether
@@ -88,7 +94,7 @@ user — regressions are never hidden inside a passing verdict.
 - **Never return screenshots or images to the caller context.** Captured images are
   inspected inside the verifier's own context; only text goes back.
 
-## Output schema
+### Output schema
 
 ```yaml
 verdict: done | needs_work
@@ -123,7 +129,7 @@ gaps:                                # needs_work only; actionable items only
 checked: <viewports, states, and crops actually inspected>
 ```
 
-## Rendering unavailable
+### Rendering unavailable
 
 When vision/screenshot capture is impossible (text-only environment, render crash,
 headless drill without a render surface): do not throw and do not claim visual
@@ -133,6 +139,14 @@ passed. **Still run the deterministic Layer-1 floor** through the MCP-free paths
 design-verifier drill exercises. If no browser-backed render exists at all, return
 `needs_work` with the exact limitation stated ("inspection incomplete: render
 unavailable") — what was not seen is never passed as `done`.
+
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+### Memory
 
 Memory: retain recurring hard failures and habitually omitted states per
 `_shared/memory-flow.md`.

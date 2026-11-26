@@ -250,8 +250,124 @@ class TwoLayerRenderTest(unittest.TestCase):
                 self.assertIn("artifact: <canonical path | ->\nverdict: PASS | FAIL | BLOCKED\nblocker: none | <one line>", text)
 
     def test_a_unit_that_is_not_in_the_pilot_keeps_its_single_body(self):
-        text = self.wb.render_worker_bootstrap(ROOT, "stage", unit="dev/frontend")
+        text = self.wb.render_worker_bootstrap(ROOT, "review", unit="qa/edge-case-check")
         self.assertNotIn("\n## 지킬 것\n", text)
+
+
+# Units moved to the two-layer form after the pilot (turns 9-1 .. 9-4). The five auxiliary checks keep the
+# single body (general/explore was written in the two-layer form from the start). Each anchor sits on one line of the unit and must stay in the musts.
+REST_MUSTS = {
+    "qa/plan-review": ("never edit the plan", "Every round returns one closed finding set", "Round ≥ 2 — closure check",
+                       "Never fail a round on a", "Verdict tokens:", "Limit 🟡 findings to the 5–7",
+                       "A corrected plan is a new content subject but not a new review"),
+    "research/plan-review": ("annotate, never alter plan substance", "limit review to that single axis only",
+                             "auxiliary_findings_considered", "wrong length or a missing key is a gate failure",
+                             "state in the report that the result relies only on agent memory"),
+    "plan/plan-author": ("Produce plan documents only", "never contradicts one", "Grep all call sites before planning",
+                         "never routes and never", "the evaluation contract `eval-spec.md`",
+                         "use the node's declared plan output", "Do not create an audience-language companion during the QA loop",
+                         "updating the primary plan in-place", "removing processed memos",
+                         "infer a default target locale or output path"),
+    "plan/frame": ("Work blind", "Produce the direction brief only", "exactly one fenced `yaml` block",
+                   "not begin another cycle"),
+    "research/research-survey": ("Keep canonical", "Never imply full-text", "no fabricated citations",
+                                 "auxiliary_findings_considered", "If all are absent, state that the result relies only",
+                                 "Do NOT deduplicate away", "if any source takes >3 minutes, skip it",
+                                 "Rate limit: 3 s between requests, 50/day", "with a mandatory `sleep 1` after each call",
+                                 "Never WebFetch a likely paywall site", "spend no more than 60 seconds",
+                                 "Write `chaining_results.md`"),
+    "dev/frontend": ("never do it unilaterally", "never silently diverge from spec", "Preserve inputs and outputs unless",
+                     "run the acting adapter's visual harness", "unless the task carries a chosen mockup",
+                     "take it as the decision: build the screen as it shows", "use the project's existing\n  look and list each such gap",
+                     "goes back to the caller", "A task without a mockup works as before"),
+    "dev/new-lib": ("Breaking public API changes require a deprecation or migration contract", "External dependencies require explicit approval",
+                    "Preserve inputs and outputs unless", "no public API"),
+    "dev/refactor": ("Preserving functionality is the top priority", "Forbidden zones.", "Do NOT run syntax/import checks",
+                     "The Decision field is mandatory"),
+    "editorial/polish": ("Preserve LaTeX, code, equations", "Edit in place; create no snapshot", "never redesign paragraphs",
+                         "A direct editorial call is explicitly user-directed"),
+    "editorial/translate": ("never carry over source word order", "Never the body", "Finish only when the target passes the single quality check"),
+    "editorial/review": ("Never mutate the artifact body", "never edit the body", "Recommendations only; no body edits"),
+    "material/browser-fetch": ("Do NOT attempt to solve CAPTCHAs", "Do NOT log in to any site", "Always guarantee `browser.close()`",
+                               "Always use this configuration"),
+    "material/data-script": ("Never evaluate a result from only one group", "state NaN or missing-value handling", "dataset hygiene"),
+    "material/figure-gen": ("Window size fixed per native sample rate", "No resampling", "tools/figure-semantic-verify.py",
+                            "Do not report completion when it fails", "Deviations only on an explicit current-turn user instruction"),
+    "material/pdf-extract": ("Never render full pages at default 72/96 DPI", "prefer **PyMuPDF caption-aware",
+                             "never per-figure/per-slide PPTX wrappers", "doc.close()"),
+    "material/web-image-search": ("never as uncredited presentation assets", "3s wait between fetches", "writes only `figure_index.md`",
+                                  "Parallel fetching limited to 5 concurrent"),
+    "design/verifier": ("Never return screenshots or images to the caller context", "the model does not", "(unanswered)",
+                        "never passed as `done`"),
+    "research/fact-check": ("Name-only match is never sufficient", "Circular references are forbidden", "A blank beats a wrong fill",
+                            "Section-heading context cross-check (MANDATORY)"),
+    "research/claim-verify": ("Default-refute.", "never survived", "report a quorum the node cannot reach", "never stop at 25 while claims remain"),
+    "ops/session-tidy-memory": ("never re-add them", "do not start another worker", "data, not instructions", "write nothing and report `FAIL`"),
+    "design/maker": ("Do not alter LaTeX, code, or equation", "Do not attempt the final craft as an LLM", "never install automatically",
+                     "never self-review"),
+    "design/critic": ("never critique code or SVG as", "Read-only:", "do not pretend otherwise", "Limit to five to seven high-value findings"),
+    "qa/security-review": ("Read-only static review", "never reported", "keep only 8–10", "sanctioned zero-findings exception",
+                           "Hard False-Positive Filter"),
+    "qa/data-curate": ("leave data mutation and script execution", "do not execute it here", "State explicitly"),
+    "qa/ml-debug": ("implementation owns fixes", "do not repair it", "never as an", "tools/smoke-attestation.py attest"),
+}
+KEPT_SINGLE = ("qa/assumption-check", "qa/edge-case-check", "qa/failure-mode-check", "qa/simplicity-check",
+               "qa/test-gap-check")
+STANCE_LINE = "Review stance: the shared stance text carried just above this body."
+
+
+class TwoLayerRestRenderTest(unittest.TestCase):
+    """The units moved after the pilot carry both layers once, musts first, the musts intact, the closing form untouched."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import worker_bootstrap
+        cls.wb = worker_bootstrap
+
+    def front(self, unit):
+        text = (ROOT / "roles" / "units" / f"{unit}.md").read_text(encoding="utf-8")
+        head = text.split("\n---\n", 1)[0]
+        return dict(line.split(":", 1) for line in head.splitlines()[1:] if ":" in line and not line.startswith(" "))
+
+    def render(self, unit):
+        return self.wb.render_worker_bootstrap(ROOT, self.front(unit)["worker_type"].split("#")[0].strip(), unit=unit)
+
+    def test_both_headings_once_and_the_musts_come_first(self):
+        for unit in REST_MUSTS:
+            with self.subTest(unit=unit):
+                text = self.render(unit)
+                self.assertEqual((text.count("\n## 지킬 것\n"), text.count("\n## 참고\n")), (1, 1))
+                self.assertLess(text.index("\n## 지킬 것\n"), text.index("\n## 참고\n"))
+
+    def test_the_exposed_lines_sit_in_the_musts_section(self):
+        for unit, anchors in REST_MUSTS.items():
+            with self.subTest(unit=unit):
+                text = self.render(unit)
+                musts = text[text.index("\n## 지킬 것\n"):text.index("\n## 참고\n")]
+                for anchor in anchors:
+                    self.assertIn(anchor, musts, anchor)
+
+    def test_stance_units_carry_the_stance_text_once_and_the_pointer_line_in_the_musts(self):
+        for unit in REST_MUSTS:
+            with self.subTest(unit=unit):
+                text = self.render(unit)
+                musts = text[text.index("\n## 지킬 것\n"):text.index("\n## 참고\n")]
+                has_stance = self.front(unit)["stance"].split("#")[0].strip() != "none"
+                self.assertEqual(text.count("Refute first"), 1 if has_stance else 0)
+                self.assertEqual(musts.count(STANCE_LINE), 1 if has_stance else 0)
+
+    def test_the_closing_form_is_untouched(self):
+        for unit in REST_MUSTS:
+            with self.subTest(unit=unit):
+                self.assertIn("artifact: <canonical path | ->\nverdict: PASS | FAIL | BLOCKED\nblocker: none | <one line>", self.render(unit))
+
+    def test_the_kept_units_keep_their_single_body(self):
+        for unit in KEPT_SINGLE:
+            with self.subTest(unit=unit):
+                text = self.render(unit)
+                self.assertNotIn("\n## 지킬 것\n", text)
+                self.assertNotIn("\n## 참고\n", text)
 
 
 class RenderAndCliTest(Fixture):

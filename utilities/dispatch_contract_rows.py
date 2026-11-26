@@ -718,9 +718,18 @@ def unit_continue_receipt(args) -> str:
     """Row fields of a unit leg's session and, for a continued turn, its place in the chain.
 
     `session_id` is the harness session the turn runs in when the adapter chose it up front (Claude); a
-    continued turn adds `continues_attempt_id`, `turn` and `session` (`resumed` or `fresh:<reason>`)."""
+    continued turn adds `continues_attempt_id`, `turn` and `session` (`resumed` or `fresh:<reason>`).
+    An owner that takes over from an earlier owner of its route records the same `session`; a later turn of
+    a closed route also its place in the chain."""
     if not is_unit_leg_launch(args):
-        return ""
+        import unit_continue
+        plan = getattr(args, "session_plan", None)
+        if not unit_continue.owner_predecessor(args) or plan is None:
+            return ""
+        out = ""
+        if getattr(args, "continues_attempt_id", None):
+            out += f",continues_attempt_id={args.continues_attempt_id},turn={int(getattr(args, 'turn', 0) or 2)}"
+        return out + f",session={plan.row_value}"
     out = f",session_id={args.unit_session_id}" if getattr(args, "unit_session_id", "") else ""
     if getattr(args, "continues_attempt_id", None):
         out += f",continues_attempt_id={args.continues_attempt_id},turn={int(getattr(args, 'turn', 0) or 2)}"

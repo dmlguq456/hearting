@@ -84,9 +84,11 @@ Do the next action the command or hook prints, in order:
 2. Then `parent_next`. `end-turn`: end the turn with no wait, poll, re-run,
    or recap; the runtime wakes you. `bounded-wait`: run `parent_next_command`
    once.
-3. `resume_command` and `correction_command` are handles, not orders: run
-   `resume_command` when woken or told to, and answer a BLOCKED owner with
-   `correction_command --message-file <file>`.
+3. `resume_command`, `correction_command` and `close_command` are handles,
+   not orders: run `resume_command` when woken or told to, answer a BLOCKED
+   owner with `correction_command --message-file <file>` (on a route closed
+   PASS it hands the same work a follow-up in scope), and run `close_command`
+   when the person stops the work.
 
 No directive in view: read the printed `receipt_file`; a missing directive is
   not `end-turn`, so keep launch output unfiltered.
