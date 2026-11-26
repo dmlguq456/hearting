@@ -98,40 +98,69 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(decode("\x1b[200~가\x1b[1;32m나\x1b[m\r\n다\x1b[201~".encode()), [(KEY_PASTE, "가나\n다")])
 
     def test_a_stalled_paste_goes_on_and_only_a_key_pressed_then_ends_it(self):
-        """Review 1861: after a stall the rest of a paste is its text; a key pressed then (nothing readable right after
-        it: Enter, Esc after its 25 ms, Ctrl+] at any time) ends the paste and is that key; the paste's rest is dropped."""
+        """Review 1861: after a stall the rest of a paste is its text; a key pressed then (a read holding one key with
+        nothing after it for the key's wait: Enter, Esc; Ctrl+] at any time) ends the paste and is that key; then only
+        the paste's bulk is dropped, a read holding one key goes on. A clock moved on stands in for every wait."""
         def stalled(data):
             reader = _CursesInput(FakeCurses, explorer_mode=True)
             events = decode(data, reader=reader)
             reader.paste_since -= 2
             events.append(reader.read(FakeScreen()))
             return reader, events
+
+        def waited(reader):
+            reader.paste_key_since -= 1
+            return [reader.read(FakeScreen()), reader.read(FakeScreen())]
         # The rest's CR, tab and escape sequence are text (a CR never Enter).
         reader, events = stalled("\x1b[200~첫 줄\r둘".encode())
         self.assertEqual(events, [(KEY_PASTE_PART, "첫 줄\n둘")])
         self.assertEqual(decode("째 줄\r셋\t째\x1b[31m!\x1b[201~".encode(), reader=reader), [(KEY_PASTE, "째 줄\n셋\t째!")])
-        # Enter pressed: the paste ends as what came, then Enter; its rest is dropped up to its end mark.
+        # A lone CR, then the rest within the wait: the paste's line break (review 1861, A).
+        reader, _ = stalled("\x1b[200~첫 줄".encode())
+        self.assertEqual(decode(b"\r", reader=reader), [])
+        self.assertEqual(decode("둘째 줄\r셋째\x1b[201~".encode(), reader=reader), [(KEY_PASTE, "\n둘째 줄\n셋째")])
+        # Enter pressed: the paste ends as what came, then Enter; its bulk after it is dropped up to its end mark.
         reader, _ = stalled("\x1b[200~부분 글".encode())
-        self.assertEqual(decode(b"\r", reader=reader), [(KEY_PASTE, ""), (13, None)])
+        self.assertEqual(decode(b"\r", reader=reader), [])
+        self.assertEqual(waited(reader), [(KEY_PASTE, ""), (13, None)])
         self.assertEqual(decode("나머지\r끝\x1b[201~q".encode(), reader=reader), [(ord("q"), None)])
         # A byte right after it: the paste's own CR.
         reader, _ = stalled(b"\x1b[200~a")
         self.assertEqual(decode(b"\rb\x1b[201~", reader=reader), [(KEY_PASTE, "\nb")])
-        # Esc pressed: after its 25 ms with nothing more; a `[` within them is a sequence of the paste.
+        # Esc pressed after the wait; a `[` within it is a sequence of the paste (a late end mark too).
         reader, _ = stalled(b"\x1b[200~log")
         self.assertEqual(decode(b"\x1b", reader=reader), [])
-        reader.paste_key_since -= 1
-        self.assertEqual(reader.read(FakeScreen()), (KEY_PASTE, ""))
-        self.assertEqual(reader.read(FakeScreen()), (27, None))
+        self.assertEqual(waited(reader), [(KEY_PASTE, ""), (27, None)])
         self.assertEqual(decode(b"[31mred\r\x1b[201~", reader=reader), [])
         reader, _ = stalled(b"\x1b[200~ab")
         self.assertEqual(decode(b"\x1b", reader=reader), [])
         self.assertEqual(decode(b"[201~", reader=reader), [(KEY_PASTE, "")])
         self.assertFalse(reader.has_buffered_input())
-        # Ctrl+] at any time, not stalled too; with no end mark the dropping ends a second after its last byte.
+        # While the bulk is dropped a read holding one key goes on (review 1861, B): a typed key, a character of several
+        # bytes, an arrow, a mouse report; several characters in one read are the bulk; a new paste goes on and ends it.
+        reader, _ = stalled(b"\x1b[200~endless")
+        decode(b"\x1b", reader=reader)
+        waited(reader)
+        self.assertEqual(decode(b"h", reader=reader), [(ord("h"), None)])
+        self.assertEqual(decode("가".encode(), reader=reader), [(0xea, None), (0xb0, None), (0x80, None)])
+        self.assertEqual(decode(b"\x1b[A", reader=reader), [(FakeCurses.KEY_UP, None)])
+        self.assertEqual(decode("안녕".encode(), reader=reader), [])
+        self.assertTrue(reader.paste_discard)
+        self.assertEqual(decode(b"\x1b[200~new\x1b[201~", reader=reader), [(KEY_PASTE, "new")])
+        self.assertFalse(reader.has_buffered_input())
+        # Its end: a second after the last read it dropped; keys going on do not count it.
+        reader, _ = stalled(b"\x1b[200~endless")
+        decode(b"\x1b", reader=reader)
+        waited(reader)
+        reader.paste_since -= 2
+        self.assertEqual(decode(b"k", reader=reader), [(ord("k"), None)])
+        reader.read(FakeScreen())
+        self.assertFalse(reader.paste_discard)
+        # Ctrl+] at any time, not stalled too; with no end mark the dropping ends a second after the last bulk.
         reader = _CursesInput(FakeCurses, explorer_mode=True)
         decode("\x1b[200~앞 글".encode(), reader=reader)
-        self.assertEqual(decode(b"\x1d", reader=reader), [(KEY_PASTE, "앞 글"), (29, None)])
+        self.assertEqual(decode(b"\x1d", reader=reader), [])
+        self.assertEqual(waited(reader), [(KEY_PASTE, "앞 글"), (29, None)])
         self.assertEqual(decode(b"more", reader=reader), [])
         reader.paste_since -= 2
         reader.read(FakeScreen())
@@ -147,6 +176,12 @@ class ReaderTest(unittest.TestCase):
                 parts = [payload for _code, payload in events if payload]
                 parts += [payload for _code, payload in decode(tail + b"\x1b[201~", reader=reader)]
                 self.assertEqual("".join(parts), whole)
+        # A pressed key leaves out what is not whole of the paste (review 1861, 🟡1).
+        for head in (b"x\x1b[3", b"x" + "\uac00".encode()[:2]):
+            with self.subTest(head=head):
+                reader, events = stalled(b"\x1b[200~" + head)
+                decode(b"\r", reader=reader)
+                self.assertEqual([payload for _code, payload in events + waited(reader) if payload], ["x"])
 
     def test_word_text_and_delete_keys(self):
         self.assertEqual(decode(b"\x1b[1;5D\x1b[1;3D"), [(KEY_WORD_LEFT, None)] * 2)

@@ -22,16 +22,29 @@ const WORD_LEFT=['\x1b[1;3D','\x1b[1;5D'],WORD_RIGHT=['\x1b[1;3C','\x1b[1;5C'],W
 const TEXT_START=['\x1b[1;5H'],TEXT_END=['\x1b[1;5F'];
 // 11-26: a paste whose bytes stop this long has stalled (Fleet's `_PASTE_IDLE`); review 1861: it is not over then.
 const PASTE_IDLE=1000;
+// Review 1861: while a paste is open the person's key is a read holding one key with nothing after it for this long
+// (Fleet's `_PASTE_KEY_WAIT`); a paste resumed after a stall can bring its next byte, a CR, alone, its rest tens of ms on.
+const PASTE_KEY_WAIT=150;
+// A read holding one key as a person types it: one byte, one character, or one whole escape sequence (an arrow, a
+// modified key, a mouse or focus report, a terminal's reply). A paste's bulk holds more. Fleet's reader tells keys from
+// a paste by the same rule (`render_input._one_key`): to end a paste and to pass a dropping.
+const ONE_SEQUENCE=/^\x1b(?:\[[0-?]*[ -\/]*[@-~]|O[\x20-\x7e]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x20-\x7f])$/;
+function oneKey(data){
+  if(data.length===1||ONE_SEQUENCE.test(data.toString('latin1')))return true;
+  let text=data.toString('utf8');if(text[0]==='\x1b')text=text.slice(1);
+  const chars=[...text];return chars.length===1&&chars[0]!=='\ufffd'&&chars[0]>=' ';
+}
 const wordChar=c=>/[\p{L}\p{N}\p{M}_]/u.test(c||'');
-module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE}) {
+module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,keyWait=PASTE_KEY_WAIT}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false,pasteCR=false;
   // 11-26 (review 1861): a paste whose bytes stop for a second has stalled. It is not over: what comes after is still
-  // its text (a line break, a tab, an Esc of its own). Only a key pressed then, a read of its own (Esc, Enter,
-  // Ctrl+]), ends it and is that key; the rest of that paste, if more comes, is dropped (`discarding`) up to its end
-  // mark or a second with no byte, never typed keys and never the native's. The line breaks a paste ends a secret
-  // with are held until more of it comes; `pasteLines`: this paste put a line break inside the secret.
-  let pasteTimer,heldBreaks=0,pasteLines=false,stalled=false,discarding=false,discardTail='',discardTimer;
+  // its text (a line break, a tab, an Esc of its own). Only a key pressed then (`oneKey` with nothing after it for
+  // `keyWait`: Enter, Esc; Ctrl+] at any time in a paste) ends it and is that key (`held` waits for it). The rest of
+  // that paste is then dropped (`discarding`) but only its bulk: a read holding one key, or a new paste, goes on. The
+  // line breaks a paste ends a secret with are held until more of it comes; `pasteLines`: this paste put a line break
+  // inside the secret.
+  let pasteTimer,heldBreaks=0,pasteLines=false,stalled=false,discarding=false,discardTail='',discardTimer,held=-1,heldTimer;
   // 11-26: the answer's rows are laid out at the popup's width when painted; ↑↓ move between those rows (the
   // cell column held while they repeat), and the rows shown follow the place when the answer is taller than its room.
   let answerColumns=60,goal=null,answerTop=0,answerSeat=null;
@@ -110,7 +123,7 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE}) 
   }
   // ↑↓ choose only while this question takes a choice; otherwise they scroll as before.
   function choosing(row){return !!row&&focused&&active(row)&&!state(row.item).typing[row.question.id]&&choices(row).length>0;}
-  function resetParser(){clearTimeout(escapeTimer);escapeTimer=undefined;endPaste();decoder=new StringDecoder('utf8');escape='';skipTail=false;goal=null;}
+  function resetParser(){clearTimeout(escapeTimer);escapeTimer=undefined;clearTimeout(heldTimer);heldTimer=undefined;held=-1;endPaste();decoder=new StringDecoder('utf8');escape='';skipTail=false;goal=null;}
   function endPaste(){clearTimeout(pasteTimer);pasteTimer=undefined;pasting=false;stalled=false;pasteCR=false;heldBreaks=0;pasteLines=false;}
   // A paste ends (its end mark, or a key pressed after it stalled): a secret pasted in several lines keeps one of the
   // line breaks it ended with (a private key needs its last one), a one-line secret none.
@@ -122,14 +135,31 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE}) 
   function pasteGoesOn(){stalled=false;clearTimeout(pasteTimer);pasteTimer=setTimeout(()=>{if(pasting){stalled=true;changed();}},pasteIdle);}
   function discardRest(){discarding=true;discardTail='';armDiscard();}
   function armDiscard(){clearTimeout(discardTimer);discardTimer=setTimeout(()=>{discarding=false;discardTail='';changed();},pasteIdle);}
-  // The rest of a paste a pressed key ended: dropped up to and with its end mark (split across reads too); what
-  // follows the mark is given back.
+  function stopDiscard(){clearTimeout(discardTimer);discardTimer=undefined;discarding=false;discardTail='';}
+  // The rest of a paste a pressed key ended. Only its bulk (a read of more than one key) is dropped, up to and with its
+  // end mark (split across reads too); a read holding one key and a new paste are the person's and go on, and what
+  // follows the end mark is given back. The dropping ends at that end mark, at a new paste, or a second after the last
+  // read it dropped (only those count the second again), so it ends however the person types.
   function swallow(data){
     if(!discarding)return data;
-    const joined=discardTail+data.toString('latin1'),end=joined.indexOf('\x1b[201~');
-    if(end<0){discardTail=joined.slice(-5);armDiscard();return Buffer.alloc(0);}
-    clearTimeout(discardTimer);discarding=false;discardTail='';
-    return data.subarray(end+6-(joined.length-data.length));
+    const text=data.toString('latin1');
+    if(text.startsWith('\x1b[200~')){stopDiscard();return data;}
+    const joined=discardTail+text,end=joined.indexOf('\x1b[201~');
+    if(end>=0){stopDiscard();return data.subarray(end+6-(joined.length-text.length));}
+    discardTail=joined.slice(-5);
+    if(oneKey(data))return data;
+    armDiscard();return Buffer.alloc(0);
+  }
+  // A key pressed in a paste: nothing came within `keyWait` after it. It ends the paste (what is not whole of it, an
+  // escape sequence not ended or a character's first bytes, is left out) and is that key; the paste's bulk that may
+  // still come is dropped.
+  function pressed(){
+    heldTimer=undefined;const byte=held;held=-1;
+    if(byte<0||!pasting||!focused)return;
+    escape='';decoder=new StringDecoder('utf8');finishPaste();discardRest();
+    if(byte===0x0d){const row=current();if(row)enterKey(row);}
+    else{leave();if(byte===0x1b)escapedAt=Date.now();}
+    changed();
   }
   // Correction 3 (11-13): a settled question (answered, expired, cancelled) is kept only while
   // the person reads its receipt in the focused editor; unfocused it is let go, so it is no
@@ -553,17 +583,13 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE}) 
   }
   function input(data){
     if(discarding){data=swallow(data);if(!data.length){changed();return data;}}
-    // 11-26 (review 1861): in a paste a pressed key (a read of its own) is told from the paste's bytes: Ctrl+] at any
-    // time, Enter and Esc once the paste stalled. It ends the paste (its rest, if more comes, is dropped) and is that
-    // key. A pressed Esc waits its usual 25 ms: a `[` then is an escape sequence of the paste, which goes on.
-    if(pasting&&focused&&data.length===1&&(data[0]===0x1d||stalled&&(data[0]===0x0d||data[0]===0x1b))){
-      clearTimeout(escapeTimer);escapeTimer=undefined;escape='';
-      if(data[0]===0x1b){
-        escape='\x1b';
-        escapeTimer=setTimeout(()=>{if(escape==='\x1b'&&pasting&&focused){escape='';finishPaste();discardRest();leave();escapedAt=Date.now();}},25);
-        changed();return Buffer.alloc(0);
-      }
-      finishPaste();discardRest();
+    // 11-26 (review 1861): in a paste a key the person pressed is told from the paste's own bytes by one rule: a read
+    // holding one key (`oneKey`), with nothing after it for `keyWait`. Ctrl+] at any time, Enter and Esc once the paste
+    // stalled; such a read waits (`held`). A byte within the wait makes it the paste's own (a line break, an escape
+    // sequence's start, a control character), read on with what came.
+    if(held>=0){clearTimeout(heldTimer);heldTimer=undefined;data=Buffer.concat([Buffer.from([held]),data]);held=-1;}
+    else if(pasting&&focused&&oneKey(data)&&data.length===1&&(data[0]===0x1d||stalled&&(data[0]===0x0d||data[0]===0x1b))){
+      held=data[0];heldTimer=setTimeout(pressed,keyWait);changed();return Buffer.alloc(0);
     }
     for(let i=0;i<data.length;i++){
       if(!focused){changed();return data.subarray(i);}
@@ -655,8 +681,9 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE}) 
       line:view.brief_line||fallback[0].slice(1),choices:choices(row||listed[0]).length,answerable:active(row||listed[0])};
   }
   return {answeredEscape,escaped(){escapedAt=Date.now();},get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},
-    // `pasting`: a paste stands, or the rest of one a pressed key ended is still being dropped (`swallow`).
-    get pasting(){return pasting||discarding;},get stalled(){return pasting&&stalled;},get discarding(){return discarding;},swallow,
+    // `pasting`: a paste stands (the panel's mouse reader leaves its bytes alone); `discarding`: the bulk of one a pressed
+    // key ended is dropped (`swallow`, which the host asks first of every read).
+    get pasting(){return pasting;},get stalled(){return pasting&&stalled;},get discarding(){return discarding;},swallow,
     get question(){return !!current();},
     get typing(){const row=current();return focused&&!!row&&!!state(row.item).typing[row.question.id];},
     enter,leave,update,input,detail:preview,summary,sent:sentLines,references,
