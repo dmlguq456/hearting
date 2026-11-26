@@ -87,7 +87,7 @@ Do the next action the command or hook prints, in order:
    not orders: run `resume_command` when woken or told to, answer a BLOCKED
    owner with `correction_command --message-file <file>` (on a route closed
    PASS it hands the same work a follow-up in scope), and run `close_command`
-   to accept the result as it is or when the person stops the work.
+   to accept the result or stop.
 
 No directive in view: read the printed `receipt_file`; a missing directive is
   not `end-turn`, so keep launch output unfiltered.
