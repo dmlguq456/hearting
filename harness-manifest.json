@@ -613,6 +613,12 @@
   }
  },
  "units": {
+  "analysis/analyze": {
+   "family": "analysis",
+   "role": "deep maker",
+   "worker_type": "stage",
+   "floor": "high"
+  },
   "design/critic": {
    "family": "design",
    "role": "fast reviewer",
@@ -825,6 +831,10 @@
   }
  },
  "modes": {
+  "analysis/analyze": {
+   "unit": "analysis/analyze",
+   "status": "portable-persona"
+  },
   "design/_design_rules": {
    "status": "adapter-coupled",
    "internal": true

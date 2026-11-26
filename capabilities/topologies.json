@@ -4337,6 +4337,7 @@
   ],
   "unit_catalog": "roles/units",
   "unit_families": [
+    "analysis",
     "design",
     "dev",
     "editorial",
@@ -4582,6 +4583,10 @@
     "analysis-qa": {
       "kind": "unit-io",
       "unit": "qa/code-review"
+    },
+    "analysis-answer": {
+      "kind": "unit-io",
+      "unit": "analysis/analyze"
     },
     "profile-write": {
       "kind": "capability-doc",
@@ -5010,10 +5015,12 @@
         "summary": "Write the draft from the approved strategy."
       },
       "autopilot-draft:quality-review": {
-        "summary": "Review the draft for structure and style."
+        "summary": "Review the draft for structure and style; borrowed, it fits any written text (readability and terms, not whether the claims are right).",
+        "shareable": true
       },
       "autopilot-draft:fact-verify": {
-        "summary": "Verify the draft's claims against the evidence map."
+        "summary": "Verify the draft's claims against the evidence map; borrowed, it fits text whose factual claims outside sources can check (it searches the web), not code evidence at file:line.",
+        "shareable": true
       },
       "autopilot-draft:finalize": {
         "summary": "Produce the final document and the pipeline summary."
@@ -5159,7 +5166,8 @@
         "summary": "Fact-check the profile against its evidence."
       },
       "audit:inspect": {
-        "summary": "Inspect the target artifact for drift, omissions and unsupported claims."
+        "summary": "Inspect the target artifact for drift, omissions and unsupported claims; borrowed, it fits text whose claims cite local research cards (verbatim matching).",
+        "shareable": true
       },
       "audit:report": {
         "summary": "Write the audit report from the inspection findings.",
@@ -5406,6 +5414,51 @@
         "execution_needs": [
           "host-process"
         ]
+      },
+      "analyze-project:analysis": {
+        "summary": "Read what is at hand and answer the brief's question: the conclusion, where its evidence is, and what stays unknown.",
+        "shareable": true,
+        "optional": {
+          "modes": [
+            "code",
+            "doc",
+            "paper"
+          ],
+          "after": [],
+          "before": [],
+          "node": {
+            "id": "analysis",
+            "kind": "pipeline-stage",
+            "depends_on": [],
+            "role": "deep maker",
+            "inputs": [
+              "task",
+              "target-artifact"
+            ],
+            "outputs": [
+              "analysis.md"
+            ],
+            "write_scope": [
+              "analysis.md",
+              "analysis/**"
+            ],
+            "resource_class": "normal",
+            "completion_gate": "analysis-answer",
+            "dispatch_depth": 2,
+            "fallback_hops": [
+              "same-harness-headless",
+              "cross-harness-headless",
+              "inline"
+            ],
+            "unit": "analysis/analyze",
+            "model_profile": "balanced-deep",
+            "continuation": {
+              "kind": "inline-next"
+            },
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
+          }
+        }
       }
     }
   }

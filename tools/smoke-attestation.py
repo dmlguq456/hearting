@@ -179,8 +179,7 @@ def verify_execution_environment(data, command, cwd, *, environ=None, remote=Non
     recorded = data.get("execution_environment") if isinstance(data, dict) else None
     if not RESOURCE_ENV.valid_execution_identity(recorded):
         raise ValueError("smoke execution environment is unbound")
-    current = RESOURCE_ENV.execution_identity(command, cwd, environ=environ, remote=remote)
-    if not RESOURCE_ENV.valid_execution_identity(current) or current != recorded:
+    if not RESOURCE_ENV.identity_matches(recorded, command, cwd, environ=environ, remote=remote):
         raise ValueError("smoke execution environment mismatch")
     return True
 

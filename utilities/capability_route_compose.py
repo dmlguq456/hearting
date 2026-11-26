@@ -393,9 +393,15 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
         follower = rows[after[0] + 2][1]
         order[follower] = {"depends_on": list(order.get(follower, {}).get("depends_on") or []) + [node_id]}
     if unknown:
+        # The kind stays the one named; another kind's shareable part is written as `capability:stage`.
+        # A part of the named kind itself is not "from another kind" here (`stages` still lists it).
+        borrowable = [part for part in TOPO.borrowable_parts(registry, base_recipe)
+                      if part.partition(":")[0] != host]
         raise ValueError(
             "compose-graph-unknown-node:" + ",".join(unknown)
             + " (available: " + ",".join(view) + ")"
+            + (" (borrow from another kind as capability:stage: " + ",".join(borrowable) + ")"
+               if borrowable else "")
             + " (run `capability-route.py stages --capability "
             + base_recipe["capability"] + "` to list valid stage ids)"
         )
@@ -546,6 +552,7 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
                          "catalog": bool(part) or node_id in optional}
     # SD-165 name mapping, sealed as `part_io` (absent on a route that uses no catalog part).
     produced = {}
+    borrowed_results = set()   # sealed outputs of the borrowed parts placed so far
     for index, node in enumerate(nodes):
         info = meta[node["id"]]
         io = {}
@@ -566,6 +573,18 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
             handed = [out for out in nodes[index - 1]["outputs"] if not TOPO._is_semantic_output(out)]
             if handed and not set(handed) & (set(inputs) | set(io.values())):
                 inputs.extend(handed)
+        if (index and nodes[index - 1].get("kind") == "review-worker"
+                and node.get("kind") not in ("capability-owner", "resource-runner")):
+            # A review hands on the borrowed result it read together with its verdict, whether the
+            # review is borrowed or the host's own: the worker stage after it reads what was reviewed.
+            # A kernel node binds exactly what it names (a resource run its attestation and config,
+            # a deploy every review whose output it reads as a judge of its command), so it gets none.
+            review = nodes[index - 1]
+            reviewed = [name for name in review["inputs"] if name in borrowed_results]
+            if reviewed:
+                verdict = [out for out in review["outputs"] if not TOPO._is_semantic_output(out)]
+                inputs.extend(name for name in dict.fromkeys(reviewed + verdict)
+                              if name not in inputs and name not in io.values())
         node["inputs"] = inputs
         io.update(info["moved"])
         if io:
@@ -573,6 +592,8 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
         for original, sealed in zip(info["originals"], node["outputs"]):
             if not TOPO._is_semantic_output(original):
                 produced[original] = sealed
+                if node.get("part") and not node.get("plan_stage"):
+                    borrowed_results.add(sealed)
     declared_groups = [(group, False) for group in base_recipe["standard_plus"].get("parallel_groups") or []]
     for _, node_id, _, part in rows:
         if part:  # a borrowed anchor brings its own group, re-keyed to the borrowed node id
@@ -596,7 +617,13 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
             closing_boundaries = set(terminal_ids)
             owner_id, suffix = "owner-close", 1
             occupied = {node["id"] for node in nodes} | {out for node in nodes for out in node["outputs"]}
-            while owner_id in occupied or owner_id + ".md" in occupied:
+            # A literal-anchor kind (design, spec) spells its bucket in every write scope:
+            # the summary sits at each anchor's root, the first being the output.
+            literal_roots = scope.get("cycle_anchors") if scope.get("anchor_mode") == "literal" else None
+
+            def closing(name, _roots=tuple(literal_roots or ())):
+                return [f"{root}/{name}.md" for root in _roots] or [name + ".md"]
+            while owner_id in occupied or set(closing(owner_id)) & occupied:
                 suffix += 1
                 owner_id = f"owner-close-{suffix}"
             terminals = [node for node in nodes if node["id"] in terminal_ids]
@@ -605,7 +632,7 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
                 "depends_on": [node["id"] for node in terminals], "role": "deep orchestrator",
                 "inputs": list(dict.fromkeys(item for node in terminals
                                              for item in node["inputs"] + node["outputs"])),
-                "outputs": [owner_id + ".md"], "write_scope": [owner_id + ".md"],
+                "outputs": closing(owner_id)[:1], "write_scope": closing(owner_id),
                 "resource_class": "normal", "completion_gate": "compose-owner-close",
                 "dispatch_depth": 1, "model_profile": registry["owner_profile_by_intensity"]["standard"],
                 "fallback_hops": ["same-harness-headless", "cross-harness-headless", "inline"],
