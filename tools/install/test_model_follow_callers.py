@@ -455,13 +455,13 @@ class OneRefreshPerUpdateTests(AnotherListThroughCallersTests):
         for name, value in {"dead pid": f"{self.dead_pid()}:codex", "no pid": "codex", "pid not a number": "x:codex",
                             "empty": ""}.items():
             with self.subTest(value=name), mock.patch.dict(os.environ, {model_follow.REFRESHED_ENV: value}):
-                (self.root / "refreshed").unlink(missing_ok=True)
+                before = self.asked()
                 self.update_with_an_activation()
-                self.assertEqual(self.asked(), 1)  # this update asked once for itself
+                self.assertEqual(self.asked() - before, 1)  # this update asked once for itself
         with mock.patch.dict(os.environ, {model_follow.REFRESHED_ENV: f"{self.dead_pid()}:codex"}):
-            (self.root / "refreshed").unlink(missing_ok=True)
+            before = self.asked()
             self.bounded(lambda: runtime_activation._follow_models("codex", ROOT, "global"))
-            self.assertEqual(self.asked(), 1)  # a pass that no live update stands behind asks as ever
+            self.assertEqual(self.asked() - before, 1)  # a pass that no live update stands behind asks as ever
 
     def test_the_value_does_not_carry_an_earlier_one_and_names_only_the_judged_harnesses(self):
         inside = []
