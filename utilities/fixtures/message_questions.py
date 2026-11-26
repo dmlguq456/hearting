@@ -111,6 +111,13 @@ class MessageQuestionFixture:
         sys.modules[spec.name] = runner
         spec.loader.exec_module(runner)
         self.stack.callback(sys.modules.pop, spec.name, None)
+        # The body the courier renders for each send, as the prompt command reads it.
+        self.bodies = []
+        real_prompt = runner.cmd_prompt
+        def prompt(args, **kwargs):
+            self.bodies.append(Path(args.body_file).read_text(encoding="utf-8").rstrip("\n"))
+            return real_prompt(args, **kwargs)
+        runner.cmd_prompt = prompt
         harness, sid = signal["harness"], signal["session_id"]
         pane = "fixture:p1"
         resolved = {"pane": pane, "harness": harness, "session_id": sid,

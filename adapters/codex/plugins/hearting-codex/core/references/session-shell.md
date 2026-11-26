@@ -1022,6 +1022,10 @@ whole words. Every count of answer waits (Fleet's head and session rows, the
 it is answered: a question the panel answers, a Claude native request, a marker
 question and a human gate. Only a blocked worker's wait (its parent agent's) and
 a finished one (closed, replaced, expired, an answer on its way) are not counted.
+While an incomplete observation lists none of a session's waits, that session's own
+question still open in its source (a registered or a marker question) counts as one wait
+of an unknown total (`◑답 대기 ?` on the status line, the OpenCode footer and the panel);
+a session with none shows no count (11-26).
 The questions section holds what the person can answer here now (answerable
 ones first; `Ctrl+]` opens the popup on the first of them); a counted wait answered in another
 place is one dim guidance line beside the count saying where

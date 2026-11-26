@@ -3424,6 +3424,64 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
             self.assertEqual(state.cached_statusline("claude", "sid-a"), (None, ""))
             request.assert_called_once_with("claude", "sid-a")
 
+    def test_an_incomplete_observation_shows_unknown_only_for_a_session_with_its_own_open_question(self):
+        # 11-26: an incomplete observation that lists no wait of a session leaves it without a badge,
+        # unless the session's own question source is open: then the status lines read one wait of
+        # an unknown total (`?`), as the panel's formula does for the same counts. A complete
+        # observation's counts stay as they were and never read the source.
+        import contextlib
+        import io
+        import re
+        import session_tidy as tidy
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+        from fleet import session_line
+
+        def statusline(sid):
+            painted = session_line.claude_native_statusline(
+                {"session_id": sid, "cwd": self.tmp.name}, {"COLUMNS": "200", "TERM": "xterm-256color"})
+            return re.sub(r"\x1b\[[0-9;]*m", "", painted)
+
+        def footer(sid):   # the OpenCode footer's helper read
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(state.main(["--statusline", "opencode", sid]), 0)
+            return out.getvalue().split("\n")[0]
+
+        def publish(complete):
+            now = time.time()
+            self.assertTrue(state.publish_cache({"items": [], "observed_at": now, "complete": complete,
+                "route_sessions": {key: now for key in ("claude\0sid-a", "claude\0sid-b", "opencode\0sid-o")}}))
+
+        wait = session_line.answer_wait_word()
+        with mock.patch.object(state, "_request_producer"):
+            publish(False)
+            self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 0))
+            self.assertNotIn(wait, statusline("sid-a"))
+            signal = state.register_message("claude", "sid-a", tidy.Seat("project", "seat-a"), "질문?",
+                                            sequence=0, cwd=self.tmp.name)
+            self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 1))
+            self.assertIn(wait + " ?", statusline("sid-a"))
+            # Another session's open question is not this one's.
+            self.assertEqual(state.cached_statusline("claude", "sid-b")[0], (-1, 0))
+            self.assertNotIn(wait, statusline("sid-b"))
+            state.register_message("opencode", "sid-o", tidy.Seat("project", "seat-o"), "질문?",
+                                   sequence=0, cwd=self.tmp.name)
+            self.assertEqual(footer("sid-o"), "? 1")
+            self.assertEqual(footer("sid-b"), "? 0")
+            # An answered question no longer waits.
+            path = state._signal_path(signal)
+            answered = {**state._read(path), "lifecycle": "answered"}
+            state._write(path, answered)
+            self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 0))
+            self.assertNotIn(wait, statusline("sid-a"))
+            # A complete observation decides as before, the session's own source unread.
+            state._write(path, {**answered, "lifecycle": "open"})
+            publish(True)
+            with mock.patch.object(state, "_own_open_signal") as own:
+                self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (0, 0))
+                self.assertNotIn(wait, statusline("sid-a"))
+                own.assert_not_called()
+
     def test_statusline_tidy_notice_is_a_third_line_only_when_asked(self):
         # PG-20: the OpenCode footer asks for the waiting session-tidy result the
         # Claude status line shows; Claude's two-line read stays unchanged.

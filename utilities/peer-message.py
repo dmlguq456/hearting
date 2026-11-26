@@ -179,6 +179,11 @@ def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=N
 # holds at most one unreceived message per visible text: a message sealed while another
 # is waiting goes in the old form (`_prepare_peer_message`), and the arrival that finds
 # one waiting is that message's arrival.
+#
+# The old form shows the whole text. A runtime body holding a secret question's answer
+# (`private_body`) that is not sealed in a display form shows a pointer instead: its body
+# is the transfer's private payload (`body_ref`, the one the receive checks already read),
+# and the window gets one header line, the payload's path and the receipt lines.
 # ---------------------------------------------------------------------------
 _DISPLAY_FORM = 2
 _DISPLAY_AGENT_MAX_CHARS = 12000
@@ -860,8 +865,12 @@ def _reference_access_evidence_valid(evidence, recipient):
 
 def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
                           reference_evidence=None, refs=(), producer_binding=None, handoff=None,
-                          request=None, display=None):
+                          request=None, display=None, private_body=False):
     """Seal a transmission intent before delivery (the receiver may run immediately).
+
+    ``private_body``: a runtime body the person's window must not show (it holds the answer to a
+    secret question). When no one-line display form is sealed for it, the body is published as
+    the transfer's private payload and the window gets only `_private_body_envelope`.
 
     This immutable record shares the ledger's local write trust boundary; it is
     not an authorization token. The final ledger row refers to this message_id.
@@ -954,6 +963,15 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
                         _publish_display_pointer(display_entry, ref)
                 except (OSError, ValueError):
                     display_entry = None
+        if (display_entry is None and private_body and producer_binding is not None
+                and include_trailer and body_ref is None and request is None and handoff is None):
+            # No one-line form carries it (Codex, an unsigned window, the same line still waiting,
+            # a delivery with no short form): the body goes to the private payload the existing
+            # checks read, and the window shows the pointer and receipt lines. A payload that
+            # cannot be published fails the seal, as a request's does; nothing is sent in full.
+            body_ref, payload_path = _write_body_payload(ref, raw_body, source_sha256)
+            text = _private_body_envelope(body, payload_path) + "\n\n" + trailer
+            record["body_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if display_entry is not None:
             record["display"] = display_entry
         if handoff is not None:
@@ -1085,6 +1103,17 @@ def _body_reference_envelope(body, payload_path, raw_size, sender, ref, *, comma
         if len(wire.encode("utf-8")) <= _BODY_REFERENCE_ENVELOPE_BYTES:
             return envelope
     return None
+
+
+_PRIVATE_BODY_HEADER = ("Hearting delivery holding a private answer: the person's window shows only "
+                        "this pointer. Read the complete text in the file below before acting on it:")
+
+
+def _private_body_envelope(body, payload_path):
+    """The window text for a ``private_body`` delivery: the header, the private payload's path and
+    the body's receipt lines (``HEARTING_RECEIPT_V1``, read by its carriers and Codex's recovery)."""
+    markers = [line for line in body.splitlines() if line.startswith("HEARTING_RECEIPT_V1 ")]
+    return "\n".join([_PRIVATE_BODY_HEADER, f"`{payload_path}`", *markers])
 
 
 def _body_reference_descriptor_valid(descriptor, ref):
@@ -2749,12 +2778,14 @@ def pending_messages(recipient, *, deadline=None):
 def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), receipt="target-form-open",
                          with_trailer=True, reference_evidence=None, first_input_process=None,
                          producer_binding=None, handoff=None, original_target=None, server=None,
-                         prepared=None, namespace=None, request=None, display_line=None):
+                         prepared=None, namespace=None, request=None, display_line=None,
+                         private_body=False):
     """A retry reuses a pending intent; ordinary sends need no preparation lock.
 
     A display form (see the block above ``_transfer_path``) is sealed only for a recipient
     session that has shown its code reads it: a peer message always, a runtime message when
-    its producer supplies ``display_line`` (not to Codex, see below).
+    its producer supplies ``display_line`` (not to Codex, see below). A runtime body marked
+    ``private_body`` that gets no display form is sealed as a pointer to its private payload.
 
     ``prepared`` (a list) receives the authoritative sealed row, stored or reused, so a
     caller can keep its courier even when a later read of that row fails.
@@ -2913,7 +2944,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         return found or _prepare_peer_message(body, sender, recipient, include_trailer=with_trailer,
                                               reference_evidence=reference_evidence, refs=refs,
                                               producer_binding=producer_binding, handoff=handoff,
-                                              request=request, display=display)
+                                              request=request, display=display,
+                                              private_body=private_body)
     key_parts = [[e.get("harness"), e.get("session_id"),
                   e.get("name") if e.get("session_id") is None else None, e.get("pane_id")]
                  for e in (sender, recipient)]
@@ -2946,7 +2978,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         text, ref = _prepare_peer_message(body, sender, recipient, include_trailer=with_trailer,
                                           reference_evidence=reference_evidence, refs=refs,
                                           producer_binding=producer_binding, handoff=handoff,
-                                          request=request, display=display)
+                                          request=request, display=display,
+                                          private_body=private_body)
         if len(text.encode("utf-8")) > _PENDING_BYTES:
             raise ValueError("peer-pending-body-oversized")
         pending = {"schema_version": 2 if _unresolved_target(recipient) else 1,
