@@ -363,7 +363,7 @@ class CrossHarnessWorkerTest(_EnvMixin, unittest.TestCase):
         original_schedule = rt.schedule_sessions
         rt.schedule_sessions = lambda *_args, **_kwargs: calls.append("called")
         render.run_live = lambda collector, hfilter, section, interval: collector(hfilter) and 0
-        # --json's header would run `git describe --dirty` in the checkout under test.
+        # Keep --json's version header off git in the checkout under test.
         original_info = fleet_main.installinfo.collect
         fleet_main.installinfo.collect = lambda *_args, **_kwargs: {}
         try:

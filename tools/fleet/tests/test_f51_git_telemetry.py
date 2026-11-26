@@ -438,7 +438,7 @@ class F51GitTelemetryTest(unittest.TestCase):
             self.assertEqual(self._ahead_behind_sync(root), (2, 1))
 
             session = Session(harness="claude", pid=1, cwd=root, liveness="idle", mtime=1000)
-            # --json's header would run `git describe --dirty` in the checkout under test.
+            # Keep --json's version header off git in the checkout under test.
             with mock.patch.object(procscan, "scan", return_value=[session]), \
                  mock.patch.object(fleet_mod.installinfo, "collect", return_value={}):
                 buf = io.StringIO()

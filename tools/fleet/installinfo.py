@@ -4,7 +4,10 @@ The resolver is deliberately read-only and fail-soft. It accepts installer state
 when that state names the exact Hearting root containing this Fleet, so a stale managed
 release or another checkout can never label the current process. Snapshot modes use only
 local state. The live worker may additionally refresh a HEAD-exact remote release tag;
-that lookup never mutates local refs or installer state.
+that lookup never mutates local refs or installer state. No git call takes the index
+lock: `describe --dirty` refreshes and locks the index even under GIT_OPTIONAL_LOCKS=0,
+and a timeout kill during the lock's create left a holderless index.lock in the checkout
+(2026-11-16), so the dirty mark comes from a lock-free `status` instead.
 """
 
 import json
@@ -25,6 +28,10 @@ _MAX_STATE_BYTES = 256 * 1024
 _REMOTE_TTL = 300.0
 _REMOTE_MISS_TTL = 15.0
 _DIRTY_TTL = 5.0
+_GIT_TIMEOUT = 2.0
+# Tracked content only, as `describe --dirty` judged it: status rechecks stat-only changes
+# in memory, and --no-optional-locks keeps it from writing the refreshed index back.
+_DIRTY_ARGV = ("git", "--no-optional-locks", "status", "--porcelain", "--untracked-files=no")
 _SEMVER_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 _OID_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 _REMOTE_CACHE = {}
@@ -83,17 +90,41 @@ def _release_version(root):
         return None
 
 
-def _git_version(root, runner):
+def _worktree_dirty(root, runner, timeout=_GIT_TIMEOUT):
+    """True/False as git answered; None when it could not tell."""
     try:
         result = runner(
-            ["git", "describe", "--tags", "--always", "--dirty"],
-            stdin=subprocess.DEVNULL, cwd=str(root), capture_output=True, text=True, timeout=2,
+            list(_DIRTY_ARGV),
+            stdin=subprocess.DEVNULL, cwd=str(root), capture_output=True, text=True,
+            timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if getattr(result, "returncode", 1) != 0:
         return None
-    return _valid_version((getattr(result, "stdout", "") or "").strip())
+    return bool((getattr(result, "stdout", "") or "").strip())
+
+
+def _git_version(root, runner):
+    deadline = time.monotonic() + _GIT_TIMEOUT
+    try:
+        result = runner(
+            ["git", "describe", "--tags", "--always"],
+            stdin=subprocess.DEVNULL, cwd=str(root), capture_output=True, text=True,
+            timeout=_GIT_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if getattr(result, "returncode", 1) != 0:
+        return None
+    version = _valid_version((getattr(result, "stdout", "") or "").strip())
+    if version is None:
+        return None
+    # One budget for both calls, as the single describe --dirty had.
+    dirty = _worktree_dirty(root, runner, max(0.1, deadline - time.monotonic()))
+    if dirty is None:
+        return None
+    return _valid_version(version + "-dirty") if dirty else version
 
 
 def _git_dirs(root):
@@ -229,15 +260,7 @@ def _git_dirty(root, runner, head, now):
         cached = _DIRTY_CACHE.get(key)
         if cached and now - cached[0] < _DIRTY_TTL:
             return cached[1]
-    dirty = False
-    try:
-        result = runner(
-            ["git", "diff-index", "--quiet", "HEAD", "--"],
-            stdin=subprocess.DEVNULL, cwd=str(root), capture_output=True, text=True, timeout=2,
-        )
-        dirty = getattr(result, "returncode", 2) == 1
-    except (OSError, subprocess.SubprocessError):
-        pass
+    dirty = bool(_worktree_dirty(root, runner))
     with _REMOTE_LOCK:
         _DIRTY_CACHE[key] = (now, dirty)
     return dirty

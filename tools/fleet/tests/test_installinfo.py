@@ -4,6 +4,9 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import contextlib
 import io
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -82,19 +85,78 @@ class InstallInfoTest(unittest.TestCase):
                 self.assertEqual(value["install_method"], "managed/" + channel)
                 git_version.assert_not_called()
 
-    def test_linked_uses_one_bounded_git_describe(self):
+    def test_linked_uses_two_bounded_lock_free_git_calls(self):
         self._activation("codex", "linked")
         calls = []
 
         def runner(argv, **kwargs):
             calls.append((argv, kwargs))
-            return SimpleNamespace(returncode=0, stdout="v9.1.0-2-gabc-dirty\n")
+            if "status" in argv:
+                return SimpleNamespace(returncode=0, stdout=" M tracked\n")
+            return SimpleNamespace(returncode=0, stdout="v9.1.0-2-gabc\n")
 
         value = installinfo.collect(self.root, self.env, runner)
         self.assertEqual(value["install_method"], "linked")
         self.assertEqual(value["version"], "v9.1.0-2-gabc-dirty")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual([argv for argv, _kwargs in calls], [
+            ["git", "describe", "--tags", "--always"],
+            ["git", "--no-optional-locks", "status", "--porcelain", "--untracked-files=no"],
+        ])
         self.assertEqual(calls[0][1]["timeout"], 2)
+        self.assertLessEqual(calls[1][1]["timeout"], 2)
+
+    def test_snapshot_version_matches_describe_dirty_without_touching_the_index(self):
+        # `describe --dirty` locks (and here may rewrite) the index; the resolver must print
+        # what it printed while leaving .git exactly as it was, lock file included.
+        strace = shutil.which("strace")
+        if strace and subprocess.run([strace, "-qq", "-o", os.devnull, "true"],
+                                     capture_output=True).returncode != 0:
+            strace = None  # present but refused by a ptrace-restricted host
+        for case in ("clean", "content", "stat-only", "untagged"):
+            with self.subTest(case=case):
+                repo = Path(tempfile.mkdtemp(dir=self.tmp.name))
+                git = ["git", "-C", str(repo), "-c", "user.name=Fixture",
+                       "-c", "user.email=f@example.invalid"]
+
+                def run(*args):
+                    return subprocess.run(git + list(args), check=True, capture_output=True,
+                                          text=True).stdout.strip()
+
+                (repo / "tracked").write_text("base\n", encoding="utf-8")
+                run("init", "-q")
+                run("add", "tracked")
+                run("commit", "-qm", "base")
+                if case != "untagged":
+                    run("tag", "-a", "v9.1.0", "-m", "v9.1.0")
+                    run("commit", "-q", "--allow-empty", "-m", "ahead")
+                if case == "content":
+                    (repo / "tracked").write_text("changed\n", encoding="utf-8")
+                elif case == "stat-only":
+                    os.utime(repo / "tracked", (1_000_000_000, 1_000_000_000))
+                index = repo / ".git" / "index"
+
+                def git_state():
+                    stat = index.stat()
+                    return (stat.st_ino, stat.st_mtime_ns, index.read_bytes(),
+                            sorted(os.listdir(repo / ".git")))
+
+                traces = []
+
+                def runner(argv, **kwargs):
+                    if not strace:
+                        return subprocess.run(argv, **kwargs)
+                    traces.append(repo.parent / f"trace-{case}-{len(traces)}")
+                    return subprocess.run([strace, "-f", "-qq", "-e", "trace=openat",
+                                           "-o", str(traces[-1]), *argv], **kwargs)
+
+                before = git_state()
+                value = installinfo._git_version(repo, runner)
+                self.assertEqual(git_state(), before)
+                for trace in traces:
+                    self.assertNotIn("index.lock", trace.read_text(errors="replace"))
+                self.assertEqual(value, run("describe", "--tags", "--always", "--dirty"))
+                self.assertEqual(value.endswith("-dirty"), case == "content")
+                self.assertEqual(value.startswith("v9.1.0-1-g"), case != "untagged")
 
     def test_live_fast_local_fallback_reads_head_without_git_subprocess(self):
         self._activation("codex", "linked")
@@ -180,6 +242,8 @@ class InstallInfoTest(unittest.TestCase):
                 remote_calls += 1
                 return SimpleNamespace(returncode=0,
                     stdout=f"{head}\trefs/tags/v3.4.5\n")
+            if "status" in argv:
+                return SimpleNamespace(returncode=0, stdout=" M tracked\n")
             return SimpleNamespace(returncode=1, stdout="")
 
         first = installinfo.collect(self.root, self.env, runner,

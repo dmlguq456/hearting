@@ -24,11 +24,11 @@ class F51OptOutTest(unittest.TestCase):
         pane_patch = mock.patch("fleet.collectors.herdr.enrich", return_value=None)
         pane_patch.start()
         self.addCleanup(pane_patch.stop)
-        # --json/--once would label the header with `git describe --dirty` in the checkout
-        # under test (see the index test below).
-        info_patch = mock.patch.object(fleet.installinfo, "collect", return_value={})
-        info_patch.start()
-        self.addCleanup(info_patch.stop)
+        # Keep --json/--once's version header off git in the checkout under test; the
+        # index test below runs the real resolver.
+        self.info_patch = mock.patch.object(fleet.installinfo, "collect", return_value={})
+        self.info_patch.start()
+        self.addCleanup(self.info_patch.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.dispatch_tmp = tempfile.TemporaryDirectory()
         self.old_state_dir = os.environ.get("FLEET_USAGE_STATE_DIR")
@@ -111,11 +111,13 @@ class F51OptOutTest(unittest.TestCase):
                             os.environ[k] = v
 
     def test_snapshot_runs_leave_the_checkouts_git_index_alone(self):
-        """installinfo.collect() runs `git describe --dirty` in Fleet's own checkout. That
-        locks and may rewrite the index even with GIT_OPTIONAL_LOCKS=0, and its 2 s timeout
-        SIGKILLs git under load: on the NFS worktree a kill inside the lock's create left a
-        holderless 0-byte, mode-000 index.lock that stopped a merge (2026-11-16). This
-        repository stands in for that checkout; the runs must leave its .git unchanged."""
+        """installinfo.collect() reads git in Fleet's own checkout. It used `describe
+        --dirty`, which locks and may rewrite the index even with GIT_OPTIONAL_LOCKS=0, and
+        its 2 s timeout SIGKILLed git under load: on the NFS worktree a kill inside the
+        lock's create left a holderless 0-byte, mode-000 index.lock that stopped a merge
+        (2026-11-16). This repository stands in for that checkout; the real resolver must
+        leave its .git unchanged."""
+        self.info_patch.stop()
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             git = ["git", "-C", td, "-c", "user.name=Fixture", "-c", "user.email=f@example.invalid"]

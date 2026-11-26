@@ -304,14 +304,11 @@ class OnceCommand(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             jobs = os.path.join(tmp, "jobs.log")
             open(jobs, "w").close()
-            # --once labels the header with `git describe --dirty` in this checkout, which
-            # locks and may rewrite the index: keep that index in this test's own folder.
             env = dict(os.environ, COLUMNS="100", LINES=str(ROWS),
                        PYTHONDONTWRITEBYTECODE="1",
                        AGENT_DISPATCH_JOBS=jobs,
                        AGENT_RESOURCE_RUN_INDEX=os.path.join(
-                           tmp, "resource-runs.index.json"),
-                       GIT_INDEX_FILE=os.path.join(tmp, "index"))
+                           tmp, "resource-runs.index.json"))
             done = subprocess.run([sys.executable, str(FLEET), "--explorer", "--once", "--demo"], env=env,
                                   capture_output=True, text=True, timeout=180)
         self.assertEqual(done.returncode, 0, done.stderr[-400:])
