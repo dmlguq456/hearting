@@ -1180,13 +1180,15 @@ class OpenCodeRejectionTests(Home):
         self.put("opencode-go", "*", "unavailable", "model-not-found")
         self.assertEqual(M.rejected_models("opencode"), frozenset())
 
-    def test_no_cache_and_a_broken_cache_give_nothing(self):
+    def test_no_cache_gives_nothing_and_a_broken_cache_cannot_be_read(self):
         self.assertEqual(M.rejected_models("opencode"), frozenset())
         path = Path(self.cache._path("opencode"))
         path.parent.mkdir(parents=True, exist_ok=True)
         for broken in ("{", "[]", '{"schema_version": 99}', '{"schema_version": 1, "harness": "opencode", "providers": []}'):
             path.write_text(broken)
-            self.assertEqual(M.rejected_models("opencode"), frozenset())
+            with self.assertRaises(M.RecordUnreadable):
+                M.rejected_models("opencode")
+        self.assertEqual(self.cache.unavailable_provider_rows("opencode"), [])  # its other readers are as they were
 
     def test_an_expired_key_does_not_send_a_followed_cell_back_and_a_refused_model_does(self):
         provider = "prov"
