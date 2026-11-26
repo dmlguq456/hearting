@@ -67,7 +67,9 @@ them is declared in `part_catalog.hosts`), and may pick
 `report:research/research-survey` when the report is a proposal rather than an
 account of findings, or `report:editorial/polish` only to polish an audit report
 that already exists. `capability-route.py stages --capability audit` lists the
-parts.
+parts. `inspect` is itself a shareable read part: another kind's explicit graph may
+borrow `audit:inspect` to inspect a named target artifact, written under that host's
+review anchor in `parts/audit/inspect/`.
 
 Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
 

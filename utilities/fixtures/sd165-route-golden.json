@@ -1,18 +1,18 @@
 {
  "capability_registry_digest": {
-  "analyze-project": "sha256:4a8e2295e6475990b499703bb7acfaf1a534af010b0797d817f42f4f5e1e3064",
-  "analyze-user": "sha256:5a3265c3db44ef4beb49c6032bee673edfb9786ce5c41fafecd6fadb9bd0cba7",
-  "audit": "sha256:ca294cde176aeeddfa2c112fd8434a86c463ae0f9430f64cfdd63943a8d743ef",
-  "autopilot-apply": "sha256:62148526248db454629b47d2e94c810f7f02fd4a878465b7927001b1dec4f0ed",
-  "autopilot-code": "sha256:fa6a803fcad97b715291fbb8e954e59f3d2570817bea56cb3b90c3a3378e7d56",
-  "autopilot-design": "sha256:33dd1ee7e1c1f867efac8e1850966cb992cf33e0854bbb6153f0b542f6ddc47b",
-  "autopilot-draft": "sha256:6dddbe5e9e709f94352065b059630995e624d566ff917633d0b5d5138ad0a253",
-  "autopilot-lab": "sha256:7f8e449ea4ded3a7b69ec5159e55cb6ded8a7007add4ba07465400f5e302ee1e",
-  "autopilot-refine": "sha256:656b372445112f21e93d9246256312a85f744848e6c713ab82fdce4fee436fe5",
-  "autopilot-research": "sha256:0db230209ec9737c5d9cef63a23e3941fe41d85f51e7836ad946f515d0ff22a9",
-  "autopilot-ship": "sha256:a067135d6ea2a54f3c689410bdd2423a501ac18a575bf093b771e1575766346c",
-  "autopilot-spec": "sha256:678bb4b8cfd86d9c0356cf402e1daea048d2a285d948b8aaa984caf4efaa5ce8",
-  "route-frame": "sha256:48ace5566d95e34f6602057963e7c5bfb5e6e5e4793c0e2331e07297b2088a50"
+  "analyze-project": "sha256:323f2a4577ca11b2a8ed0046732a4f2ffb79558a0d755cd49e15decc546a8c40",
+  "analyze-user": "sha256:ffd52aa06e867ea467abf339835b6bfba737847680b9a55ea1209bfc85c8b93c",
+  "audit": "sha256:4ce40b55d08a6c02eee2429dd03ae695c01ad288deb74772a2020399055327c0",
+  "autopilot-apply": "sha256:aabff8dddef7b73eaea0923be6cea8de797b22ac5e4fc8e791500d273bc9991e",
+  "autopilot-code": "sha256:1c9e252a586b8b164f1b0327b31fdab0f3fcd2dd793f21740d251eb797fa0c4b",
+  "autopilot-design": "sha256:ebb8cac4a24afb54f6532a95efd5c5b1f7ebe8e8ba1dac66bc80bea1794846ac",
+  "autopilot-draft": "sha256:687140529985cb9230293923d1aa6be257e13f2058830b1c1abf3403f6e2be86",
+  "autopilot-lab": "sha256:f786218e5d2809e979c48dbe3eaea226074e930c3dad9c5b6d31481a9945def5",
+  "autopilot-refine": "sha256:67b2b68f5ab05f0a5ba2144703b9f8b0848cf4dcf58754ae0c3f56bd14fdc4ef",
+  "autopilot-research": "sha256:859a2b3b8ab0b2d84f20caa41ee9028ebfaa062d99f0e415312b5d74718b16c6",
+  "autopilot-ship": "sha256:3b772af74248ad572a7d1d6f63255ce5ceaab31f74f342fe29e48d90ee15a6a1",
+  "autopilot-spec": "sha256:2a9b3523da3120831198b42fda1838e700ce3c1be5730bf3d8fa995bc17d3446",
+  "route-frame": "sha256:02a25131b3bd58d81de6a80e1c77ab8c12d692d36a16a5df6ce60f5f001f2f04"
  },
  "scenarios": {
   "framed:route-frame": {

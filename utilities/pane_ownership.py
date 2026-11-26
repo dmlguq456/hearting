@@ -401,11 +401,12 @@ def _native_session(pid, harness, *, codex_observation=None):
     try:
         if harness == "claude":
             from fleet.collectors import claude
+            from fleet import session_registry
             record = claude.read_registry(pid) or {}
             live = _process(pid)
             if live and str(record.get("procStart") or "") == live[5]:
                 # A parked frontend still names its original conversation.
-                if record.get("parkedJobId"):
+                if session_registry.holds_parked_job(record):
                     return ""
                 return record.get("sessionId") or ""
         elif harness == "codex":

@@ -964,6 +964,8 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         "popup_now", "popup_now_page",
         # 11-21: the status popup's keys on its list screen (the document read whole has the keys every popup has).
         "popup_status",
+        # 11-26: the BACKLOG board's keys (scheme A: k/a/d group, t state, / find, Home/End).
+        "popup_backlog",
         # 11-15 (panel polish 1): the action under a question to answer here.
         "answer_action",
         # 11-17 (route row 5): a frame route whose two legs are done waits for the person's direction.

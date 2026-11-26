@@ -5563,6 +5563,33 @@ def _redraw_agent_definitions(root: Path, harnesses: Iterable[str]) -> list[str]
     return notes
 
 
+def _list_refresh_begin(harnesses: Iterable[str]):
+    """Have the installed CLIs write their model lists once for this whole update: the activation
+    of the new release, this update's own pass and the agent-definition refresh each read the
+    list, and a CLI that ends late or never would otherwise be waited for in each of them. The
+    environment (which the child activations inherit) then says, with this update's pid, which
+    lists were asked for (and the CLI's version, so it is asked for once). Never raises;
+    `_list_refresh_end` puts the environment back."""
+    try:
+        utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        import model_follow
+        return model_follow.list_refresh_done(model_follow.refresh_lists_once(list(harnesses)))
+    except Exception:
+        return None
+
+
+def _list_refresh_end(token) -> None:
+    if token is None:
+        return
+    try:
+        import model_follow
+        model_follow.list_refresh_restore(token)
+    except Exception:
+        pass
+
+
 def _handled_runtimes(runtimes: Optional[Iterable[str]]) -> list[str]:
     """The harnesses an update handles: the chosen `--runtime`, else the activated ones. A
     harness that is uninstalled, or not chosen, is not this update's to touch."""
@@ -5580,14 +5607,19 @@ def update(
     automatic: bool = False,
     force_prune_unproven: bool = False,
 ) -> dict:
-    result = _update_release(version, runtimes, automatic, force_prune_unproven)
-    lines, written = _model_follow_pass(_handled_runtimes(runtimes))
-    if written and isinstance(result, dict):
-        try:
-            root = Path(result.get("release_root") or _load_state()["release_root"])
-            lines = [*lines, *_redraw_agent_definitions(root, written)]
-        except Exception:
-            pass
+    handled = _handled_runtimes(runtimes)
+    token = _list_refresh_begin(handled)
+    try:
+        result = _update_release(version, runtimes, automatic, force_prune_unproven)
+        lines, written = _model_follow_pass(handled)
+        if written and isinstance(result, dict):
+            try:
+                root = Path(result.get("release_root") or _load_state()["release_root"])
+                lines = [*lines, *_redraw_agent_definitions(root, written)]
+            except Exception:
+                pass
+    finally:
+        _list_refresh_end(token)
     if lines and isinstance(result, dict):
         result["report_lines"] = list(dict.fromkeys([*result.get("report_lines", []), *lines]))
     return result

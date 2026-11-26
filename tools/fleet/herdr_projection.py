@@ -42,6 +42,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -319,9 +320,9 @@ def refresh_observed_tag_metadata(agents) -> None:
     herdr = shutil.which("herdr")
     if not herdr:
         return
-    for observed in _tag_metadata_targets(agents):
+    for observed, held in _tag_metadata_targets(agents):
         pane, harness, sid = observed
-        metadata = _metadata_command(herdr, harness, sid, pane)
+        metadata = _metadata_command(herdr, harness, sid, pane, held=held)
         # Titles and personal formatters may be slow. Confirm the target after
         # all preparation, immediately before sending the metadata command.
         current = list_agents()
@@ -329,20 +330,76 @@ def refresh_observed_tag_metadata(agents) -> None:
         if len(peers) == 1 and _tag_metadata_identity(peers[0]) == observed:
             prepared = re.match(r"^\[([0-9a-f]{2})\]",
                                 metadata[metadata.index("--display-agent") + 1])
-            if prepared and prepared.group(1) == resolve_tag(harness, sid):
+            if prepared and prepared.group(1) == resolve_tag(harness, held or sid):
                 _send_projection(metadata, None)
+                _remember_header(observed, held, metadata)
+
+
+# The header this process last sent to (or found already on) each pane it refreshes:
+# ``{(pane, harness, sid): (held, display_agent, title)}``. Process-local, never stored, and
+# narrowed on every pass to the panes that pass looks at, so it does not grow.
+_HEADERS = {}
+_HEADERS_LOCK = threading.Lock()
+
+
+def _header_of(held, command):
+    display = command[command.index("--display-agent") + 1] if "--display-agent" in command else ""
+    title = command[command.index("--title") + 1] if "--title" in command else ""
+    return held, display, title
+
+
+def _remember_header(identity, held, command):
+    if command:
+        with _HEADERS_LOCK:
+            _HEADERS[identity] = _header_of(held, command)
 
 
 def _tag_metadata_targets(agents):
+    """``((pane, harness, sid), held)`` for each pane whose header is not the current one.
+
+    ``held`` is the session a window pane shows when its conversation was sent to the
+    background: the pass's decision, carried by the pane as ``held_session``
+    (``session_tags.assign``), never judged again here. Such a pane keeps its number when the
+    held session continues it, so its header is also refreshed when its title is not the one
+    the held session's header has now (same text: no write). A pane whose herdr record carries
+    no title is judged by its number only, so an unknown title never repeats a write.
+
+    The title is also judged once when a link has just ended (this process last wrote the pane's
+    header for a held session): the header goes back to the window's own. A header this process
+    already sent to, or found on, the same pane is not sent again, even when herdr reports
+    another title (another source, a person's edit, a reshaped string)."""
+    agents = list(agents or ())
+    with _HEADERS_LOCK:
+        known = dict(_HEADERS)
+    found, present, settled = [], set(), {}
     for agent in agents:
         identity = _tag_metadata_identity(agent)
         if identity is None:
             continue
-        _, harness, sid = identity
-        tag = resolve_tag(harness, sid)
+        present.add(identity)
+        pane, harness, sid = identity
+        held = agent.get("held_session") if harness == "claude" else None
+        held = held if isinstance(held, str) and held and held != sid else None
+        tag = resolve_tag(harness, held or sid)
         shown = re.match(r"^\[([0-9a-f]{2})\]", str(agent.get("display_agent") or ""))
-        if tag and (not shown or shown.group(1) != tag):
-            yield identity
+        if not tag:
+            continue
+        stale = not shown or shown.group(1) != tag
+        last = known.get(identity)
+        if not stale and (held or (last and last[0])) and isinstance(agent.get("title"), str):
+            wanted = _header_of(held, _metadata_command("herdr", harness, sid, pane, held=held))
+            if wanted[2] == agent["title"]:
+                settled[identity] = wanted
+            else:
+                stale = last != wanted
+        if stale:
+            found.append((identity, held))
+    with _HEADERS_LOCK:
+        for identity in list(_HEADERS):
+            if identity not in present:
+                del _HEADERS[identity]
+        _HEADERS.update(settled)
+    return found
 
 
 def refresh_tag_metadata(agents) -> None:
@@ -351,8 +408,9 @@ def refresh_tag_metadata(agents) -> None:
     This reuses the regular metadata projection. It reports no runtime session
     identity or lifecycle, and never prompts or wakes the pane's session.
     """
-    for pane, harness, sid in _tag_metadata_targets(agents):
-        _report(harness, sid, pane, False)
+    for (pane, harness, sid), held in _tag_metadata_targets(agents):
+        sent = _report(harness, sid, pane, False, **({"held": held} if held else {}))
+        _remember_header((pane, harness, sid), held, sent)
 
 
 def compose(harness: str, session_id: str, *, tag=None, steward=None, title=None,
@@ -867,10 +925,17 @@ def _send_projection(command, observation):
             observation[field] = "spawn-error"
 
 
-def _metadata_command(herdr, harness, session_id, pane, *, display_relations=False):
-    title = session_title(harness, session_id)
-    label, custom_title = _formatter_overrides(harness, session_id, title)
-    agent, shown_title = compose(harness, session_id, title=custom_title or title,
+def _metadata_command(herdr, harness, session_id, pane, *, display_relations=False, held=None):
+    """``held``: the session a viewer pane shows (its conversation sent to the background); the
+    header then names that session — its number and title — and keeps the window's steward mark."""
+    shown_id = held or session_id
+    title = session_title(harness, shown_id)
+    label, custom_title = _formatter_overrides(harness, shown_id, title)
+    steward = None
+    if held and held != session_id:
+        steward = (is_steward(harness, held, published_only=display_relations)
+                   or is_steward(harness, session_id, published_only=display_relations))
+    agent, shown_title = compose(harness, shown_id, title=custom_title or title, steward=steward,
                                  label=label, display_relations=display_relations)
     try:
         utilities = str(Path(__file__).resolve().parents[2] / "utilities")
@@ -881,6 +946,8 @@ def _metadata_command(herdr, harness, session_id, pane, *, display_relations=Fal
         if waits is None:
             waits = {"items": [], "by_session": {}}
         waiting_ids = set(waits.get("by_session", {}).get((harness, session_id), ()))
+        if held and held != session_id:
+            waiting_ids |= set(waits.get("by_session", {}).get((harness, held), ()))
         if any(item.get("id") in waiting_ids and not item.get("stale")
                for item in waits.get("items", ())):
             shown_title = human_wait_state.ui_translator()("wait.title") + " " + shown_title
@@ -1023,7 +1090,8 @@ def project_panel(binding, values, questions, *, pane_id=None):
 
 def _report(harness: str, session_id: str, pane: str, report_session: bool,
             observation=None, session_seq=None, session_start_source=None, resume_argv=None,
-            _proof=None, display_relations: bool = False) -> None:
+            _proof=None, display_relations: bool = False, held=None):
+    """Report one pane; the metadata command it sent, else ``None``."""
     herdr = shutil.which("herdr")
     if not herdr:
         if observation is not None:
@@ -1060,7 +1128,7 @@ def _report(harness: str, session_id: str, pane: str, report_session: bool,
             return
         _assign_observed_tag(harness, session_id, pane)
     metadata = _metadata_command(herdr, harness, session_id, pane,
-                                 display_relations=display_relations)
+                                 display_relations=display_relations, held=held)
     if not current():
         if observation is not None:
             observation["reason"] = "guard-refused-before-metadata"
@@ -1070,6 +1138,7 @@ def _report(harness: str, session_id: str, pane: str, report_session: bool,
     _send_projection(metadata, observation)
     if observation is not None:
         observation["reason"] = "report-attempts-finished"
+    return metadata
 
 
 def main(argv=None) -> int:

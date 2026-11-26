@@ -70,6 +70,7 @@ from dispatch_contract import (  # noqa: E402
     route_state_next_action,
     validate_attempt_metadata,
     bounded_candidate_outcomes, candidate_detail, diagnostic_line, diagnostic_token,
+    _owner_executed_node,
 )
 
 _NODE_SPEC = importlib.util.spec_from_file_location(
@@ -539,6 +540,9 @@ def load_node(route_path: Path, node_id: str, launch_phase: str) -> tuple[dict, 
     if hops != ORDER and not (hops == ORDER[:2] and node_id in one_shot_review_node_ids(route)):
         # The middle cell's reviews declare their own chain: registered headless hops only. Neither `inline` nor a
         # native subagent (whose completion is recorded as inline) can close the review of the owner's own work.
+        if _owner_executed_node(node):
+            raise ValueError(f"route node {node_id} is run by the route owner itself (dispatch depth 1) and has "
+                             "no stage fallback chain; follow your Route steps")
         raise ValueError("route node lacks checked ordered fallback")
     return route, node
 
