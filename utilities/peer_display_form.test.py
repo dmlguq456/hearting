@@ -696,6 +696,7 @@ class RuntimeLines(unittest.TestCase):
         with mock.patch("work_intent.ui_translator", return_value=self.t("ko")), \
                 mock.patch.object(sweep, "_followup", side_effect=lambda root, record: (
                 "Owner finished; no harvest.\n" + self.KO if record is work else "no summary here")), \
+                mock.patch.object(sweep, "_answered_question_secret", return_value=False), \
                 mock.patch("human_wait_state.message_answer_body", return_value="네, 그렇게 하세요\n그리고 하나 더") as body:
             line = sweep.delivery_display_text([(Path("/x"), [work, answer])])
             self.assertEqual(line.split("\n")[0].split(":")[0], "↳ 질문에 답함")
@@ -717,6 +718,7 @@ class RuntimeLines(unittest.TestCase):
                     "text": "x", "answer_binding": {"request_id": "S4:" + "a" * 64}}}
         first, second = answer("delivery-1"), answer("delivery-2")
         with mock.patch("work_intent.ui_translator", return_value=self.t("ko")), \
+                mock.patch.object(sweep, "_answered_question_secret", return_value=False), \
                 mock.patch("human_wait_state.message_answer_body", return_value="네"):
             self.assertEqual(sweep.delivery_display_text([(Path("/x"), [first, second])]), "↳ 질문에 답함: 네 ×2")
             self.assertEqual(sweep.delivery_display_text([(Path("/x"), [first, answer("delivery-3"), second])]),
@@ -732,12 +734,14 @@ class RuntimeLines(unittest.TestCase):
         bare1, bare2 = answer("x"), answer("x")
         bare1.pop("delivery_id"), bare2.pop("delivery_id")
         with mock.patch("work_intent.ui_translator", return_value=self.t("ko")), \
+                mock.patch.object(sweep, "_answered_question_secret", return_value=False), \
                 mock.patch("human_wait_state.message_answer_body", return_value="네"):
             self.assertEqual(sweep.delivery_display_text([(Path("/x"), [bare1, bare2])]), "↳ 질문에 답함: 네 ×2")
         # a work line shared by two finished works counts the same way, after the answers
         work1, work2 = {"delivery_id": "delivery-w1", "receipt": {}}, {"delivery_id": "delivery-w2", "receipt": {}}
         with mock.patch("work_intent.ui_translator", return_value=self.t("ko")), \
                 mock.patch.object(sweep, "_followup", return_value="Owner finished; no harvest.\n" + self.KO), \
+                mock.patch.object(sweep, "_answered_question_secret", return_value=False), \
                 mock.patch("human_wait_state.message_answer_body", return_value="네"):
             lines = sweep.delivery_display_text([(Path("/x"), [work1, first, work2])]).split("\n")
             self.assertEqual(len(lines), 2)
