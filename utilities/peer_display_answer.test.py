@@ -433,6 +433,45 @@ class QuestionAnswerLine(unittest.TestCase):
         self.settled(signal, ref)
         self.assertEqual(self.f.peer._read_pending(other)["state"], "received")
 
+    def test_an_opencode_recovery_resume_with_empty_guidance_clears_the_previous_sender(self):
+        import time
+        from types import SimpleNamespace
+
+        sid = "recover-ordinary-answer"
+        recipient = {"harness": "opencode", "session_id": sid}
+        # Both rows are already saved. Pending rows are listed in ref order, so the
+        # ordinary peer message resumes in the first pass and leaves sender guidance.
+        with mock.patch.object(self.f.peer.secrets, "token_hex", return_value="0" * 32):
+            _, prior_ref = self.f.peer.prepare_peer_message("an ordinary peer message", {
+                "harness": "codex", "session_id": "0100000a-0000-7000-8000-000000000012",
+                "name": "fixture-peer"}, recipient, defer=True)
+        signal, envelope = self.f.ask("opencode", sid, text="질문")
+        self.f.submit(envelope, "an ordinary answer")
+        with mock.patch.object(self.f.peer.secrets, "token_hex", return_value="1" * 32):
+            _, answer_ref, _ = self.f.prepare(signal)
+
+        history = []
+        for ref, message_id in ((prior_ref, "saved-peer"), (answer_ref, "saved-answer")):
+            row = self.f.peer.claim_pending_herdr(ref, recipient, receipt="opencode-prompt-inflight")
+            self.assertIsNotNone(row)
+            self.assertEqual(self.f.peer.cmd_pending(SimpleNamespace(
+                to_harness="opencode", to_session_id=sid, queued=ref, message_id=message_id,
+            )), 0)
+            history.append({
+                "info": {"id": message_id, "role": "user", "sessionID": sid,
+                         "time": {"created": int(time.time() * 1000)}},
+                "parts": [{"type": "text", "text": row["text"]}],
+            })
+
+        result = self.f.opencode_plugin_session(sid, {"history": history, "steps": ["idle", "idle", "idle"]})
+        self.assertEqual([entry["promptAsync"] for entry in result["log"]], [1, 2, 2])
+        self.assertEqual(result["calls"]["prompt"], 0)
+        self.assertIn("Sender of the message above", self.call(result, "saved-peer"))
+        self.assertNotIn("Sender of the message above", self.call(result, "saved-answer"))
+        self.assertEqual(self.f.peer._read_pending(prior_ref)["state"], "received")
+        self.assertEqual(self.source(signal)["lifecycle"], "answered")
+        self.settled(signal, answer_ref)
+
     def test_an_opencode_session_without_a_window_origin_gets_the_answer_at_its_tool_boundary(self):
         # `opencode -c` proves no window origin, so the idle delivery does not run: the working
         # turn's tool boundary takes the row (pointer on the tool result, text in the system context).

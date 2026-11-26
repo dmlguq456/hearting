@@ -3217,11 +3217,12 @@ async function pendingPeerDelivery(ctx, sid) {
         }
         // The resumed model call reads this message's own guidance, whatever came between
         // (a new plugin process, a person's prompt); the saving `chat.message` is not relied on.
-        // Without it (the reader failed) this pass resumes nothing: a row is resumed once.
+        // A failed read defers the resume. An empty read clears the previous row's guidance.
         const parts = peerGuidanceFor(sid, row.text, baseDir(ctx))
-        if (!parts || !(parts.guidance || parts.secret)) continue
+        if (!parts) continue
         if (!pendingPeerTransition(sid, ["--resuming", row.ref, "--message-id", mid])) continue
-        setPeerGuidance(sid, parts)
+        peerGuidanceBySession.set(sid, parts.guidance)
+        holdPeerSecret(sid, parts.secret)
         peerGuidanceMessage.set(sid, mid)
         const resumed = await bounded(client.promptAsync({ path: { id: sid }, query: { directory },
           body: { messageID: mid, parts: [] } }))
