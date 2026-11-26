@@ -471,7 +471,7 @@ route additionally seals one of these profiles from the single
 | `balanced` | configured light tier / `high` | long multi-step execution after the decision is settled |
 | `light` | configured light tier / `medium` | routine implementation, verification, reporting, and breadth legs |
 | `mini` | configured mini tier / `low` | lifecycle and micro-semantic helpers only; substantive dispatch-depth-1/2 work is rejected |
-| `top` | configured top tier / `xhigh` | exception above deep: the main-session-only model (`CFG_MAIN_SESSION_ONLY_MODELS`, enforced by this wrapper since 2026-09-10; a user copy without the key stays selected whole-file and unrestricted, receipt `main_session_only_policy=absent`), reachable only from a route that seals the explicit `top` profile on a dispatch-depth-1 owner (refused without it); no cascade in or out, no `--model` override, and `--inherit-model-settings` is refused while the key names a model (the same rule on every adapter) |
+| `top` | configured top tier / `xhigh` | exception above deep: the main-session-only model (`CFG_MAIN_SESSION_ONLY_MODELS`, enforced by this wrapper since 2026-09-10; a user copy without the key stays selected whole-file and unrestricted, receipt `main_session_only_policy=absent`), reachable only from a route that seals the explicit `top` profile on a dispatch-depth-1 owner, or, at intensity `strong`+, on a depth-2 stage worker or review/verification leg the person named in `--explicit-profiles` (refused without it); no cascade in or out, no `--model` override, and `--inherit-model-settings` is refused while the key names a model (the same rule on every adapter) |
 
 Non-route role compatibility overrides remain explicit and config-derived:
 

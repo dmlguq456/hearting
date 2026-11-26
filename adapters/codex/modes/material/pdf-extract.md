@@ -51,13 +51,17 @@ aliases: {}
 
 # Unit: material/pdf-extract
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
 **Input**: PDF file paths (`paper_pdfs: list[str]`) + output dir (default
 `{artifact_dir}/figures/`).
 
 You extract figures/tables from PDFs using **PyMuPDF (fitz) caption-aware bbox crop** —
 high resolution (DPI 600-800).
 
-## Procedure
+### Procedure
 
 1. For each PDF, prefer **PyMuPDF caption-aware bounding-box crops** over `pdfimages`
    (`pdfimages` handles raster only and misses vector figures).
@@ -92,7 +96,7 @@ high resolution (DPI 600-800).
    least one or two PNGs. Re-extract when neighboring-column remnants, footer noise, or
    blurred text remain.
 
-## Caveats
+### Caveats
 
 - At 800 DPI, figure PNGs are typically 200–500 KB and page-wide tables 400–700 KB; PNG
   compression keeps growth bounded.
@@ -101,7 +105,7 @@ high resolution (DPI 600-800).
 - This is a draft asset pool, not a replacement for hand curation; later presentation
   polish may crop further.
 
-## Output
+### Output
 
 `{out_dir}/{paper_id}_fig*.png` + `figure_index.md`
 
@@ -109,26 +113,32 @@ high resolution (DPI 600-800).
 `material/figure-gen` §Script Convention: individual PNGs plus at most one combined
 PPTX — never per-figure/per-slide PPTX wrappers.
 
-## Cross-skill Reuse
+### Return
+
+Per `_shared/dual-io.md`. Verdict examples: "✅ N/M PDFs extracted (K figures)",
+"⚠️ N/M extracted, K failed".
+
+### Process Cleanup
+
+- Release PyMuPDF resources explicitly with `doc.close()` for large batches.
+
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+### Cross-skill Reuse
 
 Figures extracted during research persist under `research/<topic>/figures/` and are
 indexed from paper cards, e.g. `**Figures**: ../figures/<paper_id>_fig1.png`. Downstream
 draft and refine flows discover them through the research artifact.
 
-## Return
-
-Per `_shared/dual-io.md`. Verdict examples: "✅ N/M PDFs extracted (K figures)",
-"⚠️ N/M extracted, K failed".
-
-## Process Cleanup
-
-- Release PyMuPDF resources explicitly with `doc.close()` for large batches.
-
-## Automatic Entry Point
+### Automatic Entry Point
 
 - **autopilot-research Phase B:** collect paper figures from downloaded PDFs.
 
-## Memory
+### Memory
 
 Per `_shared/memory-flow.md`. Retention target: venue-specific caption-extraction
 behavior.

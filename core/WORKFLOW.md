@@ -339,8 +339,8 @@ and `adversarial`; the owner starts the route's declared review nodes with the c
 its task gives, and cannot close any of them itself), or omit `--shape` and let the frame choose, or use
 `staged` when the size of the work calls for stages (`staged` is chosen for size, not to
 obtain a review where the kind declares a one-shot review; where it declares none, work that
-needs an independent review opens `staged`). A light check of a direct change may use the harness's own native
-subagent (decision 2026-11-03).
+needs an independent review opens `staged`). The session checks a direct change itself; a second look it
+wants from another worker is a short check that keeps no record (below).
 
 | Main decision | Command | Result |
 |---|---|---|
@@ -350,11 +350,16 @@ subagent (decision 2026-11-03).
 | New work whose direction is clear | `compose --start --shape solo\|staged --capability <kind> --prompt-file <task>` | opened directly; a sign may add the one advice line below |
 | Other new work (more than one reading is plausible) | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
 
-A single read-only unit can also be opened as a route of its own, with no owner:
-`compose --start --unit <family/name> --prompt-file <brief>` (for example
-`qa/code-review`, or `general/explore` for a lookup or an investigation; `stages --capability unit` lists the units). Its one worker starts
-with the brief, and its end closes the route and returns the sealed summary to the
-session that opened it (`core/OPERATIONS.md` §5.10c). A unit route has no intensity
+Handing one read-only job to another worker opens that unit as a route of its own, with no owner
+(decisions 2026-11-17 and 2026-11-26: every call to another agent is a route, and one that needs no record keeps none).
+A short check (a sentence, a term, whether a bounded finding was applied, a second look at a direct change) or
+gathering material (a lookup, many files to read) keeps none: `compose --start --unit editorial/review --ephemeral
+--prompt-file <brief>` (`qa/code-review` for code, `general/explore` for a lookup) writes nothing to the artifact folder
+or campaign records and brings the answer back in the notice (`stages --capability unit` lists the units). A review
+whose verdict and evidence need keeping (an independent judgment, evidence read later) keeps its report: the same
+command without `--ephemeral`, or `audit`. After one revision, that review is one request naming every section it
+checks (`capabilities/audit.md`). A unit route's one worker starts with the brief, and its end closes
+the route and returns the sealed summary to the session that opened it; a worker opens one the same way (`core/OPERATIONS.md` §5.10c). A unit route has no intensity
 (one unit does one job and nothing checks it; `core/CONVENTIONS.md` §1). This adds a
 way to start; it does not change the choices above. `--prompt-file -` reads the brief
 once from standard input (a heredoc), so no file has to be written first; it means the
@@ -469,7 +474,9 @@ These advisory points add no prerequisite or required stage:
   judge whether that frame's scope covers the work.
 - Choose `--intensity` for the work's purpose and, when needed,
   `--explicit-profiles` for judgment or verification nodes. Check the selection
-  reasons and actual node/leg profiles in the compose output.
+  reasons and actual node/leg profiles in the compose output. `top` on a depth-2 stage
+  worker or review/verification leg is for the person to name, at `strong` or higher only
+  (one top leg per parallel group), and an agent picks it only when the person asks.
 - Use `compose --explain` to check the displayed stage/worker/resource scale.
   At `strong` or higher, default to the eligible declared groups on retained
   anchors, with two-way as the baseline unless the registry widens it. Check
@@ -1536,7 +1543,10 @@ Only a real user decision reaches a person: the continuation names it and ends
 `correct` starts one replacement owner that receives it. A readable FAIL keeps
 waiting for an approved fix. An owner that ended `PASS` with declared stages undone is
 continued the same way once: its PASS stays as recorded, and the replacement receives the
-undone stages as observations. No gate, close, or recompose is needed.
+undone stages as observations. No gate, close, or recompose is needed. A replacement on the same
+harness wakes the earlier owner's session when it still exists and the runtime did not end it
+without a result, and starts fresh otherwise (`session: resumed | fresh:<reason>`, OPERATIONS §5.10c). The answer receipt names both actions a
+parent can take: `correction_command` with the answer, or `close_command` to stop the route.
 
 A continuation route projects this contract onto its suffix. It drops a gate
 whose gated entry node was cut, never rebinds a retained raising continuation to

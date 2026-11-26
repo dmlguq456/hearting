@@ -48,6 +48,76 @@ class QuestionPopupTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
+    def test_visible_marks_match_payloads_and_survive_navigation(self):
+        baseline = subprocess.check_output(["git", "show", "773a57382:utilities/session-shell/block-input.cjs"],
+                                           cwd=ROOT, text=True, timeout=10)
+        self.node(r"""
+const assert=require('node:assert/strict'),Module=require('node:module'),dir=process.argv[1];
+const previous=new Module(dir+'/block-input.cjs');previous.filename=dir+'/block-input.cjs';previous.paths=module.paths;
+previous._compile(process.argv[2],previous.filename);
+const current=require(dir+'/block-input.cjs'),view=require(dir+'/panel-view.cjs');
+const q={id:'q',question:'Synthetic question',recommended:1,free_text:true,choices:[1,2,3].map(n=>({value:'v'+n,label:'Label '+n}))};
+function setup(create,extra={},kind){let sent;const b=create({changed(){},action(){},answer:async x=>(sent=x,{state:'submitted'})});
+ const items=[{id:'synthetic',revision:'one',answerable:true,answer_kind:kind,questions:[{...q,...extra}]},{id:'other',revision:'one',answerable:true,questions:[{...q,id:'q2'}]}];
+ b.update(items,'',{});b.enter();return {b,items,get sent(){return sent}};}
+const rows=b=>b.detail({columns:92,budget:24});
+const marked=b=>rows(b).filter(r=>r.some(p=>p.role==='choice-mark')).map(r=>Number(r.find(p=>Number.isInteger(p.choiceIndex))?.choiceIndex??r.map(p=>p.text).join('').match(/▸ (\d+)/)[1]-1)+1);
+const words=b=>rows(b).map(r=>r.map(p=>p.text).join('')).join('\n');
+function step(x,keys){if(keys==='click-write')x.b.write();else if(keys==='click-3')x.b.choose(2);else if(keys==='reopen'){x.b.leave();x.b.update(x.items,'',{});x.b.enter();}else x.b.input(Buffer.from(keys));}
+const cases=[
+ ['default',[],[2],['v2'],true],
+ ['text',['가나'],[],['가나'],false],
+ ['number',['3','가나'],[3],['v3','가나'],false],
+ ['down',['\x1b[B','가나'],[3],['v3','가나'],true],
+ ['toggle',['3','3','가나'],[],['가나'],true],
+ ['up-retains',['가나','\x1b[A','1'],[1],['v1','가나'],false],
+ ['click-write',['click-write','1가'],[],['1가'],false],
+ ['erase',['가','\x7f'],[],null,false],
+ ['tab',['3','\t','\t','\t','reopen'],[3],['v3'],false],
+ ['default-number',['2','가나'],[2],['v2','가나'],false],
+ ['default-down-to-row',['click-write'],[2],['v2'],true],
+ ['last-default-down',['\x1b[B','가'],[3],['v3','가'],true],
+ ['click-choice',['click-3','가나'],[3],['v3','가나'],true],
+ ['paste-default',['\x1b[200~가나\x1b[201~'],[],['가나'],false],
+ ['reopen-default',['reopen'],[2],['v2'],true],
+ ['reopen-text',['가나','reopen'],[],['가나'],false],
+ ['reopen-chosen',['3','가나','reopen'],[3],['v3','가나'],false]
+];
+(async()=>{for(const [name,keys,mark,payload,changed] of cases){
+ const check=async create=>{const x=setup(create);for(const key of keys)step(x,key);
+  assert.deepEqual(marked(x.b),mark,name+' mark');
+  if(payload?.length===2)assert(words(x.b).includes('가'),name+' retains draft');
+  x.b.input(Buffer.from('\r'));await new Promise(r=>setImmediate(r));
+  assert.deepEqual(x.sent?.answers.q??null,payload,name+' payload');if(payload===null)assert(words(x.b).includes('empty answer'));};
+ await check(current);let oldPassed=true;try{await check(previous.exports);}catch{oldPassed=false;}
+ if(changed)assert(!oldPassed,name+' must reject old implementation');
+ console.log(JSON.stringify({name,mark,payload,current:'PASS',baseline:oldPassed?'PASS':'FAIL'}));
+}
+for(const extra of [{recommended:undefined},{recommended:2}]){const x=setup(current,extra);assert.deepEqual(marked(x.b),[extra.recommended===2?3:1]);x.b.input(Buffer.from('\x1b[B'));if(extra.recommended===2){assert.deepEqual(marked(x.b),[3]);x.b.input(Buffer.from('가'));assert.deepEqual(marked(x.b),[]);}}
+const plain=setup(current,{choices:[]});assert.deepEqual(marked(plain.b),[]);plain.b.input(Buffer.from('가나\r'));await new Promise(r=>setImmediate(r));assert.deepEqual(plain.sent.answers.q,['가나']);
+const choice=setup(current,{free_text:false});assert.deepEqual(marked(choice.b),[2]);choice.b.input(Buffer.from('t'));assert(!choice.b.typing);assert(!words(choice.b).includes('t text'));
+const decision=setup(current,{},'decision');assert.deepEqual(marked(decision.b),[]);decision.b.input(Buffer.from('\r'));await new Promise(r=>setImmediate(r));assert(!decision.sent);
+const grouped=setup(current);grouped.items[0].questions.push({...q,id:'second'});grouped.items.splice(1);grouped.b.update(grouped.items,'',{});grouped.b.input(Buffer.from('\r'));await new Promise(r=>setImmediate(r));assert(!grouped.sent);assert(words(grouped.b).includes('2/2'));grouped.b.input(Buffer.from('\r'));await new Promise(r=>setImmediate(r));assert.deepEqual(grouped.sent.answers,{q:['v2'],second:['v2']});
+// Every painted choice and the answer row expose their own hit; the host uses the editor's explicit chooser.
+const x=setup(current),all=rows(x.b),popup=view.popup({cols:100,rows:30,kind:'question',title:all[0],body:all.slice(1),sections:['QUESTIONS'],current:0});
+assert.equal(popup.hits.filter(h=>h.action.startsWith('answer-choice:')).length,3);assert(popup.hits.some(h=>h.action==='answer-write'));
+})().catch(e=>{console.error(e);process.exit(1)});
+""", baseline)
+
+    def test_free_text_guidance_uses_one_localized_row(self):
+        from fleet.config import ui_text
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "en"}):
+            labels = {name: ui_text("fleet.session_block." + name) for name in
+                      ("choose_write", "writing_choices", "navigate_write", "send")}
+        self.node(r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]+'/block-input.cjs');
+const b=create({changed(){},answer(){},action(){}}),labels=JSON.parse(process.argv[2]);
+b.update([{id:'fixture',revision:'one',answerable:true,questions:[{id:'q',question:'Question',free_text:true,choices:['one','two']}]}],'',{labels});b.enter();
+const last=()=>b.detail({budget:20,columns:92}).at(-1).map(p=>p.text).join('');
+assert.equal(last(),'↑↓ choose · type to write · Enter send · Tab next · Esc/Ctrl+] back');
+b.input(Buffer.from('hello'));assert.equal(last(),'Enter send · ↑ choices · Tab next · Esc/Ctrl+] back');
+""", json.dumps(labels))
+
     def test_the_backend_sends_the_summary_and_the_count_leads_its_name(self):
         items = presented(76, 52)
         display = items[0]["questions"][0]["display"]
@@ -84,7 +154,7 @@ for(const [width,side] of [[52,true],[40,true],[90,false]]){
  // Both inputs a host ever gave: the editor's rows (before 11-15) and the summary (now).
  const r=v.render({width,height:20,side,model,state:'idle',harness:'claude',configuration:{},questions:o=>b.detail(o),brief:()=>b.summary(),sent:()=>b.sent()});
  const rows=r.rows.map(row=>row.map(p=>p.text).join('')),all=rows.join('\n');
- for(const want of [side?'4 ROUTE':'route 4','ROUTE_0','MESSAGE_3',side?'╭─ 3 QUESTIONS › ─':'3 QUESTIONS','◑ 패널을'])assert(all.includes(want),width+' lost '+want+'\n'+all);
+ for(const want of [side?'4 ROUTE':'route 4','ROUTE_0','MESSAGE_3',side?'╭─ 3 QUESTIONS ─':'3 QUESTIONS','◑ 패널을'])assert(all.includes(want),width+' lost '+want+'\n'+all);
  assert(!/\bLAB\b/.test(all),all);
  assert(!/╭─ › ◑|╭─ ◑/.test(all),'no question box in the panel\n'+all);
  assert(rows.filter(s=>/패널을|아래 두 줄|넓힌|지금 그대로|21칸/.test(s)).length<=2,all);
@@ -92,7 +162,7 @@ for(const [width,side] of [[52,true],[40,true],[90,false]]){
  // keeps the head row and its rows. A press on the head and on every row of either opens the popup.)
  // (11-17: the route box's zone rule no longer goes first, so a 20-row bottom layout may keep the section's thin box, as the side layout
  // does, and give the messages their one-row form instead; either form: the head row and its rows, or the box.)
- const q=rows.findIndex(s=>s.includes(side?'╭─ 3 QUESTIONS › ─':'3 QUESTIONS')),boxed=side||rows[q].includes('╭'),last=boxed?rows.findIndex((s,i)=>i>q&&s.startsWith('│ ╰')):rows.findIndex(s=>s.includes('◑ 패널을'));
+ const q=rows.findIndex(s=>s.includes(side?'╭─ 3 QUESTIONS ─':'3 QUESTIONS')),boxed=side||rows[q].includes('╭'),last=boxed?rows.findIndex((s,i)=>i>q&&s.startsWith('│ ╰')):rows.findIndex(s=>s.includes('◑ 패널을'));
  assert(q>0&&last>q,all);
  for(let i=q;i<=last;i++)assert(r.hits.filter(h=>h.action==='question').some(h=>h.row===i),i+JSON.stringify(r.hits));
 }
@@ -331,6 +401,22 @@ const assert=require('node:assert/strict'),path=require('node:path'),create=requ
 })().catch(e=>{console.error(e);process.exit(1);});
 """)
 
+    def test_no_guidance_the_question_popup_draws_names_the_arrows_as_sections(self):
+        # 11-22: in the question popup ←→ only move the place in the typed text, so none of its guidance
+        # (the keys rows `navigate`, `navigate_write`, the writing hints, and `editor_help`, which a popup with no
+        # question row to answer stands on) says `←→`, in either language.
+        from fleet.config import ui_text
+        keys = ("navigate", "navigate_write", "editor_help", "choose", "choose_write", "writing_choices", "send", "text",
+                "more", "more_choose", "more_down", "more_page", "more_choices")
+        for language in ("en", "ko"):
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": language}):
+                for key in keys:
+                    with self.subTest(language=language, key=key):
+                        word = ui_text("fleet.session_block." + key)
+                        self.assertTrue(word and word != "fleet.session_block." + key, word)
+                        self.assertNotIn("←→", word)
+                        self.assertNotIn("section" if language == "en" else "구획", word)
+
     def test_the_question_words_and_colors_are_one_set(self):
         # 11-15 design F 1-4, 12 (words) and 7-9 (colors): one word per meaning on the panel, the
         # popup, Fleet and the notices; `◑` Fleet's waiting red everywhere; `✓` Fleet's green on the
@@ -349,7 +435,7 @@ const assert=require('node:assert/strict'),path=require('node:path'),create=requ
         self.assertEqual(words["fleet.session_block.compact_submitted"], "보내는 중")
         self.assertEqual(words["fleet.session_block.received"], "보냄 · 소비 전")
         self.assertEqual(words["fleet.session_block.send"], "Enter 보내기")
-        self.assertEqual(words["fleet.session_block.choose"], "↑↓ · Enter 보내기 · t 답 입력")
+        self.assertEqual(words["fleet.session_block.choose"], "↑↓ · Enter 보내기")
         self.assertTrue(words["fleet.session_block.navigate"].endswith("돌아가기"))
         self.assertIn("돌아가기", words["fleet.session_block.editor_help"])
         from fleet.palette import style_components

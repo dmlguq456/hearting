@@ -65,7 +65,7 @@ const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),asse
 const source=fs.readFileSync(process.argv[1],'utf8');
 const body=source.slice(source.indexOf('function queueProjection('),source.indexOf('async function projection()'));
 const input=JSON.parse(process.argv[2]);
-const host=observed=>{const c={fs,path,setTimeout,clearTimeout,watchers:new Map(),turnRecord:'',readTurnRecord(){},popupWatch:[],popupDirty:false,statusTargets:new Set(),statusDirty:false,lastWatch:[],statusDoc:()=>null,observeStatus(){},
+const host=observed=>{const c={fs,path,setTimeout,clearTimeout,watchers:new Map(),turnRecord:'',readTurnRecord(){},popupWatch:[],popupDirty:false,statusTargets:new Set(),statusDirty:false,lastWatch:[],statusDoc:()=>null,backlogDoc:()=>null,observeStatus(){},
  ended:false,relay:false,projectionTimer:undefined,succeeding:false,nativeSelectionRevision:0,sourceError:undefined,
  redraws:0,projection(){c.redraws++;if(c.drawn)c.drawn();if(observed)c.observeFiles(observed);}};
  vm.createContext(c);vm.runInContext(body,c);return c;};
@@ -210,7 +210,7 @@ const c={fs,path,setTimeout,clearTimeout,watchers:new Map(),sid:'s',ended:false,
  upgradeNoteNow:()=>'',displayValues:{},harness:'codex',turnRecord:'',readTurnRecord(){},noteTurn(){},
  projectionKey:'',heldBytes:0,shownState:()=>'idle',bootstrapModel:false,nativeSelected:{},publishNativeDisplay(){},
  height:()=>30,applyLayout(){},nativeFooter:null,footer:'',footerSegments:[],panelLines:[],panelSections:undefined,
- panelModel:{},popupWatch:[],popupDirty:false,statusTargets:new Set(),statusDirty:false,lastWatch:[],statusDoc:()=>null,observeStatus(){},popupKeys:{},sessionsKey:null,sessionsSummary:null,table:null,
+ panelModel:{},popupWatch:[],popupDirty:false,statusTargets:new Set(),statusDirty:false,lastWatch:[],statusDoc:()=>null,backlogDoc:()=>null,observeStatus(){},popupKeys:{},sessionsKey:null,sessionsSummary:null,table:null,
  // The backend's read takes about as long as the real one (20 ms) and asks for the same watch.
  source:async()=>{const at=Date.now(),lines=[read(q),read(record)];asked.push(at);await wait(20);
   return {ok:true,watch:[q,runs+path.sep],lines};},
@@ -284,7 +284,7 @@ const c={fs,path,setTimeout,clearTimeout,watchers:new Map(),sid:'s',ended:false,
  upgradeNoteNow:()=>'',displayValues:{},harness:'codex',turnRecord:'',readTurnRecord(){},noteTurn(){},
  projectionKey:'',heldBytes:0,shownState:()=>'idle',bootstrapModel:false,nativeSelected:{},publishNativeDisplay(){},
  height:()=>30,applyLayout(){},nativeFooter:null,footer:'',footerSegments:[],panelLines:[],panelSections:undefined,
- panelModel:{},popupWatch:[],popupDirty:false,statusTargets:new Set(),statusDirty:false,lastWatch:[],statusDoc:()=>null,observeStatus(){},popupKeys:{},sessionsKey:null,sessionsSummary:null,table:null,
+ panelModel:{},popupWatch:[],popupDirty:false,statusTargets:new Set(),statusDirty:false,lastWatch:[],statusDoc:()=>null,backlogDoc:()=>null,observeStatus(){},popupKeys:{},sessionsKey:null,sessionsSummary:null,table:null,
  source:async()=>{const lines=files.map(read);await wait(20);return {ok:true,watch:files,lines};},
  rebuildDisplay(){drawn.push({at:Date.now(),lines:c.panelLines.slice()});}};
 vm.createContext(c);vm.runInContext(body,c);

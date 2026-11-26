@@ -468,6 +468,22 @@ def _settlement_metadata_pipe(pipe: str, values: dict[str, str]) -> str:
     return pipe
 
 
+def _note_model_outcome(closed: dict[str, str]) -> None:
+    """Per-model record for the one transition that closed a row; best effort, outside the lock.
+
+    The three primitives below that close a row (`close_attempt_row`,
+    `close_attempt_row_if`, `reconcile_attempt_terminal`) each call this once, after
+    the registry lock is released and only when this call made the transition, so
+    every caller of a close -- supervisor, watcher, join, foreground wrapper -- is
+    covered and a row seen again already closed is never written twice.
+    """
+    try:
+        import model_outcome_record
+        model_outcome_record.note_row_closed(closed)
+    except Exception:  # noqa: BLE001 - a record that cannot be kept never changes the close
+        pass
+
+
 def close_attempt_row(
     jobs: Path,
     attempt_id: str,
@@ -476,6 +492,20 @@ def close_attempt_row(
     evidence: dict[str, str] | None = None,
 ) -> bool:
     """Close one exact SD-49 attempt atomically and idempotently."""
+    closed: dict[str, str] = {}
+    result = _close_attempt_row(jobs, attempt_id, note, evidence, closed)
+    if result:
+        _note_model_outcome(closed)
+    return result
+
+
+def _close_attempt_row(
+    jobs: Path,
+    attempt_id: str,
+    note: str,
+    evidence: dict[str, str] | None,
+    closed: dict[str, str],
+) -> bool:
     if not attempt_id or not note:
         raise DispatchContractError("attempt-close-invalid", "attempt_id and note are required")
     ensure_global_registry_writable(jobs)
@@ -512,6 +542,8 @@ def close_attempt_row(
                 return False
             lines[index] = "\t".join(fields)
             _atomic_registry_replace(jobs, lines)
+            closed.update(metadata)
+            closed.update(values)
             return True
     return False
 
@@ -686,9 +718,18 @@ def unit_continue_receipt(args) -> str:
     """Row fields of a unit leg's session and, for a continued turn, its place in the chain.
 
     `session_id` is the harness session the turn runs in when the adapter chose it up front (Claude); a
-    continued turn adds `continues_attempt_id`, `turn` and `session` (`resumed` or `fresh:<reason>`)."""
+    continued turn adds `continues_attempt_id`, `turn` and `session` (`resumed` or `fresh:<reason>`).
+    An owner that takes over from an earlier owner of its route records the same `session`; a later turn of
+    a closed route also its place in the chain."""
     if not is_unit_leg_launch(args):
-        return ""
+        import unit_continue
+        plan = getattr(args, "session_plan", None)
+        if not unit_continue.owner_predecessor(args) or plan is None:
+            return ""
+        out = ""
+        if getattr(args, "continues_attempt_id", None):
+            out += f",continues_attempt_id={args.continues_attempt_id},turn={int(getattr(args, 'turn', 0) or 2)}"
+        return out + f",session={plan.row_value}"
     out = f",session_id={args.unit_session_id}" if getattr(args, "unit_session_id", "") else ""
     if getattr(args, "continues_attempt_id", None):
         out += f",continues_attempt_id={args.continues_attempt_id},turn={int(getattr(args, 'turn', 0) or 2)}"
@@ -706,7 +747,10 @@ def reconcile_attempt_terminal(
     evidence: dict[str, str] | None = None,
 ) -> str:
     """One terminal commit, with conflicts handed back outside the jobs lock."""
-    outcome = _commit_attempt_terminal(jobs, attempt_id, note, evidence=evidence)
+    closed: dict[str, str] = {}
+    outcome = _commit_attempt_terminal(jobs, attempt_id, note, evidence=evidence, closed=closed)
+    if outcome == "closed":
+        _note_model_outcome(closed)
     if outcome == "terminal-conflict":
         from dispatch_supervision import materialize
         try:
@@ -725,6 +769,7 @@ def _commit_attempt_terminal(
     note: str,
     *,
     evidence: dict[str, str] | None = None,
+    closed: dict[str, str] | None = None,
 ) -> str:
     """Atomically close one supervisor-owned attempt or prove it already closed.
 
@@ -814,6 +859,9 @@ def _commit_attempt_terminal(
         fields[5] = _updated_attempt_metadata(fields[5], values, terminal=True)
         lines[index] = "\t".join(fields)
         _atomic_registry_replace(jobs, lines)
+        if closed is not None:
+            closed.update(metadata)
+            closed.update(values)
         return "closed"
 
 
@@ -971,6 +1019,25 @@ def close_attempt_row_if(
     teardown_claim: str | None = None,
     write_error: dict[str, str] | None = None,
 ) -> bool:
+    """Close one exact attempt when the lock-held predicate still holds (see `_close_attempt_row_if`)."""
+    closed: dict[str, str] = {}
+    result = _close_attempt_row_if(jobs, attempt_id, note, predicate, evidence,
+                                   teardown_claim, write_error, closed)
+    if result:
+        _note_model_outcome(closed)
+    return result
+
+
+def _close_attempt_row_if(
+    jobs: Path,
+    attempt_id: str,
+    note: str,
+    predicate: Callable[[list[str]], bool],
+    evidence: dict[str, str] | None,
+    teardown_claim: str | None,
+    write_error: dict[str, str] | None,
+    closed: dict[str, str],
+) -> bool:
     """Revalidate and close one exact attempt inside the SD-49 lock.
 
     Reconciliation decisions depend on mutable process, worktree, marker and
@@ -1039,6 +1106,8 @@ def close_attempt_row_if(
             return False
         lines[index] = "\t".join(fields)
         _atomic_registry_replace(jobs, lines)
+        closed.update(metadata)
+        closed.update(values)
         return True
     return False
 

@@ -2,6 +2,7 @@
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
+import hashlib
 import io
 import json
 import re
@@ -22,11 +23,24 @@ from tools.fleet.collectors import project_status  # noqa: E402
 UTC = timezone.utc
 NOW = datetime(2026, 11, 20, 12, 0, tzinfo=UTC).timestamp()
 HOUR = 3600
-WAITS_OK = {"status": "ok", "at": NOW - 60, "items": []}
 
 
 def stamp(epoch):
     return datetime.fromtimestamp(epoch, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def tree_digest(root):
+    """Every path under `root` with its bytes' digest (or what it is): equal before and after means nothing was written."""
+    out = {}
+    for path in sorted(Path(root).rglob("*")):
+        rel = str(path.relative_to(root))
+        if path.is_symlink():
+            out[rel] = "link:" + os.readlink(path)
+        elif path.is_file():
+            out[rel] = hashlib.sha256(path.read_bytes()).hexdigest() + f":{path.stat().st_mtime_ns}"
+        else:
+            out[rel] = "dir"
+    return out
 
 
 class PureTest(unittest.TestCase):
@@ -97,6 +111,13 @@ class PureTest(unittest.TestCase):
         self.assertEqual([u["key"] for u in units["active"]], ["rt:a"])
         self.assertEqual(units["active_folded"], 2)
 
+    def test_a_piece_with_a_running_attempt_on_any_open_route_is_doing_whatever_its_age(self):
+        old = NOW - 20 * HOUR
+        units = cd.link_units([], [self.open_route("a", old, pr=9), dict(self.open_route("b", old, pr=9, kind="review"), alive=True),
+                                   self.open_route("c", old), dict(self.open_route("d", old), alive=False)], {}, now=NOW)
+        self.assertEqual([u["key"] for u in units["active"]], ["pr:9"])
+        self.assertEqual(units["active_folded"], 2)
+
     def test_a_piece_of_work_with_an_open_route_is_doing_even_with_closed_members(self):
         units = cd.link_units([self.fact("a", pr=7)], [self.open_route("b", NOW - HOUR, pr=7)], {}, now=NOW)
         self.assertEqual([(u["key"], u["count"]) for u in units["active"]], [("pr:7", 2)])
@@ -142,29 +163,28 @@ class PureTest(unittest.TestCase):
         self.assertEqual(units["done"][0]["key"], "rt:r00")
         self.assertEqual(units["done_folded"], 1480)
 
-    def render(self, units=None, waits=WAITS_OK, title="Demo", summary="One line."):
+    def render(self, units=None, title="Demo", summary="One line."):
         units = units or {"active": [], "active_folded": 0, "done": [], "done_folded": 0}
-        return cd.render_document(title, summary, units, waits, now=NOW, tz=UTC)
+        return cd.render_document(title, summary, units, now=NOW, tz=UTC)
 
     def test_the_document_has_the_agreed_shape_and_no_forbidden_words(self):
         unit = {"key": "pr:7", "pr": 7, "v": "v4.1.0", "title": "Do a thing", "impl": {"slug": "x"}, "count": 3,
                 "closed_at": NOW - HOUR, "routes": 2, "activity": 0}
-        text = self.render({"active": [unit], "active_folded": 2, "done": [unit], "done_folded": 1354},
-                           {"status": "ok", "at": NOW - 120, "items": ["Which one?"]})
+        text = self.render({"active": [unit], "active_folded": 2, "done": [unit], "done_folded": 1354})
         lines = text.split("\n")
         self.assertEqual(lines[0], cd.MARKER)
         self.assertEqual(lines[1], "# Demo")
         self.assertEqual(lines[3], "갱신 2026-11-20 12:00")
         self.assertEqual(lines[5], "**한 줄**: One line.")
         headings = [line for line in lines if line.startswith("## ")]
-        self.assertEqual(headings, ["## 하는 중", "## 기다리는 것", "## 최근에 끝난 것"])
+        self.assertEqual(headings, ["## 하는 중", "## 최근에 끝난 것"])   # 11-22: a question stands on the question screens only
         self.assertIn("- Do a thing · #7 · v4.1.0 · 기록 3", lines)
         self.assertIn("- 11-20 Do a thing · #7 · v4.1.0 · 기록 3".replace("11-20", "11-20"), lines)
         self.assertIn("6시간 넘게 움직임 없는 열린 일 2개는 접어 둠.", lines)
         self.assertIn("앞서 끝난 기록 1,354개는 접어 둠.", lines)
-        self.assertIn("- Which one?", lines)
-        self.assertIn("질문판 기준 11:58", lines)
         self.assertNotIn("나중에 할 것", text)
+        for word in ("기다리는 것", "질문판"):
+            self.assertNotIn(word, text)
         for word in ("사이클", "주기", "현황판", "보드", "cycle"):
             self.assertNotIn(word, text)
         for line in lines:  # every description line is not a bullet
@@ -172,18 +192,11 @@ class PureTest(unittest.TestCase):
                 continue
             self.assertFalse(re.match(r"^\s*([-*+]|\d+[.)])\s", line), line)
 
-    def test_empty_sections_and_an_unreadable_board(self):
-        text = self.render(waits={"status": "unreadable"})
+    def test_an_empty_campaign_says_none_in_its_two_sections_and_names_no_question(self):
+        text = self.render()
         self.assertEqual(text.count("지금 없음."), 1)
-        self.assertIn("\n질문판을 읽지 못했습니다.\n", text)
-        self.assertNotIn("- 질문판", text)  # a plain line: it is not a bullet, so it is not a question
         self.assertIn("아직 없음.", text)
-        self.assertIn("지금 없음.\n질문판 기준 11:59", self.render())
-
-    def test_a_copy_from_another_day_shows_its_date(self):
-        old = {"status": "ok", "at": NOW - 3 * 24 * HOUR, "items": ["Q?"]}
-        self.assertIn("- Q?\n질문판 기준 11-17 12:00\n", self.render(waits=old))
-        self.assertIn("질문판 기준 11:59\n", self.render(waits=dict(old, at=NOW - 60)))
+        self.assertEqual([line for line in text.split("\n") if line.startswith("## ")], ["## 하는 중", "## 최근에 끝난 것"])
 
     def test_the_summary_falls_back_to_the_title_and_markup_shows_as_typed(self):
         self.assertIn("**한 줄**: Demo", self.render(summary=""))
@@ -222,9 +235,7 @@ class PureTest(unittest.TestCase):
                 "closed_at": NOW, "routes": 1, "activity": NOW}
         self.assertIn("- " + "가" * 89 + "…" + " · 기록 1", self.render({"active": [unit], "active_folded": 0, "done": [], "done_folded": 0}))
 
-    def test_long_questions_are_clipped_and_the_text_stays_inside_the_read_limit(self):
-        text = self.render(waits={"status": "ok", "at": NOW, "items": ["질" * 300]})
-        self.assertIn("- " + "질" * 119 + "…", text)
+    def test_a_long_finished_list_stays_inside_the_read_limit(self):
         units = [{"key": f"rt:{i}", "pr": None, "v": None, "title": "t" * 90, "impl": {"slug": "x"}, "count": 1,
                   "closed_at": NOW - i, "routes": 1, "activity": 0} for i in range(400)]
         big = self.render({"active": [], "active_folded": 0, "done": units, "done_folded": 5})
@@ -239,72 +250,54 @@ class PureTest(unittest.TestCase):
         """Review round 2 (11-21): 330 open routes with long titles made 72 KB, which the readers (65,536) refuse."""
         for label, args in {
             "doing": ({"active": [self.unit(i) for i in range(330)], "active_folded": 0, "done": [], "done_folded": 0},
-                      WAITS_OK, "Demo", "One line."),
-            "waiting": ({"active": [], "active_folded": 0, "done": [], "done_folded": 0},
-                        {"status": "ok", "at": NOW, "items": ["질" * 300] * 600}, "Demo", "One line."),
+                      "Demo", "One line."),
+            "done": ({"active": [], "active_folded": 0, "done": [self.unit(i) for i in range(400)], "done_folded": 0},
+                     "Demo", "One line."),
             "everything": ({"active": [self.unit(i) for i in range(500)], "active_folded": 0,
-                            "done": [self.unit(i) for i in range(400)], "done_folded": 9},
-                           {"status": "ok", "at": NOW, "items": ["질" * 300] * 600}, "제" * 5000, "요" * 30000),
+                            "done": [self.unit(i) for i in range(400)], "done_folded": 9}, "제" * 5000, "요" * 30000),
         }.items():
             with self.subTest(label):
-                units, waits, title, summary = args
-                text = cd.render_document(title, summary, units, waits, now=NOW, tz=UTC)
+                units, title, summary = args
+                text = cd.render_document(title, summary, units, now=NOW, tz=UTC)
                 self.assertLessEqual(len(text.encode("utf-8")), cd.SIZE_LIMIT)
                 self.assertLess(cd.SIZE_LIMIT, 65536)
                 self.assertTrue(text.startswith(cd.MARKER + "\n# "))
                 self.assertEqual([line for line in text.split("\n") if line.startswith("## ")],
-                                 ["## 하는 중", "## 기다리는 것", "## 최근에 끝난 것"])
+                                 ["## 하는 중", "## 최근에 끝난 것"])
 
     def test_what_is_folded_is_counted_on_a_line_that_is_not_a_bullet(self):
         units = {"active": [self.unit(i) for i in range(330)], "active_folded": 0, "done": [], "done_folded": 0}
-        text = cd.render_document("Demo", "One line.", units, WAITS_OK, now=NOW, tz=UTC)
+        text = cd.render_document("Demo", "One line.", units, now=NOW, tz=UTC)
         shown = len([line for line in text.split("\n") if line.startswith("- ")])
         folded = re.search(r"^크기 한도로 접은 열린 일 ([\d,]+)개\.$", text, re.MULTILINE)
         self.assertIsNotNone(folded)
         self.assertEqual(shown + int(folded.group(1).replace(",", "")), 330)
         self.assertIn("- " + "가" * 89 + " · 기록 1", text)   # the freshest lines stay
-        waits = {"status": "ok", "at": NOW, "items": ["질" * 300] * 600}
-        text = cd.render_document("Demo", "One line.", {"active": [], "done": []}, waits, now=NOW, tz=UTC)
-        shown = len(self.bullets_of(text, "기다리는 것"))
-        folded = re.search(r"^크기 한도로 접은 질문 ([\d,]+)개\.$", text, re.MULTILINE)
-        self.assertEqual(shown + int(folded.group(1).replace(",", "")), 600)
-        self.assertEqual(len(self.bullets_of(text, "기다리는 것")), shown)   # the folded count adds no bullet
 
-    def test_the_size_limit_folds_finished_lines_then_open_work_and_the_questions_last(self):
-        """Review round 3: 400 open lines folded every question first (waiting 0 for the readers)."""
-        waits = {"status": "ok", "at": NOW, "items": [f"질문 {i}?" for i in range(60)]}
+    def test_the_size_limit_folds_finished_lines_first_and_then_open_work(self):
         units = {"active": [self.unit(i) for i in range(400)], "active_folded": 0,
                  "done": [self.unit(i) for i in range(20)], "done_folded": 3}
-        text = cd.render_document("Demo", "One line.", units, waits, now=NOW, tz=UTC)
+        text = cd.render_document("Demo", "One line.", units, now=NOW, tz=UTC)
         self.assertLessEqual(len(text.encode("utf-8")), cd.SIZE_LIMIT)
-        self.assertEqual(len(self.bullets_of(text, "기다리는 것")), 60)
-        self.assertNotIn("크기 한도로 접은 질문", text)
         self.assertEqual(self.bullets_of(text, "최근에 끝난 것"), [])             # the finished lines went first
         shown = len(self.bullets_of(text, "하는 중"))
         self.assertLess(shown, 400)
         self.assertIn(f"크기 한도로 접은 열린 일 {400 - shown}개.", text)
-        # the questions alone too long: they fold last, after the others are gone
-        waits = {"status": "ok", "at": NOW, "items": ["질" * 300] * 600}
-        text = cd.render_document("Demo", "One line.", units, waits, now=NOW, tz=UTC)
-        self.assertLessEqual(len(text.encode("utf-8")), cd.SIZE_LIMIT)
-        self.assertEqual((self.bullets_of(text, "하는 중"), self.bullets_of(text, "최근에 끝난 것")), ([], []))
-        self.assertTrue(self.bullets_of(text, "기다리는 것"))
 
     def bullets_of(self, text, section):
         body = text.split("## " + section + "\n", 1)[1].split("\n## ", 1)[0]
         return [line for line in body.split("\n") if line.startswith("- ")]
 
     def test_a_title_and_a_summary_are_clipped(self):
-        text = cd.render_document("제" * 5000, "요" * 30000, {"active": [], "done": []}, WAITS_OK, now=NOW, tz=UTC)
+        text = cd.render_document("제" * 5000, "요" * 30000, {"active": [], "done": []}, now=NOW, tz=UTC)
         self.assertEqual(text.split("\n")[1], "# " + "제" * (cd.HEADING_CHARS - 1) + "…")
         self.assertIn("**한 줄**: " + "요" * (cd.SUMMARY_CHARS - 1) + "…\n", text)
 
     def test_an_unpaired_surrogate_is_dropped_and_the_text_can_be_written_as_utf8(self):
         unit = self.unit(1, title="앞\ud800뒤")
-        text = cd.render_document("제\udc00목", "요\ud83d약", {"active": [unit], "done": []},
-                                  {"status": "ok", "at": NOW, "items": ["질\udfff문?"]}, now=NOW, tz=UTC)
+        text = cd.render_document("제\udc00목", "요\ud83d약", {"active": [unit], "done": []}, now=NOW, tz=UTC)
         text.encode("utf-8")
-        for word in ("제목", "요약", "앞뒤", "질문?"):
+        for word in ("제목", "요약", "앞뒤"):
             self.assertIn(word, text)
 
 
@@ -370,7 +363,6 @@ class Fixture(unittest.TestCase):
         return path
 
     def catch_up(self, **kw):
-        kw.setdefault("waits", WAITS_OK)
         err = io.StringIO()
         with redirect_stderr(err):
             written = cd.catch_up(self.root, now=kw.pop("now", NOW), **kw)
@@ -380,9 +372,13 @@ class Fixture(unittest.TestCase):
     def document(self, folder=None):
         return ((folder or self.folder) / "campaign.md").read_text()
 
-    def bullets(self, text, section):
+    def raw_bullets(self, text, section):
         body = text.split("## " + section + "\n", 1)[1].split("\n## ", 1)[0]
         return [line for line in body.split("\n") if line.startswith("- ")]
+
+    def bullets(self, text, section):
+        """The lines as a person reads them: the tail `[기록 N ›](<records/…>)` shows as `기록 N`."""
+        return [re.sub(r"\[(기록 \d+) ›\]\(<[^>]*>\)", r"\1", line) for line in self.raw_bullets(text, section)]
 
 
 class GeneratorTest(Fixture):
@@ -565,7 +561,7 @@ class GeneratorTest(Fixture):
         self.meta({cycle: "alpha-1700"})  # a title equal to the slug is not a title
         with mock.patch("work_intent.route_intent", return_value={"intent": "# Fix the thing now. Then more."}):
             self.catch_up()
-        self.assertIn("- 11-20 Fix the thing now. · #1700 · 기록 1", self.document())
+        self.assertEqual(self.bullets(self.document(), "최근에 끝난 것"), ["- 11-20 Fix the thing now. · #1700 · 기록 1"])
 
     def test_the_pr_comes_from_the_report_when_the_slug_has_none(self):
         self.route("alpha-x", closed=NOW - HOUR, evidence="# done\n\nPR #1800 opened\n")
@@ -623,27 +619,42 @@ class ReadersTest(Fixture):
     def test_fleet_and_the_common_reader_read_the_generated_document(self):
         rid, cycle = self.route("alpha-1700", closed=NOW - HOUR)
         self.route("open-x", started=NOW - HOUR)
-        waits = {"status": "ok", "at": NOW, "items": ["First?", "Second?"]}
-        self.catch_up(waits=waits)
+        self.catch_up()
         text = self.document()
         parsed = project_status.parse(text)
         self.assertEqual(parsed["title"], "Demo")
         self.assertEqual(parsed["line"], "Demo")  # no summary: the title stands in, never the marker
-        self.assertEqual(len(parsed["decisions"]), 2)
+        self.assertEqual(parsed["decisions"], [])
         self.assertNotIn("hearting", parsed["line"])
         self.meta(summary="Demo summary.")
-        self.catch_up(waits=waits, cycle_id=cycle, now=NOW + 5)
+        self.catch_up(cycle_id=cycle, now=NOW + 5)
         self.assertEqual(project_status.parse(self.document())["line"], "Demo summary.")
         from artifact_campaign_documents import campaign_status
         self.assertEqual(campaign_status(self.folder)["path"], self.folder / "campaign.md")
 
-    def test_fleet_counts_nothing_for_an_empty_board_and_the_entrance_points_at_the_document(self):
+    def test_fleet_counts_no_decision_in_a_generated_document_even_an_older_one_with_the_waiting_section(self):
+        old = cd.MARKER + "\n# Old\n\n## 하는 중\n- a job\n\n## 기다리는 것\n- First?\n- Second?\n\n## 최근에 끝난 것\n아직 없음.\n"
+        self.assertEqual(project_status.parse(old)["decisions"], [])
+        by_hand = old.split("\n", 1)[1]                                  # the same words with no marker: a person's page
+        self.assertEqual(project_status.parse(by_hand)["decisions"], ["First?", "Second?"])
+
+    def test_the_entrance_points_at_the_generated_document(self):
         self.route("alpha-1700", closed=NOW - HOUR)
         self.catch_up()
         self.assertEqual(project_status.parse(self.document())["decisions"], [])
         self.assertEqual(project_status.find_documents(str(self.root)), [str(self.folder / "campaign.md")])
         snapshot = entrance.scan(self.root)
         self.assertEqual(snapshot["all_campaigns"][0]["target"], "campaigns/2026-11-01_demo/campaign.md")
+
+    def test_the_entrance_draws_and_counts_no_question_from_an_older_page_with_the_waiting_section(self):
+        (self.folder / "campaign.md").write_text(
+            cd.MARKER + "\n# Demo\n\n## 하는 중\n지금 없음.\n\n## 기다리는 것\n- Old question?\n질문판 기준 11:59\n\n## 최근에 끝난 것\n아직 없음.\n")
+        snapshot = entrance.scan(self.root)
+        self.assertEqual(snapshot["all_campaigns"][0]["target"], "campaigns/2026-11-01_demo/campaign.md")
+        drawn = entrance.render_markdown(snapshot, entrance._translator()) + entrance.render_recent_markdown(snapshot, entrance._translator()) \
+            + entrance.render_html(snapshot, entrance._translator()) + json.dumps(snapshot, ensure_ascii=False, default=str)
+        for word in ("Old question?", "기다리는 것", "질문판"):
+            self.assertNotIn(word, drawn)
 
     def test_a_worker_turn_makes_the_document_before_the_entrance_points_at_it(self):
         self.route("alpha-1700", closed=NOW - HOUR)
@@ -752,22 +763,6 @@ class ReviewFixesTest(Fixture):
         self.catch_up(now=NOW + 120)
         self.assertEqual(self.bullets(self.document(), "최근에 끝난 것"), ["- 11-20 late-1701 · #1701 · 기록 1"])
 
-    def test_an_answered_question_leaves_the_list_on_the_next_refresh_with_no_route_event(self):
-        self.route("alpha-1700", closed=NOW - 3 * HOUR)
-        self.catch_up(now=NOW, waits={"status": "ok", "at": NOW, "items": ["Which one?", "And this?"]})
-        self.assertEqual(self.bullets(self.document(), "기다리는 것"), ["- Which one?", "- And this?"])
-        self.catch_up(now=NOW + 60, waits={"status": "ok", "at": NOW + 60, "items": ["And this?"]})
-        self.assertEqual(self.bullets(self.document(), "기다리는 것"), ["- And this?"])
-        self.catch_up(now=NOW + 120, waits={"status": "ok", "at": NOW + 120, "items": ["And this?"]})
-        self.assertEqual(self.bullets(self.document(), "기다리는 것"), ["- And this?"])
-
-    def test_the_same_questions_write_nothing_again(self):
-        self.route("alpha-1700", closed=NOW - 3 * HOUR)
-        waits = {"status": "ok", "at": NOW, "items": ["Which one?"]}
-        self.catch_up(now=NOW, waits=waits)
-        with mock.patch.object(cd, "collect", side_effect=AssertionError("nothing moved and nothing changed")):
-            self.assertEqual(self.catch_up(now=NOW + 60, waits=dict(waits, at=NOW + 60)), [])
-
     def test_a_still_moving_route_that_names_a_pr_in_its_intent_is_one_line_with_the_closed_one(self):
         self.route("closed-work", closed=NOW - 2 * HOUR, evidence="# r\n\nPR #1779 opened\n")
         rid, _cycle = self.route("continue-pieces", state="open")
@@ -793,20 +788,19 @@ class ReviewFixesTest(Fixture):
         self.assertIn("6시간 넘게 움직임 없는 열린 일 1개는 접어 둠.", self.document())
 
     def test_the_folded_count_says_records_because_it_counts_routes(self):
-        text = cd.render_document("T", "s", {"active": [], "active_folded": 0, "done": [], "done_folded": 1354}, WAITS_OK, now=NOW, tz=UTC)
+        text = cd.render_document("T", "s", {"active": [], "active_folded": 0, "done": [], "done_folded": 1354}, now=NOW, tz=UTC)
         self.assertIn("앞서 끝난 기록 1,354개는 접어 둠.", text)
         self.assertNotIn("앞서 끝난 것", text)
 
     def test_control_characters_are_not_written_to_the_document(self):
         title = "고침\x1b[31m 빨강\x07\x00 끝\x85\x9f"
-        text = cd.render_document(title, "요약\x1b 줄", {"active": [], "done": []},
-                                  {"status": "ok", "at": NOW, "items": ["질문\x1b[0m?\x7f"]}, now=NOW, tz=UTC)
+        text = cd.render_document(title, "요약\x1b 줄", {"active": [], "done": []}, now=NOW, tz=UTC)
         self.assertEqual(re.findall("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", text), [])
         self.assertIn("# 고침\\[31m 빨강 끝", text)
-        self.assertIn("- 질문\\[0m?", text)
+        self.assertIn("**한 줄**: 요약 줄", text)
         unit = {"key": "rt:x", "pr": None, "v": "v1\x1b", "title": "t\x1bu", "impl": {"slug": "x"}, "count": 1,
                 "closed_at": NOW, "routes": 1, "activity": NOW}
-        drawn = cd.render_document("T", "s", {"active": [unit], "done": []}, WAITS_OK, now=NOW, tz=UTC)
+        drawn = cd.render_document("T", "s", {"active": [unit], "done": []}, now=NOW, tz=UTC)
         self.assertEqual(re.findall("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", drawn), [])
         self.assertIn("- tu · v1 · 기록 1", drawn)
 
@@ -890,187 +884,1385 @@ class RoundThreeFixesTest(Fixture):
         self.assertEqual(self.bullets(text, "최근에 끝난 것"), ["- 11-20 work-1785 · #1785 · v4.66.2 · 기록 3"])
 
 
-class WaitsTest(Fixture):
-    """The board's saved copy and its question files sit in an isolated state folder."""
+class RunningAttemptTest(Fixture):
+    """An open route with a running attempt is doing at any age; the runtime's own liveness says what is running."""
 
     def setUp(self):
         super().setUp()
-        import human_wait_state
-        self.hws = human_wait_state
-        state = tempfile.TemporaryDirectory(prefix="cd-state-")
-        self.addCleanup(state.cleanup)
-        patch = mock.patch.dict(os.environ, {"XDG_STATE_HOME": state.name})
+        self.jobs = self.root.parent / "state" / "dispatch" / "jobs.log"
+        self.jobs.parent.mkdir(parents=True)
+        self.jobs.write_text("")
+        patch = mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(self.jobs)})
         patch.start()
         self.addCleanup(patch.stop)
-        self.other = Path(tempfile.mkdtemp(prefix="cd-other-"))
-        self.addCleanup(lambda: __import__("shutil").rmtree(self.other, ignore_errors=True))
-        (self.other / ".agent_reports").mkdir()
-        self.mine = self.root.parent
+        self.sleeper = None
 
-    def copy(self, items, observed=NOW - 30):
-        rows = [dict({"since": NOW - 100, "owner": {}, "stale": False}, **item) for item in items]
-        self.hws._write(self.hws._cache_path(), {
-            "schema_version": 3, "observed_at": observed, "items": rows, "by_session": {},
-            "total": len(rows), "older": 0})
+    def row(self, status, attempt, rid, *, alive, at=NOW - 7 * HOUR, log=None, extra="", lineage="",
+            worker_type="owner"):
+        """A registry row. `alive`: the attempt's process is this test's own; otherwise a pid no one has.
+        `lineage`: fields the real writer puts before the row's own `attempt_id` (`parent_attempt_id=…,`)."""
+        if alive:
+            start = Path(f"/proc/{os.getpid()}/stat").read_text().rsplit(")", 1)[1].split()[19]
+            process = f"pid={os.getpid()},pid_start={start}"
+        else:
+            process = "pid=4000000,pid_start=1,pgid=4000000,pgid_host=4000000"
+        meta = (f"{lineage}attempt_id={attempt},worker_type={worker_type},dispatch_depth=1,route_id={rid},"
+                f"{process}{extra}")
+        if log is not None:
+            meta += f",log_file={log}"
+        with self.jobs.open("a") as handle:
+            handle.write(f"{stamp(at)}\t{status}\t/w\t/w\tslug\t{meta}\n")
 
-    def question(self, name, cwd, text, lifecycle="open", since=NOW - 100):
-        item_id = "S4:" + name * 64
-        self.hws._write(self.hws.state_root() / (name * 64 + ".json"), {
-            "schema_version": 1, "mode": "message", "source": "S4", "id": item_id, "harness": "claude",
-            "session_id": "s-" + name, "seat_key": "seat-" + name, "sequence": 1, "question": text,
-            "since": since, "lifecycle": lifecycle, "cwd": str(cwd)})
-        return item_id
+    def log(self, moved):
+        path = self.root.parent / f"attempt-{self.serial}.log"
+        path.write_text("x")
+        os.utime(path, (moved, moved))
+        return path
 
-    def asked(self, name, source="S4"):
-        return {"id": "S4:" + name * 64, "source": source}
+    def doing(self):
+        self.catch_up()
+        text = self.document()
+        return self.bullets(text, "하는 중"), text
 
-    def test_this_repos_open_s4_questions_come_from_their_files_one_line_each(self):
-        self.question("a", self.mine, "Which one?\nsecond line")
-        self.question("b", self.mine, "Second?")
-        self.copy([self.asked("a"), self.asked("b")])
-        waits = cd.read_waits(self.root, NOW)
-        self.assertEqual(waits, {"status": "ok", "at": NOW - 30, "items": ["Which one?", "Second?"]})
+    def test_a_route_older_than_six_hours_with_a_running_attempt_stays_doing_and_an_idle_one_folds(self):
+        busy, _ = self.route("busy-1720", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.route("idle-1721", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-busy", busy, alive=True)
+        bullets, text = self.doing()
+        self.assertEqual(bullets, ["- busy-1720 · #1720 · 기록 1"])
+        self.assertIn("6시간 넘게 움직임 없는 열린 일 1개는 접어 둠.", text)
 
-    def test_another_repo_an_answered_a_folded_and_a_fileless_question_are_left_out(self):
-        self.question("a", self.other, "Other repo")
-        self.question("b", self.mine, "Answered one", lifecycle="answered")
-        self.question("c", self.mine, "Old one")
-        self.question("d", self.mine, "Blocked owner")
-        self.question("f", self.mine, "No place on the copy")
-        self.copy([self.asked("a"), self.asked("b"),
-                   dict(self.asked("c"), stale=True), dict(self.asked("c"), id="S4:" + "9" * 64, stale="older"),
-                   dict(self.asked("d"), source="S3"),
-                   self.asked("e"),                                   # no file at all
-                   dict(self.asked("g"), cwd=str(self.mine), question="Only on the copy")])  # the copy's own fields are not read
-        self.assertEqual(cd.read_waits(self.root, NOW)["items"], [])
+    def test_a_replacement_attempt_counts_when_the_first_one_ended(self):
+        busy, _ = self.route("handoff-1722", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-first", busy, alive=False, at=NOW - 9 * HOUR)
+        self.row("done", "att-first", busy, alive=False, at=NOW - 8 * HOUR, extra=",failure_class=capacity,note=dead-capacity")
+        self.row("open", "att-second", busy, alive=True, at=NOW - 2 * HOUR)
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- handoff-1722 · #1722 · 기록 1"])
 
-    def test_a_route_item_is_split_by_its_route_as_before(self):
-        rid, _ = self.route("alpha-1700")
-        self.copy([
-            {"id": "a", "source": "S1", "route_id": rid, "question": "By route?\nsecond line"},
-            {"id": "e", "source": "S3", "route_id": rid, "question": "Blocked owner"},
-            {"id": "f", "source": "S1", "route_id": rid, "question": "Old one", "stale": True},
-            {"id": "g", "source": "S1", "route_id": rid, "question": "Older", "stale": "older"},
-            {"id": "h", "source": "S1", "route_id": rid},
-            {"id": "i", "source": "S1", "route_id": "rt-" + "0" * 16, "question": "Not this root's route"}])
-        self.assertEqual(cd.read_waits(self.root, NOW)["items"], ["By route?", "질문 (본문 없음)"])
+    def test_only_ended_or_gone_attempts_leave_an_old_open_route_folded(self):
+        gone, _ = self.route("gone-1723", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        done, _ = self.route("done-1724", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-gone", gone, alive=False)                 # open row, its process is gone
+        self.row("open", "att-done", done, alive=True)                   # later closed: the row says it ended
+        self.row("done", "att-done", done, alive=False, at=NOW - 6 * HOUR)
+        bullets, text = self.doing()
+        self.assertEqual(bullets, [])
+        self.assertIn("6시간 넘게 움직임 없는 열린 일 2개는 접어 둠.", text)
 
-    def test_an_old_copy_is_used_and_its_time_is_written(self):
-        self.question("a", self.mine, "Still open?")
-        self.copy([self.asked("a")], observed=NOW - 3 * 24 * HOUR)
-        waits = cd.read_waits(self.root, NOW)
-        self.assertEqual(waits, {"status": "ok", "at": NOW - 3 * 24 * HOUR, "items": ["Still open?"]})
-        text = cd.render_document("Demo", "", {"active": [], "active_folded": 0, "done": [], "done_folded": 0},
-                                  waits, now=NOW, tz=UTC)
-        self.assertIn("- Still open?\n질문판 기준 11-17 12:00\n", text)
+    def test_one_running_route_of_a_pr_keeps_the_whole_piece_doing_and_its_log_is_its_movement(self):
+        old = self.route("work-1725", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)[0]
+        review, _ = self.route("rv-1725-unit", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        other, _ = self.route("other-1726", started=NOW - HOUR, touched=NOW - 2 * HOUR)
+        self.row("open", "att-review", review, alive=True, log=self.log(NOW - HOUR))
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- work-1725 · #1725 · 기록 2", "- other-1726 · #1726 · 기록 1"])   # newest movement first
+        self.assertNotEqual(old, review)
 
-    def test_no_copy_or_a_failing_read_is_unreadable(self):
-        self.assertEqual(cd.read_waits(self.root, NOW), {"status": "unreadable"})
-        with mock.patch.object(self.hws, "cached_view", side_effect=OSError):
-            self.assertEqual(cd.read_waits(self.root, NOW), {"status": "unreadable"})
+    def test_a_finished_stage_worker_written_after_its_owner_leaves_the_owner_doing(self):
+        busy, _ = self.route("owner-1730", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-owner", busy, alive=True)
+        self.row("done", "att-stage", busy, alive=False, at=NOW - 3 * HOUR, worker_type="worker",
+                 lineage="parent_attempt_id=att-owner,")
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- owner-1730 · #1730 · 기록 1"])
 
-    def test_reading_changes_no_question_file_and_no_copy(self):
-        self.question("a", self.mine, "Q?")
-        self.copy([self.asked("a")])
-        before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.hws.state_root().iterdir()}
-        cd.read_waits(self.root, NOW)
-        after = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.hws.state_root().iterdir()}
-        self.assertEqual(before, after)
+    def test_a_finished_unit_call_written_after_a_running_worker_leaves_the_worker_doing(self):
+        busy, _ = self.route("worker-1731", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-worker", busy, alive=True, worker_type="worker")
+        self.row("done", "att-unit", busy, alive=False, at=NOW - 3 * HOUR, worker_type="worker",
+                 lineage="caller_attempt_id=att-worker,")
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- worker-1731 · #1731 · 기록 1"])
 
-    def test_the_count_fleet_reads_is_the_number_of_open_questions(self):
+    def test_a_live_child_with_a_finished_sibling_of_the_same_parent_is_doing(self):
+        busy, _ = self.route("child-1732", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-child", busy, alive=True, worker_type="worker", lineage="parent_attempt_id=att-p,")
+        self.row("done", "att-sibling", busy, alive=False, at=NOW - 3 * HOUR, worker_type="worker",
+                 lineage="parent_attempt_id=att-p,")
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- child-1732 · #1732 · 기록 1"])
+
+    def test_a_last_row_still_being_written_is_not_read(self):
+        busy, _ = self.route("tail-1733", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.row("open", "att-tail", busy, alive=True)
+        with self.jobs.open("a") as handle:   # half of a later row for the same attempt, no newline yet
+            handle.write(f"{stamp(NOW - HOUR)}\tdone\t/w\t/w\tslug\tattempt_id=att-tail,worker_ty")
+        bullets, _ = self.doing()
+        self.assertEqual(bullets, ["- tail-1733 · #1733 · 기록 1"])
+
+    def test_the_registry_is_read_once_per_pass_for_every_campaign_and_nothing_is_written_to_it(self):
+        second_id = "camp_" + "2" * 32
+        second = self.campaign("2026-11-02_second", second_id, "Second")
+        a, _ = self.route("a-1727", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        b, _ = self.route("b-1728", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR, campaign_id=second_id)
+        self.row("open", "att-a", a, alive=True)
+        self.row("open", "att-b", b, alive=True)
+        before = self.jobs.read_bytes()
+        import route_autoclose
+        with mock.patch.object(route_autoclose, "live_routes", wraps=route_autoclose.live_routes) as spy:
+            self.catch_up()
+        self.assertEqual(spy.call_count, 1)
+        self.assertEqual(self.bullets(self.document(), "하는 중"), ["- a-1727 · #1727 · 기록 1"])
+        self.assertEqual(self.bullets(self.document(second), "하는 중"), ["- b-1728 · #1728 · 기록 1"])
+        self.assertEqual(self.jobs.read_bytes(), before)
+
+    def test_an_unreadable_registry_leaves_the_six_hour_rule_alone(self):
+        busy, _ = self.route("busy-1729", started=NOW - 9 * HOUR, touched=NOW - 8 * HOUR)
+        self.jobs.write_bytes(b"\xff\xfe not a row\n\t\t\n")
+        self.assertEqual(self.doing()[0], [])
+        os.environ["AGENT_DISPATCH_JOBS"] = str(self.jobs.parent / "missing.log")
+        self.assertEqual(self.doing()[0], [])
+
+
+class NoQuestionsTest(Fixture):
+    """11-22: what waits for a person's answer is a question and stands on the question screens only. The document
+    neither reads the question board nor is written again when its questions change."""
+
+    def test_the_module_has_no_way_to_read_the_questions(self):
+        for name in ("read_waits", "_waits_signature", "_open_question_files", "_folder_root", "WAIT_CHARS"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(cd, name))
+
+    def test_a_new_document_has_two_sections_and_no_question_line_whatever_the_board_holds(self):
+        import human_wait_state
+        state = tempfile.TemporaryDirectory(prefix="cd-state-")
+        self.addCleanup(state.cleanup)
+        digest = "a" * 64
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": state.name}):
+            human_wait_state._write(human_wait_state.state_root() / (digest + ".json"), {
+                "schema_version": 1, "mode": "message", "source": "S4", "id": "S4:" + digest, "harness": "claude",
+                "session_id": "s-a", "seat_key": "seat-a", "sequence": 1, "question": "Which one?\nsecond line",
+                "since": NOW - 100, "lifecycle": "open", "cwd": str(self.root.parent)})
+            self.route("alpha-1700", closed=NOW - 3 * HOUR)
+            self.route("open-x", started=NOW - HOUR)
+            self.catch_up()
+        text = self.document()
+        self.assertEqual([line for line in text.split("\n") if line.startswith("## ")], ["## 하는 중", "## 최근에 끝난 것"])
+        for word in ("기다리는 것", "질문판", "Which one?"):
+            self.assertNotIn(word, text)
+
+    def test_a_changed_question_set_writes_nothing_and_the_pass_mark_carries_no_question_state(self):
+        import human_wait_state
+        state = tempfile.TemporaryDirectory(prefix="cd-state-")
+        self.addCleanup(state.cleanup)
+        self.route("alpha-1700", closed=NOW - 3 * HOUR)
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": state.name}):
+            self.catch_up(now=NOW)
+            human_wait_state._write(human_wait_state.state_root() / ("b" * 64 + ".json"), {
+                "schema_version": 1, "mode": "message", "source": "S4", "id": "S4:" + "b" * 64, "harness": "claude",
+                "session_id": "s-b", "seat_key": "seat-b", "sequence": 1, "question": "Just asked?",
+                "since": NOW + 5, "lifecycle": "open", "cwd": str(self.root.parent)})
+            with mock.patch.object(cd, "collect", side_effect=AssertionError("a question is no reason to write")):
+                self.assertEqual(self.catch_up(now=NOW + 60), [])
+        self.assertEqual(json.loads((self.runtime / "campaign-document" / "watermark.json").read_text()).keys(), {"v", "ns"})
+
+    def test_an_older_page_that_still_has_the_waiting_section_is_written_again_without_it(self):
         self.route("alpha-1700", closed=NOW - HOUR)
-        for name in "abc":
-            self.question(name, self.mine, f"Q{name}?")
-        self.question("d", self.other, "Not ours")
-        self.copy([self.asked(name) for name in "abcd"])
-        waits = cd.read_waits(self.root, NOW)
-        self.assertEqual(waits["items"], ["Qa?", "Qb?", "Qc?"])
-        self.catch_up(waits=waits)
-        self.assertEqual(len(project_status.parse(self.document())["decisions"]), 3)
+        (self.folder / "campaign.md").write_text(
+            cd.MARKER + "\n# old\n\n## 하는 중\n지금 없음.\n\n## 기다리는 것\n- Old question?\n질문판 기준 11:59\n\n## 최근에 끝난 것\n아직 없음.\n")
+        self.catch_up()
+        text = self.document()
+        self.assertNotIn("기다리는 것", text)
+        self.assertNotIn("Old question?", text)
+        self.assertEqual(self.bullets(text, "최근에 끝난 것"), ["- 11-20 alpha-1700 · #1700 · 기록 1"])
 
 
-    def test_an_open_question_of_this_repo_asked_after_the_copy_is_added_and_others_are_not(self):
-        self.question("a", self.mine, "On the copy?")
-        self.copy([self.asked("a")], observed=NOW - 30)
-        self.question("b", self.mine, "Asked after the copy?", since=NOW - 10)
-        self.question("c", self.other, "Another repo, after the copy", since=NOW - 10)
-        self.question("d", self.mine, "Answered after the copy", since=NOW - 10, lifecycle="answered")
-        self.question("e", self.mine, "Before the copy and not on it", since=NOW - 100)
-        waits = cd.read_waits(self.root, NOW)
-        self.assertEqual(waits["items"], ["On the copy?", "Asked after the copy?"])
-        self.assertEqual(waits["at"], NOW - 30)
+class RecordFixture(Fixture):
+    """Routes with cycle folders, reports and the other things a record page reads."""
 
-    def test_a_question_on_the_copy_follows_the_copy_and_is_not_added_twice(self):
-        self.question("a", self.mine, "Folded as old", since=NOW - 10)
-        self.copy([dict(self.asked("a"), stale="older")], observed=NOW - 30)   # the copy says old: it stays out
-        self.assertEqual(cd.read_waits(self.root, NOW)["items"], [])
-        self.question("b", self.mine, "Listed once", since=NOW - 10)
-        self.copy([dict(self.asked("a"), stale="older"), self.asked("b")], observed=NOW - 30)
-        self.assertEqual(cd.read_waits(self.root, NOW)["items"], ["Listed once"])
+    def day(self, moment):
+        return datetime.fromtimestamp(moment).strftime("%m-%d")
 
-    def test_the_state_folder_is_looked_at_once_and_only_question_file_names_are_read(self):
-        self.question("a", self.mine, "First?")
-        self.question("b", self.mine, "After the copy?", since=NOW - 10)
-        self.copy([self.asked("a")], observed=NOW - 30)
-        self.hws._write(self.hws.state_root() / "extra.json", {"schema_version": 1})
-        self.hws._write(self.hws._fleet_cache_path(), {"schema_version": 1, "items": []})
-        read = []
-        real = self.hws._read
-        with mock.patch.object(self.hws, "_read", side_effect=lambda path: read.append(Path(path).name) or real(path)):
-            waits = cd.read_waits(self.root, NOW)
-        self.assertEqual(waits["items"], ["First?", "After the copy?"])
-        self.assertEqual(sorted(read), ["a" * 64 + ".json", "b" * 64 + ".json"])   # neither the copies nor a stray file, each once
+    def cycle_dir(self, slug):
+        return self.folder / f"2026-11-20_{slug}"
 
-    def test_two_files_with_one_id_add_one_question(self):
-        item_id = self.question("a", self.mine, "Moved midway?", since=NOW - 10)
-        twin = dict(self.hws._read(self.hws.state_root() / ("a" * 64 + ".json")))
-        self.hws._write(self.hws.state_root() / ("9" * 64 + ".json"), twin)
-        self.copy([], observed=NOW - 30)
-        self.assertEqual(cd.read_waits(self.root, NOW)["items"], ["Moved midway?"])
-        self.assertEqual(twin["id"], item_id)
+    def files(self, slug, **names):
+        """Write `artifacts/<name>` files (`__` stands for `/`) into the route's cycle folder."""
+        for name, text in names.items():
+            path = self.cycle_dir(slug) / "artifacts" / name.replace("__", "/")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
 
-    def test_a_folder_that_is_not_absolute_is_not_this_repos(self):
-        """A relative folder would resolve against the worker's own folder, whichever repo that is."""
-        self.question("a", ".", "On the copy, relative")
-        self.question("b", ".", "After the copy, relative", since=NOW - 10)
-        self.copy([self.asked("a"), {"id": "x", "source": "S1", "cwd": ".", "question": "Route-less, relative"}],
-                  observed=NOW - 30)
-        here = os.getcwd()
-        os.chdir(self.mine)
-        try:
-            self.assertEqual(cd.read_waits(self.root, NOW)["items"], [])
-        finally:
-            os.chdir(here)
+    def bump(self, number):
+        """Something that closes after the last pass: a new route, and the clock of the next pass."""
+        self.route(f"tick-{chr(96 + number)}", closed=NOW + 1000 * number - 10)
+        return NOW + 1000 * number
 
-    def test_an_unpaired_surrogate_in_a_question_file_stops_no_document(self):
-        self.route("alpha-1700", closed=NOW - 3 * HOUR)
-        self.hws.state_root().mkdir(parents=True, exist_ok=True)
-        raw = json.dumps({"schema_version": 1, "mode": "message", "source": "S4", "id": "S4:" + "c" * 64,
-                          "harness": "claude", "session_id": "s-c", "seat_key": "seat-c", "sequence": 1,
-                          "question": "Pick one \ud83d please?", "since": NOW + 5, "lifecycle": "open",
-                          "cwd": str(self.mine)})                  # ASCII escapes: the one way such a file exists
-        (self.hws.state_root() / ("c" * 64 + ".json")).write_text(raw)
-        os.chmod(self.hws.state_root() / ("c" * 64 + ".json"), 0o600)
-        self.copy([], observed=NOW - 30)
-        self.assertEqual(self.catch_up(now=NOW + 60, waits=None), ["2026-11-01_demo"])
-        self.assertNotIn("skipped", self.err)
-        self.assertEqual(self.bullets(self.document(), "기다리는 것"), ["- Pick one please?"])
-        self.assertEqual(len(cd._waits_signature({"status": "ok", "items": ["a\ud800b"]})), 16)   # any text can be signed
+    def more_cycle(self, rid, slug, *, started, locator=None, state="sealed", written=None):
+        """Another cycle of the same route (a review's later round)."""
+        self.serial += 1
+        cycle_id = f"cyc_{self.serial:032x}"
+        record = {"campaign_id": self.campaign_id, "cycle_id": cycle_id, "route_id": rid, "slug": slug,
+                  "route_capability": "audit", "started_on": stamp(started), "state": state,
+                  "locator": locator or f"2026-11-20_{slug}-r{self.serial}", "title": slug}
+        path = self.runtime / "artifact-producer/v1/cycles" / f"{cycle_id}.json"
+        path.write_text(json.dumps(record))
+        os.utime(path, (written or started, written or started))
+        return cycle_id, record["locator"]
 
-    def test_a_question_asked_after_the_copy_reaches_the_document_and_leaves_it_when_answered(self):
-        self.route("alpha-1700", closed=NOW - 3 * HOUR)
-        self.copy([], observed=NOW - 30)
-        self.catch_up(now=NOW, waits=None)
-        self.assertEqual(self.bullets(self.document(), "기다리는 것"), [])
-        self.question("b", self.mine, "Just asked?", since=NOW + 5)
-        self.route("beta-1701", closed=NOW + 10)                      # a route event: the question list is read
-        self.catch_up(now=NOW + 60, waits=None)
-        self.assertEqual(self.bullets(self.document(), "기다리는 것"), ["- Just asked?"])
-        self.hws._write(self.hws.state_root() / ("b" * 64 + ".json"), dict(
-            self.hws._read(self.hws.state_root() / ("b" * 64 + ".json")), lifecycle="answered"))
-        self.route("gamma-1702", closed=NOW + 100)                    # again only a route event
-        self.catch_up(now=NOW + 120, waits=None)
-        self.assertEqual(self.bullets(self.document(), "기다리는 것"), [])
+    def page(self, key):
+        return (self.folder / "records" / f"{key}.md").read_text()
+
+    def page_lines(self, key):
+        return [line for line in self.page(key).split("\n") if line.startswith("- ")]
+
+    def work_and_review(self):
+        """A PR's work, its two-round review and its publish: the shape of a real page."""
+        self.route("alpha-1700", started=NOW - 9 * HOUR, closed=NOW - 8 * HOUR)
+        self.files("alpha-1700", **{"final_report.md": "# done\n"})
+        rid, _cycle = self.route("rv-1700-unit", started=NOW - 7 * HOUR, closed=NOW - 5 * HOUR, capability="audit")
+        self.files("rv-1700-unit", **{"units__unit__report.md": "# Review\n최종 판정: 수정 후 병합 — head abc1234\n"})
+        return rid
+
+
+class RecordLinkTest(RecordFixture):
+    def test_the_tail_links_to_the_page_named_by_the_pr_or_by_the_first_routes_folder(self):
+        self.route("alpha-1700", closed=NOW - HOUR)
+        self.route("solo-work", closed=NOW - 2 * HOUR)
+        self.catch_up()
+        lines = self.raw_bullets(self.document(), "최근에 끝난 것")
+        self.assertEqual(lines, ["- 11-20 alpha-1700 · #1700 · [기록 1 ›](<records/pr-1700.md>)",
+                                 "- 11-20 solo-work · [기록 1 ›](<records/2026-11-20_solo-work.md>)"])
+
+    def test_a_key_with_a_character_outside_the_set_is_no_link(self):
+        for good in ("pr-1", "2026-11-20_a.b-c"):
+            self.assertEqual(cd.record_key(None, good), good)
+        for bad in ("a b", "a/b", "..", ".hidden", "a)b", "a\n", "", None, "é", "a" * 201):
+            self.assertIsNone(cd.record_key(None, bad), bad)
+        self.assertEqual(cd.record_key(1798, "a b"), "pr-1798")
+        self.route("odd name", closed=NOW - HOUR)
+        self.catch_up()
+        self.assertEqual(self.raw_bullets(self.document(), "최근에 끝난 것"), ["- 11-20 odd name · 기록 1"])
+        self.assertFalse((self.folder / "records").exists())
+
+    def test_a_file_of_that_name_that_is_not_the_generators_is_untouched_and_not_linked(self):
+        self.route("alpha-1700", closed=NOW - HOUR)
+        self.route("beta-1701", closed=NOW - 2 * HOUR)
+        (self.folder / "records").mkdir()
+        foreign = self.folder / "records" / "pr-1700.md"
+        foreign.write_text("a person wrote this\n")
+        os.utime(foreign, (1_700_000_000, 1_700_000_000))
+        self.catch_up()
+        self.assertEqual(foreign.read_text(), "a person wrote this\n")
+        self.assertEqual(foreign.stat().st_mtime, 1_700_000_000)
+        self.assertEqual(self.raw_bullets(self.document(), "최근에 끝난 것"),
+                         ["- 11-20 alpha-1700 · #1700 · 기록 1", "- 11-20 beta-1701 · #1701 · [기록 1 ›](<records/pr-1701.md>)"])
+        self.assertTrue((self.folder / "records" / "pr-1701.md").is_file())
+
+    def test_a_page_of_the_generator_is_replaced(self):
+        self.route("alpha-1700", closed=NOW - HOUR)
+        (self.folder / "records").mkdir()
+        old = self.folder / "records" / "pr-1700.md"
+        old.write_text(cd.RECORD_MARKER + "\nold words\n")
+        self.catch_up()
+        self.assertIn(f"#1700 · {self.day(NOW - HOUR)} · 기록 1 · 파일 0개", old.read_text())
+
+    def test_a_records_that_is_a_link_is_never_written_into_and_no_line_links(self):
+        elsewhere = self.root.parent / "elsewhere"
+        elsewhere.mkdir()
+        (self.folder / "records").symlink_to(elsewhere, target_is_directory=True)
+        self.route("alpha-1700", closed=NOW - HOUR)
+        self.catch_up()
+        self.assertEqual(os.listdir(elsewhere), [])
+        self.assertNotIn("›", self.document())
+
+    def test_a_records_that_is_a_file_is_left_as_it_is_and_no_line_links(self):
+        (self.folder / "records").write_text("file")
+        self.route("alpha-1700", closed=NOW - HOUR)
+        self.catch_up()
+        self.assertEqual((self.folder / "records").read_text(), "file")
+        self.assertNotIn("›", self.document())
+
+    def test_a_pure_unit_with_no_record_draws_as_it_always_did(self):
+        unit = {"key": "rt:x", "pr": 7, "v": "v1", "title": "t", "impl": {"slug": "x"}, "count": 2,
+                "closed_at": NOW, "routes": 1, "activity": NOW}
+        drawn = cd.render_document("T", "s", {"active": [], "done": [unit]}, now=NOW, tz=UTC)
+        self.assertIn("- 11-20 t · #7 · v1 · 기록 2\n", drawn)
+        drawn = cd.render_document("T", "s", {"active": [], "done": [dict(unit, record="pr-7")]}, now=NOW, tz=UTC)
+        self.assertIn("- 11-20 t · #7 · v1 · [기록 2 ›](<records/pr-7.md>)\n", drawn)
+
+    def test_the_same_key_twice_links_only_the_first_line(self):
+        self.route("same-a", closed=NOW - HOUR)
+        self.route("same-b", closed=NOW - 2 * HOUR)
+        for path in sorted((self.runtime / "artifact-producer/v1/cycles").glob("*.json")):   # both routes name one folder
+            value = json.loads(path.read_text())
+            value["locator"] = "shared-folder"
+            path.write_text(json.dumps(value))
+        self.catch_up()
+        tails = [line.rsplit(" · ", 1)[1] for line in self.raw_bullets(self.document(), "최근에 끝난 것")]
+        self.assertEqual(sorted(tails), ["[기록 1 ›](<records/shared-folder.md>)", "기록 1"])
+
+
+class RecordPageTest(RecordFixture):
+    def test_a_page_has_the_marker_the_head_and_one_line_per_record(self):
+        self.work_and_review()
+        self.files("alpha-1700", **{"extra.md": "x"})
+        self.route("fix-pr1700", started=NOW - 4 * HOUR, closed=NOW - 3 * HOUR)
+        self.files("fix-pr1700", **{"final_report.md": "# fix\n"})
+        pub, _c = self.route("publish-v4.1.0", started=NOW - 2 * HOUR, closed=NOW - 2 * HOUR, capability="autopilot-ship",
+                             evidence="# v4.1.0 — #1700\n")
+        self.catch_up()
+        text = self.page("pr-1700")
+        lines = text.split("\n")
+        self.assertEqual(lines[0], cd.RECORD_MARKER)
+        self.assertEqual(lines[1], "# alpha-1700")
+        total = int(re.search(r"기록 (\d+)", lines[3]).group(1))
+        self.assertEqual(total, len(self.page_lines("pr-1700")))   # one line is one record
+        self.assertEqual(lines[3], f"#1700 · v4.1.0 · {self.day(NOW - 2 * HOUR)} · 기록 4 · 파일 5개")
+        kinds = [line.split(" · ")[0] for line in self.page_lines("pr-1700")]
+        self.assertEqual(kinds, ["- 구현", "- 독립 검토", "- 고침", "- 출판"])
+        self.assertTrue(text.endswith("\n"))
+        self.assertEqual(self.bullets(self.document(), "최근에 끝난 것")[0].split(" · ")[-1], "기록 4")
+
+    def test_the_head_says_doing_for_open_work_and_drops_a_missing_pr_and_version(self):
+        self.route("solo-open", started=NOW - HOUR)
+        self.catch_up()
+        lines = self.page("2026-11-20_solo-open").split("\n")
+        self.assertEqual(lines[3], "하는 중 · 기록 1 · 파일 0개")
+        self.assertEqual(self.page_lines("2026-11-20_solo-open"), [f"- 구현 · {self.day(NOW - HOUR)} · solo-open · 보고 아직 없음 · 파일 0개"])
+
+    def test_a_closed_route_with_no_report_has_no_link_and_an_open_one_says_so(self):
+        self.route("alpha-1700", closed=NOW - HOUR)
+        self.catch_up()
+        self.assertEqual(self.page_lines("pr-1700"), [f"- 구현 · {self.day(NOW - HOUR)} · alpha-1700 · 파일 0개"])
+
+    def test_the_same_input_makes_the_same_bytes_and_a_changed_page_alone_is_written(self):
+        self.work_and_review()
+        self.route("other-1701", closed=NOW - 2 * HOUR)
+        self.catch_up()
+        page, other = self.folder / "records" / "pr-1700.md", self.folder / "records" / "pr-1701.md"
+        for path in (page, other):
+            os.utime(path, (1_700_000_000, 1_700_000_000))
+        before = page.read_bytes()
+        self.catch_up(now=NOW + 600)   # a later clock changes the document's stamp, not the pages
+        self.assertEqual(page.read_bytes(), before)
+        self.assertEqual((page.stat().st_mtime, other.stat().st_mtime), (1_700_000_000, 1_700_000_000))
+        self.route("alpha-1700-again", closed=NOW + 1190)   # a new route of the PR changes its page
+        self.catch_up(now=NOW + 1200)
+        self.assertNotEqual(page.stat().st_mtime, 1_700_000_000)
+        self.assertEqual(other.stat().st_mtime, 1_700_000_000)
+
+    def test_a_page_is_made_only_for_a_line_the_document_shows_and_one_that_folded_stays(self):
+        for index in range(4):
+            self.route(f"work-{1700 + index}", closed=NOW - (index + 1) * HOUR)
+        with mock.patch.object(cd, "DONE_LINES", 3):
+            self.catch_up()
+        pages = sorted(os.listdir(self.folder / "records"))
+        self.assertEqual(pages, ["pr-1700.md", "pr-1701.md", "pr-1702.md"])   # the fourth line is folded
+        self.route("work-1704", closed=NOW + 50)
+        with mock.patch.object(cd, "DONE_LINES", 3):
+            self.catch_up(now=NOW + 60)
+        self.assertEqual(sorted(os.listdir(self.folder / "records")),
+                         ["pr-1700.md", "pr-1701.md", "pr-1702.md", "pr-1704.md"])   # none removed
+
+    def test_a_foreign_campaign_md_stops_the_pages_too(self):
+        (self.folder / "campaign.md").write_text("by hand\n")
+        self.route("alpha-1700", closed=NOW - HOUR)
+        with redirect_stderr(io.StringIO()):
+            self.catch_up()
+        self.assertFalse((self.folder / "records").exists())
+        self.assertEqual((self.folder / "campaign.md").read_text(), "by hand\n")
+
+    def test_no_line_means_no_records_folder(self):
+        self.catch_up()
+        self.route("frame-x", closed=NOW + 50, capability="route-frame")
+        self.catch_up(now=NOW + 60)
+        self.assertFalse((self.folder / "records").exists())
+
+    def test_one_page_failing_does_not_stop_the_others(self):
+        self.route("alpha-1700", closed=NOW - 2 * HOUR)
+        self.route("beta-1701", closed=NOW - HOUR)
+        real = cd._write_document
+
+        def flaky(folder, text, **kw):
+            if kw.get("name") == "pr-1700.md":
+                raise OSError("disk")
+            return real(folder, text, **kw)
+        with mock.patch.object(cd, "_write_document", side_effect=flaky):
+            self.catch_up()
+        self.assertIn("skipped error=OSError", self.err)
+        self.assertTrue((self.folder / "records" / "pr-1701.md").is_file())
+        self.assertTrue((self.folder / "campaign.md").is_file())
+
+    def test_a_campaign_folder_a_begin_made_and_nothing_filled_can_be_cleared_of_the_generators_files(self):
+        self.route("open-x", started=NOW - HOUR)
+        self.catch_up()
+        records = self.folder / "records"
+        self.assertTrue(any(records.iterdir()))
+        (records / "by-hand.md").write_text("mine")
+        cd.remove_generated_records(self.folder)
+        self.assertEqual(os.listdir(records), ["by-hand.md"])   # only the generator's pages go, and the folder stays with a file in it
+        (records / "by-hand.md").unlink()
+        cd.remove_generated_records(self.folder)
+        self.assertFalse(records.exists())   # nothing else in it: the folder goes too
+        (self.folder / "campaign.md").write_text("by hand\n")
+        cd.remove_generated(self.folder)
+        self.assertEqual((self.folder / "campaign.md").read_text(), "by hand\n")
+
+    def test_the_page_writer_has_no_way_to_remove_anything(self):
+        import inspect
+        source = inspect.getsource(cd._write_records) + inspect.getsource(cd._Pages) + inspect.getsource(cd._GitPass)
+        for word in ("unlink", "rmdir", "rmtree", "os.remove", "os.rename", "shutil"):
+            self.assertNotIn(word, source)
+
+    def test_the_markup_in_a_title_cannot_break_a_page_line_or_a_link(self):
+        self.route("alpha-1700", closed=NOW - HOUR)
+        self.meta({self.cycle_of("alpha-1700"): "A [b](c) <x> `y` *z*"})
+        self.catch_up()
+        line = self.page_lines("pr-1700")[0]
+        self.assertIn(r"A \[b\](c) \<x\> `y` \*z\*", line)
+
+    def cycle_of(self, slug):
+        for path in (self.runtime / "artifact-producer/v1/cycles").glob("*.json"):
+            value = json.loads(path.read_text())
+            if value["slug"] == slug:
+                return value["cycle_id"]
+
+
+class RecordLabelTest(unittest.TestCase):
+    def unit(self, kinds, pubs=0):
+        facts = [{"rid": f"rt-{i:04d}", "kind": kind, "slug": f"s{i}", "cy": f"cy{i}", "st": 100 + i, "c": 200 + i, "ok": True,
+                  "pr": 5, "prs": [], "v": None, "t": None, "loc": f"loc{i}"} for i, kind in enumerate(kinds)]
+        out = cd.link_units(facts, [], {}, now=NOW)
+        unit = out["done"][0]
+        unit["pubs"] = [{"rid": f"rt-p{i}", "st": 500 + i, "c": 600 + i, "v": "v1", "kind": "publish"} for i in range(pubs)]
+        unit["count"] += pubs
+        return unit
+
+    def labels(self, unit):
+        return [label for label, _kind, _member in cd.record_labels(unit)]
+
+    def test_the_first_work_is_the_build_and_the_later_ones_fix_numbered_from_two(self):
+        self.assertEqual(self.labels(self.unit(["work"])), ["구현"])
+        self.assertEqual(self.labels(self.unit(["work", "work"])), ["구현", "고침"])
+        self.assertEqual(self.labels(self.unit(["work", "work", "work", "work"])), ["구현", "고침 1", "고침 2", "고침 3"])
+
+    def test_the_first_review_is_independent_and_the_later_ones_confirm_numbered_from_two(self):
+        self.assertEqual(self.labels(self.unit(["work", "review"])), ["구현", "독립 검토"])
+        self.assertEqual(self.labels(self.unit(["work", "review", "review"])), ["구현", "독립 검토", "닫힘 확인"])
+        self.assertEqual(self.labels(self.unit(["review", "review", "review"])), ["독립 검토", "닫힘 확인 1", "닫힘 확인 2"])
+
+    def test_lines_follow_the_start_then_the_route_id_and_a_publish_is_a_line(self):
+        unit = self.unit(["work", "review", "work"], pubs=1)
+        self.assertEqual(self.labels(unit), ["구현", "독립 검토", "고침", "출판"])
+        self.assertEqual(len(cd.record_labels(unit)), unit["count"])
+        tied = self.unit(["work", "work"])
+        for member in tied["closed"]:
+            member["st"] = 100
+        tied["closed"].sort(key=lambda m: m["rid"], reverse=True)
+        self.assertEqual([m["rid"] for _l, _k, m in cd.record_labels(tied)], ["rt-0000", "rt-0001"])
+
+    def test_the_order_follows_the_start_of_the_first_cycle_a_route_is_given(self):
+        unit = self.unit(["work", "review"])   # rt-0000 starts at 101, rt-0001 at 102
+        self.assertEqual(self.labels(unit), ["구현", "독립 검토"])
+        order = [(label, member["rid"]) for label, _kind, member in cd.record_labels(unit, {"rt-0001": 1})]
+        self.assertEqual(order, [("독립 검토", "rt-0001"), ("구현", "rt-0000")])
+        order = [label for label, _kind, _member in cd.record_labels(unit, {"rt-0001": 1, "rt-0000": 0})]
+        self.assertEqual(order, ["구현", "독립 검토"])
+        self.assertEqual(self.labels(unit), ["구현", "독립 검토"])   # none given: as before
+
+    def test_a_piece_with_no_pr_has_its_first_route_as_the_build(self):
+        facts = [{"rid": "rt-1", "kind": "work", "slug": "s", "cy": "c", "st": 1, "c": 2, "ok": True, "pr": None, "prs": [],
+                  "v": None, "t": None, "loc": "l"}]
+        unit = cd.link_units(facts, [], {}, now=NOW)["done"][0]
+        self.assertEqual(self.labels(unit), ["구현"])
+
+
+class RecordRoundTest(RecordFixture):
+    def review_with_rounds(self, rounds=3, *, verdicts=None, closed=True):
+        self.route("alpha-1700", started=NOW - 9 * HOUR, closed=NOW - 8 * HOUR)
+        rid, _cycle = self.route("rv-1700-unit", started=NOW - 3 * HOUR, closed=(NOW - HOUR) if closed else None,
+                                 capability="audit")
+        locators = [f"2026-11-20_rv-1700-unit"]
+        for index in range(1, rounds):
+            _cy, loc = self.more_cycle(rid, "rv-1700-unit", started=NOW - 3 * HOUR + index * 600)
+            locators.append(loc)
+        verdicts = verdicts or ["수정 후 병합", "수정 후 병합", "병합 가능"]
+        for index, loc in enumerate(locators):
+            path = self.folder / loc / "artifacts" / "units" / "unit" / "report.md"
+            path.parent.mkdir(parents=True)
+            if index < len(verdicts) and verdicts[index]:
+                path.write_text(f"# r\n최종 판정: {verdicts[index]}\n")
+            else:
+                path.write_text("# r\n")
+        return rid, locators
+
+    def review_line(self):
+        return next(line for line in self.page_lines("pr-1700") if line.startswith("- 독립 검토"))
+
+    def test_the_cycles_of_one_review_route_are_its_rounds_on_one_line(self):
+        _rid, locators = self.review_with_rounds()
+        self.catch_up()
+        line = self.review_line()
+        self.assertEqual(len(self.page_lines("pr-1700")), 2)
+        self.assertEqual(self.bullets(self.document(), "최근에 끝난 것")[0].split(" · ")[-1], "기록 2")
+        self.assertIn("[1라운드 \"수정 후 병합\"]", line)
+        self.assertIn("[2라운드 \"수정 후 병합\"]", line)
+        self.assertIn("[3라운드 \"병합 가능\"]", line)
+        self.assertTrue(line.endswith("파일 3개"))
+        self.assertIn("(<../" + locators[0] + "/artifacts/units/unit/report.md>)", line)
+
+    def test_one_cycle_is_a_verdict_link_and_no_verdict_is_a_plain_report_link(self):
+        self.route("rv-1700-unit", closed=NOW - HOUR, capability="audit")
+        self.files("rv-1700-unit", **{"units__unit__report.md": "# r\n최종 판정: **병합 가능** — head abc123\n"})
+        self.catch_up()
+        self.assertEqual(self.page_lines("pr-1700"), [
+            f'- 독립 검토 · {self.day(NOW - HOUR)} · ["병합 가능"](<../2026-11-20_rv-1700-unit/artifacts/units/unit/report.md>) · 파일 1개'])
+        self.files("rv-1700-unit", **{"units__unit__report.md": "# r\nno verdict here\n"})
+        self.cache_reset()
+        self.catch_up(now=NOW + 5)
+        self.assertIn("· [보고](<../2026-11-20_rv-1700-unit/artifacts/units/unit/report.md>) ·", self.page_lines("pr-1700")[0])
+
+    def cache_reset(self):
+        for path in (self.runtime / "campaign-document").glob("camp_*.json"):
+            path.unlink()
+        (self.runtime / "campaign-document" / "watermark.json").write_text('{"v": 1, "ns": 1}')
+
+    def test_the_verdict_is_read_from_the_first_eight_lines_only_and_loses_the_head_tail(self):
+        self.assertEqual(cd.verdict_of("# a\n최종 판정: 병합 가능 — head abc\n"), "병합 가능")
+        self.assertEqual(cd.verdict_of("# a\n최종 판정 : `수정 후 병합` – head 12ab\n"), "수정 후 병합")
+        self.assertEqual(cd.verdict_of("\n" * 8 + "최종 판정: 늦음\n"), None)
+        self.assertEqual(cd.verdict_of("최종 판정: " + "가" * 100).__len__(), cd.VERDICT_CHARS)
+        self.assertIsNone(cd.verdict_of("no verdict\n"))
+
+    def test_an_open_last_round_with_no_report_says_so_and_an_earlier_round_with_none_is_plain(self):
+        rid, locators = self.review_with_rounds(verdicts=["수정 후 병합", None, None], closed=False)
+        import shutil
+        shutil.rmtree(self.folder / locators[2] / "artifacts")
+        (self.folder / locators[1] / "artifacts" / "units" / "unit" / "report.md").unlink()
+        self.catch_up()
+        line = self.review_line()
+        self.assertIn("[1라운드 \"수정 후 병합\"]", line)
+        self.assertIn(" · 2라운드 · ", line)
+        self.assertIn(" · 3라운드 보고 아직 없음 · ", line)
+
+    def test_a_fix_between_two_rounds_of_a_review_stands_after_the_review_s_first_round(self):
+        self.route("alpha-1700", started=NOW - 9 * HOUR, closed=NOW - 8 * HOUR)
+        rid, _cy = self.route("rv-1700-unit", started=NOW - 7 * HOUR, closed=NOW - 6 * HOUR, capability="audit")
+        self.route("fix-1700", started=NOW - 5 * HOUR, closed=NOW - 4 * HOUR)
+        self.more_cycle(rid, "rv-1700-unit", started=NOW - 3 * HOUR)   # the second round, after the fix
+        self.catch_up()
+        lines = self.page_lines("pr-1700")
+        self.assertEqual([line.split(" · ")[0] for line in lines], ["- 구현", "- 독립 검토", "- 고침"])
+        self.assertIn(" · 1라운드 · 2라운드 · ", lines[1])
+
+    def test_the_review_that_began_first_is_the_independent_one_even_when_another_round_ran_later(self):
+        self.route("alpha-1700", started=NOW - 9 * HOUR, closed=NOW - 8 * HOUR)
+        first, _c = self.route("rv-1700-unit", started=NOW - 7 * HOUR, closed=NOW - 6 * HOUR, capability="audit")
+        self.route("rv-1700-close-unit", started=NOW - 4 * HOUR, closed=NOW - 3 * HOUR, capability="audit")
+        self.more_cycle(first, "rv-1700-unit", started=NOW - 2 * HOUR)
+        self.catch_up()
+        lines = self.page_lines("pr-1700")
+        self.assertEqual([line.split(" · ")[0] for line in lines], ["- 구현", "- 독립 검토", "- 닫힘 확인"])
+        self.assertIn("2라운드", lines[1])
+
+    def aged_cache(self):
+        """The saved list as an older version left it: a member it had drawn again is whole and plain (no
+        `cycles`, no `rk`), and `rounds` says its reviews' cycles were read."""
+        cache_path = next((self.runtime / "campaign-document").glob("camp_*.json"))
+        saved = json.loads(cache_path.read_text())
+        for member in saved["members"].values():
+            member.pop("cycles", None)
+            member.pop("rk", None)
+        saved["rounds"] = True
+        cache_path.write_text(json.dumps(saved))
+        return cache_path
+
+    def test_a_list_an_older_version_replaced_a_review_in_gets_its_rounds_back_once(self):
+        rid, locators = self.review_with_rounds()
+        self.catch_up()
+        cache_path = self.aged_cache()
+        (self.folder / "records" / "pr-1700.md").unlink()
+        self.catch_up(now=self.bump(1))   # something moved, so the campaign is drawn again
+        self.assertIn("[3라운드", (self.folder / "records" / "pr-1700.md").read_text())
+        saved = json.loads(cache_path.read_text())
+        self.assertEqual(len(saved["members"][rid]["cycles"]), 3)
+        self.assertTrue(all("rk" in member for member in saved["members"].values() if member["cap"] == "audit"))
+        with mock.patch.object(cd.store, "list_cycle_records", wraps=cd.store.list_cycle_records) as spy:
+            self.catch_up(now=self.bump(2))
+        self.assertEqual(spy.call_count, 0)   # the saved list is whole now: no record is listed again
+
+    def last_round(self, rid):
+        folder = self.runtime / "artifact-producer/v1/cycles"
+        return max(r["cycle_id"] for r in (json.loads(p.read_text()) for p in folder.glob("cyc_*.json"))
+                   if r.get("route_id") == rid)
+
+    def test_a_review_an_older_version_replaced_keeps_its_rounds_when_its_own_record_moves_next(self):
+        rid, _locators = self.review_with_rounds()
+        self.catch_up()
+        self.aged_cache()
+        third = self.last_round(rid)
+        moment = self.bump(1)
+        path = self.runtime / "artifact-producer/v1/cycles" / f"{third}.json"
+        os.utime(path, (moment - 5, moment - 5))   # the review itself moved right after the older version's pass
+        self.catch_up(now=moment, cycle_id=third)
+        for number in (1, 2, 3):
+            self.assertIn(f"[{number}라운드", self.review_line())
+        self.catch_up(now=self.bump(2))
+        for number in (1, 2, 3):
+            self.assertIn(f"[{number}라운드", self.review_line())
+
+    def test_a_drawing_from_an_older_version_s_list_writes_nothing_even_with_no_index(self):
+        _rid, _locators = self.review_with_rounds()
+        self.catch_up()
+        cache = json.loads(self.aged_cache().read_text())
+        index = self.runtime / "artifact-producer/v1/cycles" / ".cycle-routes-index.json"
+        if index.exists():
+            index.unlink()
+        moment = self.bump(1)
+        before = tree_digest(self.root)
+        pages = {}
+        cd.collect(self.root, self.folder, now=moment, cache=cache, persist=False, pages=pages)
+        self.assertEqual(tree_digest(self.root), before)
+        self.assertFalse(index.exists())
+        line = next(text for text in pages["pr-1700"].split("\n") if text.startswith("- 독립 검토"))
+        for number in (1, 2, 3):
+            self.assertIn(f"[{number}라운드", line)
+
+    def test_a_drawing_writes_nothing_with_other_campaigns_and_no_index(self):
+        self.campaign("2026-11-02_other", "camp_" + "2" * 32, "Other")
+        self.route("pr-1700-unit", closed=NOW - HOUR)
+        self.route("rv-1700-unit", closed=NOW - HOUR, capability="audit")
+        self.route("pr-1701-open")
+        self.route("pr-1702-other", campaign_id="camp_" + "2" * 32, closed=NOW - HOUR)
+        for index in (self.root / "campaigns").glob("INDEX.*"):
+            index.unlink()
+        before = tree_digest(self.root)
+        pages = {}
+        text, _cache = cd.collect(self.root, self.folder, now=NOW, persist=False, pages=pages)
+        self.assertIn("pr-1700", pages)
+        self.assertEqual(tree_digest(self.root), before)
+        self.assertEqual(list((self.root / "campaigns").glob("INDEX.*")), [])
+
+    def test_a_review_with_one_cycle_is_read_once_and_then_marked_read(self):
+        self.route("rv-1700-unit", closed=NOW - HOUR, capability="audit")
+        self.catch_up()
+        cache_path = self.aged_cache()
+        with mock.patch.object(cd.store, "list_cycle_records", wraps=cd.store.list_cycle_records) as spy:
+            self.catch_up(now=self.bump(1))
+        self.assertEqual(spy.call_count, 1)
+        member = next(m for m in json.loads(cache_path.read_text())["members"].values() if m["cap"] == "audit")
+        self.assertEqual(len(member["rk"]), 2)
+        with mock.patch.object(cd.store, "list_cycle_records", wraps=cd.store.list_cycle_records) as spy:
+            self.catch_up(now=self.bump(2))
+        self.assertEqual(spy.call_count, 0)
+
+    def test_a_new_cycle_joins_the_route_and_the_cycle_a_line_stands_on_stays(self):
+        rid, locators = self.review_with_rounds(rounds=2, verdicts=["수정 후 병합", "병합 가능"])
+        self.catch_up()
+        cache_path = next((self.runtime / "campaign-document").glob("camp_*.json"))
+        before = json.loads(cache_path.read_text())["members"][rid]["cy"]
+        _cy, loc = self.more_cycle(rid, "rv-1700-unit", started=NOW - 3 * HOUR - 30, state="draft", written=NOW + 30)   # older and not sealed
+        path = self.folder / loc / "artifacts" / "units" / "unit" / "report.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("# r\n최종 판정: 병합 불가\n")
+        self.catch_up(now=NOW + 60)
+        member = json.loads(cache_path.read_text())["members"][rid]
+        self.assertEqual(len(member["cycles"]), 3)
+        self.assertEqual(member["cy"], before)
+        self.assertIn("[1라운드 \"병합 불가\"]", self.review_line())
+
+
+class RecordReportTest(RecordFixture):
+    def test_the_evidence_wins_then_the_final_report_then_a_unit_report_then_nothing(self):
+        self.route("a-1701", closed=NOW - HOUR, evidence="# evidence\n")
+        self.files("a-1701", **{"final_report.md": "f", "units__u__report.md": "u"})
+        self.route("b-1702", closed=NOW - 2 * HOUR)
+        self.files("b-1702", **{"final_report.md": "f", "units__u__report.md": "u"})
+        self.route("c-1703", closed=NOW - 3 * HOUR)
+        self.files("c-1703", **{"units__b__report.md": "u", "units__a__report.md": "u"})
+        self.route("d-1704", closed=NOW - 4 * HOUR)
+        self.files("d-1704", **{"note.md": "n"})
+        self.catch_up()
+        self.assertRegex(self.page_lines("pr-1701")[0], r"\[보고\]\(<\.\./\.\./\.\./reports/rt-\w+\.md>\)")
+        self.assertIn("(<../2026-11-20_b-1702/artifacts/final_report.md>)", self.page_lines("pr-1702")[0])
+        self.assertIn("(<../2026-11-20_c-1703/artifacts/units/a/report.md>)", self.page_lines("pr-1703")[0])
+        self.assertNotIn("](<", self.page_lines("pr-1704")[0])
+        self.assertNotIn("보고 아직 없음", self.page_lines("pr-1704")[0])
+
+    def test_a_link_stands_only_on_a_regular_file_inside_the_root(self):
+        outside = self.root.parent / "outside.md"
+        outside.write_text("out")
+        self.route("a-1701", closed=NOW - HOUR)
+        self.route("b-1702", closed=NOW - 2 * HOUR)
+        self.files("a-1701", **{"x.md": "x"})
+        (self.cycle_dir("a-1701") / "artifacts" / "final_report.md").symlink_to(outside)   # a link to a file outside
+        (self.cycle_dir("b-1702") / "artifacts").mkdir(parents=True)
+        (self.cycle_dir("b-1702") / "artifacts" / "final_report.md").mkdir()   # a folder with the name
+        self.catch_up()
+        for key in ("pr-1701", "pr-1702"):
+            self.assertNotIn("](<", self.page_lines(key)[0])
+        self.assertNotIn("outside", self.page("pr-1701"))
+
+    def test_the_path_is_relative_to_the_page_folder(self):
+        self.route("a-1701", closed=NOW - HOUR)
+        self.files("a-1701", **{"final_report.md": "f"})
+        self.catch_up()
+        self.assertIn("[보고](<../2026-11-20_a-1701/artifacts/final_report.md>)", self.page("pr-1701"))
+        target = (self.folder / "records" / "../2026-11-20_a-1701/artifacts/final_report.md").resolve()
+        self.assertTrue(target.is_file())
+
+    def test_a_target_with_a_character_a_link_cannot_carry_is_left_unlinked(self):
+        self.assertEqual(cd._link("보고", "a>b"), "보고")
+        self.assertEqual(cd._link("보고", "a\nb"), "보고")
+        self.assertEqual(cd._link("보고", "a b/c.md"), "[보고](<a b/c.md>)")
+
+    def test_the_files_of_a_closed_cycle_are_counted_once_and_an_open_one_every_pass(self):
+        self.route("a-1701", closed=NOW - HOUR)
+        self.files("a-1701", **{"one.md": "1", "sub__two.md": "2"})
+        (self.cycle_dir("a-1701") / "artifacts" / "link.md").symlink_to(self.cycle_dir("a-1701") / "artifacts" / "one.md")
+        self.route("open-1702", started=NOW - HOUR)
+        self.files("open-1702", **{"one.md": "1"})
+        with mock.patch.object(cd, "_count_files", wraps=cd._count_files) as spy:
+            self.catch_up()
+            first = spy.call_count
+            self.route("c-1703", closed=NOW + 50)
+            self.files("c-1703", **{"one.md": "1"})
+            self.catch_up(now=NOW + 60)
+        self.assertEqual(self.page_lines("pr-1701")[0].rsplit(" · ", 1)[1], "파일 2개")   # a link is not a file
+        self.assertEqual(first, 2)
+        self.assertEqual(spy.call_count - first, 2)   # the open route and the new one; the closed one is not counted again
+
+
+class RecordFolderMakingTest(RecordFixture):
+    def test_the_records_folder_is_made_inside_a_campaign_folder_and_never_the_folders_above_it(self):
+        gone = self.root / "campaigns" / "gone-campaign"
+        cd._write_records(gone, {"pr-1": "text"})
+        self.assertFalse(gone.exists())
+        cd._write_records(self.folder, {"pr-1": f"{cd.RECORD_MARKER}\ntext\n"})   # the campaign folder is there: records is made
+        self.assertTrue((self.folder / "records" / "pr-1.md").is_file())
+
+    def test_a_campaign_folder_that_goes_away_during_the_pass_is_not_made_again(self):
+        self.route("alpha-1700", closed=NOW - HOUR)
+        real = cd.collect
+
+        def collect_then_lose_the_folder(*a, **kw):
+            result = real(*a, **kw)
+            import shutil
+            shutil.rmtree(self.folder)
+            return result
+        with mock.patch.object(cd, "collect", side_effect=collect_then_lose_the_folder):
+            self.catch_up()
+        self.assertFalse(self.folder.exists())
+
+
+class RecordSupervisorTest(RecordFixture):
+    def inputs(self, **names):
+        folder = self.root / "research" / self.folder.name / "inputs"
+        folder.mkdir(parents=True, exist_ok=True)
+        for name, text in names.items():
+            (folder / name).write_text(text)
+        return folder
+
+    def test_the_names_that_carry_the_pr_with_no_digit_beside_it(self):
+        names = ["RV-PR1798-1119.md", "RV-PR17980-1.md", "RV-XPR1798.md", "RV-CLOSE-PR1798-R3.md", "RV-PR1798.txt",
+                 "CP-PR1798.md", "RV-PR179.md", "RV-1798.md"]
+        self.assertEqual(cd.supervisor_names(names, 1798), ["RV-CLOSE-PR1798-R3.md", "RV-PR1798-1119.md"])
+        self.assertEqual(cd.supervisor_names(names, None), [])
+
+    def test_the_supervisors_records_are_lines_of_the_page_but_not_in_the_count(self):
+        self.route("alpha-1798", closed=NOW - HOUR)
+        self.route("beta-1799", closed=NOW - 2 * HOUR)
+        self.inputs(**{"RV-PR1798-1119.md": "# a\n최종 판정: 병합 가능\n", "RV-CLOSE-PR1798-R3.md": "# b\n", "RV-PR1799.md": "x"})
+        self.catch_up()
+        lines = self.page_lines("pr-1798")
+        self.assertEqual(lines[1:], [
+            '- 감독의 검토 기록 · [RV-CLOSE-PR1798-R3.md](<../../../research/2026-11-01_demo/inputs/RV-CLOSE-PR1798-R3.md>)',
+            '- 감독의 검토 기록 · "병합 가능" · [RV-PR1798-1119.md](<../../../research/2026-11-01_demo/inputs/RV-PR1798-1119.md>)'])
+        self.assertIn("기록 1 · 파일 2개", self.page("pr-1798"))   # the lines are files of the page, not records
+        self.assertEqual(self.bullets(self.document(), "최근에 끝난 것")[0].split(" · ")[-1], "기록 1")
+
+    def test_no_folder_is_no_line_and_a_piece_with_no_pr_has_none(self):
+        self.route("alpha-1798", closed=NOW - HOUR)
+        self.route("solo", closed=NOW - 2 * HOUR)
+        self.catch_up()
+        self.assertEqual(len(self.page_lines("pr-1798")), 1)
+        self.inputs(**{"RV-PR1798.md": "x"})
+        self.catch_up(now=NOW + 5)
+        self.assertEqual(len(self.page_lines("pr-1798")), 1)   # nothing moved: the pages are as they were
+        self.route("zzz-1798b", closed=NOW + 50)
+        self.catch_up(now=NOW + 60)
+        self.assertEqual(len(self.page_lines("pr-1798")), 2)
+        self.assertEqual(len(self.page_lines("2026-11-20_solo")), 1)
+
+    def test_the_folder_is_listed_once_per_campaign_pass(self):
+        self.inputs(**{"RV-PR1798.md": "x"})
+        for number in (1798, 1799, 1800):
+            self.route(f"w-{number}", closed=NOW - number)
+        with mock.patch.object(cd, "_supervisor_listing", wraps=cd._supervisor_listing) as spy:
+            self.catch_up()
+        self.assertEqual(spy.call_count, 1)
+
+
+import subprocess  # noqa: E402
+
+
+class GitFixture(RecordFixture):
+    GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]
+
+    def setUp(self):
+        super().setUp()
+        self.env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+                    "GIT_AUTHOR_DATE": "2026-11-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-11-01T00:00:00Z"}
+        self.repo = self.root.parent / "repo"
+        self.repo.mkdir()
+        self.git("init", "-q", "-b", "main")
+        self.commit("start")
+        self.start = self.rev("HEAD")
+
+    def git(self, *args, repo=None, date=None):
+        env = self.env if date is None else {**self.env, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
+        done = subprocess.run([*self.GIT, "-C", str(repo or self.repo), *args], capture_output=True, text=True, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout.strip()
+
+    def commit(self, name, date=None, repo=None):
+        (Path(repo or self.repo) / name).write_text(name)
+        self.git("add", name, repo=repo, date=date)
+        self.git("commit", "-q", "-m", name, repo=repo, date=date)
+
+    def rev(self, ref):
+        return self.git("rev-parse", ref)
+
+    def branch_commit(self, branch, name):
+        """A commit on `branch` (made from `main`'s tip when new); returns its hash."""
+        if branch in self.git("branch", "--list", branch):
+            self.git("checkout", "-q", branch)
+        else:
+            self.git("checkout", "-q", "-b", branch, "main")
+        self.commit(name)
+        head = self.rev("HEAD")
+        self.git("checkout", "-q", "main")
+        return head
+
+    def merge(self, branch, subject, date=None):
+        self.git("merge", "--no-ff", "-q", "-m", subject, branch, date=date)
+
+    def asked(self, calls, subcommand):
+        return [c for c in calls if subcommand in c]
+
+    def pr_of(self, rid):
+        return self.cache()["git"][rid]["pr"]
+
+    def closed_work(self, slug, head, *, source=None, repo="same", closed=None, **kw):
+        rid, cycle = self.route(slug, closed=closed or NOW - HOUR, **kw)
+        self.link_commits(rid, head, source if source is not None else self.start, repo)
+        return rid, cycle
+
+    def link_commits(self, rid, head, source, repo="same"):
+        path = self.runtime / "routes" / f"{rid}.json"
+        route = json.loads(path.read_text())
+        route["source_commit"] = source
+        route["source_repository"] = {"worktree": {"path": str(self.repo if repo == "same" else repo)}}
+        path.write_text(json.dumps(route))
+        out = self.runtime / "routes" / f"{rid}.outcome.json"
+        value = json.loads(out.read_text())
+        value["head_commit"] = head
+        mtime = out.stat().st_mtime
+        out.write_text(json.dumps(value))
+        os.utime(out, (mtime, mtime))
+
+    def recorded(self):
+        """The git subcommands one pass runs."""
+        calls = []
+        real = subprocess.run
+
+        def spy(args, *a, **kw):
+            calls.append(args)
+            return real(args, *a, **kw)
+        return calls, mock.patch.object(cd.subprocess, "run", side_effect=spy)
+
+    def cache(self):
+        return json.loads(next((self.runtime / "campaign-document").glob("camp_*.json")).read_text())
+
+    def lines(self):
+        return self.bullets(self.document(), "최근에 끝난 것")
+
+
+class GitLinkTest(GitFixture):
+    def test_a_route_that_closed_before_its_pr_is_joined_to_it_and_the_first_build_names_the_line(self):
+        head = self.branch_commit("feature", "impl")
+        self.closed_work("build-it", head, started=NOW - 9 * HOUR, closed=NOW - 8 * HOUR)
+        self.branch_commit("feature", "fix")
+        self.merge("feature", "Merge pull request #1777 from owner/feature")
+        self.route("fix-pr1777", started=NOW - 5 * HOUR, closed=NOW - 4 * HOUR)
+        self.catch_up()
+        self.assertEqual(self.lines(), ["- 11-20 build-it · #1777 · 기록 2"])
+        self.assertEqual(self.cache()["git"][next(iter(self.cache()["git"]))]["pr"], 1777)
+        self.assertEqual(self.page_lines("pr-1777")[0].split(" · ")[0:1], ["- 구현"])
+        self.assertEqual(len(self.page_lines("pr-1777")), 2)
+
+    def test_the_first_pull_request_merge_is_taken_and_other_merges_are_skipped(self):
+        head = self.branch_commit("feature", "impl")
+        self.closed_work("build-it", head)
+        self.git("checkout", "-q", "feature")
+        self.merge("main", "Merge branch 'main' into feature")
+        self.git("checkout", "-q", "-q", "main")
+        self.commit("main-moves")
+        self.git("checkout", "-q", "feature")
+        self.git("merge", "--no-ff", "-q", "-m", "Merge remote-tracking branch 'origin/main' into feature", "main")
+        self.git("checkout", "-q", "main")
+        self.merge("feature", "Merge pull request #1778")   # a subject with nothing after the number
+        self.catch_up()
+        self.assertEqual(self.lines(), ["- 11-20 build-it · #1778 · 기록 1"])
+
+    def test_pr_from_merges_reads_only_the_pull_request_merge_that_brought_the_head_in(self):
+        log = ("a1 p0 p1\tMerge branch 'x' into y\n"
+               "b1 p0 p1\tMerge remote-tracking branch 'o/m'\n"
+               "c1 p0 p1\tMerge pull request #12 from a/b\n"
+               "d1 p0 p1\tMerge pull request #13 from a/c")
+        self.assertEqual(cd.pr_from_merges(log, "H"), 12)
+        self.assertIsNone(cd.pr_from_merges("a\tMerge pull request #x\nb\tMerge branch #5", "H"))
+        self.assertIsNone(cd.pr_from_merges("", "H"))
+        self.assertIsNone(cd.pr_from_merges("c1 p0\tMerge pull request #12", "H"))   # one parent: not a merge
+        # the first parent is the head or a commit already seen (a descendant of the head): not the merge that brought it in
+        self.assertIsNone(cd.pr_from_merges("c1 H p1\tMerge pull request #12", "H"))
+        stacked = "k1 H\tfix\nm1 k1 z1\tMerge pull request #61 from o/f2\nm2 base0 m1\tMerge pull request #60 from o/f1"
+        self.assertEqual(cd.pr_from_merges(stacked, "H"), 60)
+        self.assertEqual(cd.pr_from_merges(stacked, "H", "m2"), 60)
+
+    def test_pr_from_merges_gives_a_head_on_the_base_branch_s_own_line_no_pr(self):
+        # pushed straight to main, then a longer branch took main in (#83) and came back (#84): none, not 83
+        back = "m83 i1 H\tMerge pull request #83 from o/main\nm84 H m83\tMerge pull request #84 from o/integration"
+        self.assertIsNone(cd.pr_from_merges(back, "H", "m84"))
+        # the head went into a longer branch by its own PR (#81), the branch reached main by #82: the head's own
+        longer = "m81 i1 H\tMerge pull request #81 from o/work\nm82 b0 m81\tMerge pull request #82 from o/integration"
+        self.assertEqual(cd.pr_from_merges(longer, "H", "m82"), 81)
+        # the head is itself a merge on main, and more came after it: none
+        after = "c1 H\tnext on main\nm90 c1 f1\tMerge pull request #90 from o/f"
+        self.assertIsNone(cd.pr_from_merges(after, "H", "m90"))
+        self.assertIsNone(cd.pr_from_merges("", "H", "H"))   # the base is the head itself
+        # a merge with three parents counts by its subject
+        self.assertEqual(cd.pr_from_merges("m87 b0 x1 H\tMerge pull request #87 from o/x", "H", "m87"), 87)
+
+    def test_a_route_not_merged_yet_is_not_joined_and_is_not_asked_again_until_the_base_moves(self):
+        head = self.branch_commit("feature", "impl")
+        rid, _c = self.closed_work("build-it", head)
+        self.catch_up()
+        self.assertEqual(self.lines(), ["- 11-20 build-it · 기록 1"])
+        entry = self.cache()["git"][rid]
+        self.assertEqual((entry["pr"], entry["base"]), (None, self.rev("main")))
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up(now=self.bump(1))
+        self.assertTrue(calls)   # the base is looked up
+        self.assertEqual([c for c in calls if "log" in c], [])   # the base is the same: no `git log`
+        self.commit("main-moves")
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up(now=self.bump(2))
+        self.assertEqual(len([c for c in calls if "log" in c]), 1)   # the base moved: asked again, still not merged
+        self.merge("feature", "Merge pull request #1779 from o/feature")
+        self.catch_up(now=self.bump(3))
+        self.assertIn("- 11-20 build-it · #1779 · 기록 1", self.lines())
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up(now=self.bump(4))
+        self.assertEqual([c for c in calls if "log" in c], [])   # a found number is for good
+        self.assertEqual(self.cache()["git"][rid]["pr"], 1779)
+
+    def test_a_route_that_made_no_commit_is_not_asked(self):
+        self.branch_commit("feature", "impl")
+        self.merge("feature", "Merge pull request #1777 from o/feature")
+        self.closed_work("design-it", self.start, source=self.start)
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up()
+        self.assertEqual(calls, [])
+        self.assertEqual(self.lines(), ["- 11-20 design-it · 기록 1"])
+
+    def test_a_number_the_route_already_has_is_never_changed_and_never_asked(self):
+        head = self.branch_commit("feature", "impl")
+        self.merge("feature", "Merge pull request #1777 from o/feature")
+        self.closed_work("build-pr1700", head)
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up()
+        self.assertEqual(calls, [])
+        self.assertEqual(self.lines(), ["- 11-20 build-pr1700 · #1700 · 기록 1"])
+
+    def test_only_a_few_are_asked_in_a_pass_newest_first_and_the_next_pass_asks_the_rest(self):
+        heads = []
+        for index in range(4):
+            head = self.branch_commit(f"f{index}", f"impl{index}")
+            heads.append(head)
+            self.merge(f"f{index}", f"Merge pull request #{1780 + index} from o/f{index}")
+        for index, head in enumerate(heads):
+            self.closed_work(f"w{index}-x", head, closed=NOW - (index + 1) * HOUR)
+        with mock.patch.object(cd, "GIT_BUDGET", 2):   # two `git log`; the base lookup (3 `rev-parse` here) is not counted
+            self.catch_up()
+        joined = [line for line in self.lines() if "#178" in line]
+        self.assertEqual(sorted(re.search(r"#(\d+)", line).group(1) for line in joined), ["1780", "1781"])   # the two newest closes
+        with mock.patch.object(cd, "GIT_BUDGET", 2):
+            self.catch_up(now=self.bump(1))
+        self.assertEqual(len([line for line in self.lines() if "#178" in line]), 4)
+
+    def test_a_working_tree_that_is_gone_is_asked_in_the_repository_that_holds_the_root(self):
+        head = self.branch_commit("feature", "impl")
+        self.merge("feature", "Merge pull request #1779 from o/feature")
+        outer = self.root.parent   # a repository around the artifact root, holding the same history
+        self.git("init", "-q", "-b", "other", repo=outer)
+        self.git("fetch", "-q", str(self.repo), "main:main", repo=outer)
+        rid, _c = self.closed_work("build-it", head, repo=str(outer / "gone-worktree"))
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up()
+        self.assertTrue(calls)
+        self.assertTrue(all(c[3] == str(self.root) for c in calls))
+        self.assertEqual(self.cache()["git"][rid]["pr"], 1779)
+
+    def test_git_missing_or_not_a_repository_leaves_the_document_as_it_was(self):
+        head = "a" * 40
+        rid, _c = self.closed_work("build-it", head)
+        with mock.patch.object(cd.subprocess, "run", side_effect=FileNotFoundError("git")):
+            self.catch_up()
+        self.assertEqual(self.lines(), ["- 11-20 build-it · 기록 1"])
+        self.assertIsNone(self.cache()["git"][rid]["base"])
+        shutil = __import__("shutil")
+        shutil.rmtree(self.repo / ".git")
+        self.catch_up(now=self.bump(1))
+        self.assertIn("- 11-20 build-it · 기록 1", self.lines())
+
+    def test_a_timeout_is_not_remembered_and_the_next_pass_asks_again(self):
+        head = self.branch_commit("feature", "impl")
+        rid, _c = self.closed_work("build-it", head)
+        real = cd.subprocess.run
+
+        def slow(args, *a, **kw):
+            if "log" in args:
+                raise subprocess.TimeoutExpired(args, 5)
+            return real(args, *a, **kw)
+        with mock.patch.object(cd.subprocess, "run", side_effect=slow):
+            self.catch_up()
+        self.assertIsNone(self.cache()["git"][rid]["base"])
+        self.merge("feature", "Merge pull request #1779 from o/feature")
+        self.catch_up(now=self.bump(1))
+        self.assertIn("- 11-20 build-it · #1779 · 기록 1", self.lines())
+
+    def test_a_commit_git_does_not_know_is_remembered_like_a_route_not_merged(self):
+        rid, _c = self.closed_work("build-it", "b" * 40)
+        self.catch_up()
+        self.assertEqual(self.cache()["git"][rid]["base"], self.rev("main"))
+        self.assertEqual(self.lines(), ["- 11-20 build-it · 기록 1"])
+
+    def test_only_rev_parse_and_log_are_run_nothing_is_fetched_and_no_lock_is_left(self):
+        head = self.branch_commit("feature", "impl")
+        self.closed_work("build-it", head)
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up()
+        self.assertTrue(calls)
+        self.assertEqual({c[4] for c in calls}, {"rev-parse", "log"})
+        self.assertTrue(all(c[:3] == ["git", "--no-pager", "-C"] for c in calls))
+        self.assertEqual(list((self.repo / ".git").glob("*.lock")), [])
+
+    def outer_git(self, present):
+        """`os.path.lexists` as it is, except that a `.git` outside this test's temporary folder is there or
+        not as `present` says: whatever repository the machine has above the temporary folders (a CI's
+        checkout, this machine's `/tmp/.git`) is made to show, or hidden."""
+        real, inside = os.path.lexists, str(self.root.parent) + os.sep
+
+        def lexists(path):
+            path = str(path)
+            return present if path.endswith(os.sep + ".git") and not path.startswith(inside) else real(path)
+        return mock.patch.object(cd.os.path, "lexists", side_effect=lexists)
+
+    def test_a_folder_with_no_git_in_or_above_it_is_not_asked_and_a_fatal_answer_stops_the_search(self):
+        nowhere = self.root.parent / "nowhere"
+        nowhere.mkdir()
+        with self.outer_git(True):   # a machine whose temporary folders sit inside a repository: the folder is "inside" it
+            self.assertTrue(cd._inside_repository(str(nowhere)))
+        with self.outer_git(False), mock.patch.object(cd.subprocess, "run", side_effect=AssertionError("git was started")):
+            self.assertEqual(cd._GitPass().base(str(nowhere)), "")
+            self.assertFalse(cd._inside_repository(str(nowhere)))
+            self.assertTrue(cd._inside_repository(str(self.repo / "sub" / "folder")))   # this test's own repository is seen
+        fatal = mock.Mock(returncode=128, stdout="")
+        with mock.patch.object(cd.subprocess, "run", return_value=fatal) as run:
+            git = cd._GitPass()
+            self.assertEqual(git.base(str(self.repo)), "")
+        self.assertEqual(run.call_count, 1)   # not a repository for one ref is not a repository for the next
+        missing = mock.Mock(returncode=1, stdout="")
+        with mock.patch.object(cd.subprocess, "run", return_value=missing) as run:
+            self.assertEqual(cd._GitPass().base(str(self.repo)), "")
+        self.assertEqual(run.call_count, 3)   # no such ref: the next one is tried
+
+    def test_the_environment_git_runs_in_is_clean_and_read_only(self):
+        seen = {}
+
+        def look(args, *a, **kw):
+            seen.update(kw["env"])
+            raise FileNotFoundError("git")
+        with mock.patch.dict(os.environ, {"GIT_DIR": "/nowhere", "GIT_WORK_TREE": "/nowhere", "GIT_INDEX_FILE": "/nowhere"}):
+            with mock.patch.object(cd.subprocess, "run", side_effect=look):
+                cd._GitPass().base(str(self.repo))
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+            self.assertNotIn(name, seen)
+        self.assertEqual((seen["GIT_OPTIONAL_LOCKS"], seen["GIT_NO_LAZY_FETCH"], seen["GIT_TERMINAL_PROMPT"]), ("0", "1", "0"))
+
+    def test_the_base_is_the_first_of_origin_head_origin_main_main_that_resolves_once_per_repository(self):
+        self.git("update-ref", "refs/remotes/origin/main", self.start)
+        self.commit("main-moves")
+        git = cd._GitPass()
+        self.assertEqual(git.base(str(self.repo)), self.start)   # origin/main wins over main
+        calls = git.calls
+        git.base(str(self.repo))
+        self.assertEqual(git.calls, calls)
+
+    def test_a_commit_pushed_straight_to_main_has_no_pr_even_when_a_pull_request_merges_later(self):
+        self.commit("pushed-straight")   # on main, after `start`
+        head = self.rev("HEAD")
+        self.git("checkout", "-q", "-b", "other", self.start)
+        self.commit("other-work")
+        self.git("checkout", "-q", "main")
+        self.merge("other", "Merge pull request #50 from o/other")   # its first parent is the head itself
+        rid, _c = self.closed_work("build-it", head)
+        self.catch_up()
+        self.assertEqual(self.lines(), ["- 11-20 build-it · 기록 1"])
+        self.assertIsNone(self.pr_of(rid))
+
+    def test_a_stacked_pull_request_joins_the_one_that_reached_main_not_the_one_beneath_it(self):
+        self.git("checkout", "-q", "-b", "f1", "main")
+        self.commit("impl")
+        head = self.rev("HEAD")
+        self.commit("more-on-f1")
+        self.git("checkout", "-q", "-b", "f2")
+        self.commit("on-top")
+        self.git("checkout", "-q", "f1")
+        self.merge("f2", "Merge pull request #61 from o/f2")   # a merge into f1, after the head
+        self.git("checkout", "-q", "main")
+        self.merge("f1", "Merge pull request #60 from o/f1")
+        rid, _c = self.closed_work("build-it", head)
+        self.catch_up()
+        self.assertEqual(self.pr_of(rid), 60)
+
+    def test_a_merge_of_main_into_the_branch_on_the_way_does_not_hide_the_pull_request(self):
+        head = self.branch_commit("feature", "impl")
+        self.git("checkout", "-q", "feature")
+        self.git("merge", "--no-ff", "-q", "-m", "Merge branch 'main' into feature", "main")
+        self.git("checkout", "-q", "main")
+        self.merge("feature", "Merge pull request #70 from o/feature")
+        rid, _c = self.closed_work("build-it", head)
+        self.catch_up()
+        self.assertEqual(self.pr_of(rid), 70)
+
+    def test_a_merge_dated_before_the_commit_it_was_made_on_is_still_judged_after_it(self):
+        self.commit("pushed-straight", date="2026-11-01T00:00:00Z")
+        head = self.rev("HEAD")
+        side = self.branch_commit("feature", "work-for-a-pr")
+        self.commit("x-on-main", date="2026-11-25T00:00:00Z")   # the commit the pull request merge is made on
+        x = self.rev("HEAD")
+        self.commit("y-on-main", date="2026-11-26T00:00:00Z")
+        self.git("checkout", "-q", "-b", "side", x)
+        self.merge(side, "Merge pull request #50 from o/feature", date="2026-11-20T00:00:00Z")   # older than its first parent
+        self.git("checkout", "-q", "main")
+        self.merge("side", "Merge branch 'side'", date="2026-11-27T00:00:00Z")
+        rid, _c = self.closed_work("build-it", head)
+        self.catch_up()
+        self.assertIsNone(self.pr_of(rid))   # by date alone X would come after the merge and #50 would be taken
+
+    def test_a_commit_pushed_straight_to_main_has_no_pr_when_a_longer_branch_takes_main_in_and_comes_back(self):
+        self.git("checkout", "-q", "-b", "integration", self.start)
+        self.commit("integration-work")
+        self.git("checkout", "-q", "main")
+        self.commit("pushed-straight")
+        head = self.rev("HEAD")
+        self.git("checkout", "-q", "integration")
+        self.merge("main", "Merge pull request #83 from o/main")   # the longer branch takes main in
+        self.git("checkout", "-q", "main")
+        self.merge("integration", "Merge pull request #84 from o/integration")   # and comes back
+        rid, _c = self.closed_work("build-it", head)
+        self.catch_up()
+        self.assertIsNone(self.pr_of(rid))
+        self.assertEqual(self.lines(), ["- 11-20 build-it · 기록 1"])
+
+    def test_a_head_that_went_through_a_longer_branch_joins_its_own_pull_request(self):
+        self.git("checkout", "-q", "-b", "integration", self.start)
+        self.commit("integration-work")
+        self.git("checkout", "-q", "-b", "work", self.start)
+        self.commit("impl")
+        head = self.rev("HEAD")
+        self.git("checkout", "-q", "integration")
+        self.merge("work", "Merge pull request #81 from o/work")
+        self.git("checkout", "-q", "main")
+        self.merge("integration", "Merge pull request #82 from o/integration")
+        rid, _c = self.closed_work("build-it", head)
+        self.catch_up()
+        self.assertEqual(self.pr_of(rid), 81)
+
+    def test_a_head_that_is_itself_a_pull_request_merge_has_none_before_and_after_more_comes(self):
+        self.branch_commit("feature", "impl")
+        self.merge("feature", "Merge pull request #85 from o/feature")
+        head = self.rev("HEAD")
+        rid, _c = self.closed_work("build-it", head)
+        self.catch_up()
+        self.assertIsNone(self.pr_of(rid))
+        self.branch_commit("later", "later-work")
+        self.merge("later", "Merge pull request #86 from o/later")   # the base moves: asked again
+        self.catch_up(now=self.bump(1))
+        self.assertIsNone(self.pr_of(rid))
+        self.assertEqual(self.cache()["git"][rid]["base"], self.rev("main"))
+
+    def test_a_pull_request_merge_with_three_parents_counts_by_its_subject(self):
+        self.branch_commit("b1", "one")
+        head = self.branch_commit("b2", "two")
+        self.git("merge", "--no-ff", "-q", "-m", "Merge pull request #87 from o/b1", "b1", "b2")
+        self.assertEqual(len(self.git("log", "-1", "--format=%P").split()), 3)
+        rid, _c = self.closed_work("build-it", head)
+        self.catch_up()
+        self.assertEqual(self.pr_of(rid), 87)
+
+    def test_base_lookups_of_routes_not_merged_yet_never_starve_an_older_route(self):
+        """Fourteen working trees with only `main` (three `rev-parse` each): the thirteen newest are not
+        merged, the oldest is. The lookups are not counted, so the oldest is asked in the first pass."""
+        rids = []
+        for index in range(14):
+            tree = self.root.parent / f"tree-{index}"
+            self.git("worktree", "add", "-q", "-b", f"w{index}", str(tree), self.start)
+            self.commit(f"impl{index}", repo=tree)
+            head = self.git("rev-parse", "HEAD", repo=tree)
+            rids.append(self.closed_work(f"w{index}-x", head, repo=str(tree), closed=NOW - (14 - index) * HOUR)[0])
+        self.merge("w0", "Merge pull request #77 from o/w0")   # the oldest close
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up()
+        self.assertEqual(self.pr_of(rids[0]), 77)
+        self.assertEqual([self.pr_of(rid) for rid in rids[1:]], [None] * 13)
+        self.assertEqual(len(self.asked(calls, "log")), 14)
+        self.assertEqual(len(self.asked(calls, "rev-parse")), 42)
+
+    def test_a_value_that_is_not_a_full_commit_hash_is_never_handed_to_git(self):
+        out = self.root.parent / "written-by-git"
+        bad = {"option": f"--output={out}", "name": "HEAD", "branch": "main", "short": "a" * 39, "upper": "A" * 40,
+               "newline": "a" * 40 + "\n", "long": "a" * 41}
+        for index, (label, value) in enumerate(bad.items()):
+            self.closed_work(f"w{index}-{label}", value, closed=NOW - (index + 1) * HOUR)
+        self.closed_work("w-source", "a" * 40, source="HEAD")
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up()
+        self.assertEqual(calls, [])
+        self.assertFalse(out.exists())
+        self.assertFalse([line for line in self.lines() if "#" in line])
+
+    def test_the_log_is_asked_with_the_range_last_after_the_end_of_options_and_no_signature_or_merge_filter(self):
+        head = self.branch_commit("feature", "impl")
+        self.merge("feature", "Merge pull request #1777 from o/feature")
+        self.closed_work("build-it", head)
+        calls, patch = self.recorded()
+        with patch:
+            self.catch_up()
+        (log,) = self.asked(calls, "log")
+        self.assertEqual(log[log.index("--end-of-options") + 1:], [f"{head}..{self.rev('main')}"])
+        for flag in ("--ancestry-path", "--topo-order", "--reverse", "--no-show-signature"):
+            self.assertIn(flag, log)
+        self.assertNotIn("--merges", log)
+
+    def test_a_timeout_ends_git_for_the_pass_and_the_next_pass_asks_again(self):
+        heads = []
+        for index in range(2):
+            head = self.branch_commit(f"f{index}", f"impl{index}")
+            heads.append(head)
+            self.merge(f"f{index}", f"Merge pull request #{1790 + index} from o/f{index}")
+        rids = [self.closed_work(f"w{index}-x", head, closed=NOW - (index + 1) * HOUR)[0] for index, head in enumerate(heads)]
+        real = cd.subprocess.run
+        calls = []
+
+        def slow(args, *a, **kw):
+            calls.append(args)
+            if "log" in args:
+                raise subprocess.TimeoutExpired(args, 5)
+            return real(args, *a, **kw)
+        with mock.patch.object(cd.subprocess, "run", side_effect=slow):
+            self.catch_up()
+        self.assertEqual(len(self.asked(calls, "log")), 1)   # the second route was not asked after the first timed out
+        self.assertEqual([self.cache()["git"][rid]["base"] for rid in rids], [None, None])   # a timeout is not remembered
+        self.catch_up(now=self.bump(1))
+        self.assertEqual(sorted(self.pr_of(rid) for rid in rids), [1790, 1791])
+
+    def test_a_timeout_of_the_base_lookup_ends_git_for_the_pass_across_repositories(self):
+        other = self.root.parent / "repo-two"
+        other.mkdir()
+        self.git("init", "-q", "-b", "main", repo=other)
+        self.commit("start-two", repo=other)
+        source = self.git("rev-parse", "HEAD", repo=other)
+        self.commit("work-two", repo=other)
+        head = self.git("rev-parse", "HEAD", repo=other)
+        self.git("checkout", "-q", "-b", "f", source, repo=other)
+        self.commit("pr-work", repo=other)
+        self.git("checkout", "-q", "main", repo=other)
+        self.git("merge", "--no-ff", "-q", "-m", "Merge pull request #1800 from o/f", "f", repo=other)
+        own = self.branch_commit("feature", "impl")
+        self.merge("feature", "Merge pull request #1801 from o/feature")
+        a, _ca = self.closed_work("w0-x", own, closed=NOW - HOUR)
+        b, _cb = self.closed_work("w1-x", head, source=source, repo=str(other), closed=NOW - 2 * HOUR)
+        real = cd.subprocess.run
+        calls = []
+
+        def slow(args, *a, **kw):
+            calls.append(args)
+            if "rev-parse" in args:
+                raise subprocess.TimeoutExpired(args, 5)
+            return real(args, *a, **kw)
+        with mock.patch.object(cd.subprocess, "run", side_effect=slow):
+            self.catch_up()
+        self.assertEqual(len(self.asked(calls, "rev-parse")), 1)
+        self.assertEqual(self.asked(calls, "log"), [])
+        self.catch_up(now=self.bump(1))
+        self.assertEqual((self.pr_of(a), self.pr_of(b)), (1801, None))   # `b` was merged on `other`'s main, not the one asked first
+
+    def test_the_budget_counts_only_git_log_and_none_left_starts_nothing(self):
+        head, main = self.branch_commit("feature", "impl"), self.rev("main")
+        git = cd._GitPass(budget=1)
+        self.assertEqual(git.base(str(self.repo)), main)   # three refs tried, none of them counted
+        self.assertEqual((git.calls, git.budget), (3, 1))
+        self.assertEqual(git.first_pr(str(self.repo), head, main), ("ok", None))
+        self.assertEqual((git.calls, git.budget), (4, 0))
+        with mock.patch.object(cd.subprocess, "run", side_effect=AssertionError("git was started")):
+            self.assertEqual(git.first_pr(str(self.repo), head, main), ("timeout", None))
+            off = cd._GitPass(budget=0)
+            self.assertEqual(off.base(str(self.repo)), "")
+            self.assertEqual(off.first_pr(str(self.repo), "a" * 40, "b" * 40), ("timeout", None))
+        self.assertEqual((git.calls, off.calls), (4, 0))
+
+    def test_a_pass_in_a_test_process_starts_no_git_and_one_called_directly_still_does(self):
+        head = self.branch_commit("feature", "impl")
+        self.merge("feature", "Merge pull request #1777 from o/feature")
+        rid, _c = self.closed_work("build-it", head)
+        calls, patch = self.recorded()
+        with patch, mock.patch.object(entrance, "refresh"):
+            entrance.request_refresh(self.root)   # a test process refreshes in place, and starts no child
+        self.assertEqual(calls, [])
+        self.assertEqual(self.lines(), ["- 11-20 build-it · 기록 1"])
+        (self.runtime / "campaign-document" / "watermark.json").write_text('{"v": 1, "ns": 1}')   # the pass above ran on the real clock
+        self.catch_up(now=self.bump(1))   # the generator's own entry keeps asking git
+        self.assertEqual(self.pr_of(rid), 1777)
+
+
+class RecordReadersTest(RecordFixture):
+    def test_the_readers_show_the_tail_as_words_and_never_the_link(self):
+        from tools.fleet import session_status
+        from tools.fleet.explorer import transcript
+        self.route("alpha-1700", closed=NOW - HOUR)
+        self.route("open-x", started=NOW - HOUR)
+        self.catch_up()
+        text = self.document()
+        self.assertIn("[기록 1 ›](<records/pr-1700.md>)", text)
+        lines = text.split("\n")
+        parsed = session_status.parse_listing(lines)
+        shown = [item for group in parsed["groups"] for item in group["items"]]
+        self.assertTrue(shown)
+        for item in shown:
+            self.assertIn("기록 1 ›", item)
+            for hidden in ("records/", "](", "[기록", "<"):
+                self.assertNotIn(hidden, item)
+        rows = " ".join("".join(text for text, _key in row) for row in transcript.doc_rows(lines, 100))
+        self.assertIn("기록 1 ›", rows)
+        for hidden in ("records/", "](", "[기록"):
+            self.assertNotIn(hidden, rows)
+        plain = project_status._plain("- t · [기록 1 ›](<records/pr-1700.md>)")
+        self.assertIn("기록 1 ›", plain)
+        self.assertNotIn("records/", plain)
 
 
 if __name__ == "__main__":

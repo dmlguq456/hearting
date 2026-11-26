@@ -1545,5 +1545,34 @@ class LeftoverCyclesTest(PRODUCER_FIXTURE.ProducerTestBase):
         self.assertNotIn("withdrawn", self._sweep())
 
 
+class RegistryKeyTest(unittest.TestCase):
+    """A row's key is its own `attempt_id` field: at the start of the metadata column or right after a `,`."""
+
+    def test_the_key_is_the_attempt_id_field_not_a_longer_name_ending_in_it(self):
+        import route_autoclose
+        key = route_autoclose._attempt_key
+        self.assertEqual(key(b"attempt_id=att-1,worker_type=owner", 7), b"att-1")
+        self.assertEqual(key(b"parent_attempt_id=att-p,attempt_id=att-1,route_id=rt-1", 7), b"att-1")
+        self.assertEqual(key(b"caller_attempt_id=att-c,parent_attempt_id=att-p,attempt_id=att-1", 7), b"att-1")
+        self.assertEqual(key(b"worker_type=owner,attempt_id=att-1", 7), b"att-1")
+        self.assertEqual(key(b"worker_type=owner,attempt_id=", 7), b"")                # an empty value is still a key
+        self.assertEqual(key(b"parent_attempt_id=att-p,worker_type=worker", 7), b"#7")   # no own id: the line number
+        self.assertEqual(key(b"x_attempt_id=att-p", 3), b"#3")
+        self.assertEqual(key(b"", 0), b"#0")
+
+
+class RegistriesTest(unittest.TestCase):
+    def test_an_api_without_root_reads_only_the_explicit_registry_and_never_raises(self):
+        # artifact_cross_root_move hands the sweep the artifact_producer module, which has no ROOT.
+        import types
+        import route_autoclose
+        explicit = str(Path(tempfile.gettempdir()) / "explicit-jobs.log")
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": explicit}):
+            self.assertEqual(route_autoclose._registries(types.SimpleNamespace()), [Path(explicit)])
+            os.environ.pop("AGENT_DISPATCH_JOBS")
+            self.assertEqual(route_autoclose._registries(types.SimpleNamespace()), [])
+            self.assertEqual(route_autoclose.registries_at(None), [])
+
+
 if __name__ == "__main__":
     unittest.main()

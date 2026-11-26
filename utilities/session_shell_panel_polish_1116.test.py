@@ -94,7 +94,7 @@ class PanelPolish1116Test(unittest.TestCase):
         out = self.node(r"""
 const v=draw(),m=section(v);
 assert(m,lines(v).join('\n'));
-assert.match(m.head,/^MESSAGES \+4 ─+ ›$/,m.head);
+assert.match(m.head,/^MESSAGES \+4 +›$/,m.head);
 // Three messages (11-20: three at most, the person: "MESSAGE도 최대 3개 정도로 다시 줄이고"), each its head and its first line two cells in, the newest last.
 assert.equal(m.rows.length,6,m.rows.join('\n'));
 const heads=m.rows.filter((_,i)=>i%2===0),bodies=m.rows.filter((_,i)=>i%2===1);
@@ -145,7 +145,7 @@ console.log(JSON.stringify(seen.map(s=>[s.h,s.count,s.form,s.rule?1:0])));
     def test_three_messages_and_none_hidden_read_whole(self):
         self.node(r"""
 const v=draw({messages:3}),m=section(v);
-assert.match(m.head,/^MESSAGES ─+ ›$/,m.head);
+assert.match(m.head,/^MESSAGES +›$/,m.head);
 assert.equal(m.rows.length,6,m.rows.join('\n'));
 """)
 
@@ -350,7 +350,7 @@ for(const o of [{},{messages:0},{mem:false}]){
   assert.match(ls[n-3],/^│ ─{46} │$/,ls.join('\n'));
   // The section heads' rule: its look (dim, the messages role).
   const rule=v.rows[n-3].find(p=>/^─+$/.test(p.text));assert(rule&&rule.dim===true,JSON.stringify(v.rows[n-3]));
-  assert.match(ls[n-4],o.mem===false?/[^─]/:/^│ ◇ 2h lesson 점멸은 1초 박자로/,ls[n-4]);   // 11-20: a record is one row
+  assert.match(ls[n-4],o.mem===false?/[^─]/:/^│  ◇ 2h lesson 점멸은 1초 박자로/,ls[n-4]);   // 11-20: a record is one row
 }
 // Without MESSAGES and MEM nothing stands to part; under the native area there is no MEM and no rule.
 const none=lines(draw({messages:0,mem:false}));assert(!/^│ ─{46} │$/.test(none.at(-3)),none.join('\n'));

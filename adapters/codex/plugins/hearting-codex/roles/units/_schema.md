@@ -67,7 +67,8 @@ a projection concern). Reference `_shared/*` fragments — do not restate them.
 
 The `stance:` text is carried by the runtime into the worker prompt, just before the body.
 
-**Two-layer form (pilot: `qa/code-review`, `qa/test`, `dev/backend`, `editorial/report`).**
+**Two-layer form (every unit except the five auxiliary checks `qa/assumption-check`, `qa/edge-case-check`,
+`qa/failure-mode-check`, `qa/simplicity-check`, `qa/test-gap-check`, which keep a single body).**
 A unit body may be written as two sections, both always carried with the worker text:
 
 ```
@@ -82,7 +83,20 @@ A unit body may be written as two sections, both always carried with the worker 
 A line the unit cannot do without belongs in 지킬 것; write-scope does not stop a worker from
 writing inside its worktree, so a prohibition lives there too. Lines moved out of the worker
 text are recorded in `<family>/_NOTES.md`, never deleted. No checker enforces the headings;
-units not yet moved keep the single-body form.
+the auxiliary checks keep the single-body form. A heading that splits across the layers is
+repeated in both.
+
+**Field reference (common units, R31).** A unit that runs under more than one field may key part
+of its 참고 by field with a `### 참고 — <field>` section (field ids as in `roles/fields/`; a section
+that fits several fields names them, `### 참고 — code, lab`, and is written once). The
+runtime then carries the route's sealed field (an old route: its recipe's default field), and
+for that unit only: the field's `## Fundamentals` lines from `roles/fields/<field>.md` under
+`## 갈래의 기본 — <field>` just before `## 참고`, the common reference, and that field's sections.
+Other fields' sections are left out. A route whose field is unknown renders the body as written
+(every field's section, no fundamentals), as before this selection existed; `other` or a field
+with no section in the unit carries the common reference only; a missing page drops only the
+fundamentals, the field's own sections stay. 지킬 것 is never keyed by field. A unit with no
+such section renders as written.
 
 ## Floor guidance (from the investigation gradient)
 

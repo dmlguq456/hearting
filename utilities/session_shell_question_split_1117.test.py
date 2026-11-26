@@ -118,7 +118,7 @@ const out={};
     ahead:(()=>{const i=text.findIndex(t=>/^─{10,}$/.test(t));return i>0?[rows[i-1].length===0,text[i-1]]:null;})()});}
  out.shown=shown;
  // Read to the end with PgDn: the line before the first choice, the choices and the keys on the last page.
- const e=editor();let last;for(let n=0;n<30;n++){key(e,'\x1b[6~');last=e.detail({budget:9,columns:72}).map(row=>row.map(p=>p.text).join(''));}
+ const e=editor();let last;for(let n=0;n<30;n++){key(e,'\x1b[6~');last=e.detail({budget:10,columns:72}).map(row=>row.map(p=>p.text).join(''));}
  out.end=last;}
 // (5) No hue (mono, eight colors, NO_COLOR): the numbers' weight and the line tell; no ground; the line is dim in a bright frame.
 out.plain=[{configuration:{theme:'mono'}},{colors:8},{noColor:true}].map(o=>{
@@ -220,16 +220,20 @@ class QuestionSplitTest(unittest.TestCase):
         # A roomy popup has the empty row and the line; the empty row is never there without the line.
         self.assertTrue(shown[0]["blank"] and shown[0]["rule"], shown[0])
         self.assertTrue(all(s["rule"] for s in shown if s["blank"]), shown)
-        # The empty row leaves while the whole content still fits: the line, every choice and the keys, nothing paged.
-        tight = [s for s in shown if s["rule"] and not s["blank"] and not s["more"] and s["numbers"] == 3]
-        self.assertTrue(tight, shown)
-        first_tight = max(s["budget"] for s in tight)
-        full = min(s["budget"] for s in shown if s["blank"] and not s["more"] and s["numbers"] == 3)
-        self.assertEqual(first_tight, full - 1, (first_tight, full))
-        # The keys stay on the last row at every height the popup can have; a paged one says how to read on.
-        self.assertTrue(all(s["keys"] for s in shown if s["budget"] >= 6), [s for s in shown if not s["keys"]])
+        # 11-22: short of rows the question's words page (`+N · more …`); the choices never leave. What gives way
+        # first is the key hints, then the empty row, then the line, then the words themselves (the head says they page).
+        # The words keep a row and the `more` line before a choice is given up, so the choices stand whole down to 7 rows
+        # and slide (one at least) in what is left below that.
+        self.assertTrue(all(s["numbers"] == 3 for s in shown if s["budget"] >= 7), [s for s in shown if s["budget"] >= 7 and s["numbers"] != 3])
+        self.assertTrue(all(s["numbers"] >= 1 and s["more"] for s in shown if s["budget"] < 7), [s for s in shown if s["budget"] < 7])
+        self.assertTrue(all(not (s["keys"] and not s["blank"]) for s in shown), shown)
+        self.assertTrue(all(not (s["blank"] and not s["rule"]) for s in shown), shown)
+        keyless = [s for s in shown if not s["keys"] and s["budget"] >= 7]
+        self.assertTrue(keyless and all(s["more"] for s in keyless), keyless)
+        self.assertTrue(any(s["more"] and s["keys"] and s["blank"] and s["rule"] for s in shown), shown)
+        self.assertTrue(any(s["rule"] and not s["blank"] and not s["keys"] for s in shown), shown)
+        self.assertTrue(any(not s["rule"] and not s["blank"] and s["more"] for s in shown), shown)
         self.assertTrue(any(s["more"] for s in shown))
-        self.assertTrue(all(not s["blank"] for s in shown if s["more"]), [s for s in shown if s["more"] and s["blank"]])
         # Where the question is read page by page, the end of it is the line, the choices and the keys.
         end = out["end"]
         self.assertTrue(any(set(t) == {"─"} for t in end), end)

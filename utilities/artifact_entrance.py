@@ -5,8 +5,9 @@ Writes `README.md`, `index.html`, `all-campaigns.md`, `all-campaigns.html`,
 `all-spec.md`, `all-spec.html`, `recent-route-reports.md` and
 `recent-route-reports.html` directly under the
 artifact root so a person can see what exists and open it, without any external
-tool.  The entrance (`README.md`/`index.html`) has three sections: spec topics,
-recent campaigns (with their one-line summary) and the records (links to the
+tool.  The entrance (`README.md`/`index.html`) has up to four sections: spec topics,
+recent campaigns (with their one-line summary), the backlog (one line that opens the
+root's `backlog.md`, drawn only when that regular file exists) and the records (links to the
 recent route reports page and the ID index).  The spec and campaign sections
 show `ENTRANCE_SPEC_LINES` / `ENTRANCE_CAMPAIGN_LINES` lines and fold the rest
 into one line that opens `all-spec.*` / `all-campaigns.*`.  The route reports themselves are
@@ -51,6 +52,7 @@ import stat
 import subprocess
 import sys
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import quote
@@ -85,6 +87,8 @@ MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 HEAD_BYTES = 16 * 1024
 SUMMARY_CHARS = 120
 MARKER = "<!-- hearting:artifact-entrance v1 -->"
+BACKLOG_NAME = "backlog.md"
+MAX_BACKLOG_BYTES = 1 << 20      # the panel's own limit (tools/fleet/session_status.BACKLOG_READ_LIMIT): both count one file
 
 # Hook for rows that are not cycle folders (see the module header).
 def _campaign_target_path(folder: str, campaign_path: Path) -> str:
@@ -147,6 +151,14 @@ def _fallback_translator(message: str, /, **fields: Any) -> str:
         "entrance.section_spec": "spec",
         "entrance.section_campaigns": "Campaigns",
         "entrance.section_records": "Records",
+        "entrance.section_backlog": "Backlog",
+        "entrance.backlog_note": ("Work handed off, and what you said then. "
+                                  "The session that postpones work writes one line each."),
+        "entrance.backlog_open": "Open backlog.md",
+        "entrance.backlog_count": "{count} total",
+        "entrance.backlog_kinds": "FIX {fix} · IMPR {improve} · NOTE {note} · TBD {tbd}",
+        "entrance.backlog_unavailable": "Counts unavailable",
+        "entrance.backlog_updated": "updated {date}",
         "entrance.recent_routes": "Recent route reports",
         "entrance.spec_note": "How this repo works now. {count} topics; each change edits the same document.",
         "entrance.campaigns_note": "One document per stream of work. No new document appears; this one is rewritten.",
@@ -454,6 +466,7 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
         "recent": [],
         "topics": [],
         "campaigns": [],
+        "backlog": None,
         "all_campaigns": [],
         "totals": {"campaigns": 0, "cycles": 0, "open": 0},
         "selected_by": {"audience": 0, "name-rule": 0},
@@ -579,7 +592,122 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
         _topic_title(row)
     snapshot["topics"] = topics
     snapshot["campaigns"] = [dict(row) for row in snapshot["all_campaigns"][:campaign_limit]]
+    snapshot["backlog"] = _backlog(root)
     return snapshot
+
+
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_BACKLOG_UPDATED = re.compile(r"^갱신 ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2})$")
+_BACKLOG_HEADING = re.compile(r"^ {0,3}##(?:[ \t]|$)")
+
+
+def _backlog_updated(line: str) -> str:
+    """`갱신 YYYY-MM-DD HH:MM` as `YYYY-MM-DD HH:MM`, or "" when the line is another shape or no real time."""
+    found = _BACKLOG_UPDATED.match(line.strip())
+    if not found:
+        return ""
+    try:
+        datetime.strptime(found.group(1), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return ""
+    return found.group(1)
+
+
+BACKLOG_KINDS = ("fix", "improve", "note")
+_BACKLOG_KIND = re.compile(r"^kind:(.*)$", re.IGNORECASE)
+
+
+def _backlog_kind_value(stripped: str) -> Optional[str]:
+    """The value of an indented `kind:` line (`stripped` is the line without its blanks): lower case, blanks cut; None for any other line.
+
+    The one rule for the sort of a job (core/ARTIFACT_META.md `backlog.md`; `tools/fleet/session_status.py` `parse_backlog` reads it the same way)."""
+    found = _BACKLOG_KIND.match(stripped)
+    return found.group(1).strip().lower() if found else None
+
+
+def _backlog_sort(values: set) -> str:
+    """`fix`, `improve` or `note` when the job's `kind:` lines gave exactly one value and it is one of those, else `tbd`."""
+    only = next(iter(values)) if len(values) == 1 else None
+    return only if only in BACKLOG_KINDS else "tbd"
+
+
+def _backlog(root: Path) -> Optional[Dict[str, Any]]:
+    """The root's `backlog.md` as `{"count", "updated", "kinds"}`, or None when there is no such regular file.
+
+    Read by name from a no-follow fd, never written, never followed (a link is no file).  A file that
+    cannot be read or is over MAX_BACKLOG_BYTES keeps the line but has no count (`count` and `kinds` None).
+    A job is a top-level `- ` bullet under a `##` heading (core/ARTIFACT_META.md `backlog.md`); `kinds` is the
+    count of each sort of job (`fix`, `improve`, `note`, `tbd`), read from the optional indented `kind:` lines."""
+    try:
+        if not stat.S_ISREG(os.lstat(str(Path(root) / BACKLOG_NAME)).st_mode):
+            return None
+    except OSError:
+        return None
+    entry: Dict[str, Any] = {"count": None, "updated": "", "kinds": None}
+    try:
+        root_fd = open_root(os.path.realpath(str(root)))
+        try:
+            fd = open_relative(root_fd, [BACKLOG_NAME])
+        finally:
+            os.close(root_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            raw = b""
+            while len(raw) <= MAX_BACKLOG_BYTES:
+                chunk = os.read(fd, MAX_BACKLOG_BYTES + 1 - len(raw))
+                if not chunk:
+                    break
+                raw += chunk
+        finally:
+            os.close(fd)
+    except (OSError, RuntimeError):
+        return entry
+    if len(raw) > MAX_BACKLOG_BYTES:
+        return entry
+    count, fence, updated, headed = 0, None, "", False
+    kinds = {"fix": 0, "improve": 0, "note": 0, "tbd": 0}
+    values: Optional[set] = None          # the `kind:` values of the job being read (None: no job is open)
+
+    def close() -> None:
+        nonlocal values
+        if values is not None:
+            kinds[_backlog_sort(values)] += 1
+        values = None
+
+    for line in raw.decode("utf-8", "replace").splitlines():
+        opened = _FENCE.match(line)
+        if fence is not None:
+            if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= fence[1] \
+                    and not line.strip().strip(fence[0]):
+                fence = None
+            continue
+        if opened:
+            fence = (opened.group(1)[0], len(opened.group(1)))
+            close()
+            continue
+        if _BACKLOG_HEADING.match(line):
+            headed = True
+            close()
+            continue
+        if not headed and not updated:
+            updated = _backlog_updated(line)
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if line[:1] in (" ", "\t"):
+            if values is not None:
+                value = _backlog_kind_value(stripped)
+                if value is not None:
+                    values.add(value)
+            continue
+        close()
+        if headed and line.startswith("- "):
+            count += 1
+            values = set()
+    close()
+    entry.update({"count": count, "updated": updated, "kinds": kinds})
+    return entry
 
 
 _SPEC_TAIL = re.compile(r" — [^—]*\bPRD\b[^—]*$")
@@ -874,6 +1002,24 @@ def entrance_sections(snapshot: Dict[str, Any], t) -> List[Dict[str, Any]]:
                           "all-campaigns.md", "all-campaigns.html", "all-campaigns.html"))
     sections.append({"key": "campaigns", "title": t("entrance.section_campaigns"),
                      "note": t("entrance.campaigns_note"), "lines": lines})
+    backlog = snapshot.get("backlog")
+    if backlog:
+        meta = []
+        if backlog["count"] is not None:
+            kinds = backlog.get("kinds") or {}
+            # a document with no sort written anywhere (an old one) has every sort unknown, not none: `?`
+            sorted_any = any(kinds.get(name) for name in BACKLOG_KINDS)
+            shown = {name: (_count(kinds.get(name, 0)) if sorted_any or not kinds.get("tbd") else "?") for name in BACKLOG_KINDS}
+            meta.append(t("entrance.backlog_kinds", tbd=_count(kinds.get("tbd", 0)), **shown))
+            meta.append(t("entrance.backlog_count", count=_count(backlog["count"])))
+        else:
+            meta.append(t("entrance.backlog_unavailable"))
+        if backlog["updated"]:
+            meta.append(t("entrance.backlog_updated", date=backlog["updated"]))
+        sections.append({"key": "backlog", "title": t("entrance.section_backlog"),
+                         "note": t("entrance.backlog_note"), "lines": [
+            line("backlog", t("entrance.backlog_open"), _md_href(BACKLOG_NAME), _href(BACKLOG_NAME),
+                 BACKLOG_NAME, note=" · ".join(meta))]})
     sections.append({"key": "records", "title": t("entrance.section_records"), "note": "", "lines": [
         line("recent-routes", t("entrance.recent_routes"), RECORDS_MD, RECORDS_HTML, RECORDS_HTML,
              note=t("entrance.records_note")),
@@ -1103,7 +1249,8 @@ def request_refresh(root: Path, cycle_id: Optional[str] = None) -> None:
     if in_test_process():
         # A test process never spawns a detached child (the checkpoint trigger's
         # rule); refreshing in place keeps its fixtures free of stray writers.
-        _worker_pass(root, cycle_id)
+        # same-process pass: no git (the test-process rule: a test process starts no children)
+        _worker_pass(root, cycle_id, ask_git=False)
         return
     runtime = root / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -1130,14 +1277,14 @@ def request_refresh(root: Path, cycle_id: Optional[str] = None) -> None:
             os.close(fd)
 
 
-def _worker_pass(root: Path, cycle_id: Optional[str] = None) -> None:
+def _worker_pass(root: Path, cycle_id: Optional[str] = None, *, ask_git: bool = True) -> None:
     """One worker turn: bring the campaign documents up to date, then refresh the entrance.
 
     The documents come first so that the entrance written next already points at a document
     this turn created. A failing generator never stops the entrance."""
     try:
         import campaign_document
-        campaign_document.catch_up(root, cycle_id)
+        campaign_document.catch_up(root, cycle_id, git=None if ask_git else campaign_document._GitPass(budget=0))
     except Exception as exc:  # noqa: BLE001 -- the entrance never waits on the documents
         print(f"campaign_document skipped error={type(exc).__name__}", file=sys.stderr)
     refresh(root, cycle_id=cycle_id)

@@ -18,6 +18,8 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import gpu_leases as G
 
 SOURCE = Path(G.__file__).read_text()
@@ -269,7 +271,7 @@ class LeasesTest(unittest.TestCase):
         options["tmux_environment"] = {
             **{key: "" for key in G.session_environment_keys()},
             "AGENT_HOME": "/fixture/pinned-release",
-            "AGENT_DISPATCH_ATTEMPT_ID": "att-current-launch",
+            "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-current-launch"),
             "CODEX_THREAD_ID": "current-thread",
             "HEARTING_COMPUTE_RUN_ID": options["run_id"],
             "HEARTING_COMPUTE_HOST": "fixture-host",
@@ -281,7 +283,7 @@ class LeasesTest(unittest.TestCase):
             "PATH": str(fakebin) + os.pathsep + str(self.no_tmux_bin),
             "HEARTING_FAKE_TMUX_RECORDS": str(records),
             "AGENT_HOME": "/launcher/stale-release",
-            "AGENT_DISPATCH_ATTEMPT_ID": "att-launcher-stale",
+            "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-launcher-stale"),
             "CODEX_THREAD_ID": "launcher-stale-thread",
             "TMUX": "/tmp/default-tmux,123,0",
             "TMUX_PANE": "%9",
@@ -299,7 +301,7 @@ class LeasesTest(unittest.TestCase):
                           str(wrapper_env_path))
         receipt = self.launch(options, env=server_env, payload_source=payload_source)
         self.assertEqual(output.read_text(),
-                         "/fixture/pinned-release|att-current-launch|current-thread")
+                         "/fixture/pinned-release|" + unique_attempt_id("att-current-launch") + "|current-thread")
         transport = receipt["tmux_transport"]
         self.assertEqual(transport["kind"], "hearting-tmux-v1")
         self.assertRegex(transport["server"], r"^hearting-[0-9a-f]{20}$")
@@ -313,7 +315,7 @@ class LeasesTest(unittest.TestCase):
         self.assertEqual(shlex.split(session["command"])[0:2], ["exec", "env"])
         wrapper_env = json.loads(wrapper_env_path.read_text())
         self.assertEqual(wrapper_env["AGENT_HOME"], "/fixture/pinned-release")
-        self.assertEqual(wrapper_env["AGENT_DISPATCH_ATTEMPT_ID"], "att-current-launch")
+        self.assertEqual(wrapper_env["AGENT_DISPATCH_ATTEMPT_ID"], unique_attempt_id("att-current-launch"))
         self.assertEqual(wrapper_env["CODEX_THREAD_ID"], "current-thread")
         self.assertEqual(wrapper_env["CLAUDE_CODE_SESSION_ID"], "")
         self.assertEqual(wrapper_env["HEARTING_RESOURCE_RUN_ID"], "")
@@ -352,7 +354,7 @@ class LeasesTest(unittest.TestCase):
                                         "\"$AGENT_HOME\" \"$HEARTING_RESOURCE_RUN_ID\" > "
                                         + shlex.quote(str(output)))
                     options["tmux_environment"] = {
-                        "AGENT_HOME": "/current/release", "AGENT_DISPATCH_ATTEMPT_ID": "att-current",
+                        "AGENT_HOME": "/current/release", "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-current"),
                         "HEARTING_COMPUTE_RUN_ID": options["run_id"],
                         "HEARTING_COMPUTE_HOST": "old-tmux", "HEARTING_RESOURCE_RUN_ID": "",
                         "HEARTING_GPU_LEASE_RELEASE": "", "CODEX_THREAD_ID": "thread-current",
@@ -364,7 +366,7 @@ class LeasesTest(unittest.TestCase):
                                        "'HEARTING_RESOURCE_RUN_ID','CLAUDE_CODE_SESSION_ID')}))\n") %
                                       str(probe))
                     launch_env = {"PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", ""),
-                                  "AGENT_HOME": "stale", "AGENT_DISPATCH_ATTEMPT_ID": "stale",
+                                  "AGENT_HOME": "stale", "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("stale"),
                                   "HEARTING_RESOURCE_RUN_ID": "stale", "TMUX": "stale",
                                   "TMUX_TEST_CWD": str(self.root / (tag + "-cwd"))}
                     if namespaced:
@@ -387,7 +389,7 @@ class LeasesTest(unittest.TestCase):
                     self.assertEqual(output.read_text(), "/current/release|")
                     wrapper_env = json.loads(probe.read_text())
                     self.assertEqual(wrapper_env["AGENT_HOME"], "/current/release")
-                    self.assertEqual(wrapper_env["AGENT_DISPATCH_ATTEMPT_ID"], "att-current")
+                    self.assertEqual(wrapper_env["AGENT_DISPATCH_ATTEMPT_ID"], unique_attempt_id("att-current"))
                     self.assertEqual(wrapper_env["HEARTING_RESOURCE_RUN_ID"], "")
                     self.assertEqual(wrapper_env["CLAUDE_CODE_SESSION_ID"], "")
 

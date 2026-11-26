@@ -20,6 +20,8 @@ import worker_bootstrap as WB
 import route_plan as RP
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 def _clean_test_env():
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("AGENT_DISPATCH_", "AGENT_ROUTE_", "AGENT_REVIEW_",
@@ -90,7 +92,7 @@ class WorkerDispatchPromptTest(unittest.TestCase):
                         "execution_surface=registered-headless,registered_worker=1,"
                         "fallback_hop=same-harness-headless,worker_type=owner,"
                         f"harness={harness},runtime_sandbox=workspace-write,"
-                        f"attempt_id=att-prompt-parent,pid={parent.pid},pid_start={start}\n"
+                        f"attempt_id={unique_attempt_id('att-prompt-parent')},pid={parent.pid},pid_start={start}\n"
                     )
                 slug = f"{harness}-typed"
                 if harness == "opencode":
@@ -159,7 +161,7 @@ class WorkerDispatchPromptTest(unittest.TestCase):
                     "OPENCODE_CONFIG_CONTENT": "{}",
                 }
                 if harness in {"codex", "claude"}:
-                    env["AGENT_DISPATCH_ATTEMPT_ID"] = "att-prompt-parent"
+                    env["AGENT_DISPATCH_ATTEMPT_ID"] = unique_attempt_id("att-prompt-parent")
                 result = subprocess.run(command, text=True, capture_output=True, env=env)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 prompts = list(logs.glob(f"{slug}.*.{suffix}"))

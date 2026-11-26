@@ -265,7 +265,7 @@ class SurveyTests(unittest.TestCase):
                     row(name("light-2"), family="light", version=(2,), cost=0.9)])
                 got = {e["target"]: (e["kind"], e["reason"]) for e in result["entries"]}
                 self.assertEqual(got["profile/deep"], ("proposal", "other family"))
-                self.assertEqual(got["tier/light"], ("proposal", "price x9.0"))
+                self.assertEqual(got["tier/light"], ("proposal", "price x9.00"))
                 self.assertEqual(model_follow.counts(result), (0, 5))
                 text = "\n".join(model_follow.lines([result]))
                 self.assertIn(f"model follow: proposal {adapter} profile/deep {name('deep-1')} -> "
@@ -273,21 +273,22 @@ class SurveyTests(unittest.TestCase):
                               f"profile/deep {name('zed-9')}@high", text)
                 self.assertNotIn("followed", text)
 
-    def test_result_lines_say_newer_and_never_followed(self):
+    def test_a_survey_only_reads_it_writes_nothing_and_says_nothing_about_a_followed_cell(self):
         for adapter in HARNESSES:
             with self.subTest(adapter=adapter):
-                self.user_file(adapter)
+                path = self.user_file(adapter)
+                before = path.read_bytes()
                 name = self.names(adapter)
                 result = self.run_survey(adapter, [
                     row(name("deep-1")), row(name("deep-2"), version=(2,), efforts=("high",))])
-                text = model_follow.lines([result])
-                self.assertIn(f"model follow: newer {adapter} profile/deep {name('deep-1')} -> "
-                              f"{name('deep-2')} (high) · hearting model set {adapter} "
-                              f"profile/deep {name('deep-2')}@high", text)
-                self.assertIn(f"model follow: newer {adapter} tier/deep {name('deep-1')} -> "
-                              f"{name('deep-2')} (high, was xhigh) · hearting model set {adapter} "
-                              f"tier/deep {name('deep-2')}@high", text)
-                self.assertFalse([t for t in text if "followed" in t])
+                # Following is `apply_harness`'s work: a survey only plans it.
+                self.assertEqual(model_follow.lines([result]), [])
+                self.assertEqual(path.read_bytes(), before)
+                plan = {item["target"]: item for item in result["plan"]}
+                self.assertEqual(plan["profile/deep"]["to"], name("deep-2"))
+                self.assertEqual(plan["profile/deep"]["effort"], "high")
+                self.assertEqual(plan["tier/deep"]["effort_was"], "xhigh")
+                self.assertEqual(model_follow.counts(result)[0], len(plan))
 
     def test_codex_cli_note_needs_a_matching_list_version_a_mark_and_no_successor(self):
         self.user_file("codex")
@@ -299,7 +300,6 @@ class SurveyTests(unittest.TestCase):
                          "model follow: codex CLI 0.163.0 lists deep-1, light-1 as previous "
                          "generation with no successor · update the Codex CLI yourself")
         for case, kwargs in (
-                ("list is another CLI version", {"client_version": "0.170.0", "probe": probe}),
                 ("no list version", {"client_version": None, "probe": probe}),
                 ("installed version unknown", {"client_version": "0.163.0"}),
                 ("not marked", {"client_version": "0.163.0", "probe": probe,
@@ -312,6 +312,27 @@ class SurveyTests(unittest.TestCase):
                 found = self.run_survey("codex", kwargs.pop("rows", rows), **kwargs)
                 self.assertIsNone(found["cli"])
                 self.assertFalse([t for t in model_follow.lines([found]) if "CLI" in t])
+
+    def test_a_list_another_cli_version_wrote_gives_its_own_note_and_no_previous_generation_one(self):
+        self.user_file("codex")
+        rows = [row("deep-1", deprecated=True), row("light-1", family="light", deprecated=True)]
+        probe = lambda _harness: ((0, 163, 0), "/usr/bin/codex")  # noqa: E731
+        found = self.run_survey("codex", rows, client_version="0.170.0", probe=probe)
+        self.assertEqual(found["cli"], {"harness": "codex", "version": "0.163.0", "models": [],
+                                        "kind": "list-from-another-cli", "list_version": "0.170.0",
+                                        "command": None})
+        self.assertEqual(model_follow.lines([found]),
+                         ["model follow: codex: the model list was written by CLI 0.170.0, installed is "
+                          "0.163.0 · start codex once to refresh it · nothing followed"])
+
+    def test_trailing_zeros_do_not_make_another_version(self):
+        for listed, have, other in (("0.171", (0, 171, 0), None), ("0.171.0", (0, 171), None),
+                                    ("0.171.0", (0, 171, 1), ("0.171.0", "0.171.1")),
+                                    ("0.170", (0, 171, 0), ("0.170", "0.171.0")),
+                                    ("1.0.0", (1, 0), None), ("1.10", (1, 1), ("1.10", "1.1"))):
+            with self.subTest(listed=listed, have=have):
+                catalog = SimpleNamespace(client_version=listed)
+                self.assertEqual(model_follow._other_cli(catalog, lambda: (have, "/usr/bin/codex")), other)
 
     def test_when_no_candidate_is_usable_the_codex_cli_note_still_shows(self):
         self.user_file("codex")

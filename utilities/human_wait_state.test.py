@@ -908,56 +908,22 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertTrue(state.publish_cache({"items": [], "observed_at": time.time(), "complete": True}))
         self.assertEqual(counts(), (0, 0, (0, 0)))
 
-    def test_a_changed_set_of_open_questions_asks_its_root_once_and_the_same_set_asks_nothing(self):
-        """The producer writes the copy; the campaign document follows when the open questions change."""
-        import artifact_entrance
-        mine, other = Path(self.tmp.name) / "mine", Path(self.tmp.name) / "other"
-        for folder in (mine, other):
-            (folder / ".agent_reports").mkdir(parents=True)
-        mine_root, other_root = (Path(os.path.realpath(folder / ".agent_reports")) for folder in (mine, other))
-        now = time.time()
-
-        def row(name, folder, source="S1"):
-            return {"id": f"{source}:{name}", "source": source, "kind": "decision", "since": now,
-                    "owner": {"harness": "claude", "session_id": "s-" + name}, "cwd": str(folder)}
-
-        def publish(*items, at=None):
-            self.assertTrue(state.publish_cache({"items": list(items), "complete": True, "observed_at": at or time.time()}))
-        with mock.patch.object(artifact_entrance, "request_refresh") as refresh:
-            publish(row("a", mine))                                      # asked
-            self.assertEqual([call.args for call in refresh.call_args_list], [(mine_root,)])
-            publish(row("a", mine), at=time.time() + 1)                  # the copy is written again, the set is the same
-            publish(row("a", mine), at=time.time() + 2)
-            self.assertEqual(refresh.call_count, 1)
-            publish(row("a", mine), row("b", other))                     # another root's question goes there alone
-            self.assertEqual([call.args for call in refresh.call_args_list][1:], [(other_root,)])
-            publish(row("b", other))                                     # answered (gone from the set)
-            self.assertEqual([call.args for call in refresh.call_args_list][2:], [(mine_root,)])
-            publish(row("b", other), at=time.time() + 3)
-            self.assertEqual(refresh.call_count, 3)
-
-    def test_a_question_whose_folder_is_only_in_its_file_and_a_failed_pass_are_handled(self):
+    def test_a_changed_set_of_open_questions_asks_no_artifact_root_for_a_refresh(self):
+        """11-22: a question stands on the question screens only; the campaign document does not follow the question list."""
         import artifact_entrance
         folder = Path(self.tmp.name) / "mine"
         (folder / ".agent_reports").mkdir(parents=True)
-        digest = "d" * 64
-        state._write(state.state_root() / (digest + ".json"), {
-            "schema_version": 1, "mode": "message", "source": "S4", "id": "S4:" + digest, "harness": "claude",
-            "session_id": "s-d", "seat_key": "seat-d", "sequence": 1, "question": "Q?", "since": time.time(),
-            "lifecycle": "open", "cwd": str(folder)})
-        item = {"id": "S4:" + digest, "source": "S4", "kind": "message", "since": time.time(),
-                "owner": {"harness": "claude", "session_id": "s-d"}}      # the copy carries no folder
-        with mock.patch.object(artifact_entrance, "request_refresh") as refresh:
-            self.assertTrue(state.publish_cache({"items": [item], "complete": True, "observed_at": time.time()}))
-            self.assertEqual([call.args for call in refresh.call_args_list],
-                             [(Path(os.path.realpath(folder / ".agent_reports")),)])
-            # a pass that failed and saw nothing is no answer: it asks nothing
-            self.assertTrue(state.publish_cache({"items": [], "complete": False, "observed_at": time.time()}))
-            self.assertEqual(refresh.call_count, 1)
-        # a refresh that fails never fails the copy
-        with mock.patch.object(artifact_entrance, "request_refresh", side_effect=OSError("busy")):
-            self.assertTrue(state.publish_cache({"items": [], "complete": True, "observed_at": time.time()}))
+        now = time.time()
+
+        def row(name):
+            return {"id": f"S1:{name}", "source": "S1", "kind": "decision", "since": now,
+                    "owner": {"harness": "claude", "session_id": "s-" + name}, "cwd": str(folder)}
+        with mock.patch.object(artifact_entrance, "request_refresh", side_effect=AssertionError("asked")) as refresh:
+            for items in ([row("a")], [row("a"), row("b")], [row("b")], []):    # asked, asked again, answered, all answered
+                self.assertTrue(state.publish_cache({"items": items, "complete": True, "observed_at": time.time()}))
+            refresh.assert_not_called()
         self.assertEqual(state._read_cache()["items"], [])
+        self.assertFalse(hasattr(state, "_request_documents_for_changed_waits"))
 
 
 class _StrictOpenCodeTransport:
@@ -3576,6 +3542,78 @@ class MessageCompletionTests(unittest.TestCase):
         self.f = self.fixture.__enter__()
         self.addCleanup(self.fixture.__exit__, None, None, None)
 
+    def test_choice_and_note_use_the_private_answer_delivery(self):
+        for harness in ("claude", "codex", "opencode"):
+            signal, envelope = self.f.ask(harness, "mixed-"+harness, "Synthetic choice?", choices=["original-value", "other"])
+            values = ["original-value", "A separate note"]
+            response = {"answers": {"message-response": values}}
+            result = state.submit_selected_response(envelope, response, action_id="mixed-"+harness)
+            self.assertEqual(result["state"], "submitted", result)
+            wire, _, _ = self.f.prepare(signal)
+            self.assertIn(json.dumps(values), wire)
+            self.assertEqual(state._message_answer_error(state._message_body(response)), None)
+        self.assertIsNone(state._message_answer_error("a" * 4096))
+
+    def test_array_shaped_single_answers_are_distinct_from_two_values_in_the_prompt(self):
+        import session_notice
+        pair = ["original-value", "A separate note"]
+        cases = [pair, [json.dumps(pair)], ["[1,2]"], ["[]"], ['["x"]'], ["[plain"]]
+        bodies = []
+        for index, values in enumerate(cases):
+            with self.subTest(values=values):
+                signal, envelope = self.f.ask("claude", f"array-shape-{index}", choices=[pair[0], "other"])
+                result = state.submit_selected_response(envelope, {"answers": {"message-response": values}},
+                                                       action_id="fixture-array")
+                self.assertEqual(result["state"], "submitted")
+                header, body = session_notice.consumer_text(self.f.record(signal)["receipt"]).split("\n", 1)
+                self.assertEqual(header, f"Question answer (request={signal['id']}):")
+                try:
+                    decoded = json.loads(body)
+                except ValueError:
+                    decoded = None
+                self.assertEqual(decoded if isinstance(decoded, list) else [body], values)
+                bodies.append(body)
+        self.assertNotEqual(bodies[0], bodies[1])
+
+    def test_a_preexisting_unwrapped_answer_keeps_its_bound_bytes(self):
+        import session_notice
+        value = '["a","b"]'
+        signal, envelope = self.f.ask()
+        # The receipt was bound before single array-shaped text began to be wrapped.
+        with mock.patch.object(state, "_message_body", return_value=value):
+            self.assertEqual(self.f.submit(envelope, value)["state"], "submitted")
+        receipt = self.f.record(signal)["receipt"]
+        self.assertEqual(session_notice.consumer_text(receipt).split("\n", 1)[1], value)
+        wire, _, recipient = self.f.prepare(signal)
+        self.f.peer.receive_peer_message(wire, recipient)
+        self.assertEqual(self.source(signal)["completion"]["answer"], value)
+
+    def test_choice_and_note_use_separate_decision_fields_and_secret_answers_are_omitted(self):
+        import tidy_decisions
+        choice, note = "original-value", "A separate note"
+        for secret in (False, True):
+            with self.subTest(secret=secret):
+                signal, envelope = self.f.ask("claude", f"split-memory-{secret}",
+                                              choices=[choice, "other"], secret=secret)
+                result = state.submit_selected_response(envelope, {"answers": {"message-response": [choice, note]}},
+                                                       action_id="fixture-note")
+                self.assertEqual(result["state"], "submitted")
+                wire, _, recipient = self.f.prepare(signal)
+                self.f.peer.receive_peer_message(wire, recipient)
+                self.assertEqual(self.source(signal)["lifecycle"], "answered")
+                state.flush_message_decisions()
+                decisions = tidy_decisions.list_pending()
+                self.assertEqual(len(decisions), 1)
+                entry = decisions[0][1]
+                self.assertEqual((entry["answers"], entry["note"]), ([choice], note))
+                body = tidy_decisions.decision_body(entry)
+                self.assertIn("고른 답: " + choice, body)
+                self.assertIn("사용자 메모: " + note, body)
+                if secret:
+                    completion = self.source(signal)["completion"]
+                    self.assertNotIn("answer", completion)
+                    self.assertNotIn("note", completion)
+
     def test_shared_project_questions_remain_open_for_each_exact_session(self):
         import session_tidy as tidy
         for harness in ("claude", "codex", "opencode"):
@@ -4084,7 +4122,7 @@ class MessageCompletionTests(unittest.TestCase):
         return "\n".join(lines)
 
     def test_a_question_asked_replaced_or_answered_never_asks_the_entrance_for_a_refresh(self):
-        """The prompt hook holds the seat lock: the campaign document follows the question list on its own."""
+        """The prompt hook holds the seat lock and asks for nothing (11-22: the campaign document does not follow the question list)."""
         import artifact_entrance
         (self.f.root / ".agent_reports").mkdir()
         with mock.patch.object(artifact_entrance, "request_refresh", side_effect=AssertionError("asked")) as refresh:

@@ -14,6 +14,7 @@ import contextlib
 import fcntl
 import json
 import hashlib
+import shutil
 import os
 import subprocess
 import stat
@@ -979,6 +980,20 @@ class BootstrapTest(ProducerTestBase):
         names = sorted(p.name for p in self.root.iterdir() if p.name not in artifact_entrance.ENTRANCE_NAMES)
         self.assertEqual(names, [".runtime", "campaigns"])
 
+    def test_root_with_only_a_backlog_still_bootstraps_the_first_begin(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n갱신 2026-11-21 23:10\n\n## Unassigned\n- later\n", encoding="utf-8")
+        self.assertEqual(P.classify_root(self.root)["state"], "inactive-empty")
+        _, _, result = self.begin()
+        self.assertEqual((result["status"], result.get("layout")), ("begun", "cycle"))
+        self.assertEqual((P.read_cutover(self.root) or {}).get("state"), "active")
+        self.assertEqual((self.root / "backlog.md").read_text(encoding="utf-8").splitlines()[0], "# Backlog")
+
+    def test_root_with_only_a_backlog_bootstraps_when_a_cycle_is_required(self):
+        (self.root / "backlog.md").write_text("# Backlog\n", encoding="utf-8")
+        _, _, result = self.begin(require_cycle=True)
+        self.assertEqual(result["status"], "begun")
+
     def test_bootstrapped_root_denies_legacy_top_level_write(self):
         self.begin()
         verdict = P.check_write(self.root, self.root / "plans" / "x.md")
@@ -1051,6 +1066,51 @@ class ClassifyRootTest(ProducerTestBase):
         for name in P.ENTRANCE_NAMES:
             (self.root / name).write_text("x\n", encoding="utf-8")
         self.assertEqual(P.classify_root(self.root)["state"], "inactive-empty")
+
+    def test_root_document_only_root_is_inactive_empty(self):
+        self.assertTrue(P.ROOT_DOCUMENT_NAMES)  # the loop below has something to do
+        for name in P.ROOT_DOCUMENT_NAMES:
+            (self.root / name).write_text("# Backlog\n", encoding="utf-8")
+        klass = P.classify_root(self.root, collect_legacy_top_level=True)
+        self.assertEqual(klass["state"], "inactive-empty")
+        self.assertEqual(klass["legacy_top_level"], [])
+
+    def test_a_root_document_is_not_an_entrance_file(self):
+        self.assertTrue(P.ROOT_DOCUMENT_NAMES)
+        self.assertEqual(set(P.ROOT_DOCUMENT_NAMES) & set(P.ENTRANCE_NAMES), set())
+
+    def test_only_a_regular_file_of_that_name_is_a_root_document(self):
+        outside = Path(self._tmp.name) / "elsewhere.md"
+        outside.write_text("x\n", encoding="utf-8")
+        path = self.root / "backlog.md"
+        for shape in ("folder with content", "link to a file", "broken link"):
+            with self.subTest(shape):
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
+                elif path.is_dir():
+                    shutil.rmtree(path)
+                if shape == "folder with content":
+                    path.mkdir()
+                    (path / "x.md").write_text("x\n", encoding="utf-8")
+                elif shape == "link to a file":
+                    path.symlink_to(outside)
+                else:
+                    path.symlink_to(Path(self._tmp.name) / "no-such-file.md")
+                self.assertFalse(P.is_root_document(path))
+                klass = P.classify_root(self.root, collect_legacy_top_level=True)
+                self.assertEqual(klass["state"], "inactive-with-legacy")
+                self.assertEqual(klass["legacy_top_level"], ["backlog.md"])
+        path.unlink()
+        path.write_text("# Backlog\n", encoding="utf-8")
+        self.assertTrue(P.is_root_document(path))
+
+    def test_root_document_beside_real_legacy_content_does_not_hide_it(self):
+        (self.root / "backlog.md").write_text("# Backlog\n", encoding="utf-8")
+        (self.root / "plans").mkdir()
+        (self.root / "plans" / "a.md").write_text("x", encoding="utf-8")
+        klass = P.classify_root(self.root, collect_legacy_top_level=True)
+        self.assertEqual(klass["state"], "inactive-with-legacy")
+        self.assertEqual(klass["legacy_top_level"], ["plans"])
 
     def test_symlink_counts_as_content_and_is_not_followed(self):
         outside = Path(self._tmp.name) / "outside-target"
@@ -1285,6 +1345,46 @@ class CheckWriteTest(ProducerTestBase):
         self.assertEqual(P.check_write(self.root, self.root / "_scratch" / "x")["verdict"], "allow")
         outside = P.check_write(self.root, Path(self._tmp.name) / "elsewhere.md")
         self.assertEqual((outside["verdict"], outside["reason"]), ("allow", "outside-artifact-root"))
+
+    def test_a_root_document_write_is_allowed_in_both_states_and_only_at_the_root(self):
+        target = self.root / "backlog.md"
+        before = P.check_write(self.root, target)
+        self.assertEqual((before["verdict"], before["reason"]), ("allow", "root-document"))
+        self.activate()
+        after = P.check_write(self.root, target)
+        self.assertEqual((after["verdict"], after["reason"]), ("allow", "root-document"))
+        nested = P.check_write(self.root, self.root / "plans" / "backlog.md")
+        self.assertEqual((nested["verdict"], nested["reason"]), ("deny", "legacy-top-level-write-denied"))
+        # a path under the root document's own name is no root document either
+        under = P.check_write(self.root, self.root / "backlog.md" / "x.md")
+        self.assertEqual((under["verdict"], under["reason"]), ("deny", "legacy-top-level-write-denied"))
+
+    def test_a_folder_or_a_link_named_as_a_root_document_is_still_denied(self):
+        outside = Path(self._tmp.name) / "elsewhere.md"
+        outside.write_text("x\n", encoding="utf-8")
+        inside = self.root / "inside.md"
+        inside.write_text("x\n", encoding="utf-8")
+        target = self.root / "backlog.md"
+        for activate in (False, True):
+            if activate:
+                self.activate()
+            for shape in ("folder", "link to a file in the root", "broken link"):
+                with self.subTest(activate=activate, shape=shape):
+                    if target.is_symlink():
+                        target.unlink()
+                    elif target.is_dir():
+                        target.rmdir()
+                    if shape == "folder":
+                        target.mkdir()
+                    elif shape == "broken link":
+                        target.symlink_to(Path(self._tmp.name) / "no-such-file.md")
+                    else:
+                        target.symlink_to(inside)
+                    verdict = P.check_write(self.root, target)
+                    self.assertNotEqual(verdict["reason"], "root-document", verdict)
+                    if activate:  # before activation every legacy write is allowed in the compat window
+                        self.assertEqual((verdict["verdict"], verdict["reason"]),
+                                         ("deny", "legacy-top-level-write-denied"))
 
     def test_shared_is_immutable_in_both_states(self):
         target = self.root / "shared" / "spec" / ("ref_" + "1" * 32) / "revisions" / ("rrev_" + "2" * 32) / "prd.md"
@@ -1876,6 +1976,23 @@ class FinalizeTest(ProducerTestBase):
         self.assertNotIn(result["cycle_id"], adm.load_index(self.root).manifests)
         self.assertEqual(before[0], P.read_cycle_record(self.root, result["cycle_id"]))
         self.assertEqual(before[1], (Path(result["cycle_dir"]) / "manifest.json").read_bytes())
+
+    def test_a_drawing_of_a_campaign_writes_no_index_when_a_removed_record_is_read_back_from_its_manifest(self):
+        import campaign_document
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result)
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=result["cycle_id"])
+        import artifact_locator
+        folder = artifact_locator.locate(self.root, result["campaign_id"], heal=False)
+        P.cycle_record_path(self.root, result["cycle_id"]).unlink()      # the cache is gone: the admitted manifest answers
+        for index in (self.root / "campaigns").glob("INDEX.*"):
+            index.unlink()
+        files = lambda: {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}  # noqa: E731
+        before = files()
+        campaign_document.collect(self.root, folder, now=time.time(), persist=False, pages={})
+        self.assertEqual(files(), before)
 
     def test_finalize_requires_closed_route_unless_allowed(self):
         self.activate()
@@ -6740,7 +6857,7 @@ class OwnerLaunchBindingTest(ProducerTestBase):
         self.activate()
         route, route_file = self.route("quick")
         launch_env = P.prepare_route_artifact_env(route_file, start=True, jobs=self.jobs)
-        owner = "att-launch-binding"
+        owner = fixture_processes.unique_attempt_id("att-launch-binding")
         node = route["nodes"][0]
         metadata = dict(attempt_id=owner, worker_type="owner", dispatch_depth="1",
             registered_worker="1", harness="codex", capability="autopilot-code",
@@ -6893,7 +7010,7 @@ class OwnerLaunchBindingTest(ProducerTestBase):
     def test_resume_only_owner_launch_publishes_and_replays_binding(self):
         route, route_file, launch_env, owner, args = self._prepared_owner()
         self.assertFalse(P.dispatch_terminal_commit.producer_binding_path(
-            self.root, route["route_id"], "att-launch-binding").exists())
+            self.root, route["route_id"], fixture_processes.unique_attempt_id("att-launch-binding")).exists())
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(self.jobs)}):
             result = P.bind_owner_launch(args, self.jobs, environ=launch_env)
             binding_path = P.dispatch_terminal_commit.producer_binding_path(self.root, route["route_id"], owner)

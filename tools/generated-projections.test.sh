@@ -402,7 +402,7 @@ for bootstrap in \
     esac
   done <<'BOOTSTRAP_PARITY_EOF'
 §5.11|OPERATIONS §5.11 same-turn commit/push policy
-dispatch depth 3 is forbidden|dispatch-depth-3 prohibition
+a short check or lookup adds `--ephemeral`|unit-route delegation clause
 genuinely non-obvious|genuinely-non-obvious ask clause
 if structured input is unavailable|structured-input fallback clause
 legacy `.claude_reports/` is only a fallback|legacy artifact-root fallback qualifier

@@ -38,7 +38,7 @@ Intensity controls procedure and default rigor; the recorded request, released d
 
 Stage gates check whether output can feed the next stage. Independent QA runs only where selected, using a separate execution with a different declared persona or perspective. Same-harness review is independent (allocation order in §2.1). Further legs retain declared profile and perspective diversity. Final verification remains capability-specific. Never add an omitted plan-check or report an unexecuted check as passed.
 
-Dispatch depth is portable route topology, not process ancestry, runtime-native
+Dispatch depth is a node's place inside one route, not process ancestry, runtime-native
 agent nesting, or proof of registry membership. Dispatch depth 0 covers all
 interactive sessions, including peers and steward sessions; dispatch depth 1 owns
 the capability pipeline; dispatch depth 2
@@ -47,9 +47,11 @@ at dispatch depth 0. Quick is semantically one registered-headless one-shot
 conductor at dispatch depth 1 and opens no child node. A `solo` route at `standard` or higher (where the kind declares a one-shot review) keeps that one owner, which makes the work itself; its children are the route's declared verification nodes at dispatch depth 2 (one review at `standard`; the kind's review legs from `strong`, the same declared group a `staged` route realizes). The owner starts them with the command its task gives (one command starts the whole group) and cannot close any of them itself. Its transport/schema
 compatibility identity remains `worker_type=owner`, `unit=_kernel/owner`,
 `owner_model_profile`, and `one-shot-owner`; those names do not make it a
-standard+ capability owner. Standard+ fallback attempts retain their node's
-dispatch depth even when the execution surface changes from registered headless
-to a runtime-native subagent or inline. Dispatch depth 3 or greater is forbidden.
+standard+ capability owner. Standard+ fallback attempts retain their node's dispatch depth when the
+execution surface changes from registered headless to inline, or to a runtime-native subagent where the
+route sealed a candidate for that hop (compose's readiness check records none). No route has a node at dispatch
+depth 3 or greater; a unit route a worker opens is a route of its own: its leg is dispatch depth 1, hangs below
+the caller in Fleet, counts under the worker governor's caps and widens nothing of the caller's scope (`OPERATIONS §5.10c`).
 Resource runners and Claude agent-team teammate sessions are separate lifecycle
 surfaces and carry no dispatch depth.
 
@@ -200,7 +202,7 @@ a scalar quality ranking:
 | `balanced` | Predetermined work with an extended multi-step execution | light model with high execution budget | allowed |
 | `light` | Predetermined, short local execution | configured light budget | allowed |
 | `mini` | Lifecycle, classification, title, or explicitly micro-semantic help | configured micro budget | forbidden for substantive registered dispatch-depth-1/2 owner, stage, and review nodes |
-| `top` | Above deep: the harness's main-session-only model, only by a route-sealed explicit selection under important or difficult-uncertain judgment | configured top budget, opt-in; an older OpenCode user file may omit it and use the installed default collapse without rewriting that file | route-sealed dispatch-depth-1 owner only; not a stage node, leg, review worker, matrix cell, policy band, or capacity cascade |
+| `top` | Above deep: the harness's main-session-only model, only by a route-sealed explicit selection under important or difficult-uncertain judgment. An agent picks `top` only when the person said so | configured top budget, opt-in; an older OpenCode user file may omit it and use the installed default collapse without rewriting that file | (a) the route-sealed dispatch-depth-1 owner and the depth-1 frame anchor leg, and (b) at intensity `strong`, `thorough` or `adversarial`, a depth-2 stage worker or review/verification leg the person named with `--explicit-profiles` (key: the realized node id, `__owner__` for the owner; a fan-out `map-worker` leg and a step the owner runs itself are not eligible). Not a default, matrix cell, policy band, automatic promotion, pair-rotation target or capacity-cascade step, and not set route-wide (`--profile` has no `top`) |
 
 Compile and compose use one pure resolver. `profile_demand`
 contains `schema_version: 1`, `judgment_requirement`, `execution_scope`, nonempty
@@ -212,7 +214,7 @@ never selects a deep profile. Important explicit deep records additional judgmen
 headroom. These are recommendations: an explicit known profile takes precedence
 without requiring a demand document or a justification for overriding the matrix.
 For a parallel group, `--explicit-profiles` wins for the named node/leg only;
-unnamed legs retain their declared profiles. An explicitly selected profile (`--profile`, `--explicit-profiles`, or a harness/profile-only pin) remains eligible for same-harness pair rotation; only a concrete model pin or capacity-retry-chosen model is preserved. Traversal skips profiles configured to the sibling's model and skips `top` and `mini`; profile order is a decision rule, not a quality ranking. Compose records omitted presets in
+unnamed legs retain their declared profiles; a leg's realized id (for example `impl-review-alternative`) is its key. A `top` value on a depth-2 stage worker or review/verification leg is accepted only at `strong` or higher (give `--intensity`; the route does not infer `strong`) and only when the person named that node, and at most one leg of a parallel group may be `top` (the batch contract's `MAX_TOP_LEGS`); compose refuses a lower intensity, a fan-out `map-worker` leg and a step the owner runs itself with the cause named (a step the owner runs itself is reached through the owner's `__owner__` key). A route-wide worker pin's model still wins over a node's `top`, as it does for the owner. An explicitly selected profile (`--profile`, `--explicit-profiles`, or a harness/profile-only pin) remains eligible for same-harness pair rotation; only a concrete model pin or capacity-retry-chosen model is preserved. Traversal skips profiles configured to the sibling's model and skips `top` and `mini`; profile order is a decision rule, not a quality ranking. Compose records omitted presets in
 `omitted_parallel_presets` and displays active-intensity omissions before launch,
 including `terminal-anchor`; this notice does not change the terminal/group contract.
 
@@ -778,9 +780,8 @@ capability-route compose`, but their name and description are not in the model's
 per-request Skill list. Codex sets `policy.allow_implicit_invocation: false` in
 `agents/openai.yaml`, Claude sets `disable-model-invocation: true`, and OpenCode,
 which has no such switch, drops them from its Skill projection and keeps the
-native command. Model-support Skills (`session-tidy`,
-`artifact-projection-read`) stay model-visible helpers, not primary entry
-candidates. `DESIGN_PRINCIPLES §10`
+native command. The model-support Skill (`session-tidy`) stays a model-visible
+helper, not a primary entry candidate. `DESIGN_PRINCIPLES §10`
 owns the qualitative design tenets.
 
 The conformance gate enumerates the portable capability domain and checks every

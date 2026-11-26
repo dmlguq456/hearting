@@ -29,6 +29,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 TOOL = ROOT / "compute-hosts.py"
+sys.path.insert(0, str(ROOT.parent / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 
 
 def controlled_proc_root(root, processes):
@@ -1621,7 +1623,7 @@ class ComputeHostsTest(unittest.TestCase):
                 {**clean, "CODEX_THREAD_ID": "same-session-token",
                  "CLAUDE_CODE_SESSION_ID": "same-session-token"})
             job_proc = launch_fixture(
-                {**clean, "AGENT_DISPATCH_ATTEMPT_ID": "att-42",
+                {**clean, "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-42"),
                  "AGENT_DISPATCH_SELF_SLUG": "train-test",
                  "HEARTING_COMPUTE_RUN_ID": "shadowed-run"})
             session_proc = launch_fixture(
@@ -2684,10 +2686,10 @@ class LauncherProvenanceTest(unittest.TestCase):
         self.assertEqual(
             module._launcher_provenance({
                 "AGENT_HOME": str(home),
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-9f2c4b1ad34e",
+                "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-9f2c4b1ad34e"),
             }),
             {"AGENT_HOME": str(home.resolve()),
-             "AGENT_DISPATCH_ATTEMPT_ID": "att-9f2c4b1ad34e"})
+             "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-9f2c4b1ad34e")})
         # An unknown attempt shape is omitted, never forwarded or executed.
         self.assertEqual(
             module._launcher_provenance({
@@ -2699,7 +2701,7 @@ class LauncherProvenanceTest(unittest.TestCase):
                     "att-" + "x" * 241, None, 7, ["att-9f2c"]):
             with self.subTest(bad=bad):
                 self.assertFalse(module._valid_attempt_id(bad))
-        for good in ("att-9f2c4b1ad34e", "att-retry-abc123", "att-x",
+        for good in (unique_attempt_id("att-9f2c4b1ad34e"), "att-retry-abc123", "att-x",
                      "att-a.B_c-d"):
             with self.subTest(good=good):
                 self.assertTrue(module._valid_attempt_id(good))
@@ -2757,7 +2759,7 @@ class LauncherProvenanceTest(unittest.TestCase):
         home = self.make_home()
         env = self.scrubbed_env(
             AGENT_HOME=str(home),
-            AGENT_DISPATCH_ATTEMPT_ID="att-9f2c4b1ad34e",
+            AGENT_DISPATCH_ATTEMPT_ID=unique_attempt_id("att-9f2c4b1ad34e"),
             AWS_SECRET_ACCESS_KEY="canary-secret",
             SSH_AUTH_SOCK="/tmp/canary-agent.sock",
             AGENT_DISPATCH_JOBS="/tmp/canary-jobs.log",
@@ -2768,7 +2770,7 @@ class LauncherProvenanceTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("export AGENT_HOME=", result.stdout)
         self.assertIn(str(home.resolve()), result.stdout)
-        self.assertIn("export AGENT_DISPATCH_ATTEMPT_ID=att-9f2c4b1ad34e",
+        self.assertIn("export AGENT_DISPATCH_ATTEMPT_ID=" + unique_attempt_id("att-9f2c4b1ad34e"),
                       result.stdout)
         # Without dispatch depth, this attempt's session identity is unresolved.
         self.assertNotIn("export CODEX_THREAD_ID=launch-thread", result.stdout)
@@ -2808,11 +2810,11 @@ class LauncherProvenanceTest(unittest.TestCase):
 
     def test_forwarded_provenance_crosses_a_scrubbed_tmux_boundary(self):
         home = self.make_home()
-        attempt = "att-9f2c4b1ad34e"
+        attempt = unique_attempt_id("att-9f2c4b1ad34e")
         fakebin = self.root / "tmux-bin"
         install_fake_tmux(fakebin, stale_environment={
             "AGENT_HOME": "/foreign/old-release",
-            "AGENT_DISPATCH_ATTEMPT_ID": "att-stale-owner",
+            "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-stale-owner"),
         })
         env = self.scrubbed_env(
             AGENT_HOME=str(home), AGENT_DISPATCH_ATTEMPT_ID=attempt,
@@ -2842,7 +2844,7 @@ class LauncherProvenanceTest(unittest.TestCase):
         home = self.make_home()
         env = self.scrubbed_env(
             AGENT_HOME=str(home),
-            AGENT_DISPATCH_ATTEMPT_ID="bogus; touch /tmp/prov-pwned")
+            AGENT_DISPATCH_ATTEMPT_ID=unique_attempt_id("bogus; touch /tmp/prov-pwned"))
         dry = self.run_tool("run", "here", "--name", "prov-bad", "--dry-run",
                             "--", "bash", "-c", "echo hi", env=env)
         self.assertEqual(dry.returncode, 0, dry.stderr)
@@ -2870,12 +2872,12 @@ class LauncherProvenanceTest(unittest.TestCase):
         home = self.make_home()
         env = self.scrubbed_env(
             AGENT_HOME=str(home),
-            AGENT_DISPATCH_ATTEMPT_ID="att-9f2c4b1ad34e")
+            AGENT_DISPATCH_ATTEMPT_ID=unique_attempt_id("att-9f2c4b1ad34e"))
         dry = self.run_tool("run", "here", "--name", "prov-order",
                             "--dry-run", "--", "bash", "-c", "echo hi", env=env)
         self.assertEqual(dry.returncode, 0, dry.stderr)
         setup = dry.stdout.split("setup: ", 1)[1]
-        self.assertIn("export AGENT_DISPATCH_ATTEMPT_ID=att-9f2c4b1ad34e", setup)
+        self.assertIn("export AGENT_DISPATCH_ATTEMPT_ID=" + unique_attempt_id("att-9f2c4b1ad34e"), setup)
         self.assertIn("export AGENT_HOME=", setup)
         # Unknown here is the empty string, never an absent key a strict read dies on.
         unknown = self.run_tool("run", "here", "--name", "prov-unknown", "--dry-run", "--",
@@ -2887,7 +2889,7 @@ class LauncherProvenanceTest(unittest.TestCase):
         fakebin = self.root / name
         install_fake_tmux(fakebin, stale_environment={
             "AGENT_HOME": "/foreign/stale-home",
-            "AGENT_DISPATCH_ATTEMPT_ID": "att-unrelated-old-owner",
+            "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-unrelated-old-owner"),
         })
         env = {**env, "PATH": str(fakebin) + os.pathsep
                + os.environ.get("PATH", "")}
@@ -2918,14 +2920,14 @@ class LauncherProvenanceTest(unittest.TestCase):
         run_id = self.run_with_foreign_transport(
             "prov-foreign-invalid",
             self.scrubbed_env(AGENT_HOME=str(home),
-                              AGENT_DISPATCH_ATTEMPT_ID="bogus-value"))
+                              AGENT_DISPATCH_ATTEMPT_ID=unique_attempt_id("bogus-value")))
         self.assertEqual(
             (self.run_root / run_id / "log").read_text(encoding="utf-8"),
             f"{home.resolve()}|")
 
     def test_known_provenance_overrides_foreign_values(self):
         home = self.make_home()
-        attempt = "att-9f2c4b1ad34e"
+        attempt = unique_attempt_id("att-9f2c4b1ad34e")
         run_id = self.run_with_foreign_transport(
             "prov-foreign-known",
             self.scrubbed_env(AGENT_HOME=str(home),

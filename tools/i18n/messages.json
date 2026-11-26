@@ -338,6 +338,30 @@
    "en": "Back to the entrance",
    "ko": "입구로 돌아가기"
   },
+  "entrance.backlog_count": {
+   "en": "{count} total",
+   "ko": "전체 {count}"
+  },
+  "entrance.backlog_kinds": {
+   "en": "FIX {fix} · IMPR {improve} · NOTE {note} · TBD {tbd}",
+   "ko": "FIX {fix} · IMPR {improve} · NOTE {note} · TBD {tbd}"
+  },
+  "entrance.backlog_note": {
+   "en": "Work handed off, and what you said then. The session that postpones work writes one line each.",
+   "ko": "맡긴 일과 그때 하신 말. 일을 미루는 세션이 한 줄씩 적습니다."
+  },
+  "entrance.backlog_open": {
+   "en": "Open backlog.md",
+   "ko": "backlog.md 열기"
+  },
+  "entrance.backlog_unavailable": {
+   "en": "Counts unavailable",
+   "ko": "수를 읽을 수 없음"
+  },
+  "entrance.backlog_updated": {
+   "en": "updated {date}",
+   "ko": "갱신 {date}"
+  },
   "entrance.campaigns_note": {
    "en": "One document per stream of work. No new document appears; this one is rewritten.",
    "ko": "일의 흐름 하나에 문서 한 장. 새 문서가 생기지 않고 이 문서가 고쳐집니다."
@@ -385,6 +409,10 @@
   "entrance.rewrite": {
    "en": "Hearting rewrites this file. Editing it is overwritten; deleting it comes back at the next publish.",
    "ko": "이 파일은 하팅이 다시 씁니다. 직접 고치면 덮어씁니다. 지우면 다음 발행 때 다시 생깁니다."
+  },
+  "entrance.section_backlog": {
+   "en": "Backlog",
+   "ko": "백로그"
   },
   "entrance.section_campaigns": {
    "en": "Campaigns",
@@ -1343,8 +1371,12 @@
    "ko": "질문 변경됨 · Tab 다음"
   },
   "fleet.session_block.choose": {
-   "en": "↑↓ choose · Enter send · t text",
-   "ko": "↑↓ · Enter 보내기 · t 답 입력"
+   "en": "↑↓ choose · Enter send",
+   "ko": "↑↓ · Enter 보내기"
+  },
+  "fleet.session_block.choose_write": {
+   "en": "↑↓ choose · type to write · Enter send",
+   "ko": "↑↓ 선택 · 바로 답 입력 · Enter 보내기"
   },
   "fleet.session_block.compact_answer_below": {
    "en": "answer below",
@@ -1403,8 +1435,8 @@
    "ko": "전달 대기"
   },
   "fleet.session_block.editor_help": {
-   "en": "←→ section · p open/fold panel · w work · f Fleet · Esc/Ctrl+] back",
-   "ko": "←→ 구획 · p 패널 펼치기/접기 · w 열린 일 · f Fleet · Esc/Ctrl+] 돌아가기"
+   "en": "p open/fold panel · w work · f Fleet · Esc/Ctrl+] back",
+   "ko": "p 패널 펼치기/접기 · w 열린 일 · f Fleet · Esc/Ctrl+] 돌아가기"
   },
   "fleet.session_block.empty": {
    "en": "empty answer",
@@ -1414,6 +1446,10 @@
    "en": "expired",
    "ko": "만료"
   },
+  "fleet.session_block.full": {
+   "en": "answer is full · 4,096 bytes",
+   "ko": "답 입력 한도 · 4,096바이트"
+  },
   "fleet.session_block.help": {
    "en": "questions · ↵ route · r peers · w work · f Fleet",
    "ko": "질문 · ↵ route · r 메시지 · w 열린 일 · f Fleet"
@@ -1422,17 +1458,29 @@
    "en": "more · focus and ↑↓ to read",
    "ko": "더 있음 · 포커스 후 ↑↓ 읽기"
   },
+  "fleet.session_block.more_choices": {
+   "en": "more choices · ↑↓",
+   "ko": "선택지 더 있음 · ↑↓"
+  },
   "fleet.session_block.more_choose": {
    "en": "more · PgUp/PgDn to read",
    "ko": "더 있음 · PgUp/PgDn 읽기"
+  },
+  "fleet.session_block.more_down": {
+   "en": "more · ↓ to read",
+   "ko": "더 있음 · ↓ 읽기"
   },
   "fleet.session_block.more_page": {
    "en": "more · focus and PgUp/PgDn to read",
    "ko": "더 있음 · 포커스 후 PgUp/PgDn 읽기"
   },
   "fleet.session_block.navigate": {
-   "en": "Tab next · ←→ section · Esc/Ctrl+] back",
-   "ko": "Tab 다음 · ←→ 구획 · Esc/Ctrl+] 돌아가기"
+   "en": "Tab next · Esc/Ctrl+] back",
+   "ko": "Tab 다음 · Esc/Ctrl+] 돌아가기"
+  },
+  "fleet.session_block.navigate_write": {
+   "en": "Tab next · Esc/Ctrl+] back",
+   "ko": "Tab 다음 · Esc/Ctrl+] 돌아가기"
   },
   "fleet.session_block.open": {
    "en": "answer needed",
@@ -1485,6 +1533,14 @@
   "fleet.session_block.wait_old_shell": {
    "en": "reopen that window or type once there to deliver it",
    "ko": "그 창을 다시 열거나 한 번 입력하면 받음"
+  },
+  "fleet.session_block.waits_unread": {
+   "en": "not sent · reading the waits · Enter again or answer below",
+   "ko": "아직 안 보냄 · 대기 목록 읽는 중 · 다시 Enter 또는 아래 입력창에 답"
+  },
+  "fleet.session_block.writing_choices": {
+   "en": "Enter send · ↑ choices",
+   "ko": "Enter 보내기 · ↑ 선택지"
   },
   "fleet.session_page.generation": {
    "en": "generation {count}",
@@ -1853,6 +1909,10 @@
   "fleet.session_panel.popup_shown_failed": {
    "en": "as read at {time} · could not read again",
    "ko": "{time}에 읽은 내용 · 다시 읽지 못함"
+  },
+  "fleet.session_panel.popup_status": {
+   "en": "↑↓ · Enter open",
+   "ko": "↑↓ · Enter 열기"
   },
   "fleet.session_panel.popup_unfold": {
    "en": "p open panel",
@@ -2245,6 +2305,26 @@
   "fleet.status.group.waiting": {
    "en": "Waiting for you",
    "ko": "기다리는 것"
+  },
+  "fleet.status.popup.all": {
+   "en": "all {count}",
+   "ko": "전체 {count}"
+  },
+  "fleet.status.popup.full": {
+   "en": "full document",
+   "ko": "문서 전체"
+  },
+  "fleet.status.popup.old": {
+   "en": "old document",
+   "ko": "오래된 문서"
+  },
+  "fleet.status.popup.updated": {
+   "en": "updated {when}",
+   "ko": "갱신 {when}"
+  },
+  "fleet.status.popup.updated_unknown": {
+   "en": "updated: could not read the time",
+   "ko": "갱신: 시각을 읽지 못함"
   },
   "frame.note_truncated": {
    "en": "…(truncated)",

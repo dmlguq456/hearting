@@ -1543,7 +1543,7 @@ def main(argv: list[str] | None = None) -> int:
         server.notification("initialized")
         thread_params: dict[str, Any] = {
             "cwd": frame_repository.rpc_worktree(args.worktree, server),
-            "ephemeral": not RESOURCE_WAIT.durable_native_session(args),
+            "ephemeral": not (args.keep_session or RESOURCE_WAIT.durable_native_session(args)),
         }
         if getattr(args, "verification_profile_active", False):
             thread_params["permissions"] = LOCAL_VERIFICATION_PROFILE_NAME
@@ -1554,6 +1554,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.model:
             thread_params["model"] = args.model
         resource_session = (recovered.resource or {}).get("session_id") if recovered else None
+        # The earlier owner's thread (an owner taking over from one of its route), with this launch's grants.
+        resource_session = resource_session or args.resume_thread
         if resource_session:
             thread_params.pop("ephemeral", None)
             thread_params["threadId"] = resource_session

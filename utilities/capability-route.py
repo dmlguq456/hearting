@@ -1677,7 +1677,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
             raise ValueError("profile-explicit-unknown:" + str(profile))
         explicit_profiles = {**{n["id"]: profile for n in nodes if not _no_model_node(n)},
                              "__owner__": profile, **(explicit_profiles or {})}
-    profile_demands, explicit_profiles = _profile_input_maps(nodes, profile_demands, explicit_profiles)
+    profile_demands, explicit_profiles = _profile_input_maps(nodes, profile_demands, explicit_profiles, effective)
     owner_demand = profile_demands.get("__owner__")
     owner_model_profile, owner_profile_selection = _resolve_owner_profile(
         effective, registry, owner_demand, explicit_profiles.get("__owner__"),
@@ -1871,7 +1871,7 @@ def main():
     c.add_argument("--campaign-key",help="explicit work stream passed to the producer owner")
     c.add_argument("--parent-cycle",help="open or sealed predecessor cycle; causal link, not input approval")
     c.add_argument("--profile-demands", help="JSON file mapping node ids and __owner__ to full SD-88 demands")
-    c.add_argument("--explicit-profiles", help="JSON file mapping demanded node ids to explicit profiles")
+    c.add_argument("--explicit-profiles", help="JSON file mapping node ids to explicit profiles; keys: __owner__ (the owner) or a node id (a parallel-group leg by its realized id, e.g. impl-review-alternative); a value of top is for the owner at any intensity, or for a depth-2 stage worker or review/verification leg you name at strong or higher (set --intensity; one top leg per parallel group; a route-wide worker pin's model still wins; never route-wide)")
     c.add_argument("--intensity",default="auto"); c.add_argument("--cwd",required=True); c.add_argument("--artifact-root",required=True)
     c.add_argument("--predicate",action="append",default=[]); c.add_argument("--signal",action="append",default=[])
     c.add_argument("--transport",default=None); c.add_argument("--transport-evidence",default="caller-selected")
@@ -1901,7 +1901,7 @@ def main():
     cp.add_argument("--plan",default=None,help="optional declared capability sequence for this session's route chain, e.g. research,draft,apply; shown in Fleet, not sealed into the route")
     cp.add_argument("--route-plan",default=None,metavar="RECORD#INDEX",help="runtime-generated: leg INDEX of an approved route decision record; compiles without frame nodes and seals its reference")
     cp.add_argument("--profile-demands", help="JSON file mapping node ids and __owner__ to full SD-88 demands")
-    cp.add_argument("--explicit-profiles", help="JSON file mapping demanded node ids to explicit profiles")
+    cp.add_argument("--explicit-profiles", help="JSON file mapping node ids to explicit profiles; keys: __owner__ (the owner) or a node id (a parallel-group leg by its realized id, e.g. impl-review-alternative); a value of top is for the owner at any intensity, or for a depth-2 stage worker or review/verification leg you name at strong or higher (set --intensity; one top leg per parallel group; a route-wide worker pin's model still wins; never route-wide)")
     cp.add_argument("--profile", choices=sorted(PROFILE.PORTABLE_PROFILES),
                     help="explicit model budget for owner and model nodes; node-specific --explicit-profiles takes precedence; mini only with --shape direct (a registered owner or stage needs light or higher)")
     cp.add_argument("--shape",choices=COMPOSE_SHAPES,default=None,help="direct (inline) | solo (one registered owner) | staged (capability recipe, optionally narrowed by --graph) | framed (two top frame legs propose the route by default; explicit quick/direct may use one deep leg for unprotected work; --capability, --capability-mode, --graph and --profile are recorded as hints only); default: framed; use --shape direct for inline work; --graph without --shape is a frame routing hint")
@@ -1932,7 +1932,7 @@ def main():
     cp.add_argument("--full-record",action="store_true",help="print all sealed evidence; default prints choices and the canonical route_file")
     cp.add_argument("--help-all",action="help",help="also show advanced/compatibility inputs")
     if "--help-all" not in sys.argv:
-        advanced = {"route_plan", "parent_cycle", "profile_demands", "explicit_profiles", "intensity", "artifact_root",
+        advanced = {"route_plan", "parent_cycle", "profile_demands", "artifact_root",
                     "drift_verdict", "tracking", "artifact_guard", "parent_harness", "jobs",
                     "dispatch_evidence", "registered_headless_evidence", "transport_evidence", "output", "full_record"}
         for option in cp._actions:
@@ -2346,6 +2346,8 @@ def main():
     if a.command=="correct":
         from dispatch_owner_input import submit, inspect, InputError
         jobs=Path(a.jobs or _compose_default_jobs())
+        # Read once: the message may be a pipe (`--message-file /dev/stdin`) that every path below shares.
+        message=a.message_file.read_text() if a.message_file else None
         given=a.attempt_id or a.correct_route
         if given is None:
             found,source,rows=caller_open_route(os.getcwd())
@@ -2363,11 +2365,27 @@ def main():
             # A unit route has no owner to answer: the text is the route's next turn (work_start.correct_unit_route).
             from work_start import correct_unit_route
             code,result=correct_unit_route(verify_route(frame_raw),frame_path,jobs,
-                                           a.message_file.read_text() if a.message_file else None,a.request_id)
+                                           message,a.request_id)
             print(json.dumps(result,ensure_ascii=False))
             from start_receipt import print_next_line
             print_next_line(result)
             return code
+        if isinstance(frame_raw,dict) and a.message_file and not ROUTE_PLAN.is_framed_route(frame_raw):
+            # A closed one-shot route its owner finished PASS takes the text as its next owner turn
+            # (work_start.correct_owner_route); any other state keeps the owner input path below.
+            from work_start import correct_owner_route
+            try:
+                verified=verify_route(frame_raw)
+            except (ValueError, KeyError, TypeError, OSError):
+                verified=None   # an unverifiable record keeps the owner input path, which reports it
+            taken=(correct_owner_route(verified,frame_path,jobs,message,a.request_id)
+                   if verified is not None else None)
+            if taken is not None:
+                code,result=taken
+                print(json.dumps(result,ensure_ascii=False))
+                from start_receipt import print_next_line
+                print_next_line(result)
+                return code
         if ROUTE_PLAN.is_framed_route(frame_raw):
             from work_start import _framed_cycle
             _first = {}
@@ -2383,7 +2401,7 @@ def main():
                 given = _leg_owner
             else:
                 from dispatch_owner_input import frame_input
-                result = frame_input(verify_route(frame_raw), a.message_file.read_text() if a.message_file else None,
+                result = frame_input(verify_route(frame_raw), message,
                                      a.request_id, jobs=jobs)
                 if result.get("redirect_owner"):
                     given = result["redirect_owner"]
@@ -2408,7 +2426,7 @@ def main():
         except Exception:
             stage_unit=None  # a label that cannot be read is no label
         try:
-            result=(submit(jobs,attempt,a.message_file.read_text(),a.request_id,unit=stage_unit)
+            result=(submit(jobs,attempt,message,a.request_id,unit=stage_unit)
                     if a.message_file else inspect(jobs,attempt))
         except InputError as exc:
             refusal={"state":"not-admitted","reason":str(exc),

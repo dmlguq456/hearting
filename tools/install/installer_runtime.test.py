@@ -281,29 +281,41 @@ class LauncherCommitBoundaryTest(unittest.TestCase):
         install.assert_called_once_with(dry_run=True)
         ensure.assert_called_once_with(str(target), dry_run=False)
 
-    def test_refresh_prints_model_follow_lines_and_a_failing_survey_never_fails_it(self):
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utilities"))
-        import model_follow
+    def test_refresh_and_activate_print_what_the_activation_did_to_the_model_table_once(self):
         launchers = [{"name": "hearting", "target": str(self.home / ".local/bin/hearting"),
                       "status": "unchanged"}]
         history = {"status": "unchanged", "changed": False}
-        for command, wanted in (("refresh", True), ("activate", False)):
-            with self.subTest(command=command), _stubbed_runtime_projection(), \
+        said = ["model follow: codex tier/deep a -> b (high) · backup models.conf.bak"]
+        for command in ("refresh", "activate"):
+            with self.subTest(command=command), _stubbed_runtime_projection() as mocks, \
                  mock.patch.object(bootstrap, "install_launchers", return_value=launchers), \
-                 mock.patch.object(herdr_integration, "ensure_history_key", return_value=history), \
-                 mock.patch.object(model_follow, "follow_lines",
-                                   return_value=["model follow: fixture line"]) as survey:
+                 mock.patch.object(herdr_integration, "ensure_history_key", return_value=history):
+                for name in ("activate", "refresh"):
+                    mocks[name].return_value["model_follow_lines"] = list(said)
                 result = installer.cmd_runtime(self._args(command))
             self.assertEqual(result["exit"], installer.EXIT_OK)
-            self.assertEqual("model follow: fixture line" in result["lines"], wanted)
-            self.assertEqual([call.args for call in survey.call_args_list], [(["codex"],)] if wanted else [])
+            self.assertEqual(result["lines"].count(said[0]), 1)
         with _stubbed_runtime_projection(), \
              mock.patch.object(bootstrap, "install_launchers", return_value=launchers), \
-             mock.patch.object(herdr_integration, "ensure_history_key", return_value=history), \
-             mock.patch.object(model_follow, "follow_lines", side_effect=RuntimeError("fixture")):
+             mock.patch.object(herdr_integration, "ensure_history_key", return_value=history):
             result = installer.cmd_runtime(self._args("refresh"))
         self.assertEqual(result["exit"], installer.EXIT_OK)
         self.assertFalse([line for line in result["lines"] if line.startswith("model follow")])
+
+    def test_an_activation_that_fails_after_it_edited_the_model_table_still_says_what_it_edited(self):
+        said = "model follow: codex tier/deep a -> b (high) · backup models.conf.bak"
+
+        def edit_then_fail(*_args, **_kwargs):
+            runtime_activation.MODEL_FOLLOW_LINES.append(said)  # what `_follow_models` records
+            raise runtime_activation.ActivationError("fixture failure after the table was edited")
+        for command in ("activate", "refresh"):
+            with self.subTest(command=command), _stubbed_runtime_projection() as mocks:
+                mocks[command].side_effect = edit_then_fail
+                result = installer.cmd_runtime(self._args(command))
+            self.assertEqual(result["exit"], installer.EXIT_BLOCKED)
+            self.assertEqual(result["lines"].count(said), 1)
+            self.assertLess(result["lines"].index(said),
+                            next(i for i, line in enumerate(result["lines"]) if ": blocked:" in line))
 
     def test_activation_reconnects_once_and_rollback_never_reconnects(self):
         with _stubbed_runtime_projection() as mocks, \

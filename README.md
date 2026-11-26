@@ -58,8 +58,8 @@ box of three zones (`direct`, `dispatch`, `request`; a route's first line reads 
 of the window, the rest gray behind it; `MEM`, `RESOURCES` and `USAGE` open nothing. A question you can answer here stands
 in a rose-bordered box. **Ctrl+]** always opens a popup, that question first:
 answer with **Tab**, **1–9**, and **Enter**, and the popup closes with
-`✓ answer sent`. The **STATUS ›** button on the REPO row opens the project's
-status document whole. In a popup **←/→** move between sections, **f** opens
+`✓ answer sent`. The **STATUS** and **BACKLOG** heads under the REPO group list the first
+three items each (`+N` for the rest; the BACKLOG head tells its sorts too, `FIX 14 · IMPR 26 · +37 /125`, and its `+N` is the FIX and IMPR items not shown) and open the project's status document and backlog. In a popup **←/→** move between sections, **f** opens
 Fleet in the same window, **p** folds the panel into a strip under the agent's
 screen, and **Esc** or **Ctrl+]** closes it. `hearting session shell disable`
 turns the panel off for new terminals. Keys, settings, the narrow-window
@@ -89,7 +89,7 @@ waiting on whom. Each has its own place in the panel and in Fleet.
 | **MESSAGES** | A short note, read and done | Any session | Nothing to close | Panel: MESSAGES · Fleet: the session page and PEERS |
 | **PEERS** | The sessions linked by messages, requests, supervision, or a handover | Those links themselves | — | Fleet: PEERS |
 
-The REPO row's **STATUS ›** button opens the campaign's status document, the
+The **STATUS** head under the REPO group opens the campaign's status document, the
 one page that says where the project stands, whole in a popup; Fleet shows its
 one line at the top of the project. Writing one is optional.
 

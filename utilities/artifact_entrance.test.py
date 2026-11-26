@@ -1694,6 +1694,267 @@ class SectionTests(SectionFixture):
         self.assertNotIn("<ol>", html)
 
 
+BACKLOG = """# Backlog
+갱신 2026-11-21 23:10
+
+## 2026-01-01_some-campaign
+- First job
+  date: 2026-11-20
+  source: a talk
+  note: said then
+  - not a job: a sub-bullet
+- Second job
+
+```
+- inside a code block
+```
+
+~~~text
+- inside a tilde block
+~~~
+
+## Unassigned
+- Third job
+"""
+
+
+class BacklogTests(SectionFixture):
+    def _setup(self, text=BACKLOG):
+        self.spec(5)
+        self._routes()
+        (self.root / "backlog.md").write_text(text, encoding="utf-8")
+        self.refresh()
+
+    def _routes(self):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha",
+                   [("artifacts/final_report.md", "# Alpha result\n\nFirst body.\n")])
+        self.cycle("2026-01-03_two", "2026-01-03_beta",
+                   [("artifacts/final_report.md", "# Beta result\n\nSecond body.\n")])
+
+    def _headings(self, readme):
+        return [line for line in readme.splitlines() if line.startswith("## ")]
+
+    def test_the_backlog_section_stands_between_the_campaigns_and_the_records_in_both_files(self):
+        self._setup()
+        readme, page = self.entrance(), self.entrance("index.html")
+        self.assertEqual(self._headings(readme), ["## spec", "## Campaigns", "## Backlog", "## Records"])
+        marks = ("<h2>spec</h2>", "<h2>Campaigns</h2>", "<h2>Backlog</h2>", "<h2>Records</h2>")
+        positions = [page.index(mark) for mark in marks]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("The session that postpones work writes one line each.", readme)
+        self.assertIn("[Open backlog.md](<backlog.md>)\n   FIX ? · IMPR ? · NOTE ? · TBD 3 · 3 total · updated 2026-11-21 23:10", readme)
+        self.assertIn('<a href="backlog.md">Open backlog.md</a> '
+                      '<span class="meta">FIX ? · IMPR ? · NOTE ? · TBD 3 · 3 total · updated 2026-11-21 23:10</span>', page)
+        self.assertEqual(readme.count("(<backlog.md>)"), 1)
+        self.assertEqual(page.count('href="backlog.md"'), 1)
+
+    def test_only_a_top_level_bullet_outside_a_code_block_is_a_job(self):
+        self._setup()
+        self.assertIn("3 total", self.entrance())
+        self._setup("# B\n## C\n- one\n  - nested\n    - deeper\n\n````\n```\n- fenced\n````\n- two\n")
+        self.assertIn("2 total", self.entrance())
+        self.assertNotIn("updated", self.entrance())  # no 갱신 line, no date
+        self._setup("# B\n")
+        self.assertIn("0 total", self.entrance())
+
+    def _count(self, text):
+        (self.root / "backlog.md").write_text(text, encoding="utf-8")
+        return E._backlog(self.root)["count"]
+
+    def test_a_job_is_the_top_level_dash_bullet_under_a_heading(self):
+        self.spec(5)
+        self.assertEqual(self._count("# B\n- before\n- any heading\n## C\n- one\n- two\n"), 2)
+        self.assertEqual(self._count("# B\n- a\n- b\n"), 0)
+        self.assertEqual(self._count("## C\n* star\n+ plus\n1. numbered\n2) numbered\n-tight\n- one\n"), 1)
+        self.assertEqual(self._count("## C\n  - indented\n\t- tabbed\n- one\n    - deeper\n"), 1)
+        self.assertEqual(self._count("## A\n- one\n### sub\n- two\n## B\n- three\n"), 3)
+
+    def test_a_fence_closes_only_with_the_same_character_at_least_as_long(self):
+        self.spec(5)
+        self.assertEqual(self._count("## C\n````\n```\n- fenced\n````\n- one\n"), 1)      # shorter does not close
+        self.assertEqual(self._count("## C\n```\n~~~\n- fenced\n```\n- one\n"), 1)       # another character does not close
+        self.assertEqual(self._count("## C\n```\n- fenced\n`````\n- one\n"), 1)          # longer closes
+        self.assertEqual(self._count("## C\n~~~\n- fenced\n~~~\n- one\n- two\n"), 2)
+        self.assertEqual(self._count("## C\n```\n- never closed\n- still fenced\n"), 0)    # an open fence runs to the end
+        self.assertEqual(self._count("## C\n    ```\n- one\n"), 1)                        # four spaces is no fence
+
+    def test_a_heading_may_be_indented_up_to_three_spaces(self):
+        self.spec(5)
+        self.assertEqual(self._count("# B\n ## C\n- a\n"), 1)
+        self.assertEqual(self._count("# B\n   ## C\n- a\n"), 1)
+        self.assertEqual(self._count("# B\n   ##\n- a\n"), 1)
+        self.assertEqual(self._count("# B\n    ## C\n- a\n"), 0)       # four spaces is no heading
+        self.assertEqual(self._count("# B\n\t## C\n- a\n"), 0)
+        self.assertEqual(self._count("# B\n ### C\n- a\n"), 0)
+        self.assertEqual(self._count("# B\n ## C\n - indented\n- a\n"), 1)  # the job itself stays at the left edge
+
+    def test_the_update_line_ends_at_an_indented_heading_but_not_at_a_four_space_one(self):
+        self.spec(5)
+        def updated(text):
+            (self.root / "backlog.md").write_text(text, encoding="utf-8")
+            return E._backlog(self.root)["updated"]
+        self.assertEqual(updated("# B\n ## C\n갱신 2026-11-21 23:10\n- a\n"), "")
+        self.assertEqual(updated("# B\n    ## C\n갱신 2026-11-21 23:10\n## D\n"), "2026-11-21 23:10")
+
+    def test_the_counting_rule_is_by_the_shape_of_the_line_not_by_markdown(self):
+        self.spec(5)
+        self.assertEqual(self._count("## C\n- - -\n"), 1)                             # a rule in Markdown, a job here
+        self.assertEqual(self._count("## C\n<!--\n- hidden\n-->\n- one\n"), 2)     # a comment is not read
+        self.assertEqual(self._count("## C\n```\n## D\n```\n- one\n"), 1)           # a fenced heading is no heading
+        self.assertEqual(self._count("```\n## D\n```\n- one\n"), 0)                 # so no heading opens the jobs
+        self.assertEqual(self._count("## C\n```\n- f\n``` x\n- g\n"), 0)            # text after a closer: still fenced
+        self.assertEqual(self._count("## C\n```\n- f\n```  \n- one\n"), 1)          # trailing spaces still close
+        self.assertEqual(self._count("## C\n```\n- f\n   ```\n- one\n"), 1)         # up to three spaces before a closer
+        self.assertEqual(self._count("## C\n> - quoted\n-\n- one\n"), 1)
+
+    def test_the_counting_rule_is_written_in_the_backlog_section_of_the_meta_contract(self):
+        meta = (HERE.parent / "core" / "ARTIFACT_META.md").read_text(encoding="utf-8")
+        section = meta[meta.index("### `backlog.md`"):]
+        self.assertIn("A job is a line whose first two characters are `- `,", section)
+        self.assertIn("at most three\n    spaces", section)
+        self.assertIn("`- - -`, and a `- ` line inside an HTML comment, each count", section)
+        self.assertIn("an unclosed fence runs to\n    the end of the file", section)
+        self.assertIn("at least as long", section)
+        self.assertIn("`갱신 YYYY-MM-DD HH:MM`", section)
+        self.assertIn("surrounding\n  whitespace is ignored", section)
+
+    def test_the_update_line_is_only_a_real_date_and_time_before_the_first_heading(self):
+        self.spec(5)
+        def updated(text):
+            (self.root / "backlog.md").write_text(text, encoding="utf-8")
+            return E._backlog(self.root)["updated"]
+        self.assertEqual(updated("# B\n갱신 2026-11-21 23:10\n## C\n- a\n"), "2026-11-21 23:10")
+        self.assertEqual(updated("# B\n갱신 2026-13-45 99:99\n## C\n- a\n"), "")
+        self.assertEqual(updated("# B\n갱신 2026-02-30 10:00\n## C\n"), "")
+        self.assertEqual(updated("# B\n갱신 2026-11-21 24:00\n## C\n"), "")
+        self.assertEqual(updated("# B\n## C\n갱신 2026-11-21 23:10\n- a\n"), "")          # after the first heading
+        for line in ("갱신 2026-11-21", "갱신: 2026-11-21 23:10", "Updated 2026-11-21 23:10",
+                     "갱신 2026-11-21T23:10", "갱신 2026-11-21 23:10 · memo", "갱신  2026-11-21 23:10",
+                     "갱신 ２０２６-11-21 23:10"):
+            self.assertEqual(updated(f"# B\n{line}\n## C\n"), "", line)
+        self.assertEqual(updated("# B\n갱신 2026-13-45 99:99\n갱신 2026-11-21 23:10\n## C\n"), "2026-11-21 23:10")
+        self.assertEqual(updated("# B\n   갱신 2026-11-21 23:10   \n## C\n"), "2026-11-21 23:10")  # surrounding spaces ignored
+        (self.root / "backlog.md").write_text("# B\n갱신 2026-13-45 99:99\n## C\n- a\n", encoding="utf-8")
+        self.refresh()
+        self.assertIn("1 total", self.entrance())
+        self.assertNotIn("updated", self.entrance())
+
+    def test_no_backlog_file_draws_no_section_and_changes_no_other_number(self):
+        self.spec(5)
+        self._routes()
+        self.refresh()
+        without = self.entrance()
+        self.assertNotIn("Backlog", without)
+        self.assertNotIn("backlog.md", self.entrance("index.html"))
+        self.assertEqual(self._headings(without), ["## spec", "## Campaigns", "## Records"])
+        targets = self.reports_targets()
+        self.assertEqual(targets[-3:], ["all-campaigns.md", "recent-route-reports.md", "campaigns/INDEX.md"])
+        self.assertNotIn("backlog.md", targets)
+        (self.root / "backlog.md").write_text(BACKLOG, encoding="utf-8")
+        self.refresh()
+        with_file = self.reports_targets()
+        self.assertEqual(with_file[:len(targets) - 2], targets[:-2])  # the numbers above it do not move
+        self.assertEqual(with_file[len(targets) - 2], "backlog.md")
+        self.assertEqual(with_file[len(targets) - 1:], targets[-2:])
+        (self.root / "backlog.md").unlink()
+        self.refresh()
+        self.assertEqual(self.entrance(), without)
+
+    def test_an_unreadable_or_oversized_backlog_keeps_one_line_without_a_count(self):
+        self._setup("# B\n갱신 2026-11-21 23:10\n## C\n" + "- job\n" * (E.MAX_BACKLOG_BYTES // 6 + 1))
+        self.assertGreater((self.root / "backlog.md").stat().st_size, E.MAX_BACKLOG_BYTES)
+        readme = self.entrance()
+        self.assertIn("[Open backlog.md](<backlog.md>)", readme)
+        self.assertNotIn("total", readme)
+        self.assertIn("Counts unavailable", readme)
+        self.assertNotIn("updated", readme)
+        self.assertEqual(self.entrance("index.html").count('href="backlog.md"'), 1)
+        self._setup("# B\n## C\n- job\n" + "x" * (E.MAX_BACKLOG_BYTES - 15))  # exactly the limit still counts
+        self.assertEqual((self.root / "backlog.md").stat().st_size, E.MAX_BACKLOG_BYTES)
+        self.assertIn("1 total", self.entrance())
+        path = self.root / "backlog.md"
+        path.chmod(0)
+        self.addCleanup(path.chmod, 0o644)
+        self.refresh()
+        self.assertIn("[Open backlog.md](<backlog.md>)", self.entrance())
+        self.assertNotIn("total", self.entrance())
+        self.assertIn("Counts unavailable", self.entrance())
+
+    def test_a_symbolic_link_backlog_is_never_followed(self):
+        self.spec(5)
+        self._routes()
+        outside = self.base / "elsewhere.md"
+        outside.write_text(BACKLOG, encoding="utf-8")
+        (self.root / "backlog.md").symlink_to(outside)
+        opened = []
+        real = E.open_relative
+        with mock.patch.object(E, "open_relative", side_effect=lambda fd, parts, *a: (opened.append(list(parts)), real(fd, parts, *a))[1]):
+            self.refresh()
+        self.assertNotIn(["backlog.md"], opened)  # the link was never opened, not even to be refused
+        self.assertNotIn("backlog", self.entrance().casefold())
+        self.assertNotIn("backlog.md", self.entrance("index.html"))
+        self.assertEqual(outside.read_text(encoding="utf-8"), BACKLOG)
+        self.assertTrue((self.root / "backlog.md").is_symlink())
+
+    def test_a_directory_named_backlog_is_no_backlog(self):
+        self.spec(5)
+        (self.root / "backlog.md").mkdir()
+        self.refresh()
+        self.assertNotIn("Backlog", self.entrance())
+
+    def test_reports_and_open_number_reach_the_backlog_line(self):
+        self._setup()
+        targets = self.reports_targets()
+        number = targets.index("backlog.md") + 1
+        self.assertEqual(targets[number:], ["recent-route-reports.md", "campaigns/INDEX.md"])
+        out = self.reports()
+        self.assertIn("Backlog\n   Work handed off, and what you said then.", out)
+        self.assertIn(f"{number}. Open backlog.md\n   backlog.md\n   FIX ? · IMPR ? · NOTE ? · TBD 3 · 3 total · updated 2026-11-21 23:10", out)
+        self.assertEqual(self.open_line(number), str(self.root / "backlog.md"))
+        self.assertEqual(self.open_line(number + 1), str(self.root / "recent-route-reports.html"))
+        self.assertEqual(self.open_line(number + 2), str(self.root / "campaigns/INDEX.md"))
+
+    def test_the_line_tells_each_sort_the_total_and_the_date(self):
+        mixed = ("# B\n갱신 2026-11-21 23:10\n## C\n- a\n  kind: fix\n- b\n  kind: Improve\n- c\n  kind: note\n- d\n- e\n  kind: fix\n  kind: note\n## D\n- f\n  kind: FIX\n")
+        self._setup(mixed)
+        meta = "FIX 2 · IMPR 1 · NOTE 1 · TBD 2 · 6 total · updated 2026-11-21 23:10"
+        self.assertIn("[Open backlog.md](<backlog.md>)\n   " + meta, self.entrance())
+        self.assertIn('<span class="meta">' + meta + '</span>', self.entrance("index.html"))
+        self.assertEqual(E._backlog(self.root)["kinds"], {"fix": 2, "improve": 1, "note": 1, "tbd": 2})
+        # an old document (no `kind:` line anywhere): what is sorted is not told, as against none; nothing else of the line moves
+        self._setup("# B\n갱신 2026-11-21 23:10\n## C\n- a\n- b\n")
+        self.assertIn("\n   FIX ? · IMPR ? · NOTE ? · TBD 2 · 2 total · updated 2026-11-21 23:10", self.entrance())
+        # an empty one is zeros; only notes is zeros for the rest
+        self._setup("# B\n")
+        self.assertIn("\n   FIX 0 · IMPR 0 · NOTE 0 · TBD 0 · 0 total", self.entrance())
+        self._setup("# B\n## C\n- a\n  kind: note\n")
+        self.assertIn("\n   FIX 0 · IMPR 0 · NOTE 1 · TBD 0 · 1 total", self.entrance())
+
+    def test_the_backlog_is_read_only_and_leaves_the_file_as_it_was(self):
+        self._setup()
+        path = self.root / "backlog.md"
+        before = (path.read_bytes(), path.stat().st_mtime_ns)
+        self.refresh()
+        self.reports()
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+
+    def test_korean_says_the_agreed_words(self):
+        self._setup()
+        os.environ["FLEET_NOW_LANG"] = "ko"
+        self.refresh()
+        readme = self.entrance()
+        self.assertIn("## 백로그", readme)
+        self.assertIn("맡긴 일과 그때 하신 말. 일을 미루는 세션이 한 줄씩 적습니다.", readme)
+        self.assertIn("[backlog.md 열기](<backlog.md>)\n   FIX ? · IMPR ? · NOTE ? · TBD 3 · 전체 3 · 갱신 2026-11-21 23:10", readme)
+        self.assertIn("<h2>백로그</h2>", self.entrance("index.html"))
+
+    def test_the_fallback_dictionary_carries_the_backlog_words(self):
+        for key in ("entrance.section_backlog", "entrance.backlog_note", "entrance.backlog_open",
+                    "entrance.backlog_count", "entrance.backlog_updated", "entrance.backlog_kinds",
+                    "entrance.backlog_unavailable"):
+            self.assertNotEqual(E._fallback_translator(key, count="1", date="d", fix="1", improve="1", note="1", tbd="1"), key)
+
+
 def _has_entrance_marker(path):
     return E.MARKER in path.read_text(encoding="utf-8").splitlines()[:2]
 

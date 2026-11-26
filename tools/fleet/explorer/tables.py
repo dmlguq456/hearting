@@ -1657,6 +1657,30 @@ def _clip(text, width):
     return clip_cells(text, int(width))
 
 
+def _caret_window(text, place, room):
+    """``(before, after)`` of the place, together within ``room`` cells (the place's mark is one more).
+
+    What does not fit is cut with ``…`` from the far side of the place: the text before it keeps its end
+    (two thirds of the room at most while text follows), the text after it its start.
+    """
+    from .grid import cell_width
+    text, room = str(text), max(1, int(room))
+    front, back = text[:place], text[place:]
+    if cell_width(front) + cell_width(back) <= room:
+        return front, back
+    left_room = room if not back else max(1, room - max(1, min(cell_width(back), room // 3)))
+    if cell_width(front) > left_room:
+        kept, used = [], 1
+        for char in reversed(front):
+            cells = cell_width(char)
+            if used + cells > left_room:
+                break
+            kept.append(char)
+            used += cells
+        front = "…" + "".join(reversed(kept))
+    return front, _clip(back, max(1, room - cell_width(front))) if back else ""
+
+
 def _clip_cut(text, width):
     """Cut to ``width`` cells with ``…`` even when the text exactly fills the cell."""
     from .grid import cell_width
@@ -2247,7 +2271,8 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
     from .state import (question_action_supported, question_answer_supported,
                         question_choice_click_allowed, question_decisions,
                         question_draft_supported, question_free_text_available, question_items,
-                        question_multiple_select, question_values_valid, _question_text_draft)
+                        question_multiple_select, question_values_valid, _question_text_draft, question_mark,
+                        _question_draft_response)
     detail = private.get("detail")
     envelope = detail if hasattr(detail, "get") else {}
     specs = question_items(envelope)
@@ -2283,32 +2308,57 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
                 line(wrapped)
     can_draft = question_draft_supported(envelope) and request_state == "open"
     can_answer = question_answer_supported(envelope)
-    draft = private.get("draft")
-    answers = draft.get("answers", {}) if hasattr(draft, "get") else {}
+    answers = (_question_draft_response(private) or {}).get("answers", {})
     complete = True
     native_only = False
-    for spec in () if approval else specs:
+    asked = () if approval else specs
+
+    def _asked(spec):
         qid = spec["id"]
-        for text in _question_text(spec, envelope).splitlines() or [""]:
-            for wrapped in _wrap(text, width):
-                line(wrapped)
         values = answers.get(qid, ()) if hasattr(answers, "get") else ()
         values = tuple(values) if isinstance(values, (list, tuple)) else ()
         choices = _question_choices(spec)
+        words = [wrapped for text in _question_text(spec, envelope).splitlines() or [""]
+                 for wrapped in _wrap(text, width)]
+        return qid, values, choices, words, len(choices) + (1 if question_free_text_available(envelope, qid, values) else 0)
+
+    shapes = [_asked(spec) for spec in asked]
+    for index, spec in enumerate(asked):
+        qid, values, choices, words, own = shapes[index]
         secret = bool(spec.get("is_secret") or spec.get("isSecret"))
+        # 11-22: the choices (and the answer row and the action line) are never pushed out by a long question:
+        # only the words give way, ending in `… +N more lines` (the shell's popup pages them instead). Short of
+        # rows the empty row goes first, then the thin line, then the words down to one row and that line.
+        # With several questions in one item every one's choices and answer row, and the action line, are kept
+        # first (each later question's words keep their first row and the `more` line); this one's words get the rest.
+        later = sum(shape[4] + min(len(shape[3]), 2) for shape in shapes[index + 1:])
+        gap = 2 if choices else 0
+        room = bottom - y - own - 1 - later
+        while gap and room - gap < min(len(words), 2):
+            gap -= 1
+        shown = max(0, room - gap)
+        if len(words) > shown:
+            for wrapped in words[:max(0, shown - 1)]:
+                line(wrapped)
+            if shown:
+                line(f"… +{len(words) - max(0, shown - 1)} more lines", "dim")
+        else:
+            for wrapped in words:
+                line(wrapped)
         if choices:
             # 11-17: the question's words end, then one empty row and a thin line, then the choices (as the
             # shell's question popup does); short of rows the empty row goes first, never a choice's row.
-            if bottom - y >= len(choices) + 2:
+            if gap == 2 and bottom - y >= len(choices) + 2:
                 y += 1
-            if bottom - y >= len(choices) + 1:
+            if gap >= 1 and bottom - y >= len(choices) + 1:
                 line("─" * width, "line")
         for number, (value, label) in enumerate(choices, 1):
             if y >= bottom:
                 break
-            chosen = value in values
+            selection = question_mark(private, spec) if request_state == "open" else None
+            chosen = selection[0] == number - 1 if selection is not None else value in values
             selectable = can_draft and question_choice_click_allowed(envelope, qid, value, values)
-            mark = ("●" if chosen else "○") if (selectable or chosen) else " "
+            mark = ("▸" if selection is not None else "●") if chosen else "○" if selectable else " "
             cursor = grid.put(indent, y, mark, "hearting" if chosen else "dim", limit=right)
             # The number is the question's rose and bold, as `◑` and the popup's numbers are (11-17).
             cursor = grid.put(cursor + 1, y, f"{number}  ", "lvl_r", limit=right)
@@ -2326,17 +2376,27 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
         if free and y < bottom:
             editing = private.get("editing") and (private.get("editing_question_id") or qid) == qid
             choice_values = {value for value, _label in choices}
-            typed = (_question_text_draft(private, qid) if editing else
+            typed = (_question_text_draft(private, qid) if editing or question_mark(private, spec) is not None else
                      " · ".join(str(value) for value in values if value not in choice_values))
+            from .state import question_caret
+            place = question_caret(private, qid, typed) if editing else len(typed)
             if secret:
                 typed = "•" * min(len(typed), 32)
+                place = min(place, len(typed))
             cursor = grid.put(indent, y, "> ", "hearting" if can_draft else "dim", limit=right)
-            if typed:
+            if editing and typed:
+                # 11-22: the place stands between the characters; a text wider than the row slides so the
+                # place stays in sight (the text's end, as before, when the place is there).
+                front, back = _caret_window(typed, place, max(1, right - cursor - 1))
+                cursor = grid.put(cursor, y, front, "soft", limit=right)
+                cursor = grid.put(cursor, y, "▏", "hearting", limit=right)
+                grid.put(cursor, y, back, "soft", limit=right)
+            elif typed:
                 cursor = grid.put(cursor, y, _clip(typed, max(1, right - cursor - 1)), "soft",
                                   limit=right)
             elif not editing:
                 cursor = grid.put(cursor, y, "…", "dim", limit=right)
-            if editing:
+            if editing and not typed:
                 grid.put(cursor, y, "▏", "hearting", limit=right)
             if can_draft:
                 grid.add_hit(y, x, right, ("question.edit", qid))
@@ -2380,6 +2440,8 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
         items[0] = ("sending…", "dim", None)
     if open_item:
         items.append(open_item)
+    if private.get("answer_full") and request_state == "open":
+        items.insert(0, (ui_text("fleet.session_block.full"), "dim", None))
     _question_actions(grid, indent, right, y, items)
     return y + 1
 

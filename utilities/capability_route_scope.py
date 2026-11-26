@@ -526,10 +526,15 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
         profile = (t("route.tier.inline") if node.get("execution_surface") == "inline"
                    else node.get("model_profile") or "unknown")
         profiles.setdefault(anchor, []).append(profile)
-    lines.append("  tiers: " + (" ".join(f"{node}={'+'.join(values)}" for node, values in profiles.items()) or t("route.none")))
     workers = sum(n.get("dispatch_depth") == 2 or _frame_node(n) or (unit_route and RP.is_depth0_leg(n))
                   for n in nodes)
     owners = int(shape != "framed" and route["effective_intensity"] != "direct" and not unit_route)
+    owner_tier = route.get("owner_model_profile")
+    if owners and owner_tier and "one-shot" not in profiles:
+        # The owner's own tier is a sealed choice too (`top` is allowed for it at any intensity); a
+        # one-shot route's owner is already its `one-shot` node, listed below.
+        profiles = {"owner": [owner_tier], **profiles}
+    lines.append("  tiers: " + (" ".join(f"{node}={'+'.join(values)}" for node, values in profiles.items()) or t("route.none")))
     resources = [n["id"] for n in nodes if n.get("kind") == "resource-runner"]
     size = "  " + t("route.size", nodes=len(nodes), workers=workers, owners=owners,
                       resources=",".join(resources) or t("route.none"))
