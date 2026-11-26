@@ -802,30 +802,31 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const countWords=(n,more)=>n>0?'+'+n+(more?'+':''):'+';
     const listTotalOf=doc=>Math.max(0,Math.min(Number.isInteger(doc.total)?doc.total:0,99999));
     // 11-22 (the person: "알파벳 하나가 아니라 그래도 적절히 3~4자로 약어든 단어든 붙이는게 맞지"): a BACKLOG item's sort word and its colour (colours of the table the panel has).
-    const KIND_WORDS={fix:{word:'FIX',key:'lvl_y'},improve:{word:'IMPR',key:'lvl_g'},note:{word:'NOTE',key:'dim'},tbd:{word:'TBD',key:'dim'}};
+    // 11-26 (scheme A): the kinds are FIX, TASK, NOTE (the earlier `improve` is read as TASK by the backend); only the words changed here.
+    const KIND_WORDS={fix:{word:'FIX',key:'lvl_y'},task:{word:'TASK',key:'lvl_g'},note:{word:'NOTE',key:'dim'},tbd:{word:'TBD',key:'dim'}};
     // The BACKLOG head's text after the word, widest first (what is dropped as the width falls; the sorts' words outlast the numbers, as the person wanted a word of 3~4 letters, not one):
-    // `FIX 14 · IMPR 26 · +37 /125`, then `/N`, then the ` · `, then `+N` (`FIX 14 IMPR 26`), then the words (`14 26`), then nothing. `+N` is the FIX and IMPR not shown
+    // `FIX 14 · TASK 26 · +37 /125`, then `/N`, then the ` · `, then `+N` (`FIX 14 TASK 26`), then the words (`14 26`), then nothing. `+N` is the FIX and TASK not shown
     // (none: left out), `/N` every line of the document, `?` the sorts of a document nothing in is sorted yet; a `+` after the number where the document has more than was read.
     const kindStages=(k,hidden,doc)=>{
       const plus=doc.more===true?'+':'',total=Math.max(0,Math.min(Number.isInteger(doc.total)?doc.total:0,99999));
-      const q=unsortedOnly(k),nf=q?'?':String(k.fix),ni=q?'?':String(k.improve);
+      const q=unsortedOnly(k),nf=q?'?':String(k.fix),ni=q?'?':String(k.task);
       const more=hidden>0||plus?[text(countWords(hidden,doc.more===true),'loc_repo')]:[];
       const sep=text(' · ','dim'),gap=text(' '),word=n=>text(KIND_WORDS[n].word,KIND_WORDS[n].key),num=v=>text(v,'loc_repo');
       const join=(parts,s)=>parts.flatMap((p,i)=>i?[s,...p]:p);
       const tail=[text('/'+total+plus,'dim')];
-      const full=join([[word('fix'),gap,num(nf)],[word('improve'),gap,num(ni)],...(more.length?[more]:[])],sep);
-      const bare=join([[word('fix'),gap,num(nf)],[word('improve'),gap,num(ni)],...(more.length?[more]:[])],gap);
-      const named=join([[word('fix'),gap,num(nf)],[word('improve'),gap,num(ni)]],gap);
+      const full=join([[word('fix'),gap,num(nf)],[word('task'),gap,num(ni)],...(more.length?[more]:[])],sep);
+      const bare=join([[word('fix'),gap,num(nf)],[word('task'),gap,num(ni)],...(more.length?[more]:[])],gap);
+      const named=join([[word('fix'),gap,num(nf)],[word('task'),gap,num(ni)]],gap);
       const nums=join([[num(nf)],[num(ni)]],gap);
       return [[...full,gap,...tail],full,bare,named,nums];
     };
-    // 11-22: a BACKLOG that tells its sorts (`counts`) has its button's number the FIX and IMPR together (what is to be done), `?` where nothing in the document is sorted yet;
+    // 11-22: a BACKLOG that tells its sorts (`counts`) has its button's number the FIX and TASK together (what is to be done), `?` where nothing in the document is sorted yet;
     // no row of a button is shown, so every one of them is hidden. Any other value is the items' own count.
     const kindsOf=doc=>{const c=doc&&doc.counts;if(!c||typeof c!=='object')return null;const out={};
-      for(const name of ['fix','improve','note','tbd']){if(!Number.isInteger(c[name])||c[name]<0)return null;out[name]=Math.min(c[name],99999);}return out;};
-    const unsortedOnly=k=>k.tbd>0&&!(k.fix||k.improve||k.note);
+      for(const name of ['fix','task','note','tbd']){if(!Number.isInteger(c[name])||c[name]<0)return null;out[name]=Math.min(c[name],99999);}return out;};
+    const unsortedOnly=k=>k.tbd>0&&!(k.fix||k.task||k.note);
     const listButton=(doc,stage)=>{const arrow=text('›','dim');if(stage>=2)return [arrow];
-      const k=kindsOf(doc),n=k?k.fix+k.improve:listTotalOf(doc),q=!!k&&n===0&&unsortedOnly(k);
+      const k=kindsOf(doc),n=k?k.fix+k.task:listTotalOf(doc),q=!!k&&n===0&&unsortedOnly(k);
       return [text(clean(doc.word).trim(),doc.has_doc===true?'loc_repo':'dim'),...(stage===0&&(n>0||q||doc.more===true)?[text(' '),text(q?'?':countWords(n,doc.more===true),'loc_repo')]:[]),text(' '),arrow];};
     // The REPO row where the two heads do not stand: `REPO hearting · wt 12 ──── STATUS +N ›  BACKLOG +N ›`, the bottom layout's first row's buttons (the same words, the same
     // order of giving way: the counts, then the words, then the name is cut). `offset` cells of the row stand left of `room`; a press on a button opens its popup, on the rest of the row the status popup.
@@ -904,7 +905,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         listRows.add(top.length);topActions.set(top.length,'popup:'+name);listHeads.set(top.length,entry);top.push([]);
         items.forEach((item,j)=>{
           const at=top.length,sorted=name==='BACKLOG'&&kindsOf(doc);
-          // 11-22: a BACKLOG item stands behind its sort's word in four cells (`FIX `, `IMPR`, `NOTE`, `TBD `), the word and its colour (the colour table's own: yellow, green, dim) both tell it.
+          // 11-22: a BACKLOG item stands behind its sort's word in four cells (`FIX `, `TASK`, `NOTE`, `TBD `), the word and its colour (the colour table's own: yellow, green, dim) both tell it.
           const kind=KIND_WORDS[item.kind]||KIND_WORDS.tbd,
             mark=sorted?[text(kind.word.padEnd(4),kind.key),text(' ')]:[item.mark==='!'?text('! ','lvl_y'):text('· ','dim')];
           listRows.add(at);listItemAt.set(at,{entry,j});
@@ -2201,7 +2202,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const head=listHeads.get(i);
         // A list part's head: ` STATUS +2        ›` (one cell in; the count of the items not shown, as MESSAGES' head; the word dim, not titled, where its document is not there).
         const shownRows=head?head.items.slice(0,take[head.name+'_ITEMS']):[],k=head&&head.name==='BACKLOG'?kindsOf(head.doc):null;
-        const hidden=head?(k?k.fix+k.improve-shownRows.filter(it=>it&&(it.kind==='fix'||it.kind==='improve')).length:head.total-shownRows.length):0;
+        const hidden=head?(k?k.fix+k.task-shownRows.filter(it=>it&&(it.kind==='fix'||it.kind==='task')).length:head.total-shownRows.length):0;
         const stages=k?kindStages(k,hidden,head.doc):null;
         order.push({parts:head?[pad(IND),...narrow(()=>sectionHead([],head.name,stages?stages[0]:hidden>0||head.doc.more===true?[text(countWords(hidden,head.doc.more===true),'loc_repo')]:[],[[]],true,head.doc.has_doc!==true,stages?stages.slice(1):[]))]:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});}});
     for(const item of order)add(item.parts,item.action,item.groups);

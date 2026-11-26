@@ -418,9 +418,9 @@ const checks={};
   if(cfg.scenario==='backlog'){
     // 11-21: the BACKLOG part under the REPO group (its head and its first three items, `+N` for the rest); a press on an item opens the BACKLOG popup
     // standing on it; the group of this window's campaign is open on top and the others are folded; an item with detail opens under its row.
-    await until(s=>s.some(l=>/BACKLOG FIX \d+ · IMPR \d+ · \+\d+ +\/\d+ +›/.test(l)),'the BACKLOG head');
+    await until(s=>s.some(l=>/BACKLOG FIX \d+ · TASK \d+ · \+\d+ +\/\d+ +›/.test(l)),'the BACKLOG head');
     const panel=await screen();
-    checks.head=panel.find(l=>/BACKLOG FIX/.test(l));checks.items=panel.filter(l=>/BL_ITEM/.test(l)).length;
+    checks.head=panel.find(l=>/BACKLOG FIX/.test(l));checks.items=panel.filter(l=>/BL_ITEM|BL_OTHER_ITEM/.test(l)).length;
     checks.status_head=panel.some(l=>/STATUS( \+\d+)? +›/.test(l));
     const spot=await at('BL_ITEM_TWO');await press(spot.x,spot.y,0);
     let r=await until(popupHas('BL_ITEM_ONE'),'the BACKLOG popup');
@@ -433,9 +433,29 @@ const checks={};
     await key('\r',300);r=await screen();checks.detail_closed=!popupHas('BL_DETAIL_NOTE')(r);
     for(let i=0;i<4;i++)await key('\x1b[B',200);await key('\r',400);r=await screen();
     checks.group_opened=popupHas('BL_OTHER_ITEM')(r);
-    // PgDn/PgUp move the chosen line (the window follows): to the end of what there is, and back to the first line.
+    // PgDn/PgUp move the chosen line (the window follows): to the end of what there is, and back to the first line (11-26: the board's first group head).
     await key('\x1b[6~',300);r=await screen();checks.pgdn_end=body(r).some(l=>l.startsWith('> ')&&l.includes('full document'));
-    await key('\x1b[5~',300);r=await screen();checks.pgup_top=body(r).some(l=>l.startsWith('> ')&&l.includes('BL_ITEM_ONE'));
+    await key('\x1b[5~',300);r=await screen();checks.pgup_top=body(r).some(l=>l.startsWith('> ')&&l.includes('FIX 4'));
+    // 11-26 (scheme A): the board's own keys, typed as a person types them. `t` shows the Discuss items only, and Esc undoes that, not the popup.
+    const chosen=s=>body(s).find(l=>l.startsWith('> '))||'';
+    await key('t',400);r=await screen();
+    checks.discuss=popupHas('state Discuss')(r)&&popupHas('showing 1 of 6')(r)&&body(r).some(l=>/Discuss +BL_ITEM_ONE/.test(l))&&!popupHas('BL_ITEM_TWO')(r);
+    await key('\x1b',500);r=await screen();checks.esc_filter=!!box(r)&&popupHas('showing 6 ·')(r)&&!popupHas('state Discuss')(r);
+    // `a`, `d`, `k`: grouped by area (case and blanks folded: `Panel` and `panel` are one group), by date, and by kind again.
+    await key('a',400);r=await screen();checks.area=popupHas('[Area]')(r)&&popupHas('Panel 2')(r)&&popupHas('No area 4')(r);
+    await key('d',400);r=await screen();checks.date=popupHas('[Date]')(r)&&popupHas('2026-11-20 1')(r)&&popupHas('No date 5')(r);
+    await key('k',400);r=await screen();checks.kind=popupHas('[Kind]')(r)&&popupHas('FIX 4')(r);
+    // `/` finds a title: the keys typed are the finder's (the `t` and `e` of "three" neither filter nor do anything else); Korean is typed whole.
+    await key('/',300);for(const c of 'three')await key(c,120);r=await screen();checks.typing=popupHas('/ Title: three')(r);
+    await key('\r',400);r=await screen();checks.find=popupHas('find Title "three"')(r)&&/BL_ITEM_THREE/.test(chosen(r))&&!popupHas('BL_ITEM_TWO')(r)&&!popupHas('state Discuss')(r);
+    await key('\x1b',500);await key('/',300);await key('셋째',300);await key('\r',400);r=await screen();
+    checks.find_korean=popupHas('find Title "셋째"')(r)&&/BL_ITEM_THREE/.test(chosen(r));
+    // `/` then Tab finds an area's name.
+    await key('\x1b',500);await key('/',300);await key('\t',200);for(const c of 'PANEL')await key(c,120);await key('\r',400);r=await screen();
+    checks.find_area=popupHas('find Area "PANEL"')(r)&&popupHas('BL_ITEM_ONE')(r)&&popupHas('BL_ITEM_TWO')(r)&&!popupHas('BL_ITEM_THREE')(r);
+    // Home and End: the first and the last item of the view (End opens the folded TBD group the last item is in).
+    await key('\x1b',500);await key('\x1b[F',400);r=await screen();checks.end=/BL_LOOSE/.test(chosen(r));
+    await key('\x1b[H',400);r=await screen();checks.home=/BL_ITEM_ONE/.test(chosen(r));
     await key('\x1b[C',400);r=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('ROUTE');},'the next section after BACKLOG');checks.next_section=true;
     await key('\x1b[D',400);r=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('BACKLOG');},'BACKLOG again by ←');checks.back=true;
     await close();
@@ -545,7 +565,8 @@ class PtyTest(unittest.TestCase):
             # 11-21: a backlog document in the artifact root: this window's campaign group (the newest document's folder) first, another group folded.
             (case / 'tree' / '.agent_reports' / 'backlog.md').write_text(
                 '# 시험용 백로그\n갱신 2026-11-21 11:02\n\n## 2026-02-11_camp-001\n- BL_OTHER_ITEM 다른 캠페인의 일\n\n'
-                '## 2026-01-10_camp-000\n- BL_ITEM_ONE 첫째 일\n  kind: fix\n  date: 2026-11-20\n  note: BL_DETAIL_NOTE 맥락\n- BL_ITEM_TWO 둘째 일\n  kind: Fix\n- BL_ITEM_THREE 셋째 일\n  kind: fix\n- BL_ITEM_FOUR 넷째 일\n  kind: fix\n\n'
+                '## 2026-01-10_camp-000\n- BL_ITEM_ONE 첫째 일\n  kind: fix\n  date: 2026-11-20\n  state: discuss\n  area: Panel\n  note: BL_DETAIL_NOTE 맥락\n'
+                '- BL_ITEM_TWO 둘째 일\n  kind: Fix\n  area:  panel \n- BL_ITEM_THREE 셋째 일\n  kind: fix\n- BL_ITEM_FOUR 넷째 일\n  kind: fix\n\n'
                 '## Unassigned\n- BL_LOOSE 캠페인 없는 일\n', encoding='utf-8')
         backend = case / 'backend'
         backend.write_text(BACKEND.format(python=sys.executable, utilities=str(ROOT / 'utilities'), tools=str(ROOT / 'tools'),
@@ -611,7 +632,7 @@ class PtyTest(unittest.TestCase):
     def test_the_backlog_part_lists_three_items_and_its_popup_opens_on_the_one_pressed(self):
         checks = self.run_case('backlog')
         self.assertEqual(checks['items'], 3, checks)                                     # the first three; the others are `+N`
-        self.assertRegex(checks['head'], r'BACKLOG FIX 4 · IMPR 0 · \+1 +/6 +›', checks)  # six items in the document, four of them FIX, three shown
+        self.assertRegex(checks['head'], r'BACKLOG FIX 4 · TASK 0 · \+2 +/6 +›', checks)  # six items in the document, four of them FIX, two of those shown
         self.assertTrue(checks['status_head'], checks)
         self.assertIn('BACKLOG', checks['title'], checks)
         self.assertIn('╰─ STATUS · BACKLOG · ', checks['band'], checks)
@@ -621,6 +642,9 @@ class PtyTest(unittest.TestCase):
         self.assertTrue(checks['group_opened'], checks)
         self.assertTrue(checks['pgdn_end'] and checks['pgup_top'], checks)                # PgDn/PgUp move the chosen line, not only the window
         self.assertTrue(checks['next_section'] and checks['back'], checks)
+        # 11-26 (scheme A): the board's keys, in the real host over a pty
+        for name in ('discuss', 'esc_filter', 'area', 'date', 'kind', 'typing', 'find', 'find_korean', 'find_area', 'end', 'home'):
+            self.assertTrue(checks[name], (name, checks))
 
     def test_a_late_fleet_part_of_another_width_is_not_kept(self):
         checks = self.run_case('width')
