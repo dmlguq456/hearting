@@ -27,6 +27,8 @@ from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
 SUPERVISOR = ROOT / "utilities" / "codex-app-server-supervisor.py"
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 PARENT = "att-parent"
 DELIVERY_TIMING_POINTS = (
     "last_child_terminal_ns", "join_completed_ns", "same_thread_resume_ns",
@@ -1417,7 +1419,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         worker_home = (jobs.parent / "codex-owner-home" if legacy_record
                        else runtime_dir / "codex-owner-home")
         route_path = base / "owner-route.json"
-        attempt = PARENT
+        attempt = unique_attempt_id("att-parent")
         parent_session = "fixture-parent"
         log_path = logs / f"owner.{attempt}.codex.jsonl"
         summary_prompt = logs / f"owner.{attempt}.codex.prompt.txt"

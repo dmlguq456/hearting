@@ -20,6 +20,8 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 LEASE = HERE / "verification-background-lease.py"
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import foreground_activity as ACTIVITY
 import owner_route_binding as OWNER_BINDING
 from split_module_fixture import patch_split
@@ -29,7 +31,7 @@ spec.loader.exec_module(L)
 
 
 def owner_registry_fixture(root: Path, *, conflicting_stage_identity=False):
-    attempt = "att-owner-lease"
+    attempt = unique_attempt_id("att-owner-lease")
     route = {
         "route_id": "rt-owner-lease",
         "route_hash": "sha256:rt-owner-lease",

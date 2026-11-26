@@ -27,7 +27,13 @@ FLEET_P=P.parent.parent/"tools"/"fleet"/"route.py"
 FLEET_S=importlib.util.spec_from_file_location("fleet_route",FLEET_P)
 FLEET_ROUTE=importlib.util.module_from_spec(FLEET_S); FLEET_S.loader.exec_module(FLEET_ROUTE)
 sys.path.insert(0,str(P.parent))
+sys.path.insert(0,str(P.parent.parent/"tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import dispatch_contract as D
+CLI_STAGE_COMPILE=unique_attempt_id("att-cli-stage-compile")
+CLI_OWNER=unique_attempt_id("att-cli-owner")
+CLI_STAGE=unique_attempt_id("att-cli-stage")
+CLI_REPLAY=unique_attempt_id("att-cli-replay")
 import dispatch_runtime_support as RUNTIME_SUPPORT
 from split_module_fixture import patch_split, set_split
 ALL=["atomic-outcome","known-scope","no-shared-contract","no-resource-run","no-artifact-handoff","no-independent-verifier","focused-verification"]
@@ -2645,6 +2651,7 @@ class TestRoute(unittest.TestCase):
     R.close_route(route,outside,commit="6"*40)
    self.assertFalse(R.outcome_path(canonical).exists())
  def test_f47_1_new_route_records_carry_owner_attempt_and_family_key(self):
+  FIXTURE_OWNER=unique_attempt_id("att-fixture-owner")
   previous=os.environ.pop("AGENT_DISPATCH_ATTEMPT_ID",None)
   try:
    unowned=R.compile_route(**self.args())
@@ -2654,13 +2661,13 @@ class TestRoute(unittest.TestCase):
     R.route_family_key(
      unowned["capability"],unowned["cwd"],unowned["capability_mode"],"-"),
    )
-   os.environ["AGENT_DISPATCH_ATTEMPT_ID"]="att-fixture-owner"
+   os.environ["AGENT_DISPATCH_ATTEMPT_ID"]=FIXTURE_OWNER
    owned=R.compile_route(**self.args())
-   self.assertEqual(owned["owner_attempt_id"],"att-fixture-owner")
+   self.assertEqual(owned["owner_attempt_id"],FIXTURE_OWNER)
    self.assertEqual(
     owned["route_family_key"],
     R.route_family_key(
-     owned["capability"],owned["cwd"],owned["capability_mode"],"att-fixture-owner"),
+     owned["capability"],owned["cwd"],owned["capability_mode"],FIXTURE_OWNER),
    )
    self.assertNotEqual(unowned["route_family_key"],owned["route_family_key"])
   finally:
@@ -2688,10 +2695,11 @@ class TestRoute(unittest.TestCase):
   self.assertEqual(R.route_hash(owner_varied),digest)
   self.assertEqual(FLEET_ROUTE.route_hash(owner_varied),digest)
  def test_f47_2_selection_structurally_identical(self):
+  FIXTURE_OWNER=unique_attempt_id("att-fixture-owner")
   previous=os.environ.pop("AGENT_DISPATCH_ATTEMPT_ID",None)
   try:
    a=R.compile_route(**self.args())
-   os.environ["AGENT_DISPATCH_ATTEMPT_ID"]="att-fixture-owner"
+   os.environ["AGENT_DISPATCH_ATTEMPT_ID"]=FIXTURE_OWNER
    b=R.compile_route(**self.args())
   finally:
    if previous is None: os.environ.pop("AGENT_DISPATCH_ATTEMPT_ID",None)
@@ -3574,7 +3582,7 @@ class TestContinuation(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    artifact=Path(tmp)/"artifacts"; jobs=Path(tmp)/"state"/"jobs.log"
    jobs.parent.mkdir(parents=True)
-   attempt="att-cli-post-launch"
+   attempt=unique_attempt_id("att-cli-post-launch")
    jobs.write_text(
     "2099-01-01T00:00:00Z\topen\t%s\t%s\towner\t"
     "attempt_schema_version=2,worker_type=owner,unit=_kernel/owner,"
@@ -3626,14 +3634,14 @@ class TestContinuation(unittest.TestCase):
     "2099-01-01T00:00:00Z\topen\t%s\t%s\tstage\t"
     "attempt_schema_version=2,worker_type=stage,unit=dev/backend,"
     "dispatch_depth=2,registered_worker=1,execution_surface=registered-headless,"
-    "attempt_id=att-cli-stage-compile\n" % (R.ROOT,R.ROOT), encoding="utf-8",
+    "attempt_id=%s\n" % (R.ROOT,R.ROOT,CLI_STAGE_COMPILE), encoding="utf-8",
    )
    dispatch_path=Path(tmp)/"dispatch.json"
    dispatch_path.write_text(json.dumps(self._dispatch()),encoding="utf-8")
    env=os.environ.copy()
    env.update({
     "AGENT_HOME":str(R.ROOT), "AGENT_DISPATCH_JOBS":str(jobs),
-    "AGENT_DISPATCH_ATTEMPT_ID":"att-cli-stage-compile",
+    "AGENT_DISPATCH_ATTEMPT_ID":CLI_STAGE_COMPILE,
     "AGENT_DISPATCH_WORKER_TYPE":"stage", "AGENT_DISPATCH_DEPTH":"2",
     "AGENT_DISPATCH_ATTEMPT_SCHEMA_VERSION":"2",
     "AGENT_DISPATCH_EXECUTION_SURFACE":"registered-headless",
@@ -3658,7 +3666,7 @@ class TestContinuation(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp); artifact=root/"artifacts"; jobs=root/"state"/"jobs.log"
    jobs.parent.mkdir(parents=True)
-   attempt="att-real-owner-lifecycle"
+   attempt=unique_attempt_id("att-real-owner-lifecycle")
    source_root=self._source_fixture()
    owner_meta=",".join((
     "attempt_schema_version=2","worker_type=owner","unit=_kernel/owner",
@@ -4567,8 +4575,8 @@ class TestContinuation(unittest.TestCase):
       "dispatch_depth=1,registered_worker=1,execution_surface=registered-headless,"
       "capability=autopilot-code,capability_mode=dev,intensity=strong,artifact_root=%s,"
       "owner_harness=codex,parent_sid=thread-source,"
-      "attempt_id=att-cli-owner,owner_route_file=%s,owner_route_id=%s,owner_route_hash=%s\n"
-      % (source["cwd"], source["cwd"], source["artifact_root"], source_path, source["route_id"], source["route_hash"]))
+      "attempt_id=%s,owner_route_file=%s,owner_route_id=%s,owner_route_hash=%s\n"
+      % (source["cwd"], source["cwd"], source["artifact_root"], CLI_OWNER, source_path, source["route_id"], source["route_hash"]))
     env=os.environ.copy()
     for key in ("AGENT_DISPATCH_OWNER_HARNESS","AGENT_DISPATCH_CURRENT_HARNESS",
                 "AGENT_DISPATCH_WORKER_TYPE","AGENT_DISPATCH_DEPTH",
@@ -4576,7 +4584,7 @@ class TestContinuation(unittest.TestCase):
                 "AGENT_DISPATCH_EXECUTION_SURFACE","AGENT_DISPATCH_REGISTERED_WORKER",
                 "CODEX_THREAD_ID","CLAUDE_CODE_SESSION_ID","AGENT_DISPATCH_PARENT_SESSION_ID"):
      env.pop(key,None)
-    env["AGENT_DISPATCH_ATTEMPT_ID"]="att-cli-owner"; env["AGENT_OWNER_ROUTE_FILE"]=str(source_path)
+    env["AGENT_DISPATCH_ATTEMPT_ID"]=CLI_OWNER; env["AGENT_OWNER_ROUTE_FILE"]=str(source_path)
     env["AGENT_OWNER_ROUTE_ID"]=source["route_id"]
     env["AGENT_OWNER_ROUTE_HASH"]=source["route_hash"]
     env["AGENT_DISPATCH_DEPTH"]="1"
@@ -4609,8 +4617,8 @@ class TestContinuation(unittest.TestCase):
      handle.write(
       "2099-01-01T00:00:00Z\topen\trepo\t%s\tstage\t"
       "attempt_schema_version=2,dispatch_depth=2,registered_worker=1,"
-      "worker_type=stage,unit=dev/backend,attempt_id=att-cli-stage\n" % source["cwd"])
-    env=os.environ.copy(); env["AGENT_DISPATCH_ATTEMPT_ID"]="att-cli-stage"
+      "worker_type=stage,unit=dev/backend,attempt_id=%s\n" % (source["cwd"],CLI_STAGE))
+    env=os.environ.copy(); env["AGENT_DISPATCH_ATTEMPT_ID"]=CLI_STAGE
     env["AGENT_DISPATCH_DEPTH"]="2"
     env["AGENT_DISPATCH_REGISTERED_WORKER"]="1"
     env["AGENT_DISPATCH_WORKER_TYPE"]="stage"
@@ -4644,9 +4652,9 @@ class TestContinuation(unittest.TestCase):
       "attempt_schema_version=2,worker_type=owner,unit=_kernel/owner,"
       "dispatch_depth=1,registered_worker=1,execution_surface=registered-headless,"
       "capability=autopilot-code,capability_mode=dev,intensity=strong,artifact_root=%s,"
-      "owner_harness=codex,parent_sid=thread-source,attempt_id=att-cli-replay,"
+      "owner_harness=codex,parent_sid=thread-source,attempt_id=%s,"
       "owner_route_file=%s,owner_route_id=%s,owner_route_hash=%s\n"
-      % (source["cwd"], source["cwd"], source["artifact_root"], source_path, source["route_id"], source["route_hash"]))
+      % (source["cwd"], source["cwd"], source["artifact_root"], CLI_REPLAY, source_path, source["route_id"], source["route_hash"]))
     env=os.environ.copy()
     for key in ("AGENT_DISPATCH_OWNER_HARNESS","AGENT_DISPATCH_CURRENT_HARNESS",
                 "AGENT_DISPATCH_WORKER_TYPE","AGENT_DISPATCH_DEPTH",
@@ -4654,7 +4662,7 @@ class TestContinuation(unittest.TestCase):
                 "AGENT_DISPATCH_EXECUTION_SURFACE","AGENT_DISPATCH_REGISTERED_WORKER",
                 "CODEX_THREAD_ID","CLAUDE_CODE_SESSION_ID","AGENT_DISPATCH_PARENT_SESSION_ID"):
      env.pop(key,None)
-    env["AGENT_DISPATCH_ATTEMPT_ID"]="att-cli-replay"; env["AGENT_OWNER_ROUTE_FILE"]=str(source_path)
+    env["AGENT_DISPATCH_ATTEMPT_ID"]=CLI_REPLAY; env["AGENT_OWNER_ROUTE_FILE"]=str(source_path)
     env["AGENT_OWNER_ROUTE_ID"]=source["route_id"]
     env["AGENT_OWNER_ROUTE_HASH"]=source["route_hash"]
     env["AGENT_DISPATCH_DEPTH"]="1"

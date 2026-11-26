@@ -13,6 +13,7 @@ sys.path.insert(0,str(ROOT/"utilities"))
 import dispatch_contract as DC
 sys.path.insert(0,str(ROOT/"tools"))
 import fixture_processes  # noqa: E402
+PARENT_FIXTURE=fixture_processes.unique_attempt_id("att-parent-fixture")
 from split_module_fixture import patch_split  # noqa: E402
 
 ADAPTERS={
@@ -221,7 +222,7 @@ class AdapterV11Test(unittest.TestCase):
        or key in {"AGENT_MODEL_GOVERNOR_ROOT", "AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN"}):
     os.environ.pop(key,None)
   os.environ.update(self.ambient_worker_env)
- def seed_parent(self,jobs,repo,attempt="att-parent-fixture",harness="codex",sandbox="fixture"):
+ def seed_parent(self,jobs,repo,attempt=PARENT_FIXTURE,harness="codex",sandbox="fixture"):
   proc=subprocess.Popen(["sleep","60"]);self.parent_procs.append(proc)
   start=(Path("/proc")/str(proc.pid)/"stat").read_text().split()[21]
   jobs.write_text(
@@ -256,7 +257,7 @@ class AdapterV11Test(unittest.TestCase):
    env={**os.environ,"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
         "AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
         "AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
-        "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture",
+        "AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE,
         "OPENCODE_CONFIG_CONTENT":"{}","XDG_STATE_HOME":str(root/"state")}
    env.pop("AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN",None)
    calls=[]
@@ -322,7 +323,7 @@ class AdapterV11Test(unittest.TestCase):
      (codex_home/"auth.json").write_text('{}\n')
      claude_home=Path(env["HOME"])/".claude";claude_home.mkdir()
      env.update(CODEX_HOME=str(codex_home),CLAUDE_CONFIG_DIR=str(claude_home))
-     if kind=="reap": env.update(AGENT_DISPATCH_CHILD="1",AGENT_DISPATCH_ATTEMPT_ID="att-parent-fixture")
+     if kind=="reap": env.update(AGENT_DISPATCH_CHILD="1",AGENT_DISPATCH_ATTEMPT_ID=PARENT_FIXTURE)
      def refuse(*args,**kwargs):
       deadline=time.monotonic()+3
       while not started.exists() and time.monotonic()<deadline: time.sleep(.02)
@@ -432,7 +433,7 @@ class AdapterV11Test(unittest.TestCase):
     env={**os.environ,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
          "AGENT_DISPATCH_JOBS":str(jobs),"OPENCODE_CONFIG_CONTENT":"{}"}
     self.seed_parent(jobs,repo,harness=harness)
-    env["AGENT_DISPATCH_ATTEMPT_ID"]="att-parent-fixture"
+    env["AGENT_DISPATCH_ATTEMPT_ID"]=PARENT_FIXTURE
     registered=subprocess.run(self.command(harness,"register",repo,jobs,logs),text=True,capture_output=True,env=env)
     self.assertEqual(registered.returncode,0,registered.stdout+registered.stderr)
     row=jobs.read_text(encoding="utf-8")
@@ -440,7 +441,7 @@ class AdapterV11Test(unittest.TestCase):
     self.assertIn("capability_mode=dev",row); self.assertIn("worker_mode=dev/backend",row)
     self.assertNotIn(",mode=",row)
     self.assertIn("nested_eligibility=supported",row); self.assertIn("fallback_ordinal=1",row)
-    self.assertIn("parent_attempt_id=att-parent-fixture",row)
+    self.assertIn(f"parent_attempt_id={PARENT_FIXTURE}",row)
     self.assertIn("parent_pid=",row);self.assertIn("parent_pid_start=",row)
     self.assertIn(f"launch_home={ROOT}",row)
     duplicate=subprocess.run(self.command(harness,"register",repo,jobs,logs),text=True,capture_output=True,env=env)
@@ -513,9 +514,9 @@ class AdapterV11Test(unittest.TestCase):
     "execution_surface=registered-headless,registered_worker=1,"
     "fallback_hop=same-harness-headless,worker_type=owner,harness=claude,"
     "runtime_sandbox=adapter-default,"
-    f"attempt_id=att-parent-fixture,pid={proc.pid},pid_start={start},pgid={pgid},"
+    f"attempt_id={PARENT_FIXTURE},pid={proc.pid},pid_start={start},pgid={pgid},"
     f"pid_ns={observer_ns},pid_observer_ns={observer_ns},pid_scope=namespace-local\n")
-   env["AGENT_DISPATCH_ATTEMPT_ID"]="att-parent-fixture"
+   env["AGENT_DISPATCH_ATTEMPT_ID"]=PARENT_FIXTURE
    env["AGENT_DISPATCH_CHILD"]="1"
    node=next(n for n in route["nodes"] if n["id"]=="plan")
    cmd=[sys.executable,str(ROOT/"adapters/claude/bin/dispatch-headless.py"),
@@ -563,7 +564,7 @@ class AdapterV11Test(unittest.TestCase):
      jobs=root/"jobs.log"; logs=root/"logs"; fakebin=root/"bin"
      fakebin.mkdir(); logs.mkdir()
      home=root/"home"; home.mkdir()
-     attempt=f"att-parent-runtime-{harness}-{int(artifact_inside)}"
+     attempt=fixture_processes.unique_attempt_id(f"att-parent-runtime-{harness}-{int(artifact_inside)}")
      sandbox=sandboxes[harness]
      evidence_rows=[{
       "parent_harness":child,"parent_transport":"headless",
@@ -618,7 +619,7 @@ class AdapterV11Test(unittest.TestCase):
       "--worker-type","stage","--worker-mode",node["unit"],"--worker-role","code-plan",
       "--assigned-contract",node["completion_gate"],"--owner","autopilot-code",
       "--owner-harness",harness,"--unit",node["unit"],"--parent","owner",
-      "--jobs",str(jobs),"--log-dir",str(logs),"--attempt-id",f"att-child-{harness}-{int(artifact_inside)}",
+      "--jobs",str(jobs),"--log-dir",str(logs),"--attempt-id",fixture_processes.unique_attempt_id(f"att-child-{harness}-{int(artifact_inside)}"),
       "--parent-attempt-id",attempt,"--parent-harness",harness,"--parent-transport","headless",
       "--parent-sandbox",sandbox,"--launch-authority","conductor",
       "--nested-eligibility","supported","--eligibility-source",f"{harness}-fixture",
@@ -709,7 +710,7 @@ class AdapterV11Test(unittest.TestCase):
         "HOME":str(root/"home"),"CLAUDE_CONFIG_DIR":str(main_config),
         "AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
         "AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
-        "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture",
+        "AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE,
         "XDG_STATE_HOME":str(root/"state")}
    Path(env["HOME"]).mkdir()
    resolution=wrapper.reconcile_launch_lifecycle(
@@ -774,7 +775,7 @@ class AdapterV11Test(unittest.TestCase):
     env={"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
          "HOME":str(home),"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
          "AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
-         "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture",
+         "AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE,
          "GIT_OPTIONAL_LOCKS":"1","XDG_STATE_HOME":str(root/"state"),
          "OPENCODE_CONFIG_CONTENT":"{}",runtime_key:str(source_home)}
     resolution=wrapper.reconcile_launch_lifecycle(
@@ -823,7 +824,7 @@ class AdapterV11Test(unittest.TestCase):
     env={**os.environ,"AGENT_HOME":str(current),"AGENT_ARTIFACT_ROOT":str(art),
          "AGENT_DISPATCH_JOBS":str(jobs),"OPENCODE_CONFIG_CONTENT":"{}"}
     self.seed_parent(jobs,repo,harness=harness)
-    env["AGENT_DISPATCH_ATTEMPT_ID"]="att-parent-fixture"
+    env["AGENT_DISPATCH_ATTEMPT_ID"]=PARENT_FIXTURE
     registered=subprocess.run(self.command(harness,"register",repo,jobs,logs),text=True,capture_output=True,env=env)
     self.assertEqual(registered.returncode,0,registered.stdout+registered.stderr)
     row=jobs.read_text(encoding="utf-8")
@@ -836,7 +837,7 @@ class AdapterV11Test(unittest.TestCase):
     env={**os.environ,"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
          "AGENT_DISPATCH_JOBS":str(jobs),"OPENCODE_CONFIG_CONTENT":"{}"}
     self.seed_parent(jobs,repo,harness=harness)
-    env["AGENT_DISPATCH_ATTEMPT_ID"]="att-parent-fixture"
+    env["AGENT_DISPATCH_ATTEMPT_ID"]=PARENT_FIXTURE
     before=jobs.read_text(encoding="utf-8")
     result=subprocess.run(self.command(harness,"dry-run",repo,jobs,logs),
                           text=True,capture_output=True,env=env)
@@ -1221,7 +1222,7 @@ class AdapterV11Test(unittest.TestCase):
   wrapper=self.load_wrapper("codex")
   env={"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),"HOME":str(root/"home"),
        "AGENT_ARTIFACT_ROOT":str(art),"AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
-       "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture","AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN":"1",
+       "AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE,"AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN":"1",
        "XDG_STATE_HOME":str(root/"state"),"FAKE_CHILD_COUNT":str(count),
        "CODEX_RUNTIME_PROJECTION_FAST":"1","CODEX_RUNTIME_PROJECTION_SKIP_CLI_DISCOVERY":"1",
        "PYTHONDONTWRITEBYTECODE":"1"}
@@ -1470,7 +1471,7 @@ class AdapterV11Test(unittest.TestCase):
        "lifecycle_nspid_width":"1",
        "lifecycle_pid1_class":"non-system-init",
       })
-     env={**os.environ,"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),"AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1","AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture","XDG_STATE_HOME":str(root/"state")}
+     env={**os.environ,"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),"AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1","AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE,"XDG_STATE_HOME":str(root/"state")}
      stream=io.StringIO()
      patches=[mock.patch.dict(os.environ,env,clear=True),mock.patch.object(wrapper,"reconcile_launch_lifecycle",return_value=resolution)]
      if hasattr(wrapper,"check_runtime_projection"): patches.append(mock.patch.object(wrapper,"check_runtime_projection",return_value=0))
@@ -1495,7 +1496,7 @@ class AdapterV11Test(unittest.TestCase):
      self.assertIn("launch_lifecycle_reselection=promoted-wrapper-scope",row)
      self.assertIn("launch_lifecycle_override=absent",row)
      self.assertNotIn("dead-nested-sandbox-lifetime",row)
-     self.assertIn("parent_attempt_id=att-parent-fixture",row)
+     self.assertIn(f"parent_attempt_id={PARENT_FIXTURE}",row)
      # A one-element NSpid vector (this test's own procfs view) proves only
      # local identity, never an outer host mapping; neither wrapper may
      # publish a pid_host* claim from it.
@@ -1661,7 +1662,7 @@ class AdapterV11Test(unittest.TestCase):
   env={**os.environ,"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
        "AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
        "AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
-       "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture",
+       "AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE,
        "AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN":"1",
        "XDG_STATE_HOME":str(root/"state"),
        "FAKE_CHILD_COUNT":str(count)}
@@ -1735,7 +1736,7 @@ class AdapterV11Test(unittest.TestCase):
    env={**os.environ,"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
         "AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
         "AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
-        "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture",
+        "AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE,
         "AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN":"1",
         "XDG_STATE_HOME":str(root/"state"),
         "FAKE_CHILD_COUNT":str(count)}
@@ -1791,7 +1792,7 @@ class AdapterV11Test(unittest.TestCase):
     env={**os.environ,"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
          "AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
          "AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
-         "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture",
+         "AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE,
          "AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN":"1",
          "XDG_STATE_HOME":str(root/"state")}
     stream=io.StringIO()
@@ -1829,7 +1830,7 @@ class AdapterV11Test(unittest.TestCase):
     env={**os.environ,"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
          "AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
          "AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
-         "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture",
+         "AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE,
          "XDG_STATE_HOME":str(root/"state")}
     stream=io.StringIO()
     patches=[mock.patch.dict(os.environ,env,clear=True),
@@ -1876,7 +1877,7 @@ class AdapterV11Test(unittest.TestCase):
      self.seed_parent(jobs,repo,harness=harness)
      command=self.command(harness,"start",repo,jobs,logs)+["--foreground-timeout","5"]
      argv=["dispatch-headless.py",*command[2:]]
-     env_extra={"AGENT_DISPATCH_CHILD":"1","AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture"}
+     env_extra={"AGENT_DISPATCH_CHILD":"1","AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE}
     resolution=wrapper.reconcile_launch_lifecycle(
      wrapper.DETACHED,{},evidence={
       "lifecycle_selector_source":"pid1-class",
@@ -1951,7 +1952,7 @@ class AdapterV11Test(unittest.TestCase):
      self.seed_parent(jobs,repo,harness=harness)
      command=self.command(harness,"start",repo,jobs,logs)+["--foreground-timeout","5"]
      argv=["dispatch-headless.py",*command[2:]]
-     env_extra={"AGENT_DISPATCH_CHILD":"1","AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture"}
+     env_extra={"AGENT_DISPATCH_CHILD":"1","AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE}
     resolution=wrapper.reconcile_launch_lifecycle(
      wrapper.DETACHED,{},evidence={
       "lifecycle_selector_source":"pid1-class",

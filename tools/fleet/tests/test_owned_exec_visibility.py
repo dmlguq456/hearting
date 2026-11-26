@@ -12,11 +12,12 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from fixture_processes import unique_attempt_id  # noqa: E402
 from fleet import model
 from fleet.collectors import dispatch, procscan
 
 
-ATTEMPT = "att-owned-exec-fixture"
+ATTEMPT = unique_attempt_id("att-owned-exec-fixture")
 
 
 def owned_child(comm="node"):
