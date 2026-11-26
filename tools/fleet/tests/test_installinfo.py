@@ -4,6 +4,9 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import contextlib
 import io
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -82,19 +85,132 @@ class InstallInfoTest(unittest.TestCase):
                 self.assertEqual(value["install_method"], "managed/" + channel)
                 git_version.assert_not_called()
 
-    def test_linked_uses_one_bounded_git_describe(self):
+    def test_linked_uses_two_bounded_lock_free_git_calls(self):
         self._activation("codex", "linked")
         calls = []
 
         def runner(argv, **kwargs):
             calls.append((argv, kwargs))
-            return SimpleNamespace(returncode=0, stdout="v9.1.0-2-gabc-dirty\n")
+            if "status" in argv:
+                return SimpleNamespace(returncode=0, stdout=" M tracked\n")
+            return SimpleNamespace(returncode=0, stdout="v9.1.0-2-gabc\n")
 
         value = installinfo.collect(self.root, self.env, runner)
         self.assertEqual(value["install_method"], "linked")
         self.assertEqual(value["version"], "v9.1.0-2-gabc-dirty")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual([argv for argv, _kwargs in calls], [
+            ["git", "describe", "--tags", "--always"],
+            ["git", "--no-optional-locks", "status", "--porcelain", "--untracked-files=no"],
+        ])
         self.assertEqual(calls[0][1]["timeout"], 2)
+        self.assertLessEqual(calls[1][1]["timeout"], 2)
+
+    def test_status_gets_what_describe_left_of_the_two_second_budget(self):
+        for spent, expected in ((1.5, 0.5), (1.95, 0.1)):
+            with self.subTest(spent=spent):
+                clock = [100.0]
+                timeouts = []
+
+                def runner(argv, **kwargs):
+                    timeouts.append(kwargs["timeout"])
+                    if "describe" in argv:
+                        clock[0] += spent
+                        return SimpleNamespace(returncode=0, stdout="v9.1.0\n")
+                    return SimpleNamespace(returncode=0, stdout="")
+
+                with mock.patch.object(installinfo.time, "monotonic", side_effect=lambda: clock[0]):
+                    self.assertEqual(installinfo._git_version(self.root, runner), "v9.1.0")
+                self.assertEqual(timeouts[0], 2)
+                self.assertAlmostEqual(timeouts[1], expected)
+
+    def test_status_failure_falls_back_to_head_like_a_timed_out_describe(self):
+        self._activation("codex", "linked")
+        head = "9" * 40
+        self._git_head(head)
+        for label, failure in (("exit 128", SimpleNamespace(returncode=128, stdout="")),
+                               ("timeout", subprocess.TimeoutExpired(["git", "status"], 2))):
+            with self.subTest(status=label):
+                def runner(argv, **_kwargs):
+                    if "status" not in argv:
+                        return SimpleNamespace(returncode=0, stdout="v9.1.0-2-gabc\n")
+                    if isinstance(failure, BaseException):
+                        raise failure
+                    return failure
+
+                value = installinfo.collect(self.root, self.env, runner)
+                self.assertEqual(value["version"], head[:8])
+
+    def test_snapshot_version_matches_describe_dirty_without_touching_the_index(self):
+        # `describe --dirty` locks (and here may rewrite) the index; the resolver must print
+        # what it printed while leaving .git exactly as it was, lock file included.
+        strace = shutil.which("strace")
+        if strace and subprocess.run([strace, "-qq", "-o", os.devnull, "true"],
+                                     capture_output=True).returncode != 0:
+            strace = None  # present but refused by a ptrace-restricted host
+        if not strace:
+            with self.subTest(check="strace"):
+                self.skipTest("strace unavailable or refused: index.lock opens are not traced; "
+                              "the index and .git checks below still run")
+        # The caller's GIT_OPTIONAL_LOCKS (the test runner sets 0) must not be what keeps
+        # the lock away.
+        env = {key: value for key, value in os.environ.items() if key != "GIT_OPTIONAL_LOCKS"}
+        dirty_cases = ("content", "non-utf8-name")
+        for case in ("clean", "content", "stat-only", "untagged", "non-utf8-name"):
+            with self.subTest(case=case):
+                repo = Path(tempfile.mkdtemp(dir=self.tmp.name))
+                git = ["git", "-C", str(repo), "-c", "user.name=Fixture",
+                       "-c", "user.email=f@example.invalid"]
+
+                def run(*args):
+                    return subprocess.run(git + list(args), check=True, capture_output=True,
+                                          text=True).stdout.strip()
+
+                # A Latin-1 name status prints raw once core.quotePath=false.
+                name = os.fsdecode(b"caf\xe9.txt") if case == "non-utf8-name" else "tracked"
+                try:
+                    (repo / name).write_text("base\n", encoding="utf-8")
+                except OSError as exc:
+                    self.skipTest(f"this filesystem refuses a non-UTF-8 name: {exc}")
+                run("init", "-q")
+                run("add", name)
+                run("commit", "-qm", "base")
+                if case != "untagged":
+                    run("tag", "-a", "v9.1.0", "-m", "v9.1.0")
+                    run("commit", "-q", "--allow-empty", "-m", "ahead")
+                if case == "non-utf8-name":
+                    run("config", "core.quotePath", "false")
+                if case in dirty_cases:
+                    (repo / name).write_text("changed\n", encoding="utf-8")
+                elif case == "stat-only":
+                    os.utime(repo / name, (1_000_000_000, 1_000_000_000))
+                index = repo / ".git" / "index"
+
+                def git_state():
+                    stat = index.stat()
+                    return (stat.st_ino, stat.st_mtime_ns, index.read_bytes(),
+                            sorted(os.listdir(repo / ".git")))
+
+                traces = []
+
+                def runner(argv, **kwargs):
+                    # This test watches the lock, not the product's 2 s budget.
+                    kwargs = dict(kwargs, timeout=30, env=env)
+                    if not strace:
+                        return subprocess.run(argv, **kwargs)
+                    traces.append(repo.parent / f"trace-{case}-{len(traces)}")
+                    return subprocess.run([strace, "-f", "-qq", "-e", "trace=openat",
+                                           "-o", str(traces[-1]), *argv], **kwargs)
+
+                before = git_state()
+                value = installinfo._git_version(repo, runner)
+                remote_dirty = installinfo._git_dirty(repo, runner, "head-" + case, 0.0)
+                self.assertEqual(git_state(), before)
+                for trace in traces:
+                    self.assertNotIn("index.lock", trace.read_text(errors="replace"))
+                self.assertEqual(value, run("describe", "--tags", "--always", "--dirty"))
+                self.assertEqual(value.endswith("-dirty"), case in dirty_cases)
+                self.assertEqual(remote_dirty, case in dirty_cases)
+                self.assertEqual(value.startswith("v9.1.0-1-g"), case != "untagged")
 
     def test_live_fast_local_fallback_reads_head_without_git_subprocess(self):
         self._activation("codex", "linked")
@@ -180,7 +296,9 @@ class InstallInfoTest(unittest.TestCase):
                 remote_calls += 1
                 return SimpleNamespace(returncode=0,
                     stdout=f"{head}\trefs/tags/v3.4.5\n")
-            return SimpleNamespace(returncode=1, stdout="")
+            if "status" in argv:
+                return SimpleNamespace(returncode=0, stdout=" M tracked\n")
+            return SimpleNamespace(returncode=0, stdout="")
 
         first = installinfo.collect(self.root, self.env, runner,
                                     refresh_remote=True, now=100.0)
