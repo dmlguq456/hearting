@@ -66,7 +66,8 @@ person or a frame already chose, using `--shape staged --capability
 <kind> --graph <stage,…>` for person-named stages (§0.2.1). Refusals name missing inputs.
 Before unapproved material work, present the §0.4 intent card (진행 / 수정 /
 중단). Peer requests need only compose's `[경로]` line and scope, except for
-destructive or external-facing work. Dispatch depth 3 is forbidden.
+destructive or external-facing work. Delegate a read-only job with `--unit <unit>`;
+a short check or lookup adds `--ephemeral` (no record, §0.2.1).
 
 ## Following the runtime
 
