@@ -27,6 +27,7 @@ class QuestionAnswerLine(unittest.TestCase):
         self.fixture = MessageQuestionFixture()
         self.f = self.fixture.__enter__()
         self.addCleanup(self.fixture.__exit__, None, None, None)
+        self.f.hold_projection_lock()
         self.korean = work_intent._ui_text().translator("ko")
         patch = mock.patch.object(work_intent, "ui_translator", return_value=self.korean)
         patch.start()
@@ -183,6 +184,7 @@ class QuestionAnswerLine(unittest.TestCase):
         self.f = fixture.__enter__()
         self.f.node = node
         self.addCleanup(fixture.__exit__, None, None, None)
+        self.f.hold_projection_lock()
         sid = "full-" + harness + "-" + case
         recipient = {"harness": harness, "session_id": sid}
         self.f.display = case not in ("unsigned", "stale-sign")
@@ -295,6 +297,7 @@ class QuestionAnswerLine(unittest.TestCase):
         fixture = MessageQuestionFixture()
         self.f = fixture.__enter__()
         self.addCleanup(fixture.__exit__, None, None, None)
+        self.f.hold_projection_lock()
         signal, envelope = self.f.ask("claude", "payload-fails", text="질문", secret=True)
         self.f.submit(envelope, "SECRET-SENTINEL-VALUE")
         with failing:
@@ -314,6 +317,7 @@ class QuestionAnswerLine(unittest.TestCase):
         self.f = fixture.__enter__()
         self.f.node = node
         self.addCleanup(fixture.__exit__, None, None, None)
+        self.f.hold_projection_lock()
         self.f.display, self.f.shell = display, False
         signal, envelope = self.f.ask(harness, sid, text="질문", secret=True)
         self.f.submit(envelope, answer)
@@ -656,6 +660,7 @@ class QuestionAnswerLine(unittest.TestCase):
         self.f = fixture.__enter__()
         self.f.node = node
         self.addCleanup(fixture.__exit__, None, None, None)
+        self.f.hold_projection_lock()
         self.f.display, self.f.shell = True, False
         sid = "too-long"
         signal, envelope = self.f.ask("claude", sid, text="질문", secret=True)
@@ -689,6 +694,7 @@ class QuestionAnswerLine(unittest.TestCase):
         self.f = fixture.__enter__()
         self.f.node = node
         self.addCleanup(fixture.__exit__, None, None, None)
+        self.f.hold_projection_lock()
         self.f.display = True
         signal, envelope = self.f.ask("claude", "line-too-long", text="질문", secret=True)
         state.submit_selected_response(envelope, {"answers": {"message-response": [

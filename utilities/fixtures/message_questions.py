@@ -39,12 +39,6 @@ class MessageQuestionFixture:
                     "AGENT_PEER_LEDGER_ROOT": str(self.root),
                     "PYTHONDONTWRITEBYTECODE": "1"}
         self.stack.enter_context(mock.patch.dict(os.environ, self.env, clear=True))
-        # CLI children share the private state, but cannot see the in-process mock.
-        # Keep the existing projection lock held until those children have finished.
-        projection = waits.state_root()
-        projection.mkdir(mode=0o700, parents=True)
-        lock = self.stack.enter_context((projection / ".projection.lock").open("a"))
-        fcntl.flock(lock, fcntl.LOCK_EX)
         self.stack.enter_context(mock.patch.object(waits, "_request_producer"))
         self.stack.enter_context(mock.patch.object(obligations, "ensure_normal_runner", return_value=False))
         self.stack.enter_context(mock.patch.object(obligations, "request_dispatch_reconciliation", return_value=False))
@@ -55,6 +49,13 @@ class MessageQuestionFixture:
 
     def __exit__(self, *args):
         return self.stack.__exit__(*args)
+
+    def hold_projection_lock(self):
+        """Keep CLI children from starting an unrelated projection producer."""
+        projection = waits.state_root()
+        projection.mkdir(mode=0o700, parents=True)
+        lock = self.stack.enter_context((projection / ".projection.lock").open("a"))
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def seat(self, harness="claude", sid="native-question-session"):
         return tidy.session_seat(tidy.Seat("pane", "question-seat-" + harness,
