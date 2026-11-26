@@ -26,7 +26,7 @@ sys.path.insert(0, str(HERE))
 import worker_bootstrap as W  # noqa: E402
 
 FIELDS = (None, "plan", "design", "code", "lab", "research", "docs", "admin", "other")
-FIELD_UNITS = ("qa/code-review", "plan/plan-author")
+FIELD_UNITS = ("qa/code-review", "plan/plan-author", "analysis/analyze")
 
 
 def _raw(unit):
@@ -183,6 +183,47 @@ class FieldReferenceSelectionTest(unittest.TestCase):
         self.assertEqual(W.unit_field_reference(ROOT, fenced_only, "lab"), fenced_only)
 
 
+class AnalysisUnitTest(unittest.TestCase):
+    """Routing fragment 11: the analysis unit has one must layer and a reference line per field."""
+
+    UNIT = "analysis/analyze"
+    LINES = {"code": "look at the contributing factors, not at a person",
+             "lab": "Split the sources of variation before reading a difference",
+             "design": "rate each problem's severity",
+             "docs": "The reader, the structure, and each claim with its evidence",
+             "research": "Keep the evidence apart from the assumptions",
+             "admin": "Read the requirements one by one"}
+
+    def test_the_head_is_a_read_only_stage_with_no_default_field(self):
+        head = (ROOT / "roles" / "units" / "analysis" / "analyze.md").read_text(encoding="utf-8").split("---")[1]
+        for line in ("unit: analysis/analyze", "family: analysis", "worker_type: stage", "floor: high",
+                     "read_only: true", "stance: none"):
+            self.assertIn(f"\n{line}\n", head)
+        self.assertNotIn("\nfield:", head)   # a common unit: the route's field picks the reference
+
+    def test_each_field_carries_its_own_line_and_the_whole_must_layer(self):
+        must = _must_layer(self.UNIT)
+        for line in ("Do not change the target.", "Do not bring in new outside material",
+                     "name it as work for a research stage", "No conclusion without evidence."):
+            self.assertIn(line, must)
+        for field in FIELDS:
+            text = W.unit_persona_body(ROOT, self.UNIT, field)
+            self.assertIn(must, text, field)
+            for other, line in self.LINES.items():
+                self.assertEqual(line in text, field in (None, other), (field, other))
+            self.assertEqual("## 갈래의 기본" in text, field not in (None, "other"), field)
+        lab = W.unit_persona_body(ROOT, self.UNIT, "lab")
+        self.assertIn("follow the result diagnosis in `qa/ml-debug`", lab)
+        self.assertIn("`autopilot-lab:diagnose` is the review that judges it", lab)
+        self.assertIn("## 갈래의 기본 — lab", lab)
+        self.assertEqual(W.unit_persona_body(ROOT, self.UNIT, None), _raw(self.UNIT))
+
+    def test_the_rendered_text_stays_small(self):
+        sizes = {field: len(W.unit_persona_body(ROOT, self.UNIT, field).encode("utf-8")) for field in FIELDS}
+        self.assertLess(max(sizes.values()), 4500, sizes)
+        self.assertLess(sizes["other"], sizes[None])   # one field's line, not six
+
+
 class RouteFieldTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -267,6 +308,17 @@ class ThreeHarnessRenderTest(unittest.TestCase):
         docs = self.stage_text("codex", self.stage_args(self.route({"field": "docs"})))
         self.assertIn("## 갈래의 기본 — docs", docs)
         self.assertNotIn("PyTorch", docs)
+
+    def test_the_analysis_stage_is_one_render_across_the_harnesses(self):
+        for field in ("code", "lab", "docs", None):
+            path = self.route({"field": field})
+            args = self.stage_args(path, unit="analysis/analyze", worker_type="stage")
+            texts = {harness: self.stage_text(harness, args) for harness in self.HARNESSES}
+            self.assertEqual(len(set(texts.values())), 1, field)
+            self.assertEqual(texts["claude"], W.render_worker_bootstrap(ROOT, "stage", unit="analysis/analyze",
+                                                                        field=field))
+            self.assertIn(_must_layer("analysis/analyze"), texts["claude"])
+            self.assertEqual("### 참고 — code" in texts["claude"], field in ("code", None), field)
 
     def test_an_unreadable_route_still_renders_the_unit_text_as_written(self):
         for path in (str(self.tmp / "missing.json"), self.route({"field": "docs"}).replace("route-", "gone-")):

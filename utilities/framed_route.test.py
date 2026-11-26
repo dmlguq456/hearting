@@ -512,7 +512,28 @@ class RegistryRegistrationTest(unittest.TestCase):
         self._assert_audit_report_delta_and_restore(layout)
         self._assert_draft_project_scope_delta_and_restore(layout)
         self._assert_field_delta_and_restore(layout)
+        self._assert_borrowed_read_parts_delta_and_restore(layout)
         return layout
+
+    def _assert_borrowed_read_parts_delta_and_restore(self, registry):
+        # Routing redesign piece 10/11 intentionally adds the analysis unit family, its one
+        # borrowable read part and that part's unit-io gate, and lets three read-only review
+        # parts be borrowed by another kind; nothing else.
+        families = registry["unit_families"]
+        self.assertEqual(families.count("analysis"), 1)
+        families.remove("analysis")
+        parts = registry["part_catalog"]["parts"]
+        self.assertEqual(parts.pop("analyze-project:analysis")["optional"]["node"]["unit"], "analysis/analyze")
+        # Each borrowable review's summary gains one clause saying which text it fits.
+        summaries = {"autopilot-draft:quality-review": "Review the draft for structure and style.",
+                     "autopilot-draft:fact-verify": "Verify the draft's claims against the evidence map.",
+                     "audit:inspect": "Inspect the target artifact for drift, omissions and unsupported claims."}
+        for part, summary in summaries.items():
+            self.assertIs(parts[part].pop("shareable"), True, part)
+            self.assertTrue(parts[part]["summary"].startswith(summary[:-1] + "; borrowed, it fits "), part)
+            parts[part]["summary"] = summary
+        self.assertEqual(registry["completion_gate_contracts"].pop("analysis-answer"),
+                         {"kind": "unit-io", "unit": "analysis/analyze"})
 
     def _assert_field_delta_and_restore(self, registry):
         # Routing redesign piece 4 intentionally adds the field vocabulary, each

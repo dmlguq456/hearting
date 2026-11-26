@@ -2,7 +2,7 @@
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
-import importlib.util,os,subprocess,sys,tempfile,unittest
+import importlib.util,os,shutil,subprocess,sys,tempfile,unittest
 import contextlib,hashlib,io,json
 from contextlib import ExitStack
 from pathlib import Path
@@ -95,6 +95,32 @@ class TestSmoke(unittest.TestCase):
    self.assertRaisesRegex(ValueError,'environment mismatch',M.verify_execution_environment,
        data,["env","-i","PATH="+CLEAN_ENV["PATH"],sys.executable,"-c","pass"],td,
        environ=CLEAN_ENV)
+
+ def test_unset_path_identity_follows_exec_search_and_accepts_older_records(self):
+  import resource_execution_environment as ENV
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td); shim_dir=root/'bin'; shim_dir.mkdir()
+   shim=shim_dir/'sh'; shim.write_text('#!/bin/sh\nexit 87\n'); shim.chmod(0o755)
+   ambient={"PATH":f"{shim_dir}:/usr/bin:/bin"}
+   command=["/usr/bin/env","-u","PATH","sh","-c","pass"]
+   exact=ENV.execution_identity(command,td,environ=ambient)
+   with mock.patch.dict(os.environ,ambient):
+    # Earlier releases searched the PATH of the process that computed the record.
+    older=ENV.execution_identity(command,td,environ=ambient,legacy_lookup=True)
+   # exec searches its default path once PATH is unset, so the shim is never run.
+   self.assertEqual(exact["interpreter"],str(Path(shutil.which("sh",path=os.defpath)).resolve()))
+   self.assertNotEqual(exact["interpreter"],str(shim))
+   self.assertEqual(older["interpreter"],str(shim))
+   owner={"PATH":"/usr/bin:/bin"}
+   self.assertEqual(exact,ENV.execution_identity(command,td,environ=owner))
+   self.assertTrue(M.verify_execution_environment({"execution_environment":exact},command,td,environ=owner))
+   # An older record matches only the launcher PATH it was made with.
+   older_data={"execution_environment":older}
+   with mock.patch.dict(os.environ,ambient):
+    self.assertTrue(M.verify_execution_environment(older_data,command,td,environ=owner))
+   with mock.patch.dict(os.environ,owner):
+    self.assertRaisesRegex(ValueError,'environment mismatch',
+        M.verify_execution_environment,older_data,command,td,environ=owner)
 
  def _sealed_repo(self, td):
   root=Path(td); repo=root/"repo"; (repo/"configs").mkdir(parents=True)

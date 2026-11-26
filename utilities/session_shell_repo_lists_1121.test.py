@@ -8,7 +8,8 @@ the panel's STATUS part and BACKLOG part under the REPO group, and the BACKLOG p
    never give up a row for the new parts (they go on MESSAGES, MEM, the SESSION head, then Git, PEERS and the two heads together: a head never stands without Git).
 3. The bottom layout has no list: its first row ends in `STATUS +N ›  BACKLOG +N ›` and the panel is no taller.
 4. The two parts' items come with the status value (one read, the document read again only where it changed: `have`), and the panel's drawing reads no file.
-5. The BACKLOG popup is the status popup's list screen (`status-list.cjs`) over `<artifact root>/backlog.md`; its groups are the document's `##` headings as written.
+5. The BACKLOG popup is the status popup's list screen (`status-list.cjs`) over `<artifact root>/backlog.md` (11-26: the board of scheme A, its own tests in
+   `utilities/session_shell_backlog_board_1126.test.py`); its campaigns are the document's `##` headings as written.
 6. (From the review of #1793) a list dropped for its size leaves no stale style index; the document's rows are made only where the list is dropped.
 """
 import os, sys  # noqa: E401
@@ -42,8 +43,10 @@ const route=i=>({id:'rt-'+i,title:'시험용 작업 '+i,kind:'working',state:'wo
   paint:{glyph:t('⠏','g_spin'),harness:t('claude','hb_claude'),model_text:t('Opus 5.5','hb_claude'),effort:t('xhigh','dim'),ctx:t('52%','lvl_g'),gauge5:[t('━━━','lvl_g'),t('──'),t(' '),t('52%','lvl_g')]}});
 // The two parts' values as the host holds them: `{word, has_doc, items: [{mark, text, key}], total}`.
 const SI=[{mark:'!',text:'시험용 정할 것 하나',key:'i:a1'},{mark:'',text:'시험용 하는 일 하나 · #101',key:'i:a2'},{mark:'',text:'시험용 하는 일 둘 — 제목이 길면 이렇게 잘린다 이렇게 길게 이어지는 시험용 제목입니다',key:'i:a3'}];
-const BI=[{mark:'',text:'시험용 나중 일 하나',key:'i:b1'},{mark:'',text:'시험용 나중 일 둘',key:'i:b2'},{mark:'',text:'시험용 나중 일 셋',key:'i:b3'}];
-const part=(word,list,n,total,has=true)=>({word,has_doc:has,items:list.slice(0,n),total});
+// (11-26, panel B: the BACKLOG items are the ones the backend chose by the person's priority, each with its four values.)
+const BI=[{mark:'',text:'시험용 나중 일 하나',key:'i:b1',kind:'task',state:'ready',area:'Panel',date:'2026-11-26'},{mark:'',text:'시험용 나중 일 둘',key:'i:b2',kind:'fix',state:'discuss',date:'2026-11-20'},
+  {mark:'',text:'시험용 나중 일 셋',key:'i:b3',kind:'note',date:'2025-12-01'}];
+const part=(word,list,n,total,has=true)=>({word,has_doc:has,items:list.slice(0,n),total,...(word==='BACKLOG'?{year:2026}:{})});
 const status=(n=3,total=5,has=true)=>part('STATUS',SI,n,total,has),backlog=(n=3,total=14,has=true)=>part('BACKLOG',BI,n,total,has);
 function model(o={}){
   const routes=Array.from({length:o.routes??0},(_,i)=>route(i+1));
@@ -72,38 +75,40 @@ class PanelListsTest(unittest.TestCase):
         return result.stdout
 
     def test_the_picture_under_the_repo_group_and_the_count_of_what_is_not_shown(self):
+        # 11-26 (panel B; the person: "STATUS는 그냥 버튼만 만들고 목록은 없애는게 좋겠어. 백로그는 사용자가 말한 우선순위로 최대 3개 정도만 띄우고"):
+        # the repository is one row (its Git words in parentheses), STATUS its head alone with the board's whole count, BACKLOG its head
+        # (`+N` the items not shown) and the chosen items state first, then the SESSION rule without a word.
         self.node(r"""
 const v=draw({status:status(),backlog:backlog(),routes:1,messages:3,mem:2,height:40}),ls=lines(v);
 const want=[
-'│ REPO hearting · wt 12 ───────────────────────────────── │',
-'│  GIT    branch ✓                                        │',
+'│  REPO   hearting (branch ✓)  wt 12                      │',
 '│  PEERS  [e9] ⚑  ─ [d4]                                  │',
-'│  STATUS +2                                            › │',
-'│   ! 시험용 정할 것 하나                                 │',
-'│   · 시험용 하는 일 하나 · #101                          │',
-'│   · 시험용 하는 일 둘 — 제목이 길면 이렇게 잘린다 이렇… │',
+'│  STATUS 5                                             › │',
 '│  BACKLOG +11                                          › │',
-'│   · 시험용 나중 일 하나                                 │',
-'│   · 시험용 나중 일 둘                                   │',
-'│   · 시험용 나중 일 셋                                   │',
-'│ SESSION ─────────────────────────────────────────────── │'];
-assert.deepEqual(ls.slice(1,13),want,ls.join('\n'));
+'│   · Ready   TASK 11-26    Panel    시험용 나중 일 하나  │',
+'│   · Discuss FIX  11-20    —        시험용 나중 일 둘    │',
+'│   · —       NOTE 25-12-01 —        시험용 나중 일 셋    │',
+'│ ─────────────────────────────────────────────────────── │'];
+assert.deepEqual(ls.slice(1,9),want,ls.join('\n'));
 assert(ls.every(l=>cells(l)===59));
-// `+N` is the head's own text in the MESSAGES head's colour (`loc_repo`); the mark of what waits is the status list's own yellow.
-const row=v.rows[4],plus=row.find(p=>p.text==='+2');assert(plus&&plus.foreground===253,JSON.stringify(row));
-{const w=v.rows[5].find(p=>p.text==='! '),d=v.rows[6].find(p=>p.text==='· ');assert(w&&w.foreground===186&&d&&d.dim===true,JSON.stringify([v.rows[5],v.rows[6]]));}
-// No `+N` where every item shows (the total is the three), and none for a total that was not told.
+assert(!v.hits.some(h=>/^popup:STATUS:/.test(h.action)),'no STATUS item and no press on one');
+// The counts in the MESSAGES head's colour (`loc_repo`); the states the caution yellow, bold (Discuss, Waiting), Ready dim; the kinds the colour table's.
+{const st=v.rows[3].find(p=>p.text==='5'),bk=v.rows[4].find(p=>p.text===' +11');assert(st&&st.foreground===253&&bk&&bk.foreground===253,JSON.stringify([v.rows[3],v.rows[4]]));}
+{const ready=v.rows[5].find(p=>/^Ready/.test(p.text)),talk=v.rows[6].find(p=>/^Discuss/.test(p.text)),task=v.rows[5].find(p=>p.text==='TASK'),fix=v.rows[6].find(p=>p.text==='FIX ');
+ assert(ready.dim===true&&talk.foreground===186&&talk.bold===true&&task.foreground===150&&fix.foreground===186,JSON.stringify([v.rows[5],v.rows[6]]));}
+// No `+N` where every item shows (the total is the two), and STATUS's count is the whole one.
 {const a=inside(draw({status:status(3,3),backlog:backlog(2,2),height:40}));
- assert(a.some(l=>/^ STATUS +›$/.test(l))&&a.some(l=>/^ BACKLOG +›$/.test(l)),a.join('\n'));}
+ assert(a.some(l=>/^ STATUS 3 +›$/.test(l))&&a.some(l=>/^ BACKLOG +›$/.test(l))&&a.filter(l=>/^  · /.test(l)).length===2,a.join('\n'));}
+// A total that was not told: STATUS counts what came, BACKLOG has no item and no count.
 {const a=inside(draw({status:{word:'STATUS',has_doc:true,items:SI},backlog:{word:'BACKLOG',has_doc:true},height:40}));
- assert(a.some(l=>/^ STATUS +›$/.test(l))&&a.some(l=>/^ BACKLOG +›$/.test(l))&&a.filter(l=>/^  [!·] /.test(l)).length===3,a.join('\n'));}
-// No item: the head alone (no empty row). A total of nothing and a total with no items shown (the host holds the count only) say `+N`.
+ assert(a.some(l=>/^ STATUS 3 +›$/.test(l))&&a.some(l=>/^ BACKLOG +›$/.test(l))&&a.filter(l=>/^  [!·] /.test(l)).length===0,a.join('\n'));}
+// No item: the head alone (no empty row), then the SESSION rule. A total with no items shown says it.
 {const a=inside(draw({status:status(0,0),backlog:backlog(0,0),height:40}));
- const at=a.findIndex(l=>/^ STATUS/.test(l));assert(/^ BACKLOG/.test(a[at+1])&&/^SESSION/.test(a[at+2]),a.join('\n'));}
-{const a=inside(draw({status:status(0,7),backlog:backlog(0,9),height:40}));assert(a.some(l=>/^ STATUS \+7 +›$/.test(l))&&a.some(l=>/^ BACKLOG \+9 +›$/.test(l)),a.join('\n'));}
-// The REPO row has no button now, and the heads stand between PEERS and SESSION.
-{const a=inside(draw({status:status(),backlog:backlog(),height:40}));assert(!a[1].includes('›')&&/^REPO hearting · wt 12 ─+$/.test(a[1]),a[1]);
- const at=n=>a.findIndex(l=>l.trimStart().startsWith(n));assert(at('PEERS')<at('STATUS')&&at('STATUS')<at('BACKLOG')&&at('BACKLOG')<at('SESSION'));}
+ const at=a.findIndex(l=>/^ STATUS/.test(l));assert(/^ STATUS +›$/.test(a[at])&&/^ BACKLOG +›$/.test(a[at+1])&&/^─+$/.test(a[at+2]),a.join('\n'));}
+{const a=inside(draw({status:status(0,7),backlog:backlog(0,9),height:40}));assert(a.some(l=>/^ STATUS 7 +›$/.test(l))&&a.some(l=>/^ BACKLOG \+9 +›$/.test(l)),a.join('\n'));}
+// The REPO row has no button, and the heads stand between PEERS and the SESSION rule.
+{const a=inside(draw({status:status(),backlog:backlog(),height:40}));assert(!a[1].includes('›')&&/^ REPO   hearting \(branch ✓\)  wt 12$/.test(a[1]),a[1]);
+ const at=re=>a.findIndex(l=>re.test(l));assert(at(/^ PEERS/)<at(/^ STATUS/)&&at(/^ STATUS/)<at(/^ BACKLOG/)&&at(/^ BACKLOG/)<at(/^─+$/));}
 """)
 
     def test_a_missing_document_is_a_dim_word_and_no_root_has_no_part(self):
@@ -130,14 +135,15 @@ const v=draw({status:status(),backlog:backlog(),height:40}),a=inside(v);
 const at=re=>a.findIndex(l=>re.test(l));
 const sh=at(/^ STATUS/),bh=at(/^ BACKLOG/);
 const acts=v.hits.filter(h=>/popup:(STATUS|BACKLOG)/.test(h.action)).map(h=>[h.row,h.action]);
-assert.deepEqual(acts,[[sh,'popup:STATUS'],[sh+1,'popup:STATUS:i:a1'],[sh+2,'popup:STATUS:i:a2'],[sh+3,'popup:STATUS:i:a3'],
-  [bh,'popup:BACKLOG'],[bh+1,'popup:BACKLOG:i:b1'],[bh+2,'popup:BACKLOG:i:b2'],[bh+3,'popup:BACKLOG:i:b3']],JSON.stringify(acts));
-// A press stands for the whole row; no press on the REPO, GIT, PEERS or SESSION rows.
+// 11-26 (panel B): STATUS is its head alone (no item, no press on one); BACKLOG's chosen items open the board standing on them.
+assert.deepEqual(acts,[[sh,'popup:STATUS'],[bh,'popup:BACKLOG'],[bh+1,'popup:BACKLOG:i:b1'],[bh+2,'popup:BACKLOG:i:b2'],[bh+3,'popup:BACKLOG:i:b3']],JSON.stringify(acts));
+assert.equal(bh,sh+1);
+// A press stands for the whole row; no press on the REPO, PEERS or SESSION rows.
 assert(v.hits.filter(h=>/popup:(STATUS|BACKLOG)/.test(h.action)).every(h=>h.left===2&&h.right===56));
 assert(!v.hits.some(h=>h.row<sh&&/STATUS|BACKLOG/.test(h.action)));
 // An item with no key opens the popup at its top: the head's own press.
-{const w=draw({status:{...status(),items:[{mark:'',text:'시험용 키 없음'}]},backlog:backlog(0,0),height:40});
- assert(w.hits.some(h=>h.action==='popup:STATUS'&&inside(w)[h.row]==='  · 시험용 키 없음'),JSON.stringify(w.hits));}
+{const w=draw({status:status(),backlog:{...backlog(),items:[{mark:'',text:'시험용 키 없음'}]},height:40});
+ assert(w.hits.some(h=>h.action==='popup:BACKLOG'&&/^  · —       TBD  —     —        시험용 키 없음$/.test(inside(w)[h.row])),JSON.stringify(w.hits)+'\n'+inside(w).join('\n'));}
 """)
 
     def test_narrow_panels_cut_the_head_and_the_items(self):
@@ -146,14 +152,20 @@ for(const width of [59,44,40,36,32,30]){
   const v=draw({width,status:status(),backlog:backlog(),height:50}),ls=lines(v),a=inside(v);
   assert(ls.every(l=>cells(l)===width),width+'\n'+ls.join('\n'));
   const sh=a.findIndex(l=>/^ STATUS/.test(l)),bh=a.findIndex(l=>/^ BACKLOG/.test(l));
-  assert(sh>0&&bh===sh+4,width+'\n'+ls.join('\n'));
-  assert(/^ STATUS( \+2)? +›$/.test(a[sh])&&/^ BACKLOG( \+11)? +›$/.test(a[bh]),a[sh]+'|'+a[bh]);
-  assert.equal(a[sh+1].slice(0,4),'  ! ');assert(a[sh+3].endsWith('…'),a[sh+3]);   // the long title is cut at the width
+  assert(sh>0&&bh===sh+1,width+'\n'+ls.join('\n'));   // (11-26, panel B: STATUS lists nothing)
+  assert(/^ STATUS 5 +›$/.test(a[sh])&&/^ BACKLOG \+11 +›$/.test(a[bh]),a[sh]+'|'+a[bh]);
+  // The items state first; the area from 55 cells inside; the title is cut at the width. The date column is as wide as the widest date shown (one of
+  // another year here, eight cells), so under 36 cells it goes before the title is left under three cells (a date of this year alone stays at 30: below).
+  if(width>=36)assert(/^  · Ready   TASK 11-26 /.test(a[bh+1])&&/^  · Discuss FIX  11-20 /.test(a[bh+2])&&/^  · —       NOTE 25-12-01 /.test(a[bh+3]),width+'\n'+a.join('\n'));
+  else assert(/^  · Ready   TASK 시험용/.test(a[bh+1])&&/^  · —       NOTE 시험용/.test(a[bh+3]),width+'\n'+a.join('\n'));
+  assert.equal(a[bh+1].includes('Panel'),width>=59,a[bh+1]);
+  if(width<=44)assert(a[bh+1].endsWith('…'),a[bh+1]);
 }
-// The least a head is: ` STATUS +2 ›` (the count gives way to nothing but a space and `›` before the word does).
-{const v=draw({width:24,status:status(),backlog:backlog(),height:50}),a=inside(v);assert(a.some(l=>/^ STATUS( \+2)? *›$/.test(l)),a.join('\n'));}
+{const a=inside(draw({width:30,status:status(),backlog:backlog(2,14),height:50}));assert(/^  · Ready   TASK 11-26 시…$/.test(a.find(l=>/^  · Ready/.test(l))),a.join('\n'));}
+// The least a head is: ` STATUS 5 ›` (the count gives way to nothing but a space and `›` before the word does).
+{const v=draw({width:24,status:status(),backlog:backlog(),height:50}),a=inside(v);assert(a.some(l=>/^ STATUS( 5)? *›$/.test(l))&&lines(v).every(l=>cells(l)===24),a.join('\n'));}
 // Hangul is two cells: a row never passes the panel.
-{const v=draw({width:30,status:{...status(),items:[{mark:'!',text:'한글로만 이루어진 아주 긴 제목이라서 잘려야 합니다 한글로만',key:'i:x'}]},backlog:backlog(0,0),height:50});
+{const v=draw({width:30,status:status(),backlog:{...backlog(),items:[{...BI[0],text:'한글로만 이루어진 아주 긴 제목이라서 잘려야 합니다 한글로만',key:'i:x'}]},height:50});
  assert(lines(v).every(l=>cells(l)===30));}
 """)
 
@@ -204,7 +216,7 @@ for(const width of [59,44,40,30])for(let height=6;height<=60;height++)for(const 
       const have=[3,1,0,0,0][n],bItems=items(p,'BACKLOG'),sItems=items(p,'STATUS'),blank=p.rows.filter(r=>r.k==='blank').length;
       if(bItems<have)short++;
       assert(!(bItems<have&&blank>0),'a BACKLOG item short with an empty row\n'+where);
-      assert(!(bItems>0&&sItems<[3,1,0,0,3][n]),'a BACKLOG item standing with a STATUS item short\n'+where);
+      assert.equal(sItems,0,'no STATUS item at any size (11-26, panel B)\n'+where);
       assert(!v.hits.some(h=>h.row===1&&/^popup:(STATUS|BACKLOG)/.test(h.action)),'no buttons beside the heads\n'+where);
     }else{
       off++;
@@ -220,6 +232,8 @@ assert(up>1000&&off>1000&&short>100,[cases,up,off,short].join(' '));
 
     def test_the_lists_give_way_first_and_in_their_order_as_the_height_falls(self):
         # Height by height: the BACKLOG items, then MESSAGES and MEM fold (each keeps its head and one row; the rows a fold leaves empty are the BACKLOG items' again), then the STATUS items, then the two heads (the REPO row takes the buttons).
+        # 11-26 (panel B): STATUS lists nothing; the BACKLOG items the person ranked stand on the rows the STATUS items and the BACKLOG items held, so
+        # MESSAGES and MEM fold first, then the BACKLOG items go (the last first), then the two heads.
         self.node(self.SORT + r"""
 const o={width:44,question:true,routes:3,messages:7,mem:5,peers:true};
 const seen=[];
@@ -230,8 +244,9 @@ for(let h=70;h>=14;h--){
   seen.push(r);const w=JSON.stringify(r)+'\n'+p.lines.join('\n');
   assert.deepEqual(rest(p),rest(base),w);
   if(r.heads){
-    // STATUS items give way only once MESSAGES and MEM are down to one row each, and then BACKLOG has none.
-    if(r.s<3)assert(r.b===0&&r.msg<=1&&r.mem<=1,w);
+    // No STATUS item; the BACKLOG items give way only once MESSAGES and MEM are down to one row each.
+    assert.equal(r.s,0,w);
+    if(r.b<3)assert(r.msg<=1&&r.mem<=1,w);
     // A BACKLOG item missing while a row is empty: never (a fold that frees several rows at once leaves some, and the BACKLOG items stand on them again).
     if(r.b<3)assert.equal(r.gap,0,w);
   }else{
@@ -242,18 +257,23 @@ for(let h=70;h>=14;h--){
 // Falling, the STATUS items and the heads only go. (The BACKLOG items may stand again where a fold leaves empty rows: the layout without the lists is not monotonic in the height either.)
 for(let i=1;i<seen.length;i++){const a=seen[i-1],b=seen[i];assert(b.s<=a.s&&b.heads<=a.heads,JSON.stringify([a,b]));}
 assert(seen.some(r=>r.heads&&r.b>0&&(r.msg<r.msg0||r.mem<r.mem0)),'the BACKLOG items stand on the rows a fold left');
-// And the four steps all stand in this run, in this order.
+// And the three steps all stand in this run, in this order.
 const first=f=>seen.findIndex(f);
-const at=[first(r=>r.heads&&r.b<3),first(r=>r.heads&&(r.msg<r.msg0||r.mem<r.mem0)),first(r=>r.heads&&r.s<3),first(r=>!r.heads)];
-assert(at.every(x=>x>0)&&at[0]<at[1]&&at[1]<at[2]&&at[2]<at[3],JSON.stringify({at,seen:seen.slice(0,3)}));
+const at=[first(r=>r.heads&&(r.msg<r.msg0||r.mem<r.mem0)),first(r=>r.heads&&r.b<3),first(r=>!r.heads)];
+assert(at.every(x=>x>0)&&at[0]<at[1]&&at[1]<at[2],JSON.stringify({at,seen:seen.slice(0,3)}));
 // The full panel stands whole and the same at a height with room to spare.
-assert.deepEqual([seen[0].b,seen[0].s,seen[0].heads],[3,3,2]);
+assert.deepEqual([seen[0].b,seen[0].s,seen[0].heads],[3,0,2]);
 """)
 
     def test_the_repo_row_ends_in_the_two_buttons_where_the_heads_go_and_gives_way_as_the_bottom_row_does(self):
         self.node(self.SORT + r"""
 const press=(v,a)=>v.hits.find(h=>h.row===1&&h.action===a);
-for(const [w,want] of [[59,/^REPO hearting · wt 12 +STATUS \+5 ›  BACKLOG \+14 ›$/],[44,/^REPO hearting +STATUS ›  BACKLOG ›$/],[40,/^REPO hearting +STATUS ›  BACKLOG ›$/],[30,/^REPO hearting · wt 12 ›  ›$/]]){
+// 11-26 (panel B): the row's value is the repository row's, its Git words in parentheses; it stays whole (`wt` and the label's column go first; the
+// branch is cut only where the name and the Git status stay whole) and the buttons give way to `›` where both do not fit.
+// (fix 1 of #1863: the buttons' numbers mean what the heads' do, `STATUS 5` and `BACKLOG +14`; fix 2: the buttons fold before a letter of the
+// name or the branch goes, then the longer of the two goes first, the status last)
+for(const [w,want] of [[59,/^ REPO   hearting \(branch ✓\)   STATUS 5 ›  BACKLOG \+14 ›$/],[50,/^ REPO hearting \(branch ✓\)  STATUS ›  BACKLOG ›$/],[44,/^ REPO   hearting \(branch ✓\)  wt 12  ›  ›$/],
+  [40,/^ REPO   hearting \(branch ✓\) +›  ›$/],[30,/^ REPO hear… \(bran… ✓\) ›  ›$/]]){
   const v=drawN({width:w,height:14,question:true,routes:3,messages:7,mem:5,peers:true,status:status(),backlog:backlog()}),p=sort(v);
   assert(!p.rows.some(r=>r.k==='list'),w+'\n'+p.lines.join('\n'));
   assert.match(p.rows[0].t.trimEnd(),want,w+' '+p.rows[0].t);
@@ -266,7 +286,8 @@ for(const [w,want] of [[59,/^REPO hearting · wt 12 +STATUS \+5 ›  BACKLOG \+1
 }
 // The counts give way first, then the words, as the bottom layout's first row: the same pieces at widths that cut them.
 {const at=(w,s,b)=>sort(drawN({width:w,height:14,question:true,routes:3,messages:7,mem:5,peers:true,status:status(3,s),backlog:backlog(3,b)})).rows[0].t.trimEnd();
- assert.match(at(59,5,14),/STATUS \+5 ›  BACKLOG \+14 ›$/);assert.match(at(50,5,14),/STATUS \+5 ›  BACKLOG \+14 ›$/);assert.match(at(44,5,14),/hearting +STATUS ›  BACKLOG ›$/);
+ assert.match(at(59,5,14),/STATUS 5 ›  BACKLOG \+14 ›$/);assert.match(at(54,5,14),/\(branch ✓\) +STATUS ›  BACKLOG ›$/);assert.match(at(50,5,14),/\(branch ✓\)  STATUS ›  BACKLOG ›$/);
+ assert.match(at(44,5,14),/\(branch ✓\)  wt 12  ›  ›$/);assert.match(at(59,0,0),/ STATUS ›  BACKLOG › *$/);
  // Only the STATUS value (no backlog value): one button, the whole row is its press.
  const v=drawN({width:44,height:14,question:true,routes:3,messages:7,mem:5,peers:true,status:status(3,5)}),h=v.hits.filter(x=>x.row===1);
  assert.deepEqual(h.map(x=>x.action),['popup:STATUS']);assert.equal(h[0].right,44-3);}
@@ -350,6 +371,11 @@ BACKLOG = """# 시험용 백로그
 - 정해지지 않은 일
 """
 
+# 11-26 (panel B): the same document with the order the person gave (`priority:`, 1 first; the same number in the document's order). The panel's items
+# are these alone: 일 둘 (1), 일 하나 (2, first in the document), 다른 일 (2); the item with no priority is never chosen.
+RANKED = (BACKLOG.replace("  date: 2026-11-20\n", "  date: 2026-11-20\n  priority: 2\n").replace("- 일 둘\n", "- 일 둘\n  priority: 1\n")
+          .replace("- 다른 일\n", "- 다른 일\n  priority: 2\n"))
+
 STATUS_PAGE = """<!-- hearting:campaign-document v1 -->
 # 시험용 캠페인
 
@@ -410,18 +436,27 @@ class BackendTest(unittest.TestCase):
         parsed = self.status.parse_backlog("## A\n- 1\n## A\n- 2\n- 3\n".splitlines())
         self.assertEqual([[i["text"] for i in g["items"]] for g in parsed["groups"]], [["1"], ["2", "3"]])
 
-    def test_the_panels_backlog_items_are_this_windows_campaign_first_then_the_rest_and_the_count_is_the_whole_documents(self):
-        parsed = self.status.parse_backlog(BACKLOG.splitlines())
-        items, total = self.status.panel_backlog_items(parsed, "2026-11-02_some-campaign")
-        self.assertEqual([i["text"] for i in items], ["일 하나", "일 둘", "다른 일"])
-        self.assertEqual(total, 4)
-        items, total = self.status.panel_backlog_items(parsed, "2026-10-01_other-campaign")
-        self.assertEqual([i["text"] for i in items], ["다른 일", "일 하나", "일 둘"])
-        items, total = self.status.panel_backlog_items(parsed, "")                         # no campaign known: the document's order
-        self.assertEqual([i["text"] for i in items], ["일 하나", "일 둘", "다른 일"])
-        items, total = self.status.panel_backlog_items(parsed, "2026-11-02_some-campaign-2")    # the name is the folder's, letter for letter
-        self.assertEqual([i["text"] for i in items], ["일 하나", "일 둘", "다른 일"])
+    def test_the_panels_backlog_items_are_the_newest_whatever_the_window_and_the_count_is_the_whole_documents(self):
+        # 11-26 (panel B; the person: "백로그는 사용자가 말한 우선순위로 최대 3개 정도만 띄우고"): only the items with a `priority:` line, the smallest first,
+        # the same number in the document's order, three at most, whichever this window's campaign is; the count is the whole document's.
+        parsed = self.status.parse_backlog(RANKED.splitlines())
+        for own in ("2026-11-02_some-campaign", "2026-10-01_other-campaign", "", "2026-11-02_some-campaign-2"):
+            items, total = self.status.panel_backlog_items(parsed, own)
+            self.assertEqual([i["text"] for i in items], ["일 둘", "일 하나", "다른 일"], own)
+            self.assertEqual(total, 4)
         self.assertTrue(all(i["mark"] == "" and i["key"].startswith("i:") for i in items))
+        self.assertEqual([(i["date"], i["kind"], i["state"], i["area"]) for i in items], [("", "tbd", "", ""), ("2026-11-20", "tbd", "", ""), ("", "tbd", "", "")])
+        self.assertTrue(all("priority" not in i for i in items))                  # the number is not drawn, so it is not sent
+        # No item ranked: none chosen (no date or Discuss fills a place). Three at most.
+        self.assertEqual(self.status.panel_backlog_items(self.status.parse_backlog(BACKLOG.splitlines()), "")[0], [])
+        four = RANKED.replace("- 정해지지 않은 일\n", "- 정해지지 않은 일\n  priority: 1\n")
+        self.assertEqual([i["text"] for i in self.status.panel_backlog_items(self.status.parse_backlog(four.splitlines()), "")[0]], ["일 둘", "정해지지 않은 일", "일 하나"])
+        # A wrong value leaves the item unranked and the document opens (0, a sign, a fraction, a word, two different numbers); the same number twice is it.
+        for value in ("0", "-1", "1.5", "first", "1 2"):
+            body = "## A\n- 하나\n  priority: %s\n- 둘\n  priority: 3\n" % value
+            self.assertEqual([i["text"] for i in self.status.panel_backlog_items(self.status.parse_backlog(body.splitlines()), "")[0]], ["둘"], value)
+        body = "## A\n- 하나\n  priority: 2\n  priority: 1\n- 둘\n  priority: 3\n  priority: 3\n"
+        self.assertEqual([i["text"] for i in self.status.panel_backlog_items(self.status.parse_backlog(body.splitlines()), "")[0]], ["둘"])
 
     def test_the_panels_status_items_are_the_list_screens_order_what_runs_with_its_keys_and_no_question(self):
         for page in (STATUS_PAGE, STATUS_PAGE_OLD):              # the older page, with its `기다리는 것`, gives the same items
@@ -482,16 +517,17 @@ class BackendTest(unittest.TestCase):
         hand = self.page("2026-11-03_hand", "# 손으로 쓴 글\n\n## 하는 중\n- 하나\n")
         self.assertEqual(self.status.panel_lists(self.cwd, hand, {})["status"]["items"], [])
 
-    def test_a_change_of_the_windows_campaign_folder_reads_the_backlog_again_because_its_order_is_made_for_that_folder(self):
-        self.backlog()
+    def test_a_change_of_the_windows_campaign_folder_reads_the_backlog_again_and_its_order_stays_the_dates(self):
+        # (11-26, panel B: the order is the person's, the same for every folder.)
+        self.backlog(RANKED)
         mine, other = self.page("2026-11-02_some-campaign"), self.page("2026-10-01_other-campaign")
         first = self.status.panel_lists(self.cwd, mine, {}, now=time.time())
         have = {"status": first["status"]["sign"], "backlog": first["backlog"]["sign"]}
-        self.assertEqual([i["text"] for i in first["backlog"]["items"]], ["일 하나", "일 둘", "다른 일"])
-        # The same backlog.md, the window in another campaign's folder: not "same", and that folder's group stands first.
+        self.assertEqual([i["text"] for i in first["backlog"]["items"]], ["일 둘", "일 하나", "다른 일"])
+        # The same backlog.md, the window in another campaign's folder: not "same" (the sign names the folder), and (11-26) the order is the person's.
         second = self.status.panel_lists(self.cwd, other, have, now=time.time())
         self.assertNotEqual(second["backlog"], {"same": True})
-        self.assertEqual([i["text"] for i in second["backlog"]["items"]], ["다른 일", "일 하나", "일 둘"])
+        self.assertEqual([i["text"] for i in second["backlog"]["items"]], ["일 둘", "일 하나", "다른 일"])
         self.assertNotEqual(second["backlog"]["sign"], first["backlog"]["sign"])
         # (the sign is still one opaque text; the same folder again is "same")
         self.assertIsInstance(second["backlog"]["sign"], str)
@@ -512,10 +548,10 @@ vm.runInContext(cut('let statusValue=null,','// At a projection:')+'\nthis.api={
 const settle=()=>new Promise(r=>setTimeout(r,10)),texts=()=>ctx.api.backlogDoc().items.map(i=>i.text);
 (async()=>{
   ctx.askStatus();await settle();
-  same([ctx.api.ownFolder(),texts()],['2026-11-02_some-campaign',['일 하나','일 둘','다른 일']]);
+  same([ctx.api.ownFolder(),texts()],['2026-11-02_some-campaign',['일 둘','일 하나','다른 일']]);
   ctx.askStatus();await settle();
   assert(asked[1].have.backlog);
-  same([ctx.api.ownFolder(),texts()],['2026-10-01_other-campaign',['다른 일','일 하나','일 둘']]);
+  same([ctx.api.ownFolder(),texts()],['2026-10-01_other-campaign',['일 둘','일 하나','다른 일']]);
 })().catch(e=>{console.error(e);process.exit(1);});
 """, str(SHELL), str(path)], capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -540,24 +576,26 @@ const settle=()=>new Promise(r=>setTimeout(r,10)),texts=()=>ctx.api.backlogDoc()
         self.assertIsNone(self.status._sign(str(self.root / "none.md")))
 
     def test_a_panel_item_of_a_folded_group_is_a_line_of_the_popup_once_its_group_is_open(self):
-        sorted_backlog = BACKLOG.replace("- 다른 일\n", "- 다른 일\n  kind: fix\n")        # (11-22: the groups are the sorts) one FIX item stands open, the rest are the folded TBD group
+        sorted_backlog = RANKED.replace("- 다른 일\n", "- 다른 일\n  kind: fix\n")        # one FIX item: the board's first group (FIX) stands open, TBD is folded
         self.backlog(sorted_backlog)
-        own = "2026-10-01_other-campaign"           # one item of its own: the panel fills up with the other group's
-        items, _total = self.status.panel_backlog_items(self.status.parse_backlog(sorted_backlog.splitlines()), own, first=2)       # (the panel's keys are of the document the popup reads)
-        pressed = items[1]["key"]                    # the first of the group that is a folded line in the popup
+        items, _total = self.status.panel_backlog_items(self.status.parse_backlog(sorted_backlog.splitlines()), "", first=2)       # (the panel's keys are of the document the popup reads)
+        pressed = items[0]["key"]                    # the first the person ranked, a TBD item: a folded group of the board
         with tempfile.TemporaryDirectory(prefix="rlj") as folder:
             path = Path(folder) / "answer.json"
-            path.write_text(json.dumps(self.popup("list", own=own), ensure_ascii=False), encoding="utf-8")
+            path.write_text(json.dumps(self.popup("list"), ensure_ascii=False), encoding="utf-8")
             out = subprocess.run([NODE, "-e", r"""
 const fs=require('node:fs'),path=require('node:path');
-const list=require(path.join(process.argv[1],'status-list.cjs'));
-const entries=list.entriesOf(JSON.parse(fs.readFileSync(process.argv[2],'utf8'))),key=process.argv[3];
-const closed={sel:key,fold:new Set(),items:new Set()},gid=key.split(':')[1];
-const open={sel:key,fold:new Set([gid]),items:new Set()};
-console.log(JSON.stringify({closed:list.layout(entries,closed).fellBack,open:list.layout(entries,open).fellBack,stands:list.layout(entries,open).sel===key}));
+const list=require(path.join(process.argv[1],'status-list.cjs')),board=require(path.join(process.argv[1],'backlog-board.cjs'));
+const b=board.fromAnswer(JSON.parse(fs.readFileSync(process.argv[2],'utf8'))),key=process.argv[3];
+// (11-26) the board opened standing on the pressed item opens that item's group (`prepare`); without it the item is not on the screen
+const bare={sel:key,fold:new Set(),items:new Set()},bs0=board.newState();
+const closed=list.layout(board.entries(b,bs0),bare).fellBack;
+const t={sel:key,fold:new Set(),items:new Set()},bs=board.newState();board.prepare(b,bs,t);
+const v=list.layout(board.entries(b,bs),t);
+console.log(JSON.stringify({closed,open:v.fellBack,stands:v.sel===key,folded:[...t.fold]}));
 """, str(SHELL), str(path), pressed], capture_output=True, text=True, timeout=120)
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(json.loads(out.stdout), {"closed": True, "open": False, "stands": True})
+        self.assertEqual(json.loads(out.stdout), {"closed": True, "open": False, "stands": True, "folded": ["kind:=tbd"]})
 
     def test_the_status_read_carries_the_lists_and_asks_the_signs_back(self):
         value = {"word": "STATUS", "has_doc": True, "path": self.page()["path"], "title": "STATUS x", "slot": "", "watch": []}
@@ -573,38 +611,42 @@ console.log(JSON.stringify({closed:list.layout(entries,closed).fellBack,open:lis
         with mock.patch.object(self.status, "read", lambda cwd, routes=(), now=None: None):
             self.assertEqual(self.shell._panel_status({}, {"cwd": self.cwd, "routes": []}), {"ok": True, "status": None, "lists": None})
 
-    def popup(self, part, own="2026-11-02_some-campaign", width=80, kind="backlog", open=""):
+    def popup(self, part, own="2026-11-02_some-campaign", width=80, kind="backlog", open="", indent=0):
         binding = {"harness": "claude", "sid": "00000000-0000-4000-8000-000000000001"}
-        return self.shell._status_popup(binding, {"cwd": self.cwd, "routes": [], "status": {}, "part": part, "own": own, "open": open}, width, 256, False, kind)
+        return self.shell._status_popup(binding, {"cwd": self.cwd, "routes": [], "status": {}, "part": part, "own": own, "open": open, "indent": indent},
+                                        width, 256, False, kind)
 
     def test_the_backlog_popup_is_the_status_screens_own_parts_over_the_document(self):
         self.backlog()
         answer = self.popup("list")
         self.assertEqual((answer["ok"], answer["kind"], answer["part"], answer["rows"], answer["has_doc"]), (True, "backlog", "list", [], True))
         self.assertTrue(answer["title"].startswith("BACKLOG"))
-        entries = answer["list"]
-        shown = [("".join(run[0] for run in e["rows"][0]), e.get("key", "")[:2]) for e in entries]
-        # (11-22) the items stand by sort; a document with no `kind:` line is all TBD, one open group, and the sorts it has not told are `?`
-        self.assertEqual([t for t, _ in shown], ["시험용 백로그", "updated 11-21 11:02", "FIX ? · IMPR ? · TBD 4 · NOTE ? · 4 total", "", "TBD 4",
-                                                  "  일 하나", "  일 둘", "  다른 일", "  정해지지 않은 일", "", "  full document ›"])
-        self.assertEqual([k for _, k in shown], ["", "", "", "", "", "i:", "i:", "i:", "i:", "", "fu"])
-        # The answer carries titles only: an item opens to its lines (its sort first), which are asked for when it is opened, and no entry holds them.
-        self.assertTrue(all("more" not in e for e in entries))
-        self.assertEqual([bool(e.get("lazy")) for e in entries if e.get("key", "").startswith("i:")], [True, True, True, True])
-        self.assertNotIn("date: 2026-11-20", json.dumps(answer, ensure_ascii=False))
-        # The lines come with the item's own ask.
-        key = entries[5]["key"]
+        self.assertNotIn("list", answer)
+        # (11-26, scheme A) the answer is the board: the head and one short row per item, newest first; a document with no `kind:` line is all TBD
+        board = answer["board"]
+        self.assertEqual((board["title"], board["updated"], board["total"], board["sent"], board["cut"]), ("시험용 백로그", "updated 11-21 11:02", 4, 4, False))
+        self.assertEqual(board["counts"], {"fix": 0, "task": 0, "note": 0, "tbd": 4, "discuss": 0, "ready": 0, "waiting": 0})
+        self.assertEqual(board["campaigns"], ["2026-11-02_some-campaign", "2026-10-01_other-campaign", "Unassigned"])
+        self.assertEqual([row[1:] for row in board["items"]], [["", "2026-11-20", "", "", "일 하나", 0], ["", "", "", "", "일 둘", 0],
+                                                                ["", "", "", "", "다른 일", 1], ["", "", "", "", "정해지지 않은 일", 2]])
+        self.assertTrue(all(row[0].startswith("i:") for row in board["items"]))
+        self.assertEqual(sorted(board["styles"]), sorted(self.status.BOARD_STYLES))
+        self.assertTrue(all(0 <= at < len(answer["styles"]) for at in board["styles"].values()))
+        # The answer carries titles only: an item's lines are asked for when it is opened.
+        self.assertNotIn("맥락 하나", json.dumps(answer, ensure_ascii=False))
+        # The lines come with the item's own ask: its date, kind, area and state, its campaign, then its own lines (`indent` cells in).
+        key = board["items"][0][0]
         got = self.popup("detail", open=key)
         self.assertEqual((got["ok"], got["part"], got["open"]), (True, "detail", key))
-        self.assertEqual(["".join(run[0] for run in row) for row in got["rows"]], ["    kind: TBD", "    date: 2026-11-20", "    source: 어딘가", "    note: 맥락 하나"])
-        last = [e for e in entries if e.get("key", "").startswith("i:")][-1]
-        self.assertEqual(["".join(run[0] for run in row) for row in self.popup("detail", open=last["key"])["rows"]], ["    kind: TBD"])   # an item with no lines of its own: its sort
+        self.assertEqual(["".join(run[0] for run in row) for row in got["rows"]],
+                         ["2026-11-20 · TBD · No area · —", "campaign 2026-11-02_some-campaign", "source 어딘가", "note 맥락 하나"])
+        last = board["items"][-1][0]
+        self.assertEqual(["".join(run[0] for run in row) for row in self.popup("detail", open=last)["rows"]], ["— · TBD · No area · —", "campaign Unassigned"])
         for bad in ("", "g:abc", "i:nothere", "x" * 80):
             self.assertFalse(self.popup("detail", open=bad)["ok"], bad)
         self.assertEqual(self.popup("detail", open=key, kind="status", own=""), {"ok": False, "reason": "invalid-status"})
-        # Not the campaign of this window: the document's order inside the sort.
-        other = [("".join(run[0] for run in e["rows"][0])) for e in self.popup("list", own="")["list"] if e.get("key", "").startswith("i:")]
-        self.assertEqual(other, ["  일 하나", "  일 둘", "  다른 일", "  정해지지 않은 일"])
+        # Whichever this window's campaign is: the same rows.
+        self.assertEqual(self.popup("list", own="")["board"]["items"], board["items"])
         # The document read whole is the other answer; the Fleet part is not the backlog's.
         whole = self.popup("doc")
         self.assertNotIn("list", whole)
@@ -612,7 +654,8 @@ console.log(JSON.stringify({closed:list.layout(entries,closed).fellBack,open:lis
         self.assertEqual(self.popup("fleet"), {"ok": False, "reason": "invalid-status"})
         # An older document is said to be old.
         os.utime(self.root / "backlog.md", (time.time() - 5 * 86400,) * 2)
-        self.assertIn("old document", "".join(run[0] for run in self.popup("list")["list"][1]["rows"][0]))
+        self.assertIn("old document", self.popup("list")["board"]["updated"])
+        self.assertTrue(self.popup("list")["board"]["old"])
 
     def test_the_backlog_popup_without_a_document_says_so_in_one_line(self):
         for part in ("list", "doc"):
@@ -626,17 +669,18 @@ console.log(JSON.stringify({closed:list.layout(entries,closed).fellBack,open:lis
     def test_an_item_opens_to_its_indented_lines_in_the_status_lists_own_code_and_a_press_stands_on_it(self):
         self.backlog()
         answer = self.popup("list")
-        detail = self.popup("detail", open=answer["list"][5]["key"])
+        detail = self.popup("detail", open=answer["board"]["items"][0][0], indent=4)
         with tempfile.TemporaryDirectory(prefix="rlj") as folder:
             path, more = Path(folder) / "answer.json", Path(folder) / "detail.json"
             path.write_text(json.dumps(answer, ensure_ascii=False), encoding="utf-8")
             more.write_text(json.dumps(detail, ensure_ascii=False), encoding="utf-8")
             out = subprocess.run([NODE, "-e", r"""
 const fs=require('node:fs'),path=require('node:path');
-const list=require(path.join(process.argv[1],'status-list.cjs'));
-const entries=list.entriesOf(JSON.parse(fs.readFileSync(process.argv[2],'utf8'))),text=r=>r.map(p=>p.text).join('');
+const list=require(path.join(process.argv[1],'status-list.cjs')),board=require(path.join(process.argv[1],'backlog-board.cjs'));
+const b=board.fromAnswer(JSON.parse(fs.readFileSync(process.argv[2],'utf8'))),text=r=>r.map(p=>p.text).join('');
 const detail=list.rowsOf(JSON.parse(fs.readFileSync(process.argv[3],'utf8')));
-const st={sel:'',fold:new Set(),items:new Set(),more:{}};
+const st={sel:'',fold:new Set(),items:new Set(),more:{}},bs=board.newState();board.prepare(b,bs,st);
+const entries=board.entries(b,bs,{width:60});
 const lines=()=>list.layout(entries,st,{width:60}).rows.map(text);
 const first=lines(),item=list.layout(entries,st).marks.find(m=>m.key.startsWith('i:')&&m.text);
 // (every item opens: its sort stands on its first line)
@@ -645,19 +689,20 @@ out.pressed=list.press(st,list.layout(entries,st),item.key);
 // until the lines come one dim `⠏` stands under the row; then they do
 out.waiting=lines().slice(lines().findIndex(l=>l.startsWith('> '))+1)[0];
 st.more[item.key]=detail;
-const opened=lines();out.more=opened.length-first.length;out.shown=opened.filter(l=>/kind:|date:|source:|note:/.test(l));
+const opened=lines();out.more=opened.length-first.length;out.shown=opened.filter(l=>/TBD ·|campaign |source |note /.test(l));
 const v=list.layout(entries,st,{width:60});out.tinted=v.rows.slice(v.at,v.at+v.span).every(r=>r.some(p=>p.tint));out.span=v.span;
 out.hits=list.hits(v).filter(h=>h.action[1]===item.key).length;
 out.press_again=list.press(st,list.layout(entries,st),item.key);out.closed=lines().length===first.length;
 // A press from the panel stands on the item (the popup is opened with its key as the chosen line).
-const sel={sel:item.key,fold:new Set(),items:new Set()};out.stands=list.layout(entries,sel).sel===item.key&&!list.layout(entries,sel).fellBack;
+const sel={sel:item.key,fold:new Set(st.fold),items:new Set()};out.stands=list.layout(entries,sel).sel===item.key&&!list.layout(entries,sel).fellBack;
 const gone={sel:'i:nothere',fold:new Set(),items:new Set()};out.fell=list.layout(entries,gone).fellBack;
 console.log(JSON.stringify(out));
 """, str(SHELL), str(path), str(more)], capture_output=True, text=True, timeout=120)
         self.assertEqual(out.returncode, 0, out.stderr)
         got = json.loads(out.stdout)
         self.assertEqual(got, {"item_can_open": True, "item_lazy": True, "pressed": "item", "waiting": "    ⠏", "more": 4,
-                               "shown": ["    kind: TBD", "    date: 2026-11-20", "    source: 어딘가", "    note: 맥락 하나"], "tinted": True, "span": 5, "hits": 5,
+                               "shown": ["    2026-11-20 · TBD · No area · —", "    campaign 2026-11-02_some-campaign", "    source 어딘가", "    note 맥락 하나"],
+                               "tinted": True, "span": 5, "hits": 5,
                                "press_again": "item", "closed": True, "stands": True, "fell": True})
 
     # -- the entrance's counting rule, and a backlog far longer than the first one -------------------------------------------
@@ -685,12 +730,13 @@ console.log(JSON.stringify(out));
         self.assertIsNone(stamp("```\n갱신 2026-11-21 11:02\n```\n## A\n"))
         self.assertEqual(stamp("갱신 2026-11-21 11:02\n갱신 2026-11-22 12:00\n## A\n"), (2026, 11, 21, 11, 2))          # the first one
         # The panel and the popup count the same.
-        body = "# T\n- 앞\n## A\n- 하나\n* 둘\n```\n- 셋\n```\n- 넷\n"
+        # (11-26, panel B: the panel's items are the ranked ones; a ranked line in a fence is no item.)
+        body = "# T\n- 앞\n## A\n- 하나\n  priority: 2\n* 둘\n```\n- 셋\n  priority: 1\n```\n- 넷\n  priority: 1\n"
         self.backlog(body)
         got = self.status.panel_lists(self.cwd, self.page(), {})["backlog"]
-        self.assertEqual((got["total"], [i["text"] for i in got["items"]]), (2, ["하나", "넷"]))
-        heads = [e for e in self.popup("list", own="A")["list"] if e.get("rows") and "".join(r[0] for r in e["rows"][0]).startswith("TBD ")]
-        self.assertEqual("".join(r[0] for r in heads[0]["rows"][0]), "TBD 2")
+        self.assertEqual((got["total"], [i["text"] for i in got["items"]]), (2, ["넷", "하나"]))
+        board = self.popup("list", own="A")["board"]
+        self.assertEqual((board["counts"]["tbd"], board["total"], [row[5] for row in board["items"]]), (2, 2, ["하나", "넷"]))
 
     # What the artifact entrance (`utilities/artifact_entrance.py` `_backlog`, `core/ARTIFACT_META.md`'s rule) counts and reads for the same
     # texts: (name, text, its count, its `갱신` as `YYYY-MM-DD HH:MM` or ''). The expectations are written out from running its function on these texts (and the
@@ -768,7 +814,7 @@ console.log(JSON.stringify(out));
             got = self.status.panel_lists(self.cwd, self.page(), {})["backlog"]
             self.assertEqual(got["total"], count, name)
             if parsed["groups"]:
-                self.assertEqual(len([e for e in self.popup("list", own="")["list"] if e.get("key", "").startswith("i:")]), count, name)
+                self.assertEqual(len(self.popup("list", own="")["board"]["items"]), count, name)
         # Around 64 KiB (the real backlog's size): the panel reads to 1 MiB and says `+` past that, so both sizes count the same 8191.
         # The entrance reads to the same 1 MiB (its limit is tested with the sort rule, session_shell_backlog_kinds_1122.test.py).
         def sized(n):
@@ -792,6 +838,7 @@ console.log(JSON.stringify(out));
             for _ in range(per if g < groups - 1 else items - n):
                 n += 1
                 out += ["- %s %d — 제목이 한 줄로 이어지는 시험용 글입니다" % (title, n), "  date: 2026-11-%02d" % (n % 28 + 1), "  source: 시험용 출처 %d" % n,
+                        *(["  priority: %d" % n] if n <= 5 else []),       # (11-26, panel B: the first five ranked, so the panel has its three)
                         "  note: " + ("시험용 맥락이 길게 이어집니다 " * 40)[:note]]
             out.append("")
         return "\n".join(out) + "\n"
@@ -804,13 +851,11 @@ console.log(JSON.stringify(out));
             got = self.status.panel_lists(self.cwd, self.page(), {})["backlog"]
             self.assertEqual((got["total"], len(got["items"]), got["more"]), (count, 3, False))
             answer = self.popup("list")
-            self.assertIn("list", answer, count)                                          # the list stands: not the document read whole
+            self.assertIn("board", answer, count)                                         # the board stands: not the document read whole
             self.assertLessEqual(len(json.dumps({"id": 0, **answer}, ensure_ascii=False).encode()), self.shell.BACKLOG_ANSWER_BYTES)
-            titles = [e for e in answer["list"] if e.get("key", "").startswith("i:")]
-            self.assertEqual(len(titles), count)                                          # every title; no note in the answer
+            titles = answer["board"]["items"]
+            self.assertEqual((len(titles), answer["board"]["sent"], answer["board"]["total"]), (count, count, count))     # every title; no note in the answer
             self.assertNotIn("시험용 맥락이 길게", json.dumps(answer, ensure_ascii=False))
-            self.assertEqual(sum(1 for e in titles if e.get("lazy")), count)
-            self.assertNotIn("more in backlog.md", json.dumps(answer, ensure_ascii=False))
 
     def test_a_backlog_of_thousands_is_read_as_far_as_it_goes_and_says_there_is_more(self):
         # Titles alone pass the answer's size: the most that fit stand, then one line says how many more, and `full document ›` is there.
@@ -818,14 +863,13 @@ console.log(JSON.stringify(out));
         got = self.status.panel_lists(self.cwd, self.page(), {})["backlog"]
         self.assertEqual((got["total"], got["more"]), (4000, False))
         answer = self.popup("list")
-        self.assertIn("list", answer)
-        shown = ["".join(r[0] for r in e["rows"][0]) for e in answer["list"] if e.get("rows") and e["rows"][0]]
-        self.assertEqual(shown[-1], "  full document ›")
-        more = [t for t in shown if "more in backlog.md" in t]
-        self.assertEqual(len(more), 1)
-        drawn = sum(1 for e in answer["list"] if e.get("key", "").startswith("i:"))
-        self.assertEqual(more[0].strip(), "… %d more in backlog.md" % (4000 - drawn))
+        self.assertIn("board", answer)
+        # (11-26) the board holds the newest that fit and says how many the document has: the host draws `showing the newest N of 4,000 · M more in backlog.md`
+        drawn = answer["board"]["sent"]
+        self.assertEqual((len(answer["board"]["items"]), answer["board"]["total"], answer["board"]["cut"]), (drawn, 4000, False))
         self.assertTrue(0 < drawn < 4000)
+        dates = [row[2] for row in answer["board"]["items"]]
+        self.assertEqual(dates, sorted(dates, reverse=True))                                # the newest stand
         self.assertLessEqual(len(json.dumps({"id": 0, **answer}, ensure_ascii=False).encode()), self.shell.BACKLOG_ANSWER_BYTES)
         self.assertLess(len(json.dumps({"id": 0, **answer}, ensure_ascii=False).encode()), 256 * 1024)       # what the host reads of an answer
         # Past what is read at all (a file longer than the read limit): what was read is counted and the panel says there is more (`+`).
@@ -835,8 +879,9 @@ console.log(JSON.stringify(out));
             self.assertTrue(got["more"] and 0 < got["total"] < 2000, got)
             self.assertTrue(got["has_doc"] and len(got["items"]) == 3)
             answer = self.popup("list")
-            self.assertIn("list", answer)
-            self.assertIn("the file is longer than is read here", json.dumps(answer, ensure_ascii=False))
+            self.assertIn("board", answer)
+            self.assertTrue(answer["board"]["cut"])                                       # the host draws `read N · more in backlog.md`
+            self.assertEqual(answer["board"]["total"], got["total"])
             self.assertEqual(self.popup("doc")["has_doc"], True)
 
     def test_the_status_read_of_a_long_backlog_is_bounded(self):
@@ -1007,11 +1052,9 @@ assert.equal(ctx.table.kind,'STATUS');assert.equal(ctx.table.sel,'i:abc:def');as
 ctx.openPopup('STATUS','');assert.equal(ctx.table.sel,'');
 calls.length=0;ctx.openPopup('BACKLOG','i:1:2');
 assert.equal(ctx.table.kind,'BACKLOG');assert.equal(ctx.table.sel,'i:1:2');assert(ctx.table.fold instanceof Set&&ctx.table.items instanceof Set);assert(calls.includes('askTable'));
-// A press on an item of a folded group (another campaign's, when this window's has fewer than three) opens that group with it.
-calls.length=0;ctx.openPopup('BACKLOG','i:g1:abc');assert(ctx.table.fold.has('g1'));assert.equal(ctx.table.sel,'i:g1:abc');
-ctx.openPopup('BACKLOG','i:g2:abc:2');same([...ctx.table.fold],['g2']);                      // (the group id is the key's second part; a repeat's number is the third)
-ctx.openPopup('BACKLOG','');same([...ctx.table.fold],[]);ctx.openPopup('BACKLOG','g:g3');same([...ctx.table.fold],[]);   // no item: nothing opened
-ctx.openPopup('STATUS','i:g1:abc');same([...ctx.table.fold],[]);                              // (the status list has no folded group of items to open)
+// (11-26) the board's state starts empty with each opening; the group of a pressed item opens when the board's answer comes (`backlogBoard.prepare`)
+same([ctx.table.board,ctx.table.boardState,[...ctx.table.fold]],[null,null,[]]);
+ctx.openPopup('STATUS','i:g1:abc');same([...ctx.table.fold],[]);assert(!('board' in ctx.table));
 // What a panel press names parses to that: `popup:STATUS:i:a:b` is the section STATUS and the key `i:a:b`.
 const [,name,...rest]='popup:BACKLOG:i:a:b'.split(':');same([name,rest.join(':')],['BACKLOG','i:a:b']);
 // The sections the host walks, and the popup kind the backend is asked for.

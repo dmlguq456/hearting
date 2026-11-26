@@ -51,6 +51,12 @@ case "$family" in
     native_mode_path="adapters/codex/modes/$family/$name.md"
     requirement="codex edit/read tools plus normal preflight guards"
     ;;
+  analysis)
+    status=portable
+    realization=portable-persona
+    native_mode_path="adapters/codex/modes/$family/$name.md"
+    requirement="read-only analysis of what is at hand with Codex file, search and read-only command tools; only the node's declared output is written"
+    ;;
   general)
     status=portable
     realization=portable-persona

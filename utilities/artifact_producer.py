@@ -2377,7 +2377,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     p = sub.add_parser("checkpoint",
                        help="publish an open cycle's interim manifest (the sealed schema with "
-                            "cycle.state=open) for readers such as Cairn; rate-limited per cycle")
+                            "cycle.state=open) for readers of open cycles; rate-limited per cycle")
     p.add_argument("--artifact-root",
                    help="default: $AGENT_ARTIFACT_ROOT, else the route file's artifact_root")
     p.add_argument("--cycle", help="default: $AGENT_ARTIFACT_CYCLE_ID when --route is absent")

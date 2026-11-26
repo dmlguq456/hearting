@@ -1,7 +1,7 @@
 """11-16 (panel polish 1116): the person's seven corrections on v4.39.0/v4.40.0, panel-view's and the backend's side.
 
 1. MESSAGES draws v4.36.4's two rows per message again (spec rule 31: the head, then the first line two cells
-   in), five at most (`+N` counts the rest; three at most since 11-20); short of rows a message keeps its one body row, then every
+   in; 11-26 panel B: that is the bottom layout's now, the side panel's message is one row), five at most (`+N` counts the rest; three at most since 11-20); short of rows a message keeps its one body row, then every
    message takes the one-row form, then fewer show.
 2. A sent answer's line stays ten minutes, its session having it or not (no timer: it leaves at the next update
    or paint past that).
@@ -68,6 +68,9 @@ const lines=v=>v.rows.map(str);
 // The rows between the MESSAGES head and the MEM head (inside the frame).
 function section(v){const ls=lines(v).map(l=>l.slice(2,-2)),a=ls.findIndex(l=>l.startsWith('MESSAGES')),b=ls.findIndex(l=>l.startsWith('MEM'));
   return a<0?null:{head:ls[a],rows:ls.slice(a+1,b<0?ls.length-2:b),at:a};}
+// 11-26 (panel B): the bottom layout keeps the two-row message; its rows between the `messages` head and the quota row.
+function bsection(v){const ls=lines(v).map(l=>l.slice(2,-2)),a=ls.findIndex(l=>l.startsWith('messages'));
+  return a<0?null:{head:ls[a],rows:ls.slice(a+1,ls.length-2),at:a};}
 """
 
 
@@ -91,54 +94,76 @@ class PanelPolish1116Test(unittest.TestCase):
 
     # 1 ---------------------------------------------------------------------------------------------------------
     def test_messages_take_two_rows_each_three_at_most(self):
+        # 11-26 (panel B): the side panel's message is one row (arrow, number, body, time at the right); the two-row form (head, then the first line two cells in) is the bottom layout's.
         out = self.node(r"""
 const v=draw(),m=section(v);
 assert(m,lines(v).join('\n'));
 assert.match(m.head,/^MESSAGES \+4 +›$/,m.head);
-// Three messages (11-20: three at most, the person: "MESSAGE도 최대 3개 정도로 다시 줄이고"), each its head and its first line two cells in, the newest last.
-assert.equal(m.rows.length,6,m.rows.join('\n'));
-const heads=m.rows.filter((_,i)=>i%2===0),bodies=m.rows.filter((_,i)=>i%2===1);
-assert.deepEqual(heads.map(h=>h.trim()),['← [12] opencode · 09:52 · report','← [e7] codex · 10:03 · reply','→ [12] opencode · 10:05 · not delivered'],heads.join('\n'));
-assert(bodies.every(b=>/^  \S/.test(b)),bodies.join('\n'));
-assert.match(bodies[0].trimEnd(),/^  시험 통과, CI 기다리는 중$/,bodies[0]);
-// The looks: the arrow in its direction's color, the number in the body color, the rest of the head dim,
-// a sent one's state in its own color; the body in the body color. A press on any row opens the popup.
-const row=v.rows.find(r=>str(r).includes('← [12] opencode'));
+// Three messages (11-20: three at most, the person: "MESSAGE도 최대 3개 정도로 다시 줄이고"), one row each, the newest last; no harness, kind or delivery word on the row.
+assert.equal(m.rows.length,3,m.rows.join('\n'));
+assert.deepEqual(m.rows.map(x=>x.replace(/ +/g,' ').trim()),['← [12] 시험 통과, CI 기다리는 중 09:52','← [e7] 세 안 중 권장안이 가장 낫습니다 10:03','→ [12] 고맙습니다 10:05'],m.rows.join('\n'));
+assert(m.rows.every(x=>!/opencode|codex|report|reply|not delivered/.test(x)&&cells(x)===46),m.rows.join('\n'));
+// The looks: the arrow in its direction's color, the number and the body in the body color, the time at the right dim.
+const row=v.rows.find(r=>str(r).includes('← [12] 시험 통과'));
 const look=s=>row.find(p=>p.text.includes(s));
-assert.equal(look('←').foreground,150);assert.equal(look('[12]').foreground,253);assert.equal(look(' opencode').dim,true);assert.equal(look(' · 09:52').dim,true);
-const body=v.rows.find(r=>str(r).includes('시험 통과'));assert.equal(body.find(p=>p.text.includes('시험')).foreground,253);
-const late=v.rows.find(r=>str(r).includes('not delivered'));assert.equal(late.find(p=>p.text==='not delivered').foreground,186);
+assert.equal(look('←').foreground,150);assert.equal(look('[12]').foreground,253);assert.equal(look('시험').foreground,253);
+assert.equal(row.findLast(p=>p.text.includes('09:52')).dim,true);assert(/09:52 *$/.test(str(row).slice(2,-2)),str(row));
+// A press on any of its rows opens the popup.
 const top=v.rows.findIndex(r=>str(r).includes('MESSAGES +4'));
-for(let y=top;y<=top+6;y++)assert(v.hits.some(h=>h.row===y&&h.action==='popup:MESSAGES'),'row '+y);
-console.log(JSON.stringify({rows:m.rows.length}));
+for(let y=top;y<=top+3;y++)assert(v.hits.some(h=>h.row===y&&h.action==='popup:MESSAGES'),'row '+y);
+// The bottom layout keeps the two-row form: the head (harness, time, kind, a sent one's state), then the first line two cells in; its looks as before.
+const w=draw({side:false,width:100,height:24}),b=bsection(w);
+assert(b&&/^messages \+4 /.test(b.head),lines(w).join('\n'));
+const rows=b.rows.slice(0,6),heads=rows.filter((_,i)=>i%2===0),bodies=rows.filter((_,i)=>i%2===1);
+assert.deepEqual(heads.map(h=>h.trim()),['← [12] opencode · 09:52 · report','← [e7] codex · 10:03 · reply','→ [12] opencode · 10:05 · message · not delivered'],heads.join('\n'));
+assert(bodies.every(x=>/^  \S/.test(x)),bodies.join('\n'));
+assert.match(bodies[0].trimEnd(),/^  시험 통과, CI 기다리는 중$/,bodies[0]);
+const brow=w.rows.find(r=>str(r).includes('← [12] opencode'));
+const blook=s=>brow.find(p=>p.text.includes(s));
+assert.equal(blook('←').foreground,150);assert.equal(blook('[12]').foreground,253);assert.equal(blook(' opencode').dim,true);assert.equal(blook(' · 09:52').dim,true);
+const bbody=w.rows.find(r=>str(r).includes('시험 통과'));assert.equal(bbody.find(p=>p.text.includes('시험')).foreground,253);
+const late=w.rows.find(r=>str(r).includes('not delivered'));assert.equal(late.find(p=>p.text==='not delivered').foreground,186);
+console.log(JSON.stringify({rows:m.rows.length,bottom:rows.length}));
 """)
-        self.assertIn('"rows":6', out)
+        self.assertIn('"rows":3,"bottom":6', out)
 
     def test_short_of_rows_a_message_folds_to_one_row_before_fewer_show(self):
-        # Every height from the person's 46 rows down: the rule over the last row goes first; then (after the
-        # head's structural rows) every message takes the one-row form while all three stay (11-20: three at most, and MESSAGES
-        # with MEM is the first section to go down); fewer show only after that, down to the newest one; the newest stay.
+        # 11-26 (panel B): beside the native area a message is always one row, so there is no fold: every height from the person's 46 rows down keeps all
+        # three until the rule over the last row has gone, then fewer show down to the newest one; the newest stay. The fold (two rows to one, then fewer)
+        # is the bottom layout's: 100 columns, every height from 24 down.
         out = self.node(r"""
 const seen=[];
 for(let h=46;h>=18;h--){
   const v=draw({height:h}),m=section(v),ls=lines(v),rule=/^│ ─+ │$/.test(ls[ls.length-3]);
-  if(!m){seen.push({h,count:0,form:'',rule});continue;}
-  const two=m.rows.length>=2&&/^  \S/.test(m.rows[1]),count=two?m.rows.length/2:m.rows.length;
-  seen.push({h,count,form:two?'two':'one',rule,newest:m.rows.at(two?-2:-1)});
+  if(!m){seen.push({h,count:0,rule});continue;}
+  assert(m.rows.every(x=>!/^  \S/.test(x)&&/^ [←→] \[/.test(x)),'one-row form '+h+'\n'+m.rows.join('\n'));
+  seen.push({h,count:m.rows.length,rule,newest:m.rows.at(-1)});
 }
-let sawOne=false,sawFewer=false,ruleGone=false;
+let sawFewer=false,ruleGone=false;
 for(const s of seen){
   if(!s.rule)ruleGone=true;
-  if(s.form==='one')sawOne=true;
-  if(s.form==='one'||s.count<3)assert(ruleGone,JSON.stringify(s));
-  if(s.count&&s.count<3){sawFewer=true;assert.equal(s.form,'one',JSON.stringify(s));}
+  if(s.count<3)assert(ruleGone,JSON.stringify(s));
+  if(s.count&&s.count<3)sawFewer=true;
   if(s.count)assert.match(s.newest,/\[12\]/,JSON.stringify(s));
 }
-assert(sawOne&&sawFewer,JSON.stringify(seen));
-assert.deepEqual([seen[0].count,seen[0].form,seen[0].rule],[3,'two',true]);
+assert(sawFewer,JSON.stringify(seen));
+assert.deepEqual([seen[0].count,seen[0].rule],[3,true]);
 // The section stands at one row (the newest message) where rows are the shortest of these heights.
-assert.deepEqual([seen.at(-1).count,seen.at(-1).form],[1,'one'],JSON.stringify(seen.at(-1)));
-console.log(JSON.stringify(seen.map(s=>[s.h,s.count,s.form,s.rule?1:0])));
+assert.equal(seen.at(-1).count,1,JSON.stringify(seen.at(-1)));
+// The bottom layout: two rows each while they fit, then every message in the one-row form while all three stay, then fewer, down to the newest.
+const bs=[];
+for(let h=24;h>=12;h--){const m=bsection(draw({side:false,width:100,height:h}));
+  const two=m.rows.length>=2&&/^  \S/.test(m.rows[1]),body=m.rows.filter(x=>!/^5h /.test(x)),count=two?body.length/2:body.length;
+  bs.push({h,count,form:two?'two':'one',newest:two?body.at(-2):body.at(-1)});}
+let one=false,fewer=false;
+for(const s of bs){if(s.form==='one'&&s.count===3)one=true;
+  if(s.count&&s.count<3){fewer=true;assert.equal(s.form,'one',JSON.stringify(s));}
+  if(s.count)assert.match(s.newest,/\[12\]/,JSON.stringify(s));}
+assert(one&&fewer,JSON.stringify(bs));
+assert.deepEqual([bs[0].count,bs[0].form],[3,'two']);assert.deepEqual([bs.at(-1).count,bs.at(-1).form],[1,'one'],JSON.stringify(bs));
+// Once a height shows the one-row form, no taller one shows two rows again after it going down: two, then one, then fewer, in that order.
+const order=bs.map(s=>s.count<3?2:s.form==='one'?1:0);assert.deepEqual(order,[...order].sort((a,b)=>a-b),JSON.stringify(bs));
+console.log(JSON.stringify(seen.map(s=>[s.h,s.count,s.rule?1:0])));
 """)
         self.assertTrue(out.strip())
 
@@ -146,7 +171,9 @@ console.log(JSON.stringify(seen.map(s=>[s.h,s.count,s.form,s.rule?1:0])));
         self.node(r"""
 const v=draw({messages:3}),m=section(v);
 assert.match(m.head,/^MESSAGES +›$/,m.head);
-assert.equal(m.rows.length,6,m.rows.join('\n'));
+// 11-26 (panel B): one row each.
+assert.equal(m.rows.length,3,m.rows.join('\n'));
+assert(m.rows.every(x=>/^ [←→] \[/.test(x)),m.rows.join('\n'));
 """)
 
     # 2 ---------------------------------------------------------------------------------------------------------

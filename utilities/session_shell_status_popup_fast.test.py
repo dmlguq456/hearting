@@ -270,6 +270,14 @@ def text(path):
     if flag('doc-fail'):return (None, False)
     return real_text(path)
 session_status.read_text=text
+# (11-26, panel B: with `messages` in the control folder this session has sent one message, so the panel's MESSAGES part stands)
+real_sent=m._sent_peer_messages
+def sent(sid):
+    if flag('messages'):
+        return ([{{'to':{{'harness':'codex','session_id':'peer-x','name':'peer'}},'kind':'report','summary':'BL_MSG_ONE 같이 볼 일',
+                  'at':time.time()-60,'status':'received','message_id':'m-x'}}],[])
+    return real_sent(sid)
+m._sent_peer_messages=sent
 raise SystemExit(m._backend())
 """
 
@@ -293,11 +301,12 @@ const until=async(test,what,ms=20000)=>{const began=Date.now();while(Date.now()-
   throw Error('never '+what+'\n'+(await screen()).join('\n'));};
 const has=word=>s=>s.some(line=>word instanceof RegExp?word.test(line):line.includes(word));
 // 11-21: the STATUS head stands under the REPO group (` STATUS +N        ›`), the panel's only drawing of the status.
-const hasButton=s=>s.some(line=>/STATUS( \+\d+)? +›/.test(line));
+const hasButton=s=>s.some(line=>/STATUS( \+?\d+)? +›/.test(line));   // (11-26, panel B: beside the native area the head says the whole count, `STATUS 5 ›`)
 const press=async(x,y,ms=100)=>{child.write(`\x1b[<0;${x+1};${y+1}M\x1b[<0;${x+1};${y+1}m`);await sleep(ms);};
 const key=async(bytes,ms=250)=>{child.write(bytes);await sleep(ms);};
 const box=s=>{const top=s.findIndex(l=>l.includes('╭─')&&l.includes('✕ ─╮'));if(top<0)return null;
   const left=[...s[top]].indexOf('╭'),bottom=s.findIndex((l,i)=>i>top&&[...l][left]==='╰'&&l.includes('╯'));
+  if(bottom<0)return null;   // (a popup whose bottom line is not drawn yet is no box yet: every wait reads it as "not yet")
   return {top,bottom,left,rows:s.slice(top,bottom+1).map(l=>l.slice(left))};};
 const popupHas=word=>s=>{const b=box(s);return !!b&&b.rows.some(l=>l.includes(word));};
 const place=s=>{const m=(box(s)?box(s).rows.join('\n'):'').match(/(\d+)\/(\d+) · /);return m?[+m[1],+m[2]]:null;};
@@ -311,18 +320,20 @@ const rename=async title=>{const cache=JSON.parse(fs.readFileSync(cfg.cache,'utf
   cache.route_panels[cfg.key][0].title=title;write(cfg.cache,JSON.stringify(cache));};
 // 11-21: the press that opens the popup stands on the STATUS head under the REPO group.
 const opened=async()=>{const spot=await at('STATUS');await press(spot.x+2,spot.y,0);};
-const close=async()=>{await key('\x1b',300);await until(s=>!box(s),'closed');};
+// (closed: the popup's top line is gone; a box whose bottom line went first is not closed yet)
+const close=async()=>{await key('\x1b',300);await until(s=>!s.some(l=>l.includes('╭─')&&l.includes('✕ ─╮')),'closed');};
 const edit=(from,to)=>fs.writeFileSync(cfg.doc,fs.readFileSync(cfg.doc,'utf8').replace(from,to));
 const checks={};
 (async()=>{try{
   if(cfg.scenario==='open'){
     // The button's read is slow (a scan of a slow disk); Fleet's collection is slower still.
     control('read-delay',1.5);control('vm-delay',4);
-    await until(hasButton,'the button');await sleep(500);
+    // The button stands once a read has ended; wait for that (no read under way), not a fixed time.
+    await until(hasButton,'the button');await until(()=>count('read-start')>=1&&count('read-end')>=count('read-start'),'the first read ended');
     const r0=count('read-start'),v0=count('vm');
-    // 100 paints: no read.
+    // 100 paints: no read. The count is taken once the typed letters stand on the panel (the paints reached it).
     for(let i=0;i<100;i++){child.write('a');await sleep(10);}
-    await sleep(400);checks.reads_after_paints=count('read-start')-r0;
+    await until(has(/❯ a+/),'the paints on the panel');checks.reads_after_paints=count('read-start')-r0;
     // The press: the document stands under a second; Fleet's lines are not there yet.
     const began=Date.now();await opened();
     let r=await until(popupHas('NEWEST_DOC_LINE'),'the document in the popup');
@@ -417,10 +428,12 @@ const checks={};
   if(cfg.scenario==='backlog'){
     // 11-21: the BACKLOG part under the REPO group (its head and its first three items, `+N` for the rest); a press on an item opens the BACKLOG popup
     // standing on it; the group of this window's campaign is open on top and the others are folded; an item with detail opens under its row.
-    await until(s=>s.some(l=>/BACKLOG FIX \d+ · IMPR \d+ · \+\d+ +\/\d+ +›/.test(l)),'the BACKLOG head');
+    // 11-26 (panel B): the items are the ones the person ranked (`priority:`), three at most; the head `BACKLOG +N · Discuss n ›`.
+    await until(s=>s.some(l=>/BACKLOG \+\d+ · Discuss \d+ +›/.test(l)),'the BACKLOG head');
     const panel=await screen();
-    checks.head=panel.find(l=>/BACKLOG FIX/.test(l));checks.items=panel.filter(l=>/BL_ITEM/.test(l)).length;
-    checks.status_head=panel.some(l=>/STATUS( \+\d+)? +›/.test(l));
+    checks.head=panel.find(l=>/BACKLOG \+/.test(l));checks.items=panel.filter(l=>/BL_ITEM|BL_OTHER_ITEM/.test(l)).length;
+    checks.ranked=panel.filter(l=>/BL_ITEM/.test(l)).map(l=>(/BL_ITEM_[A-Z]{3}/.exec(l)||[''])[0]);   // (a title is cut at the panel's width)
+    checks.status_head=panel.some(l=>/STATUS( \+?\d+)? +›/.test(l));
     const spot=await at('BL_ITEM_TWO');await press(spot.x,spot.y,0);
     let r=await until(popupHas('BL_ITEM_ONE'),'the BACKLOG popup');
     const b=box(r.s);checks.title=b.rows[0];checks.band=b.rows.at(-1);
@@ -432,12 +445,51 @@ const checks={};
     await key('\r',300);r=await screen();checks.detail_closed=!popupHas('BL_DETAIL_NOTE')(r);
     for(let i=0;i<4;i++)await key('\x1b[B',200);await key('\r',400);r=await screen();
     checks.group_opened=popupHas('BL_OTHER_ITEM')(r);
-    // PgDn/PgUp move the chosen line (the window follows): to the end of what there is, and back to the first line.
+    // PgDn/PgUp move the chosen line (the window follows): to the end of what there is, and back to the first line (11-26: the board's first group head).
     await key('\x1b[6~',300);r=await screen();checks.pgdn_end=body(r).some(l=>l.startsWith('> ')&&l.includes('full document'));
-    await key('\x1b[5~',300);r=await screen();checks.pgup_top=body(r).some(l=>l.startsWith('> ')&&l.includes('BL_ITEM_ONE'));
+    await key('\x1b[5~',300);r=await screen();checks.pgup_top=body(r).some(l=>l.startsWith('> ')&&l.includes('FIX 4'));
+    // 11-26 (scheme A): the board's own keys, typed as a person types them. `t` shows the Discuss items only, and Esc undoes that, not the popup.
+    const chosen=s=>body(s).find(l=>l.startsWith('> '))||'';
+    await key('t',400);r=await screen();
+    checks.discuss=popupHas('state Discuss')(r)&&popupHas('showing 1 of 6')(r)&&body(r).some(l=>/Discuss +BL_ITEM_ONE/.test(l))&&!popupHas('BL_ITEM_TWO')(r);
+    await key('\x1b',500);r=await screen();checks.esc_filter=!!box(r)&&popupHas('showing 6 ·')(r)&&!popupHas('state Discuss')(r);
+    // `a`, `d`, `k`: grouped by area (case and blanks folded: `Panel` and `panel` are one group), by date, and by kind again.
+    await key('a',400);r=await screen();checks.area=popupHas('[Area]')(r)&&popupHas('Panel 2')(r)&&popupHas('No area 4')(r);
+    await key('d',400);r=await screen();checks.date=popupHas('[Date]')(r)&&popupHas('2026-11-20 1')(r)&&popupHas('No date 5')(r);
+    await key('k',400);r=await screen();checks.kind=popupHas('[Kind]')(r)&&popupHas('FIX 4')(r);
+    // `/` finds a title: the keys typed are the finder's (the `t` and `e` of "three" neither filter nor do anything else); Korean is typed whole.
+    await key('/',300);for(const c of 'three')await key(c,120);r=await screen();checks.typing=popupHas('/ Title: three')(r);
+    await key('\r',400);r=await screen();checks.find=popupHas('find Title "three"')(r)&&/BL_ITEM_THREE/.test(chosen(r))&&!popupHas('BL_ITEM_TWO')(r)&&!popupHas('state Discuss')(r);
+    await key('\x1b',500);await key('/',300);await key('셋째',300);await key('\r',400);r=await screen();
+    checks.find_korean=popupHas('find Title "셋째"')(r)&&/BL_ITEM_THREE/.test(chosen(r));
+    // `/` then Tab finds an area's name.
+    await key('\x1b',500);await key('/',300);await key('\t',200);for(const c of 'PANEL')await key(c,120);await key('\r',400);r=await screen();
+    checks.find_area=popupHas('find Area "PANEL"')(r)&&popupHas('BL_ITEM_ONE')(r)&&popupHas('BL_ITEM_TWO')(r)&&!popupHas('BL_ITEM_THREE')(r);
+    // Home and End: the first and the last item of the view (End opens the folded TBD group the last item is in).
+    await key('\x1b',500);await key('\x1b[F',400);r=await screen();checks.end=/BL_LOOSE/.test(chosen(r));
+    await key('\x1b[H',400);r=await screen();checks.home=/BL_ITEM_ONE/.test(chosen(r));
     await key('\x1b[C',400);r=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('ROUTE');},'the next section after BACKLOG');checks.next_section=true;
     await key('\x1b[D',400);r=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('BACKLOG');},'BACKLOG again by ←');checks.back=true;
     await close();
+    // 11-26 (panel B): the presses of the new rows, in the real host. The BACKLOG head opens the board; the MESSAGES head (a message is one row,
+    // its time at the right end) opens the MESSAGES popup; the STATUS head is one row and opens the status popup (`opened`, the other scenarios).
+    {const spot=await at(/BACKLOG \+\d+/);await press(spot.x+2,spot.y,0);r=await until(popupHas('BL_ITEM_ONE'),'the board from the BACKLOG head');
+     checks.backlog_head=box(r.s).rows[0].includes('BACKLOG');await close();}
+    {const s=await screen();checks.message_row=s.find(l=>l.includes('BL_MSG_ONE'))||'';}
+    {const spot=await at(/MESSAGES( \+\d+)? +›/);await press(spot.x+2,spot.y,0);r=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('MESSAGES');},'the MESSAGES popup from its head');
+     checks.messages_head=popupHas('BL_MSG_ONE')(r.s);await close();}
+    // Short of rows the two heads fold into the REPO row's buttons: the last `›` opens the board, the row's first cells the status popup.
+    rows=16;term.resize(cols,rows);child.resize(cols,rows);
+    const folded=/REPO .*›  (BACKLOG[^│]*)?› │/;   // (`STATUS +5 ›  BACKLOG +3 ›`, `STATUS ›  BACKLOG ›` or `›  ›`, as the row's own value leaves room)
+    r=await until(s=>s.some(l=>folded.test(l)),'the buttons on the REPO row');
+    {const y=r.s.findIndex(l=>folded.test(l)),line=r.s[y];checks.folded_row=line.slice(line.lastIndexOf('│',line.indexOf('REPO'))).trim();
+     // (by cells, the folder's name and its Git words being the machine's: the last `›` of the row is BACKLOG's button, its label `REPO` lies in STATUS's press)
+     await flush();const c=cellsOf(y),button={x:c.lastIndexOf('›'),y},name=await at(/REPO +/);
+     await press(button.x,button.y,0);let o=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('BACKLOG')&&popupHas('6 total')(s);},'the board from the folded button');
+     checks.folded_backlog=true;await close();   // (16 rows: the board's head lines; its items are below its short window)
+     await press(name.x+1,name.y,0);o=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('STATUS');},'the status popup from the REPO row');
+     checks.folded_status=true;await close();}
+    rows=40;term.resize(cols,rows);child.resize(cols,rows);await sleep(300);
   }
   if(cfg.scenario==='mem'){
     // 11-20: the MEM section's records are one row each; a press on a record opens the MEM popup (the MESSAGES popup's frame and keys) on it.
@@ -541,10 +593,12 @@ class PtyTest(unittest.TestCase):
                 'MEMREC_ONE first record body line, which goes on and on so that the one row cuts it short of its end MEMREC_ONE_END',
                 'MEMREC_TWO second record')) ) + '\n')
         if scenario == 'backlog':
+            (control / 'messages').write_text('')
             # 11-21: a backlog document in the artifact root: this window's campaign group (the newest document's folder) first, another group folded.
             (case / 'tree' / '.agent_reports' / 'backlog.md').write_text(
                 '# 시험용 백로그\n갱신 2026-11-21 11:02\n\n## 2026-02-11_camp-001\n- BL_OTHER_ITEM 다른 캠페인의 일\n\n'
-                '## 2026-01-10_camp-000\n- BL_ITEM_ONE 첫째 일\n  kind: fix\n  date: 2026-11-20\n  note: BL_DETAIL_NOTE 맥락\n- BL_ITEM_TWO 둘째 일\n  kind: Fix\n- BL_ITEM_THREE 셋째 일\n  kind: fix\n- BL_ITEM_FOUR 넷째 일\n  kind: fix\n\n'
+                '## 2026-01-10_camp-000\n- BL_ITEM_ONE 첫째 일\n  kind: fix\n  date: 2026-11-20\n  state: discuss\n  area: Panel\n  priority: 2\n  note: BL_DETAIL_NOTE 맥락\n'
+                '- BL_ITEM_TWO 둘째 일\n  kind: Fix\n  area:  panel \n  priority: 1\n- BL_ITEM_THREE 셋째 일\n  kind: fix\n  priority: 3\n- BL_ITEM_FOUR 넷째 일\n  kind: fix\n  priority: 4\n\n'
                 '## Unassigned\n- BL_LOOSE 캠페인 없는 일\n', encoding='utf-8')
         backend = case / 'backend'
         backend.write_text(BACKEND.format(python=sys.executable, utilities=str(ROOT / 'utilities'), tools=str(ROOT / 'tools'),
@@ -609,8 +663,10 @@ class PtyTest(unittest.TestCase):
 
     def test_the_backlog_part_lists_three_items_and_its_popup_opens_on_the_one_pressed(self):
         checks = self.run_case('backlog')
-        self.assertEqual(checks['items'], 3, checks)                                     # the first three; the others are `+N`
-        self.assertRegex(checks['head'], r'BACKLOG FIX 4 · IMPR 0 · \+1 +/6 +›', checks)  # six items in the document, four of them FIX, three shown
+        # 11-26 (panel B): the three the person ranked first, in that order (the fourth ranked and the unranked ones are `+N`); Discuss counts the document's.
+        self.assertEqual(checks['items'], 3, checks)
+        self.assertEqual(checks['ranked'], ['BL_ITEM_TWO', 'BL_ITEM_ONE', 'BL_ITEM_THR'], checks)
+        self.assertRegex(checks['head'], r'BACKLOG \+3 · Discuss 1 +›', checks)        # six items in the document, three shown
         self.assertTrue(checks['status_head'], checks)
         self.assertIn('BACKLOG', checks['title'], checks)
         self.assertIn('╰─ STATUS · BACKLOG · ', checks['band'], checks)
@@ -620,6 +676,14 @@ class PtyTest(unittest.TestCase):
         self.assertTrue(checks['group_opened'], checks)
         self.assertTrue(checks['pgdn_end'] and checks['pgup_top'], checks)                # PgDn/PgUp move the chosen line, not only the window
         self.assertTrue(checks['next_section'] and checks['back'], checks)
+        # 11-26 (scheme A): the board's keys, in the real host over a pty
+        for name in ('discuss', 'esc_filter', 'area', 'date', 'kind', 'typing', 'find', 'find_korean', 'find_area', 'end', 'home'):
+            self.assertTrue(checks[name], (name, checks))
+        # 11-26 (panel B): the BACKLOG head, the MESSAGES head (its message one row, the time at the right end) and the REPO row's folded buttons.
+        for name in ('backlog_head', 'messages_head', 'folded_backlog', 'folded_status'):
+            self.assertTrue(checks[name], (name, checks))
+        self.assertRegex(checks['message_row'], r'│  → peer BL_MSG_ONE .* \d\d[:-]\d\d │', checks)
+        self.assertRegex(checks['folded_row'], r'^│  REPO .*›  (BACKLOG[^│]*)?› │$', checks)
 
     def test_a_late_fleet_part_of_another_width_is_not_kept(self):
         checks = self.run_case('width')

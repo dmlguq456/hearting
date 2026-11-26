@@ -8,7 +8,8 @@ a person's answer is a registered question and stands on the question screens on
 nothing about it. One piece of work is one line: routes that carry the same PR number are
 joined (`link_units`), a route with no number is its own line. A route that closed with code but no number is
 joined to its PR by git ancestry (`_GitPass`: read only, no fetch). Each line's tail `기록 N` links to the
-record page of that work, `records/<key>.md`, which the same pass writes for the lines on the page.
+record page of that work, `records/<key>.md`, which the same pass writes for the lines on the page and draws again
+for work it already wrote a page for (a line that folded, a close that was not proven).
 
 Three layers:
 
@@ -58,6 +59,7 @@ GIT_TIMEOUT = 5
 GIT_BUDGET = 40
 VERDICT_CHARS = 60
 RECORD_KEY_CHARS = 200
+UNPROVEN_WORD = "미확인"   # the head of a page of work whose close was not proven: it ended, and passing is not shown
 ACTIVE_SECONDS = 6 * 3600
 DONE_LINES = 20
 READ_CAP = 400
@@ -155,7 +157,8 @@ def _start(member):
 
 def record_key(pr, locator):
     """The name of a piece of work's record page (`records/<key>.md`): `pr-<N>` when it has a PR, else the
-    folder name of its first route; None when the name has a character a file name or link should not."""
+    folder name of the cycle its first route stands on (`_choose`: a sealed one, else the latest started);
+    None when the name has a character a file name or link should not."""
     if pr:
         return f"pr-{int(pr)}"
     locator = locator if isinstance(locator, str) else ""
@@ -243,7 +246,7 @@ def link_units(facts, open_routes, titles, *, now, closed_total=None):
     done.sort(key=lambda u: (-u["closed_at"], u["key"]))
     shown = done[:DONE_LINES]
     total = closed_total if closed_total is not None else sum(len(i["closed"]) for i in units.values())
-    return {"active": active, "active_folded": active_folded, "done": shown,
+    return {"active": active, "active_folded": active_folded, "done": shown, "done_hidden": done[DONE_LINES:],
             "done_folded": max(0, total - sum(u["routes"] for u in shown))}
 
 
@@ -843,7 +846,7 @@ class _Pages:
     def page(self, unit):
         lines, files = self.lines(unit)
         head = [f"#{unit['pr']}" if unit.get("pr") else None, _escape(unit["v"]) if unit.get("v") else None,
-                "하는 중" if id(unit) in self.active_ids else self.day(unit.get("closed_at")),
+                "하는 중" if id(unit) in self.active_ids else UNPROVEN_WORD if unit.get("unproven") else self.day(unit.get("closed_at")),
                 f"기록 {unit['count']}", f"파일 {files}개"]
         return render_record(_unit_title(unit), " · ".join(part for part in head if part), lines)
 
@@ -1009,8 +1012,9 @@ def collect(root, campaign_dir, *, now, cache=None, persist=False, listing=None,
             live=None, pages=None, git=None):
     """`(document text, cache)` for one campaign, from its records. Writes nothing itself;
     `persist=False` is a faithful drawing from real records, `catch_up` persists. A dict given as `pages`
-    is filled with the record pages (`key -> text`) of the lines the document really shows; `git` is the
-    pass's `_GitPass` (one is made when none is given)."""
+    is filled with the record pages (`key -> text`) of the lines the document really shows and of the pages
+    `records/` already holds for work that is not on a line now; `git` is the pass's `_GitPass` (one is made
+    when none is given)."""
     root, campaign_dir = Path(root), Path(campaign_dir)
     campaign = store._read_json(campaign_dir / "campaign.json") or {}
     campaign_id = campaign.get("campaign_id")
@@ -1189,10 +1193,63 @@ def collect(root, campaign_dir, *, now, cache=None, persist=False, listing=None,
                     or _intent_title(root, rid) or member.get("slug") or rid)
         drawing = _Pages(root, campaign_dir, tz=tz, facts=facts, members=members, title_of=title_of,
                          active_ids={id(unit) for unit in units["active"]})
+        drawn = {}   # a work's page text, drawn once however many names it is written under
         for unit in shown:
             if unit.get("record"):
-                pages[unit["record"]] = drawing.page(unit)
+                pages[unit["record"]] = drawn[id(unit)] = drawing.page(unit)
+        _redraw_held_pages(campaign_dir, pages, drawing, drawn, units, shown, members, fact_rows, titles, now)
     return text, cache
+
+
+def _redraw_held_pages(campaign_dir, pages, drawing, drawn, units, shown, members, fact_rows, titles, now):
+    """Add to `pages` the pages `records/` already holds for work, on the document or not, under every name the
+    work has had (its PR number became known, a later round began in another folder): the name of each cycle of
+    its routes. The work is a line, a line that folded after its close, or a close that was not proven (no line,
+    no count; its page shows `UNPROVEN_WORD`); one that went quiet while open is not drawn. A name `records/`
+    does not hold is not made. A work's own page name stays that work's: a line's page is drawn first, then each
+    folded work's own, and only then the old names, so no old name takes a page a work still owns. A work is
+    drawn once."""
+    held = _page_names(campaign_dir)   # one listing of `records/` for the pass
+    if not held:
+        return
+    unproven = [dict(row, ok=True) for row in fact_rows
+                if not row.get("ok") and row.get("kind") in ("work", "review")]
+    quiet = link_units(unproven, [], titles, now=now) if unproven else {}
+    quiet = quiet.get("done", []) + quiet.get("done_hidden", [])
+    for unit in quiet:
+        unit["unproven"] = True
+    shown_ids = {id(unit) for unit in shown}
+    candidates = shown + units.get("done_hidden", []) + quiet
+
+    def text(unit):
+        if id(unit) not in drawn:
+            drawn[id(unit)] = drawing.page(unit)
+        return drawn[id(unit)]
+
+    def free(name):
+        return isinstance(name, str) and name in held and name not in pages and bool(_RECORD_KEY.fullmatch(name))
+
+    for unit in candidates:   # the own name of a work that is not a line
+        if id(unit) not in shown_ids and free(unit.get("record")):
+            pages[unit["record"]] = text(unit)
+    for unit in candidates:   # then the names it had
+        names = set()
+        for member in unit["closed"] + unit["open"]:
+            row = members.get(member["rid"]) or {}
+            cycles = row.get("cycles")
+            found = [row.get("loc")] + [c.get("loc") for c in cycles if isinstance(c, dict)] if isinstance(cycles, list) else [row.get("loc")]
+            names |= {name for name in found if free(name)}
+        for name in sorted(names):
+            pages[name] = text(unit)
+
+
+def _page_names(campaign_dir):
+    """The names (without `.md`) of the files in `records/`; a bare listing, nothing is read from them."""
+    try:
+        with os.scandir(Path(campaign_dir) / RECORDS_DIR) as entries:
+            return {entry.name[:-3] for entry in entries if entry.name.endswith(".md")}
+    except OSError:
+        return set()
 
 
 # ---------------------------------------------------------------------------
@@ -1293,7 +1350,8 @@ def remove_generated_records(campaign_dir):
 def _write_records(campaign_dir, pages):
     """Write the record pages (`key -> text`) into `records/`: made (inside a campaign folder that is there;
     never its parents) when there is a page to write, never a folder that is a link or a file, a page changed only when its text changed, a file of that name that
-    is not the generator's left as it is. Nothing is removed: a page whose line has folded stays."""
+    is not the generator's left as it is. Nothing is removed: a page whose line has folded stays (and is drawn
+    again while its work is known)."""
     if not pages:
         return
     folder = Path(campaign_dir) / RECORDS_DIR

@@ -222,10 +222,10 @@ for(const [side,width,height] of [[true,40,60],[true,32,46],[false,120,20]]){
  const inBox=rows.slice(b.a+1,b.b).filter(requestRow),outside=[...rows.slice(0,b.a),...rows.slice(b.b+1)].filter(requestRow);
  assert(inBox.length===2&&outside.length===0,label);
  const m=rows.findIndex(s=>/^│ (MESSAGES|messages)/.test(s));
- // MESSAGES: the three messages, two rows each (head, body), no `+N` for the requests.
+ // MESSAGES: the three messages, one row each beside the native area (11-26 panel B: no body row), two below it, no `+N` for the requests.
  assert(m>b.b&&/^│ (MESSAGES +|messages ─+ )› │$/.test(rows[m]),label);
  const ind=/^│ MESSAGES/.test(rows[m])?1:0;   // 11-22: beside the native area an item stands one cell in
- assert.deepEqual([1,3,5].map(i=>rows[m+i].slice(2+ind,8+ind)),['← [e7]','→ [52]','← [e1]'],label);
+ assert.deepEqual((side?[1,2,3]:[1,3,5]).map(i=>rows[m+i].slice(2+ind,8+ind)),['← [e7]','→ [52]','← [e1]'],label);
 }
 const body=pv.messagesBody({model:scene,columns:72}).map(txt);
 const first=body.findIndex(s=>s.includes('검토 요청: 팝업 바탕')),msg=body.findIndex(s=>s.includes('[e1]'));

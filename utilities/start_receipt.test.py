@@ -205,10 +205,48 @@ class NextLineTest(unittest.TestCase):
               'required_action': 'wait-for-auto-resume', 'auto_resume': {'resume_at': '2026-11-02T00:53:37Z'}},
              'next: end this turn; nothing to run - the runtime starts this route again at '
              '2026-11-02T00:53:37Z and leaves one notice'),
+            # (나) A failed owner: the person decides; close first (accept as it is, or stop), then the correction.
+            ({'state': 'needs-attention', 'required_action': 'answer-failed-owner', 'owner_report': '/r/report.md',
+              'correction_command': 'py capability-route.py correct --attempt-id att-o',
+              'close_command': 'env AGENT_DISPATCH_JOBS=/j py capability-route.py close --route /r/rt-x.json'},
+             'next: the owner ended FAIL; the person decides (owner_report says what it needs): to accept the result '
+             'as it is or stop the work, run: env AGENT_DISPATCH_JOBS=/j py capability-route.py close --route '
+             '/r/rt-x.json; to give the owner a fix or an answer, put it in a file and run: '
+             'py capability-route.py correct --attempt-id att-o --message-file <answer file>'),
+            # No readable report: the line names what the receipt names instead (its log), or nothing.
+            ({'state': 'needs-attention', 'required_action': 'answer-failed-owner', 'owner_log_file': '/l/o.jsonl',
+              'correction_command': 'py correct --attempt-id att-o', 'close_command': 'py close --route rt-x'},
+             'next: the owner ended FAIL; the person decides (its result is in owner_log_file /l/o.jsonl): to '
+             'accept the result as it is or stop the work, run: py close --route rt-x; to give the owner a fix or '
+             'an answer, put it in a file and run: py correct --attempt-id att-o --message-file <answer file>'),
+            ({'state': 'needs-attention', 'required_action': 'answer-failed-owner',
+              'correction_command': 'py correct --attempt-id att-o', 'close_command': 'py close --route rt-x'},
+             'next: the owner ended FAIL; the person decides: to accept the result as it is or stop the work, run: '
+             'py close --route rt-x; to give the owner a fix or an answer, put it in a file and run: '
+             'py correct --attempt-id att-o --message-file <answer file>'),
+            # A BLOCKED owner waits for an answer: the answer first, the stop after.
+            ({'state': 'needs-attention', 'required_action': 'answer-blocked-owner',
+              'correction_command': 'py capability-route.py correct --attempt-id att-o',
+              'close_command': 'env AGENT_DISPATCH_JOBS=/j py capability-route.py close --route /r/rt-x.json'},
+             "next: the owner is waiting for an answer; get the person's answer to owner_report, then run: "
+             'py capability-route.py correct --attempt-id att-o --message-file <answer file>; to stop the work '
+             'instead, run: env AGENT_DISPATCH_JOBS=/j py capability-route.py close --route /r/rt-x.json'),
+            # A receipt that carries no close_command keeps the answer alone.
             ({'state': 'needs-attention', 'required_action': 'answer-blocked-owner',
               'correction_command': 'py capability-route.py correct --attempt-id att-o'},
              "next: get the person's answer to owner_report, then run: "
              'py capability-route.py correct --attempt-id att-o --message-file <answer file>'),
+            # (다) A refusal the same start repeats: its own next step and the close it names, no resume_command.
+            ({'state': 'needs-attention', 'reason': 'replacement-workflow-not-open',
+              'required_action': 'inspect-preparation', 'resume_command': 'py start --route rt-x',
+              'close_command': 'py close --route rt-x',
+              'next_step': "This route's workflow already ended (COMPLETE), so no replacement owner can continue "
+                           "it, and running the same start again is refused the same way. Read the owner's result; "
+                           "to end the route as it is, run close_command; for more work, compose a new route."},
+             'next: inspect-preparation (replacement-workflow-not-open): This route\'s workflow already ended '
+             '(COMPLETE), so no replacement owner can continue it, and running the same start again is refused the '
+             "same way. Read the owner's result; to end the route as it is, run close_command; for more work, "
+             'compose a new route. close_command=py close --route rt-x'),
             ({'state': 'completed', 'required_action': 'advance-completed'},
              'next: the route is complete; report its result'),
             ({'state': 'needs-attention', 'reason': 'frame-launch-not-admitted', 'required_action': 'inspect-preparation',

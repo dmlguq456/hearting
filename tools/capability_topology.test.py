@@ -836,7 +836,8 @@ class PartCatalogTest(unittest.TestCase):
         optional = {part for part, row in self.parts.items() if "optional" in row}
         self.assertEqual(set(self.parts), stages | optional)
         self.assertEqual(optional, {"autopilot-lab:diagnose", "autopilot-lab:eval-spec", "autopilot-lab:eval-smoke",
-                                    "autopilot-lab:resume-run", "autopilot-lab:host-run"})
+                                    "autopilot-lab:resume-run", "autopilot-lab:host-run",
+                                    "analyze-project:analysis"})
         self.invalid(lambda c, r: c["parts"].pop("audit:inspect"), "lacks a row for recipe stages")
         self.invalid(lambda c, r: c["parts"]["audit:inspect"].update(summary=""), "one-line summary")
         self.invalid(lambda c, r: c["parts"]["audit:inspect"].update(gate="x"), "unknown catalog fields")
@@ -854,7 +855,7 @@ class PartCatalogTest(unittest.TestCase):
         self.invalid(lambda c, r: c["parts"]["autopilot-lab:publish"].update(shareable=True), "cannot be shared")
         self.invalid(lambda c, r: c["parts"]["autopilot-design:build"].update(shareable=True),
                      "only an implicit-anchor recipe")
-        self.invalid(lambda c, r: c["parts"]["audit:inspect"].update(hosts=["audit"]), "hosts is only valid")
+        self.invalid(lambda c, r: c["parts"]["audit:report"].update(hosts=["audit"]), "hosts is only valid")
         self.invalid(lambda c, r: c["parts"]["autopilot-lab:smoke"].update(hosts=["nope"]), "known capabilities")
     def test_widened_choices_and_name_mapping_are_checked(self):
         self.invalid(lambda c, r: c["parts"]["autopilot-code:execute"].update(unit_choices=["dev/backend"]),
@@ -950,9 +951,46 @@ class PartCatalogTest(unittest.TestCase):
                            (research, "autopilot-research:retrieval"), (apply, "autopilot-research:retrieval")):
             self.assertIsNone(T.resolve_shared_part(self.r, host, part), part)
         self.assertEqual(T.borrowable_parts(self.r, audit), [
-            "autopilot-research:retrieval", "autopilot-research:synthesis", "autopilot-lab:diagnose"])
+            "autopilot-draft:quality-review", "autopilot-draft:fact-verify", "autopilot-research:retrieval",
+            "autopilot-research:synthesis", "autopilot-lab:diagnose", "analyze-project:analysis"])
         self.invalid(lambda c, r: c["hosts"].update({"autopilot-code": {"map_anchor": "shards"}}),
                      "redeclares an anchor its recipe already has")
+    def test_only_read_workers_travel_and_resources_keep_their_hosts(self):
+        # Routing fragment 10: the parts another kind may borrow are read-only workers; the parts
+        # that hold a resource stay limited to their hosts; writers and owners stay home.
+        shared = sorted(part for part, row in self.parts.items() if row.get("shareable"))
+        self.assertEqual(shared, [
+            "analyze-project:analysis", "audit:inspect", "autopilot-draft:fact-verify",
+            "autopilot-draft:quality-review", "autopilot-lab:diagnose", "autopilot-lab:full-run",
+            "autopilot-lab:host-run", "autopilot-lab:smoke", "autopilot-research:retrieval",
+            "autopilot-research:synthesis"])
+        writers = []
+        for part in shared:
+            node = T.part_recipe(self.r, part)[1]
+            row = self.parts[part]
+            if node["kind"] == "resource-runner" or row.get("execution_needs"):
+                self.assertEqual(row.get("hosts"), ["autopilot-code", "autopilot-lab"], part)
+                continue
+            if T._unit_frontmatter(node["unit"])["read_only"] != "true":
+                writers.append(part)
+            self.assertIsNone(row.get("start_approval"), part)
+            self.assertNotEqual((node.get("continuation") or {}).get("kind"), "human-gate", part)
+        # The two research parts predate this rule; their unit writes shards and summaries only.
+        self.assertEqual(writers, ["autopilot-research:retrieval", "autopilot-research:synthesis"])
+        for part in ("autopilot-draft:draft-production", "autopilot-draft:finalize", "autopilot-research:report",
+                     "autopilot-refine:review", "autopilot-code:execute", "autopilot-code:report"):
+            self.assertNotIn(part, shared, part)
+        # The analysis part lands in every composable kind but its own.
+        hosts = [r for r in self.r["recipes"] if r["capability"] not in T.COMPILER_INTERNAL_CAPABILITIES]
+        for host in hosts:
+            found = T.resolve_shared_part(self.r, host, "analyze-project:analysis")
+            self.assertEqual(found is None, host["capability"] == "analyze-project", host["capability"])
+        analysis = T.part_recipe(self.r, "analyze-project:analysis")[1]
+        self.assertEqual((analysis["kind"], analysis["unit"], analysis["completion_gate"]),
+                         ("pipeline-stage", "analysis/analyze", "analysis-answer"))
+        self.assertEqual(self.r["completion_gate_contracts"]["analysis-answer"],
+                         {"kind": "unit-io", "unit": "analysis/analyze"})
+        self.assertIn("analysis", self.r["unit_families"])
     def test_digest_ignores_the_catalog_until_a_recipe_uses_it(self):
         before = {c: T.capability_registry_digest(self.r, c) for c in ("audit", "autopilot-lab", "autopilot-code")}
         r = copy.deepcopy(self.r)

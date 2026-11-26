@@ -363,6 +363,10 @@ class BlockingReviewEndTest(UnitLegBase):
             "an en dash for the dash": "# R\n\nFinal verdict: changes requested – head abc1234\n\n- A: bad\n",
             "the whole line in backticks": "# R\n\n`Final verdict: changes requested — head abc1234`\n\n- A: bad\n",
             "the placeholder left as written": "# R\n\nFinal verdict: changes requested — head <sha>\n\n- A: bad\n",
+            # (라) The same verdict in both forms on one line, as the instruction names both (an observed review report, 11-26).
+            "both forms on one line": ("## 📋 Code Review Results\n\nFinal verdict: changes requested — head "
+                                       "08937a052edef9ca9fbd9d67fb3b4e7a3e26c4a9 · 최종 판정: 수정 후 병합 — head 08937a0\n\n- A: bad\n"),
+            "both forms, no head": "# R\n\nFinal verdict: changes requested · 최종 판정: 수정 후 병합\n\n- A: bad\n",
         }
         for name, text in promoted.items():
             with self.subTest(name):
@@ -384,6 +388,13 @@ class BlockingReviewEndTest(UnitLegBase):
             "a mergeable verdict without a head": "# R\n\nFinal verdict: mergeable\n\n- fine\n",
             "a verdict with a note after it": "# R\n\nFinal verdict: changes requested (2 blocking)\n\n- A: bad\n",
             "a line that is not a verdict": "# R\n\nI think this needs changes requested.\n\n- A: bad\n",
+            "two different verdicts on one line":
+                "# R\n\nFinal verdict: mergeable — head abc1234 · 최종 판정: 수정 후 병합 — head abc1234\n\n- A: bad\n",
+            "two negative verdicts on one line":
+                "# R\n\nFinal verdict: changes requested — head abc1234 · 최종 판정: 보류 — head abc1234\n\n- A: bad\n",
+            "two heads on one line":
+                "# R\n\nFinal verdict: changes requested — head abc1234 · 최종 판정: 수정 후 병합 — head def5678\n\n- A\n",
+            "a verdict joined to a note": "# R\n\nFinal verdict: changes requested — head abc1234 · 2 blocking\n\n- A\n",
         }
         for name, text in stays.items():
             with self.subTest(name):
@@ -399,6 +410,59 @@ class BlockingReviewEndTest(UnitLegBase):
         self.assertIsNone(TERMINAL.closed_review_kind(self.report))
         self.write("# R\n\nFinal verdict: changes requested — head abc1234\n\n- A: bad\n")
         self.assertEqual(TERMINAL.closed_review_kind(self.report), "fix")
+
+    def test_one_verdict_in_both_forms_reads_as_that_verdict_and_two_verdicts_as_none(self):
+        both = {"fix": "Final verdict: changes requested — head abc1234 · 최종 판정: 수정 후 병합 — head abc1234",
+                "merge": "최종 판정: 병합 가능 — head abc1234 · Final verdict: mergeable — head abc1234.",
+                "hold": "Final verdict: hold — head abc1234 · 최종 판정: 보류 — head abc1234"}
+        for kind, line in both.items():
+            with self.subTest(kind):
+                self.write(f"# R\n\n{line}\n\n- A\n")
+                self.assertEqual(TERMINAL.closed_review_kind(self.report), kind)
+        for line in ("Final verdict: mergeable — head abc1234 · 최종 판정: 수정 후 병합 — head abc1234",
+                     "Final verdict: changes requested — head abc1234 · see below",
+                     "Final verdict: changes requested — head abc1234 · 최종 판정: 수정 후 병합"):
+            with self.subTest(line):
+                self.write(f"# R\n\n{line}\n\n- A\n")
+                self.assertIsNone(TERMINAL.closed_review_kind(self.report))
+
+    def test_the_verdict_line_table(self):
+        # 🟡1 (the PR #1859 review's table): what each line reads as. `kind` is the closed verdict an audit or a
+        # disposition handoff reads (`closed_review_kind`); `negative` is what a unit review's FAIL end needs.
+        h = "abc1234"
+        fix, fix_ko = f"Final verdict: changes requested — head {h}", f"최종 판정: 수정 후 병합 — head {h}"
+        merge, merge_ko = f"Final verdict: mergeable — head {h}", f"최종 판정: 병합 가능 — head {h}"
+        table = [
+            ("fix·fix (en·ko)", f"{fix} · {fix_ko}", "fix", True),
+            ("merge·merge", f"{merge} · {merge_ko}", "merge", False),
+            ("fix·hold (two negatives)", f"{fix} · 최종 판정: 보류 — head {h}", None, False),
+            ("fix·merge", f"{fix} · {merge_ko}", None, False),
+            ("merge·fix", f"{merge} · {fix_ko}", None, False),
+            ("fix · note", f"{fix} · 2 blocking", None, False),
+            ("fix heads differ", f"{fix} · 최종 판정: 수정 후 병합 — head def5678", None, False),
+            ("fix·fix no head", "Final verdict: changes requested · 최종 판정: 수정 후 병합", None, True),
+            ("fix·fix one head", f"{fix} · 최종 판정: 수정 후 병합", None, True),
+            ("conditional", f"Final verdict: changes requested if CI fails — head {h}", None, False),
+            ("U+2022 bullet", f"{fix} • {fix_ko}", None, False),
+            ("U+30FB katakana", f"{fix} ・ {fix_ko}", None, False),
+            ("no spaces ·", f"{fix}·{fix_ko}", None, False),
+            ("quote >", f"> {fix} · {fix_ko}", None, False),
+            ("backticked whole", f"`{fix} · {fix_ko}`", None, False),
+            ("each backticked", f"`{fix}` · `{fix_ko}`", None, True),
+            ("bold each", f"**{fix}** · **{fix_ko}**", "fix", True),
+            ("trailing period each", f"{fix}. · {fix_ko}.", "fix", True),
+            ("three parts", f"{fix} · {fix_ko} · {fix}", "fix", True),
+            ("dash - no head ·", f"Final verdict: changes requested - head {h} · 최종 판정: 수정 후 병합", None, True),
+            ("a short and a full head of one commit", f"Final verdict: changes requested — head {h}def0 · {fix_ko}",
+             "fix", True),
+            ("two lines ko/en", f"{fix_ko}\n{fix}", "fix", True),
+            ("two lines merge ko/en", f"{merge_ko}\n{merge}", "merge", False),
+        ]
+        for name, line, kind, negative in table:
+            with self.subTest(name):
+                self.write(f"# R\n\n{line}\n\n- A\n")
+                self.assertEqual((TERMINAL.closed_review_kind(self.report),
+                                  TERMINAL._opens_on_negative_verdict(self.report)), (kind, negative))
 
     def test_the_verdict_conflict_check_still_runs_for_an_end_that_is_not_promoted(self):
         self.write("# Review\n\n## verdict: FAIL\n\n- A: bad\n")

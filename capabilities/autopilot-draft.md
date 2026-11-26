@@ -133,6 +133,10 @@ Use portable role names from `roles/README.md` and `core/CONVENTIONS.md`. Concre
 
 Pipeline intensity follows `core/CONVENTIONS.md §1`: `direct` has no plan stage or durable plan artifact; `quick` is one registered-headless dispatch-depth-1 one-shot conductor with its inline micro-plan plus plan-check-lite; `standard+` uses the capability's durable work-cycle plan when applicable. This recipe has no separate `plan-check` node (only `autopilot-code` declares one): `quick` checks its micro-plan inline (plan-check-lite), and `standard+` reviews through the recipe's own review stages — `strategy-review`, `quality-review`, and `fact-verify` — rather than after every stage. Verification rigor for those reviews and final verify is derived from intensity; it does not name a model or introduce a separate stage graph. `capabilities/topologies.json` (recipe plus `part_catalog`) is the one stage list; `capability-route.py stages --capability autopilot-draft` prints it.
 
+`quality-review` and `fact-verify` are shareable read parts: another kind's explicit graph may
+borrow `autopilot-draft:quality-review` or `autopilot-draft:fact-verify` with the same unit and
+gate, written under that host's review anchor in `parts/autopilot-draft/<stage>/`.
+
 ## Guard Requirements
 
 At `thorough+` the `quality-review` parallel group realizes a third

@@ -1125,13 +1125,34 @@ def _opens_on_negative_verdict(path) -> bool:
     line = _opening_line(path)
     if line is None:
         return False
-    line = line.replace("**", "").replace("__", "").strip()
-    if len(line) > 1 and line.startswith("`") and line.endswith("`"):
-        line = line[1:-1].strip()
-    line = line[:-1].rstrip() if line.endswith(".") else line
     import work_intent
-    match = work_intent._VERDICT_LINE.match(line)
-    return bool(match and _UNIT_NEGATIVE_VERDICT.fullmatch(match["verdict"].strip()))
+    kinds, heads = set(), []
+    for part in _verdict_parts(line.replace("**", "").replace("__", "").strip()):
+        if len(part) > 1 and part.startswith("`") and part.endswith("`"):
+            part = part[1:-1].strip()
+        line_match = work_intent._VERDICT_LINE.match(part)
+        match = line_match and _UNIT_NEGATIVE_VERDICT.fullmatch(line_match["verdict"].strip())
+        if not match:
+            return False
+        kinds.add(_VERDICT_NAME_KINDS[re.sub(r"\s+", "", match["name"]).lower()])
+        if match["head"] and match["head"] != "<sha>":
+            heads.append(match["head"])
+    # One verdict, read once per form: two verdicts (`fix · hold`) or two heads on one line read as none.
+    return len(kinds) == 1 and _one_head(heads)
+
+
+def _one_head(heads):
+    """Whether the heads a verdict line names are one commit (a short form is a prefix of the long one)."""
+    longest = max(heads, key=len, default="").lower()
+    return all(longest.startswith(head.lower()) for head in heads)
+
+
+def _verdict_parts(line):
+    """The verdict line's forms: one, or the same verdict written in both languages on one line joined by
+    ` · ` (`Final verdict: changes requested — head <sha> · 최종 판정: 수정 후 병합 — head <sha>`), each
+    without a closing period."""
+    return [part[:-1].rstrip() if part.endswith(".") else part
+            for part in (part.strip() for part in _VERDICT_JOINER.split(line))]
 
 
 def _sealed_route(binding):
@@ -1158,8 +1179,9 @@ def _is_unit_route_leg(binding) -> bool:
         return False
 
 
-# Same whole-line forms/normalization as pr-chain.py (PR #1430). Only the
-# negative forms reconcile a legacy audit FAIL. Free prose is never evidence.
+# The whole-line forms/normalization of pr-chain.py (PR #1430), plus one verdict written in both
+# forms on one line joined by ` · ` (`_verdict_parts`), which pr-chain.py does not read (it leaves such
+# a line to a person). Only the negative forms reconcile a legacy audit FAIL. Free prose is never evidence.
 # A held review (`보류`/`hold`) is a closed judgment too; only a verdict-word
 # handoff reads it (`closed_review_kind`), an audit FAIL still needs `fix`.
 _AUDIT_OPENING_BYTES = 64 * 1024
@@ -1183,6 +1205,8 @@ _AUDIT_CLOSED = re.compile(
     + r")\s+—\s+head\s+`?(?P<head>[0-9a-f]{7,40})`?$", re.I)
 _AUDIT_KINDS = {re.sub(r"\s+", "", label).replace("：", ":").lower(): kind
                 for kind, label in _AUDIT_VERDICT_FORMS}
+# Two forms of one verdict on one line (English and Korean, as the unit's instruction names both).
+_VERDICT_JOINER = re.compile(r"\s+·\s+")
 
 
 # A unit leg's closed negative verdict, with or without the commit it reviewed: a read-only unit also
@@ -1191,7 +1215,9 @@ _AUDIT_KINDS = {re.sub(r"\s+", "", label).replace("：", ":").lower(): kind
 _UNIT_NEGATIVE_VERDICT = re.compile(
     r"(?P<name>" + "|".join(_audit_form_pattern(label.split(":", 1)[-1].strip())
                             for kind, label in _AUDIT_VERDICT_FORMS if kind != "merge")
-    + r")(?:\s+[—–-]\s+head\s+`?(?:[0-9a-f]{7,40}|<sha>)`?)?", re.I)
+    + r")(?:\s+[—–-]\s+head\s+`?(?P<head>[0-9a-f]{7,40}|<sha>)`?)?", re.I)
+# The kind of a verdict name without its label (`changes requested` -> fix).
+_VERDICT_NAME_KINDS = {re.sub(r"\s+", "", label.split(":", 1)[-1]).lower(): kind for kind, label in _AUDIT_VERDICT_FORMS}
 
 
 def _opening_line(path):
@@ -1221,7 +1247,8 @@ def _opening_line(path):
 def closed_review_kind(path):
     """``merge``, ``fix`` or ``hold`` when the report opens on a closed review verdict.
 
-    Reads only the first nonblank, non-heading line, like pr-chain.py. The body is
+    Reads only the first nonblank, non-heading line, like pr-chain.py (which does not take the ` · `-joined
+    line of one verdict in both forms that this reads). The body is
     not an authority source: no prose, fence, history or conflicting later verdict
     interpretation. A missing, unreadable or differently shaped opening is ``None``,
     as is anything but a regular file (a pipe or device is never opened).
@@ -1229,13 +1256,15 @@ def closed_review_kind(path):
     line = _opening_line(path)
     if line is None:
         return None
-    line = line.replace("**", "").replace("__", "").strip()
-    line = line[:-1].rstrip() if line.endswith(".") else line
-    match = _AUDIT_CLOSED.fullmatch(line)
-    if not match:
-        return None
-    label = re.sub(r"\s+", "", match["label"]).replace("：", ":").lower()
-    return _AUDIT_KINDS[label]
+    kinds, heads = set(), []
+    for part in _verdict_parts(line.replace("**", "").replace("__", "").strip()):
+        match = _AUDIT_CLOSED.fullmatch(part)
+        if not match:
+            return None
+        kinds.add(_AUDIT_KINDS[re.sub(r"\s+", "", match["label"]).replace("：", ":").lower()])
+        heads.append(match["head"])
+    # The same verdict in both forms reads as that verdict; two verdicts or two heads on one line read as none.
+    return kinds.pop() if len(kinds) == 1 and _one_head(heads) else None
 
 
 def _completed_negative_audit_report(path):

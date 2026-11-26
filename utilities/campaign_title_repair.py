@@ -14,7 +14,6 @@ import contextlib
 import hashlib
 import json
 import os
-import re
 import stat
 import sys
 import tempfile
@@ -46,7 +45,6 @@ REPAIR_LOCK_TIMEOUT = artifact_admission.LOCK_TIMEOUT_DEFAULT
 
 # Automatic display titles (see "automatic display titles" below).
 AUTO_DISABLE_ENV = "HEARTING_CAMPAIGN_TITLE_AUTO"
-CAIRN_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class RepairError(Exception):
@@ -746,49 +744,6 @@ class AutoTitleError(Exception):
 def auto_disabled(env: Optional[Mapping[str, str]] = None) -> bool:
     env = os.environ if env is None else env
     return str(env.get(AUTO_DISABLE_ENV, "")).strip().lower() in {"off", "0", "false", "no", "disabled"}
-
-
-def check_cairn_declaration(doc: Mapping[str, Any], root_id: str) -> None:
-    """Port of Cairn's declaration reader rules; Cairn drops a whole root's declaration on one miss."""
-    def fail(reason: str) -> None:
-        raise AutoTitleError("write-failed", f"cairn-contract:{reason}")
-
-    def text(value: Any) -> str:
-        return value.strip() if isinstance(value, str) else ""
-
-    if doc.get("schema") != DECLARATION_SCHEMA:
-        fail("schema")
-    if not text(doc.get("artifact_root_id")) or doc.get("artifact_root_id") != root_id:
-        fail("artifact-root-id")
-    entries = doc.get("entries")
-    if not isinstance(entries, list):
-        fail("entries-not-list")
-    seen: set = set()
-    for row in entries:
-        if not isinstance(row, dict):
-            fail("entry-not-object")
-        campaign_id, title = text(row.get("campaign_id")), text(row.get("display_title"))
-        if not campaign_id or not title:
-            fail("campaign-id-or-title-empty")
-        if campaign_id in seen:
-            fail("campaign-id-duplicate")
-        seen.add(campaign_id)
-        raw = row.get("manifest_bindings")
-        if not isinstance(raw, list) or not raw:
-            fail("bindings-empty")
-        pairs = [(text(item.get("manifest_revision_id")), text(item.get("manifest_digest")))
-                 if isinstance(item, dict) else ("", "") for item in raw]
-        if any(not revision or not CAIRN_DIGEST_RE.match(digest) for revision, digest in pairs) or pairs != sorted(pairs):
-            fail("bindings-invalid")
-        if len({revision for revision, _ in pairs}) != len(pairs) or len({digest for _, digest in pairs}) != len(pairs):
-            fail("bindings-duplicate")
-        revisions, digests = row.get("manifest_revision_ids"), row.get("manifest_digests")
-        if not isinstance(revisions, list) or not isinstance(digests, list) \
-                or len(revisions) != len(pairs) or len(digests) != len(pairs):
-            fail("binding-arrays-length")
-        if [text(item) for item in revisions] != [revision for revision, _ in pairs] \
-                or [text(item) for item in digests] != [digest for _, digest in pairs]:
-            fail("binding-arrays-mismatch")
 
 
 def _default_invoke(prompt: str) -> tuple[str, Optional[str]]:

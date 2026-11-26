@@ -240,11 +240,11 @@ const line=(peers,w=60)=>rowsOf(peers,w).map(s=>s.replace(/^│ /,'').replace(/ 
 assert.equal(line(supervising),'PEERS  [c7] ⚑  ─ [d4] [3b]');
 assert.equal(line(supervised),'PEERS  [c7] ⚑  ─ [d4]');
 assert.equal(line(both),'PEERS  [c7] ⚑  ─ [3b] · [3b] ⚑  ─ [a1] [a2]');
-// The row stands right under GIT, with the labels' column; none for a window with no relation (and no empty row).
+// The row stands right under REPO (11-26 panel B: the GIT row is gone), with the labels' column; none for a window with no relation (and no empty row).
 const all=rowsOf(supervising).map(s=>s.replace(/^│ /,'').replace(/ │$/,'').trim());
 const at=all.findIndex(s=>/^PEERS/.test(s));
-assert(/^GIT /.test(all[at-1])&&/^REPO /.test(all[at-2]),all.join('\n'));
-assert.equal(all[at].indexOf('[c7]'),all[at-1].indexOf('main'));
+assert(/^REPO /.test(all[at-1])&&!all.some(s=>/^GIT /.test(s)),all.join('\n'));
+assert.equal(all[at].indexOf('[c7]'),all[at-1].indexOf('hearting'));
 const none=rowsOf(undefined);
 assert(!none.some(s=>/PEERS/.test(s)));
 assert.equal(none.length,rowsOf({me:'x',groups:[]}).length);
